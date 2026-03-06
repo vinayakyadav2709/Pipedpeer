@@ -1,8 +1,0 @@
-{
-  "dataset": "replicated_configs",
-  "version": "5.0",
-  "policy": "write-once-multi-read",
-  "rows": 128,
-  "columns": 128,
-  "checksum": "exp5-data/replica-ready"
-}

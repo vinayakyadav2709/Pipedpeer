@@ -1,5 +1,0 @@
-Starting node worker8 on port 50068 with latency 0.08
-[NODE worker8] Initializing async node (simulated latency: 80ms)
-[NODE worker8] Async server started on port 50068
-[NODE worker8] Ready (async)
-Node worker8 running... Press Ctrl+C to stop
