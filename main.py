@@ -1,1 +1,2 @@
-print("hello from worker 343434")
+c = 2+2
+print(c)
