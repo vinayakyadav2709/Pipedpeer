@@ -1,0 +1,92 @@
+#!/bin/bash
+
+SCRIPT_PATH=""
+WORKER="worker-1"
+PORT=2221
+
+usage() {
+    echo "Usage: $0 <script.py> [worker]"
+    echo "Workers: worker-1 (2221), worker-2 (2222), worker-3 (2223)"
+    exit 1
+}
+
+if [ $# -lt 1 ]; then
+    usage
+fi
+
+SCRIPT_PATH="$1"
+if [ $# -ge 2 ]; then
+    case "$2" in
+        worker-1) PORT=2221 ;;
+        worker-2) PORT=2222 ;;
+        worker-3) PORT=2223 ;;
+        *) echo "Unknown worker: $2"; usage ;;
+    esac
+fi
+
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo "File not found: $SCRIPT_PATH"
+    exit 1
+fi
+
+echo "=== Pipedpeer CLI ==="
+echo "Script: $SCRIPT_PATH"
+echo "Worker: $2 (port $PORT)"
+echo ""
+
+DIR=$(dirname "$(realpath "$SCRIPT_PATH")")
+SCRIPT_NAME=$(basename "$SCRIPT_PATH")
+
+echo "[1/5] Generating flake.nix..."
+cat > "$DIR/flake.nix" << 'NIXEOF'
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+
+  outputs = { self, nixpkgs }: {
+    packages.x86_64-linux.default =
+      let
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+      in
+      pkgs.writeShellScriptBin "run" ''
+        ${pkgs.python3}/bin/python3 ${./SCRIPT}
+      '';
+  };
+}
+NIXEOF
+
+sed -i "s|SCRIPT|$SCRIPT_NAME|g" "$DIR/flake.nix"
+echo "      Created: $DIR/flake.nix"
+
+echo ""
+echo "[2/5] Building locally..."
+cd "$DIR"
+rm -f result
+if ! nix build .#packages.x86_64-linux.default 2>&1; then
+    echo "      Build failed"
+    exit 1
+fi
+echo "      Built successfully"
+
+echo ""
+echo "[3/5] Getting store path..."
+STORE_PATH=$(readlink result 2>/dev/null)
+if [ -z "$STORE_PATH" ]; then
+    echo "      Could not get store path"
+    exit 1
+fi
+echo "      Store path: $STORE_PATH"
+
+echo ""
+echo "[4/5] Copying to worker-$((PORT-2220))..."
+if ! nix copy --to "ssh://root@localhost:$PORT" "$STORE_PATH" 2>&1; then
+    echo "      Copy failed"
+    exit 1
+fi
+echo "      Copied successfully"
+
+echo ""
+echo "[5/5] Executing on worker-$((PORT-2220))..."
+ssh -p "$PORT" root@localhost "$STORE_PATH/bin/run"
+
+echo ""
+echo "=== Done ==="
