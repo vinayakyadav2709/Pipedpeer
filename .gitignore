@@ -1,0 +1,4 @@
+/bin/
+/pipedpeer
+cmd/pipedpeer/pipedpeer
+*.log
