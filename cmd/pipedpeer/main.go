@@ -1,288 +1,296 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
+	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
+	"syscall"
+
+	"github.com/pipedpeer/pipedpeer/internal/app"
+	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
+	"github.com/pipedpeer/pipedpeer/internal/remote"
 )
 
-type SSHConfig struct {
-	User string
-	Host string
-	Port int
-}
-
-var nixpkgsMapping = map[string]string{
-	"numpy":          "numpy",
-	"pandas":         "pandas",
-	"requests":       "requests",
-	"flask":          "flask",
-	"django":         "django",
-	"scipy":          "scipy",
-	"sklearn":        "scikit-learn",
-	"matplotlib":     "matplotlib",
-	"pillow":         "Pillow",
-	"pyyaml":         "pyyaml",
-	"pytest":         "pytest",
-	"torch":          "torch",
-	"tensorflow":     "tensorflow",
-	"keras":          "keras",
-	"opencv":         "opencv-python",
-	"beautifulsoup4": "beautifulsoup4",
-	"lxml":           "lxml",
-	"PIL":            "Pillow",
-	"cryptography":   "cryptography",
-	"jwt":            "pyjwt",
-	"sqlalchemy":     "sqlalchemy",
-	"psycopg2":       "psycopg2",
-	"redis":          "redis",
-	"pymongo":        "pymongo",
-	"boto3":          "boto3",
-	"aiohttp":        "aiohttp",
-	"httpx":          "httpx",
-	"celery":         "celery",
-	"fastapi":        "fastapi",
-	"uvicorn":        "uvicorn",
-	"pydantic":       "pydantic",
-	"click":          "click",
-}
-
-func parseRemote(remote string) (*SSHConfig, error) {
-	var user, host string
-	var port int
-
-	if strings.Contains(remote, "@") {
-		parts := strings.SplitN(remote, "@", 2)
-		user = parts[0]
-		hostPort := parts[1]
-		if strings.Contains(hostPort, ":") {
-			hP := strings.SplitN(hostPort, ":", 2)
-			host = hP[0]
-			fmt.Sscanf(hP[1], "%d", &port)
-		} else {
-			host = hostPort
-			port = 22
-		}
-	} else {
-		user = "root"
-		if strings.Contains(remote, ":") {
-			hP := strings.SplitN(remote, ":", 2)
-			host = hP[0]
-			fmt.Sscanf(hP[1], "%d", &port)
-		} else {
-			host = remote
-			port = 22
-		}
-	}
-
-	return &SSHConfig{User: user, Host: host, Port: port}, nil
-}
-
-func extractImports(scriptPath string) []string {
-	file, err := os.Open(scriptPath)
-	if err != nil {
-		return nil
-	}
-	defer file.Close()
-
-	var imports []string
-	seen := make(map[string]bool)
-	reader := bufio.NewReader(file)
-
-	for {
-		line, _, err := reader.ReadLine()
-		if err != nil {
-			break
-		}
-
-		lineStr := strings.TrimSpace(string(line))
-		re := regexp.MustCompile(`^\s*(?:import|from)\s+([a-zA-Z0-9_]+)`)
-		matches := re.FindStringSubmatch(lineStr)
-		if len(matches) >= 2 {
-			imp := matches[1]
-			if !seen[imp] {
-				seen[imp] = true
-				imports = append(imports, imp)
-			}
-		}
-	}
-
-	return imports
-}
-
-func resolveNixpkg(pkg string) string {
-	if nixpkg, ok := nixpkgsMapping[pkg]; ok {
-		return nixpkg
-	}
-	return ""
-}
-
 func main() {
-	scriptPath := flag.String("script", "", "Path to Python script")
-	remote := flag.String("remote", "", "Remote SSH destination (e.g., root@localhost:2221)")
-	flag.Parse()
-
-	if *scriptPath == "" || *remote == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s --script <script.py> --remote <user@host:port>\n", os.Args[0])
-		flag.PrintDefaults()
-		os.Exit(1)
+	if len(os.Args) > 1 && os.Args[1] == "__daemon__" {
+		runDaemon(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__sync_job__" {
+		runSyncJobWorker(os.Args[2:])
+		return
 	}
 
-	sshCfg, err := parseRemote(*remote)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to parse remote: %v\n", err)
-		os.Exit(1)
-	}
-
-	if _, err := os.Stat(*scriptPath); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "File not found: %s\n", *scriptPath)
-		os.Exit(1)
-	}
-
-	absScriptPath, err := filepath.Abs(*scriptPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to get absolute path: %v\n", err)
-		os.Exit(1)
-	}
-
-	scriptName := filepath.Base(absScriptPath)
-
-	fmt.Printf("=== Pipedpeer CLI ===\n")
-	fmt.Printf("Script: %s\n", absScriptPath)
-	fmt.Printf("Remote: %s@%s:%d\n\n", sshCfg.User, sshCfg.Host, sshCfg.Port)
-
-	fmt.Printf("[1/6] Detecting imports...\n")
-	imports := extractImports(absScriptPath)
-	if len(imports) > 0 {
-		fmt.Printf("      Found imports: %s\n", strings.Join(imports, ", "))
-	}
-
-	var nixPkgs []string
-	for _, pkg := range imports {
-		if nixpkg := resolveNixpkg(pkg); nixpkg != "" {
-			fmt.Printf("      %s -> %s\n", pkg, nixpkg)
-			nixPkgs = append(nixPkgs, nixpkg)
+	cmd := "run"
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "start", "stop", "status", "run", "jobs", "job":
+			cmd = args[0]
+			args = args[1:]
 		}
 	}
 
-	tmpDir, err := os.MkdirTemp("", "pipedpeer-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create temp dir: %v\n", err)
-		os.Exit(1)
+	switch cmd {
+	case "start":
+		runStart(args)
+	case "stop":
+		runStop()
+	case "status":
+		runStatus()
+	case "jobs":
+		runJobs(args)
+	case "job":
+		runJobDetails(args)
+	default:
+		runJob(args)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	if err := os.WriteFile(filepath.Join(tmpDir, scriptName), []byte{}, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create placeholder: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Printf("\n[2/6] Copying script to temp dir...\n")
-	input, err := os.ReadFile(absScriptPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to read script: %v\n", err)
-		os.Exit(1)
-	}
-	if err := os.WriteFile(filepath.Join(tmpDir, scriptName), input, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write script: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("      Copied to: %s\n", tmpDir)
-
-	fmt.Printf("\n[3/6] Generating flake.nix...\n")
-	var flakeContent string
-	if len(nixPkgs) == 0 {
-		flakeContent = fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
-
-  outputs = { self, nixpkgs }: {
-    packages.x86_64-linux.default =
-      let
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
-      in
-      pkgs.writeShellScriptBin "run" ''
-        ${pkgs.python3}/bin/python3 ${./%s}
-      '';
-  };
 }
-`, scriptName)
+
+func runDaemon(args []string) {
+	fs := flag.NewFlagSet("__daemon__", flag.ExitOnError)
+	nodeID := fs.String("node-id", "node-local", "Node ID served by this daemon")
+	port := fs.Int("port", 38080, "Daemon listen port")
+	_ = fs.Parse(args)
+
+	server := daemonapi.New(*nodeID)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sig
+		os.Exit(0)
+	}()
+
+	if err := server.ListenAndServe(*port); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func runSyncJobWorker(args []string) {
+	fs := flag.NewFlagSet("__sync_job__", flag.ExitOnError)
+	user := fs.String("user", "", "SSH user")
+	host := fs.String("host", "", "SSH host")
+	port := fs.Int("port", 22, "SSH port")
+	jobDir := fs.String("job-dir", "", "Remote job directory")
+	localRoot := fs.String("local-root", "", "Local workspace root to sync files into")
+	historyDir := fs.String("history-dir", "", "Local job history directory")
+	timeoutSec := fs.Int("timeout-sec", 43200, "Wait timeout for detached job completion")
+	_ = fs.Parse(args)
+
+	if *user == "" || *host == "" || *jobDir == "" || *localRoot == "" || *historyDir == "" {
+		fmt.Fprintln(os.Stderr, "missing required sync worker arguments")
+		os.Exit(2)
+	}
+
+	err := app.RunDetachedSyncWorker(app.DetachedSyncWorkerOptions{
+		User:       *user,
+		Host:       *host,
+		Port:       *port,
+		JobDir:     *jobDir,
+		LocalRoot:  *localRoot,
+		HistoryDir: *historyDir,
+		TimeoutSec: *timeoutSec,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func runStart(args []string) {
+	fs := flag.NewFlagSet("start", flag.ExitOnError)
+	nodeID := fs.String("node-id", "node-local", "Local node ID")
+	port := fs.Int("daemon-port", 38080, "Local daemon port")
+	_ = fs.Parse(args)
+
+	wasStarted, err := daemonctl.EnsureStarted(*nodeID, *port)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if wasStarted {
+		fmt.Printf("started daemon (node-id=%s, port=%d)\n", *nodeID, *port)
 	} else {
-		var psPkgs []string
-		for _, pkg := range nixPkgs {
-			psPkgs = append(psPkgs, "ps."+pkg)
-		}
-		pkgsList := strings.Join(psPkgs, "\n          ")
-		flakeContent = fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
-
-  outputs = { self, nixpkgs }: {
-    packages.x86_64-linux.default =
-      let
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
-        python = pkgs.python3.withPackages (ps: [
-          %s
-        ]);
-      in
-      pkgs.writeShellScriptBin "run" ''
-        ${python}/bin/python3 ${./%s}
-      '';
-  };
+		fmt.Printf("daemon already running\n")
+	}
 }
-`, pkgsList, scriptName)
-	}
 
-	flakePath := filepath.Join(tmpDir, "flake.nix")
-	if err := os.WriteFile(flakePath, []byte(flakeContent), 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to write flake.nix: %v\n", err)
+func runStop() {
+	if err := daemonctl.Stop(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("      Created: %s\n", flakePath)
+	fmt.Println("stopped daemon")
+}
 
-	fmt.Printf("\n[4/6] Building locally...\n")
-	cmd := exec.Command("nix", "build", ".#packages.x86_64-linux.default")
-	cmd.Dir = tmpDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "nix build failed: %v\n", err)
+func runStatus() {
+	st := daemonctl.Status()
+	if !st.Running {
+		fmt.Println("daemon stopped")
+		return
+	}
+	fmt.Printf("daemon running (pid=%d node-id=%s port=%d)\n", st.PID, st.NodeID, st.Port)
+}
+
+func runJob(args []string) {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	scriptPath := fs.String("script", "", "Path to Python script")
+	remoteAddr := fs.String("remote", "", "Remote SSH destination (e.g., root@localhost:2221)")
+	targetID := fs.String("target-id", "", "Required remote node ID for daemon acceptance")
+	daemonPort := fs.Int("daemon-port", 38080, "Daemon API port on nodes")
+	localNodeID := fs.String("local-node-id", "node-local", "Local node ID used when auto-starting daemon")
+	detach := fs.Bool("detach", false, "Submit job and return immediately instead of waiting for completion")
+	jobName := fs.String("job-name", "", "Optional job name used for remote job directory")
+	isolate := fs.Bool("isolate", true, "Run job in an isolated bubblewrap sandbox on the remote node")
+	checkOnly := fs.Bool("check-only", false, "Only perform daemon start + target acceptance checks")
+	_ = fs.Parse(args)
+
+	if *scriptPath == "" || *remoteAddr == "" || *targetID == "" {
+		fmt.Fprintf(os.Stderr, "Usage: %s run --script <script.py> --remote <user@host:port> --target-id <node-id>\n", os.Args[0])
+		fs.PrintDefaults()
 		os.Exit(1)
 	}
-	fmt.Printf("      Built successfully\n")
 
-	fmt.Printf("\n[5/6] Getting store path...\n")
-	resultPath := filepath.Join(tmpDir, "result")
-	storePath, err := os.Readlink(resultPath)
+	wasStarted, err := daemonctl.EnsureStarted(*localNodeID, *daemonPort)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to readlink result: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("      Store path: %s\n", storePath)
-
-	fmt.Printf("\n[6/6] Copying to remote...\n")
-	sshDest := fmt.Sprintf("ssh://%s@%s:%d", sshCfg.User, sshCfg.Host, sshCfg.Port)
-	cmd = exec.Command("nix", "copy", "--to", sshDest, storePath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "nix copy failed: %v\n", err)
-		os.Exit(1)
+	if wasStarted {
+		fmt.Println("started daemon")
 	}
-	fmt.Printf("      Copied successfully\n")
 
-	fmt.Printf("\n[7/7] Executing on remote...\n")
-	runPath := filepath.Join(storePath, "bin", "run")
-	cmd = exec.Command("ssh", "-p", fmt.Sprintf("%d", sshCfg.Port), fmt.Sprintf("%s@%s", sshCfg.User, sshCfg.Host), runPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Execution failed: %v\n", err)
+	sshCfg, err := remote.Parse(*remoteAddr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("\n=== Done ===\n")
+	if err := daemonctl.CheckRemoteAcceptance(sshCfg.Host, *daemonPort, *targetID, *jobName); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	fmt.Printf("remote daemon accepted job for target-id=%s\n", *targetID)
+
+	if *checkOnly {
+		fmt.Println("checks complete")
+		return
+	}
+
+	if err := app.Run(app.Options{
+		ScriptPath: *scriptPath,
+		Remote:     *remoteAddr,
+		TargetID:   *targetID,
+		Detach:     *detach,
+		JobName:    *jobName,
+		Isolate:    *isolate,
+	}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func runJobs(args []string) {
+	fs := flag.NewFlagSet("jobs", flag.ExitOnError)
+	limit := fs.Int("limit", 20, "Max jobs to show")
+	_ = fs.Parse(args)
+
+	historyPath := jobhistory.BaseDir()
+	if err := os.MkdirAll(historyPath, 0755); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	items, err := jobhistory.List(*limit)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if len(items) == 0 {
+		fmt.Println("no jobs found yet (run a non-check-only job first)")
+		fmt.Printf("history path: %s\n", historyPath)
+		return
+	}
+
+	fmt.Printf("history path: %s\n", historyPath)
+	fmt.Println("ID\tSTATUS\tMODE\tTARGET\tREMOTE\tDURATION_MS\tSTARTED")
+	for _, it := range items {
+		mode := "fg"
+		if it.Detached {
+			mode = "bg"
+		}
+		fmt.Printf("%s\t%s\t%s\t%s\t%s\t%d\t%s\n", it.ID, it.Status, mode, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
+	}
+}
+
+func runJobDetails(args []string) {
+	fs := flag.NewFlagSet("job", flag.ExitOnError)
+	id := fs.String("id", "", "Job ID from `pipedpeer jobs`")
+	withOutput := fs.Bool("output", false, "Print saved stdout/stderr for foreground jobs")
+	_ = fs.Parse(args)
+
+	if *id == "" {
+		fmt.Fprintln(os.Stderr, "--id is required")
+		os.Exit(1)
+	}
+
+	r, dir, err := jobhistory.ReadRecord(*id)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("id: %s\n", r.ID)
+	fmt.Printf("status: %s\n", r.Status)
+	fmt.Printf("error: %s\n", r.Error)
+	fmt.Printf("started_at: %s\n", r.StartedAt)
+	fmt.Printf("finished_at: %s\n", r.FinishedAt)
+	fmt.Printf("duration_ms: %d\n", r.DurationMs)
+	fmt.Printf("script_path: %s\n", r.ScriptPath)
+	fmt.Printf("remote: %s\n", r.Remote)
+	fmt.Printf("target_id: %s\n", r.TargetID)
+	fmt.Printf("detached: %t\n", r.Detached)
+	fmt.Printf("isolate: %t\n", r.Isolate)
+	fmt.Printf("job_name: %s\n", r.JobName)
+	fmt.Printf("run_host: %s\n", r.RunHost)
+	fmt.Printf("store_path: %s\n", r.StorePath)
+	fmt.Printf("remote_job_dir: %s\n", r.RemoteJobDir)
+	fmt.Printf("local_sync_root: %s\n", r.LocalSyncRoot)
+	fmt.Printf("received_files: %d\n", r.ReceivedFiles)
+	fmt.Printf("new_files: %d\n", r.NewFiles)
+	fmt.Printf("updated_files: %d\n", r.UpdatedFiles)
+	fmt.Printf("unchanged_files: %d\n", r.UnchangedFiles)
+	fmt.Printf("manifest_path: %s\n", r.ManifestPath)
+	fmt.Printf("history_dir: %s\n", dir)
+
+	if *withOutput {
+		stdout, _ := jobhistory.ReadOptionalText(dir, "stdout.log")
+		stderr, _ := jobhistory.ReadOptionalText(dir, "stderr.log")
+		remoteLogs, _ := jobhistory.ReadOptionalText(dir, "remote_logs.txt")
+		fmt.Println("--- stdout ---")
+		if strings.TrimSpace(stdout) == "" {
+			fmt.Println("(empty)")
+		} else {
+			fmt.Println(stdout)
+		}
+		fmt.Println("--- stderr ---")
+		if strings.TrimSpace(stderr) == "" {
+			fmt.Println("(empty)")
+		} else {
+			fmt.Println(stderr)
+		}
+		if strings.TrimSpace(remoteLogs) != "" {
+			fmt.Println("--- remote logs ---")
+			fmt.Println(remoteLogs)
+		}
+	}
+
+	fmt.Printf("artifacts: %s\n", filepath.Join(dir, "metadata.json"))
 }
