@@ -4,6 +4,12 @@ services:
       context: .
       dockerfile: Dockerfile.nix
     container_name: worker-1
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "2221:22"
 
@@ -12,6 +18,12 @@ services:
       context: .
       dockerfile: Dockerfile.nix
     container_name: worker-2
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "2222:22"
 
@@ -20,5 +32,11 @@ services:
       context: .
       dockerfile: Dockerfile.nix
     container_name: worker-3
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "2223:22"

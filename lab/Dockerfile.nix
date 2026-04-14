@@ -2,7 +2,7 @@ FROM docker.io/nixos/nix:2.31.3
 
 ENV PATH="/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:$PATH"
 
-RUN nix-env -iA nixpkgs.openssh nixpkgs.bash nixpkgs.coreutils nixpkgs.python3
+RUN nix-env -iA nixpkgs.openssh nixpkgs.bash nixpkgs.coreutils nixpkgs.python3 nixpkgs.bubblewrap nixpkgs.util-linux nixpkgs.iproute2
 
 RUN mkdir -p /var/run/sshd /etc/ssh /var/empty /root/.ssh /var/log && chmod 700 /root/.ssh && /nix/var/nix/profiles/default/bin/ssh-keygen -A
 
