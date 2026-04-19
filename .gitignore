@@ -2,3 +2,4 @@
 /pipedpeer
 cmd/pipedpeer/pipedpeer
 *.log
+test_results/

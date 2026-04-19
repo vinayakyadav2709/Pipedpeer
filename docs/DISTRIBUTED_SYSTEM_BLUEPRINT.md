@@ -7,9 +7,13 @@
 - Support reproducible execution via host Nix builds with SSH deployment.
 - Allow optional GPU execution via containerized Nix (future).
 - Allow each node to act as both submitter and executor.
-- Support two execution modes:
-  - Script mode: run a full script remotely and return output.
-  - SDK mode: intercept selected operations and distribute sub-tasks.
+- Support three execution modes:
+  - **Script mode**: Sync entire workspace (`pwd`) to remote, execute normally, and sync output files back.
+  - **SDK mode**: Intercept specific Python operations, send them via RPC to the Pipedpeer daemon, which distributes tasks across the cluster. (No workspace files sent).
+  - **Script+SDK mode**: Sync workspace like Script mode, but remote execution acts as an SDK master to distribute sub-operations across the cluster.
+- Terminal modes:
+  - **Attached**: Real-time terminal output streaming with graceful `Ctrl+C` handling.
+  - **Detached**: Background async execution and artifact polling.
 - Enable GPU-aware scheduling.
 - Preserve strong cache reuse for shared dependencies and data artifacts.
 
@@ -145,10 +149,12 @@ Benefits:
 - Makes cancellations safer.
 
 Current implementation status:
-- The active CLI path targets an explicit remote endpoint.
-- Detached/background jobs are supported.
-- Detached jobs return immediately, then a local sync worker collects output and artifacts asynchronously.
-- Scheduler/optimizer and lease-based placement are planned but not yet active.
+- The CLI supports both explicit remote (`--remote`) and automatic coordinator placement.
+- Lease-based reservations are active: accept → commit → complete lifecycle.
+- Admission control enforces memory-based rejection at both coordinator and daemon level.
+- Detached/background jobs are supported with async artifact sync.
+- Task lifecycle state machine is implemented: queued → reserved → running → succeeded/failed/cancelled/expired.
+- Queue/retry: if no node can accept, tasks queue and retry at configurable intervals.
 
 ## 7. Task Lifecycle and Fault Tolerance
 
@@ -345,22 +351,25 @@ A practical approach:
 
 ## Go service and APIs
 
-- cobra: CLI commands and subcommands
-- chi or gin: lightweight HTTP API server
-- grpc-go or connect-go: strong typed RPC between nodes
-- zap or slog: structured logging
-- viper: configuration
+- cobra: CLI commands and subcommands ✅ (implemented)
+- chi: lightweight HTTP API server with middleware ✅ (implemented)
+- zerolog: structured logging (zero-allocation, JSON + console modes) ✅ (implemented)
+- viper: configuration with env var support ✅ (implemented)
+- gopsutil: cross-platform system metrics ✅ (implemented)
+- google/uuid: RFC-compliant UUID generation ✅ (implemented)
+- go-humanize: human-readable byte formatting ✅ (implemented)
 
 ## Reliability and messaging
 
-- NATS JetStream: queueing, retries, request/reply, durable events
-- Alternative: direct RPC for first version, then add queue
+- NATS JetStream: queueing, retries, request/reply, durable events ✅ (implemented)
+- NATS embedded server: zero-config for single-node / dev ✅ (implemented)
+- Dual transport: NATS preferred, HTTP fallback ✅ (implemented)
 
 ## Registry and state
 
-- etcd: lease-friendly control metadata
-- Alternative: PostgreSQL with heartbeat tables and constraints
-- Redis can help as fast cache but should not be single source of truth alone
+- NATS JetStream KV: registry backend with TTL, watches, persistence ✅ (implemented)
+- In-memory backend: fallback when NATS unavailable ✅ (implemented)
+- Future: etcd for multi-coordinator leader election if HA coordinator is needed
 
 ## Data and artifact storage
 
@@ -376,15 +385,16 @@ A practical approach:
 
 ## Runtime and execution
 
-- Docker or Podman as base runtime wrapper
-- bubblewrap for per-job sandbox namespace isolation
-- Nix inside node container for deterministic package/runtime builds
+- bubblewrap for per-job sandbox namespace isolation (CPU tasks)
+- Nix on host for deterministic package/runtime builds
+- Docker or Podman only for GPU jobs requiring OCI containers (future)
 
-## Observability
+## Observability (deferred — not needed for current milestone)
 
 - OpenTelemetry for traces/metrics
 - Prometheus metrics endpoint
 - Loki or standard log aggregation for executor logs
+- Implement when multi-node production deployments begin and monitoring becomes necessary
 
 ## 15. Suggested Milestone Plan
 
@@ -418,6 +428,13 @@ Phase 5:
 - Optimizer learning from telemetry
 - Replication policies and hotspot handling
 
+Phase 6 (deferred — low priority):
+
+- OpenTelemetry distributed tracing across nodes
+- Prometheus metrics endpoint on daemon
+- NATS header propagation for trace context
+- Implement when production monitoring is required
+
 ## 16. Non-Negotiable Design Rules
 
 - Node identity must be stable and not IP-based.
@@ -430,7 +447,7 @@ Phase 5:
 
 ## 17. Practical Defaults for v1
 
-- Runtime: Docker containerized node with Nix inside
+- Runtime: Nix + bubblewrap on host (CPU), OCI containers for GPU (future)
 - Registry: replicated service with lease heartbeats
 - Scheduler: weighted heuristic + lease reservation fanout
 - Data plane: S3-compatible artifact store + SHA-256 IDs
@@ -523,7 +540,7 @@ Track at least:
 
 ### Practical deployment default
 
-- CPU path: direct Nix execution inside node container.
+- CPU path: direct Nix execution on host with bubblewrap isolation.
 - GPU path: Nix-built OCI image launched by the node on a GPU-capable host.
 - Shared cache: Nix store cache for builds plus OCI layer cache for GPU images.
 

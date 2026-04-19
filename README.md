@@ -29,9 +29,11 @@ This installs all prerequisites and validates the setup with `pipedpeer doctor`.
 - **Integration Tests:** Docker-based lab in `lab/` (Nix runs inside workers)
 
 Current runtime scope:
-- Detached/background execution is supported via CLI flags and remote execution.
-- Detached jobs return immediately and sync outputs asynchronously without streaming live terminal output.
-- Script mode with dependency detection is supported.
+- **Execution Modes**: Supports `script` (default syncing of workspace), `sdk`, and `script+sdk`.
+- **Workspace Sync**: Synchronizes the user's current working directory (`pwd`) directly to the remote node, ensuring paths act locally. Respects `.pipedpeerignore`.
+- **Terminal Modes**: 
+  - Attached (default): live streaming of remote execution stdout/stderr and graceful `Ctrl+C` cancellation.
+  - Detached (`--detach`): returns immediately and syncs outputs asynchronously.
 - Multi-node scheduling/optimizer is not implemented yet (explicit remote target is used).
 
 Job history is stored under `$XDG_DATA_HOME/pipedpeer/jobs` or `~/.local/share/pipedpeer/jobs` and records metadata, stdout/stderr, manifests, and synced artifacts.
@@ -65,9 +67,16 @@ CLI runtime commands:
 - `./bin/pipedpeer start --node-id <local-node-id> --daemon-port 38080`
 - `./bin/pipedpeer status`
 - `./bin/pipedpeer stop`
-- `./bin/pipedpeer run --script <script.py> --remote <user@host:port> --target-id <remote-node-id>`
+- `./bin/pipedpeer init` (generates `.pipedpeerignore`)
+- `./bin/pipedpeer run --script <script.py> --remote <user@host:port> --target-id <remote-node-id> [flags] -- [script_args...]`
 - `./bin/pipedpeer jobs`
 - `./bin/pipedpeer job --id <job-id> --output`
+
+**Unified CLI `run` Command Example:**
+```bash
+# 1. Terminal Var | 2. Pipedpeer Command | 3. Pipedpeer Flags                         | 4. Script  | 5. Forward Env | 6. Separator | 7. Script Args
+API_KEY=xyz         pipedpeer run          --remote root@host --python 3.10 --pkg req.txt script.py  -e API_KEY       --             --epochs 50 --batch 32
+```
 
 ## Install Pattern
 
