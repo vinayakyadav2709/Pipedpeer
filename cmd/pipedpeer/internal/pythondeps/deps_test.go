@@ -63,3 +63,38 @@ func TestExtractImportScanSeparatesExternalAndLocal(t *testing.T) {
 		t.Fatalf("local files mismatch\nwant: %#v\n got: %#v", wantLocals, scan.LocalFiles)
 	}
 }
+
+func TestResolvePackages(t *testing.T) {
+	tmp := t.TempDir()
+	reqFile := filepath.Join(tmp, "requirements.txt")
+	content := "numpy\npandas>=2.0\npytest==7.0.0\nunknown-pkg"
+	if err := os.WriteFile(reqFile, []byte(content), 0644); err != nil {
+		t.Fatalf("write req file: %v", err)
+	}
+
+	astImports := []string{"flask", "scipy"}
+	explicit := []string{"pillow", reqFile, "boto3"}
+
+	got := ResolvePackages(astImports, explicit)
+	want := []string{"flask", "scipy", "Pillow", "numpy", "pandas", "pytest", "unknown-pkg", "boto3"}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved packages mismatch\nwant: %#v\n got: %#v", want, got)
+	}
+}
+
+func TestStdlibModulesFilteredFromExternalDeps(t *testing.T) {
+	tmp := t.TempDir()
+	script := filepath.Join(tmp, "script.py")
+	content := "import os\nimport sys\nimport json\nimport pickle\nimport numpy\nimport math\nfrom pathlib import Path\nimport csv\n"
+	if err := os.WriteFile(script, []byte(content), 0644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	got := ExtractImports(script)
+	// Only numpy should appear — os, sys, json, pickle, math, pathlib, csv are all stdlib
+	want := []string{"numpy"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stdlib filtering failed\nwant: %#v\n got: %#v", want, got)
+	}
+}

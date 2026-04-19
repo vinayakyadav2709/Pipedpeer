@@ -2,33 +2,51 @@ package nixgen
 
 import (
 	"fmt"
-	"path/filepath"
-	"sort"
+	"runtime"
 	"strings"
 )
 
-func GenerateFlake(scriptRelPath string, nixPkgs []string, sourceFiles []string) string {
-	if len(sourceFiles) == 0 {
-		sourceFiles = []string{scriptRelPath}
+// NixArch returns the Nix system identifier for the current platform.
+func NixArch() string {
+	arch := runtime.GOARCH
+	os := runtime.GOOS
+	nixArch := "x86_64"
+	switch arch {
+	case "arm64":
+		nixArch = "aarch64"
+	case "arm":
+		nixArch = "armv7l"
 	}
-	sourceSetup := buildSourceSetup(sourceFiles)
+	nixOS := "linux"
+	if os == "darwin" {
+		nixOS = "darwin"
+	}
+	return nixArch + "-" + nixOS
+}
 
+func GenerateFlake(nixPkgs []string, pythonVersion string) string {
+	return GenerateFlakeForArch(nixPkgs, pythonVersion, NixArch())
+}
+
+func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem string) string {
+	if pythonVersion == "" {
+		pythonVersion = "python3"
+	}
 	if len(nixPkgs) == 0 {
 		return fmt.Sprintf(`{
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
 
   outputs = { self, nixpkgs }: {
-    packages.x86_64-linux.default =
+    packages.%s.default =
       let
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        pkgs = nixpkgs.legacyPackages.%s;
       in
       pkgs.writeShellScriptBin "run" ''
-%s
-        exec ${pkgs.python3}/bin/python3 "$srcdir/%s"
+        exec ${pkgs.%s}/bin/python3 "$@"
       '';
   };
 }
-`, sourceSetup, scriptRelPath)
+`, nixSystem, nixSystem, pythonVersion)
 	}
 
 	var psPkgs []string
@@ -40,47 +58,17 @@ func GenerateFlake(scriptRelPath string, nixPkgs []string, sourceFiles []string)
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
 
   outputs = { self, nixpkgs }: {
-    packages.x86_64-linux.default =
+    packages.%s.default =
       let
-        pkgs = nixpkgs.legacyPackages.x86_64-linux;
-        python = pkgs.python3.withPackages (ps: [
+        pkgs = nixpkgs.legacyPackages.%s;
+        python = pkgs.%s.withPackages (ps: [
           %s
         ]);
       in
       pkgs.writeShellScriptBin "run" ''
-%s
-        exec ${python}/bin/python3 "$srcdir/%s"
+        exec ${python}/bin/python3 "$@"
       '';
   };
 }
-`, pkgsList, sourceSetup, scriptRelPath)
-}
-
-func buildSourceSetup(sourceFiles []string) string {
-	seen := map[string]bool{}
-	var clean []string
-	for _, f := range sourceFiles {
-		f = filepath.ToSlash(filepath.Clean(f))
-		if f == "." || f == "" {
-			continue
-		}
-		if !seen[f] {
-			seen[f] = true
-			clean = append(clean, f)
-		}
-	}
-	sort.Strings(clean)
-
-	var b strings.Builder
-	b.WriteString("        srcdir=$(mktemp -d)\n")
-	b.WriteString("        trap 'rm -rf \"$srcdir\"' EXIT\n")
-	for _, rel := range clean {
-		dir := filepath.ToSlash(filepath.Dir(rel))
-		if dir != "." {
-			b.WriteString(fmt.Sprintf("        mkdir -p \"$srcdir/%s\"\n", dir))
-		}
-		b.WriteString(fmt.Sprintf("        cp ${./%s} \"$srcdir/%s\"\n", rel, rel))
-	}
-	b.WriteString("        cd \"$srcdir\"\n")
-	return b.String()
+`, nixSystem, nixSystem, pythonVersion, pkgsList)
 }

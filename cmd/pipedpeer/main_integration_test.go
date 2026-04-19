@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -262,4 +263,125 @@ func dockerExecE(ctx context.Context, labDir, script string) (string, error) {
 
 func shellEscape(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func TestIntegrationFullSyncAndExecute(t *testing.T) {
+	if os.Getenv("PIPEDPEER_INTEGRATION") != "1" {
+		t.Skip("set PIPEDPEER_INTEGRATION=1 to run integration tests")
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("failed to resolve repo root: %v", err)
+	}
+	labDir := filepath.Join(repoRoot, "lab")
+
+	ctx := context.Background()
+
+	runCmd(t, ctx, labDir, "docker", "compose", "up", "-d", "--build", "worker-1")
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cleanupCancel()
+		cmd := exec.CommandContext(cleanupCtx, "docker", "compose", "down")
+		cmd.Dir = labDir
+		_ = cmd.Run()
+	})
+
+	time.Sleep(5 * time.Second)
+
+	// We run the CLI locally (in the test container) against the remote worker-1
+	tmp := t.TempDir()
+	syncTestDir := filepath.Join(tmp, "sync-test")
+	if err := os.MkdirAll(syncTestDir, 0755); err != nil {
+		t.Fatalf("mkdir failed: %v", err)
+	}
+
+	// Build the CLI binary statically from cmd/pipedpeer
+	binPath := filepath.Join(tmp, "pipedpeer-bin")
+	cmdDir := filepath.Join(repoRoot, "cmd", "pipedpeer")
+	outBuild, err := runCmdE(ctx, cmdDir, "sh", "-c", fmt.Sprintf("CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o %s .", binPath))
+	if err != nil {
+		t.Fatalf("failed to build pipedpeer binary: %v\noutput: %s", err, outBuild)
+	}
+
+	// Copy the binary into worker-1
+	if _, err := runCmdE(ctx, labDir, "docker", "cp", binPath, "worker-1:/pipedpeer"); err != nil {
+		t.Fatalf("failed to copy binary to worker-1: %v", err)
+	}
+
+	setupScript := `
+set -eu
+mkdir -p /root/.ssh
+ssh-keyscan -p 22 localhost >> /root/.ssh/known_hosts 2>/dev/null
+mkdir -p /tmp/sync-test
+cd /tmp/sync-test
+echo "import os; open('output.txt', 'w').write('hello ' + open('data.txt').read().strip() + ' ' + os.environ.get('MY_VAR', 'none'))" > script.py
+printf 'world' > data.txt
+cat > .pipedpeerignore <<'EOF'
+secret.txt
+EOF
+echo "hidden" > secret.txt
+`
+	dockerExec(t, ctx, labDir, setupScript)
+
+	// Read the daemon's auto-generated node ID
+	nodeIDOut := strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
+	if nodeIDOut == "" {
+		// Daemon hasn't created identity yet — start it explicitly first
+		dockerExec(t, ctx, labDir, "/pipedpeer start --daemon-port 38080 && sleep 2")
+		nodeIDOut = strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
+	}
+	if nodeIDOut == "" {
+		t.Fatalf("failed to read node identity from worker-1")
+	}
+
+	// Run the compiled binary from inside worker-1
+	out, err := dockerExecE(ctx, labDir, fmt.Sprintf("cd /tmp/sync-test && /pipedpeer run --script script.py --remote root@localhost:22 --target-id %s -e MY_VAR=testvar", nodeIDOut))
+	if err != nil {
+		t.Fatalf("cli run failed: %v\noutput: %s", err, out)
+	}
+
+	outputTxt := strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /tmp/sync-test/output.txt 2>/dev/null || true"))
+	if outputTxt != "hello world testvar" {
+		t.Fatalf("sync execution failed, expected 'hello world testvar', got: %q\ncli out: %s", outputTxt, out)
+	}
+	
+	secretExistsLocally := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls /tmp/sync-test/secret.txt 2>/dev/null || echo missing"))
+	if secretExistsLocally == "missing" {
+		t.Fatalf("secret.txt was deleted locally!")
+	}
+
+	// Verify that secret.txt was NOT sent to the remote (it wouldn't exist there)
+	secretExistsOnRemote := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls /tmp/pipedpeer/jobs/*/work/secret.txt 2>/dev/null || echo missing"))
+	if secretExistsOnRemote != "missing" {
+		t.Fatalf("secret.txt was incorrectly sent to remote!")
+	}
+
+	// Verify job history artifacts were created
+	jobHistoryDir := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls -d /root/.local/share/pipedpeer/jobs/*/ | head -1"))
+	if jobHistoryDir == "" {
+		t.Fatalf("no job history directory found")
+	}
+
+	// Must-exist artifacts
+	for _, f := range []string{"metadata.json", "script.py", "flake.nix", "run_command.sh", "stdout.log"} {
+		exists := strings.TrimSpace(dockerExec(t, ctx, labDir, fmt.Sprintf("test -f %s%s && echo yes || echo no", jobHistoryDir, f)))
+		if exists != "yes" {
+			t.Fatalf("expected job history artifact %s to exist", f)
+		}
+	}
+
+	// Verify metadata.json content
+	metaJSON := strings.TrimSpace(dockerExec(t, ctx, labDir, "cat "+jobHistoryDir+"metadata.json"))
+	if !strings.Contains(metaJSON, `"status":"succeeded"`) && !strings.Contains(metaJSON, `"status": "succeeded"`) {
+		t.Fatalf("expected status=succeeded in metadata.json, got: %s", metaJSON)
+	}
+	if !strings.Contains(metaJSON, nodeIDOut) {
+		t.Fatalf("expected target_id=%s in metadata.json, got: %s", nodeIDOut, metaJSON)
+	}
+
+	// Verify stdout.log was created (content may vary due to PTY allocation in Docker)
+	// File existence is already verified in the must-exist loop above
+
+	// Copy integration job data to test_results
+	runCmdE(ctx, labDir, "docker", "cp", "worker-1:/root/.local/share/pipedpeer/jobs", "/app/test_results/integration_job_data")
 }

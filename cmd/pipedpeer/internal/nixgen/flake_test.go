@@ -6,27 +6,64 @@ import (
 )
 
 func TestGenerateFlakeWithoutPackages(t *testing.T) {
-	flake := GenerateFlake("main.py", nil, []string{"main.py", "helpers.py"})
+	flake := GenerateFlake(nil, "")
 	if !strings.Contains(flake, "pkgs.python3") {
 		t.Fatalf("expected plain python runtime in flake")
 	}
 	if strings.Contains(flake, "withPackages") {
 		t.Fatalf("did not expect withPackages when nix package list is empty")
 	}
-	if !strings.Contains(flake, "cp ${./helpers.py} \"$srcdir/helpers.py\"") {
-		t.Fatalf("expected local source copy setup")
-	}
 }
 
 func TestGenerateFlakeWithPackages(t *testing.T) {
-	flake := GenerateFlake("main.py", []string{"numpy", "pandas"}, []string{"main.py", "pkg/__init__.py"})
-	if !strings.Contains(flake, "python3.withPackages") {
-		t.Fatalf("expected withPackages section")
+	flake := GenerateFlake([]string{"numpy", "pandas"}, "python310")
+	if !strings.Contains(flake, "pkgs.python310.withPackages") {
+		t.Fatalf("expected withPackages section with python310")
 	}
 	if !strings.Contains(flake, "ps.numpy") || !strings.Contains(flake, "ps.pandas") {
 		t.Fatalf("expected mapped python packages in flake")
 	}
-	if !strings.Contains(flake, "mkdir -p \"$srcdir/pkg\"") {
-		t.Fatalf("expected package directory materialization")
+}
+
+func TestGenerateFlakePythonVersionDefault(t *testing.T) {
+	flake := GenerateFlake([]string{"numpy"}, "")
+	if !strings.Contains(flake, "pkgs.python3.withPackages") {
+		t.Fatalf("expected default python3 when version is empty, got:\n%s", flake)
+	}
+}
+
+func TestGenerateFlakePythonVersionExplicit(t *testing.T) {
+	flake := GenerateFlake(nil, "python311")
+	if !strings.Contains(flake, "pkgs.python311") {
+		t.Fatalf("expected python311 in flake, got:\n%s", flake)
+	}
+}
+
+func TestGenerateFlakeForArchAarch64(t *testing.T) {
+	flake := GenerateFlakeForArch([]string{"numpy"}, "", "aarch64-linux")
+	if !strings.Contains(flake, "packages.aarch64-linux.default") {
+		t.Fatalf("expected aarch64-linux in flake, got:\n%s", flake)
+	}
+	if !strings.Contains(flake, "legacyPackages.aarch64-linux") {
+		t.Fatalf("expected aarch64-linux legacyPackages, got:\n%s", flake)
+	}
+}
+
+func TestNixArchReturnsValidFormat(t *testing.T) {
+	arch := NixArch()
+	if !strings.Contains(arch, "-") {
+		t.Fatalf("expected arch-os format, got: %s", arch)
+	}
+	// Should contain a valid Nix system like x86_64-linux or aarch64-linux
+	validPrefixes := []string{"x86_64", "aarch64", "armv7l"}
+	found := false
+	for _, p := range validPrefixes {
+		if strings.HasPrefix(arch, p) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("unexpected architecture prefix in: %s", arch)
 	}
 }

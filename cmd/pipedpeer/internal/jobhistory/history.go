@@ -33,6 +33,15 @@ type Record struct {
 	UpdatedFiles   int    `json:"updated_files,omitempty"`
 	UnchangedFiles int    `json:"unchanged_files,omitempty"`
 	ManifestPath   string `json:"manifest_path,omitempty"`
+	// Coordinator placement diagnostics
+	PlacementSource  string `json:"placement_source,omitempty"`  // "registry", "cache", "discovery", "self", "explicit"
+	DegradedMode     bool   `json:"degraded_mode,omitempty"`
+	CandidateCount   int    `json:"candidate_count,omitempty"`
+	PlacementReason  string `json:"placement_reason,omitempty"`
+	// Resource estimation and tracking
+	PeakMemBytes      int64  `json:"peak_mem_bytes,omitempty"`
+	EstimatedMemBytes int64  `json:"estimated_mem_bytes,omitempty"`
+	EstimationTier    string `json:"estimation_tier,omitempty"` // "user", "historical", "filesize", "import"
 }
 
 type JobSummary struct {
@@ -65,7 +74,7 @@ func NewRecord(scriptPath, remote, targetID string, detached, isolate bool) (Rec
 	}
 	r := Record{
 		ID:         id,
-		Status:     "running",
+		Status:     StateRunning,
 		StartedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 		ScriptPath: scriptPath,
 		Remote:     remote,
@@ -94,12 +103,14 @@ func Finalize(dir string, r Record, runErr error) error {
 	if err == nil {
 		r.DurationMs = finished.Sub(start).Milliseconds()
 	}
+	prevStatus := r.Status
 	if runErr != nil {
-		r.Status = "failed"
+		r.Status = StateFailed
 		r.Error = runErr.Error()
 	} else {
-		r.Status = "succeeded"
+		r.Status = StateSucceeded
 	}
+	PublishEvent(r.ID, r.Status, prevStatus, r.Error)
 	return SaveRecord(dir, r)
 }
 
@@ -185,4 +196,30 @@ func ReadOptionalText(dir, name string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+// QueryPeakMem returns the PeakMemBytes from the last N runs of the same script.
+// Only returns non-zero values. Result is unsorted.
+func QueryPeakMem(scriptPath string, limit int) []int64 {
+	entries, err := os.ReadDir(BaseDir())
+	if err != nil {
+		return nil
+	}
+
+	var peaks []int64
+	// Iterate in reverse (newest first)
+	for i := len(entries) - 1; i >= 0 && len(peaks) < limit; i-- {
+		e := entries[i]
+		if !e.IsDir() {
+			continue
+		}
+		r, _, err := ReadRecord(e.Name())
+		if err != nil {
+			continue
+		}
+		if r.ScriptPath == scriptPath && r.PeakMemBytes > 0 {
+			peaks = append(peaks, r.PeakMemBytes)
+		}
+	}
+	return peaks
 }

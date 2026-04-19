@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -9,21 +10,34 @@ func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-func BuildRunCommand(runPath, jobDir string, isolate bool) string {
+func BuildRunCommand(runPath, jobDir string, isolate bool, scriptRelPath string, scriptArgs []string, envs []string) string {
 	workDir := filepath.Join(jobDir, "work")
 
+	var runCmdBuilder strings.Builder
+	for _, env := range envs {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			runCmdBuilder.WriteString("export " + parts[0] + "=" + ShellQuote(parts[1]) + " && ")
+		} else {
+			runCmdBuilder.WriteString("export " + parts[0] + "=" + ShellQuote(os.Getenv(parts[0])) + " && ")
+		}
+	}
+	runCmdBuilder.WriteString(ShellQuote(runPath) + " " + ShellQuote(scriptRelPath))
+	for _, arg := range scriptArgs {
+		runCmdBuilder.WriteString(" " + ShellQuote(arg))
+	}
+	runCmdTarget := runCmdBuilder.String()
+
 	if !isolate {
-		return "mkdir -p " + ShellQuote(workDir) + " && cd " + ShellQuote(workDir) + " && " + ShellQuote(runPath)
+		return "mkdir -p " + ShellQuote(workDir) + " && cd " + ShellQuote(workDir) + " && " + runCmdTarget
 	}
 
 	homeDir := filepath.Join(jobDir, "home")
 	pathEnv := "/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin"
 
-	return strings.Join([]string{
-		"mkdir -p " + ShellQuote(workDir) + " " + ShellQuote(homeDir),
+	bwrapArgs := []string{
 		"bwrap",
 		"--die-with-parent",
-		"--unshare-net",
 		"--unshare-pid",
 		"--unshare-ipc",
 		"--unshare-uts",
@@ -36,8 +50,23 @@ func BuildRunCommand(runPath, jobDir string, isolate bool) string {
 		"--chdir /work",
 		"--setenv HOME /home/root",
 		"--setenv PATH " + ShellQuote(pathEnv),
-		"-- " + ShellQuote(runPath),
-	}, " ")
+	}
+
+	for _, env := range envs {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			bwrapArgs = append(bwrapArgs, "--setenv "+parts[0]+" "+ShellQuote(parts[1]))
+		} else {
+			bwrapArgs = append(bwrapArgs, "--setenv "+parts[0]+" "+ShellQuote(os.Getenv(parts[0])))
+		}
+	}
+
+	bwrapArgs = append(bwrapArgs, "--", ShellQuote(runPath), ShellQuote(scriptRelPath))
+	for _, arg := range scriptArgs {
+		bwrapArgs = append(bwrapArgs, ShellQuote(arg))
+	}
+
+	return "mkdir -p " + ShellQuote(workDir) + " " + ShellQuote(homeDir) + " && " + strings.Join(bwrapArgs, " ")
 }
 
 func BuildDetachedRemoteCommand(runCmd, jobDir, storePath, resolvedJobName string) string {

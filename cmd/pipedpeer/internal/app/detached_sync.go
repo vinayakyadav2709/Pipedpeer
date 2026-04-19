@@ -130,7 +130,7 @@ func readRemoteText(user, host string, port int, remotePath string) (string, err
 }
 
 func remoteTest(user, host string, port int, shCmd string) (bool, error) {
-	cmd := exec.Command("ssh", "-p", strconv.Itoa(port), fmt.Sprintf("%s@%s", user, host), "sh", "-lc", shCmd)
+	cmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", strconv.Itoa(port), fmt.Sprintf("%s@%s", user, host), shCmd)
 	err := cmd.Run()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -144,7 +144,7 @@ func remoteTest(user, host string, port int, shCmd string) (bool, error) {
 }
 
 func remoteOutput(user, host string, port int, shCmd string) (string, error) {
-	cmd := exec.Command("ssh", "-p", strconv.Itoa(port), fmt.Sprintf("%s@%s", user, host), "sh", "-lc", shCmd)
+	cmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", strconv.Itoa(port), fmt.Sprintf("%s@%s", user, host), shCmd)
 	var out bytes.Buffer
 	var errOut bytes.Buffer
 	cmd.Stdout = &out

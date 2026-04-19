@@ -75,7 +75,7 @@ func Start(nodeID string, port int) error {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(exe, "__daemon__", "--node-id", nodeID, "--port", strconv.Itoa(port))
+	cmd := exec.Command(exe, "__daemon__", "--port", strconv.Itoa(port))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -198,23 +198,27 @@ func writeInt(path string, v int) error {
 }
 
 type AcceptResponse struct {
-	Accepted bool   `json:"accepted"`
-	NodeID   string `json:"node_id"`
-	Reason   string `json:"reason,omitempty"`
+	Accepted  bool   `json:"accepted"`
+	NodeID    string `json:"node_id"`
+	Reason    string `json:"reason,omitempty"`
+	LeaseID   string `json:"lease_id,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
-func CheckRemoteAcceptance(host string, port int, targetID, jobName string) error {
+// CheckRemoteAcceptance sends an accept request and returns the full response including lease info.
+func CheckRemoteAcceptance(host string, port int, targetID, jobName, submitterNode string, requiredMemBytes int64) (*AcceptResponse, error) {
 	url := fmt.Sprintf("http://%s:%d/v1/accept", host, port)
-	payload := fmt.Sprintf(`{"target_id":%q,"job_name":%q}`, targetID, jobName)
+	payload := fmt.Sprintf(`{"target_id":%q,"job_name":%q,"submitter_node":%q,"required_mem_bytes":%d}`,
+		targetID, jobName, submitterNode, requiredMemBytes)
 	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
 	if err != nil {
-		return fmt.Errorf("failed to contact remote daemon at %s: %w", url, err)
+		return nil, fmt.Errorf("failed to contact remote daemon at %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	var out AcceptResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return fmt.Errorf("remote daemon returned invalid response: %w", err)
+		return nil, fmt.Errorf("remote daemon returned invalid response: %w", err)
 	}
 
 	if !out.Accepted {
@@ -222,7 +226,42 @@ func CheckRemoteAcceptance(host string, port int, targetID, jobName string) erro
 		if reason == "" {
 			reason = "remote daemon rejected job"
 		}
-		return fmt.Errorf("job rejected by remote daemon: %s", reason)
+		return nil, fmt.Errorf("job rejected by remote daemon: %s", reason)
 	}
+	return &out, nil
+}
+
+// CommitLease commits a lease, transitioning it from reserved to running.
+func CommitLease(host string, port int, leaseID string) error {
+	url := fmt.Sprintf("http://%s:%d/v1/commit", host, port)
+	payload := fmt.Sprintf(`{"lease_id":%q}`, leaseID)
+	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to commit lease: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out struct {
+		Committed bool   `json:"committed"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("invalid commit response: %w", err)
+	}
+	if !out.Committed {
+		return fmt.Errorf("commit rejected: %s", out.Reason)
+	}
+	return nil
+}
+
+// CompleteLease completes a lease after job execution.
+func CompleteLease(host string, port int, leaseID, status string) error {
+	url := fmt.Sprintf("http://%s:%d/v1/complete", host, port)
+	payload := fmt.Sprintf(`{"lease_id":%q,"status":%q}`, leaseID, status)
+	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("failed to complete lease: %w", err)
+	}
+	defer resp.Body.Close()
 	return nil
 }

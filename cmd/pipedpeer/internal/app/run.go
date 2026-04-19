@@ -10,24 +10,39 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/execution"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
+	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/remote"
 )
 
 type Options struct {
-	ScriptPath string
-	Remote     string
-	TargetID   string
-	Detach     bool
-	JobName    string
-	Isolate    bool
+	ScriptPath    string
+	Remote        string
+	TargetID      string
+	Detach        bool
+	JobName       string
+	Isolate       bool
+	Mode          string
+	PythonVersion string
+	Envs          []string
+	Pkgs          []string
+	ScriptArgs    []string
+	// Coordinator placement diagnostics (populated when --remote is omitted)
+	PlacementSource  string
+	DegradedMode     bool
+	CandidateCount   int
+	PlacementReason  string
+	// Resource estimation
+	EstimatedMemBytes int64
+	EstimationTier    string
 }
 
 func Run(opts Options) (runErr error) {
@@ -45,8 +60,6 @@ func Run(opts Options) (runErr error) {
 		return fmt.Errorf("Failed to get absolute path: %v", err)
 	}
 
-	scriptDir := filepath.Dir(absScriptPath)
-
 	resolvedJobName := opts.JobName
 	if resolvedJobName == "" {
 		resolvedJobName = fmt.Sprintf("job-%d", time.Now().UnixNano())
@@ -58,6 +71,14 @@ func Run(opts Options) (runErr error) {
 	}
 	historyRecord.JobName = resolvedJobName
 	historyRecord.RunHost = sshCfg.Host
+	// Coordinator placement diagnostics
+	historyRecord.PlacementSource = opts.PlacementSource
+	historyRecord.DegradedMode = opts.DegradedMode
+	historyRecord.CandidateCount = opts.CandidateCount
+	historyRecord.PlacementReason = opts.PlacementReason
+	// Resource estimation
+	historyRecord.EstimatedMemBytes = opts.EstimatedMemBytes
+	historyRecord.EstimationTier = opts.EstimationTier
 	_ = jobhistory.SaveRecord(historyDir, historyRecord)
 	defer func() {
 		if opts.Detach {
@@ -81,30 +102,10 @@ func Run(opts Options) (runErr error) {
 		fmt.Printf("      Found local imports: %d (will be bundled into runtime artifact)\n", len(importScan.LocalFiles))
 	}
 
-	bundleMap := map[string]string{}
-	scriptRelPath, err := filepath.Rel(scriptDir, absScriptPath)
-	if err != nil {
-		return fmt.Errorf("Failed to compute script relative path: %v", err)
-	}
-	bundleMap[filepath.ToSlash(scriptRelPath)] = absScriptPath
-	for _, localFile := range importScan.LocalFiles {
-		rel, err := filepath.Rel(scriptDir, localFile)
-		if err != nil {
-			return fmt.Errorf("Failed to compute local import relative path: %v", err)
-		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, "../") {
-			return fmt.Errorf("Local import %s is outside script directory; workspace replication across roots is not supported yet", localFile)
-		}
-		bundleMap[rel] = localFile
-	}
-
-	var nixPkgs []string
-	for _, pkg := range imports {
-		if nixpkg := pythondeps.ResolveNixPackage(pkg); nixpkg != "" {
-			fmt.Printf("      %s -> %s\n", pkg, nixpkg)
-			nixPkgs = append(nixPkgs, nixpkg)
-		}
+	fmt.Printf("\n[2/6] Parsing dependencies...\n")
+	nixPkgs := pythondeps.ResolvePackages(imports, opts.Pkgs)
+	for _, pkg := range nixPkgs {
+		fmt.Printf("      Using Nix package: %s\n", pkg)
 	}
 
 	tmpDir, err := os.MkdirTemp("", "pipedpeer-*")
@@ -113,26 +114,8 @@ func Run(opts Options) (runErr error) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	fmt.Printf("\n[2/6] Copying script to temp dir...\n")
-	bundleFiles := make([]string, 0, len(bundleMap))
-	for relPath, srcPath := range bundleMap {
-		target := filepath.Join(tmpDir, filepath.FromSlash(relPath))
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return fmt.Errorf("Failed to create bundle directory: %v", err)
-		}
-		input, err := os.ReadFile(srcPath)
-		if err != nil {
-			return fmt.Errorf("Failed to read source file %s: %v", srcPath, err)
-		}
-		if err := os.WriteFile(target, input, 0644); err != nil {
-			return fmt.Errorf("Failed to write bundled source file %s: %v", target, err)
-		}
-		bundleFiles = append(bundleFiles, relPath)
-	}
-	fmt.Printf("      Copied %d files to: %s\n", len(bundleFiles), tmpDir)
-
 	fmt.Printf("\n[3/6] Generating flake.nix...\n")
-	flakeContent := nixgen.GenerateFlake(filepath.ToSlash(scriptRelPath), nixPkgs, bundleFiles)
+	flakeContent := nixgen.GenerateFlake(nixPkgs, opts.PythonVersion)
 	flakePath := filepath.Join(tmpDir, "flake.nix")
 	if err := os.WriteFile(flakePath, []byte(flakeContent), 0644); err != nil {
 		return fmt.Errorf("Failed to write flake.nix: %v", err)
@@ -141,7 +124,8 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Created: %s\n", flakePath)
 
 	fmt.Printf("\n[4/6] Building locally...\n")
-	cmd := exec.Command("nix", "build", ".#packages.x86_64-linux.default")
+	nixSystem := nixgen.NixArch()
+	cmd := exec.Command("nix", "build", ".#packages."+nixSystem+".default", "--option", "build-users-group", "")
 	cmd.Dir = tmpDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -170,19 +154,69 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Copied successfully\n")
 	fmt.Printf("      Note: this node reuses its Nix store cache across jobs\n")
 
-	fmt.Printf("\n[7/7] Executing on remote...\n")
-	runPath := filepath.Join(storePath, "bin", "run")
-	historyRecord.RunPath = runPath
-
+	fmt.Printf("\n[7/8] Syncing workspace to remote...\n")
 	jobDir := filepath.Join("/tmp/pipedpeer/jobs", resolvedJobName)
 	historyRecord.RemoteJobDir = jobDir
 	_ = jobhistory.SaveRecord(historyDir, historyRecord)
-	runCmd := execution.BuildRunCommand(runPath, jobDir, opts.Isolate)
+
+	localPwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("Failed to get pwd: %v", err)
+	}
+	scriptRelPath, err := filepath.Rel(localPwd, absScriptPath)
+	if err != nil {
+		scriptRelPath = filepath.Base(absScriptPath)
+	}
+
+	remoteWorkDir := filepath.Join(jobDir, "work")
+	syncCmd := fmt.Sprintf("mkdir -p %s && tar -C %s -xf -", execution.ShellQuote(remoteWorkDir), execution.ShellQuote(remoteWorkDir))
+	sshOpts := []string{"-o", "StrictHostKeyChecking=accept-new"}
+	
+	tarArgs := []string{"--exclude=.git", "--exclude=__pycache__", "--exclude=.venv", "--exclude=venv", "--exclude=env", "--exclude=node_modules"}
+	ignoreFile := filepath.Join(localPwd, ".pipedpeerignore")
+	if content, err := os.ReadFile(ignoreFile); err == nil {
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				tarArgs = append(tarArgs, "--exclude="+line)
+			}
+		}
+	}
+	tarArgs = append(tarArgs, "-cf", "-", ".")
+	tarCmd := exec.Command("tar", tarArgs...)
+	
+	tarCmd.Dir = localPwd
+	sshSyncArgs := append(sshOpts, "-p", fmt.Sprintf("%d", sshCfg.Port), fmt.Sprintf("%s@%s", sshCfg.User, sshCfg.Host), syncCmd)
+	sshSyncCmd := exec.Command("ssh", sshSyncArgs...)
+
+	pipe, err := tarCmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("Failed to create tar pipe: %v", err)
+	}
+	sshSyncCmd.Stdin = pipe
+
+	if err := sshSyncCmd.Start(); err != nil {
+		return fmt.Errorf("Failed to start ssh sync: %v", err)
+	}
+	if err := tarCmd.Run(); err != nil {
+		return fmt.Errorf("Failed to run tar: %v", err)
+	}
+	if err := sshSyncCmd.Wait(); err != nil {
+		return fmt.Errorf("Failed to finish ssh sync: %v", err)
+	}
+	fmt.Printf("      Workspace synced to %s\n", remoteWorkDir)
+
+	fmt.Printf("\n[8/8] Executing on remote...\n")
+	runPath := filepath.Join(storePath, "bin", "run")
+	historyRecord.RunPath = runPath
+
+	runCmd := execution.BuildRunCommand(runPath, jobDir, opts.Isolate, scriptRelPath, opts.ScriptArgs, opts.Envs)
 	_ = jobhistory.SaveText(historyDir, "run_command.sh", runCmd)
 
 	if opts.Detach {
 		remoteCmd := execution.BuildDetachedRemoteCommand(runCmd, jobDir, storePath, resolvedJobName)
-		cmd = exec.Command("ssh", "-p", fmt.Sprintf("%d", sshCfg.Port), fmt.Sprintf("%s@%s", sshCfg.User, sshCfg.Host), "sh", "-lc", remoteCmd)
+		cmd = exec.Command("ssh", append(sshOpts, "-p", fmt.Sprintf("%d", sshCfg.Port), fmt.Sprintf("%s@%s", sshCfg.User, sshCfg.Host), remoteCmd)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -203,7 +237,7 @@ func Run(opts Options) (runErr error) {
 			Host:       sshCfg.Host,
 			Port:       sshCfg.Port,
 			JobDir:     jobDir,
-			LocalRoot:  scriptDir,
+			LocalRoot:  localPwd,
 			HistoryDir: historyDir,
 		}); err != nil {
 			return fmt.Errorf("Failed to start detached sync worker: %v", err)
@@ -211,24 +245,50 @@ func Run(opts Options) (runErr error) {
 		fmt.Printf("      Detached sync worker started (job history will update asynchronously)\n")
 		fmt.Printf("      Tip: submit more jobs to this same node with --detach\n")
 	} else {
-		cmd = exec.Command("ssh", "-p", fmt.Sprintf("%d", sshCfg.Port), fmt.Sprintf("%s@%s", sshCfg.User, sshCfg.Host), "sh", "-lc", runCmd)
+		cmd = exec.Command("ssh", append(sshOpts, "-t", "-p", fmt.Sprintf("%d", sshCfg.Port), fmt.Sprintf("%s@%s", sshCfg.User, sshCfg.Host), runCmd)...)
 		var stdoutBuf bytes.Buffer
 		var stderrBuf bytes.Buffer
 		cmd.Stdout = io.MultiWriter(os.Stdout, &stdoutBuf)
 		cmd.Stderr = io.MultiWriter(os.Stderr, &stderrBuf)
-		if err := cmd.Run(); err != nil {
+		cmd.Stdin = os.Stdin
+
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("Failed to start remote execution: %v", err)
+		}
+
+		// Wait for execution or interrupt
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- cmd.Wait()
+		}()
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt)
+
+		select {
+		case err := <-errCh:
 			_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutBuf.String())
 			_ = jobhistory.SaveText(historyDir, "stderr.log", stderrBuf.String())
-			return fmt.Errorf("Execution failed: %v", err)
+			if err != nil {
+				fmt.Printf("\n      Execution finished with error: %v\n", err)
+			}
+		case <-sigCh:
+			fmt.Printf("\n      Caught interrupt, terminating remote execution...\n")
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(os.Interrupt)
+			}
+			<-errCh
+			_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutBuf.String())
+			_ = jobhistory.SaveText(historyDir, "stderr.log", stderrBuf.String())
 		}
-		_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutBuf.String())
-		_ = jobhistory.SaveText(historyDir, "stderr.log", stderrBuf.String())
+		signal.Stop(sigCh)
 
-		syncSummary, err := receiveAndSyncOutputs(sshCfg.User, sshCfg.Host, sshCfg.Port, jobDir, scriptDir, historyDir)
+		syncSummary, err := receiveAndSyncOutputs(sshCfg.User, sshCfg.Host, sshCfg.Port, jobDir, localPwd, historyDir)
 		if err != nil {
-			fmt.Printf("      Warning: failed to receive output files: %v\n", err)
+			log := logging.WithComponent("sync")
+			log.Warn().Err(err).Msg("failed to receive output files")
 		} else {
-			historyRecord.LocalSyncRoot = scriptDir
+			historyRecord.LocalSyncRoot = localPwd
 			historyRecord.ReceivedFiles = syncSummary.Total
 			historyRecord.NewFiles = syncSummary.New
 			historyRecord.UpdatedFiles = syncSummary.Updated
@@ -264,7 +324,7 @@ func receiveAndSyncOutputs(user, host string, port int, jobDir, localRoot, histo
 	remoteWorkDir := filepath.Join(jobDir, "work")
 	remoteCmd := "if [ -d " + execution.ShellQuote(remoteWorkDir) + " ]; then tar -C " + execution.ShellQuote(remoteWorkDir) + " -cf - .; fi"
 
-	cmd := exec.Command("ssh", "-p", fmt.Sprintf("%d", port), fmt.Sprintf("%s@%s", user, host), "sh", "-lc", remoteCmd)
+	cmd := exec.Command("ssh", "-o", "StrictHostKeyChecking=accept-new", "-p", fmt.Sprintf("%d", port), fmt.Sprintf("%s@%s", user, host), remoteCmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return syncSummary{}, err
