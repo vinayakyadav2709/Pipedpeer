@@ -5,13 +5,15 @@ services:
       dockerfile: Dockerfile.nix
     container_name: worker-1
     privileged: true
+    network: host
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
     security_opt:
       - seccomp:unconfined
-    ports:
-      - "2221:22"
+    command: ["sh", "-c", "mkdir -p /usr/local/bin && while true; do sleep 1; done"]
+    environment:
+      - NODE_ID=worker-1
 
   worker-2:
     build:
@@ -19,13 +21,15 @@ services:
       dockerfile: Dockerfile.nix
     container_name: worker-2
     privileged: true
+    network: host
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
     security_opt:
       - seccomp:unconfined
-    ports:
-      - "2222:22"
+    command: ["sh", "-c", "mkdir -p /usr/local/bin && while true; do sleep 1; done"]
+    environment:
+      - NODE_ID=worker-2
 
   worker-3:
     build:
@@ -33,10 +37,12 @@ services:
       dockerfile: Dockerfile.nix
     container_name: worker-3
     privileged: true
+    network: host
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
     security_opt:
       - seccomp:unconfined
-    ports:
-      - "2223:22"
+    command: ["sh", "-c", "mkdir -p /usr/local/bin && while true; do sleep 1; done"]
+    environment:
+      - NODE_ID=worker-3
