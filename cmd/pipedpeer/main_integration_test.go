@@ -13,12 +13,37 @@ import (
 	"time"
 )
 
+// detectContainerRuntime returns the available container runtime command.
+// Returns "podman-compose" if available (preferred), "docker" as fallback.
+// Returns empty string if neither is found.
+func detectContainerRuntime() string {
+	if _, err := exec.LookPath("podman-compose"); err == nil {
+		return "podman-compose"
+	}
+	if _, err := exec.LookPath("docker"); err == nil {
+		return "docker"
+	}
+	return ""
+}
+
+// composeArgs returns the arguments for a compose operation based on the runtime.
+// For podman-compose: returns ["up", "-d", ...] (no "compose" subcommand)
+// For docker: returns ["compose", "up", "-d", ...] (includes "compose" subcommand)
+func composeArgs(runtime string, args ...string) []string {
+	if runtime == "podman-compose" {
+		return args
+	}
+	// docker uses "compose" as subcommand
+	return append([]string{"compose"}, args...)
+}
+
 func TestConcurrentJobsAndSharedNumpyCache(t *testing.T) {
 	if os.Getenv("PIPEDPEER_INTEGRATION") != "1" {
 		t.Skip("set PIPEDPEER_INTEGRATION=1 to run integration tests")
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker is required for integration test")
+	runtime := detectContainerRuntime()
+	if runtime == "" {
+		t.Skip("docker or podman is required for integration test")
 	}
 
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -29,11 +54,13 @@ func TestConcurrentJobsAndSharedNumpyCache(t *testing.T) {
 
 	ctx := context.Background()
 
-	runCmd(t, ctx, labDir, "docker", "compose", "up", "-d", "--build", "worker-1")
+	args := composeArgs(runtime, "up", "-d", "--build", "worker-1")
+	runCmd(t, ctx, labDir, runtime, args...)
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()
-		cmd := exec.CommandContext(cleanupCtx, "docker", "compose", "down")
+		downArgs := composeArgs(runtime, "down")
+		cmd := exec.CommandContext(cleanupCtx, runtime, downArgs...)
 		cmd.Dir = labDir
 		_ = cmd.Run()
 	})
@@ -258,7 +285,12 @@ func dockerExec(t *testing.T, ctx context.Context, labDir, script string) string
 }
 
 func dockerExecE(ctx context.Context, labDir, script string) (string, error) {
-	return runCmdE(ctx, labDir, "docker", "compose", "exec", "-T", "worker-1", "sh", "-lc", script)
+	runtime := detectContainerRuntime()
+	if runtime == "" {
+		return "", fmt.Errorf("no container runtime found")
+	}
+	args := composeArgs(runtime, "exec", "-T", "worker-1", "sh", "-lc", script)
+	return runCmdE(ctx, labDir, runtime, args...)
 }
 
 func shellEscape(s string) string {
@@ -269,6 +301,10 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 	if os.Getenv("PIPEDPEER_INTEGRATION") != "1" {
 		t.Skip("set PIPEDPEER_INTEGRATION=1 to run integration tests")
 	}
+	runtime := detectContainerRuntime()
+	if runtime == "" {
+		t.Skip("docker or podman is required for integration test")
+	}
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("failed to resolve repo root: %v", err)
@@ -277,11 +313,13 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 
 	ctx := context.Background()
 
-	runCmd(t, ctx, labDir, "docker", "compose", "up", "-d", "--build", "worker-1")
+	args := composeArgs(runtime, "up", "-d", "--build", "worker-1")
+	runCmd(t, ctx, labDir, runtime, args...)
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cleanupCancel()
-		cmd := exec.CommandContext(cleanupCtx, "docker", "compose", "down")
+		downArgs := composeArgs(runtime, "down")
+		cmd := exec.CommandContext(cleanupCtx, runtime, downArgs...)
 		cmd.Dir = labDir
 		_ = cmd.Run()
 	})
@@ -304,7 +342,8 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 	}
 
 	// Copy the binary into worker-1
-	if _, err := runCmdE(ctx, labDir, "docker", "cp", binPath, "worker-1:/pipedpeer"); err != nil {
+	runtime = detectContainerRuntime()
+	if _, err := runCmdE(ctx, labDir, runtime, "cp", binPath, "worker-1:/pipedpeer"); err != nil {
 		t.Fatalf("failed to copy binary to worker-1: %v", err)
 	}
 
@@ -383,5 +422,6 @@ echo "hidden" > secret.txt
 	// File existence is already verified in the must-exist loop above
 
 	// Copy integration job data to test_results
-	runCmdE(ctx, labDir, "docker", "cp", "worker-1:/root/.local/share/pipedpeer/jobs", "/app/test_results/integration_job_data")
+	runtime = detectContainerRuntime()
+	runCmdE(ctx, labDir, runtime, "cp", "worker-1:/root/.local/share/pipedpeer/jobs", "/app/test_results/integration_job_data")
 }
