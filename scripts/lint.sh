@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$repo_root/cmd/pipedpeer"
+cd "$repo_root/src"
 
 go vet ./...
 echo "go vet completed"

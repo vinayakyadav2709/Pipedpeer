@@ -22,7 +22,7 @@ if [ "$RUNTIME" = "podman" ]; then
     # Podman: Run tests directly on host (Go is available, no DinD needed)
     # Integration tests auto-skip when PIPEDPEER_INTEGRATION is not set
     echo "Running tests directly (runtime: $RUNTIME)..."
-    cd cmd/pipedpeer
+    cd src
     # Clear any PIPEDPEER_INTEGRATION env var to skip integration tests
     unset PIPEDPEER_INTEGRATION
     go test -v -count=1 ./... > "$repo_root/test_results/unit_and_integration_tests.log" 2>&1
@@ -51,7 +51,7 @@ else
       chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
       
       echo 'Running unit and integration tests...'
-      cd cmd/pipedpeer
+      cd src
       PIPEDPEER_INTEGRATION=1 go test -v ./... > /app/test_results/unit_and_integration_tests.log 2>&1
       test_exit=\$?
       

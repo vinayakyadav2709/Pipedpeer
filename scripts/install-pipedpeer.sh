@@ -64,7 +64,7 @@ download_and_install() {
 local_build_install() {
   echo "Release artifact download unavailable; falling back to local build..."
   (
-    cd "$repo_root/cmd/pipedpeer"
+    cd "$repo_root/src"
     go build -o "$tmp_dir/$BINARY_NAME" .
   )
   chmod +x "$tmp_dir/$BINARY_NAME"
