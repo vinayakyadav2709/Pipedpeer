@@ -55,6 +55,11 @@ type Server struct {
 
 	stopSweep chan struct{}
 
+	// Job execution tracking
+	jobDir string
+	jobsMu sync.Mutex
+	jobs   map[string]*JobRecord
+
 	// NATS subscriptions (nil if NATS not configured)
 	natsSubs []*nats.Subscription
 }
@@ -111,6 +116,8 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		sweepInterval: sweepInterval,
 		leases:        make(map[string]*Lease),
 		stopSweep:     make(chan struct{}),
+		jobDir:        defaultJobDir(),
+		jobs:          make(map[string]*JobRecord),
 	}
 	s.buildRouter()
 	return s
@@ -265,6 +272,9 @@ func (s *Server) buildRouter() {
 	r.Post("/v1/commit", s.handleCommit)
 	r.Post("/v1/complete", s.handleComplete)
 	r.Post("/v1/cancel", s.handleCancel)
+	r.Post("/v1/jobs/upload", s.handleJobUpload)
+	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
+	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
 
 	s.router = r
 }

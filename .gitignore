@@ -1,5 +1,6 @@
 /bin/
 /pipedpeer
 cmd/pipedpeer/pipedpeer
+lab/pipedpeer
 *.log
 test_results/

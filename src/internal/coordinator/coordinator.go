@@ -12,6 +12,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/peers"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -24,6 +25,7 @@ const (
 	SourceDiscovery NodeSource = "discovery"
 	SourceSelf      NodeSource = "self"
 	SourceExplicit  NodeSource = "explicit"
+	SourceManual    NodeSource = "manual"
 )
 
 // ScoredNode is a candidate with a placement score.
@@ -148,11 +150,38 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		}
 	}
 
-	// 3. Always inject self-node
+	// 3. Manual peers (user-specified)
+	for _, p := range loadManualPeers() {
+		candidates = mergeNode(candidates, ScoredNode{
+			Node: registry.NodeRecord{
+				NodeID:      fmt.Sprintf("manual-%s:%d", p.Host, p.Port),
+				SSHEndpoint: fmt.Sprintf("root@%s:22", p.Host),
+				DaemonPort:  p.Port,
+				State:       "healthy",
+				HealthScore: 0.6,
+			},
+			Source: SourceManual,
+		})
+	}
+
+	// 4. Always inject self-node
 	selfNode := c.buildSelfNode()
 	candidates = mergeNode(candidates, ScoredNode{Node: selfNode, Source: SourceSelf})
 
-	// 4. Score + resource filter (all nodes including self)
+	// 4. Arch compatibility filter — closure is built for local arch
+	for i := range candidates {
+		if candidates[i].Rejected {
+			continue
+		}
+		nodeArch, ok := candidates[i].Node.Capabilities["arch"]
+		if ok && nodeArch != "" && nodeArch != c.selfIdentity.Arch {
+			candidates[i].Rejected = true
+			candidates[i].RejectReason = fmt.Sprintf(
+				"arch mismatch: closure %s, node %s", c.selfIdentity.Arch, nodeArch)
+		}
+	}
+
+	// 5. Score + resource filter (all nodes including self)
 	for i := range candidates {
 		if candidates[i].Rejected {
 			continue
@@ -201,7 +230,7 @@ func (c *Coordinator) FindNode() PlacementDecision {
 // PlaceWithRetry attempts to place a task on a node with a lease.
 // If no node can accept, it queues the task and retries every RetryInterval
 // until placement succeeds or ctx is cancelled.
-// Returns the lease result including the lease_id and SSH endpoint.
+// Returns the lease result including the lease_id and daemon endpoint.
 func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn func(string)) (*LeaseResult, error) {
 	retryInterval := cfg.RetryInterval
 	if retryInterval == 0 {
@@ -224,9 +253,26 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 		decision := c.FindNode()
 
 		// Try non-rejected candidates in score order
-		for _, cand := range decision.Candidates {
+		for i := range decision.Candidates {
+			cand := &decision.Candidates[i]
 			if cand.Rejected || cand.Node.NodeID == "" {
 				continue
+			}
+
+			// Resolve real UUID for manual peers via health endpoint
+			if cand.Source == SourceManual {
+				host := extractHost(cand.Node.SSHEndpoint)
+				healthURL := fmt.Sprintf("http://%s:%d/health", host, cand.Node.DaemonPort)
+				resp, err := c.httpClient.Get(healthURL)
+				if err == nil {
+					var h struct {
+						NodeID string `json:"node_id"`
+					}
+					if json.NewDecoder(resp.Body).Decode(&h) == nil && h.NodeID != "" {
+						cand.Node.NodeID = h.NodeID
+					}
+					resp.Body.Close()
+				}
 			}
 
 			endpoint := c.resolveEndpointForNode(cand.Node)
@@ -385,9 +431,9 @@ func (c *Coordinator) CancelLease(daemonURL, leaseID, submitterNode string, node
 }
 
 // ExecutorFunc is a function that executes a task on a placed node.
-// It receives the SSH endpoint and target node ID.
+// It receives the daemon host, port, and target node ID.
 // Returns nil on success, error on failure (triggering reschedule).
-type ExecutorFunc func(endpoint, targetNodeID string) error
+type ExecutorFunc func(host string, port int, targetNodeID string) error
 
 // StatusFunc is called with human-readable status updates.
 type StatusFunc func(msg string)
@@ -440,7 +486,7 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 		}
 
 		// 3. Execute
-		execErr := executor(result.Endpoint, result.NodeID)
+		execErr := executor(extractHost(result.Endpoint), result.DaemonPort, result.NodeID)
 
 		// 4. Complete the lease
 		if execErr == nil {
@@ -546,6 +592,12 @@ func scoreNode(n registry.NodeRecord) float64 {
 	return score
 }
 
+// loadManualPeers returns peer entries from the CLI's peers store.
+func loadManualPeers() []peers.Peer {
+	list, _ := peers.List()
+	return list
+}
+
 // mergeNode adds a node to the list, deduplicating by NodeID.
 // Registry source takes priority over discovery/cache.
 func mergeNode(list []ScoredNode, newNode ScoredNode) []ScoredNode {
@@ -553,10 +605,11 @@ func mergeNode(list []ScoredNode, newNode ScoredNode) []ScoredNode {
 		if existing.Node.NodeID == newNode.Node.NodeID {
 			// Keep the more authoritative source
 			priority := map[NodeSource]int{
-				SourceRegistry:  3,
-				SourceCache:     2,
-				SourceDiscovery: 1,
-				SourceSelf:      0,
+				SourceRegistry:  5,
+				SourceSelf:      4,
+				SourceManual:    3,
+				SourceDiscovery: 2,
+				SourceCache:     1,
 			}
 			if priority[newNode.Source] > priority[existing.Source] {
 				list[i] = newNode

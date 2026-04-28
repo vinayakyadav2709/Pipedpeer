@@ -24,6 +24,7 @@ var nixpkgsMapping = map[string]string{
 	"matplotlib":     "matplotlib",
 	"pillow":         "Pillow",
 	"pyyaml":         "pyyaml",
+	"yaml":            "pyyaml",
 	"pytest":         "pytest",
 	"torch":          "torch",
 	"tensorflow":     "tensorflow",

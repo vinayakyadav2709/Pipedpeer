@@ -15,6 +15,7 @@ import (
 type DiscoveredNode struct {
 	NodeID      string `json:"node_id"`
 	DaemonAddr  string `json:"daemon_addr"`   // "10.0.1.5:38080"
+	DaemonPort  int    `json:"daemon_port"`
 	SSHEndpoint string `json:"ssh_endpoint"`  // "root@10.0.1.5:22"
 	Arch        string `json:"arch"`
 }
@@ -163,6 +164,7 @@ func Discover(timeout time.Duration) []DiscoveredNode {
 			results = append(results, DiscoveredNode{
 				NodeID:      info.NodeID,
 				DaemonAddr:  fmt.Sprintf("%s:%d", extractHost(info.SSHEndpoint), info.DaemonPort),
+				DaemonPort:  info.DaemonPort,
 				SSHEndpoint: info.SSHEndpoint,
 				Arch:        info.Arch,
 			})
@@ -182,19 +184,33 @@ func DiscoverAsNodeRecords(timeout time.Duration) []registry.NodeRecord {
 	client := &http.Client{Timeout: 2 * time.Second}
 
 	for _, d := range discovered {
-		// Try to get full info from daemon health endpoint
-		resp, err := client.Get(fmt.Sprintf("http://%s/health", d.DaemonAddr))
 		rec := registry.NodeRecord{
 			NodeID:      d.NodeID,
 			SSHEndpoint: d.SSHEndpoint,
+			DaemonPort:  d.DaemonPort,
 			Capabilities: map[string]string{"arch": d.Arch},
 			State:        "healthy",
-			HealthScore:  0.5, // provisional score — discovered nodes get lower confidence
+			HealthScore:  0.5,
 		}
+
+		resp, err := client.Get(fmt.Sprintf("http://%s/health", d.DaemonAddr))
 		if err == nil {
-			resp.Body.Close()
+			defer resp.Body.Close()
 			if resp.StatusCode == 200 {
-				rec.HealthScore = 0.7 // validated via health check
+				rec.HealthScore = 0.7
+				var health struct {
+					ActiveJobs    int   `json:"active_jobs"`
+					ReservedMem   int64 `json:"reserved_mem"`
+					AvailableMem  int64 `json:"available_mem"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&health) == nil {
+					rec.Load = registry.LoadInfo{
+						ActiveJobs:        health.ActiveJobs,
+						ReservedMemBytes:  health.ReservedMem,
+						AvailableMemBytes: health.AvailableMem,
+					}
+					rec.HealthScore = 0.8
+				}
 			}
 		}
 		records = append(records, rec)

@@ -26,19 +26,15 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/peers"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
-	"github.com/pipedpeer/pipedpeer/internal/remote"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/setup"
 )
 
 func main() {
-	// Handle internal subcommands before Cobra (these are forked by the daemon)
 	if len(os.Args) > 1 && os.Args[1] == "__daemon__" {
 		runDaemon(os.Args[2:])
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "__sync_job__" {
-		runSyncJobWorker(os.Args[2:])
 		return
 	}
 
@@ -48,7 +44,6 @@ func main() {
 		Long:  "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
 	}
 
-	// Viper config: reads from env vars with PIPEDPEER_ prefix
 	viper.SetEnvPrefix("PIPEDPEER")
 	viper.AutomaticEnv()
 	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
@@ -57,25 +52,22 @@ func main() {
 		newStartCmd(),
 		newStopCmd(),
 		newStatusCmd(),
+		newSetupCmd(),
 		newRunCmd(),
 		newJobsCmd(),
 		newJobCmd(),
 		newInitCmd(),
 		newRegistryCmd(),
 		newNodesCmd(),
+		newPeersCmd(),
 	)
 
-	// Default command is "run" when no subcommand given
 	rootCmd.RunE = newRunCmd().RunE
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
 }
-
-// ──────────────────────────────────────────────────────
-// init
-// ──────────────────────────────────────────────────────
 
 func newInitCmd() *cobra.Command {
 	return &cobra.Command{
@@ -97,10 +89,6 @@ node_modules/
 		},
 	}
 }
-
-// ──────────────────────────────────────────────────────
-// start / stop / status
-// ──────────────────────────────────────────────────────
 
 func newStartCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -158,21 +146,40 @@ func newStatusCmd() *cobra.Command {
 	}
 }
 
-// ──────────────────────────────────────────────────────
-// run
-// ──────────────────────────────────────────────────────
+func newSetupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "Check prerequisites, install missing, and start daemon",
+		Long: `Checks for required system tools (nix, tar, bash), optionally installs
+missing ones, creates a node identity, and starts the local daemon.
+
+Use --no-install to only check without modifying the system.
+Use -y to skip the install confirmation prompt.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			autoYes, _ := cmd.Flags().GetBool("yes")
+			noInstall, _ := cmd.Flags().GetBool("no-install")
+			port, _ := cmd.Flags().GetInt("port")
+
+			_, err := setup.Run(autoYes, noInstall, port)
+			return err
+		},
+	}
+	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation, auto-install")
+	cmd.Flags().Bool("no-install", false, "Check only, don't install anything")
+	cmd.Flags().Int("port", 38080, "Daemon port")
+	return cmd
+}
 
 func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Submit and execute a task on a remote node",
-		Long:  "Submit a Python script for remote execution. Auto-discovers nodes if --remote is not specified.",
+		Long:  "Submit a Python script for remote execution. Auto-discovers nodes if --host is not specified.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scriptPath, _ := cmd.Flags().GetString("script")
-			remoteAddr, _ := cmd.Flags().GetString("remote")
+			daemonHost, _ := cmd.Flags().GetString("host")
 			targetID, _ := cmd.Flags().GetString("target-id")
 			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
-			detach, _ := cmd.Flags().GetBool("detach")
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
@@ -206,8 +213,8 @@ func newRunCmd() *cobra.Command {
 			var estimatedMemBytes int64
 			var estimationTier string
 
-			if remoteAddr == "" {
-				fmt.Println("[coordinator] No --remote specified, discovering nodes...")
+			if daemonHost == "" {
+				fmt.Println("[coordinator] No --host specified, discovering nodes...")
 
 				userMem := resourceest.ParseMemString(memOverride)
 				resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
@@ -241,12 +248,12 @@ func newRunCmd() *cobra.Command {
 
 				scriptArgs := args
 
-				executor := func(endpoint, targetNodeID string) error {
+				executor := func(host string, port int, targetNodeID string) error {
 					return app.Run(app.Options{
 						ScriptPath:        scriptPath,
-						Remote:            endpoint,
+						DaemonHost:        host,
+						DaemonPort:        port,
 						TargetID:          targetNodeID,
-						Detach:            detach,
 						JobName:           jobName,
 						Isolate:           isolate,
 						Mode:              mode,
@@ -274,37 +281,31 @@ func newRunCmd() *cobra.Command {
 				return nil
 			}
 
-			// Explicit --remote mode
 			placementSource = "explicit"
 
-			sshCfg, err := remote.Parse(remoteAddr)
+			acceptResp, err := daemonctl.CheckRemoteAcceptance(daemonHost, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
 			if err != nil {
 				return err
 			}
+			fmt.Printf("remote daemon accepted job (lease=%s, expires=%s)\n",
+				acceptResp.LeaseID[:min(8, len(acceptResp.LeaseID))], acceptResp.ExpiresAt)
 
-			acceptResp, err := daemonctl.CheckRemoteAcceptance(sshCfg.Host, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("remote daemon accepted job for target-id=%s (lease=%s, expires=%s)\n",
-				targetID, acceptResp.LeaseID[:min(8, len(acceptResp.LeaseID))], acceptResp.ExpiresAt)
-
-			if err := daemonctl.CommitLease(sshCfg.Host, daemonPort, acceptResp.LeaseID); err != nil {
-				return fmt.Errorf("lease commit failed (resources changed): %w", err)
+			if err := daemonctl.CommitLease(daemonHost, daemonPort, acceptResp.LeaseID); err != nil {
+				return fmt.Errorf("lease commit failed: %w", err)
 			}
 			fmt.Println("lease committed — starting execution")
 
 			if checkOnly {
 				fmt.Println("checks complete")
-				_ = daemonctl.CompleteLease(sshCfg.Host, daemonPort, acceptResp.LeaseID, "cancelled")
+				_ = daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, "cancelled")
 				return nil
 			}
 
 			runErr := app.Run(app.Options{
 				ScriptPath:        scriptPath,
-				Remote:            remoteAddr,
+				DaemonHost:        daemonHost,
+				DaemonPort:        daemonPort,
 				TargetID:          targetID,
-				Detach:            detach,
 				JobName:           jobName,
 				Isolate:           isolate,
 				Mode:              mode,
@@ -324,16 +325,15 @@ func newRunCmd() *cobra.Command {
 			if runErr != nil {
 				completeStatus = jobhistory.StateFailed
 			}
-			_ = daemonctl.CompleteLease(sshCfg.Host, daemonPort, acceptResp.LeaseID, completeStatus)
+			_ = daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, completeStatus)
 
 			return runErr
 		},
 	}
 	cmd.Flags().String("script", "", "Path to Python script")
-	cmd.Flags().String("remote", "", "Remote SSH destination (user@host:port)")
+	cmd.Flags().String("host", "", "Daemon host (replaces --remote)")
 	cmd.Flags().String("target-id", "", "Remote node ID")
 	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
-	cmd.Flags().Bool("detach", false, "Submit job and return immediately")
 	cmd.Flags().String("job-name", "", "Optional job name")
 	cmd.Flags().Bool("isolate", true, "Run in bubblewrap sandbox")
 	cmd.Flags().Bool("check-only", false, "Only check acceptance, don't execute")
@@ -345,10 +345,6 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	return cmd
 }
-
-// ──────────────────────────────────────────────────────
-// jobs / job
-// ──────────────────────────────────────────────────────
 
 func newJobsCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -370,7 +366,7 @@ func newJobsCmd() *cobra.Command {
 				return nil
 			}
 			fmt.Printf("history path: %s\n", historyPath)
-			fmt.Println("ID\tSTATUS\tMODE\tTARGET\tREMOTE\tDURATION_MS\tSTARTED")
+			fmt.Println("ID\tSTATUS\tMODE\tTARGET\tHOST\tDURATION_MS\tSTARTED")
 			for _, it := range items {
 				mode := "fg"
 				if it.Detached {
@@ -451,10 +447,6 @@ func newJobCmd() *cobra.Command {
 	return cmd
 }
 
-// ──────────────────────────────────────────────────────
-// registry
-// ──────────────────────────────────────────────────────
-
 func newRegistryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "registry",
@@ -476,10 +468,6 @@ func newRegistryCmd() *cobra.Command {
 	cmd.Flags().Int("port", 38090, "Registry listen port")
 	return cmd
 }
-
-// ──────────────────────────────────────────────────────
-// nodes
-// ──────────────────────────────────────────────────────
 
 func newNodesCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -541,14 +529,69 @@ func newNodesCmd() *cobra.Command {
 	return cmd
 }
 
-// ──────────────────────────────────────────────────────
-// Internal daemon process (forked by daemonctl.Start)
-// ──────────────────────────────────────────────────────
+func newPeersCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "peers",
+		Short: "Manage manually registered peers",
+	}
+
+	cmd.AddCommand(
+		&cobra.Command{
+			Use:   "add <host> <port>",
+			Short: "Add a peer by host and port",
+			Args:  cobra.ExactArgs(2),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				host := args[0]
+				var port int
+				fmt.Sscanf(args[1], "%d", &port)
+				if port < 1 || port > 65535 {
+					return fmt.Errorf("invalid port: %s", args[1])
+				}
+				if err := peers.Add(host, port); err != nil {
+					return err
+				}
+				fmt.Printf("added peer %s:%d\n", host, port)
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "list",
+			Short: "List all peers",
+			RunE: func(cmd *cobra.Command, args []string) error {
+				list, err := peers.List()
+				if err != nil {
+					return err
+				}
+				if len(list) == 0 {
+					fmt.Println("no peers added. Use: pipedpeer peers add <host> <port>")
+					return nil
+				}
+				for _, p := range list {
+					fmt.Printf("%s:%d\n", p.Host, p.Port)
+				}
+				return nil
+			},
+		},
+		&cobra.Command{
+			Use:   "remove <host>",
+			Short: "Remove all peers at the given host",
+			Args:  cobra.ExactArgs(1),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if err := peers.Remove(args[0]); err != nil {
+					return err
+				}
+				fmt.Printf("removed peers at %s\n", args[0])
+				return nil
+			},
+		},
+	)
+
+	return cmd
+}
 
 func runDaemon(args []string) {
 	log := logging.WithComponent("daemon")
 
-	// Parse daemon-specific flags (these come from daemonctl.Start)
 	var port int
 	var registryURL, sshEndpoint, natsURL string
 	for i := 0; i < len(args); i++ {
@@ -592,7 +635,6 @@ func runDaemon(args []string) {
 
 	server := daemonapi.New(nodeID.NodeID)
 
-	// Start NATS bus (embedded if no URL provided)
 	var bus *natsbus.Bus
 	natsCfg := natsbus.Config{
 		URL:      natsURL,
@@ -613,7 +655,6 @@ func runDaemon(args []string) {
 		}
 	}
 
-	// Start heartbeat
 	var hbClient *heartbeat.Client
 	sshEp := sshEndpoint
 	if sshEp == "" {
@@ -630,7 +671,6 @@ func runDaemon(args []string) {
 		_ = hbClient.Start()
 	}
 
-	// Start LAN discovery advertiser
 	advertiser := discovery.NewAdvertiser(discovery.ServiceInfo{
 		NodeID:      nodeID.NodeID,
 		DaemonPort:  port,
@@ -659,55 +699,6 @@ func runDaemon(args []string) {
 		log.Fatal().Err(err).Msg("daemon listen failed")
 	}
 }
-
-func runSyncJobWorker(args []string) {
-	// Parse sync worker flags manually (forked subprocess)
-	var user, host, jobDir, localRoot, historyDir string
-	var port, timeoutSec int
-	port = 22
-	timeoutSec = 43200
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--user":
-			if i+1 < len(args) { user = args[i+1]; i++ }
-		case "--host":
-			if i+1 < len(args) { host = args[i+1]; i++ }
-		case "--port":
-			if i+1 < len(args) { fmt.Sscanf(args[i+1], "%d", &port); i++ }
-		case "--job-dir":
-			if i+1 < len(args) { jobDir = args[i+1]; i++ }
-		case "--local-root":
-			if i+1 < len(args) { localRoot = args[i+1]; i++ }
-		case "--history-dir":
-			if i+1 < len(args) { historyDir = args[i+1]; i++ }
-		case "--timeout-sec":
-			if i+1 < len(args) { fmt.Sscanf(args[i+1], "%d", &timeoutSec); i++ }
-		}
-	}
-
-	if user == "" || host == "" || jobDir == "" || localRoot == "" || historyDir == "" {
-		fmt.Fprintln(os.Stderr, "missing required sync worker arguments")
-		os.Exit(2)
-	}
-
-	err := app.RunDetachedSyncWorker(app.DetachedSyncWorkerOptions{
-		User:       user,
-		Host:       host,
-		Port:       port,
-		JobDir:     jobDir,
-		LocalRoot:  localRoot,
-		HistoryDir: historyDir,
-		TimeoutSec: timeoutSec,
-	})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-// ──────────────────────────────────────────────────────
-// Utilities
-// ──────────────────────────────────────────────────────
 
 func detectLocalIP() string {
 	addrs, err := net.InterfaceAddrs()

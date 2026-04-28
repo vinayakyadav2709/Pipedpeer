@@ -682,7 +682,7 @@ func TestExecuteWithRetrySuccessFirstTry(t *testing.T) {
 	})
 
 	var execCount int32
-	executor := func(endpoint, nodeID string) error {
+	executor := func(host string, port int, nodeID string) error {
 		atomic.AddInt32(&execCount, 1)
 		return nil // success
 	}
@@ -731,7 +731,7 @@ func TestExecuteWithRetryReschedulesOnFailure(t *testing.T) {
 
 	// Executor fails twice, then succeeds
 	var execCount int32
-	executor := func(endpoint, nodeID string) error {
+	executor := func(host string, port int, nodeID string) error {
 		n := atomic.AddInt32(&execCount, 1)
 		if n <= 2 {
 			return fmt.Errorf("node crashed (attempt %d)", n)
@@ -796,7 +796,7 @@ func TestExecuteWithRetryCancelStopsLoop(t *testing.T) {
 
 	// Executor always fails
 	var execCount int32
-	executor := func(endpoint, nodeID string) error {
+	executor := func(host string, port int, nodeID string) error {
 		atomic.AddInt32(&execCount, 1)
 		return fmt.Errorf("node crashed")
 	}
@@ -846,9 +846,9 @@ func TestExecuteWithRetryNeverAutoCancel(t *testing.T) {
 
 	// Executor always fails — simulates persistent node failures
 	var execCount int32
-	executor := func(endpoint, nodeID string) error {
+	executor := func(host string, port int, nodeID string) error {
 		atomic.AddInt32(&execCount, 1)
-		return fmt.Errorf("SSH connection refused")
+		return fmt.Errorf("connection refused")
 	}
 
 	// Let it run for 300ms — should keep retrying, never auto-cancel

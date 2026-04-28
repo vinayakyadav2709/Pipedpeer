@@ -154,13 +154,16 @@ func TestExecuteWithRetryNATSFullLifecycle(t *testing.T) {
 
 	// Executor that always succeeds
 	executed := false
-	executor := func(endpoint, targetNodeID string) error {
+	executor := func(host string, port int, targetNodeID string) error {
 		executed = true
 		if targetNodeID != daemonNodeID {
 			t.Fatalf("expected target %s, got %s", daemonNodeID, targetNodeID)
 		}
-		if endpoint != "root@10.0.4.5:22" {
-			t.Fatalf("expected endpoint root@10.0.4.5:22, got %s", endpoint)
+		if host != "10.0.4.5" {
+			t.Fatalf("expected host 10.0.4.5, got %s", host)
+		}
+		if port != 38080 {
+			t.Fatalf("expected port 38080, got %d", port)
 		}
 		return nil
 	}

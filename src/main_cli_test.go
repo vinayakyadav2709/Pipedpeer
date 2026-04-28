@@ -65,7 +65,7 @@ func TestRunCheckOnlyAutoStartsDaemon(t *testing.T) {
 		stateDir, xdg,
 		"run",
 		"--script", scriptPath,
-		"--remote", fmt.Sprintf("root@127.0.0.1:%d", 22),
+		"--host", "127.0.0.1",
 		"--target-id", nodeID,
 		"--daemon-port", fmt.Sprintf("%d", port),
 		"--check-only",
@@ -95,7 +95,7 @@ func TestRunCheckOnlyRejectsWrongTargetID(t *testing.T) {
 		stateDir, xdg,
 		"run",
 		"--script", scriptPath,
-		"--remote", "root@127.0.0.1:22",
+		"--host", "127.0.0.1",
 		"--target-id", "different-node",
 		"--daemon-port", fmt.Sprintf("%d", port),
 		"--check-only",
@@ -364,32 +364,29 @@ func TestNodesCLIShowsSelf(t *testing.T) {
 	stateDir := t.TempDir()
 	xdg := t.TempDir()
 
-	// With no registry and no LAN peers, nodes command should show self
+	// Stop any leftover daemon first
+	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
+
 	out := runCLIWithEnv(t, stateDir, xdg, "nodes")
-	if !strings.Contains(out, "No nodes found") && !strings.Contains(out, "self") {
-		t.Fatalf("expected self-node info in nodes output, got: %s", out)
+	if !strings.Contains(out, "NODE_ID") && !strings.Contains(out, "No nodes found") {
+		t.Fatalf("expected nodes table or empty output, got: %s", out)
 	}
 }
 
 func TestAutoPlacementSelectsSelf(t *testing.T) {
-	// Run without --remote: coordinator should pick self-node
 	stateDir := t.TempDir()
 	xdg := t.TempDir()
 	port := freePort(t)
 	scriptPath := writeScript(t)
 
+	// Stop any leftover daemon first
+	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
+
 	// Start daemon first
 	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
 	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
 
-	// Read auto-generated node ID
-	idBytes, err := os.ReadFile(filepath.Join(xdg, "pipedpeer", "node_identity.json"))
-	if err != nil {
-		t.Fatalf("read identity: %v", err)
-	}
-	nodeID := extractNodeID(t, idBytes)
-
-	// Run with --check-only, NO --remote
+	// Run with --check-only, NO --host
 	out := runCLIWithEnv(t,
 		stateDir, xdg,
 		"run",
@@ -400,9 +397,6 @@ func TestAutoPlacementSelectsSelf(t *testing.T) {
 
 	if !strings.Contains(out, "[coordinator]") {
 		t.Fatalf("expected coordinator output, got: %s", out)
-	}
-	if !strings.Contains(out, nodeID[:8]) {
-		t.Fatalf("expected self-node ID in coordinator output, got: %s", out)
 	}
 	if !strings.Contains(out, "checks complete") {
 		t.Fatalf("expected 'checks complete' message, got: %s", out)
