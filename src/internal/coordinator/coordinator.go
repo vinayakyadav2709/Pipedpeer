@@ -63,10 +63,13 @@ type Coordinator struct {
 	maxCacheAge      time.Duration
 	requiredMemBytes int64
 	retryInterval    time.Duration
+	noSelf           bool
+	strategy         string
 
 	mu          sync.Mutex
 	cachedNodes []registry.NodeRecord
 	cacheTime   time.Time
+	rrCounter   int // round-robin counter
 }
 
 // Config for the coordinator.
@@ -81,6 +84,8 @@ type Config struct {
 	MaxCacheAge      time.Duration     // default 2m
 	RequiredMemBytes int64             // estimated memory requirement for this job (0 = no check)
 	RetryInterval    time.Duration     // how long to wait between queue retries (default: 30s)
+	NoSelf           bool              // exclude self-node from placement
+	Strategy         string            // "smart" (default) or "round-robin"
 }
 
 // LeaseResult is the outcome of a successful placement with lease.
@@ -113,6 +118,8 @@ func New(cfg Config) *Coordinator {
 		maxCacheAge:      cfg.MaxCacheAge,
 		requiredMemBytes: cfg.RequiredMemBytes,
 		retryInterval:    cfg.RetryInterval,
+		noSelf:           cfg.NoSelf,
+		strategy:         cfg.Strategy,
 	}
 }
 
@@ -164,9 +171,11 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		})
 	}
 
-	// 4. Always inject self-node
-	selfNode := c.buildSelfNode()
-	candidates = mergeNode(candidates, ScoredNode{Node: selfNode, Source: SourceSelf})
+	// 4. Inject self-node (unless --no-self)
+	if !c.noSelf {
+		selfNode := c.buildSelfNode()
+		candidates = mergeNode(candidates, ScoredNode{Node: selfNode, Source: SourceSelf})
+	}
 
 	// 4. Arch compatibility filter — closure is built for local arch
 	for i := range candidates {
@@ -204,17 +213,36 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		return candidates[i].Score > candidates[j].Score
 	})
 
-	// 6. Pick best non-rejected candidate
+	// 6. Pick best non-rejected candidate or use round-robin
 	var chosen registry.NodeRecord
 	chosenSource := SourceSelf
 	reason := "no candidates available"
 
-	for _, c := range candidates {
-		if !c.Rejected {
-			chosen = c.Node
-			chosenSource = c.Source
-			reason = fmt.Sprintf("score=%.3f, source=%s", c.Score, c.Source)
-			break
+	if c.strategy == "round-robin" {
+		// Collect non-rejected candidates
+		var eligible []*ScoredNode
+		for i := range candidates {
+			if !candidates[i].Rejected {
+				eligible = append(eligible, &candidates[i])
+			}
+		}
+		if len(eligible) > 0 {
+			c.mu.Lock()
+			idx := c.rrCounter % len(eligible)
+			c.rrCounter++
+			c.mu.Unlock()
+			chosen = eligible[idx].Node
+			chosenSource = eligible[idx].Source
+			reason = fmt.Sprintf("round-robin #%d/%d, source=%s", idx+1, len(eligible), chosenSource)
+		}
+	} else {
+		for _, c := range candidates {
+			if !c.Rejected {
+				chosen = c.Node
+				chosenSource = c.Source
+				reason = fmt.Sprintf("score=%.3f, source=%s", c.Score, c.Source)
+				break
+			}
 		}
 	}
 
@@ -259,17 +287,24 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 				continue
 			}
 
-			// Resolve real UUID for manual peers via health endpoint
+			// Resolve real UUID + load for manual peers via health endpoint
 			if cand.Source == SourceManual {
 				host := extractHost(cand.Node.SSHEndpoint)
 				healthURL := fmt.Sprintf("http://%s:%d/health", host, cand.Node.DaemonPort)
 				resp, err := c.httpClient.Get(healthURL)
 				if err == nil {
 					var h struct {
-						NodeID string `json:"node_id"`
+						NodeID       string `json:"node_id"`
+						AvailableMem int64  `json:"available_mem"`
+						ActiveJobs   int    `json:"active_jobs"`
+						ReservedMem  int64  `json:"reserved_mem"`
 					}
 					if json.NewDecoder(resp.Body).Decode(&h) == nil && h.NodeID != "" {
 						cand.Node.NodeID = h.NodeID
+						cand.Node.Load.AvailableMemBytes = h.AvailableMem
+						cand.Node.Load.ActiveJobs = h.ActiveJobs
+						cand.Node.Load.ReservedMemBytes = h.ReservedMem
+						cand.Node.HealthScore = 0.8
 					}
 					resp.Body.Close()
 				}
@@ -630,5 +665,7 @@ func (c *Coordinator) configSnapshot() Config {
 		SelfLoad:         c.selfLoad,
 		RequiredMemBytes: c.requiredMemBytes,
 		RetryInterval:    c.retryInterval,
+		NoSelf:           c.noSelf,
+		Strategy:         c.strategy,
 	}
 }

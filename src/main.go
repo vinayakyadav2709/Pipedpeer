@@ -27,6 +27,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/peers"
+	"github.com/pipedpeer/pipedpeer/internal/ping"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
@@ -60,6 +61,7 @@ func main() {
 		newRegistryCmd(),
 		newNodesCmd(),
 		newPeersCmd(),
+		newPingCmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE
@@ -189,6 +191,8 @@ func newRunCmd() *cobra.Command {
 			memOverride, _ := cmd.Flags().GetString("mem")
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
+			noSelf, _ := cmd.Flags().GetBool("no-self")
+			strategy, _ := cmd.Flags().GetString("strategy")
 
 			if scriptPath == "" {
 				return fmt.Errorf("--script is required")
@@ -230,6 +234,8 @@ func newRunCmd() *cobra.Command {
 					SelfDaemon:       daemonPort,
 					SelfLoad:         heartbeat.CollectLoad(0, 0),
 					RequiredMemBytes: resReq.MemBytes,
+					NoSelf:           noSelf,
+					Strategy:         strategy,
 					DiscoverFn: func() []registry.NodeRecord {
 						return discovery.DiscoverAsNodeRecords(1 * time.Second)
 					},
@@ -343,6 +349,8 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("mem", "", "Memory requirement override")
+	cmd.Flags().Bool("no-self", false, "Exclude self-node from placement")
+	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
 	return cmd
 }
 
@@ -586,6 +594,21 @@ func newPeersCmd() *cobra.Command {
 		},
 	)
 
+	return cmd
+}
+
+func newPingCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ping <host:port> [host:port ...]",
+		Short: "Live health dashboard for workers",
+		Long:  "Polls /health on each worker every second and displays a live status table.",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			intervalSec, _ := cmd.Flags().GetInt("interval")
+			return ping.Run(args, time.Duration(intervalSec)*time.Second)
+		},
+	}
+	cmd.Flags().Int("interval", 1, "Poll interval in seconds")
 	return cmd
 }
 

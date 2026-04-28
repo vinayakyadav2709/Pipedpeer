@@ -114,17 +114,15 @@ tasks:
         done
         echo "" | tee -a "$LOG"
 
-        # Dispatch tasks sequentially (Nix locks the global store — only one build at a time)
-        echo "Dispatching 10 tasks (sequential)..."
+        # Burst all 10 tasks concurrently
+        echo "Bursting 10 tasks..." | tee -a "$LOG"
         TASKS=10
         for t in $(seq 1 $TASKS); do
-          echo "  [$t/$TASKS] Starting..." | tee -a "$LOG"
-          ../bin/pipedpeer run --isolate=false --script ../test_project/dispatch_t${t}.py \
-            > .task/logs/task${t}.log 2>&1
-          # Extract node ID immediately after each task
-          node=$(grep -oP "completed successfully on node \K[a-f0-9]+" .task/logs/task${t}.log 2>/dev/null || echo "?")
-          echo "  [$t/$TASKS] Done -> node $node" | tee -a "$LOG"
+          ../bin/pipedpeer run --no-self --isolate=false --script ../test_project/dispatch_t${t}.py \
+            > .task/logs/task${t}.log 2>&1 &
         done
+        wait
+        echo "" | tee -a "$LOG"
         echo "" | tee -a "$LOG"
 
         # Analyze results
