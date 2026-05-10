@@ -66,6 +66,33 @@ func main() {
 
 	rootCmd.RunE = newRunCmd().RunE
 
+	// Pre-process args to support `pipedpeer python script.py [args...]` shorthand
+	args := os.Args[1:]
+	if len(args) >= 2 && args[0] == "python" {
+		scriptPath := args[1]
+		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Error: script file '%s' does not exist.\n", scriptPath)
+			os.Exit(1)
+		}
+
+		// Rewrite into: run --script <script> --strategy round-robin --no-self --isolate=false
+		newArgs := []string{
+			"run",
+			"--script", scriptPath,
+			"--strategy", "round-robin",
+			"--no-self",
+			"--isolate=false",
+		}
+
+		// Append any remaining args
+		if len(args) > 2 {
+			newArgs = append(newArgs, args[2:]...)
+		}
+		args = newArgs
+	}
+
+	rootCmd.SetArgs(args)
+
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
