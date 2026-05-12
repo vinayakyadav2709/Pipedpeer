@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,7 +17,8 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
-	"github.com/pipedpeer/pipedpeer/internal/peers"
+	"github.com/pipedpeer/pipedpeer/internal/nodestore"
+	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
 // Default lease configuration
@@ -69,10 +71,25 @@ type Server struct {
 	// Round-robin counter for cross-invocation persistence
 	rrCounter atomic.Int64
 
+	// Node store (SQLite — single source of truth for all peers)
+	store *nodestore.Store
+
 	// Peer health cache (populated by background poller)
 	peersMu     sync.RWMutex
 	peerHealths map[string]*PeerHealth // key: "host:port"
 	stopPoller  chan struct{}
+
+	// Discovery function for mDNS scanning (set before StartPeerPoller)
+	discoverFn func() []NodeDiscovered
+}
+
+// NodeDiscovered represents a node found via mDNS or other discovery.
+type NodeDiscovered struct {
+	NodeID      string
+	SSHEndpoint string
+	DaemonPort  int
+	Arch        string
+	Hostname    string
 }
 
 // PeerHealth represents the live state of a peer worker.
@@ -131,6 +148,11 @@ func New(nodeID string) *Server {
 }
 
 func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time.Duration) *Server {
+	store, err := nodestore.New()
+	if err != nil {
+		// Non-fatal: store may be unavailable, daemon still works via mDNS-only
+		store = nil
+	}
 	s := &Server{
 		nodeID:        nodeID,
 		leaseDuration: leaseDuration,
@@ -140,9 +162,14 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		stopSweep:     make(chan struct{}),
 		jobDir:        defaultJobDir(),
 		jobs:          make(map[string]*JobRecord),
+		store:         store,
 	}
 	s.buildRouter()
 	return s
+}
+
+func (s *Server) SetDiscoverFn(fn func() []NodeDiscovered) {
+	s.discoverFn = fn
 }
 
 func (s *Server) Handler() http.Handler {
@@ -298,7 +325,9 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
-	r.Get("/v1/peers", s.handlePeers)
+	r.Get("/v1/nodes", s.handleNodes)
+	r.Post("/v1/nodes", s.handleNodesAdd)
+	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 
 	s.router = r
 }
@@ -326,20 +355,108 @@ func (s *Server) handleRoundRobin(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"index":%d}`, idx)
 }
 
-func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
-	s.peersMu.RLock()
-	defer s.peersMu.RUnlock()
-
-	result := make([]*PeerHealth, 0, len(s.peerHealths))
-	for _, ph := range s.peerHealths {
-		result = append(result, ph)
+func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, http.StatusOK, []interface{}{})
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	dbNodes, err := s.store.ListAll()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	type nodeResp struct {
+		NodeID      string            `json:"node_id"`
+		SSHEndpoint string            `json:"ssh_endpoint"`
+		DaemonPort  int               `json:"daemon_port"`
+		Capabilities map[string]string `json:"capabilities"`
+		Load        registry.LoadInfo `json:"load"`
+		State       string            `json:"state"`
+		HealthScore float64           `json:"health_score"`
+		Source      string            `json:"source"`
+	}
+
+	nodes := make([]nodeResp, 0, len(dbNodes))
+	for _, n := range dbNodes {
+		ssh := n.SSHEndpoint
+		if ssh == "" {
+			ssh = fmt.Sprintf("root@%s:22", n.Host)
+		}
+		nodes = append(nodes, nodeResp{
+			NodeID:      n.NodeID,
+			SSHEndpoint: ssh,
+			DaemonPort:  n.Port,
+			Capabilities: map[string]string{
+				"arch":     n.Arch,
+				"hostname": n.Hostname,
+			},
+			Load: registry.LoadInfo{
+				AvailableMemBytes: n.AvailableMem,
+				ActiveJobs:        n.ActiveJobs,
+				ReservedMemBytes:  n.ReservedMem,
+				TotalMemBytes:     n.TotalMem,
+				CPUPercent:        n.CPUPercent,
+			},
+			State:       n.State,
+			HealthScore: n.HealthScore,
+			Source:      n.Source,
+		})
+	}
+	writeJSON(w, http.StatusOK, nodes)
 }
 
-// StartPeerPoller launches a background goroutine that polls peer health endpoints
-// every interval. The results are stored in the in-memory peerHealths cache.
+func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host string `json:"host"`
+		Port int    `json:"port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Host == "" || req.Port == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host and port required"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
+		return
+	}
+	if err := s.store.AddManual(req.Host, req.Port); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
+}
+
+func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) {
+	host := chi.URLParam(r, "host")
+	if host == "_all" {
+		if s.store == nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
+			return
+		}
+		if err := s.store.RemoveAll(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "all removed"})
+		return
+	}
+	if host == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
+		return
+	}
+	if s.store == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
+		return
+	}
+	if err := s.store.RemoveManual(host); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+}
+
+// StartPeerPoller launches a background goroutine that discovers nodes via mDNS
+// and polls health from both discovered and manually added nodes.
 func (s *Server) StartPeerPoller(interval time.Duration) {
 	s.peersMu.Lock()
 	s.peerHealths = make(map[string]*PeerHealth)
@@ -349,14 +466,12 @@ func (s *Server) StartPeerPoller(interval time.Duration) {
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-
-		// Poll immediately on start
-		s.pollPeers()
+		s.pollAllNodes()
 
 		for {
 			select {
 			case <-ticker.C:
-				s.pollPeers()
+				s.pollAllNodes()
 			case <-s.stopPoller:
 				return
 			}
@@ -364,7 +479,6 @@ func (s *Server) StartPeerPoller(interval time.Duration) {
 	}()
 }
 
-// StopPeerPoller stops the background peer health polling.
 func (s *Server) StopPeerPoller() {
 	s.peersMu.Lock()
 	if s.stopPoller != nil {
@@ -373,30 +487,42 @@ func (s *Server) StopPeerPoller() {
 	s.peersMu.Unlock()
 }
 
-func (s *Server) pollPeers() {
-	peerList, err := peers.List()
-	if err != nil || len(peerList) == 0 {
-		s.peersMu.Lock()
-		s.peerHealths = make(map[string]*PeerHealth)
-		s.peersMu.Unlock()
+// extractHost pulls "host" from "user@host:port" or "host:port" or "host".
+func extractHost(endpoint string) string {
+	s := endpoint
+	if idx := strings.Index(s, "@"); idx != -1 {
+		s = s[idx+1:]
+	}
+	if idx := strings.LastIndex(s, ":"); idx != -1 {
+		s = s[:idx]
+	}
+	return s
+}
+
+func (s *Server) pollAllNodes() {
+	if s.store == nil {
 		return
 	}
 
-	// Poll all peers concurrently
 	var wg sync.WaitGroup
-	results := make(map[string]*PeerHealth)
-	var resultsMu sync.Mutex
+	mu := sync.Mutex{}
+	finalHealths := make(map[string]*PeerHealth)
 
-	for _, p := range peerList {
+	// Only poll manually added nodes
+	manualNodes, _ := s.store.ListManual()
+	for _, n := range manualNodes {
 		wg.Add(1)
-		go func(host string, port int) {
+		go func(node nodestore.Node) {
 			defer wg.Done()
-			key := fmt.Sprintf("%s:%d", host, port)
-			ph := &PeerHealth{Host: host, Port: port, Status: "unreachable", Source: "manual"}
+			key := fmt.Sprintf("%s:%d", node.Host, node.Port)
+			ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: "manual"}
 
-			healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+			healthURL := fmt.Sprintf("http://%s:%d/health", node.Host, node.Port)
 			resp, err := http.Get(healthURL)
-			if err == nil {
+			if err != nil {
+				ph.Status = "unreachable"
+				s.store.MarkUnreachable(node.NodeID)
+			} else {
 				defer resp.Body.Close()
 				var h struct {
 					NodeID       string `json:"node_id"`
@@ -408,18 +534,21 @@ func (s *Server) pollPeers() {
 					ph.Status = "healthy"
 					ph.ActiveJobs = h.ActiveJobs
 					ph.AvailableMem = h.AvailableMem
+					s.store.UpdateHealth(h.NodeID, h.ActiveJobs, h.AvailableMem, 0, 0, 0)
+				} else {
+					ph.Status = "unreachable"
 				}
 			}
 
-			resultsMu.Lock()
-			results[key] = ph
-			resultsMu.Unlock()
-		}(p.Host, p.Port)
+			mu.Lock()
+			finalHealths[key] = ph
+			mu.Unlock()
+		}(n)
 	}
 	wg.Wait()
 
 	s.peersMu.Lock()
-	s.peerHealths = results
+	s.peerHealths = finalHealths
 	s.peersMu.Unlock()
 }
 

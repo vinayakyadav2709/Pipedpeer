@@ -12,7 +12,6 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
-	"github.com/pipedpeer/pipedpeer/internal/peers"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -132,68 +131,18 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	var candidates []ScoredNode
 	degraded := false
 
-	// 1. Primary: mDNS discovery (always, for LAN peers)
-	if c.discoverFn != nil {
-		discovered := c.discoverFn()
-		for _, n := range discovered {
-			candidates = append(candidates, ScoredNode{Node: n, Source: SourceDiscovery})
-		}
-	}
-
-	// 2. Registry query (if configured)
-	if c.registryURL != "" {
-		regNodes, err := c.queryRegistry()
-		if err == nil {
-			c.updateCache(regNodes)
-			for _, n := range regNodes {
-				candidates = mergeNode(candidates, ScoredNode{Node: n, Source: SourceRegistry})
-			}
-		} else {
-			degraded = true
-			// Fall back to cache
-			cached := c.getCachedNodes()
-			if len(cached) > 0 {
-				for _, n := range cached {
-					candidates = mergeNode(candidates, ScoredNode{Node: n, Source: SourceCache})
-				}
+	// 1. Query daemon for all known nodes (single source of truth)
+	resp, err := c.httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", c.selfDaemon))
+	if err == nil {
+		defer resp.Body.Close()
+		var nodes []registry.NodeRecord
+		if json.NewDecoder(resp.Body).Decode(&nodes) == nil {
+			for _, n := range nodes {
+				candidates = append(candidates, ScoredNode{Node: n, Source: SourceDiscovery})
 			}
 		}
-	}
-
-	// 3. Manual peers (user-specified) — resolve to real UUIDs, merge/dedup
-	for _, p := range loadManualPeers() {
-		healthURL := fmt.Sprintf("http://%s:%d/health", p.Host, p.Port)
-		resp, err := c.httpClient.Get(healthURL)
-		if err != nil {
-			continue
-		}
-		var h struct {
-			NodeID       string `json:"node_id"`
-			AvailableMem int64  `json:"available_mem"`
-			ActiveJobs   int    `json:"active_jobs"`
-			ReservedMem  int64  `json:"reserved_mem"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil || h.NodeID == "" {
-			resp.Body.Close()
-			continue
-		}
-		resp.Body.Close()
-
-		candidates = mergeNode(candidates, ScoredNode{
-			Node: registry.NodeRecord{
-				NodeID:      h.NodeID,
-				SSHEndpoint: fmt.Sprintf("root@%s:22", p.Host),
-				DaemonPort:  p.Port,
-				State:       "healthy",
-				HealthScore: 0.8,
-				Load: registry.LoadInfo{
-					AvailableMemBytes: h.AvailableMem,
-					ActiveJobs:        h.ActiveJobs,
-					ReservedMemBytes:  h.ReservedMem,
-				},
-			},
-			Source: SourceManual,
-		})
+	} else {
+		degraded = true
 	}
 
 	// 4. Inject self-node (unless --no-self)
@@ -681,12 +630,6 @@ func scoreNode(n registry.NodeRecord) float64 {
 		score = 0
 	}
 	return score
-}
-
-// loadManualPeers returns peer entries from the CLI's peers store.
-func loadManualPeers() []peers.Peer {
-	list, _ := peers.List()
-	return list
 }
 
 // mergeNode adds a node to the list, deduplicating by NodeID.

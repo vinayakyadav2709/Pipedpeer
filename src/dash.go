@@ -17,14 +17,19 @@ import (
 )
 
 type peerInfo struct {
-	Host         string `json:"host"`
-	Port         int    `json:"port"`
-	NodeID       string `json:"node_id"`
-	Status       string `json:"status"`
-	ActiveJobs   int    `json:"active_jobs"`
-	AvailableMem int64  `json:"available_mem"`
-	Source       string `json:"source"`
+	NodeID      string            `json:"node_id"`
+	SSHEndpoint string            `json:"ssh_endpoint"`
+	DaemonPort  int               `json:"daemon_port"`
+	State       string            `json:"state"`
+	Load        struct {
+		ActiveJobs        int   `json:"active_jobs"`
+		AvailableMemBytes int64 `json:"available_mem_bytes"`
+	} `json:"load"`
+	Source string `json:"source"`
 }
+
+func (p peerInfo) ActiveJobs() int  { return p.Load.ActiveJobs }
+func (p peerInfo) AvailableMem() int64 { return p.Load.AvailableMemBytes }
 
 type dashModel struct {
 	daemonPort int
@@ -84,7 +89,7 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *dashModel) refresh() {
 	// Fetch peers from daemon
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/peers", m.daemonPort))
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", m.daemonPort))
 	if err != nil {
 		m.peerErr = "daemon unreachable"
 	} else {
@@ -137,28 +142,42 @@ func (m dashModel) View() string {
 			shortID = "?"
 		}
 
+		host := p.SSHEndpoint
+		if idx := strings.Index(host, "@"); idx != -1 {
+			host = host[idx+1:]
+		}
+		if idx := strings.LastIndex(host, ":"); idx != -1 {
+			host = host[:idx]
+		}
+
+		status := p.State
 		statusCol := greenStyle
-		if p.Status != "healthy" {
+		if status != "healthy" {
 			statusCol = redStyle
 		}
 
-		memStr := resourceest.FormatBytes(p.AvailableMem)
-		if p.AvailableMem == 0 && p.Status != "healthy" {
+		memStr := resourceest.FormatBytes(p.AvailableMem())
+		if p.AvailableMem() == 0 && p.State != "healthy" {
 			memStr = "-"
 		}
 
-		jobsStr := fmt.Sprintf("%d", p.ActiveJobs)
-		if p.ActiveJobs > 0 {
+		jobsStr := fmt.Sprintf("%d", p.ActiveJobs())
+		if p.ActiveJobs() > 0 {
 			jobsStr = yellowStyle.Render(jobsStr)
+		}
+
+		srcDisplay := p.Source
+		if srcDisplay == "discovery" {
+			srcDisplay = "mDNS"
 		}
 
 		peerRows = append(peerRows, []string{
 			shortID,
-			fmt.Sprintf("%s:%d", p.Host, p.Port),
-			statusCol.Render(p.Status),
+			fmt.Sprintf("%s:%d", host, p.DaemonPort),
+			statusCol.Render(status),
 			jobsStr,
 			memStr,
-			p.Source,
+			srcDisplay,
 		})
 	}
 	s += renderTable(
