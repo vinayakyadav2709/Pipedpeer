@@ -28,7 +28,7 @@ esac
 VERSION="${PIPEDPEER_VERSION:-latest}"
 # Placeholder release URL. Replace with your actual release host later.
 # Example: https://github.com/<org>/<repo>/releases/download
-RELEASE_BASE_URL="${PIPEDPEER_RELEASE_BASE_URL:-https://example.com/pipedpeer/releases/download}"
+RELEASE_BASE_URL="${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}"
 
 mkdir -p "$INSTALL_DIR"
 
@@ -37,9 +37,11 @@ trap 'rm -rf "$tmp_dir"' EXIT
 
 artifact_name="${BINARY_NAME}-${PLATFORM}-${ARCH}"
 if [[ "$VERSION" != "latest" ]]; then
-  release_url="${RELEASE_BASE_URL}/${VERSION}/${artifact_name}"
+  # Version tag format like v1.0.0
+  release_url="${RELEASE_BASE_URL}/download/${VERSION}/${artifact_name}"
 else
-  release_url="${RELEASE_BASE_URL}/latest/${artifact_name}"
+  # Uses GitHub's latest redirect
+  release_url="${RELEASE_BASE_URL}/latest/download/${artifact_name}"
 fi
 
 echo "Installing ${BINARY_NAME}..."

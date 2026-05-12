@@ -1,0 +1,27 @@
+version: 2
+
+project_name: pipedpeer
+
+builds:
+  - id: pipedpeer
+    dir: src
+    main: .
+    binary: pipedpeer
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+# By default, GoReleaser creates archives. 
+# "format: binary" ensures we output raw binaries instead.
+archives:
+  - format: binary
+    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
