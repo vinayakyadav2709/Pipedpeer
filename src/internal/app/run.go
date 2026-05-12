@@ -126,6 +126,7 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Created: %s\n", flakePath)
 
 	fmt.Printf("\n[4/7] Building locally...\n")
+	jobhistory.UpdateStage(historyDir, "building")
 	nixSystem := nixgen.NixArch()
 	cmd := exec.Command("nix", "build", ".#packages."+nixSystem+".default", "--option", "build-users-group", "")
 	cmd.Dir = tmpDir
@@ -137,6 +138,7 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Built successfully\n")
 
 	fmt.Printf("\n[5/7] Exporting closure...\n")
+	jobhistory.UpdateStage(historyDir, "exporting")
 	resultPath := filepath.Join(tmpDir, "result")
 	storePath, err := os.Readlink(resultPath)
 	if err != nil {
@@ -152,6 +154,7 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Exported closure to %s\n", narPath)
 
 	fmt.Printf("\n[6/7] Uploading to daemon...\n")
+	jobhistory.UpdateStage(historyDir, "uploading")
 	workspaceTar := filepath.Join(tmpDir, "workspace.tar")
 	if err := daemonctl.CreateWorkspaceTar(projectRoot, workspaceTar); err != nil {
 		return fmt.Errorf("workspace tar failed: %v", err)
@@ -171,6 +174,7 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Uploaded job %s\n", uploadResp.JobID)
 
 	fmt.Printf("\n[7/7] Executing on remote...\n")
+	jobhistory.UpdateStage(historyDir, "executing")
 	ctx := context.Background()
 	execCfg := daemonctl.ExecConfig{
 		ScriptPath: scriptRelPath,

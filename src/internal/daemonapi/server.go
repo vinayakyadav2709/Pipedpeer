@@ -16,6 +16,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/peers"
 )
 
 // Default lease configuration
@@ -67,6 +68,21 @@ type Server struct {
 
 	// Round-robin counter for cross-invocation persistence
 	rrCounter atomic.Int64
+
+	// Peer health cache (populated by background poller)
+	peersMu     sync.RWMutex
+	peerHealths map[string]*PeerHealth // key: "host:port"
+	stopPoller  chan struct{}
+}
+
+// PeerHealth represents the live state of a peer worker.
+type PeerHealth struct {
+	Host         string `json:"host"`
+	Port         int    `json:"port"`
+	NodeID       string `json:"node_id"`
+	Status       string `json:"status"`       // "healthy", "unreachable"
+	ActiveJobs   int    `json:"active_jobs"`
+	AvailableMem int64  `json:"available_mem"`
 }
 
 // --- Request/Response types ---
@@ -281,6 +297,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
+	r.Get("/v1/peers", s.handlePeers)
 
 	s.router = r
 }
@@ -306,6 +323,103 @@ func (s *Server) handleRoundRobin(w http.ResponseWriter, r *http.Request) {
 	idx := int(s.rrCounter.Add(1)-1) % count
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"index":%d}`, idx)
+}
+
+func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+
+	result := make([]*PeerHealth, 0, len(s.peerHealths))
+	for _, ph := range s.peerHealths {
+		result = append(result, ph)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// StartPeerPoller launches a background goroutine that polls peer health endpoints
+// every interval. The results are stored in the in-memory peerHealths cache.
+func (s *Server) StartPeerPoller(interval time.Duration) {
+	s.peersMu.Lock()
+	s.peerHealths = make(map[string]*PeerHealth)
+	s.stopPoller = make(chan struct{})
+	s.peersMu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		// Poll immediately on start
+		s.pollPeers()
+
+		for {
+			select {
+			case <-ticker.C:
+				s.pollPeers()
+			case <-s.stopPoller:
+				return
+			}
+		}
+	}()
+}
+
+// StopPeerPoller stops the background peer health polling.
+func (s *Server) StopPeerPoller() {
+	s.peersMu.Lock()
+	if s.stopPoller != nil {
+		close(s.stopPoller)
+	}
+	s.peersMu.Unlock()
+}
+
+func (s *Server) pollPeers() {
+	peerList, err := peers.List()
+	if err != nil || len(peerList) == 0 {
+		s.peersMu.Lock()
+		s.peerHealths = make(map[string]*PeerHealth)
+		s.peersMu.Unlock()
+		return
+	}
+
+	// Poll all peers concurrently
+	var wg sync.WaitGroup
+	results := make(map[string]*PeerHealth)
+	var resultsMu sync.Mutex
+
+	for _, p := range peerList {
+		wg.Add(1)
+		go func(host string, port int) {
+			defer wg.Done()
+			key := fmt.Sprintf("%s:%d", host, port)
+			ph := &PeerHealth{Host: host, Port: port, Status: "unreachable"}
+
+			healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
+			resp, err := http.Get(healthURL)
+			if err == nil {
+				defer resp.Body.Close()
+				var h struct {
+					NodeID       string `json:"node_id"`
+					ActiveJobs   int    `json:"active_jobs"`
+					AvailableMem int64  `json:"available_mem"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&h) == nil && h.NodeID != "" {
+					ph.NodeID = h.NodeID
+					ph.Status = "healthy"
+					ph.ActiveJobs = h.ActiveJobs
+					ph.AvailableMem = h.AvailableMem
+				}
+			}
+
+			resultsMu.Lock()
+			results[key] = ph
+			resultsMu.Unlock()
+		}(p.Host, p.Port)
+	}
+	wg.Wait()
+
+	s.peersMu.Lock()
+	s.peerHealths = results
+	s.peersMu.Unlock()
 }
 
 // --- Core lease logic (shared by HTTP and NATS handlers) ---

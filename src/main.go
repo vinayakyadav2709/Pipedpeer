@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/pipedpeer/pipedpeer/internal/app"
 	"github.com/pipedpeer/pipedpeer/internal/coordinator"
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
@@ -55,6 +57,7 @@ func main() {
 		newStatusCmd(),
 		newSetupCmd(),
 		newRunCmd(),
+		newDashboardCmd(),
 		newJobsCmd(),
 		newJobCmd(),
 		newInitCmd(),
@@ -394,6 +397,39 @@ func newRunCmd() *cobra.Command {
 	return cmd
 }
 
+func newDashboardCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "dashboard",
+		Short: "Live unified view of all workers, peers, and recent tasks (Ctrl+C / q to exit)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			interval, _ := cmd.Flags().GetDuration("interval")
+
+			nodeID, err := identity.GetOrCreate()
+			if err != nil {
+				return err
+			}
+
+			daemonctl.EnsureStarted(nodeID.NodeID, daemonPort)
+
+			st := daemonctl.Status()
+			m := dashModel{
+				daemonPort: daemonPort,
+				nodeID:     nodeID,
+				interval:   interval,
+				running:    st.Running,
+			}
+			m.refresh()
+
+			p := tea.NewProgram(m, tea.WithAltScreen())
+			_, err = p.Run()
+			return err
+		},
+	}
+	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
+	cmd.Flags().Duration("interval", 2*time.Second, "Refresh interval (e.g. 1s, 2s, 500ms)")
+	return cmd
+}
 func newJobsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "jobs",
@@ -742,6 +778,8 @@ func runDaemon(args []string) {
 		Hostname:    nodeID.Hostname,
 	})
 	_ = advertiser.Start()
+
+	server.StartPeerPoller(5 * time.Second)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
