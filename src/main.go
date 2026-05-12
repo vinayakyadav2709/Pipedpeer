@@ -28,7 +28,6 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
-	"github.com/pipedpeer/pipedpeer/internal/peers"
 	"github.com/pipedpeer/pipedpeer/internal/ping"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
@@ -63,7 +62,6 @@ func main() {
 		newInitCmd(),
 		newRegistryCmd(),
 		newNodesCmd(),
-		newPeersCmd(),
 		newPingCmd(),
 	)
 
@@ -279,9 +277,6 @@ func newRunCmd() *cobra.Command {
 					NoSelf:           noSelf,
 					Strategy:         strategy,
 					RoundRobinFn:     rrFn,
-					DiscoverFn: func() []registry.NodeRecord {
-						return discovery.DiscoverAsNodeRecords(1 * time.Second)
-					},
 				})
 
 				if checkOnly {
@@ -556,73 +551,14 @@ func newRegistryCmd() *cobra.Command {
 func newNodesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "nodes",
-		Short: "List known nodes (from registry and LAN discovery)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			registryURL, _ := cmd.Flags().GetString("registry")
-			nodeID, _ := identity.GetOrCreate()
-			fmt.Println("Discovering LAN nodes...")
-			discovered := discovery.DiscoverAsNodeRecords(1 * time.Second)
-
-			var regNodes []registry.NodeRecord
-			if registryURL != "" {
-				resp, err := http.Get(registryURL + "/v1/nodes")
-				if err == nil {
-					defer resp.Body.Close()
-					_ = json.NewDecoder(resp.Body).Decode(&regNodes)
-				} else {
-					fmt.Printf("Warning: registry unreachable: %v\n", err)
-				}
-			}
-
-			seen := make(map[string]registry.NodeRecord)
-			for _, n := range regNodes {
-				seen[n.NodeID] = n
-			}
-			for _, n := range discovered {
-				if _, exists := seen[n.NodeID]; !exists {
-					seen[n.NodeID] = n
-				}
-			}
-
-			if len(seen) == 0 {
-				fmt.Println("No nodes found (only self is available)")
-				fmt.Printf("  (self) %s  %s  %s\n", nodeID.ShortID(), nodeID.Arch, nodeID.Hostname)
-				return nil
-			}
-
-			fmt.Printf("%-10s %-12s %-16s %-6s %-6s %-5s %s\n",
-				"NODE_ID", "STATE", "ARCH", "CPU%", "MEM%", "JOBS", "ENDPOINT")
-			for _, n := range seen {
-				prefix := "  "
-				if n.NodeID == nodeID.NodeID {
-					prefix = "* "
-				}
-				shortID := n.NodeID
-				if len(shortID) > 8 {
-					shortID = shortID[:8]
-				}
-				fmt.Printf("%s%-8s %-12s %-16s %-6.0f %-6.0f %-5d %s\n",
-					prefix, shortID, n.State, n.Capabilities["arch"],
-					n.Load.CPUPercent, n.Load.MemPercent, n.Load.ActiveJobs,
-					n.SSHEndpoint)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
-	return cmd
-}
-
-func newPeersCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "peers",
-		Short: "Manage manually registered peers",
+		Short: "Manage manually registered nodes",
+		Long:  "Nodes are auto-discovered via mDNS. Use nodes add to register additional workers that mDNS cannot reach.",
 	}
 
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:   "add <host> <port>",
-			Short: "Add a peer by host and port",
+			Short: "Register a worker node",
 			Args:  cobra.ExactArgs(2),
 			RunE: func(cmd *cobra.Command, args []string) error {
 				host := args[0]
@@ -631,43 +567,91 @@ func newPeersCmd() *cobra.Command {
 				if port < 1 || port > 65535 {
 					return fmt.Errorf("invalid port: %s", args[1])
 				}
-				if err := peers.Add(host, port); err != nil {
-					return err
+				body := fmt.Sprintf(`{"host":"%s","port":%d}`, host, port)
+				resp, err := http.Post("http://127.0.0.1:38080/v1/nodes", "application/json", strings.NewReader(body))
+				if err != nil {
+					return fmt.Errorf("daemon unreachable: %w", err)
 				}
-				fmt.Printf("added peer %s:%d\n", host, port)
+				defer resp.Body.Close()
+				if resp.StatusCode != 200 {
+					return fmt.Errorf("daemon rejected: %d", resp.StatusCode)
+				}
+				fmt.Printf("added node %s:%d\n", host, port)
 				return nil
 			},
 		},
 		&cobra.Command{
 			Use:   "list",
-			Short: "List all peers",
+			Short: "List all healthy nodes",
 			RunE: func(cmd *cobra.Command, args []string) error {
-				list, err := peers.List()
+				resp, err := http.Get("http://127.0.0.1:38080/v1/nodes")
 				if err != nil {
+					return fmt.Errorf("daemon unreachable: %w", err)
+				}
+				defer resp.Body.Close()
+				var nodes []struct {
+					NodeID      string `json:"node_id"`
+					SSHEndpoint string `json:"ssh_endpoint"`
+					DaemonPort  int    `json:"daemon_port"`
+					State       string `json:"state"`
+					ActiveJobs  int    `json:"active_jobs"`
+				}
+				if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
 					return err
 				}
-				if len(list) == 0 {
-					fmt.Println("no peers added. Use: pipedpeer peers add <host> <port>")
+				if len(nodes) == 0 {
+					fmt.Println("no nodes found")
 					return nil
 				}
-				for _, p := range list {
-					fmt.Printf("%s:%d\n", p.Host, p.Port)
+				fmt.Printf("%-10s %-6s %-21s %-10s\n", "ID", "PORT", "HOST", "STATE")
+				for _, n := range nodes {
+					shortID := n.NodeID
+					if len(shortID) > 8 {
+						shortID = shortID[:8]
+					}
+					fmt.Printf("%-10s %-6d %-21s %-10s\n", shortID, n.DaemonPort, n.SSHEndpoint, n.State)
 				}
 				return nil
 			},
 		},
-		&cobra.Command{
-			Use:   "remove <host>",
-			Short: "Remove all peers at the given host",
-			Args:  cobra.ExactArgs(1),
-			RunE: func(cmd *cobra.Command, args []string) error {
-				if err := peers.Remove(args[0]); err != nil {
-					return err
-				}
-				fmt.Printf("removed peers at %s\n", args[0])
-				return nil
-			},
-		},
+		func() *cobra.Command {
+			removeCmd := &cobra.Command{
+				Use:   "remove [host]",
+				Short: "Remove nodes (--all clears everything, or specify host for manual nodes only)",
+				RunE: func(cmd *cobra.Command, args []string) error {
+					all, _ := cmd.Flags().GetBool("all")
+				if all {
+					req, _ := http.NewRequest("DELETE", "http://127.0.0.1:38080/v1/nodes/_all", nil)
+						resp, err := http.DefaultClient.Do(req)
+						if err != nil {
+							return fmt.Errorf("daemon unreachable: %w", err)
+						}
+						defer resp.Body.Close()
+						if resp.StatusCode != 200 {
+							return fmt.Errorf("daemon rejected: %d", resp.StatusCode)
+						}
+						fmt.Println("removed all nodes")
+						return nil
+					}
+					if len(args) != 1 {
+						return fmt.Errorf("requires <host> argument (or use --all)")
+					}
+					req, _ := http.NewRequest("DELETE", fmt.Sprintf("http://127.0.0.1:38080/v1/nodes/%s", args[0]), nil)
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						return fmt.Errorf("daemon unreachable: %w", err)
+					}
+					defer resp.Body.Close()
+					if resp.StatusCode != 200 {
+						return fmt.Errorf("daemon rejected: %d", resp.StatusCode)
+					}
+					fmt.Printf("removed nodes at %s\n", args[0])
+					return nil
+				},
+			}
+			removeCmd.Flags().Bool("all", false, "Remove all nodes (both manual and auto-discovered)")
+			return removeCmd
+		}(),
 	)
 
 	return cmd
