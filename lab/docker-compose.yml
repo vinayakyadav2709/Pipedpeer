@@ -1,24 +1,33 @@
 services:
-  worker-1:
-    build:
-      context: .
-      dockerfile: Dockerfile.nix
-    container_name: worker-1
-    ports:
-      - "2221:22"
+  worker1:
+    build: .
+    container_name: pipedpeer-lab-1
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./pipedpeer:/usr/local/bin/pipedpeer:ro
+    environment:
+      - XDG_DATA_HOME=/var/lib/pipedpeer
+    command: ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker-1 online :38081' && exec sleep infinity"]
 
-  worker-2:
-    build:
-      context: .
-      dockerfile: Dockerfile.nix
-    container_name: worker-2
-    ports:
-      - "2222:22"
+  worker2:
+    build: .
+    container_name: pipedpeer-lab-2
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./pipedpeer:/usr/local/bin/pipedpeer:ro
+    environment:
+      - XDG_DATA_HOME=/var/lib/pipedpeer
+    command: ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38082 && echo 'Worker-2 online :38082' && exec sleep infinity"]
 
-  worker-3:
-    build:
-      context: .
-      dockerfile: Dockerfile.nix
-    container_name: worker-3
-    ports:
-      - "2223:22"
+  worker3:
+    build: .
+    container_name: pipedpeer-lab-3
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./pipedpeer:/usr/local/bin/pipedpeer:ro
+    environment:
+      - XDG_DATA_HOME=/var/lib/pipedpeer
+    command: ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38083 && echo 'Worker-3 online :38083' && exec sleep infinity"]
