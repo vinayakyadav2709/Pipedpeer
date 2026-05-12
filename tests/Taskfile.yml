@@ -106,12 +106,6 @@ tasks:
           done
         done
 
-        # Register peers
-        ../bin/pipedpeer peers remove $HOST 2>/dev/null || true
-        for p in $PORTS; do
-          ../bin/pipedpeer peers add $HOST $p
-          echo "  Peer $HOST:$p registered" | tee -a "$LOG"
-        done
         echo "" | tee -a "$LOG"
 
         # Burst all 10 tasks concurrently
@@ -217,12 +211,6 @@ tasks:
           done
         done
 
-        # Register all peers
-        ../bin/pipedpeer peers remove $HOST 2>/dev/null || true
-        for p in $PORTS; do
-          ../bin/pipedpeer peers add $HOST $p
-          echo "  Peer $HOST:$p registered" | tee -a "$LOG"
-        done
         echo "" | tee -a "$LOG"
 
         # Worker IDs for later mapping
