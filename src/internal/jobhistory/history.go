@@ -42,14 +42,18 @@ type Record struct {
 	PeakMemBytes      int64  `json:"peak_mem_bytes,omitempty"`
 	EstimatedMemBytes int64  `json:"estimated_mem_bytes,omitempty"`
 	EstimationTier    string `json:"estimation_tier,omitempty"` // "user", "historical", "filesize", "import"
+	// Live stage tracking
+	Stage string `json:"stage,omitempty"` // "building", "exporting", "uploading", "executing"
 }
 
 type JobSummary struct {
 	ID         string
 	Status     string
+	Stage      string
 	Detached   bool
 	JobName    string
 	TargetID   string
+	ScriptPath string
 	Remote     string
 	StartedAt  string
 	DurationMs int64
@@ -96,6 +100,16 @@ func SaveRecord(dir string, r Record) error {
 	return os.WriteFile(filepath.Join(dir, "metadata.json"), b, 0644)
 }
 
+// UpdateStage writes the current stage to the record file.
+func UpdateStage(dir, stage string) {
+	r, err := ReadRecordAt(dir)
+	if err != nil {
+		return
+	}
+	r.Stage = stage
+	_ = SaveRecord(dir, r)
+}
+
 func Finalize(dir string, r Record, runErr error) error {
 	finished := time.Now().UTC()
 	r.FinishedAt = finished.Format(time.RFC3339Nano)
@@ -109,6 +123,10 @@ func Finalize(dir string, r Record, runErr error) error {
 		r.Error = runErr.Error()
 	} else {
 		r.Status = StateSucceeded
+	}
+	// Preserve stage written by UpdateStage during pipeline execution
+	if existing, err := ReadRecordAt(dir); err == nil && existing.Stage != "" {
+		r.Stage = existing.Stage
 	}
 	PublishEvent(r.ID, r.Status, prevStatus, r.Error)
 	return SaveRecord(dir, r)
@@ -168,9 +186,11 @@ func List(limit int) ([]JobSummary, error) {
 		items = append(items, JobSummary{
 			ID:         r.ID,
 			Status:     r.Status,
+			Stage:      r.Stage,
 			Detached:   r.Detached,
 			JobName:    r.JobName,
 			TargetID:   r.TargetID,
+			ScriptPath: r.ScriptPath,
 			Remote:     r.Remote,
 			StartedAt:  r.StartedAt,
 			DurationMs: r.DurationMs,

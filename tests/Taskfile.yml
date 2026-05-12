@@ -107,8 +107,8 @@ tasks:
         done
 
         # Register peers
+        ../bin/pipedpeer peers remove $HOST 2>/dev/null || true
         for p in $PORTS; do
-          ../bin/pipedpeer peers remove $HOST 2>/dev/null || true
           ../bin/pipedpeer peers add $HOST $p
           echo "  Peer $HOST:$p registered" | tee -a "$LOG"
         done
@@ -191,3 +191,86 @@ tasks:
       - task: lab-up
       - task: dispatch
       - task: lab-down
+
+  burst:
+    desc: Burst tasks via round-robin across all registered peers (uses pipedpeer python shorthand)
+    vars:
+      COUNT: "6"
+      SCRIPT: ../test_project/single.py
+    cmds:
+      - |
+        HOST=127.0.0.1
+        PORTS="38081 38082 38083"
+        LOG=.task/burst.log
+        mkdir -p .task/logs
+
+        echo "=== Burst started at $(date) ===" | tee "$LOG"
+        echo "Tasks: {{.COUNT}} | Script: {{.SCRIPT}}" | tee -a "$LOG"
+        echo "" | tee -a "$LOG"
+
+        # Wait for all workers
+        for p in $PORTS; do
+          echo "Waiting for worker on port $p..."
+          for i in $(seq 1 20); do
+            curl -s http://$HOST:$p/health >/dev/null && break
+            sleep 1
+          done
+        done
+
+        # Register all peers
+        ../bin/pipedpeer peers remove $HOST 2>/dev/null || true
+        for p in $PORTS; do
+          ../bin/pipedpeer peers add $HOST $p
+          echo "  Peer $HOST:$p registered" | tee -a "$LOG"
+        done
+        echo "" | tee -a "$LOG"
+
+        # Worker IDs for later mapping
+        declare -A PORT_MAP
+        for p in $PORTS; do
+          PORT_MAP[$p]=$(curl -s http://$HOST:$p/health | sed -n 's/.*"node_id":"\([0-9a-f-]*\)".*/\1/p' | cut -c1-8)
+          echo "  Worker :$p = ${PORT_MAP[$p]}" | tee -a "$LOG"
+        done
+        echo "" | tee -a "$LOG"
+
+        # Burst all tasks concurrently
+        echo "Bursting {{.COUNT}} tasks (round-robin)..." | tee -a "$LOG"
+        for t in $(seq 1 {{.COUNT}}); do
+          ../bin/pipedpeer python {{.SCRIPT}} > .task/logs/task${t}.log 2>&1 &
+        done
+        wait
+        echo "" | tee -a "$LOG"
+
+        # Analyze results
+        declare -A COUNTS
+        echo "===================" | tee -a "$LOG"
+        echo " ROUND-ROBIN BURST" | tee -a "$LOG"
+        echo "===================" | tee -a "$LOG"
+        for t in $(seq 1 {{.COUNT}}); do
+          log=.task/logs/task${t}.log
+          status="FAIL"
+          worker="?"
+          if grep -q "Done" "$log" 2>/dev/null; then
+            status="OK"
+          fi
+          node=$(grep -oP "completed successfully on node \K[a-f0-9]+" "$log" 2>/dev/null || echo "?")
+          for p in $PORTS; do
+            if [ "$node" = "${PORT_MAP[$p]}" ]; then
+              worker="$p"
+              break
+            fi
+          done
+          echo "  task$t [$status] -> :${worker}" | tee -a "$LOG"
+          if [ "$status" = "OK" ]; then
+            COUNTS[$worker]=$(( COUNTS[$worker] + 1 ))
+          fi
+        done
+
+        echo "" | tee -a "$LOG"
+        echo "Per-worker distribution:" | tee -a "$LOG"
+        for p in $PORTS; do
+          echo "  :$p (${PORT_MAP[$p]}): ${COUNTS[$p]:-0} tasks" | tee -a "$LOG"
+        done
+
+        echo "" | tee -a "$LOG"
+        echo "Log saved to $LOG" | tee -a "$LOG"
