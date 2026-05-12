@@ -83,6 +83,7 @@ type PeerHealth struct {
 	Status       string `json:"status"`       // "healthy", "unreachable"
 	ActiveJobs   int    `json:"active_jobs"`
 	AvailableMem int64  `json:"available_mem"`
+	Source       string `json:"source"`       // "manual", "discovery", "registry"
 }
 
 // --- Request/Response types ---
@@ -391,7 +392,7 @@ func (s *Server) pollPeers() {
 		go func(host string, port int) {
 			defer wg.Done()
 			key := fmt.Sprintf("%s:%d", host, port)
-			ph := &PeerHealth{Host: host, Port: port, Status: "unreachable"}
+			ph := &PeerHealth{Host: host, Port: port, Status: "unreachable", Source: "manual"}
 
 			healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
 			resp, err := http.Get(healthURL)

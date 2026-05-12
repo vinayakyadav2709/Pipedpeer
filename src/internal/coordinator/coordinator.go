@@ -160,15 +160,37 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		}
 	}
 
-	// 3. Manual peers (user-specified)
+	// 3. Manual peers (user-specified) — resolve to real UUIDs, merge/dedup
 	for _, p := range loadManualPeers() {
+		healthURL := fmt.Sprintf("http://%s:%d/health", p.Host, p.Port)
+		resp, err := c.httpClient.Get(healthURL)
+		if err != nil {
+			continue
+		}
+		var h struct {
+			NodeID       string `json:"node_id"`
+			AvailableMem int64  `json:"available_mem"`
+			ActiveJobs   int    `json:"active_jobs"`
+			ReservedMem  int64  `json:"reserved_mem"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil || h.NodeID == "" {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+
 		candidates = mergeNode(candidates, ScoredNode{
 			Node: registry.NodeRecord{
-				NodeID:      fmt.Sprintf("manual-%s:%d", p.Host, p.Port),
+				NodeID:      h.NodeID,
 				SSHEndpoint: fmt.Sprintf("root@%s:22", p.Host),
 				DaemonPort:  p.Port,
 				State:       "healthy",
-				HealthScore: 0.6,
+				HealthScore: 0.8,
+				Load: registry.LoadInfo{
+					AvailableMemBytes: h.AvailableMem,
+					ActiveJobs:        h.ActiveJobs,
+					ReservedMemBytes:  h.ReservedMem,
+				},
 			},
 			Source: SourceManual,
 		})
@@ -193,42 +215,38 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		}
 	}
 
-	// 5. Score + resource filter (all nodes including self)
+	// 5. Resource filter — reject nodes with insufficient memory
 	for i := range candidates {
 		if candidates[i].Rejected {
 			continue
 		}
-		// Reject nodes with insufficient available memory
 		if c.requiredMemBytes > 0 && candidates[i].Node.Load.AvailableMemBytes > 0 {
 			if candidates[i].Node.Load.AvailableMemBytes < c.requiredMemBytes {
 				candidates[i].Rejected = true
 				candidates[i].RejectReason = fmt.Sprintf(
 					"insufficient memory: need %d, available %d",
 					c.requiredMemBytes, candidates[i].Node.Load.AvailableMemBytes)
-				continue
 			}
 		}
-		candidates[i].Score = scoreNode(candidates[i].Node)
 	}
 
-	// 5. Sort by score descending
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
-	})
-
-	// 6. Pick best non-rejected candidate or use round-robin
+	// 6. Pick node — separate codepaths for deterministic round-robin vs scored smart
 	var chosen registry.NodeRecord
 	chosenSource := SourceSelf
 	reason := "no candidates available"
 
 	if c.strategy == "round-robin" {
-		// Collect non-rejected candidates
+		// Collect non-rejected candidates, sort by NodeID for deterministic order
 		var eligible []*ScoredNode
 		for i := range candidates {
 			if !candidates[i].Rejected {
 				eligible = append(eligible, &candidates[i])
 			}
 		}
+		sort.Slice(eligible, func(i, j int) bool {
+			return eligible[i].Node.NodeID < eligible[j].Node.NodeID
+		})
+
 		if len(eligible) > 0 {
 			var idx int
 			if c.roundRobinFn != nil {
@@ -244,11 +262,20 @@ func (c *Coordinator) FindNode() PlacementDecision {
 			reason = fmt.Sprintf("round-robin #%d/%d, source=%s", idx+1, len(eligible), chosenSource)
 		}
 	} else {
-		for _, c := range candidates {
-			if !c.Rejected {
-				chosen = c.Node
-				chosenSource = c.Source
-				reason = fmt.Sprintf("score=%.3f, source=%s", c.Score, c.Source)
+		// Score all non-rejected, sort by score, pick best
+		for i := range candidates {
+			if !candidates[i].Rejected {
+				candidates[i].Score = scoreNode(candidates[i].Node)
+			}
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].Score > candidates[j].Score
+		})
+		for _, sn := range candidates {
+			if !sn.Rejected {
+				chosen = sn.Node
+				chosenSource = sn.Source
+				reason = fmt.Sprintf("score=%.3f, source=%s", sn.Score, sn.Source)
 				break
 			}
 		}
@@ -288,26 +315,32 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 
 		decision := c.FindNode()
 
-		// Round-robin: try the chosen node first, then fall back to other candidates
-		if c.strategy == "round-robin" && decision.ChosenNode.NodeID != "" {
-			result, ok := c.tryCandidate(&decision.ChosenNode, &decision, submitterNode, cfg.RequiredMemBytes, statusFn)
-			if ok {
-				return result, nil
+		// Round-robin: try the chosen node, no fallback to other candidates
+		if c.strategy == "round-robin" {
+			if decision.ChosenNode.NodeID != "" {
+				result, ok := c.tryCandidate(&decision.ChosenNode, &decision, submitterNode, cfg.RequiredMemBytes, statusFn)
+				if ok {
+					return result, nil
+				}
 			}
-		}
-
-		// Try non-rejected candidates in score order
-		for i := range decision.Candidates {
-			cand := &decision.Candidates[i]
-			result, ok := c.tryCandidate(&cand.Node, &decision, submitterNode, cfg.RequiredMemBytes, statusFn)
-			if ok {
-				return result, nil
+			// Chosen node rejected — let ExecuteWithRetry handle reschedule on next attempt
+			if statusFn != nil {
+				statusFn(fmt.Sprintf("Round-robin node %s rejected — queued (attempt %d)", decision.ChosenNode.NodeID[:min(8, len(decision.ChosenNode.NodeID))], attempt+1))
 			}
-		}
+		} else {
+			// Smart: try candidates in score order
+			for i := range decision.Candidates {
+				cand := &decision.Candidates[i]
+				result, ok := c.tryCandidate(&cand.Node, &decision, submitterNode, cfg.RequiredMemBytes, statusFn)
+				if ok {
+					return result, nil
+				}
+			}
 
-		// No node accepted — will retry (unless context cancelled)
-		if statusFn != nil {
-			statusFn(fmt.Sprintf("No node has capacity — task queued (attempt %d)", attempt+1))
+			// No node accepted — will retry (unless context cancelled)
+			if statusFn != nil {
+				statusFn(fmt.Sprintf("No node has capacity — task queued (attempt %d)", attempt+1))
+			}
 		}
 	}
 }

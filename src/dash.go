@@ -23,6 +23,7 @@ type peerInfo struct {
 	Status       string `json:"status"`
 	ActiveJobs   int    `json:"active_jobs"`
 	AvailableMem int64  `json:"available_mem"`
+	Source       string `json:"source"`
 }
 
 type dashModel struct {
@@ -157,12 +158,13 @@ func (m dashModel) View() string {
 			statusCol.Render(p.Status),
 			jobsStr,
 			memStr,
+			p.Source,
 		})
 	}
 	s += renderTable(
-		[]string{"ID", "HOST:PORT", "STATUS", "JOBS", "MEM AVAIL"},
+		[]string{"ID", "HOST:PORT", "STATUS", "JOBS", "MEM AVAIL", "SOURCE"},
 		peerRows,
-		[]float64{0.12, 0.28, 0.14, 0.08, 0.15},
+		[]float64{0.12, 0.24, 0.12, 0.07, 0.13, 0.10},
 	)
 
 	// ── Tasks table
