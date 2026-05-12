@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# Pipedpeer Bootstrap Script
+# Installs current runtime dependencies: Nix, SSH, bubblewrap
+# Validates setup with 'pipedpeer doctor'
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$SCRIPT_DIR/lib"
+MODULES_DIR="$SCRIPT_DIR/modules"
+
+# Source common utilities
+source "$LIB_DIR/common.sh"
+
+# Colors
+BOLD='\033[1m'
+
+# Banner
+echo -e "${BOLD}=== Pipedpeer Bootstrap ===${NC}"
+echo "Installing dependencies: Nix, SSH, Bubblewrap"
+echo ""
+
+# Check sudo
+require_sudo
+
+# Detect environment
+OS=$(detect_os)
+log_info "Detected OS: $OS"
+
+if [[ "$OS" == "unknown" ]]; then
+    error_exit "Unable to detect OS" \
+        "Run on Linux, macOS, or WSL2" \
+        "os-detection"
+fi
+
+GPU=$(detect_gpu)
+if [[ "$GPU" == "none" ]]; then
+    log_info "No GPU detected. Node will be registered CPU-only."
+else
+    log_warn "Detected GPU: $GPU"
+    log_warn "GPU setup is currently skipped. Node will run CPU-only until GPU runtime is configured."
+    log_warn "If you need GPU tasks later, install vendor drivers/runtime and re-run bootstrap."
+fi
+
+echo ""
+
+# Modules to install (GPU and Docker are intentionally out of scope for now)
+MODULES=(
+    "nix"
+    "ssh"
+    "bwrap"
+)
+
+FAILED=0
+
+# Run each module
+for module in "${MODULES[@]}"; do
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    
+    MODULE_SCRIPT="$MODULES_DIR/${module}.sh"
+    
+    if [[ ! -f "$MODULE_SCRIPT" ]]; then
+        log_error "Module script not found: $MODULE_SCRIPT"
+        FAILED=$((FAILED + 1))
+        continue
+    fi
+    
+    if bash "$MODULE_SCRIPT"; then
+        log_success "[$module] completed successfully"
+    else
+        EXIT_CODE=$?
+        log_error "[$module] failed with exit code $EXIT_CODE"
+        FAILED=$((FAILED + 1))
+    fi
+    
+    echo ""
+done
+
+# Summary
+echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+if [[ $FAILED -eq 0 ]]; then
+    log_success "All modules installed successfully!"
+    echo ""
+    
+    # Run doctor check if pipedpeer is available
+    if command_exists pipedpeer; then
+        log_info "Running pipedpeer doctor validation..."
+        echo ""
+        if pipedpeer doctor; then
+            log_success "System validation passed!"
+        else
+            log_warn "Some optional checks failed. See above for details."
+        fi
+    else
+        log_info "pipedpeer CLI not yet built. Run: ./scripts/build.sh"
+    fi
+else
+    log_error "Bootstrap failed: $FAILED module(s) did not complete successfully"
+    log_error "Review errors above for details"
+    exit 1
+fi
+
+echo ""
+log_success "Bootstrap complete!"
+log_info "Next steps:"
+echo "  1. Build CLI: ./scripts/build.sh"
+echo "  2. Run tests: ./scripts/test.sh"
+echo "  3. Try it: ./bin/pipedpeer --help"
+echo ""
+
+exit 0
