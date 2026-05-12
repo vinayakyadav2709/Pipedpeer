@@ -254,6 +254,18 @@ func newRunCmd() *cobra.Command {
 				fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 					resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
 
+				rrFn := func(count int) int {
+					url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", daemonPort, count)
+					resp, err := http.Get(url)
+					if err != nil {
+						return 0
+					}
+					defer resp.Body.Close()
+					var result struct{ Index int }
+					json.NewDecoder(resp.Body).Decode(&result)
+					return result.Index
+				}
+
 				coord := coordinator.New(coordinator.Config{
 					RegistryURL:      registryURL,
 					SelfIdentity:     nodeID,
@@ -263,6 +275,7 @@ func newRunCmd() *cobra.Command {
 					RequiredMemBytes: resReq.MemBytes,
 					NoSelf:           noSelf,
 					Strategy:         strategy,
+					RoundRobinFn:     rrFn,
 					DiscoverFn: func() []registry.NodeRecord {
 						return discovery.DiscoverAsNodeRecords(1 * time.Second)
 					},
