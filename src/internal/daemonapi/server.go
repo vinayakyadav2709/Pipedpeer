@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -62,6 +64,9 @@ type Server struct {
 
 	// NATS subscriptions (nil if NATS not configured)
 	natsSubs []*nats.Subscription
+
+	// Round-robin counter for cross-invocation persistence
+	rrCounter atomic.Int64
 }
 
 // --- Request/Response types ---
@@ -275,6 +280,7 @@ func (s *Server) buildRouter() {
 	r.Post("/v1/jobs/upload", s.handleJobUpload)
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
+	r.Get("/v1/roundrobin", s.handleRoundRobin)
 
 	s.router = r
 }
@@ -288,6 +294,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		"reserved_mem":  s.ReservedMem(),
 		"available_mem": s.AvailableForJob(),
 	})
+}
+
+func (s *Server) handleRoundRobin(w http.ResponseWriter, r *http.Request) {
+	countStr := r.URL.Query().Get("count")
+	count, err := strconv.Atoi(countStr)
+	if err != nil || count <= 0 {
+		http.Error(w, `{"error":"invalid count"}`, http.StatusBadRequest)
+		return
+	}
+	idx := int(s.rrCounter.Add(1)-1) % count
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"index":%d}`, idx)
 }
 
 // --- Core lease logic (shared by HTTP and NATS handlers) ---

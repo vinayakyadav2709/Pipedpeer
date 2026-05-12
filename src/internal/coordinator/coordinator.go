@@ -65,6 +65,7 @@ type Coordinator struct {
 	retryInterval    time.Duration
 	noSelf           bool
 	strategy         string
+	roundRobinFn     func(count int) int // external round-robin counter, nil = in-memory
 
 	mu          sync.Mutex
 	cachedNodes []registry.NodeRecord
@@ -86,6 +87,7 @@ type Config struct {
 	RetryInterval    time.Duration     // how long to wait between queue retries (default: 30s)
 	NoSelf           bool              // exclude self-node from placement
 	Strategy         string            // "smart" (default) or "round-robin"
+	RoundRobinFn     func(count int) int // external round-robin counter (e.g. daemon endpoint), nil = in-memory
 }
 
 // LeaseResult is the outcome of a successful placement with lease.
@@ -120,6 +122,7 @@ func New(cfg Config) *Coordinator {
 		retryInterval:    cfg.RetryInterval,
 		noSelf:           cfg.NoSelf,
 		strategy:         cfg.Strategy,
+		roundRobinFn:     cfg.RoundRobinFn,
 	}
 }
 
@@ -227,10 +230,15 @@ func (c *Coordinator) FindNode() PlacementDecision {
 			}
 		}
 		if len(eligible) > 0 {
-			c.mu.Lock()
-			idx := c.rrCounter % len(eligible)
-			c.rrCounter++
-			c.mu.Unlock()
+			var idx int
+			if c.roundRobinFn != nil {
+				idx = c.roundRobinFn(len(eligible)) % len(eligible)
+			} else {
+				c.mu.Lock()
+				idx = c.rrCounter % len(eligible)
+				c.rrCounter++
+				c.mu.Unlock()
+			}
 			chosen = eligible[idx].Node
 			chosenSource = eligible[idx].Source
 			reason = fmt.Sprintf("round-robin #%d/%d, source=%s", idx+1, len(eligible), chosenSource)
@@ -280,55 +288,21 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 
 		decision := c.FindNode()
 
+		// Round-robin: try the chosen node first, then fall back to other candidates
+		if c.strategy == "round-robin" && decision.ChosenNode.NodeID != "" {
+			result, ok := c.tryCandidate(&decision.ChosenNode, &decision, submitterNode, cfg.RequiredMemBytes, statusFn)
+			if ok {
+				return result, nil
+			}
+		}
+
 		// Try non-rejected candidates in score order
 		for i := range decision.Candidates {
 			cand := &decision.Candidates[i]
-			if cand.Rejected || cand.Node.NodeID == "" {
-				continue
+			result, ok := c.tryCandidate(&cand.Node, &decision, submitterNode, cfg.RequiredMemBytes, statusFn)
+			if ok {
+				return result, nil
 			}
-
-			// Resolve real UUID + load for manual peers via health endpoint
-			if cand.Source == SourceManual {
-				host := extractHost(cand.Node.SSHEndpoint)
-				healthURL := fmt.Sprintf("http://%s:%d/health", host, cand.Node.DaemonPort)
-				resp, err := c.httpClient.Get(healthURL)
-				if err == nil {
-					var h struct {
-						NodeID       string `json:"node_id"`
-						AvailableMem int64  `json:"available_mem"`
-						ActiveJobs   int    `json:"active_jobs"`
-						ReservedMem  int64  `json:"reserved_mem"`
-					}
-					if json.NewDecoder(resp.Body).Decode(&h) == nil && h.NodeID != "" {
-						cand.Node.NodeID = h.NodeID
-						cand.Node.Load.AvailableMemBytes = h.AvailableMem
-						cand.Node.Load.ActiveJobs = h.ActiveJobs
-						cand.Node.Load.ReservedMemBytes = h.ReservedMem
-						cand.Node.HealthScore = 0.8
-					}
-					resp.Body.Close()
-				}
-			}
-
-			endpoint := c.resolveEndpointForNode(cand.Node)
-			daemonURL := fmt.Sprintf("http://%s:%d", extractHost(endpoint), cand.Node.DaemonPort)
-
-			leaseID, expiresAt, err := c.requestLease(daemonURL, cand.Node.NodeID, submitterNode, cfg.RequiredMemBytes)
-			if err != nil {
-				if statusFn != nil {
-					statusFn(fmt.Sprintf("Node %s rejected: %v", cand.Node.NodeID, err))
-				}
-				continue // try next candidate
-			}
-
-			return &LeaseResult{
-				Decision:   decision,
-				LeaseID:    leaseID,
-				ExpiresAt:  expiresAt,
-				NodeID:     cand.Node.NodeID,
-				Endpoint:   endpoint,
-				DaemonPort: cand.Node.DaemonPort,
-			}, nil
 		}
 
 		// No node accepted — will retry (unless context cancelled)
@@ -336,6 +310,55 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 			statusFn(fmt.Sprintf("No node has capacity — task queued (attempt %d)", attempt+1))
 		}
 	}
+}
+
+// tryCandidate attempts to place a task on a specific node.
+// Returns the lease result and true if successful.
+func (c *Coordinator) tryCandidate(node *registry.NodeRecord, decision *PlacementDecision, submitterNode string, requiredMemBytes int64, statusFn func(string)) (*LeaseResult, bool) {
+	if node.NodeID == "" {
+		return nil, false
+	}
+
+	// Resolve real UUID + load via health endpoint (needed for manual peers)
+	host := extractHost(node.SSHEndpoint)
+	healthURL := fmt.Sprintf("http://%s:%d/health", host, node.DaemonPort)
+	resp, err := c.httpClient.Get(healthURL)
+	if err == nil {
+		var h struct {
+			NodeID       string `json:"node_id"`
+			AvailableMem int64  `json:"available_mem"`
+			ActiveJobs   int    `json:"active_jobs"`
+			ReservedMem  int64  `json:"reserved_mem"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&h) == nil && h.NodeID != "" {
+			node.NodeID = h.NodeID
+			node.Load.AvailableMemBytes = h.AvailableMem
+			node.Load.ActiveJobs = h.ActiveJobs
+			node.Load.ReservedMemBytes = h.ReservedMem
+			node.HealthScore = 0.8
+		}
+		resp.Body.Close()
+	}
+
+	endpoint := c.resolveEndpointForNode(*node)
+	daemonURL := fmt.Sprintf("http://%s:%d", extractHost(endpoint), node.DaemonPort)
+
+	leaseID, expiresAt, err := c.requestLease(daemonURL, node.NodeID, submitterNode, requiredMemBytes)
+	if err != nil {
+		if statusFn != nil {
+			statusFn(fmt.Sprintf("Node %s rejected: %v", node.NodeID, err))
+		}
+		return nil, false
+	}
+
+	return &LeaseResult{
+		Decision:   *decision,
+		LeaseID:    leaseID,
+		ExpiresAt:  expiresAt,
+		NodeID:     node.NodeID,
+		Endpoint:   endpoint,
+		DaemonPort: node.DaemonPort,
+	}, true
 }
 
 // requestLease sends an accept request to a daemon via NATS (preferred) or HTTP (fallback).
