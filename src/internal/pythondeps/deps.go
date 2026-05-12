@@ -21,6 +21,7 @@ var nixpkgsMapping = map[string]string{
 	"django":         "django",
 	"scipy":          "scipy",
 	"sklearn":        "scikit-learn",
+	"scikit-learn":   "scikit-learn",
 	"matplotlib":     "matplotlib",
 	"pillow":         "Pillow",
 	"pyyaml":         "pyyaml",
@@ -154,6 +155,45 @@ func ExtractImportScan(scriptPath string) ImportScan {
 	}
 
 	return ImportScan{ExternalDeps: deps, LocalFiles: localFiles}
+}
+
+// ParseUVLock parses a uv.lock file and extracts the names of all packages.
+func ParseUVLock(lockPath string) ([]string, error) {
+	content, err := os.ReadFile(lockPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// uv.lock has an array of tables named "package"
+	// [[package]]
+	// name = "pandas"
+	// version = "2.0.3"
+	
+	// We do a simple string-based parse to avoid complex TOML unmarshaling
+	// of the entire schema, since we only need the package names.
+	var pkgs []string
+	lines := strings.Split(string(content), "\n")
+	inPackage := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "[[package]]" {
+			inPackage = true
+			continue
+		}
+		if inPackage && strings.HasPrefix(line, "name =") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				name := strings.TrimSpace(parts[1])
+				name = strings.Trim(name, `"'`)
+				pkgs = append(pkgs, name)
+			}
+			inPackage = false // wait for next [[package]]
+		} else if strings.HasPrefix(line, "[[") {
+			inPackage = false
+		}
+	}
+	
+	return pkgs, nil
 }
 
 func ResolveNixPackage(pkg string) string {

@@ -82,12 +82,24 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("Script: %s\n", absScriptPath)
 	fmt.Printf("Daemon: %s:%d\n\n", opts.DaemonHost, opts.DaemonPort)
 
+	projectRoot := findProjectRoot(filepath.Dir(absScriptPath))
+
 	fmt.Printf("[1/7] Detecting imports...\n")
 	importScan := pythondeps.ExtractImportScan(absScriptPath)
-	imports := importScan.ExternalDeps
-	if len(imports) > 0 {
-		fmt.Printf("      Found external imports: %s\n", strings.Join(imports, ", "))
+	
+	var imports []string
+	
+	uvLockPath := filepath.Join(projectRoot, "uv.lock")
+	if uvPkgs, err := pythondeps.ParseUVLock(uvLockPath); err == nil {
+		fmt.Printf("      Found uv.lock in project root\n")
+		imports = uvPkgs
+	} else {
+		imports = importScan.ExternalDeps
+		if len(imports) > 0 {
+			fmt.Printf("      Found external imports: %s\n", strings.Join(imports, ", "))
+		}
 	}
+
 	if len(importScan.LocalFiles) > 0 {
 		fmt.Printf("      Found local imports: %d (will be bundled)\n", len(importScan.LocalFiles))
 	}
@@ -140,7 +152,6 @@ func Run(opts Options) (runErr error) {
 	fmt.Printf("      Exported closure to %s\n", narPath)
 
 	fmt.Printf("\n[6/7] Uploading to daemon...\n")
-	projectRoot := findProjectRoot(filepath.Dir(absScriptPath))
 	workspaceTar := filepath.Join(tmpDir, "workspace.tar")
 	if err := daemonctl.CreateWorkspaceTar(projectRoot, workspaceTar); err != nil {
 		return fmt.Errorf("workspace tar failed: %v", err)
