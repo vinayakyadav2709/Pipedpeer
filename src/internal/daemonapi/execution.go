@@ -284,7 +284,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 	importCmd := &exec.Cmd{
 		Path:   nixPath,
-		Args:   []string{"nix-store", "--import"},
+		Args:   []string{"nix-store", "--import", "--no-check-sigs"},
 		Stdin:  narFile,
 		Stdout: nil,
 		Stderr: nil,
