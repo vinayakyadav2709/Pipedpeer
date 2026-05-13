@@ -138,7 +138,9 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		var nodes []registry.NodeRecord
 		if json.NewDecoder(resp.Body).Decode(&nodes) == nil {
 			for _, n := range nodes {
-				candidates = append(candidates, ScoredNode{Node: n, Source: SourceDiscovery})
+				if n.State == "healthy" {
+					candidates = append(candidates, ScoredNode{Node: n, Source: SourceDiscovery})
+				}
 			}
 		}
 	} else {
