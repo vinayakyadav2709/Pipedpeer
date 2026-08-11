@@ -4,33 +4,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
 	"time"
-
-	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
 // DiscoveredNode is a node found via LAN discovery.
 type DiscoveredNode struct {
 	NodeID      string `json:"node_id"`
-	DaemonAddr  string `json:"daemon_addr"`   // "10.0.1.5:38080"
+	DaemonAddr  string `json:"daemon_addr"` // "10.0.1.5:38080"
 	DaemonPort  int    `json:"daemon_port"`
-	SSHEndpoint string `json:"ssh_endpoint"`  // "root@10.0.1.5:22"
+	SSHEndpoint string `json:"ssh_endpoint"` // "root@10.0.1.5:22"
 	Arch        string `json:"arch"`
+	Hostname    string `json:"hostname"`
 }
 
 // ServiceInfo is what each daemon advertises on the network.
 // For now we use a simple UDP broadcast approach (can be upgraded to mDNS later).
 type ServiceInfo struct {
-	NodeID      string `json:"node_id"`
-	DaemonPort  int    `json:"daemon_port"`
-	SSHEndpoint string `json:"ssh_endpoint"`
-	Arch        string `json:"arch"`
-	Hostname    string `json:"hostname"`
+	NodeID      string  `json:"node_id"`
+	DaemonPort  int     `json:"daemon_port"`
+	SSHEndpoint string  `json:"ssh_endpoint"`
+	Arch        string  `json:"arch"`
+	Hostname    string  `json:"hostname"`
 	CPUPercent  float64 `json:"cpu_percent"`
 	MemPercent  float64 `json:"memory_percent"`
-	ActiveJobs  int    `json:"active_jobs"`
+	ActiveJobs  int     `json:"active_jobs"`
 }
 
 const (
@@ -173,49 +171,6 @@ func Discover(timeout time.Duration) []DiscoveredNode {
 	}
 
 	return results
-}
-
-// DiscoverAsNodeRecords wraps Discover and returns registry.NodeRecord slice
-// suitable for the coordinator. Probes each discovered node's daemon for
-// capabilities and load info.
-func DiscoverAsNodeRecords(timeout time.Duration) []registry.NodeRecord {
-	discovered := Discover(timeout)
-	var records []registry.NodeRecord
-	client := &http.Client{Timeout: 2 * time.Second}
-
-	for _, d := range discovered {
-		rec := registry.NodeRecord{
-			NodeID:      d.NodeID,
-			SSHEndpoint: d.SSHEndpoint,
-			DaemonPort:  d.DaemonPort,
-			Capabilities: map[string]string{"arch": d.Arch},
-			State:        "healthy",
-			HealthScore:  0.5,
-		}
-
-		resp, err := client.Get(fmt.Sprintf("http://%s/health", d.DaemonAddr))
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 {
-				rec.HealthScore = 0.7
-				var health struct {
-					ActiveJobs    int   `json:"active_jobs"`
-					ReservedMem   int64 `json:"reserved_mem"`
-					AvailableMem  int64 `json:"available_mem"`
-				}
-				if json.NewDecoder(resp.Body).Decode(&health) == nil {
-					rec.Load = registry.LoadInfo{
-						ActiveJobs:        health.ActiveJobs,
-						ReservedMemBytes:  health.ReservedMem,
-						AvailableMemBytes: health.AvailableMem,
-					}
-					rec.HealthScore = 0.8
-				}
-			}
-		}
-		records = append(records, rec)
-	}
-	return records
 }
 
 // localBroadcasts returns broadcast addresses for all local interfaces.

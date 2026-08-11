@@ -64,20 +64,33 @@ sudo ./scripts/bootstrap/modules/nix.sh
 # Just set up SSH
 sudo ./scripts/bootstrap/modules/ssh.sh
 
-# Just install Bubblewrap
-sudo ./scripts/bootstrap/modules/bwrap.sh
+# Just install crun
+sudo ./scripts/bootstrap/modules/crun.sh
 ```
 
 ## GPU Support
 
-GPU setup is currently **not implemented in bootstrap**. Nodes are treated as CPU-only.
+Bootstrap auto-detects the GPU vendor and installs the appropriate runtime:
 
-To enable GPU job execution later:
-- NVIDIA: Install CUDA drivers
-- AMD: Install ROCm drivers
-- Intel Arc: Install oneAPI/DPC++ drivers
+| GPU Vendor | Detection | Installed Runtime |
+|---|---|---|
+| NVIDIA | `nvidia-smi` | `nvidia-container-toolkit` + CDI spec |
+| AMD | `rocm-smi` | ROCm runtime |
+| Intel | `lspci` | Intel compute runtime |
 
-After runtime support lands, re-run bootstrap to register GPU capability.
+After bootstrap, the node registers its GPU capabilities (vendor, model, VRAM, count) with the scheduler.
+
+### Manual GPU setup
+
+```bash
+# Install GPU runtime for detected vendor
+sudo ./scripts/bootstrap/modules/gpu.sh
+
+# Or specify vendor explicitly
+sudo ./scripts/bootstrap/modules/gpu.sh nvidia
+sudo ./scripts/bootstrap/modules/gpu.sh amd
+sudo ./scripts/bootstrap/modules/gpu.sh intel
+```
 
 ## Troubleshooting
 
@@ -139,16 +152,16 @@ If bootstrap fails, install dependencies manually:
 ### Nix
 https://nixos.org/download.html
 
-### Bubblewrap
+### crun (OCI Runtime)
 ```bash
 # Ubuntu/Debian
-sudo apt-get install bubblewrap
+sudo apt-get install crun
 
 # macOS
-brew install bubblewrap
+brew install crun
 
 # Arch
-sudo pacman -S bubblewrap
+sudo pacman -S crun
 ```
 
 ### SSH

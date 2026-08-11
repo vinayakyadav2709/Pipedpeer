@@ -209,7 +209,7 @@ func TestCoordinatorNATSCommitAndComplete(t *testing.T) {
 	defer daemon.UnbindNATS()
 
 	coord := New(Config{
-		Bus: bus,
+		Bus:          bus,
 		SelfIdentity: identity.NodeIdentity{NodeID: "coord-commit"},
 	})
 
@@ -225,7 +225,11 @@ func TestCoordinatorNATSCommitAndComplete(t *testing.T) {
 		return []registry.NodeRecord{workerNode}
 	}
 
-	leaseID, _, err := coord.requestLease("", nodeID, "coord-commit", 1024)
+	leaseID, _, _, err := coord.requestLease("", acceptReq{
+		TargetID:         nodeID,
+		SubmitterNode:    "coord-commit",
+		RequiredMemBytes: 1024,
+	})
 	if err != nil {
 		t.Fatalf("request lease: %v", err)
 	}

@@ -92,6 +92,36 @@ var stdlibModules = map[string]bool{
 	"_thread": true, "__future__": true,
 }
 
+// GPU-accelerated libraries — scripts importing these likely need GPU access.
+var gpuImports = map[string]bool{
+	"torch":      true, // PyTorch
+	"tensorflow": true, // TensorFlow
+	"tf":         true, // TensorFlow shorthand
+	"cupy":       true, // CuPy
+	"numba":      true, // Numba (may use CUDA)
+	"pycuda":     true, // PyCUDA
+	"cuda":       true, // CUDA Python
+	"jax":        true, // JAX
+	"jaxlib":     true, // JAX lib
+	"paddle":     true, // PaddlePaddle
+	"onnxruntime": true, // ONNX Runtime
+	"tensorrt":   true, // TensorRT
+	"keras":      true, // Keras (usually on top of TF)
+}
+
+// HasGPUImports checks if the given script imports any GPU-accelerated libraries.
+func HasGPUImports(scriptPath string) bool {
+	scan := ExtractImportScan(scriptPath)
+	for _, imp := range scan.ExternalDeps {
+		// Also check for submodules like numba.cuda
+		base := strings.SplitN(imp, ".", 2)[0]
+		if gpuImports[imp] || gpuImports[base] {
+			return true
+		}
+	}
+	return false
+}
+
 func ExtractImports(scriptPath string) []string {
 	scan := ExtractImportScan(scriptPath)
 	return scan.ExternalDeps

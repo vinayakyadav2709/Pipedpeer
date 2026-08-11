@@ -10,12 +10,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
+
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 )
 
 // ExecConfig is sent by the CLI as the first WebSocket message.
@@ -25,6 +27,54 @@ type ExecConfig struct {
 	Envs       []string `json:"envs"`
 	Isolate    bool     `json:"isolate"`
 	StorePath  string   `json:"store_path"`
+	GPU        bool     `json:"gpu,omitempty"`
+	GPUDevices string   `json:"gpu_devices,omitempty"` // e.g. "0" or "0,1" or "all"
+}
+
+// OCI config structures for crun bundle generation.
+type ociConfig struct {
+	OciVersion string     `json:"ociVersion"`
+	Process    ociProcess `json:"process"`
+	Root       ociRoot    `json:"root"`
+	Hostname   string     `json:"hostname"`
+	Mounts     []ociMount `json:"mounts"`
+	Linux      *ociLinux  `json:"linux,omitempty"`
+}
+type ociProcess struct {
+	Terminal bool     `json:"terminal"`
+	User     ociUser  `json:"user"`
+	Args     []string `json:"args"`
+	Env      []string `json:"env"`
+	Cwd      string   `json:"cwd"`
+}
+type ociUser struct {
+	UID int `json:"uid"`
+	GID int `json:"gid"`
+}
+type ociRoot struct {
+	Path     string `json:"path"`
+	Readonly bool   `json:"readonly"`
+}
+type ociMount struct {
+	Destination string   `json:"destination"`
+	Type        string   `json:"type"`
+	Source      string   `json:"source"`
+	Options     []string `json:"options,omitempty"`
+}
+type ociLinux struct {
+	Namespaces []ociNamespace `json:"namespaces"`
+	Devices    []ociDevice    `json:"devices,omitempty"`
+}
+type ociNamespace struct {
+	Type string `json:"type"`
+}
+type ociDevice struct {
+	Path        string `json:"path"`
+	Type        string `json:"type"`
+	Major       int64  `json:"major"`
+	Minor       int64  `json:"minor"`
+	FileMode    int    `json:"fileMode,omitempty"`
+	Permissions string `json:"permissions,omitempty"`
 }
 
 // OutputMessage is streamed from daemon to CLI during execution.
@@ -72,57 +122,21 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
-func buildRunCmd(runPath, workDir string, isolate bool, scriptRelPath string, scriptArgs, envs []string) string {
-	if !isolate {
-		cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
-			shellQuote(runPath) + " " + shellQuote(scriptRelPath)
-		for _, arg := range scriptArgs {
-			cmd += " " + shellQuote(arg)
-		}
-		for _, env := range envs {
-			parts := strings.SplitN(env, "=", 2)
-			if len(parts) == 2 {
-				cmd = "export " + parts[0] + "=" + shellQuote(parts[1]) + " && " + cmd
-			} else {
-				cmd = "export " + parts[0] + "=" + shellQuote(os.Getenv(parts[0])) + " && " + cmd
-			}
-		}
-		return cmd
+func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
+	cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
+		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
+	for _, arg := range scriptArgs {
+		cmd += " " + shellQuote(arg)
 	}
-
-	homeDir := filepath.Join(filepath.Dir(workDir), "home")
-	pathEnv := "/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin"
-
-	bwrapArgs := []string{
-		"bwrap",
-		"--die-with-parent",
-		"--unshare-pid",
-		"--unshare-ipc",
-		"--unshare-uts",
-		"--ro-bind", "/nix", "/nix",
-		"--dev", "/dev",
-		"--proc", "/proc",
-		"--tmpfs", "/tmp",
-		"--bind", workDir, "/work",
-		"--bind", homeDir, "/home/root",
-		"--chdir", "/work",
-		"--setenv", "HOME", "/home/root",
-		"--setenv", "PATH", pathEnv,
-	}
-
 	for _, env := range envs {
 		parts := strings.SplitN(env, "=", 2)
 		if len(parts) == 2 {
-			bwrapArgs = append(bwrapArgs, "--setenv", parts[0], parts[1])
+			cmd = "export " + parts[0] + "=" + shellQuote(parts[1]) + " && " + cmd
 		} else {
-			bwrapArgs = append(bwrapArgs, "--setenv", parts[0], os.Getenv(parts[0]))
+			cmd = "export " + parts[0] + "=" + shellQuote(os.Getenv(parts[0])) + " && " + cmd
 		}
 	}
-
-	bwrapArgs = append(bwrapArgs, "--", runPath, scriptRelPath)
-	bwrapArgs = append(bwrapArgs, scriptArgs...)
-
-	return "mkdir -p " + shellQuote(workDir) + " " + shellQuote(homeDir) + " && " + strings.Join(bwrapArgs, " ")
+	return cmd
 }
 
 // handleJobUpload processes POST /v1/jobs/upload.
@@ -282,14 +296,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	importCmd := &exec.Cmd{
-		Path:   nixPath,
-		Args:   []string{"nix-store", "--import", "--no-check-sigs"},
-		Stdin:  narFile,
-		Stdout: nil,
-		Stderr: nil,
-	}
-	out, err := importCmd.CombinedOutput()
+	out, err := importNAR(nixPath, narFile)
 	if err != nil {
 		writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
 		s.jobsMu.Lock()
@@ -303,23 +310,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	s.jobsMu.Unlock()
 
 	runPath := filepath.Join(cfg.StorePath, "bin", "run")
-	runCmd := buildRunCmd(runPath, job.WorkDir, cfg.Isolate, cfg.ScriptPath, cfg.Args, cfg.Envs)
-
-	cmd := exec.Command("sh", "-c", runCmd)
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
-
-	if err := cmd.Start(); err != nil {
-		writeWS(OutputMessage{Error: "start command: " + err.Error()})
-		s.jobsMu.Lock()
-		job.Status = "failed"
-		s.jobsMu.Unlock()
-		return
-	}
 
 	outCh := make(chan OutputMessage, 64)
 	writerDone := make(chan struct{})
-
 	go func() {
 		defer close(writerDone)
 		for m := range outCh {
@@ -330,47 +323,180 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			outCh <- OutputMessage{O: scanner.Text() + "\n"}
-		}
-	}()
+	var exitCode int
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			outCh <- OutputMessage{E: scanner.Text() + "\n"}
-		}
-	}()
+	if !cfg.Isolate {
+		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
+		cmd := exec.Command("sh", "-c", runCmd)
+		stdout, _ := cmd.StdoutPipe()
+		stderr, _ := cmd.StderrPipe()
 
-	cmdDone := make(chan struct{})
-	go func() {
+		if err := cmd.Start(); err != nil {
+			writeWS(OutputMessage{Error: "start command: " + err.Error()})
+			s.jobsMu.Lock()
+			job.Status = "failed"
+			s.jobsMu.Unlock()
+			return
+		}
+
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				outCh <- OutputMessage{O: scanner.Text() + "\n"}
+			}
+		}()
+		go func() {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				outCh <- OutputMessage{E: scanner.Text() + "\n"}
+			}
+		}()
 		cmd.Wait()
-		close(cmdDone)
-	}()
+		exitCode = cmd.ProcessState.ExitCode()
+	} else {
+		bundleDir := filepath.Join(filepath.Dir(job.WorkDir), "oci-bundle")
+		rootfsDir := filepath.Join(bundleDir, "rootfs")
+		os.MkdirAll(filepath.Join(rootfsDir, "dev"), 0755)
+		os.MkdirAll(filepath.Join(rootfsDir, "proc"), 0755)
+		os.MkdirAll(filepath.Join(rootfsDir, "sys"), 0755)
 
-	go func() {
-		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
-				if cmd.Process != nil {
-					cmd.Process.Kill()
-				}
-				return
+		args := append([]string{runPath, cfg.ScriptPath}, cfg.Args...)
+		env := []string{
+			"HOME=/home/root",
+			"PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin",
+		}
+		for _, e := range cfg.Envs {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				env = append(env, e)
+			} else {
+				env = append(env, parts[0]+"="+os.Getenv(parts[0]))
 			}
 		}
-	}()
 
-	<-cmdDone
+		homeDir := filepath.Join(filepath.Dir(job.WorkDir), "home")
+		os.MkdirAll(homeDir, 0755)
 
-	exitCode := cmd.ProcessState.ExitCode()
+		ociCfg := ociConfig{
+			OciVersion: "1.0.2",
+			Process: ociProcess{
+				Terminal: false,
+				User:     ociUser{UID: 0, GID: 0},
+				Args:     args,
+				Env:      env,
+				Cwd:      "/work",
+			},
+			Root:     ociRoot{Path: "rootfs", Readonly: true},
+			Hostname: "pipedpeer",
+			Mounts: []ociMount{
+				{Destination: "/nix", Type: "bind", Source: "/nix", Options: []string{"rbind", "ro"}},
+				{Destination: "/proc", Type: "proc", Source: "proc"},
+				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "noexec"}},
+				{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev"}},
+				{Destination: "/work", Type: "bind", Source: job.WorkDir, Options: []string{"rbind", "rw"}},
+				{Destination: "/home/root", Type: "bind", Source: homeDir, Options: []string{"rbind", "rw"}},
+			},
+			Linux: &ociLinux{
+				Namespaces: []ociNamespace{
+					{Type: "pid"}, {Type: "ipc"}, {Type: "uts"}, {Type: "mount"},
+				},
+			},
+		}
 
-	wg.Wait()
+		if cfg.GPU {
+			gpuInfo := gpu.Detect()
+			for _, d := range gpuInfo.Devices {
+				ociCfg.Linux.Devices = append(ociCfg.Linux.Devices, ociDevice{
+					Path: d.Path, Type: "c",
+					Major: d.Major, Minor: d.Minor,
+					Permissions: "rwm",
+				})
+			}
+			// Determine which GPU devices to expose
+			gpuDevices := "all"
+			if cfg.GPUDevices != "" {
+				gpuDevices = cfg.GPUDevices
+			} else if gpuInfo.Count > 1 {
+				// With multiple GPUs, check if one is reserved for this task.
+				// This is set by the daemon's lease system when accepting a GPU task.
+				reservedGPU := ""
+				for _, e := range cfg.Envs {
+					if strings.HasPrefix(e, "PIPEDPEER_GPU_INDEX=") {
+						reservedGPU = strings.TrimPrefix(e, "PIPEDPEER_GPU_INDEX=")
+						break
+					}
+				}
+				if reservedGPU != "" {
+					gpuDevices = reservedGPU
+				} else {
+					// No reservation — expose the GPU with most free VRAM
+					devices := gpu.PerDevice()
+					bestIdx := -1
+					var bestFree int64
+					for _, d := range devices {
+						if d.MemoryFreeBytes > bestFree {
+							bestFree = d.MemoryFreeBytes
+							bestIdx = d.Index
+						}
+					}
+					if bestIdx >= 0 {
+						gpuDevices = strconv.Itoa(bestIdx)
+					}
+				}
+			}
+			switch gpuInfo.Vendor {
+			case gpu.VendorNVIDIA:
+				ociCfg.Process.Env = append(ociCfg.Process.Env,
+					fmt.Sprintf("NVIDIA_VISIBLE_DEVICES=%s", gpuDevices),
+					"NVIDIA_DRIVER_CAPABILITIES=compute,utility",
+				)
+			case gpu.VendorAMD:
+				ociCfg.Process.Env = append(ociCfg.Process.Env,
+					"ROCR_VISIBLE_DEVICES=0",
+					"HSA_OVERRIDE_GFX_VERSION=0",
+				)
+			case gpu.VendorIntel:
+				ociCfg.Process.Env = append(ociCfg.Process.Env,
+					"ONEAPI_DEVICE_SELECTOR=level_zero:*",
+				)
+			}
+		}
+
+		data, _ := json.MarshalIndent(ociCfg, "", "  ")
+		os.WriteFile(filepath.Join(bundleDir, "config.json"), data, 0644)
+
+		containerID := "pp-" + jobID
+		exec.Command("crun", "delete", "-f", containerID).Run()
+		defer exec.Command("crun", "delete", "-f", containerID).Run()
+		defer os.RemoveAll(bundleDir)
+
+		cmd := exec.Command("crun", "run", "--bundle", bundleDir, containerID)
+		stdout, _ := cmd.StdoutPipe()
+		stderr, _ := cmd.StderrPipe()
+
+		if err := cmd.Start(); err != nil {
+			writeWS(OutputMessage{Error: "start crun: " + err.Error()})
+			s.jobsMu.Lock()
+			job.Status = "failed"
+			s.jobsMu.Unlock()
+			return
+		}
+
+		go func() {
+			scanner := bufio.NewScanner(stdout)
+			for scanner.Scan() {
+				outCh <- OutputMessage{O: scanner.Text() + "\n"}
+			}
+		}()
+		go func() {
+			scanner := bufio.NewScanner(stderr)
+			for scanner.Scan() {
+				outCh <- OutputMessage{E: scanner.Text() + "\n"}
+			}
+		}()
+		cmd.Wait()
+		exitCode = cmd.ProcessState.ExitCode()
+	}
 
 	outCh <- OutputMessage{Done: true, ExitCode: exitCode}
 	close(outCh)
@@ -407,4 +533,33 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	if err := cmd.Run(); err != nil {
 		return
 	}
+}
+
+// importNAR imports a closure into the local Nix store.
+//
+// --no-check-sigs is needed on daemons whose store requires signed paths, but
+// classic `nix-store --import` only learned that flag in some versions and
+// errors out on others. Rather than pin one Nix version, try with the flag and
+// fall back when it is not recognised.
+func importNAR(nixPath string, nar *os.File) ([]byte, error) {
+	run := func(args ...string) ([]byte, error) {
+		if _, err := nar.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("rewind nar: %w", err)
+		}
+		cmd := &exec.Cmd{
+			Path:  nixPath,
+			Args:  append([]string{"nix-store"}, args...),
+			Stdin: nar,
+		}
+		return cmd.CombinedOutput()
+	}
+
+	out, err := run("--import", "--no-check-sigs")
+	if err == nil {
+		return out, nil
+	}
+	if !strings.Contains(string(out), "unknown flag") {
+		return out, err
+	}
+	return run("--import")
 }

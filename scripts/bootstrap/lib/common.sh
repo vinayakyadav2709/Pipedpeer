@@ -76,22 +76,24 @@ detect_distro() {
 
 # Detect GPU type (nvidia, amd, intel, none)
 detect_gpu() {
-    # Check for NVIDIA
+    # Check for NVIDIA (any GPU with NVIDIA driver)
     if command_exists nvidia-smi; then
         echo "nvidia"
         return
     fi
     
-    # Check for AMD
+    # Check for AMD (any GPU with ROCm driver)
     if command_exists rocm-smi; then
         echo "amd"
         return
     fi
     
-    # Check for Intel Arc
-    if lspci 2>/dev/null | grep -qi "intel.*arc"; then
-        echo "intel"
-        return
+    # Check for any Intel GPU (integrated, Arc, etc.)
+    if command_exists lspci; then
+        if lspci 2>/dev/null | grep -qiE "(vga.*intel|3d.*intel|intel.*arc)"; then
+            echo "intel"
+            return
+        fi
     fi
     
     echo "none"

@@ -1,0 +1,1052 @@
+[
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 0,
+    "total_ms": 3.727814,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 1,
+    "total_ms": 3.149592,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 2,
+    "total_ms": 3.3585580000000004,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 3,
+    "total_ms": 3.6386249999999998,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 4,
+    "total_ms": 3.291022,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 5,
+    "total_ms": 3.487277,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 6,
+    "total_ms": 3.5250619999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 7,
+    "total_ms": 3.5696909999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 8,
+    "total_ms": 4.0861730000000005,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 9,
+    "total_ms": 3.675642,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 10,
+    "total_ms": 4.001034,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 11,
+    "total_ms": 3.7126569999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 12,
+    "total_ms": 3.78215,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 13,
+    "total_ms": 3.690588,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 14,
+    "total_ms": 3.46849,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 15,
+    "total_ms": 3.869104,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 16,
+    "total_ms": 3.43322,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 17,
+    "total_ms": 3.555863,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 18,
+    "total_ms": 3.488326,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 19,
+    "total_ms": 3.459829,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 20,
+    "total_ms": 3.3079929999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 21,
+    "total_ms": 4.014374999999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 22,
+    "total_ms": 3.683464,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 23,
+    "total_ms": 3.8077829999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "trivial",
+    "iteration": 24,
+    "total_ms": 3.5238050000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 0,
+    "total_ms": 19.077185,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 1,
+    "total_ms": 8.596914,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 2,
+    "total_ms": 8.390252,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 3,
+    "total_ms": 8.123734,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 4,
+    "total_ms": 8.618914,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 5,
+    "total_ms": 8.627993,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 6,
+    "total_ms": 9.279409000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 7,
+    "total_ms": 28.409255,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 8,
+    "total_ms": 8.660051000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 9,
+    "total_ms": 27.216424,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 10,
+    "total_ms": 17.817027,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 11,
+    "total_ms": 8.523091,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 12,
+    "total_ms": 8.387039000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 13,
+    "total_ms": 8.740438999999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 14,
+    "total_ms": 8.473293,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 15,
+    "total_ms": 7.956671999999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 16,
+    "total_ms": 8.301971,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 17,
+    "total_ms": 30.390181,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 18,
+    "total_ms": 23.938114,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 19,
+    "total_ms": 25.527437,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 20,
+    "total_ms": 27.017025,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 21,
+    "total_ms": 8.967634,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 22,
+    "total_ms": 8.722489,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 23,
+    "total_ms": 8.771937000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "trivial",
+    "iteration": 24,
+    "total_ms": 8.269844,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 0,
+    "total_ms": 3.543501,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 1,
+    "total_ms": 3.081426,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 2,
+    "total_ms": 3.212799,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 3,
+    "total_ms": 3.300032,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 4,
+    "total_ms": 3.633806,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 5,
+    "total_ms": 3.660555,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 6,
+    "total_ms": 3.158462,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 7,
+    "total_ms": 3.218037,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 8,
+    "total_ms": 3.582611,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 9,
+    "total_ms": 3.605241,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 10,
+    "total_ms": 3.203998,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 11,
+    "total_ms": 3.4300070000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 12,
+    "total_ms": 3.3329969999999998,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 13,
+    "total_ms": 3.619349,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 14,
+    "total_ms": 3.7116100000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 15,
+    "total_ms": 3.610898,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 16,
+    "total_ms": 3.2742600000000004,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 17,
+    "total_ms": 3.5466439999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 18,
+    "total_ms": 3.334813,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 19,
+    "total_ms": 3.669845,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 20,
+    "total_ms": 3.475614,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 21,
+    "total_ms": 3.179903,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 22,
+    "total_ms": 3.424211,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 23,
+    "total_ms": 3.724181,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "medium",
+    "iteration": 24,
+    "total_ms": 3.373296,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 0,
+    "total_ms": 32.19357,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 1,
+    "total_ms": 8.866713,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 2,
+    "total_ms": 26.701899,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 3,
+    "total_ms": 8.205659,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 4,
+    "total_ms": 8.405338,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 5,
+    "total_ms": 8.431248,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 6,
+    "total_ms": 8.728007,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 7,
+    "total_ms": 8.438163,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 8,
+    "total_ms": 8.731988,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 9,
+    "total_ms": 8.432784999999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 10,
+    "total_ms": 8.238624999999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 11,
+    "total_ms": 8.847226999999998,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 12,
+    "total_ms": 8.729543,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 13,
+    "total_ms": 8.214599,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 14,
+    "total_ms": 8.734362,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 15,
+    "total_ms": 33.995352,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 16,
+    "total_ms": 25.867985,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 17,
+    "total_ms": 29.035877000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 18,
+    "total_ms": 19.338952,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 19,
+    "total_ms": 8.921329,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 20,
+    "total_ms": 25.272164,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 21,
+    "total_ms": 21.679355,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 22,
+    "total_ms": 37.40594299999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 23,
+    "total_ms": 20.901037000000002,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "medium",
+    "iteration": 24,
+    "total_ms": 23.919884999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 0,
+    "total_ms": 3.6370880000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 1,
+    "total_ms": 3.6884919999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 2,
+    "total_ms": 3.591202,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 3,
+    "total_ms": 3.254354,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 4,
+    "total_ms": 3.501176,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 5,
+    "total_ms": 3.202881,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 6,
+    "total_ms": 3.377696,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 7,
+    "total_ms": 3.701762,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 8,
+    "total_ms": 3.515563,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 9,
+    "total_ms": 3.461367,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 10,
+    "total_ms": 3.257427,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 11,
+    "total_ms": 4.006623,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 12,
+    "total_ms": 3.4247,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 13,
+    "total_ms": 3.6889119999999997,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 14,
+    "total_ms": 3.339003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 15,
+    "total_ms": 3.493354,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 16,
+    "total_ms": 3.883072,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 17,
+    "total_ms": 3.9558470000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 18,
+    "total_ms": 3.524782,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 19,
+    "total_ms": 3.328737,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 20,
+    "total_ms": 3.7803340000000003,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 21,
+    "total_ms": 3.511513,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 22,
+    "total_ms": 3.427772,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 23,
+    "total_ms": 3.4247,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "bwrap",
+    "task_name": "python",
+    "iteration": 24,
+    "total_ms": 3.821611,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 0,
+    "total_ms": 32.760616,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 1,
+    "total_ms": 20.218193,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 2,
+    "total_ms": 8.136865,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 3,
+    "total_ms": 28.493553000000002,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 4,
+    "total_ms": 8.452899,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 5,
+    "total_ms": 8.628133,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 6,
+    "total_ms": 8.788979000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 7,
+    "total_ms": 8.554659,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 8,
+    "total_ms": 8.288422,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 9,
+    "total_ms": 8.778991,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 10,
+    "total_ms": 8.831163,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 11,
+    "total_ms": 9.066182000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 12,
+    "total_ms": 27.509691,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 13,
+    "total_ms": 8.772007,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 14,
+    "total_ms": 8.76635,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 15,
+    "total_ms": 9.354140000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 16,
+    "total_ms": 9.129807999999999,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 17,
+    "total_ms": 8.554310000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 18,
+    "total_ms": 8.684355,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 19,
+    "total_ms": 8.652997000000001,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 20,
+    "total_ms": 25.499151,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 21,
+    "total_ms": 8.772915,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 22,
+    "total_ms": 8.764534,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 23,
+    "total_ms": 8.415604,
+    "exit_code": 1
+  },
+  {
+    "sandbox": "crun",
+    "task_name": "python",
+    "iteration": 24,
+    "total_ms": 8.840313,
+    "exit_code": 1
+  }
+]
