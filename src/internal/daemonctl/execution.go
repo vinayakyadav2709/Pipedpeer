@@ -22,6 +22,8 @@ type ExecConfig struct {
 	Envs       []string `json:"envs"`
 	Isolate    bool     `json:"isolate"`
 	StorePath  string   `json:"store_path"`
+	GPU        bool     `json:"gpu,omitempty"`
+	GPUDevices string   `json:"gpu_devices,omitempty"`
 }
 
 type outputMessage struct {

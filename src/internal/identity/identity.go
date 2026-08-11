@@ -10,35 +10,93 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 )
+
+// GPUInfo describes the GPU hardware available on this node.
+type GPUInfo struct {
+	Vendor      gpu.Vendor `json:"vendor"`
+	Name        string     `json:"name,omitempty"`
+	MemoryBytes int64      `json:"memory_bytes,omitempty"`
+	Count       int        `json:"count,omitempty"`
+}
 
 // NodeIdentity represents a stable node identity that persists across restarts.
 type NodeIdentity struct {
 	NodeID    string    `json:"node_id"`
 	Hostname  string    `json:"hostname"`
 	Arch      string    `json:"arch"`
+	GPU       GPUInfo   `json:"gpu,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
 // GetOrCreate loads an existing identity from disk or generates a new one.
+// GPU info is automatically detected and persisted if missing or changed.
 func GetOrCreate() (NodeIdentity, error) {
 	p := identityPath()
+	var id NodeIdentity
+	var loaded bool
+
 	if data, err := os.ReadFile(p); err == nil {
-		var id NodeIdentity
 		if err := json.Unmarshal(data, &id); err == nil && id.NodeID != "" {
-			return id, nil
+			loaded = true
 		}
 	}
-	return create(p)
+
+	if !loaded {
+		return create(p)
+	}
+
+	// Refresh GPU info: existing identity files may lack it, or hardware changed
+	gpuInfo := gpu.Detect()
+	needsUpdate := false
+
+	if gpuInfo.Vendor != gpu.VendorNone {
+		if id.GPU.Vendor != gpuInfo.Vendor ||
+			id.GPU.Name != gpuInfo.Name ||
+			id.GPU.MemoryBytes != gpuInfo.MemoryBytes ||
+			id.GPU.Count != gpuInfo.Count {
+			id.GPU = GPUInfo{
+				Vendor:      gpuInfo.Vendor,
+				Name:        gpuInfo.Name,
+				MemoryBytes: gpuInfo.MemoryBytes,
+				Count:       gpuInfo.Count,
+			}
+			needsUpdate = true
+		}
+	} else if id.GPU.Vendor != gpu.VendorNone {
+		// GPU was removed
+		id.GPU = GPUInfo{}
+		needsUpdate = true
+	}
+
+	if needsUpdate {
+		data, err := json.MarshalIndent(id, "", "  ")
+		if err == nil {
+			os.WriteFile(p, data, 0600)
+		}
+	}
+
+	return id, nil
 }
 
 func create(path string) (NodeIdentity, error) {
 	hostname, _ := os.Hostname()
+	gpuInfo := gpu.Detect()
 	id := NodeIdentity{
 		NodeID:    generateUUID(),
 		Hostname:  hostname,
 		Arch:      nixArch(),
 		CreatedAt: time.Now().UTC(),
+	}
+	if gpuInfo.Vendor != gpu.VendorNone {
+		id.GPU = GPUInfo{
+			Vendor:      gpuInfo.Vendor,
+			Name:        gpuInfo.Name,
+			MemoryBytes: gpuInfo.MemoryBytes,
+			Count:       gpuInfo.Count,
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return NodeIdentity{}, fmt.Errorf("create identity dir: %w", err)

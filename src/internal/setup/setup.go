@@ -42,9 +42,9 @@ func getPrereqs() []prereq {
 			cmd.Stdin = os.Stdin
 			return cmd.Run()
 		}},
-		{name: "bwrap", check: binaryCheck("bwrap"), install: func() error {
-			fmt.Println("    → Installing bubblewrap...")
-			cmd := exec.Command("nix-env", "-iA", "nixpkgs.bubblewrap")
+		{name: "crun", check: binaryCheck("crun"), install: func() error {
+			fmt.Println("    → Installing crun (OCI runtime)...")
+			cmd := exec.Command("nix-env", "-iA", "nixpkgs.crun")
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			return cmd.Run()

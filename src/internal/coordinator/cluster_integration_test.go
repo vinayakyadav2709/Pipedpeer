@@ -313,10 +313,18 @@ func TestLeaseExpiryRedirectsTask(t *testing.T) {
 
 	idSlow := makeID("worker-slow", "host-slow", "x86_64-linux")
 
-	// Register worker-fast manually (no heartbeat client → will expire)
+	// Register worker-fast manually (no heartbeat client → will expire).
+	// It reports the same class of hardware as the real heartbeating node but
+	// at a much lighter load, so this test turns on lease expiry rather than on
+	// the details of the scorer.
 	reg.Register(registry.NodeRecord{
 		NodeID: "worker-fast", SSHEndpoint: "root@10.0.1.1:22",
-		Load: registry.LoadInfo{CPUPercent: 10}, HealthScore: 1.0, State: "healthy",
+		Capabilities: map[string]string{"cpu_cores": "64", "cpu_mhz": "4800"},
+		Load: registry.LoadInfo{
+			CPUPercent: 1, MemPercent: 1, TotalCPUs: 64,
+			AvailableMemBytes: 256 << 30,
+		},
+		HealthScore: 1.0, State: "healthy",
 	})
 
 	// Register worker-slow with a heartbeat client (stays alive)
@@ -548,7 +556,11 @@ func TestPlaceWithRetryGetsLease(t *testing.T) {
 	})
 
 	// Use requestLease directly with the daemon URL
-	leaseID, expiresAt, err := coord.requestLease(daemonSrv.URL, "worker-1", "submitter", 1024)
+	leaseID, expiresAt, _, err := coord.requestLease(daemonSrv.URL, acceptReq{
+		TargetID:         "worker-1",
+		SubmitterNode:    "submitter",
+		RequiredMemBytes: 1024,
+	})
 	if err != nil {
 		t.Fatalf("requestLease failed: %v", err)
 	}
@@ -628,7 +640,11 @@ func TestPlaceWithRetryQueuesAndRetries(t *testing.T) {
 	// Retry loop
 	var leaseID string
 	for attempt := 0; attempt < 20; attempt++ {
-		lid, _, err := coord.requestLease(daemonSrv.URL, "busy-worker", "submitter", requestMem)
+		lid, _, _, err := coord.requestLease(daemonSrv.URL, acceptReq{
+			TargetID:         "busy-worker",
+			SubmitterNode:    "submitter",
+			RequiredMemBytes: requestMem,
+		})
 		if err != nil {
 			statusMessages = append(statusMessages, fmt.Sprintf("attempt %d rejected: %v", attempt, err))
 			time.Sleep(30 * time.Millisecond)
@@ -674,8 +690,8 @@ func TestExecuteWithRetrySuccessFirstTry(t *testing.T) {
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{{
 				NodeID: "worker-ok", SSHEndpoint: "root@" + host + ":22",
-				DaemonPort: port,
-				Load: registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
+				DaemonPort:  port,
+				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
 				HealthScore: 1.0, State: "healthy",
 			}}
 		},
@@ -722,8 +738,8 @@ func TestExecuteWithRetryReschedulesOnFailure(t *testing.T) {
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{{
 				NodeID: "worker-retry", SSHEndpoint: "root@" + host + ":22",
-				DaemonPort: port,
-				Load: registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
+				DaemonPort:  port,
+				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
 				HealthScore: 1.0, State: "healthy",
 			}}
 		},
@@ -787,8 +803,8 @@ func TestExecuteWithRetryCancelStopsLoop(t *testing.T) {
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{{
 				NodeID: "worker-cancel", SSHEndpoint: "root@" + host + ":22",
-				DaemonPort: port,
-				Load: registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
+				DaemonPort:  port,
+				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
 				HealthScore: 1.0, State: "healthy",
 			}}
 		},
@@ -834,11 +850,12 @@ func TestExecuteWithRetryNeverAutoCancel(t *testing.T) {
 		SelfDaemon:       38080,
 		RequiredMemBytes: 1024,
 		RetryInterval:    20 * time.Millisecond,
+		ExecBackoffBase:  5 * time.Millisecond,
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{{
 				NodeID: "worker-persist", SSHEndpoint: "root@" + host + ":22",
-				DaemonPort: port,
-				Load: registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
+				DaemonPort:  port,
+				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
 				HealthScore: 1.0, State: "healthy",
 			}}
 		},

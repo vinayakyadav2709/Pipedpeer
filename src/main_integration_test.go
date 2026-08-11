@@ -46,7 +46,7 @@ func TestConcurrentJobsAndSharedNumpyCache(t *testing.T) {
 		t.Skip("docker or podman is required for integration test")
 	}
 
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	repoRoot, err := filepath.Abs(filepath.Join(".."))
 	if err != nil {
 		t.Fatalf("failed to resolve repo root: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestConcurrentJobsAndSharedNumpyCache(t *testing.T) {
 
 	ctx := context.Background()
 
-	args := composeArgs(runtime, "up", "-d", "--build", "worker-1")
+	args := composeArgs(runtime, "up", "-d", "--build", "worker1")
 	runCmd(t, ctx, labDir, runtime, args...)
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -134,24 +134,46 @@ echo "$start_ns" > "$job_dir/started_at_ns"
 
 store_path=$(cat "$job_dir/store_path")
 
-mkdir -p "$job_dir/work" "$job_dir/home"
+mkdir -p "$job_dir/work" "$job_dir/home" "$job_dir/oci-bundle/rootfs/dev" "$job_dir/oci-bundle/rootfs/proc" "$job_dir/oci-bundle/rootfs/sys"
 
-bwrap \
-  --die-with-parent \
-  --unshare-net \
-  --unshare-pid \
-  --unshare-ipc \
-  --unshare-uts \
-  --ro-bind /nix /nix \
-  --dev /dev \
-  --proc /proc \
-  --tmpfs /tmp \
-  --bind "$job_dir/work" /work \
-  --bind "$job_dir/home" /home/root \
-  --chdir /work \
-  --setenv HOME /home/root \
-  --setenv PATH /nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin \
-  -- "$store_path/bin/run" >"$job_dir/stdout.log" 2>"$job_dir/stderr.log"
+cat > "$job_dir/oci-bundle/config.json" <<EOF
+{
+  "ociVersion": "1.0.2",
+  "process": {
+    "terminal": false,
+    "user": {"uid": 0, "gid": 0},
+    "args": ["$store_path/bin/run"],
+    "env": [
+      "HOME=/home/root",
+      "PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin"
+    ],
+    "cwd": "/work"
+  },
+  "root": {"path": "rootfs", "readonly": true},
+  "hostname": "pipedpeer",
+  "mounts": [
+    {"destination": "/nix", "type": "bind", "source": "/nix", "options": ["rbind", "ro"]},
+    {"destination": "/proc", "type": "proc", "source": "proc"},
+    {"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "noexec"]},
+    {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev"]},
+    {"destination": "/work", "type": "bind", "source": "$job_dir/work", "options": ["rbind", "rw"]},
+    {"destination": "/home/root", "type": "bind", "source": "$job_dir/home", "options": ["rbind", "rw"]}
+  ],
+  "linux": {
+    "namespaces": [
+      {"type": "pid"},
+      {"type": "ipc"},
+      {"type": "uts"},
+      {"type": "mount"}
+    ]
+  }
+}
+EOF
+
+container_id="pp-$$"
+crun delete -f "$container_id" 2>/dev/null || true
+crun run --bundle "$job_dir/oci-bundle" "$container_id" >"$job_dir/stdout.log" 2>"$job_dir/stderr.log"
+crun delete -f "$container_id" 2>/dev/null || true
 
 end_ns=$(date +%s%N)
 echo "$end_ns" > "$job_dir/finished_at_ns"
@@ -159,13 +181,18 @@ echo done > "$job_dir/done"
 SH
 chmod +x /tmp/pipedpeer-it/run-job.sh
 
+mkdir -p /etc/nix
+cat > /etc/nix/nix.conf <<'NIX_CONF'
+experimental-features = nix-command flakes
+NIX_CONF
+
 cat > /tmp/pipedpeer-it/build-job.sh <<'SH'
 #!/bin/sh
 set -eu
 job_dir="$1"
 
 cd "$job_dir"
-nix build .#packages.x86_64-linux.default --option build-users-group "" >/dev/null
+nix build .#packages.x86_64-linux.default --option build-users-group "" --extra-experimental-features 'nix-command flakes' >/dev/null
 store_path=$(readlink result)
 echo "$store_path" > "$job_dir/store_path"
 SH
@@ -289,7 +316,7 @@ func dockerExecE(ctx context.Context, labDir, script string) (string, error) {
 	if runtime == "" {
 		return "", fmt.Errorf("no container runtime found")
 	}
-	args := composeArgs(runtime, "exec", "-T", "worker-1", "sh", "-lc", script)
+	args := composeArgs(runtime, "exec", "-T", "worker1", "sh", "-lc", script)
 	return runCmdE(ctx, labDir, runtime, args...)
 }
 
@@ -305,7 +332,7 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 	if runtime == "" {
 		t.Skip("docker or podman is required for integration test")
 	}
-	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	repoRoot, err := filepath.Abs(filepath.Join(".."))
 	if err != nil {
 		t.Fatalf("failed to resolve repo root: %v", err)
 	}
@@ -313,7 +340,7 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 
 	ctx := context.Background()
 
-	args := composeArgs(runtime, "up", "-d", "--build", "worker-1")
+	args := composeArgs(runtime, "up", "-d", "--build", "worker1")
 	runCmd(t, ctx, labDir, runtime, args...)
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -326,25 +353,24 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 
 	time.Sleep(5 * time.Second)
 
-	// We run the CLI locally (in the test container) against the remote worker-1
+	// We run the CLI locally (in the test container) against the remote worker1
 	tmp := t.TempDir()
 	syncTestDir := filepath.Join(tmp, "sync-test")
 	if err := os.MkdirAll(syncTestDir, 0755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
 	}
 
-	// Build the CLI binary statically from cmd/pipedpeer
+	// Build the CLI binary statically from src
 	binPath := filepath.Join(tmp, "pipedpeer-bin")
-	cmdDir := filepath.Join(repoRoot, "cmd", "pipedpeer")
+	cmdDir := filepath.Join(repoRoot, "src")
 	outBuild, err := runCmdE(ctx, cmdDir, "sh", "-c", fmt.Sprintf("CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o %s .", binPath))
 	if err != nil {
 		t.Fatalf("failed to build pipedpeer binary: %v\noutput: %s", err, outBuild)
 	}
 
-	// Copy the binary into worker-1
-	runtime = detectContainerRuntime()
-	if _, err := runCmdE(ctx, labDir, runtime, "cp", binPath, "worker-1:/pipedpeer"); err != nil {
-		t.Fatalf("failed to copy binary to worker-1: %v", err)
+	// Copy the binary into the container
+	if _, err := runCmdE(ctx, labDir, "docker", "cp", binPath, "pipedpeer-lab-1:/pipedpeer"); err != nil {
+		t.Fatalf("failed to copy binary to container: %v", err)
 	}
 
 	setupScript := `
@@ -370,10 +396,10 @@ echo "hidden" > secret.txt
 		nodeIDOut = strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
 	}
 	if nodeIDOut == "" {
-		t.Fatalf("failed to read node identity from worker-1")
+		t.Fatalf("failed to read node identity from worker1")
 	}
 
-	// Run the compiled binary from inside worker-1
+	// Run the compiled binary from inside worker1
 	out, err := dockerExecE(ctx, labDir, fmt.Sprintf("cd /tmp/sync-test && /pipedpeer run --script script.py --remote root@localhost:22 --target-id %s -e MY_VAR=testvar", nodeIDOut))
 	if err != nil {
 		t.Fatalf("cli run failed: %v\noutput: %s", err, out)
@@ -422,6 +448,5 @@ echo "hidden" > secret.txt
 	// File existence is already verified in the must-exist loop above
 
 	// Copy integration job data to test_results
-	runtime = detectContainerRuntime()
-	runCmdE(ctx, labDir, runtime, "cp", "worker-1:/root/.local/share/pipedpeer/jobs", "/app/test_results/integration_job_data")
+	runCmdE(ctx, labDir, "docker", "cp", "pipedpeer-lab-1:/root/.local/share/pipedpeer/jobs", "/app/test_results/integration_job_data")
 }

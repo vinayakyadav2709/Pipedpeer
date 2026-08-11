@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -406,7 +407,7 @@ func TestCoordinatorAllNodesRejectedNoneChosen(t *testing.T) {
 		SelfSSH:          "root@localhost:22",
 		SelfDaemon:       38080,
 		SelfLoad:         registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 50 * 1024 * 1024}, // self also low
-		RequiredMemBytes: 10 * 1024 * 1024 * 1024, // need 10GB, nobody has it
+		RequiredMemBytes: 10 * 1024 * 1024 * 1024,                                                // need 10GB, nobody has it
 		DiscoverFn:       fakeLAN,
 	})
 
@@ -441,6 +442,180 @@ func TestCoordinatorAllNodesRejectedNoneChosen(t *testing.T) {
 			if !cand.Rejected {
 				t.Fatal("self-node (50MB) should also be rejected when 10GB required")
 			}
+		}
+	}
+}
+
+// GPU scheduling tests
+
+func gpuNode(id, gpuType string) registry.NodeRecord {
+	return registry.NodeRecord{
+		NodeID: id, SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+		Capabilities: map[string]string{"gpu": gpuType, "gpu_count": "1"},
+		Load:         registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
+		HealthScore:  1.0, State: "healthy",
+	}
+}
+
+func gpuNodeMulti(id, gpuType string, count int) registry.NodeRecord {
+	return registry.NodeRecord{
+		NodeID: id, SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+		Capabilities: map[string]string{"gpu": gpuType, "gpu_count": strconv.Itoa(count)},
+		Load:         registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
+		HealthScore:  1.0, State: "healthy",
+	}
+}
+
+func cpuNode(id string) registry.NodeRecord {
+	return registry.NodeRecord{
+		NodeID: id, SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 38080,
+		Load:        registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
+		HealthScore: 1.0, State: "healthy",
+	}
+}
+
+func TestGPUNodeChosenFirstWhenPreferGPU(t *testing.T) {
+	c := New(Config{
+		SelfIdentity: testIdentity(),
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   38080,
+		PreferGPU:    true,
+		SelfLoad:     registry.LoadInfo{CPUPercent: 50, MemPercent: 60, ActiveJobs: 3},
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{
+				gpuNode("gpu-node", "nvidia"),
+				cpuNode("cpu-node"),
+			}
+		},
+	})
+
+	decision := c.FindNode()
+
+	// GPU node should be chosen by FindNode (has higher score due to lower load + GPU preference in PlaceWithRetry)
+	if decision.ChosenNode.NodeID != "gpu-node" {
+		t.Fatalf("expected GPU node to be chosen, got %s (scores: gpu=%v, cpu=%v)",
+			decision.ChosenNode.NodeID,
+			scoreFor(decision.Candidates, "gpu-node"),
+			scoreFor(decision.Candidates, "cpu-node"))
+	}
+}
+
+func scoreFor(candidates []ScoredNode, id string) float64 {
+	for _, c := range candidates {
+		if c.Node.NodeID == id {
+			return c.Score
+		}
+	}
+	return -1
+}
+
+func TestRequireGPURejectsCPUNodes(t *testing.T) {
+	c := New(Config{
+		SelfIdentity: testIdentity(),
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   38080,
+		RequireGPU:   true,
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{
+				gpuNode("gpu-node", "nvidia"),
+				cpuNode("cpu-node"),
+			}
+		},
+	})
+
+	decision := c.FindNode()
+
+	if decision.ChosenNode.NodeID != "gpu-node" {
+		t.Fatalf("expected gpu-node when RequireGPU=true, got %s", decision.ChosenNode.NodeID)
+	}
+
+	// CPU node should be rejected
+	for _, cand := range decision.Candidates {
+		if cand.Node.NodeID == "cpu-node" && !cand.Rejected {
+			t.Fatal("cpu-node should be rejected when RequireGPU=true")
+		}
+	}
+}
+
+func TestRequireGPUWithNoGPUNodeFails(t *testing.T) {
+	c := New(Config{
+		SelfIdentity: testIdentity(),
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   38080,
+		RequireGPU:   true,
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{
+				cpuNode("only-cpu-1"),
+				cpuNode("only-cpu-2"),
+			}
+		},
+	})
+
+	decision := c.FindNode()
+
+	// No node should be chosen since all are CPU
+	if decision.ChosenNode.NodeID != "" {
+		t.Fatalf("expected no chosen node when RequireGPU=true and no GPU nodes, got %s", decision.ChosenNode.NodeID)
+	}
+
+	// Both CPU nodes should be rejected
+	for _, cand := range decision.Candidates {
+		if !cand.Rejected {
+			t.Fatal("all candidates should be rejected when RequireGPU=true and no GPU nodes")
+		}
+	}
+}
+
+func TestPreferGPUFallsBackToCPU(t *testing.T) {
+	c := New(Config{
+		SelfIdentity: testIdentity(),
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   38080,
+		PreferGPU:    true,
+		SelfLoad:     registry.LoadInfo{CPUPercent: 50, MemPercent: 60, ActiveJobs: 3},
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{
+				cpuNode("only-cpu"),
+			}
+		},
+	})
+
+	decision := c.FindNode()
+
+	// The discovered CPU node should be chosen (fallback behavior) over self (higher load)
+	if decision.ChosenNode.NodeID != "only-cpu" {
+		t.Fatalf("expected fallback to CPU when PreferGPU=true but no GPU nodes, got %s", decision.ChosenNode.NodeID)
+	}
+
+	// CPU node should not be rejected
+	for _, cand := range decision.Candidates {
+		if cand.Node.NodeID == "only-cpu" && cand.Rejected {
+			t.Fatal("CPU node should not be rejected when PreferGPU=true")
+		}
+	}
+}
+
+func TestGPUPreferenceDoesNotAffectNoGPUScenario(t *testing.T) {
+	// When no GPU is requested (no PreferGPU, no RequireGPU), all nodes are equal
+	c := New(Config{
+		SelfIdentity: testIdentity(),
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   38080,
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{
+				gpuNode("gpu-node", "nvidia"),
+				cpuNode("cpu-node"),
+			}
+		},
+	})
+
+	decision := c.FindNode()
+
+	// Without PreferGPU, the choice is based on load alone (both have same load here)
+	// So either is acceptable, just not rejected
+	for _, cand := range decision.Candidates {
+		if cand.Rejected {
+			t.Fatal("neither node should be rejected when no GPU config is set")
 		}
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
@@ -26,6 +29,11 @@ const (
 	DefaultLeaseDuration = 30 * time.Second
 	DefaultGracePeriod   = 5 * time.Second
 	DefaultSweepInterval = 2 * time.Second
+
+	// DefaultRunningLeaseTTL is how long a running lease survives with no
+	// renewal from its submitter. Generous, because it only ever fires when a
+	// submitter has actually gone away: a live one renews every few seconds.
+	DefaultRunningLeaseTTL = 5 * time.Minute
 )
 
 // LeaseState tracks where a lease is in its lifecycle.
@@ -43,17 +51,23 @@ type Lease struct {
 	SubmitterNode string     `json:"submitter_node"`
 	State         LeaseState `json:"state"`
 	MemBytes      int64      `json:"mem_bytes"`
+	GPUIndex      int        `json:"gpu_index"` // reserved GPU device (-1 = none)
 	CreatedAt     time.Time  `json:"created_at"`
 	ExpiresAt     time.Time  `json:"expires_at"`
+	// RenewedAt is the last sign of life from the submitter. A running lease
+	// is held for RunningLeaseTTL past this, so a long job that keeps
+	// renewing is never reaped while a submitter that died releases its slot.
+	RenewedAt time.Time `json:"renewed_at"`
 }
 
 // Server is the daemon API server that manages job leases and resource reservations.
 type Server struct {
-	nodeID        string
-	router        chi.Router
-	leaseDuration time.Duration
-	gracePeriod   time.Duration
-	sweepInterval time.Duration
+	nodeID          string
+	router          chi.Router
+	leaseDuration   time.Duration
+	gracePeriod     time.Duration
+	sweepInterval   time.Duration
+	runningLeaseTTL time.Duration
 
 	mu     sync.Mutex
 	leases map[string]*Lease // lease_id → Lease
@@ -71,6 +85,9 @@ type Server struct {
 	// Round-robin counter for cross-invocation persistence
 	rrCounter atomic.Int64
 
+	// Maximum concurrent tasks this node will hold (0 = unlimited)
+	maxConcurrent atomic.Int64
+
 	// Node store (SQLite — single source of truth for all peers)
 	store *nodestore.Store
 
@@ -81,6 +98,27 @@ type Server struct {
 
 	// Discovery function for mDNS scanning (set before StartPeerPoller)
 	discoverFn func() []NodeDiscovered
+
+	// How this node describes itself in the node store (set by SetSelfInfo)
+	selfMu   sync.RWMutex
+	selfSSH  string
+	selfPort int
+	selfCaps map[string]string
+}
+
+// healthResponse is the payload of GET /health. It carries the node's full
+// capabilities and load so a peer polling it learns everything the scheduler
+// needs — CPU cores, GPU model, free VRAM — in one round trip.
+type healthResponse struct {
+	Status        string            `json:"status"`
+	NodeID        string            `json:"node_id"`
+	ActiveJobs    int               `json:"active_jobs"`
+	ActiveLeases  int               `json:"active_leases"`
+	ReservedMem   int64             `json:"reserved_mem"`
+	AvailableMem  int64             `json:"available_mem"`
+	MaxConcurrent int               `json:"max_concurrent"`
+	Capabilities  map[string]string `json:"capabilities"`
+	Load          registry.LoadInfo `json:"load"`
 }
 
 // NodeDiscovered represents a node found via mDNS or other discovery.
@@ -97,10 +135,10 @@ type PeerHealth struct {
 	Host         string `json:"host"`
 	Port         int    `json:"port"`
 	NodeID       string `json:"node_id"`
-	Status       string `json:"status"`       // "healthy", "unreachable"
+	Status       string `json:"status"` // "healthy", "unreachable"
 	ActiveJobs   int    `json:"active_jobs"`
 	AvailableMem int64  `json:"available_mem"`
-	Source       string `json:"source"`       // "manual", "discovery", "registry"
+	Source       string `json:"source"` // "manual", "discovery", "registry"
 }
 
 // --- Request/Response types ---
@@ -110,6 +148,9 @@ type acceptRequest struct {
 	JobName          string `json:"job_name"`
 	SubmitterNode    string `json:"submitter_node"`
 	RequiredMemBytes int64  `json:"required_mem_bytes,omitempty"`
+	RequiredCores    int    `json:"required_cores,omitempty"`
+	RequireGPU       bool   `json:"require_gpu,omitempty"`
+	RequiredGPUMem   int64  `json:"required_gpu_mem_bytes,omitempty"`
 }
 
 type acceptResponse struct {
@@ -118,6 +159,7 @@ type acceptResponse struct {
 	Reason    string `json:"reason,omitempty"`
 	LeaseID   string `json:"lease_id,omitempty"`
 	ExpiresAt string `json:"expires_at,omitempty"`
+	GPUIndex  int    `json:"gpu_index"`
 }
 
 type commitRequest struct {
@@ -154,22 +196,40 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		store = nil
 	}
 	s := &Server{
-		nodeID:        nodeID,
-		leaseDuration: leaseDuration,
-		gracePeriod:   gracePeriod,
-		sweepInterval: sweepInterval,
-		leases:        make(map[string]*Lease),
-		stopSweep:     make(chan struct{}),
-		jobDir:        defaultJobDir(),
-		jobs:          make(map[string]*JobRecord),
-		store:         store,
+		nodeID:          nodeID,
+		leaseDuration:   leaseDuration,
+		gracePeriod:     gracePeriod,
+		sweepInterval:   sweepInterval,
+		runningLeaseTTL: DefaultRunningLeaseTTL,
+		leases:          make(map[string]*Lease),
+		stopSweep:       make(chan struct{}),
+		jobDir:          defaultJobDir(),
+		jobs:            make(map[string]*JobRecord),
+		store:           store,
 	}
 	s.buildRouter()
 	return s
 }
 
+// SetDiscoverFn installs the LAN discovery probe used by the peer poller.
+// Must be called before StartPeerPoller.
 func (s *Server) SetDiscoverFn(fn func() []NodeDiscovered) {
 	s.discoverFn = fn
+}
+
+// SetMaxConcurrentJobs caps how many tasks this node will hold at once.
+// 0 means unlimited. Beyond the cap, /v1/accept replies 503 and the submitting
+// orchestrator moves on to the next candidate node.
+func (s *Server) SetMaxConcurrentJobs(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.maxConcurrent.Store(int64(n))
+}
+
+// MaxConcurrentJobs returns the configured cap (0 = unlimited).
+func (s *Server) MaxConcurrentJobs() int {
+	return int(s.maxConcurrent.Load())
 }
 
 func (s *Server) Handler() http.Handler {
@@ -211,7 +271,12 @@ func (s *Server) BindNATS(bus *natsbus.Bus) error {
 		return fmt.Errorf("subscribe health: %w", err)
 	}
 
-	s.natsSubs = append(s.natsSubs, acceptSub, commitSub, completeSub, cancelSub, healthSub)
+	renewSub, err := bus.Subscribe(prefix+".renew", s.handleNATSRenew)
+	if err != nil {
+		return fmt.Errorf("subscribe renew: %w", err)
+	}
+
+	s.natsSubs = append(s.natsSubs, acceptSub, commitSub, completeSub, cancelSub, healthSub, renewSub)
 	return nil
 }
 
@@ -249,15 +314,72 @@ func (s *Server) StopSweeper() {
 
 // sweepExpired removes leases in "reserved" state past expiry + grace.
 // Running leases are NOT expired — only uncommitted reservations.
+// sweepExpired releases leases nobody is coming back for.
+//
+// Reserved leases expire quickly — the submitter should commit within seconds.
+// Running leases are held far longer and only released once the submitter has
+// stopped renewing, so a genuinely long job is never cut off mid-run.
 func (s *Server) sweepExpired() {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, lease := range s.leases {
-		if lease.State == LeaseReserved && now.After(lease.ExpiresAt.Add(s.gracePeriod)) {
-			delete(s.leases, id)
+		switch lease.State {
+		case LeaseReserved:
+			if now.After(lease.ExpiresAt.Add(s.gracePeriod)) {
+				delete(s.leases, id)
+			}
+		case LeaseRunning:
+			last := lease.RenewedAt
+			if last.IsZero() {
+				last = lease.CreatedAt
+			}
+			if s.runningLeaseTTL > 0 && now.Sub(last) > s.runningLeaseTTL {
+				delete(s.leases, id)
+			}
 		}
 	}
+}
+
+// SetRunningLeaseTTL overrides how long a running lease survives without a
+// renewal. 0 disables reaping of running leases entirely.
+func (s *Server) SetRunningLeaseTTL(d time.Duration) {
+	s.mu.Lock()
+	s.runningLeaseTTL = d
+	s.mu.Unlock()
+}
+
+// processRenew records a sign of life from the lease holder.
+func (s *Server) processRenew(leaseID string) (map[string]interface{}, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	lease, ok := s.leases[leaseID]
+	if !ok {
+		return map[string]interface{}{"renewed": false, "reason": "unknown lease"}, http.StatusNotFound
+	}
+	now := time.Now()
+	lease.RenewedAt = now
+	if lease.State == LeaseReserved {
+		lease.ExpiresAt = now.Add(s.leaseDuration)
+	}
+	return map[string]interface{}{
+		"renewed":    true,
+		"lease_id":   leaseID,
+		"expires_at": lease.ExpiresAt.Format(time.RFC3339Nano),
+	}, http.StatusOK
+}
+
+func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LeaseID string `json:"lease_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.LeaseID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lease_id required"})
+		return
+	}
+	resp, status := s.processRenew(req.LeaseID)
+	writeJSON(w, status, resp)
 }
 
 // --- Public accessors ---
@@ -319,12 +441,14 @@ func (s *Server) buildRouter() {
 	r.Get("/health", s.handleHealth)
 	r.Post("/v1/accept", s.handleAccept)
 	r.Post("/v1/commit", s.handleCommit)
+	r.Post("/v1/renew", s.handleRenew)
 	r.Post("/v1/complete", s.handleComplete)
 	r.Post("/v1/cancel", s.handleCancel)
 	r.Post("/v1/jobs/upload", s.handleJobUpload)
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
+	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
@@ -333,13 +457,48 @@ func (s *Server) buildRouter() {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.healthSnapshot())
+}
+
+func (s *Server) healthSnapshot() healthResponse {
+	activeJobs := s.ActiveJobs()
+	reserved := s.ReservedMem()
+
+	s.selfMu.RLock()
+	caps := s.selfCaps
+	s.selfMu.RUnlock()
+	if caps == nil {
+		caps = map[string]string{}
+	}
+
+	load := heartbeat.CollectLoad(activeJobs, reserved)
+	return healthResponse{
+		Status:        "ok",
+		NodeID:        s.nodeID,
+		ActiveJobs:    activeJobs,
+		ActiveLeases:  s.ActiveLeases(),
+		ReservedMem:   reserved,
+		AvailableMem:  load.AvailableMemBytes,
+		MaxConcurrent: s.MaxConcurrentJobs(),
+		Capabilities:  caps,
+		Load:          load,
+	}
+}
+
+// handleJobs lists this node's live leases, so any machine can render a
+// cluster-wide view of what is running and where.
+func (s *Server) handleJobs(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	out := make([]Lease, 0, len(s.leases))
+	for _, l := range s.leases {
+		out = append(out, *l)
+	}
+	s.mu.Unlock()
+
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":        "ok",
-		"node_id":       s.nodeID,
-		"active_jobs":   s.ActiveJobs(),
-		"active_leases": s.ActiveLeases(),
-		"reserved_mem":  s.ReservedMem(),
-		"available_mem": s.AvailableForJob(),
+		"node_id": s.nodeID,
+		"jobs":    out,
 	})
 }
 
@@ -366,44 +525,70 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	type nodeResp struct {
-		NodeID      string            `json:"node_id"`
-		SSHEndpoint string            `json:"ssh_endpoint"`
-		DaemonPort  int               `json:"daemon_port"`
-		Capabilities map[string]string `json:"capabilities"`
-		Load        registry.LoadInfo `json:"load"`
-		State       string            `json:"state"`
-		HealthScore float64           `json:"health_score"`
-		Source      string            `json:"source"`
-	}
-
 	nodes := make([]nodeResp, 0, len(dbNodes))
 	for _, n := range dbNodes {
-		ssh := n.SSHEndpoint
-		if ssh == "" {
-			ssh = fmt.Sprintf("root@%s:22", n.Host)
-		}
-		nodes = append(nodes, nodeResp{
-			NodeID:      n.NodeID,
-			SSHEndpoint: ssh,
-			DaemonPort:  n.Port,
-			Capabilities: map[string]string{
-				"arch":     n.Arch,
-				"hostname": n.Hostname,
-			},
-			Load: registry.LoadInfo{
-				AvailableMemBytes: n.AvailableMem,
-				ActiveJobs:        n.ActiveJobs,
-				ReservedMemBytes:  n.ReservedMem,
-				TotalMemBytes:     n.TotalMem,
-				CPUPercent:        n.CPUPercent,
-			},
-			State:       n.State,
-			HealthScore: n.HealthScore,
-			Source:      n.Source,
-		})
+		nodes = append(nodes, toNodeResp(n))
 	}
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+// nodeResp is a registry.NodeRecord as served by /v1/nodes. The orchestrator
+// decodes it straight back into registry.NodeRecord, so the JSON tags must
+// match that type's.
+type nodeResp struct {
+	NodeID       string            `json:"node_id"`
+	SSHEndpoint  string            `json:"ssh_endpoint"`
+	DaemonPort   int               `json:"daemon_port"`
+	Capabilities map[string]string `json:"capabilities"`
+	Load         registry.LoadInfo `json:"load"`
+	State        string            `json:"state"`
+	HealthScore  float64           `json:"health_score"`
+	Source       string            `json:"source"`
+}
+
+func toNodeResp(n nodestore.Node) nodeResp {
+	ssh := n.SSHEndpoint
+	if ssh == "" {
+		ssh = fmt.Sprintf("root@%s:22", n.Host)
+	}
+
+	// Prefer the full payload captured from the node's own /health; fall back
+	// to the indexed columns for entries that have never been polled.
+	caps := map[string]string{}
+	if n.CapsJSON != "" {
+		_ = json.Unmarshal([]byte(n.CapsJSON), &caps)
+	}
+	if caps["arch"] == "" && n.Arch != "" {
+		caps["arch"] = n.Arch
+	}
+	if caps["hostname"] == "" && n.Hostname != "" {
+		caps["hostname"] = n.Hostname
+	}
+
+	var load registry.LoadInfo
+	if n.LoadJSON != "" {
+		_ = json.Unmarshal([]byte(n.LoadJSON), &load)
+	}
+	load.AvailableMemBytes = n.AvailableMem
+	load.ActiveJobs = n.ActiveJobs
+	load.ReservedMemBytes = n.ReservedMem
+	if n.TotalMem > 0 {
+		load.TotalMemBytes = n.TotalMem
+	}
+	if n.CPUPercent > 0 {
+		load.CPUPercent = n.CPUPercent
+	}
+
+	return nodeResp{
+		NodeID:       n.NodeID,
+		SSHEndpoint:  ssh,
+		DaemonPort:   n.Port,
+		Capabilities: caps,
+		Load:         load,
+		State:        n.State,
+		HealthScore:  n.HealthScore,
+		Source:       n.Source,
+	}
 }
 
 func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
@@ -499,49 +684,71 @@ func extractHost(endpoint string) string {
 	return s
 }
 
+// SetSelfInfo tells the daemon how to describe itself in the node store, so
+// this machine is a placement candidate for every peer that polls it and shows
+// up in its own node list.
+func (s *Server) SetSelfInfo(sshEndpoint string, daemonPort int, caps map[string]string) {
+	s.selfMu.Lock()
+	s.selfSSH = sshEndpoint
+	s.selfPort = daemonPort
+	s.selfCaps = caps
+	s.selfMu.Unlock()
+}
+
+// pollAllNodes is one refresh cycle of cluster membership:
+//
+//	discover on the LAN → record self → health-check every peer → prune the dead.
+//
+// Everything the orchestrator later reads from /v1/nodes is written here.
 func (s *Server) pollAllNodes() {
 	if s.store == nil {
 		return
 	}
 
+	// 1. mDNS discovery. New nodes are inserted with state "unknown" and get
+	//    promoted to healthy by the health check below.
+	if s.discoverFn != nil {
+		for _, d := range s.discoverFn() {
+			if d.NodeID == "" || d.NodeID == s.nodeID {
+				continue
+			}
+			_ = s.store.UpsertNode(nodestore.Node{
+				NodeID:      d.NodeID,
+				Host:        extractHost(d.SSHEndpoint),
+				Port:        d.DaemonPort,
+				SSHEndpoint: d.SSHEndpoint,
+				Arch:        d.Arch,
+				Hostname:    d.Hostname,
+				State:       "unknown",
+				Source:      "discovery",
+			})
+		}
+	}
+
+	// 2. Record self. Self is always a placement candidate, so it belongs in
+	//    the same table as everyone else rather than being special-cased.
+	s.upsertSelf()
+
+	// 3. Health-check every known peer concurrently.
+	nodes, err := s.store.ListAll()
+	if err != nil {
+		return
+	}
+
 	var wg sync.WaitGroup
-	mu := sync.Mutex{}
+	var mu sync.Mutex
 	finalHealths := make(map[string]*PeerHealth)
 
-	// Only poll manually added nodes
-	manualNodes, _ := s.store.ListManual()
-	for _, n := range manualNodes {
+	for _, n := range nodes {
+		if n.NodeID == s.nodeID {
+			continue // self is refreshed directly, not over the network
+		}
 		wg.Add(1)
 		go func(node nodestore.Node) {
 			defer wg.Done()
-			key := fmt.Sprintf("%s:%d", node.Host, node.Port)
-			ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: "manual"}
-
-			healthURL := fmt.Sprintf("http://%s:%d/health", node.Host, node.Port)
-			resp, err := http.Get(healthURL)
-			if err != nil {
-				ph.Status = "unreachable"
-				s.store.MarkUnreachable(node.NodeID)
-			} else {
-				defer resp.Body.Close()
-				var h struct {
-					NodeID       string `json:"node_id"`
-					ActiveJobs   int    `json:"active_jobs"`
-					AvailableMem int64  `json:"available_mem"`
-				}
-				if json.NewDecoder(resp.Body).Decode(&h) == nil && h.NodeID != "" {
-					ph.NodeID = h.NodeID
-					ph.Status = "healthy"
-					ph.ActiveJobs = h.ActiveJobs
-					ph.AvailableMem = h.AvailableMem
-					s.store.UpdateHealth(h.NodeID, h.ActiveJobs, h.AvailableMem, 0, 0, 0)
-				} else {
-					ph.Status = "unreachable"
-				}
-			}
-
+			ph := s.pollOne(node)
 			mu.Lock()
-			finalHealths[key] = ph
+			finalHealths[fmt.Sprintf("%s:%d", node.Host, node.Port)] = ph
 			mu.Unlock()
 		}(n)
 	}
@@ -550,6 +757,107 @@ func (s *Server) pollAllNodes() {
 	s.peersMu.Lock()
 	s.peerHealths = finalHealths
 	s.peersMu.Unlock()
+
+	// 4. Forget auto-discovered nodes that have been gone a while. Manual
+	//    entries survive — see nodestore.PruneStale.
+	s.store.PruneStale(staleNodeTTL)
+}
+
+// staleNodeTTL is how long a discovered node may go unseen before it is
+// dropped: long enough to ride out a daemon restart, short enough that a
+// machine taken off the LAN stops being offered work.
+const staleNodeTTL = 5 * time.Minute
+
+func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
+	source := node.Source
+	if source == "" {
+		source = "discovery"
+	}
+	ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: source}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", node.Host, node.Port))
+	if err != nil {
+		ph.Status = "unreachable"
+		s.store.MarkUnreachable(node.NodeID)
+		return ph
+	}
+	defer resp.Body.Close()
+
+	var h healthResponse
+	if json.NewDecoder(resp.Body).Decode(&h) != nil || h.NodeID == "" {
+		ph.Status = "unreachable"
+		s.store.MarkUnreachable(node.NodeID)
+		return ph
+	}
+
+	ph.NodeID = h.NodeID
+	ph.Status = "healthy"
+	ph.ActiveJobs = h.ActiveJobs
+	ph.AvailableMem = h.AvailableMem
+
+	capsJSON, _ := json.Marshal(h.Capabilities)
+	loadJSON, _ := json.Marshal(h.Load)
+
+	updated := nodestore.Node{
+		NodeID:       h.NodeID,
+		Host:         node.Host,
+		Port:         node.Port,
+		SSHEndpoint:  node.SSHEndpoint,
+		Arch:         h.Capabilities["arch"],
+		Hostname:     h.Capabilities["hostname"],
+		ActiveJobs:   h.ActiveJobs,
+		AvailableMem: h.AvailableMem,
+		ReservedMem:  h.ReservedMem,
+		TotalMem:     h.Load.TotalMemBytes,
+		CPUPercent:   h.Load.CPUPercent,
+		Source:       source,
+		IsManual:     node.IsManual,
+		CapsJSON:     string(capsJSON),
+		LoadJSON:     string(loadJSON),
+	}
+	if err := s.store.MarkHealthy(updated); err != nil {
+		return ph
+	}
+
+	// A manual entry added before the node was up carries a placeholder
+	// "manual-host:port" ID. Now that the real UUID is known, drop the
+	// placeholder row so the node is not counted twice.
+	if node.NodeID != h.NodeID && strings.HasPrefix(node.NodeID, "manual-") {
+		s.store.DeleteNode(node.NodeID)
+	}
+	return ph
+}
+
+// upsertSelf writes this node's own live state into the store.
+func (s *Server) upsertSelf() {
+	s.selfMu.RLock()
+	ssh, port, caps := s.selfSSH, s.selfPort, s.selfCaps
+	s.selfMu.RUnlock()
+	if port == 0 {
+		return // SetSelfInfo not called (tests, or daemon not fully started)
+	}
+
+	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	capsJSON, _ := json.Marshal(caps)
+	loadJSON, _ := json.Marshal(load)
+
+	_ = s.store.MarkHealthy(nodestore.Node{
+		NodeID:       s.nodeID,
+		Host:         extractHost(ssh),
+		Port:         port,
+		SSHEndpoint:  ssh,
+		Arch:         caps["arch"],
+		Hostname:     caps["hostname"],
+		ActiveJobs:   s.ActiveJobs(),
+		AvailableMem: load.AvailableMemBytes,
+		ReservedMem:  s.ReservedMem(),
+		TotalMem:     load.TotalMemBytes,
+		CPUPercent:   load.CPUPercent,
+		Source:       "self",
+		CapsJSON:     string(capsJSON),
+		LoadJSON:     string(loadJSON),
+	})
 }
 
 // --- Core lease logic (shared by HTTP and NATS handlers) ---
@@ -562,6 +870,17 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: "target_id does not match this node"}, http.StatusConflict
 	}
 
+	// Concurrency cap. Counts every live lease, not just running ones: a
+	// reserved-but-not-yet-committed lease is a task on its way here, and
+	// counting only running leases would let an unbounded number of
+	// submitters slip past the cap in the window before they commit.
+	if max := s.MaxConcurrentJobs(); max > 0 {
+		if active := s.ActiveLeases(); active >= max {
+			reason := fmt.Sprintf("at concurrency limit: %d/%d tasks", active, max)
+			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
+		}
+	}
+
 	// Resource admission check
 	if req.RequiredMemBytes > 0 {
 		available := s.AvailableForJob()
@@ -569,6 +888,23 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 			reason := fmt.Sprintf("insufficient memory: need %d bytes, available %d bytes",
 				req.RequiredMemBytes, available)
 			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
+		}
+	}
+
+	if req.RequiredCores > 0 {
+		if free := s.freeCores(); free < float64(req.RequiredCores) {
+			reason := fmt.Sprintf("insufficient cores: need %d, free %.1f", req.RequiredCores, free)
+			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
+		}
+	}
+
+	// GPU admission: reserve a specific device so two concurrent jobs on this
+	// node do not land on the same card.
+	gpuIndex := -1
+	if req.RequireGPU {
+		gpuIndex = s.reserveGPU(req.RequiredGPUMem)
+		if gpuIndex < 0 {
+			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: "no GPU available"}, http.StatusServiceUnavailable
 		}
 	}
 
@@ -581,6 +917,7 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		SubmitterNode: req.SubmitterNode,
 		State:         LeaseReserved,
 		MemBytes:      req.RequiredMemBytes,
+		GPUIndex:      gpuIndex,
 		CreatedAt:     now,
 		ExpiresAt:     now.Add(s.leaseDuration),
 	}
@@ -593,8 +930,63 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		Accepted:  true,
 		NodeID:    s.nodeID,
 		LeaseID:   leaseID,
+		GPUIndex:  gpuIndex,
 		ExpiresAt: lease.ExpiresAt.Format(time.RFC3339Nano),
 	}, http.StatusOK
+}
+
+// freeCores estimates CPU cores not currently in use on this node.
+func (s *Server) freeCores() float64 {
+	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	cores := load.TotalCPUs
+	if cores <= 0 {
+		cores = runtime.NumCPU()
+	}
+	free := float64(cores) * (1.0 - load.CPUPercent/100.0)
+	if free < 0 {
+		return 0
+	}
+	return free
+}
+
+// reserveGPU picks the free GPU with the most available VRAM, skipping devices
+// already held by a live lease. Returns -1 when nothing satisfies minVRAM.
+func (s *Server) reserveGPU(minVRAM int64) int {
+	devices := gpu.PerDevice()
+	if len(devices) == 0 {
+		// A GPU with no per-device telemetry (Intel, or AMD without a
+		// parseable rocm-smi) can still run the job on device 0. But with no
+		// VRAM numbers we cannot honour a minimum, so a request that specifies
+		// one must be refused rather than accepted on a guess.
+		if gpu.Detect().Vendor != gpu.VendorNone && minVRAM == 0 {
+			return 0
+		}
+		return -1
+	}
+
+	s.mu.Lock()
+	reserved := make(map[int]bool, len(s.leases))
+	for _, l := range s.leases {
+		if l.GPUIndex >= 0 && (l.State == LeaseReserved || l.State == LeaseRunning) {
+			reserved[l.GPUIndex] = true
+		}
+	}
+	s.mu.Unlock()
+
+	best := -1
+	var bestFree int64 = -1
+	for _, d := range devices {
+		if reserved[d.Index] {
+			continue
+		}
+		if minVRAM > 0 && d.MemoryFreeBytes < minVRAM {
+			continue
+		}
+		if d.MemoryFreeBytes > bestFree {
+			best, bestFree = d.Index, d.MemoryFreeBytes
+		}
+	}
+	return best
 }
 
 func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
@@ -645,8 +1037,10 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 		}
 	}
 
-	// Commit: transition to running
+	// Commit: transition to running. Stamp RenewedAt so the running-lease TTL
+	// is measured from the moment execution actually started.
 	lease.State = LeaseRunning
+	lease.RenewedAt = time.Now()
 	s.mu.Unlock()
 
 	return commitResponse{Committed: true, NodeID: s.nodeID}, http.StatusOK
@@ -754,6 +1148,18 @@ func (s *Server) handleNATSCommit(msg *nats.Msg) {
 		return
 	}
 	resp, _ := s.processCommit(req)
+	natsReply(msg, resp)
+}
+
+func (s *Server) handleNATSRenew(msg *nats.Msg) {
+	var req struct {
+		LeaseID string `json:"lease_id"`
+	}
+	if err := json.Unmarshal(msg.Data, &req); err != nil {
+		natsReply(msg, map[string]interface{}{"renewed": false, "reason": "invalid request"})
+		return
+	}
+	resp, _ := s.processRenew(req.LeaseID)
 	natsReply(msg, resp)
 }
 

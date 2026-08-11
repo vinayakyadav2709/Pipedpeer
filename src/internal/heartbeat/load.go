@@ -3,6 +3,7 @@ package heartbeat
 import (
 	"runtime"
 
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -19,7 +20,7 @@ func CollectLoad(activeJobs int, reservedMemBytes int64) registry.LoadInfo {
 		available = 0
 	}
 
-	return registry.LoadInfo{
+	info := registry.LoadInfo{
 		CPUPercent:        readCPUPercent(),
 		MemPercent:        readMemPercent(),
 		ActiveJobs:        activeJobs,
@@ -28,6 +29,30 @@ func CollectLoad(activeJobs int, reservedMemBytes int64) registry.LoadInfo {
 		ReservedMemBytes:  reservedMemBytes,
 		TotalCPUs:         runtime.NumCPU(),
 	}
+
+	// Include GPU usage statistics if available
+	gpuInfo := gpu.Detect()
+	if gpuInfo.Vendor != gpu.VendorNone && gpuInfo.Name != "" {
+		info.GPUModel = gpuInfo.Name
+		info.GPUMemBytes = gpuInfo.MemoryBytes
+		if usage := gpu.DetectUsage(); usage.MemoryUsedBytes > 0 {
+			info.GPUMemUsedBytes = usage.MemoryUsedBytes
+			info.GPUUtilPercent = usage.UtilizationGPU
+		}
+		// Per-GPU stats for intelligent scheduling
+		devices := gpu.PerDevice()
+		for _, d := range devices {
+			info.GPUs = append(info.GPUs, registry.PerGPUInfo{
+				Index:            d.Index,
+				Name:             d.Name,
+				MemoryTotalBytes: d.MemoryTotalBytes,
+				MemoryFreeBytes:  d.MemoryFreeBytes,
+				UtilizationGPU:   d.UtilizationGPU,
+			})
+		}
+	}
+
+	return info
 }
 
 func readCPUPercent() float64 {

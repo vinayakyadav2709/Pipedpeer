@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Pipedpeer Bootstrap Script
-# Installs current runtime dependencies: Nix, SSH, bubblewrap
+# Installs current runtime dependencies: Nix, SSH, crun
 # Validates setup with 'pipedpeer doctor'
 
 set -e
@@ -18,7 +18,7 @@ BOLD='\033[1m'
 
 # Banner
 echo -e "${BOLD}=== Pipedpeer Bootstrap ===${NC}"
-echo "Installing dependencies: Nix, SSH, Bubblewrap"
+echo "Installing dependencies: Nix, SSH, crun"
 echo ""
 
 # Check sudo
@@ -38,19 +38,23 @@ GPU=$(detect_gpu)
 if [[ "$GPU" == "none" ]]; then
     log_info "No GPU detected. Node will be registered CPU-only."
 else
-    log_warn "Detected GPU: $GPU"
-    log_warn "GPU setup is currently skipped. Node will run CPU-only until GPU runtime is configured."
-    log_warn "If you need GPU tasks later, install vendor drivers/runtime and re-run bootstrap."
+    log_info "Detected GPU: $GPU"
+    log_info "GPU runtime will be installed."
 fi
 
 echo ""
 
-# Modules to install (GPU and Docker are intentionally out of scope for now)
+# Modules to install
 MODULES=(
     "nix"
     "ssh"
-    "bwrap"
+    "crun"
 )
+
+# Add GPU module if a GPU was detected
+if [[ "$GPU" != "none" ]]; then
+    MODULES+=("gpu:$GPU")
+fi
 
 FAILED=0
 
@@ -58,7 +62,14 @@ FAILED=0
 for module in "${MODULES[@]}"; do
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    MODULE_SCRIPT="$MODULES_DIR/${module}.sh"
+    # Support "module:arg" syntax for passing arguments
+    MODULE_NAME="${module%%:*}"
+    MODULE_ARG="${module#*:}"
+    if [[ "$MODULE_ARG" == "$MODULE_NAME" ]]; then
+        MODULE_ARG=""
+    fi
+    
+    MODULE_SCRIPT="$MODULES_DIR/${MODULE_NAME}.sh"
     
     if [[ ! -f "$MODULE_SCRIPT" ]]; then
         log_error "Module script not found: $MODULE_SCRIPT"
@@ -66,12 +77,22 @@ for module in "${MODULES[@]}"; do
         continue
     fi
     
-    if bash "$MODULE_SCRIPT"; then
-        log_success "[$module] completed successfully"
+    if [[ -n "$MODULE_ARG" ]]; then
+        if bash "$MODULE_SCRIPT" "$MODULE_ARG"; then
+            log_success "[$MODULE_NAME] completed successfully"
+        else
+            EXIT_CODE=$?
+            log_error "[$MODULE_NAME] failed with exit code $EXIT_CODE"
+            FAILED=$((FAILED + 1))
+        fi
     else
-        EXIT_CODE=$?
-        log_error "[$module] failed with exit code $EXIT_CODE"
-        FAILED=$((FAILED + 1))
+        if bash "$MODULE_SCRIPT"; then
+            log_success "[$MODULE_NAME] completed successfully"
+        else
+            EXIT_CODE=$?
+            log_error "[$MODULE_NAME] failed with exit code $EXIT_CODE"
+            FAILED=$((FAILED + 1))
+        fi
     fi
     
     echo ""

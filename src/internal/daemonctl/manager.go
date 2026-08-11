@@ -53,7 +53,10 @@ func Status() State {
 	return State{Running: running, PID: pid, NodeID: strings.TrimSpace(nodeID), Port: port}
 }
 
-func Start(nodeID string, port int) error {
+// Start launches the background daemon. maxConcurrent caps how many tasks this
+// node will accept at once; 0 leaves it unlimited (or governed by
+// PIPEDPEER_MAX_CONCURRENT, which the child inherits).
+func Start(nodeID string, port int, maxConcurrent int) error {
 	st := Status()
 	if st.Running {
 		return nil
@@ -75,7 +78,11 @@ func Start(nodeID string, port int) error {
 	}
 	defer logFile.Close()
 
-	cmd := exec.Command(exe, "__daemon__", "--port", strconv.Itoa(port))
+	args := []string{"__daemon__", "--port", strconv.Itoa(port)}
+	if maxConcurrent > 0 {
+		args = append(args, "--max-concurrent", strconv.Itoa(maxConcurrent))
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -134,7 +141,7 @@ func EnsureStarted(nodeID string, port int) (bool, error) {
 	if st.Running {
 		return false, nil
 	}
-	if err := Start(nodeID, port); err != nil {
+	if err := Start(nodeID, port, 0); err != nil {
 		return false, err
 	}
 	return true, nil

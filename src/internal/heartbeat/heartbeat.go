@@ -5,9 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/cpu"
+
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
@@ -123,16 +129,71 @@ func (c *Client) StopWithoutDeregister() {
 	})
 }
 
+// Capabilities describes a node's static hardware: things that do not change
+// between heartbeats, so the scheduler can rank raw capability separately from
+// current load. Values are strings because they travel in NodeRecord.Capabilities.
+func Capabilities(id identity.NodeIdentity) map[string]string {
+	caps := map[string]string{
+		"arch":     id.Arch,
+		"hostname": id.Hostname,
+	}
+
+	// CPU: core count, model and clock. Cached — cpu.Info() shells into
+	// /proc/cpuinfo and is called on every heartbeat.
+	cores, model, mhz := cpuStatic()
+	caps["cpu_cores"] = strconv.Itoa(cores)
+	if model != "" {
+		caps["cpu_model"] = model
+	}
+	if mhz > 0 {
+		caps["cpu_mhz"] = strconv.FormatFloat(mhz, 'f', 0, 64)
+	}
+
+	if id.GPU.Name != "" {
+		caps["gpu"] = string(id.GPU.Vendor)
+		caps["gpu_name"] = id.GPU.Name
+		caps["gpu_count"] = strconv.Itoa(id.GPU.Count)
+		if id.GPU.MemoryBytes > 0 {
+			caps["gpu_memory"] = strconv.FormatInt(id.GPU.MemoryBytes, 10)
+		}
+		if cc := gpu.ComputeCapability(); cc != "" {
+			caps["gpu_compute_cap"] = cc
+		}
+	}
+	return caps
+}
+
+var (
+	cpuStaticOnce  sync.Once
+	cpuStaticCores int
+	cpuStaticModel string
+	cpuStaticMHz   float64
+)
+
+func cpuStatic() (int, string, float64) {
+	cpuStaticOnce.Do(func() {
+		cpuStaticCores = runtime.NumCPU()
+		infos, err := cpu.Info()
+		if err != nil || len(infos) == 0 {
+			return
+		}
+		cpuStaticModel = strings.TrimSpace(infos[0].ModelName)
+		cpuStaticMHz = infos[0].Mhz
+
+		// cpu.Info() returns one entry per physical package on some kernels and
+		// one per logical CPU on others. runtime.NumCPU() is the reliable count,
+		// so only the model and clock are taken from here.
+	})
+	return cpuStaticCores, cpuStaticModel, cpuStaticMHz
+}
+
 func (c *Client) buildNodeRecord() registry.NodeRecord {
 	return registry.NodeRecord{
-		NodeID:      c.identity.NodeID,
-		SSHEndpoint: c.sshEndpoint,
-		DaemonPort:  c.daemonPort,
-		Capabilities: map[string]string{
-			"arch":     c.identity.Arch,
-			"hostname": c.identity.Hostname,
-		},
-		Load: CollectLoad(c.jobCounter(), c.reservedMemFn()),
+		NodeID:       c.identity.NodeID,
+		SSHEndpoint:  c.sshEndpoint,
+		DaemonPort:   c.daemonPort,
+		Capabilities: Capabilities(c.identity),
+		Load:         CollectLoad(c.jobCounter(), c.reservedMemFn()),
 	}
 }
 
@@ -181,7 +242,7 @@ func (c *Client) registerHTTP() error {
 
 func (c *Client) heartbeatHTTP() error {
 	payload := struct {
-		NodeID string        `json:"node_id"`
+		NodeID string            `json:"node_id"`
 		Load   registry.LoadInfo `json:"load"`
 	}{
 		NodeID: c.identity.NodeID,
@@ -225,7 +286,7 @@ func (c *Client) registerNATS() error {
 
 func (c *Client) heartbeatNATS() error {
 	payload := struct {
-		NodeID string           `json:"node_id"`
+		NodeID string            `json:"node_id"`
 		Load   registry.LoadInfo `json:"load"`
 	}{
 		NodeID: c.identity.NodeID,

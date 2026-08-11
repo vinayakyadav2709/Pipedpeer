@@ -17,10 +17,10 @@ import (
 )
 
 type peerInfo struct {
-	NodeID      string            `json:"node_id"`
-	SSHEndpoint string            `json:"ssh_endpoint"`
-	DaemonPort  int               `json:"daemon_port"`
-	State       string            `json:"state"`
+	NodeID      string `json:"node_id"`
+	SSHEndpoint string `json:"ssh_endpoint"`
+	DaemonPort  int    `json:"daemon_port"`
+	State       string `json:"state"`
 	Load        struct {
 		ActiveJobs        int   `json:"active_jobs"`
 		AvailableMemBytes int64 `json:"available_mem_bytes"`
@@ -28,7 +28,7 @@ type peerInfo struct {
 	Source string `json:"source"`
 }
 
-func (p peerInfo) ActiveJobs() int  { return p.Load.ActiveJobs }
+func (p peerInfo) ActiveJobs() int     { return p.Load.ActiveJobs }
 func (p peerInfo) AvailableMem() int64 { return p.Load.AvailableMemBytes }
 
 type dashModel struct {
@@ -39,6 +39,7 @@ type dashModel struct {
 	height     int
 	peers      []peerInfo
 	jobs       []jobhistory.JobSummary
+	live       []clusterTask
 	peerErr    string
 	jobsErr    string
 	running    bool
@@ -100,13 +101,19 @@ func (m *dashModel) refresh() {
 		}
 	}
 
-	// Fetch job history
+	// Fetch job history (local, completed + in-flight)
 	jobs, err := jobhistory.List(10)
 	if err != nil {
 		m.jobsErr = err.Error()
 	} else {
 		m.jobsErr = ""
 		m.jobs = jobs
+	}
+
+	// Fetch live leases from every healthy node, so the table shows tasks this
+	// machine submitted elsewhere as well as ones running here.
+	if live, err := fetchClusterTasks(m.daemonPort); err == nil {
+		m.live = live
 	}
 }
 
@@ -186,10 +193,38 @@ func (m dashModel) View() string {
 		[]float64{0.12, 0.24, 0.12, 0.07, 0.13, 0.10},
 	)
 
-	// ── Tasks table
+	// ── Tasks table: live cluster leases first, then local history.
 	s += sectionStyle.Render("RECENT TASKS") + "\n"
 
 	taskRows := [][]string{}
+	seenLease := make(map[string]bool)
+	for _, t := range m.live {
+		seenLease[t.LeaseID] = true
+		name := t.JobName
+		if name == "" {
+			name = "(unnamed)"
+		}
+		if len(name) > 18 {
+			name = name[:15] + "..."
+		}
+		stage := string(t.State)
+		stageCol := yellowStyle
+		if t.State == "reserved" {
+			stageCol = whiteStyle
+		}
+		node := t.Hostname
+		if len(node) > 12 {
+			node = node[:12]
+		}
+		taskRows = append(taskRows, []string{
+			shortID(t.LeaseID),
+			name,
+			node,
+			stageCol.Render(stage),
+			t.Age.Truncate(time.Second).String(),
+		})
+	}
+
 	for _, j := range m.jobs {
 		shortID := j.ID
 		if len(shortID) > 8 {
@@ -236,7 +271,7 @@ func (m dashModel) View() string {
 		})
 	}
 	s += renderTable(
-		[]string{"ID", "SCRIPT", "TARGET", "STAGE", "TIME"},
+		[]string{"ID", "SCRIPT/JOB", "NODE", "STAGE", "TIME"},
 		taskRows,
 		[]float64{0.12, 0.28, 0.14, 0.13, 0.10},
 	)
