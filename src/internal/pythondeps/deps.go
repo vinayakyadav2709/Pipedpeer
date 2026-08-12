@@ -25,7 +25,7 @@ var nixpkgsMapping = map[string]string{
 	"matplotlib":     "matplotlib",
 	"pillow":         "Pillow",
 	"pyyaml":         "pyyaml",
-	"yaml":            "pyyaml",
+	"yaml":           "pyyaml",
 	"pytest":         "pytest",
 	"torch":          "torch",
 	"tensorflow":     "tensorflow",
@@ -94,19 +94,19 @@ var stdlibModules = map[string]bool{
 
 // GPU-accelerated libraries — scripts importing these likely need GPU access.
 var gpuImports = map[string]bool{
-	"torch":      true, // PyTorch
-	"tensorflow": true, // TensorFlow
-	"tf":         true, // TensorFlow shorthand
-	"cupy":       true, // CuPy
-	"numba":      true, // Numba (may use CUDA)
-	"pycuda":     true, // PyCUDA
-	"cuda":       true, // CUDA Python
-	"jax":        true, // JAX
-	"jaxlib":     true, // JAX lib
-	"paddle":     true, // PaddlePaddle
+	"torch":       true, // PyTorch
+	"tensorflow":  true, // TensorFlow
+	"tf":          true, // TensorFlow shorthand
+	"cupy":        true, // CuPy
+	"numba":       true, // Numba (may use CUDA)
+	"pycuda":      true, // PyCUDA
+	"cuda":        true, // CUDA Python
+	"jax":         true, // JAX
+	"jaxlib":      true, // JAX lib
+	"paddle":      true, // PaddlePaddle
 	"onnxruntime": true, // ONNX Runtime
-	"tensorrt":   true, // TensorRT
-	"keras":      true, // Keras (usually on top of TF)
+	"tensorrt":    true, // TensorRT
+	"keras":       true, // Keras (usually on top of TF)
 }
 
 // HasGPUImports checks if the given script imports any GPU-accelerated libraries.
@@ -198,7 +198,7 @@ func ParseUVLock(lockPath string) ([]string, error) {
 	// [[package]]
 	// name = "pandas"
 	// version = "2.0.3"
-	
+
 	// We do a simple string-based parse to avoid complex TOML unmarshaling
 	// of the entire schema, since we only need the package names.
 	var pkgs []string
@@ -222,7 +222,7 @@ func ParseUVLock(lockPath string) ([]string, error) {
 			inPackage = false
 		}
 	}
-	
+
 	return pkgs, nil
 }
 

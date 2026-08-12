@@ -252,8 +252,8 @@ func (r *Registry) Heartbeat(nodeID string, load LoadInfo) (NodeRecord, bool) {
 
 	// Simple health score: penalize high load and recent failures
 	score := 1.0
-	score -= node.Load.CPUPercent / 200.0     // max -0.5
-	score -= node.Load.MemPercent / 200.0      // max -0.5
+	score -= node.Load.CPUPercent / 200.0 // max -0.5
+	score -= node.Load.MemPercent / 200.0 // max -0.5
 	score -= float64(node.Load.RecentFailures) * 0.1
 	if score < 0 {
 		score = 0

@@ -51,9 +51,9 @@ func TestNATSKVRegisterAndQuery(t *testing.T) {
 	r := setupNATSRegistry(t, DefaultConfig())
 
 	rec := r.Register(NodeRecord{
-		NodeID:      "nats-node-1",
-		SSHEndpoint: "root@10.0.2.5:22",
-		DaemonPort:  38080,
+		NodeID:       "nats-node-1",
+		SSHEndpoint:  "root@10.0.2.5:22",
+		DaemonPort:   38080,
 		Capabilities: map[string]string{"arch": "x86_64-linux"},
 	})
 

@@ -409,7 +409,7 @@ echo "hidden" > secret.txt
 	if outputTxt != "hello world testvar" {
 		t.Fatalf("sync execution failed, expected 'hello world testvar', got: %q\ncli out: %s", outputTxt, out)
 	}
-	
+
 	secretExistsLocally := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls /tmp/sync-test/secret.txt 2>/dev/null || echo missing"))
 	if secretExistsLocally == "missing" {
 		t.Fatalf("secret.txt was deleted locally!")

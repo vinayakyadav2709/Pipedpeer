@@ -15,20 +15,20 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 )
 
-	type Options struct {
-		ScriptPath    string
-		DaemonHost    string
-		DaemonPort    int
-		TargetID      string
-		JobName       string
-		Isolate       bool
-		GPU           bool
-		GPUDevices    string
-		Mode          string
-		PythonVersion string
-		Envs          []string
-		Pkgs          []string
-		ScriptArgs    []string
+type Options struct {
+	ScriptPath    string
+	DaemonHost    string
+	DaemonPort    int
+	TargetID      string
+	JobName       string
+	Isolate       bool
+	GPU           bool
+	GPUDevices    string
+	Mode          string
+	PythonVersion string
+	Envs          []string
+	Pkgs          []string
+	ScriptArgs    []string
 	// Coordinator placement diagnostics
 	PlacementSource string
 	DegradedMode    bool
@@ -88,9 +88,9 @@ func Run(opts Options) (runErr error) {
 
 	fmt.Printf("[1/7] Detecting imports...\n")
 	importScan := pythondeps.ExtractImportScan(absScriptPath)
-	
+
 	var imports []string
-	
+
 	uvLockPath := filepath.Join(projectRoot, "uv.lock")
 	if uvPkgs, err := pythondeps.ParseUVLock(uvLockPath); err == nil {
 		fmt.Printf("      Found uv.lock in project root\n")

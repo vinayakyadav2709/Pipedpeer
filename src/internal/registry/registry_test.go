@@ -13,9 +13,9 @@ func TestRegisterAndQuery(t *testing.T) {
 	r := New(DefaultConfig())
 
 	rec := r.Register(NodeRecord{
-		NodeID:      "node-1",
-		SSHEndpoint: "root@10.0.1.5:22",
-		DaemonPort:  38080,
+		NodeID:       "node-1",
+		SSHEndpoint:  "root@10.0.1.5:22",
+		DaemonPort:   38080,
 		Capabilities: map[string]string{"arch": "x86_64-linux"},
 	})
 
