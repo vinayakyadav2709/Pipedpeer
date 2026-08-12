@@ -238,4 +238,3 @@ func TestQueryPeakMemNoMatch(t *testing.T) {
 		t.Fatalf("expected 0 peaks for non-matching script, got %d", len(peaks))
 	}
 }
-

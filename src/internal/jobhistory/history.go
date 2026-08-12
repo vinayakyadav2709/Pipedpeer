@@ -34,10 +34,10 @@ type Record struct {
 	UnchangedFiles int    `json:"unchanged_files,omitempty"`
 	ManifestPath   string `json:"manifest_path,omitempty"`
 	// Coordinator placement diagnostics
-	PlacementSource  string `json:"placement_source,omitempty"`  // "registry", "cache", "discovery", "self", "explicit"
-	DegradedMode     bool   `json:"degraded_mode,omitempty"`
-	CandidateCount   int    `json:"candidate_count,omitempty"`
-	PlacementReason  string `json:"placement_reason,omitempty"`
+	PlacementSource string `json:"placement_source,omitempty"` // "registry", "cache", "discovery", "self", "explicit"
+	DegradedMode    bool   `json:"degraded_mode,omitempty"`
+	CandidateCount  int    `json:"candidate_count,omitempty"`
+	PlacementReason string `json:"placement_reason,omitempty"`
 	// Resource estimation and tracking
 	PeakMemBytes      int64  `json:"peak_mem_bytes,omitempty"`
 	EstimatedMemBytes int64  `json:"estimated_mem_bytes,omitempty"`

@@ -20,21 +20,21 @@ type ResourceReq struct {
 
 // Known library memory baselines in bytes.
 var libBaselines = map[string]int64{
-	"torch":       2 * GB,
-	"tensorflow":  3 * GB,
-	"keras":       1 * GB,
-	"pandas":      300 * MB,
-	"numpy":       200 * MB,
-	"scipy":       400 * MB,
-	"sklearn":     500 * MB,
-	"matplotlib":  200 * MB,
-	"opencv":      300 * MB,
-	"PIL":         150 * MB,
-	"sqlalchemy":  100 * MB,
-	"celery":      100 * MB,
-	"fastapi":     80 * MB,
-	"django":      150 * MB,
-	"flask":       60 * MB,
+	"torch":      2 * GB,
+	"tensorflow": 3 * GB,
+	"keras":      1 * GB,
+	"pandas":     300 * MB,
+	"numpy":      200 * MB,
+	"scipy":      400 * MB,
+	"sklearn":    500 * MB,
+	"matplotlib": 200 * MB,
+	"opencv":     300 * MB,
+	"PIL":        150 * MB,
+	"sqlalchemy": 100 * MB,
+	"celery":     100 * MB,
+	"fastapi":    80 * MB,
+	"django":     150 * MB,
+	"flask":      60 * MB,
 }
 
 const (
@@ -42,11 +42,11 @@ const (
 	MB = 1024 * KB
 	GB = 1024 * MB
 
-	pythonBaseline  = 100 * MB  // base Python interpreter
-	defaultEstimate = 512 * MB  // absolute fallback
-	fileMultiplier  = 3         // data files expand ~3x in memory
-	historyBuffer   = 1.2       // 20% headroom over historical peak
-	maxHistoryRuns  = 5         // look at last N runs
+	pythonBaseline  = 100 * MB // base Python interpreter
+	defaultEstimate = 512 * MB // absolute fallback
+	fileMultiplier  = 3        // data files expand ~3x in memory
+	historyBuffer   = 1.2      // 20% headroom over historical peak
+	maxHistoryRuns  = 5        // look at last N runs
 )
 
 // Estimate returns the estimated resource requirements for a job.

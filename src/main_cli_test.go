@@ -108,7 +108,6 @@ func TestRunCheckOnlyRejectsWrongTargetID(t *testing.T) {
 	}
 }
 
-
 func runCLIWithEnv(t *testing.T, stateDir, xdg string, args ...string) string {
 	t.Helper()
 	out, errOut, err := runCLIEWithEnv(t, stateDir, xdg, args...)
@@ -230,7 +229,6 @@ func TestInitCreatesIgnoreFile(t *testing.T) {
 		}
 	}
 }
-
 
 func TestJobsListAndJobDetail(t *testing.T) {
 	xdg := t.TempDir()

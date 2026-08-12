@@ -211,8 +211,8 @@ func TestNATSAndHTTPDualTransport(t *testing.T) {
 
 	// Accept via NATS
 	natsReq, _ := json.Marshal(acceptRequest{
-		TargetID:  "dual-node",
-		JobName:   "nats-job",
+		TargetID:      "dual-node",
+		JobName:       "nats-job",
 		SubmitterNode: "nats-sub",
 	})
 	msg, err := bus.Request("pipedpeer.daemon.dual-node.accept", natsReq, 2*time.Second)
