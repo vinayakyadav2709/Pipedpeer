@@ -4,3 +4,7 @@ cmd/pipedpeer/pipedpeer
 lab/pipedpeer
 *.log
 test_results/
+__pycache__/
+*.pyc
+node_modules/
+codedb.snapshot
