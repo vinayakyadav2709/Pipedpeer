@@ -23,7 +23,7 @@ This script:
 2. Installs each dependency
 3. Configures Nix with flakes enabled
 4. Generates SSH key (if missing)
-5. Runs `pipedpeer doctor` to validate setup
+5. Runs `pipedpeer setup` to validate setup
 6. Detects GPU and logs CPU-only registration (GPU setup is skipped)
 
 ## Step-by-Step
@@ -136,7 +136,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''
 ./scripts/build.sh
 
 # Validate setup
-pipedpeer doctor
+pipedpeer setup -y --no-install
 
 # Run tests
 ./scripts/test.sh
