@@ -30,6 +30,24 @@ func regWithFastSweep() (*registry.Registry, *httptest.Server) {
 		RemovalThreshold: 100 * time.Millisecond,
 		SweepInterval:    10 * time.Millisecond,
 	}
+	return regWithConfig(cfg)
+}
+
+// regWithRelaxedExpiry keeps expiry fast enough to test in a unit test but
+// leaves a wide enough healthy window that a slow or contended machine cannot
+// expire a node while the test is still setting up. Removal is pushed far out
+// so a stale node stays visible for the whole test.
+func regWithRelaxedExpiry() (*registry.Registry, *httptest.Server) {
+	cfg := registry.Config{
+		LeaseDuration:    400 * time.Millisecond,
+		StaleGrace:       200 * time.Millisecond,
+		RemovalThreshold: 30 * time.Second,
+		SweepInterval:    10 * time.Millisecond,
+	}
+	return regWithConfig(cfg)
+}
+
+func regWithConfig(cfg registry.Config) (*registry.Registry, *httptest.Server) {
 	reg := registry.New(cfg)
 	reg.Start()
 	srv := httptest.NewServer(reg.Handler())
@@ -307,16 +325,29 @@ func TestActiveJobsReportedViaHeartbeat(t *testing.T) {
 // Scenario: Lease expiry causes coordinator to stop selecting a node,
 // then another node gets the task instead
 func TestLeaseExpiryRedirectsTask(t *testing.T) {
-	reg, srv := regWithFastSweep()
+	reg, srv := regWithRelaxedExpiry()
 	defer srv.Close()
 	defer reg.Stop()
 
 	idSlow := makeID("worker-slow", "host-slow", "x86_64-linux")
 
+	// Register worker-slow with a heartbeat client (stays alive) FIRST. Its
+	// first heartbeat gathers host capabilities, which can shell out to GPU
+	// tooling and take a while on a cold cache. Doing it before worker-fast is
+	// registered keeps that cost outside worker-fast's healthy window.
+	clientSlow := heartbeat.NewClient(srv.URL, idSlow, "root@10.0.1.2:22", 38080)
+	clientSlow.SetInterval(30 * time.Millisecond)
+	_ = clientSlow.Start()
+	// Ensure heartbeat client stops BEFORE the server closes (t.Cleanup is LIFO)
+	t.Cleanup(func() { clientSlow.Stop() })
+
+	time.Sleep(20 * time.Millisecond) // let slow register
+
 	// Register worker-fast manually (no heartbeat client → will expire).
 	// It reports the same class of hardware as the real heartbeating node but
 	// at a much lighter load, so this test turns on lease expiry rather than on
 	// the details of the scorer.
+	fastRegisteredAt := time.Now()
 	reg.Register(registry.NodeRecord{
 		NodeID: "worker-fast", SSHEndpoint: "root@10.0.1.1:22",
 		Capabilities: map[string]string{"cpu_cores": "64", "cpu_mhz": "4800"},
@@ -326,15 +357,6 @@ func TestLeaseExpiryRedirectsTask(t *testing.T) {
 		},
 		HealthScore: 1.0, State: "healthy",
 	})
-
-	// Register worker-slow with a heartbeat client (stays alive)
-	clientSlow := heartbeat.NewClient(srv.URL, idSlow, "root@10.0.1.2:22", 38080)
-	clientSlow.SetInterval(30 * time.Millisecond)
-	_ = clientSlow.Start()
-	// Ensure heartbeat client stops BEFORE the server closes (t.Cleanup is LIFO)
-	t.Cleanup(func() { clientSlow.Stop() })
-
-	time.Sleep(20 * time.Millisecond) // let slow register
 
 	idSelf := makeID("self", "self", "x86_64-linux")
 	coord := New(Config{
@@ -347,12 +369,15 @@ func TestLeaseExpiryRedirectsTask(t *testing.T) {
 
 	// Before expiry: worker-fast should be chosen (lowest load)
 	decision := coord.FindNode()
+	if elapsed := time.Since(fastRegisteredAt); elapsed >= 600*time.Millisecond {
+		t.Skipf("machine too slow: worker-fast's healthy window elapsed during setup (%v)", elapsed)
+	}
 	if decision.ChosenNode.NodeID != "worker-fast" {
 		t.Fatalf("expected worker-fast before expiry, got %s", decision.ChosenNode.NodeID)
 	}
 
-	// Wait for worker-fast's lease to expire (80ms)
-	time.Sleep(120 * time.Millisecond)
+	// Wait for worker-fast's lease (400ms) plus stale grace (200ms) to pass
+	time.Sleep(time.Until(fastRegisteredAt.Add(700 * time.Millisecond)))
 	reg.Sweep()
 
 	// worker-slow is still heartbeating → healthy. worker-fast is stale.
@@ -363,7 +388,7 @@ func TestLeaseExpiryRedirectsTask(t *testing.T) {
 
 	// Stop worker-slow's heartbeat and wait for its lease to expire too
 	clientSlow.Stop()
-	time.Sleep(120 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 	reg.Sweep()
 
 	// Now only self should be available
