@@ -27,8 +27,8 @@ tasks:
   add-peer:
     desc: Register the lab container as a manual peer
     cmds:
-      - ../bin/pipedpeer peers remove {{.HOST}} 2>/dev/null || true
-      - ../bin/pipedpeer peers add {{.HOST}} {{.PORT}}
+      - ../bin/pipedpeer nodes remove {{.HOST}} 2>/dev/null || true
+      - ../bin/pipedpeer nodes add {{.HOST}} {{.PORT}}
 
   fetch-id:
     desc: Fetch the lab worker node ID (waits for daemon)
@@ -163,7 +163,7 @@ tasks:
     desc: Stop lab, remove peer, cleanup
     cmds:
       - task: lab-down
-      - ../bin/pipedpeer peers remove {{.HOST}} 2>/dev/null || true
+      - ../bin/pipedpeer nodes remove {{.HOST}} 2>/dev/null || true
       - rm -f .task/id.txt
 
   all:

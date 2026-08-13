@@ -2,7 +2,7 @@
 
 # Pipedpeer Bootstrap Script
 # Installs current runtime dependencies: Nix, SSH, crun
-# Validates setup with 'pipedpeer doctor'
+# Validates setup with 'pipedpeer setup'
 
 set -e
 
@@ -106,11 +106,11 @@ if [[ $FAILED -eq 0 ]]; then
     log_success "All modules installed successfully!"
     echo ""
     
-    # Run doctor check if pipedpeer is available
+    # Validate the install if pipedpeer is available
     if command_exists pipedpeer; then
-        log_info "Running pipedpeer doctor validation..."
+        log_info "Running pipedpeer setup validation..."
         echo ""
-        if pipedpeer doctor; then
+        if pipedpeer setup -y --no-install; then
             log_success "System validation passed!"
         else
             log_warn "Some optional checks failed. See above for details."
