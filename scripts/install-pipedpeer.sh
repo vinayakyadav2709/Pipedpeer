@@ -2,11 +2,67 @@
 set -euo pipefail
 
 # Standard installer pattern:
-# 1) Try downloading a release artifact (placeholder URL by default).
+# 1) Try downloading a release artifact for the selected channel.
 # 2) Fall back to local Go build when release download is not configured.
 # 3) Install into a user bin dir and print PATH instructions.
+#
+# Channels:
+#   stable  (default) - latest tagged release
+#   nightly           - rolling prerelease built from the dev branch
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+CHANNEL="${PIPEDPEER_CHANNEL:-stable}"
+
+usage() {
+  cat <<'EOF'
+Usage: install-pipedpeer.sh [--channel stable|nightly]
+
+Options:
+  --channel <name>   Release channel to install (default: stable)
+  -h, --help         Show this help
+
+Environment:
+  PIPEDPEER_CHANNEL          Same as --channel
+  PIPEDPEER_VERSION          Install a specific tag (stable channel only)
+  PIPEDPEER_INSTALL_DIR      Install target dir (default: ~/.local/bin)
+  PIPEDPEER_RELEASE_BASE_URL Override the release host
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --channel)
+      CHANNEL="${2:-}"
+      if [[ -z "$CHANNEL" ]]; then
+        echo "--channel requires a value" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --channel=*)
+      CHANNEL="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$CHANNEL" in
+  stable|nightly) ;;
+  *)
+    echo "Unknown channel: $CHANNEL (expected 'stable' or 'nightly')" >&2
+    exit 1
+    ;;
+esac
 
 INSTALL_DIR="${PIPEDPEER_INSTALL_DIR:-$HOME/.local/bin}"
 BINARY_NAME="pipedpeer"
@@ -26,8 +82,6 @@ case "$ARCH_RAW" in
 esac
 
 VERSION="${PIPEDPEER_VERSION:-latest}"
-# Placeholder release URL. Replace with your actual release host later.
-# Example: https://github.com/<org>/<repo>/releases/download
 RELEASE_BASE_URL="${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}"
 
 mkdir -p "$INSTALL_DIR"
@@ -36,7 +90,10 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 artifact_name="${BINARY_NAME}-${PLATFORM}-${ARCH}"
-if [[ "$VERSION" != "latest" ]]; then
+if [[ "$CHANNEL" == "nightly" ]]; then
+  # Rolling prerelease republished from dev by the nightly workflow
+  release_url="${RELEASE_BASE_URL}/download/nightly/${artifact_name}"
+elif [[ "$VERSION" != "latest" ]]; then
   # Version tag format like v1.0.0
   release_url="${RELEASE_BASE_URL}/download/${VERSION}/${artifact_name}"
 else
@@ -44,7 +101,7 @@ else
   release_url="${RELEASE_BASE_URL}/latest/download/${artifact_name}"
 fi
 
-echo "Installing ${BINARY_NAME}..."
+echo "Installing ${BINARY_NAME} (${CHANNEL} channel)..."
 echo "Target dir: ${INSTALL_DIR}"
 
 download_and_install() {
