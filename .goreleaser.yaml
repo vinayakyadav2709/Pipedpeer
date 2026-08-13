@@ -19,9 +19,12 @@ builds:
       - arm64
 
 # By default, GoReleaser creates archives.
-# "format: binary" ensures we output raw binaries instead.
+# "formats: [binary]" ensures we publish raw binaries instead. Note that this
+# does not rename anything on disk: the built binary stays at
+# dist/pipedpeer_<os>_<arch>*/pipedpeer and this name is only artifact
+# metadata, so uploads read dist/artifacts.json rather than globbing dist/.
 archives:
-  - format: binary
+  - formats: [binary]
     name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
 
 checksum:

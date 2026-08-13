@@ -21,7 +21,7 @@ jobs:
       sha: ${{ steps.decide.outputs.sha }}
     steps:
       - name: Checkout dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: dev
           fetch-depth: 0
@@ -52,12 +52,12 @@ jobs:
         working-directory: src
     steps:
       - name: Checkout dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: dev
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'src/go.mod'
           cache-dependency-path: 'src/go.sum'
@@ -77,12 +77,12 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: dev
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'src/go.mod'
           cache-dependency-path: 'src/go.sum'
@@ -95,6 +95,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y crun
 
+      # lab/docker-compose.yml bind-mounts this binary into the worker
+      # containers, so it has to exist before compose starts them.
+      - name: Build lab binary
+        working-directory: src
+        env:
+          CGO_ENABLED: '0'
+        run: go build -o ../lab/pipedpeer .
+
       - name: Run integration tests
         run: ./scripts/test-integration.sh
 
@@ -104,23 +112,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: dev
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: 'src/go.mod'
           cache-dependency-path: 'src/go.sum'
 
       - name: Build snapshot artifacts
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: '~> v2'
           args: release --snapshot --clean
+
+      - name: Collect artifacts
+        run: |
+          # "formats: [binary]" leaves each binary at its build path; the
+          # published name lives in artifacts.json. Stage them under the names
+          # the install script expects.
+          mkdir -p upload
+          jq -r '.[]
+            | select(.type == "Binary" and .extra.Format == "binary")
+            | "\(.path)\t\(.name)"' dist/artifacts.json |
+          while IFS=$'\t' read -r path name; do
+            cp "$path" "upload/$name"
+          done
+          cp dist/checksums.txt upload/
+          ls -l upload
 
       - name: Publish rolling nightly prerelease
         env:
@@ -141,4 +164,4 @@ jobs:
             --notes "$notes" \
             --prerelease \
             --target "$SHA" \
-            dist/pipedpeer-* dist/checksums.txt
+            upload/*
