@@ -475,6 +475,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
 	r.Get("/v1/store/{storePath:*}", s.handleStoreCheck)
+	r.Post("/v1/pool/map", s.handlePoolMap)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 

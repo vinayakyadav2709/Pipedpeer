@@ -41,6 +41,9 @@ func (e *Environment) Close() {
 type EnvOptions struct {
 	PythonVersion string
 	Pkgs          []string
+	// Intercept embeds the sitecustomize shim into the workspace so parallel
+	// primitives route through the cluster (see nixgen/shim.go).
+	Intercept bool
 }
 
 // StageFn reports build progress. Callers own the numbering so a single run
@@ -123,7 +126,11 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	fmt.Printf("      Exported closure to %s\n", env.NarPath)
 
 	env.WorkspaceTar = filepath.Join(tmpDir, "workspace.tar")
-	if err := daemonctl.CreateWorkspaceTar(projectRoot, env.WorkspaceTar); err != nil {
+	shimContent := ""
+	if opts.Intercept {
+		shimContent = nixgen.ShimSitecustomize
+	}
+	if err := daemonctl.CreateWorkspaceTar(projectRoot, env.WorkspaceTar, shimContent); err != nil {
 		env.Close()
 		return nil, fmt.Errorf("workspace tar failed: %v", err)
 	}

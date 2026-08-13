@@ -89,6 +89,7 @@ func main() {
 			"--strategy", "round-robin",
 			"--no-self",
 			"--isolate=false",
+			"--intercept",
 		}
 
 		// Append any remaining args
@@ -225,6 +226,7 @@ func newRunCmd() *cobra.Command {
 			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
+			intercept, _ := cmd.Flags().GetBool("intercept")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
 			mode, _ := cmd.Flags().GetString("mode")
 			pythonVersion, _ := cmd.Flags().GetString("python")
@@ -356,6 +358,7 @@ func newRunCmd() *cobra.Command {
 						TargetID:          targetNodeID,
 						JobName:           jobName,
 						Isolate:           isolate,
+						Intercept:         intercept,
 						GPU:               requestGPU,
 						GPUDevices:        devices,
 						Mode:              mode,
@@ -414,6 +417,7 @@ func newRunCmd() *cobra.Command {
 				TargetID:          targetID,
 				JobName:           jobName,
 				Isolate:           isolate,
+				Intercept:         intercept,
 				GPU:               requestGPU,
 				GPUDevices:        gpuID,
 				Mode:              mode,
@@ -444,6 +448,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
 	cmd.Flags().String("job-name", "", "Optional job name")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
+	cmd.Flags().Bool("intercept", false, "Intercept parallel primitives and route them across the cluster")
 	cmd.Flags().String("gpu", "", "GPU mode: force (GPU node required), prefer (GPU first, CPU fallback), off (CPU only). Default: infer from script imports")
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
