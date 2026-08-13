@@ -383,6 +383,7 @@ func RunMap(tasks []MapTask, base Options, concurrency int, resultsDir string, e
 			defer func() { <-sem }()
 
 			base.ResultsDir = filepath.Join(resultsDir, fmt.Sprintf("task-%d", task.ShardID))
+			base.JobSet = filepath.Base(resultsDir)
 			base.ScriptArgs = task.Args
 			base.Envs = append(append([]string{}, base.Envs...), ShardEnvs(task.ShardID, numShards)...)
 			if len(task.Envs) > 0 {
