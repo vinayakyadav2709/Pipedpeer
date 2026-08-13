@@ -132,6 +132,20 @@ func Finalize(dir string, r Record, runErr error) error {
 	return SaveRecord(dir, r)
 }
 
+// WriteManifest stores the list of files a job sent back alongside the job's
+// other history, and returns the path it was written to.
+func WriteManifest(dir string, manifest any) (string, error) {
+	b, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "results-manifest.json")
+	if err := os.WriteFile(path, b, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func SaveText(dir, name, content string) error {
 	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 }
