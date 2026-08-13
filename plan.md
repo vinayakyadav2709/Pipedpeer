@@ -111,11 +111,11 @@ terminal, and print a per-task summary line instead.
 `pipedpeer python main.py` distributes an **unmodified** script. No SDK — see `handoff.md`
 §4/D1 for why, and do not deviate from it.
 
-- [ ] Ship a `sitecustomize.py` inside the Nix closure, on `PYTHONPATH`, so Python
+- [x] Ship a `sitecustomize.py` inside the Nix closure, on `PYTHONPATH`, so Python
       auto-imports it before the user's first line
-- [ ] Patch `multiprocessing.Pool` and `concurrent.futures.ProcessPoolExecutor` →
+- [x] Patch `multiprocessing.Pool` and `concurrent.futures.ProcessPoolExecutor` →
       cluster executor talking to the local daemon
-- [ ] Register a `joblib` backend via its official plugin API (covers all of sklearn `n_jobs`)
+- [x] Register a `joblib` backend via its official plugin API (covers all of sklearn `n_jobs`)
 - [ ] Intercept `numpy.matmul`/`dot` above a high size threshold (block partitioning)
 - [ ] **Warm workers:** one persistent worker process per node per JobSet (one lease per node,
       not per task); tasks stream as pickled messages over the existing WS channel. This turns
@@ -124,6 +124,11 @@ terminal, and print a per-task summary line instead.
       it clearly wins, local cores never stop pulling, speculative re-run for the straggler tail
 - [ ] **CI benchmark gate**: shim-on vs local-only on a small workload must be within noise
 - [ ] Adaptive batching: chunk size from measured per-item cost; faster nodes get bigger chunks
+
+Note (slice shipped `6e34c08`): the shim currently spills each chunk to the local daemon's
+`/v1/pool/map`, which executes the pickled function in the closure via `bin/run`. Local-first
+measure-then-spill is in; warm workers, multi-node spill, numpy blocking, the straggler-tail
+re-run, adaptive batching and the CI gate are still open.
 
 Explicitly **out of scope** (say so in the README): Ray-style actors, a distributed object
 store (intermediates route through the driver), dynamic/nested task graphs, and synchronised

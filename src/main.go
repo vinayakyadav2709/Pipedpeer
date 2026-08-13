@@ -89,7 +89,6 @@ func main() {
 			"--strategy", "round-robin",
 			"--no-self",
 			"--isolate=false",
-			"--intercept",
 		}
 
 		// Append any remaining args
