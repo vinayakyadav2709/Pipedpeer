@@ -32,6 +32,9 @@ type Options struct {
 	// JobSet groups this run's jobhistory record under a fan-out, so the jobs
 	// view can show all tasks of one map run together.
 	JobSet string
+	// Intercept embeds the sitecustomize shim and routes parallel primitives
+	// (multiprocessing.Pool, ProcessPoolExecutor, joblib) through the cluster.
+	Intercept bool
 	// Coordinator placement diagnostics
 	PlacementSource string
 	DegradedMode    bool
@@ -66,6 +69,7 @@ func Run(opts Options) (runErr error) {
 	env, err := BuildEnvironment(absScriptPath, EnvOptions{
 		PythonVersion: opts.PythonVersion,
 		Pkgs:          opts.Pkgs,
+		Intercept:     opts.Intercept,
 	}, func(step int, title string) {
 		if step == 1 {
 			fmt.Printf("[%d/7] %s\n", step, title)
@@ -163,6 +167,7 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		StorePath:  env.StorePath,
 		GPU:        opts.GPU,
 		GPUDevices: opts.GPUDevices,
+		Intercept:  opts.Intercept,
 	}
 
 	peakBytes, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)

@@ -30,6 +30,9 @@ type ExecConfig struct {
 	StorePath  string   `json:"store_path"`
 	GPU        bool     `json:"gpu,omitempty"`
 	GPUDevices string   `json:"gpu_devices,omitempty"` // e.g. "0" or "0,1" or "all"
+	// Intercept enables the sitecustomize shim: PYTHONPATH gains the workspace's
+	// .pipedpeer/shim dir and the shim's envs are injected.
+	Intercept bool `json:"intercept,omitempty"`
 }
 
 // OCI config structures for crun bundle generation.
@@ -375,6 +378,23 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	var exitCode int
 	var peakBytes int64
 
+	// Interception: put the workspace shim on PYTHONPATH and enable it. The
+	// isolated path rebuilds env from scratch below, so this only feeds the
+	// non-isolated branch; both honour cfg.Intercept.
+	if cfg.Intercept {
+		cfg.Envs = append(cfg.Envs,
+			"PYTHONPATH="+filepath.Join(job.WorkDir, ".pipedpeer", "shim"),
+			"PIPEDPEER_SHIM=1",
+			fmt.Sprintf("PIPEDPEER_DAEMON_URL=http://127.0.0.1:%d", s.selfPort),
+			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
+			"PIPEDPEER_NODE_ID="+s.nodeID,
+			// ponytail: gate the spill path on; the local daemon is a valid
+			// /v1/pool/map target. Replace with real cluster node count when
+			// multi-node spill is wired.
+			"PIPEDPEER_NUM_SHARDS=1",
+		)
+	}
+
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
 		cmd := exec.Command("sh", "-c", runCmd)
@@ -417,6 +437,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"HOME=/home/root",
 			"PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin",
 		}
+		_ = cfg.Intercept // shim envs already in cfg.Envs above
 		for _, e := range cfg.Envs {
 			parts := strings.SplitN(e, "=", 2)
 			if len(parts) == 2 {

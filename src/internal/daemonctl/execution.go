@@ -26,6 +26,8 @@ type ExecConfig struct {
 	StorePath  string   `json:"store_path"`
 	GPU        bool     `json:"gpu,omitempty"`
 	GPUDevices string   `json:"gpu_devices,omitempty"`
+	// Intercept enables the sitecustomize shim on the node.
+	Intercept bool `json:"intercept,omitempty"`
 }
 
 type outputMessage struct {
@@ -278,7 +280,11 @@ func ExportNAR(storePath, destPath string) error {
 }
 
 // CreateWorkspaceTar creates a tarball of the project directory at destPath.
-func CreateWorkspaceTar(projectDir, destPath string) error {
+// It writes a sitecustomize.py into .pipedpeer/shim/ inside the archive, so a
+// node that enables the interception shim can put that dir on PYTHONPATH and
+// Python auto-imports it before the user's first line. shimContent empty means
+// no shim is embedded.
+func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 	ignoreFile := filepath.Join(projectDir, ".pipedpeerignore")
 
 	args := []string{"--exclude=.git", "--exclude=__pycache__", "--exclude=.venv",
@@ -294,7 +300,35 @@ func CreateWorkspaceTar(projectDir, destPath string) error {
 	}
 
 	args = append(args, "-cf", destPath, "-C", projectDir, ".")
-	cmd := exec.Command("tar", args...)
+	if err := exec.Command("tar", args...).Run(); err != nil {
+		return err
+	}
+
+	if shimContent != "" {
+		if err := appendShim(destPath, shimContent); err != nil {
+			return fmt.Errorf("append shim: %w", err)
+		}
+	}
+	return nil
+}
+
+// appendShim adds .pipedpeer/shim/sitecustomize.py as a member of an existing
+// tar archive. It stages the file in a temp dir and uses GNU tar's transform
+// to re-home it, so the user's project directory is never touched.
+func appendShim(destPath, content string) error {
+	stageDir, err := os.MkdirTemp("", "pipedpeer-shim-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+
+	stage := filepath.Join(stageDir, "sitecustomize.py")
+	if err := os.WriteFile(stage, []byte(content), 0755); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("tar", "--append", "--file="+destPath,
+		"--transform=s,.*,.pipedpeer/shim/sitecustomize.py,", stage)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
