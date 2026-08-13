@@ -68,6 +68,7 @@ func main() {
 		newNodesCmd(),
 		newPingCmd(),
 		newTasksCmd(),
+		newMapCmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE
@@ -457,6 +458,204 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().Bool("no-self", false, "Exclude self-node from placement")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
 	return cmd
+}
+
+func newMapCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "map",
+		Short: "Scatter one script across many shards/inputs and gather the results",
+		Long: "Build a Python environment once, then run the script as many tasks across " +
+			"the cluster, one per input file / args-file line / data shard. Each task gets " +
+			"its own results directory and PIPEDPEER_SHARD_ID/NUM_SHARDS envs.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			scriptPath, _ := cmd.Flags().GetString("script")
+			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			registryURL, _ := cmd.Flags().GetString("registry")
+			isolate, _ := cmd.Flags().GetBool("isolate")
+			gpuMode, _ := cmd.Flags().GetString("gpu")
+			gpuID, _ := cmd.Flags().GetString("gpu-id")
+			gpuMemStr, _ := cmd.Flags().GetString("gpu-mem")
+			noSelf, _ := cmd.Flags().GetBool("no-self")
+			strategy, _ := cmd.Flags().GetString("strategy")
+			envs, _ := cmd.Flags().GetStringSlice("env")
+			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
+			pythonVersion, _ := cmd.Flags().GetString("python")
+			mode, _ := cmd.Flags().GetString("mode")
+			concurrency, _ := cmd.Flags().GetInt("concurrency")
+			resultsDir, _ := cmd.Flags().GetString("results-dir")
+			reduce, _ := cmd.Flags().GetString("reduce")
+
+			if scriptPath == "" {
+				return fmt.Errorf("--script is required")
+			}
+
+			spec := app.MapSpec{
+				ScriptPath:  scriptPath,
+				Inputs:      mustStringSlice(cmd, "inputs"),
+				ArgsFile:    mustString(cmd, "args-file"),
+				SplitSource: mustString(cmd, "input"),
+				Split:       mustString(cmd, "split"),
+			}
+
+			tasks, shardDir, err := app.ResolveMapTasks(spec)
+			if err != nil {
+				return err
+			}
+			if shardDir != "" {
+				defer os.RemoveAll(shardDir)
+			}
+			if len(tasks) == 0 {
+				return fmt.Errorf("no tasks to run")
+			}
+
+			if resultsDir == "" {
+				resultsDir = filepath.Join(".", "results", "map-"+strconv.FormatInt(time.Now().UnixNano(), 36))
+			}
+			if err := os.MkdirAll(resultsDir, 0755); err != nil {
+				return err
+			}
+
+			var requireGPU, preferGPU bool
+			switch gpuMode {
+			case "force":
+				requireGPU, preferGPU = true, true
+			case "prefer":
+				preferGPU = true
+			case "off":
+			case "":
+				if pythondeps.HasGPUImports(scriptPath) {
+					preferGPU = true
+				}
+			default:
+				return fmt.Errorf("invalid --gpu value %q (want force, prefer, or off)", gpuMode)
+			}
+			requestGPU := requireGPU || preferGPU
+			requiredGPUMem := resourceest.ParseMemString(gpuMemStr)
+
+			nodeID, err := identity.GetOrCreate()
+			if err != nil {
+				return err
+			}
+			if _, err := daemonctl.EnsureStarted(nodeID.NodeID, daemonPort); err != nil {
+				return err
+			}
+
+			userMem := resourceest.ParseMemString(mustString(cmd, "mem"))
+			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
+			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
+				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
+
+			rrFn := func(count int) int {
+				url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", daemonPort, count)
+				resp, err := http.Get(url)
+				if err != nil {
+					return 0
+				}
+				defer resp.Body.Close()
+				var r struct{ Index int }
+				json.NewDecoder(resp.Body).Decode(&r)
+				return r.Index
+			}
+
+			coord := coordinator.New(coordinator.Config{
+				RegistryURL:      registryURL,
+				SelfIdentity:     nodeID,
+				SelfSSH:          fmt.Sprintf("root@%s:22", detectLocalIP()),
+				SelfDaemon:       daemonPort,
+				SelfLoad:         heartbeat.CollectLoad(0, 0),
+				JobName:          "map",
+				RequiredMemBytes: resReq.MemBytes,
+				RequiredGPUMem:   requiredGPUMem,
+				NoSelf:           noSelf,
+				RequireGPU:       requireGPU,
+				PreferGPU:        preferGPU,
+				Strategy:         strategy,
+				RoundRobinFn:     rrFn,
+			})
+
+			env, err := app.BuildEnvironment(scriptPath, app.EnvOptions{
+				PythonVersion: pythonVersion,
+				Pkgs:          pkgs,
+			}, func(step int, title string) {
+				if step == 1 {
+					fmt.Printf("[%d/7] %s\n", step, title)
+				} else {
+					fmt.Printf("\n[%d/7] %s\n", step, title)
+				}
+			})
+			if err != nil {
+				return err
+			}
+			defer env.Close()
+
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer cancel()
+
+			base := app.Options{
+				DaemonHost:        "",
+				DaemonPort:        daemonPort,
+				Isolate:           isolate,
+				GPU:               requestGPU,
+				GPUDevices:        gpuID,
+				Mode:              mode,
+				Envs:              envs,
+				Pkgs:              pkgs,
+				PlacementSource:   "coordinator",
+				EstimatedMemBytes: resReq.MemBytes,
+				EstimationTier:    resReq.Tier,
+			}
+
+			run := func(task app.MapTask, o app.Options) (string, error) {
+				o.ScriptPath = scriptPath
+				executor := func(host string, port int, targetNodeID string) error {
+					o.DaemonHost = host
+					o.DaemonPort = port
+					o.TargetID = targetNodeID
+					return app.RunTask(env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+				}
+				statusFn := func(msg string) {}
+				res, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
+				if err != nil {
+					return "", err
+				}
+				return res.NodeID, nil
+			}
+
+			return app.RunMap(tasks, base, concurrency, resultsDir, env, run, reduce)
+		},
+	}
+	cmd.Flags().String("script", "", "Path to Python script (required)")
+	cmd.Flags().StringSlice("inputs", nil, "Glob pattern(s); one task per matched file")
+	cmd.Flags().String("args-file", "", "File with one task's args per line")
+	cmd.Flags().String("input", "", "Record-oriented file to split (csv/jsonl/ndjson/txt)")
+	cmd.Flags().String("split", "parts:auto", "Split strategy: rows:N or parts:N (or parts:auto)")
+	cmd.Flags().Int("concurrency", 0, "Max concurrent tasks (default: all)")
+	cmd.Flags().String("results-dir", "", "Where per-task results are written")
+	cmd.Flags().String("reduce", "", "Script run locally over gathered results")
+	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
+	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
+	cmd.Flags().String("gpu", "", "GPU mode: force, prefer, off")
+	cmd.Flags().String("gpu-id", "", "Pin GPU device IDs")
+	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM on a single GPU")
+	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
+	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
+	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
+	cmd.Flags().String("python", "", "Python version")
+	cmd.Flags().String("mem", "", "Memory requirement override")
+	cmd.Flags().Bool("no-self", false, "Exclude self-node from placement")
+	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
+	cmd.Flags().String("mode", "script", "Execution mode")
+	return cmd
+}
+
+func mustString(cmd *cobra.Command, name string) string {
+	v, _ := cmd.Flags().GetString(name)
+	return v
+}
+
+func mustStringSlice(cmd *cobra.Command, name string) []string {
+	v, _ := cmd.Flags().GetStringSlice(name)
+	return v
 }
 
 func newDashboardCmd() *cobra.Command {
