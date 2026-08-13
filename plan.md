@@ -58,6 +58,16 @@ gofmt -l .                      # must print nothing
 
 The refactor gives you `BuildEnvironment()` (once) + `RunTask()` (per task). Build on it.
 
+- [x] `src/internal/app/mapset.go` — task resolution (`--inputs` glob, `--args-file`,
+      `--input` + `--split rows:N|parts:N|parts:auto`) and the fan-out runner `RunMap`
+      (semaphore, per-task results dir + `PIPEDPEER_SHARD_ID/NUM_SHARDS`, `--reduce`)
+- [x] `src/main.go` `newMapCmd` — builds env once, fans out via one shared coordinator,
+      per-task `ExecuteWithRetry` placement, per-task `RunTask` (quiet `StageFmt`)
+- [x] `mapset_test.go` — CSV header-preserving shards, line shards, args-file, inputs
+      glob, split parsing, unknown-format refusal
+- [ ] JobSet grouping in jobhistory / `pipedpeer tasks` (each task is already its own
+      `jobhistory` record with `JobName="map"`; real grouping is cosmetic)
+
 **New command** (`src/main.go`, modelled on `newRunCmd`):
 
 ```bash
