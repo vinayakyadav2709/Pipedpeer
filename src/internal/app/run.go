@@ -29,6 +29,9 @@ type Options struct {
 	// project root, which is what a single interactive run wants; a fan-out
 	// gives each task its own directory so tasks cannot overwrite each other.
 	ResultsDir string
+	// JobSet groups this run's jobhistory record under a fan-out, so the jobs
+	// view can show all tasks of one map run together.
+	JobSet string
 	// Coordinator placement diagnostics
 	PlacementSource string
 	DegradedMode    bool
@@ -110,6 +113,7 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		return fmt.Errorf("failed to initialize job history: %v", err)
 	}
 	historyRecord.JobName = resolvedJobName
+	historyRecord.JobSet = opts.JobSet
 	historyRecord.RunHost = opts.DaemonHost
 	historyRecord.PlacementSource = opts.PlacementSource
 	historyRecord.DegradedMode = opts.DegradedMode
@@ -161,9 +165,11 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		GPUDevices: opts.GPUDevices,
 	}
 
-	if err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg); err != nil {
+	peakBytes, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
+	if err != nil {
 		return fmt.Errorf("execution failed: %v", err)
 	}
+	historyRecord.PeakMemBytes = peakBytes
 
 	resultsDir := opts.ResultsDir
 	if resultsDir == "" {

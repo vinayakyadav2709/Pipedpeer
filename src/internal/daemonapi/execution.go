@@ -85,6 +85,10 @@ type OutputMessage struct {
 	Error    string `json:"error,omitempty"`
 	Done     bool   `json:"done,omitempty"`
 	ExitCode int    `json:"exit_code"`
+	// PeakMemBytes is the largest RSS (process tree, bytes) seen while running.
+	// It is set on the Done frame so the submitter can learn a job's real
+	// footprint and feed the historical estimation tier.
+	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
 }
 
 // JobRecord tracks a single uploaded job on the daemon.
@@ -143,6 +147,13 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
+// pathExists reports whether a path exists on disk. Used to short-circuit NAR
+// re-imports when a prior task already materialised the closure.
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
 		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
@@ -181,12 +192,20 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer workspaceFile.Close()
 
-	narFile, _, err := r.FormFile("nar")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required: " + err.Error()})
+	// The NAR is optional if this node already has the closure cached (same
+	// store path from a previous task in the fan-out). When present, cache it.
+	var narPath string
+	if narFile, _, err := r.FormFile("nar"); err == nil {
+		defer narFile.Close()
+		narPath, err = s.narCache.store(storePath, narFile)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cache nar: " + err.Error()})
+			return
+		}
+	} else if cached, _ := s.narCache.narFileFor(storePath); cached == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required (not cached on this node)"})
 		return
 	}
-	defer narFile.Close()
 
 	jobID := generateLeaseID()
 	jobDir := filepath.Join(s.jobDir, jobID)
@@ -233,14 +252,11 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	narPath := filepath.Join(jobDir, "closure.nar")
-	narDest, err := os.Create(narPath)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save nar: " + err.Error()})
-		return
+	// If the closure wasn't cached before, it is now (stored above). Resolve the
+	// cached NAR path for this job record.
+	if narPath == "" {
+		narPath, _ = s.narCache.narFileFor(storePath)
 	}
-	io.Copy(narDest, narFile)
-	narDest.Close()
 
 	s.jobsMu.Lock()
 	if s.jobs == nil {
@@ -257,6 +273,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		Uploaded:   uploaded,
 	}
 	s.jobsMu.Unlock()
+	s.persist()
 
 	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
 }
@@ -324,13 +341,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := importNAR(nixPath, narFile)
-	if err != nil {
-		writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
-		s.jobsMu.Lock()
-		job.Status = "failed"
-		s.jobsMu.Unlock()
-		return
+	// If the closure's run entrypoint already exists in the local store, a
+	// prior task in this fan-out imported it — skip the (expensive) re-import.
+	if runEntry := filepath.Join(job.StorePath, "bin", "run"); !pathExists(runEntry) {
+		out, err := importNAR(nixPath, narFile)
+		if err != nil {
+			writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
+			s.jobsMu.Lock()
+			job.Status = "failed"
+			s.jobsMu.Unlock()
+			return
+		}
 	}
 
 	s.jobsMu.Lock()
@@ -352,6 +373,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	var exitCode int
+	var peakBytes int64
 
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
@@ -379,7 +401,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				outCh <- OutputMessage{E: scanner.Text() + "\n"}
 			}
 		}()
+		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		cmd.Wait()
+		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	} else {
 		bundleDir := filepath.Join(filepath.Dir(job.WorkDir), "oci-bundle")
@@ -522,11 +546,13 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				outCh <- OutputMessage{E: scanner.Text() + "\n"}
 			}
 		}()
+		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		cmd.Wait()
+		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	outCh <- OutputMessage{Done: true, ExitCode: exitCode}
+	outCh <- OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
 	close(outCh)
 	<-writerDone
 	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -538,6 +564,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		job.Status = "failed"
 	}
 	s.jobsMu.Unlock()
+	s.persist()
 }
 
 // handleJobResults handles GET /v1/jobs/{id}/results.

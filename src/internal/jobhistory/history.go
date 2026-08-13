@@ -23,6 +23,7 @@ type Record struct {
 	Detached       bool   `json:"detached"`
 	Isolate        bool   `json:"isolate"`
 	JobName        string `json:"job_name,omitempty"`
+	JobSet         string `json:"job_set,omitempty"` // groups fan-out tasks from one map run
 	RemoteJobDir   string `json:"remote_job_dir,omitempty"`
 	StorePath      string `json:"store_path,omitempty"`
 	RunPath        string `json:"run_path,omitempty"`
@@ -52,6 +53,7 @@ type JobSummary struct {
 	Stage      string
 	Detached   bool
 	JobName    string
+	JobSet     string
 	TargetID   string
 	ScriptPath string
 	Remote     string
@@ -203,6 +205,7 @@ func List(limit int) ([]JobSummary, error) {
 			Stage:      r.Stage,
 			Detached:   r.Detached,
 			JobName:    r.JobName,
+			JobSet:     r.JobSet,
 			TargetID:   r.TargetID,
 			ScriptPath: r.ScriptPath,
 			Remote:     r.Remote,

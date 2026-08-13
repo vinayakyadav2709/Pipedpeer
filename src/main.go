@@ -711,13 +711,13 @@ func newJobsCmd() *cobra.Command {
 				return nil
 			}
 			fmt.Printf("history path: %s\n", historyPath)
-			fmt.Println("ID\tSTATUS\tMODE\tTARGET\tHOST\tDURATION_MS\tSTARTED")
+			fmt.Println("ID\tSTATUS\tMODE\tJOB\tJOB_SET\tTARGET\tHOST\tDURATION_MS\tSTARTED")
 			for _, it := range items {
 				mode := "fg"
 				if it.Detached {
 					mode = "bg"
 				}
-				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%d\t%s\n", it.ID, it.Status, mode, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
+				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", it.ID, it.Status, mode, it.JobName, it.JobSet, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
 			}
 			return nil
 		},
@@ -1073,6 +1073,7 @@ func runDaemon(args []string) {
 	}
 
 	server := daemonapi.New(nodeID.NodeID)
+	server.EnablePersistence()
 	server.SetMaxConcurrentJobs(maxConcurrent)
 
 	var bus *natsbus.Bus

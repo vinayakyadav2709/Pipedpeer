@@ -91,6 +91,12 @@ type Server struct {
 	// Node store (SQLite — single source of truth for all peers)
 	store *nodestore.Store
 
+	// narCache content-addresses imported Nix closures (see narcache.go)
+	narCache *narCache
+
+	// state persists leases + jobs across restarts (see state.go)
+	state *state
+
 	// Peer health cache (populated by background poller)
 	peersMu     sync.RWMutex
 	peerHealths map[string]*PeerHealth // key: "host:port"
@@ -206,6 +212,7 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		jobDir:          defaultJobDir(),
 		jobs:            make(map[string]*JobRecord),
 		store:           store,
+		narCache:        newNarCache(),
 	}
 	s.buildRouter()
 	return s
@@ -312,6 +319,22 @@ func (s *Server) StopSweeper() {
 	}
 }
 
+// EnablePersistence turns on cross-restart persistence of leases and jobs.
+// It is opt-in so the constructor stays side-effect-free for tests; the real
+// daemon calls it at startup. On enable it loads any previously saved state.
+func (s *Server) EnablePersistence() {
+	s.state = newState()
+	s.state.load(s.leases, s.jobs)
+}
+
+// persist snapshots the current leases and jobs to disk. Call after any
+// mutation so a crash or restart starts from the latest state.
+func (s *Server) persist() {
+	if s.state != nil {
+		s.state.save(s.leases, s.jobs)
+	}
+}
+
 // sweepExpired removes leases in "reserved" state past expiry + grace.
 // Running leases are NOT expired — only uncommitted reservations.
 // sweepExpired releases leases nobody is coming back for.
@@ -339,6 +362,7 @@ func (s *Server) sweepExpired() {
 			}
 		}
 	}
+	s.persist()
 }
 
 // SetRunningLeaseTTL overrides how long a running lease survives without a
@@ -450,6 +474,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
+	r.Get("/v1/store/{storePath:*}", s.handleStoreCheck)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 
@@ -947,6 +972,7 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 
 	s.leases[leaseID] = lease
 	s.mu.Unlock()
+	s.persist()
 
 	return acceptResponse{
 		Accepted:  true,
@@ -1045,6 +1071,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 	if time.Now().After(lease.ExpiresAt.Add(s.gracePeriod)) {
 		delete(s.leases, req.LeaseID)
 		s.mu.Unlock()
+		s.persist()
 		return commitResponse{Committed: false, NodeID: s.nodeID, Reason: "lease expired"}, http.StatusGone
 	}
 
@@ -1066,6 +1093,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 		if available < 0 {
 			delete(s.leases, req.LeaseID)
 			s.mu.Unlock()
+			s.persist()
 			return commitResponse{
 				Committed: false, NodeID: s.nodeID,
 				Reason: fmt.Sprintf("resources no longer available: available=%d", available),
@@ -1078,6 +1106,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 	lease.State = LeaseRunning
 	lease.RenewedAt = time.Now()
 	s.mu.Unlock()
+	s.persist()
 
 	return commitResponse{Committed: true, NodeID: s.nodeID}, http.StatusOK
 }
@@ -1098,6 +1127,7 @@ func (s *Server) processComplete(req completeRequest) {
 		delete(s.leases, leaseID)
 	}
 	s.mu.Unlock()
+	s.persist()
 }
 
 func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
@@ -1116,6 +1146,7 @@ func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
 
 	delete(s.leases, req.LeaseID)
 	s.mu.Unlock()
+	s.persist()
 
 	return map[string]string{"status": "cancelled"}, http.StatusOK
 }
