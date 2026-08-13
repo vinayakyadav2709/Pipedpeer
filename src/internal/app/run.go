@@ -29,6 +29,10 @@ type Options struct {
 	Envs          []string
 	Pkgs          []string
 	ScriptArgs    []string
+	// ResultsDir is where files the job produced are written. Defaults to the
+	// project root, which is what a single interactive run wants; a fan-out
+	// gives each task its own directory so tasks cannot overwrite each other.
+	ResultsDir string
 	// Coordinator placement diagnostics
 	PlacementSource string
 	DegradedMode    bool
@@ -192,10 +196,33 @@ func Run(opts Options) (runErr error) {
 		return fmt.Errorf("execution failed: %v", err)
 	}
 
-	if err := daemonctl.DownloadResults(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, projectRoot); err != nil {
+	resultsDir := opts.ResultsDir
+	if resultsDir == "" {
+		resultsDir = projectRoot
+	}
+	manifest, err := daemonctl.DownloadResults(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, resultsDir)
+	if err != nil {
 		fmt.Printf("      Warning: results download failed: %v\n", err)
 	} else {
-		fmt.Printf("      Results synced to %s\n", projectRoot)
+		manifest.JobID = uploadResp.JobID
+		manifestPath, writeErr := jobhistory.WriteManifest(historyDir, manifest)
+		if writeErr != nil {
+			fmt.Printf("      Warning: could not record manifest: %v\n", writeErr)
+		}
+		// Set on the record rather than on disk: the deferred Finalize writes
+		// this same value out at the end of the run.
+		historyRecord.LocalSyncRoot = resultsDir
+		historyRecord.ReceivedFiles = manifest.Count()
+		historyRecord.NewFiles = len(manifest.New)
+		historyRecord.UpdatedFiles = len(manifest.Updated)
+		historyRecord.ManifestPath = manifestPath
+		switch {
+		case manifest.Count() == 0:
+			fmt.Printf("      No files changed on the remote\n")
+		default:
+			fmt.Printf("      Synced %d file(s) to %s (%d new, %d updated)\n",
+				manifest.Count(), resultsDir, len(manifest.New), len(manifest.Updated))
+		}
 	}
 
 	fmt.Printf("\n=== Done ===\n")

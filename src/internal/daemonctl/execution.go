@@ -1,6 +1,7 @@
 package daemonctl
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -119,28 +120,93 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 }
 
 // DownloadResults fetches output files from the daemon and saves them to outDir.
-func DownloadResults(host string, port int, jobID, outDir string) error {
+func DownloadResults(host string, port int, jobID, outDir string) (*ResultManifest, error) {
 	url := fmt.Sprintf("http://%s:%d/v1/jobs/%s/results", host, port, jobID)
 	resp, err := http.Get(url)
 	if err != nil {
-		return fmt.Errorf("download results: %w", err)
+		return nil, fmt.Errorf("download results: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("download rejected: %s", string(body))
+		return nil, fmt.Errorf("download rejected: %s", string(body))
 	}
 
 	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return err
+		return nil, err
 	}
 
-	cmd := exec.Command("tar", "-C", outDir, "-xf", "-")
-	cmd.Stdin = resp.Body
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return extractResults(resp.Body, outDir)
+}
+
+// ResultManifest records what a job sent back, so a run can report what it
+// touched instead of silently overwriting files in the submitter's project.
+type ResultManifest struct {
+	JobID   string   `json:"job_id,omitempty"`
+	OutDir  string   `json:"out_dir"`
+	New     []string `json:"new,omitempty"`
+	Updated []string `json:"updated,omitempty"`
+}
+
+// Count is the total number of files received.
+func (m *ResultManifest) Count() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.New) + len(m.Updated)
+}
+
+// extractResults unpacks a results tar into outDir, classifying each entry as
+// new or updated relative to what is already on disk. Entries that would
+// escape outDir are refused: the archive comes from another machine.
+func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
+	manifest := &ResultManifest{OutDir: outDir}
+	root, err := filepath.Abs(outDir)
+	if err != nil {
+		return nil, err
+	}
+
+	tr := tar.NewReader(body)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return manifest, nil
+		}
+		if err != nil {
+			return manifest, fmt.Errorf("read results: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		target := filepath.Join(root, filepath.FromSlash(hdr.Name))
+		if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return manifest, fmt.Errorf("refusing result path outside %s: %s", outDir, hdr.Name)
+		}
+
+		_, statErr := os.Stat(target)
+		existed := statErr == nil
+
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return manifest, err
+		}
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+		if err != nil {
+			return manifest, err
+		}
+		if _, err := io.Copy(f, tr); err != nil {
+			f.Close()
+			return manifest, err
+		}
+		f.Close()
+
+		if existed {
+			manifest.Updated = append(manifest.Updated, hdr.Name)
+		} else {
+			manifest.New = append(manifest.New, hdr.Name)
+		}
+	}
 }
 
 // ExportNAR exports the full runtime closure of a store path to a NAR file.

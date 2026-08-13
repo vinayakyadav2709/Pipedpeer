@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -95,6 +96,26 @@ type JobRecord struct {
 	ScriptPath string
 	Status     string
 	CreatedAt  time.Time
+	// Uploaded stamps every file the submitter sent, keyed by path relative to
+	// WorkDir. Results are diffed against it so only what the job actually
+	// produced or changed travels back.
+	Uploaded map[string]FileStamp
+}
+
+// FileStamp identifies a file version well enough to tell whether a job
+// rewrote it. Size plus modification time is what tar itself preserves.
+type FileStamp struct {
+	Size    int64
+	ModTime time.Time
+}
+
+func stampOf(info os.FileInfo) FileStamp {
+	return FileStamp{Size: info.Size(), ModTime: info.ModTime()}
+}
+
+// changed reports whether the file on disk differs from what was uploaded.
+func (f FileStamp) changed(other FileStamp) bool {
+	return f.Size != other.Size || !f.ModTime.Equal(other.ModTime)
 }
 
 // UploadResponse is returned by POST /v1/jobs/upload.
@@ -176,6 +197,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uploaded := make(map[string]FileStamp)
 	tr := tar.NewReader(workspaceFile)
 	for {
 		hdr, err := tr.Next()
@@ -203,6 +225,11 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			io.Copy(f, tr)
 			f.Close()
+			if rel, err := filepath.Rel(workDir, cleanTarget); err == nil {
+				if info, err := os.Stat(cleanTarget); err == nil {
+					uploaded[filepath.ToSlash(rel)] = stampOf(info)
+				}
+			}
 		}
 	}
 
@@ -227,6 +254,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		ScriptPath: scriptPath,
 		Status:     "uploaded",
 		CreatedAt:  time.Now(),
+		Uploaded:   uploaded,
 	}
 	s.jobsMu.Unlock()
 
@@ -527,12 +555,58 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-results.tar", jobID))
 
-	cmd := exec.Command("tar", "-C", job.WorkDir, "-cf", "-", ".")
-	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return
+	if err := writeResultsTar(w, job); err != nil {
+		// Headers are already out, so the client sees a truncated archive and
+		// reports the read error. Log for the node operator.
+		fmt.Fprintf(os.Stderr, "results tar for %s failed: %v\n", jobID, err)
 	}
+}
+
+// writeResultsTar streams the files a job created or modified. Sending the
+// whole work dir back would overwrite the submitter's own source files with
+// copies of what they just uploaded, and makes every task in a fan-out
+// re-transfer the entire project.
+func writeResultsTar(w io.Writer, job *JobRecord) error {
+	tw := tar.NewWriter(w)
+	defer tw.Close()
+
+	return filepath.WalkDir(job.WorkDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(job.WorkDir, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
+			return nil
+		}
+
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return nil
+		}
+		hdr.Name = rel
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		_, err = io.Copy(tw, f)
+		return err
+	})
 }
 
 // importNAR imports a closure into the local Nix store.
