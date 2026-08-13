@@ -9,15 +9,16 @@ builds:
     binary: pipedpeer
     env:
       - CGO_ENABLED=0
+    # Linux is the only platform that can run jobs (crun sandbox, Linux
+    # namespaces, /dev/nvidia*). darwin is built as a submit-side client.
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
 
-# By default, GoReleaser creates archives. 
+# By default, GoReleaser creates archives.
 # "format: binary" ensures we output raw binaries instead.
 archives:
   - format: binary
@@ -25,3 +26,26 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+
+snapshot:
+  name_template: "{{ incpatch .Version }}-nightly.{{ .Now.Format \"20060102\" }}-{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Other changes
+      order: 99
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch

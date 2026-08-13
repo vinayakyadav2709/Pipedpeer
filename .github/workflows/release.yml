@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - '*' # Triggers the workflow on any tag push
+      - 'v*' # Stable releases only; nightly is published by nightly.yml
 
 permissions:
   contents: write # Required to publish a GitHub Release

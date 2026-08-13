@@ -1,0 +1,144 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  # Skip the whole run when dev has not moved since the last published nightly.
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      sha: ${{ steps.decide.outputs.sha }}
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          echo "sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          published="$(gh release view nightly --json targetCommitish -q .targetCommitish 2>/dev/null || echo '')"
+          if [ "$published" = "$head_sha" ] && [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "dev unchanged since last nightly ($head_sha); skipping."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "building nightly for $head_sha"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'src/go.mod'
+          cache-dependency-path: 'src/go.sum'
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test (race)
+        run: go test -race -count=1 ./...
+
+  # Integration tests need a real Nix store and crun. Non-blocking until the
+  # runner setup has proven itself; flip continue-on-error off once it has.
+  integration:
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'src/go.mod'
+          cache-dependency-path: 'src/go.sum'
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install crun
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y crun
+
+      - name: Run integration tests
+        run: ./scripts/test-integration.sh
+
+  release:
+    needs: [check, test]
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'src/go.mod'
+          cache-dependency-path: 'src/go.sum'
+
+      - name: Build snapshot artifacts
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --snapshot --clean
+
+      - name: Publish rolling nightly prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          # Roll the nightly pointer: drop the previous release and its tag,
+          # then republish from the current dev commit.
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+
+          notes="Automated nightly build from \`dev\` @ \`${SHA}\`.
+
+          Unstable: built from the development stream and not release tested.
+          Install with: \`./scripts/install-pipedpeer.sh --channel nightly\`"
+
+          gh release create nightly \
+            --title "Nightly ($(date -u +%Y-%m-%d))" \
+            --notes "$notes" \
+            --prerelease \
+            --target "$SHA" \
+            dist/pipedpeer-* dist/checksums.txt
