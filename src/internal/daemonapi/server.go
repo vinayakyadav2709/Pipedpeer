@@ -870,12 +870,33 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: "target_id does not match this node"}, http.StatusConflict
 	}
 
+	// Host metrics are gathered before the lock: they read the OS and GPU, not
+	// the lease table, and must not be collected while admission is held.
+	// Memory is read with zero reservations so the reserved total can be
+	// recomputed from the lease table inside the critical section.
+	hostLoad := heartbeat.CollectLoad(0, 0)
+	devices := gpu.PerDevice()
+	gpuPresent := gpu.Detect().Vendor != gpu.VendorNone
+
+	if req.RequiredCores > 0 {
+		if free := freeCoresFromLoad(hostLoad); free < float64(req.RequiredCores) {
+			reason := fmt.Sprintf("insufficient cores: need %d, free %.1f", req.RequiredCores, free)
+			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
+		}
+	}
+
+	// Admission and lease creation happen under one lock. Checking capacity and
+	// then inserting in a separate critical section would let concurrent
+	// submitters all observe the same free slot and blow past the cap.
+	s.mu.Lock()
+
 	// Concurrency cap. Counts every live lease, not just running ones: a
 	// reserved-but-not-yet-committed lease is a task on its way here, and
 	// counting only running leases would let an unbounded number of
 	// submitters slip past the cap in the window before they commit.
 	if max := s.MaxConcurrentJobs(); max > 0 {
-		if active := s.ActiveLeases(); active >= max {
+		if active := len(s.leases); active >= max {
+			s.mu.Unlock()
 			reason := fmt.Sprintf("at concurrency limit: %d/%d tasks", active, max)
 			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
 		}
@@ -883,17 +904,18 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 
 	// Resource admission check
 	if req.RequiredMemBytes > 0 {
-		available := s.AvailableForJob()
+		var reserved int64
+		for _, l := range s.leases {
+			reserved += l.MemBytes
+		}
+		available := hostLoad.AvailableMemBytes - reserved
+		if available < 0 {
+			available = 0
+		}
 		if available < req.RequiredMemBytes {
+			s.mu.Unlock()
 			reason := fmt.Sprintf("insufficient memory: need %d bytes, available %d bytes",
 				req.RequiredMemBytes, available)
-			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
-		}
-	}
-
-	if req.RequiredCores > 0 {
-		if free := s.freeCores(); free < float64(req.RequiredCores) {
-			reason := fmt.Sprintf("insufficient cores: need %d, free %.1f", req.RequiredCores, free)
 			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: reason}, http.StatusServiceUnavailable
 		}
 	}
@@ -902,8 +924,9 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	// node do not land on the same card.
 	gpuIndex := -1
 	if req.RequireGPU {
-		gpuIndex = s.reserveGPU(req.RequiredGPUMem)
+		gpuIndex = s.reserveGPULocked(devices, gpuPresent, req.RequiredGPUMem)
 		if gpuIndex < 0 {
+			s.mu.Unlock()
 			return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: "no GPU available"}, http.StatusServiceUnavailable
 		}
 	}
@@ -922,7 +945,6 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		ExpiresAt:     now.Add(s.leaseDuration),
 	}
 
-	s.mu.Lock()
 	s.leases[leaseID] = lease
 	s.mu.Unlock()
 
@@ -937,7 +959,12 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 
 // freeCores estimates CPU cores not currently in use on this node.
 func (s *Server) freeCores() float64 {
-	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	return freeCoresFromLoad(heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem()))
+}
+
+// freeCoresFromLoad derives free cores from an already-collected load sample,
+// so admission can reuse one sample instead of re-reading the host.
+func freeCoresFromLoad(load registry.LoadInfo) float64 {
 	cores := load.TotalCPUs
 	if cores <= 0 {
 		cores = runtime.NumCPU()
@@ -953,25 +980,34 @@ func (s *Server) freeCores() float64 {
 // already held by a live lease. Returns -1 when nothing satisfies minVRAM.
 func (s *Server) reserveGPU(minVRAM int64) int {
 	devices := gpu.PerDevice()
+	gpuPresent := gpu.Detect().Vendor != gpu.VendorNone
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reserveGPULocked(devices, gpuPresent, minVRAM)
+}
+
+// reserveGPULocked is reserveGPU's body with the caller holding s.mu, so the
+// device choice and the lease that claims it can be made atomically. Device
+// telemetry is passed in because reading it shells out to vendor tools.
+func (s *Server) reserveGPULocked(devices []gpu.DeviceUsage, gpuPresent bool, minVRAM int64) int {
 	if len(devices) == 0 {
 		// A GPU with no per-device telemetry (Intel, or AMD without a
 		// parseable rocm-smi) can still run the job on device 0. But with no
 		// VRAM numbers we cannot honour a minimum, so a request that specifies
 		// one must be refused rather than accepted on a guess.
-		if gpu.Detect().Vendor != gpu.VendorNone && minVRAM == 0 {
+		if gpuPresent && minVRAM == 0 {
 			return 0
 		}
 		return -1
 	}
 
-	s.mu.Lock()
 	reserved := make(map[int]bool, len(s.leases))
 	for _, l := range s.leases {
 		if l.GPUIndex >= 0 && (l.State == LeaseReserved || l.State == LeaseRunning) {
 			reserved[l.GPUIndex] = true
 		}
 	}
-	s.mu.Unlock()
 
 	best := -1
 	var bestFree int64 = -1
