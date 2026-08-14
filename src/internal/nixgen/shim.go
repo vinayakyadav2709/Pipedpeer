@@ -275,6 +275,98 @@ def _matmul_with(block, other):
     return _np.matmul(block, other)
 
 
+def _torch_dispatch(blocks, other):
+    """Run [torch.matmul(block, other) for block in blocks] over the cluster.
+    Uses GPU on the worker when available (moves both tensors to cuda before
+    matmul) so ML tensor work utilises remote GPUs fully. Falls back to local
+    on any failure so an absent cluster never breaks the model."""
+    import base64
+    import json
+    import pickle
+    import urllib.request
+    try:
+        body = json.dumps({
+            "func": _pickle_func(_torch_matmul_with),
+            "items": [base64.b64encode(pickle.dumps(b)).decode() for b in blocks],
+            "items_b64": True,
+            "starmap": False,
+        }).encode()
+        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "X-Pipedpeer-Store": _STORE})
+        with urllib.request.urlopen(req, timeout=1200) as resp:
+            rs = json.loads(resp.read())["results"]
+        return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+    except Exception as e:
+        _log("torch remote failed (%s); local fallback" % e)
+        import torch as _th
+        return [_torch_matmul_with(b, other) for b in blocks]
+
+
+def _torch_matmul_with(block, other):
+    import torch as _th
+    if _TORCH_ORIG_MATMUL is not None:
+        matmul = _TORCH_ORIG_MATMUL
+    else:
+        matmul = _th.matmul
+    if _th.cuda.is_available():
+        block, other = block.cuda(), other.cuda()
+        return matmul(block, other).cpu()
+    return matmul(block, other)
+
+
+_TORCH_ORIG_MATMUL = None
+_TORCH_ORIG_MM = None
+
+
+def _install_torch():
+    # torch block-row matmul/mm: intercept large 2D tensor ops and split A's
+    # rows across the cluster, each block computed on the worker (on GPU when
+    # the worker has one), results cat'd back. Opt-in via PIPEDPEER_TORCH=1 —
+    # same D2 reasoning as numpy: shipping tensors only pays off when local
+    # compute is the bottleneck, and a worker with a GPU is the point.
+    if os.environ.get("PIPEDPEER_TORCH") != "1":
+        return
+    try:
+        import torch as _th
+    except ImportError:
+        return
+
+    _MIN_BYTES = 32 * 1024 * 1024
+
+    _orig_matmul = _th.matmul
+    _orig_mm = _th.mm
+    global _TORCH_ORIG_MATMUL, _TORCH_ORIG_MM
+    _TORCH_ORIG_MATMUL = _orig_matmul
+    _TORCH_ORIG_MM = _orig_mm
+
+    def _matmul(a, b, *args, **kw):
+        import torch as _th
+        if (a.dim() == 2 and b.dim() == 2 and a.shape[1] == b.shape[0]
+                and a.element_size() * a.nelement() >= _MIN_BYTES
+                and a.shape[0] >= 8 and _URL and _ENABLED):
+            try:
+                n_blocks = max(2, min(64, a.shape[0] // 8))
+                rows = max(1, a.shape[0] // n_blocks)
+                blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
+                return _th.cat(_torch_dispatch(blocks, b), dim=0)
+            except Exception as e:
+                _log("torch matmul fallback (%s)" % e)
+        return _orig_matmul(a, b, *args, **kw)
+
+    def _mm(a, b, *args, **kw):
+        return _matmul(a, b, *args, **kw)
+
+    _th.matmul = _matmul
+    _th.mm = _mm
+    try:
+        _th.Tensor.matmul = _matmul
+        _th.Tensor.mm = _mm
+    except Exception:
+        pass
+    _log("torch matmul/mm interception installed")
+
+
 def _install_numpy():
     # numpy block-row matmul: intercept A @ B above a size threshold, splitting
     # A's rows across the cluster. Ships each block to the warm worker which
@@ -328,6 +420,7 @@ def _install():
     if not _ENABLED:
         return
     _install_numpy()
+    _install_torch()
     import multiprocessing
     multiprocessing.Pool = _ClusterPool
 

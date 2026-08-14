@@ -117,6 +117,9 @@ terminal, and print a per-task summary line instead.
       cluster executor talking to the local daemon
 - [x] Register a `joblib` backend via its official plugin API (covers all of sklearn `n_jobs`)
 - [x] Intercept `numpy.matmul`/`dot` above a high size threshold (block partitioning)
+- [x] Intercept `torch.matmul`/`mm`/`Tensor.matmul`/`Tensor.mm` above a size threshold
+      (block-row partitioning; worker computes on its GPU when available) — opt-in via
+      `PIPEDPEER_TORCH=1`, the ML/GPU demo path
 - [x] **Warm workers:** one persistent worker process per node per JobSet (one lease per node,
       not per task); tasks stream as pickled messages over the existing WS channel. This turns
       dispatch from seconds (job provisioning) into milliseconds.
