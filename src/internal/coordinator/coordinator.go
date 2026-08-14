@@ -193,6 +193,21 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		candidates = mergeNode(candidates, ScoredNode{Node: c.buildSelfNode(), Source: SourceSelf})
 	}
 
+	// 4b. --no-self must exclude the local machine regardless of which source it
+	// surfaced through. buildSelfNode is one path, but the local daemon also
+	// lists itself in /v1/nodes (queryDaemonNodes) and LAN discovery can return
+	// it; filter by node id so "distribute to OTHER devices" is honoured.
+	if c.noSelf && c.selfIdentity.NodeID != "" {
+		filtered := candidates[:0]
+		for _, cnd := range candidates {
+			if cnd.Node.NodeID == c.selfIdentity.NodeID {
+				continue
+			}
+			filtered = append(filtered, cnd)
+		}
+		candidates = filtered
+	}
+
 	// 5. Arch compatibility filter — closure is built for local arch
 	for i := range candidates {
 		if candidates[i].Rejected {
