@@ -1149,6 +1149,11 @@ func runDaemon(args []string) {
 
 	server.StartPeerPoller(10 * time.Second)
 
+	// Multi-node interception: allow pool-map chunks to fan out to healthy
+	// peers that share this closure. Local always participates, so a remote
+	// node adds capacity but never slows a run down.
+	server.EnablePoolSpill()
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {

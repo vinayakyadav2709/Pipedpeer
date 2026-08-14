@@ -2,6 +2,7 @@ package daemonapi
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -99,10 +100,22 @@ type poolWorker struct {
 type poolManager struct {
 	mu      sync.Mutex
 	workers map[string]*poolWorker // storePath → warm worker
+
+	// peerFn returns healthy peer daemon endpoints (host:port) that share the
+	// closure, used for multi-node spill. Nil disables spill (single node).
+	peerFn func(storePath string) []string
 }
 
 func newPoolManager() *poolManager {
 	return &poolManager{workers: make(map[string]*poolWorker)}
+}
+
+// SetPeerFn installs the function that returns peer daemon endpoints eligible
+// to run chunks for a store path. Without it, all work stays local.
+func (pm *poolManager) SetPeerFn(fn func(storePath string) []string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.peerFn = fn
 }
 
 // handlePoolMap executes a pickled function over a batch of items using the
@@ -144,7 +157,97 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 
 // runChunk dispatches one chunk, preferring a warm worker and falling back to
 // the cold per-request spawn when the warm worker dies or cannot start.
+// When healthy peers share the store, items are split across local + peers and
+// results are merged in input order — local is always one of the workers, so a
+// remote node adds capacity but never removes it (D2: never slower).
 func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
+	// Peel off peers before taking the local worker lock so each local submit
+	// serialises only its own sub-chunk.
+	var peers []string
+	pm.mu.Lock()
+	if pm.peerFn != nil {
+		peers = pm.peerFn(storePath)
+	}
+	pm.mu.Unlock()
+
+	// One worker per participating node. Local is always included.
+	type part struct {
+		items []json.RawMessage
+		// run is set only for the local part; remote parts POST instead.
+		runPath string
+		peer    string
+	}
+	var parts []part
+
+	if len(peers) == 0 {
+		parts = []part{{items: items, runPath: runPath}}
+	} else {
+		// Split evenly across local + peers. A small chunk stays local (splitting
+		// would cost more than it saves); only fan out once there is real work.
+		const minSplit = 8
+		if len(items) < minSplit {
+			parts = []part{{items: items, runPath: runPath}}
+		} else {
+			workers := len(peers) + 1
+			base := len(items) / workers
+			extra := len(items) % workers
+			idx := 0
+			for i := 0; i < workers; i++ {
+				size := base
+				if i < extra {
+					size++
+				}
+				if size == 0 {
+					continue
+				}
+				chunk := items[idx : idx+size]
+				idx += size
+				if i == workers-1 {
+					parts = append(parts, part{items: chunk, runPath: runPath}) // local
+				} else {
+					parts = append(parts, part{items: chunk, peer: peers[i]})
+				}
+			}
+		}
+	}
+
+	results := make([]any, 0, len(items))
+	mu := &sync.Mutex{}
+	var wg sync.WaitGroup
+	errs := make([]error, len(parts))
+
+	for i, p := range parts {
+		wg.Add(1)
+		go func(i int, p part) {
+			defer wg.Done()
+			var r []any
+			var e error
+			if p.runPath != "" {
+				r, e = pm.runLocal(runPath, storePath, pickledFunc, p.items, starmap)
+			} else {
+				r, e = pm.runRemote(p.peer, storePath, pickledFunc, p.items, starmap)
+			}
+			if e != nil {
+				errs[i] = e
+				return
+			}
+			mu.Lock()
+			results = append(results, r...)
+			mu.Unlock()
+		}(i, p)
+	}
+	wg.Wait()
+
+	for _, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+	}
+	return results, nil
+}
+
+// runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
+func (pm *poolManager) runLocal(runPath, storePath, pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
 	if !ok || worker.dead() {
@@ -170,6 +273,45 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []
 		delete(pm.workers, storePath)
 		pm.mu.Unlock()
 		return runPoolChunk(runPath, pickledFunc, items, starmap)
+	}
+	return results, nil
+}
+
+// runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
+// have the same closure already (peerFn filters for that). Failures are fatal
+// for the chunk: the caller returns them rather than silently dropping work.
+func (pm *poolManager) runRemote(peer, storePath, pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
+	payload := map[string]any{"func": pickledFunc, "items": items, "starmap": starmap}
+	body, _ := json.Marshal(payload)
+	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Pipedpeer-Store", storePath)
+
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("peer %s: %v", peer, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer %s returned %d", peer, resp.StatusCode)
+	}
+	var out struct {
+		Results []map[string]string `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	results := make([]any, 0, len(out.Results))
+	for _, r := range out.Results {
+		if _, err := base64.StdEncoding.DecodeString(r["pickle"]); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
 	}
 	return results, nil
 }
