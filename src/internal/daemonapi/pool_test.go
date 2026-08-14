@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -64,7 +65,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	}
 
 	items := []json.RawMessage{json.RawMessage(`1`), json.RawMessage(`2`), json.RawMessage(`3`)}
-	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), items, false)
+	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), items, false, false)
 	if err != nil {
 		t.Fatalf("runPoolChunk: %v", err)
 	}
@@ -149,7 +150,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	runPath := filepath.Join(store, "bin", "run")
 	for i := 0; i < 3; i++ {
 		items := []json.RawMessage{json.RawMessage(fmt.Sprintf(`%d`, i+1)), json.RawMessage(`2`)}
-		if _, err := pm.runChunk(runPath, store, string(pickled), items, false); err != nil {
+		if _, err := pm.runChunk(runPath, store, string(pickled), items, false, false); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
@@ -213,7 +214,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
 
-	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), items, false)
+	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), items, false, false)
 	if err != nil {
 		t.Fatalf("runChunk spill: %v", err)
 	}
@@ -280,7 +281,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s.pool.runChunk(runPath, storePath, string(pickled), items, false)
+	results, err := s.pool.runChunk(runPath, storePath, string(pickled), items, false, false)
 	if err != nil {
 		t.Fatalf("chunk failed though a peer was down: %v", err)
 	}
@@ -304,5 +305,98 @@ func TestPoolMapRejectsMissingStore(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("want 400 without store header, got %d", resp.StatusCode)
+	}
+}
+
+// TestRunPoolChunkItemsB64 verifies the items_b64 transport: pickled objects
+// (the mechanism numpy block-partitioned matmul uses) ship as base64 blobs and
+// are unpickled by the worker before the callable runs. A pickled list stands in
+// for a numpy block so the test needs no numpy.
+func TestRunPoolChunkItemsB64(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	store := t.TempDir()
+	os.MkdirAll(filepath.Join(store, "bin"), 0755)
+	runScript := "#!/bin/sh\nexec " + python + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(store, "bin", "run"), []byte(runScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	modDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def total(xs):\n    return sum(xs)\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
+
+	emit := `
+import base64, pickle, sys
+sys.path.insert(0, sys.argv[1])
+from worker_mod import total
+sys.stdout.write(base64.b64encode(pickle.dumps(total)).decode())
+`
+	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
+	if err != nil {
+		t.Fatalf("emit pickle: %v", err)
+	}
+
+	// Ship each item as a base64-pickled list, mimicking a numpy block.
+	b64pickle := `
+import base64, pickle, sys
+sys.stdout.write(base64.b64encode(pickle.dumps([int(a) for a in sys.argv[1:]])).decode())
+`
+	var items []json.RawMessage
+	for _, row := range [][]int{{1, 2}, {3, 4}, {5, 6}} {
+		args := make([]string, 0, len(row)+1)
+		args = append(args, "-c", b64pickle)
+		for _, n := range row {
+			args = append(args, fmt.Sprintf("%d", n))
+		}
+		out, err := exec.Command(python, args...).Output()
+		if err != nil {
+			t.Fatalf("pickle item: %v", err)
+		}
+		items = append(items, json.RawMessage(fmt.Sprintf("%q", string(out))))
+	}
+
+	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), items, false, true)
+	if err != nil {
+		t.Fatalf("runPoolChunk: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("want 3 results, got %d", len(results))
+	}
+
+	unpickle := `
+import pickle, sys
+sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
+`
+	var got []int
+	for _, r := range results {
+		m, ok := r.(map[string]string)
+		if !ok || m["pickle"] == "" {
+			t.Fatalf("bad result shape: %#v", r)
+		}
+		blob, err := base64.StdEncoding.DecodeString(m["pickle"])
+		if err != nil {
+			t.Fatalf("bad pickle blob: %v", err)
+		}
+		blobPath := filepath.Join(t.TempDir(), "r.pkl")
+		if err := os.WriteFile(blobPath, blob, 0644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(python, "-c", unpickle, blobPath).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v int
+		if _, err := fmt.Sscanf(string(out), "%d", &v); err != nil {
+			t.Fatalf("unpickle result: %v", err)
+		}
+		got = append(got, v)
+	}
+	if !reflect.DeepEqual(got, []int{3, 7, 11}) {
+		t.Fatalf("want [3 7 11], got %v", got)
 	}
 }

@@ -243,9 +243,91 @@ def _chunk(seq, size):
     return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 
+def _np_dispatch(blocks, other):
+    """Run [np.matmul(block, other) for block in blocks] over the cluster via
+    the warm-worker /v1/pool/map path (items_b64: blocks ship as pickled numpy).
+    Falls back to local on any failure so an absent cluster never breaks math."""
+    import base64
+    import json
+    import pickle
+    import urllib.request
+    try:
+        body = json.dumps({
+            "func": _pickle_func(_matmul_with),
+            "items": [base64.b64encode(pickle.dumps(b)).decode() for b in blocks],
+            "items_b64": True,
+            "starmap": False,
+        }).encode()
+        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "X-Pipedpeer-Store": _STORE})
+        with urllib.request.urlopen(req, timeout=1200) as resp:
+            rs = json.loads(resp.read())["results"]
+        return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+    except Exception as e:
+        _log("numpy remote failed (%s); local fallback" % e)
+        import numpy as _np
+        return [_np.matmul(b, other) for b in blocks]
+
+
+def _matmul_with(block, other):
+    import numpy as _np
+    return _np.matmul(block, other)
+
+
+def _install_numpy():
+    # numpy block-row matmul: intercept A @ B above a size threshold, splitting
+    # A's rows across the cluster. Ships each block to the warm worker which
+    # already unpickles it (items_b64). Opt-in (PIPEDPEER_NUMPY=1): shipping a
+    # matrix over JSON+pickle only wins when the local BLAS is the bottleneck;
+    # a single warm worker running serial BLAS is otherwise slower than the
+    # local multithreaded BLAS, violating D2.
+    if os.environ.get("PIPEDPEER_NUMPY") != "1":
+        return
+    try:
+        import numpy as _np
+    except ImportError:
+        return
+
+    _MIN_BYTES = 32 * 1024 * 1024  # only intercept once there's real compute
+
+    def _matmul(a, b, *args, **kw):
+        import numpy as _np
+        if (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
+                and a.nbytes >= _MIN_BYTES
+                and a.shape[0] >= 8 and _URL and _ENABLED):
+            try:
+                n_blocks = max(2, min(64, a.shape[0] // 8))
+                rows = max(1, a.shape[0] // n_blocks)
+                blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
+                return _np.vstack(_np_dispatch(blocks, b))
+            except Exception as e:
+                _log("numpy matmul fallback (%s)" % e)
+        return _np.matmul(a, b, *args, **kw)
+
+    def _dot(a, b, *args, **kw):
+        import numpy as _np
+        if (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
+                and a.nbytes >= _MIN_BYTES and a.shape[0] >= 8
+                and _URL and _ENABLED):
+            try:
+                n_blocks = max(2, min(64, a.shape[0] // 8))
+                rows = max(1, a.shape[0] // n_blocks)
+                blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
+                return _np.vstack(_np_dispatch(blocks, b))
+            except Exception as e:
+                _log("numpy dot fallback (%s)" % e)
+        return _np.dot(a, b, *args, **kw)
+
+    _np.matmul = _matmul
+    _np.dot = _dot
+    _log("numpy matmul/dot interception installed")
+
+
 def _install():
     if not _ENABLED:
         return
+    _install_numpy()
     import multiprocessing
     multiprocessing.Pool = _ClusterPool
 
