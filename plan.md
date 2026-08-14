@@ -97,9 +97,9 @@ progress — pass `StageFmt: ""` for fan-out tasks so N tasks don't interleave g
 terminal, and print a per-task summary line instead.
 
 ### 3. Part 2d — Supporting fixes (cheap, do alongside 2b)
-- [ ] Write `Record.PeakMemBytes` after runs so the "historical" estimation tier actually fires
-- [ ] Persist the daemon's job map + leases (currently lost on restart)
-- [ ] Content-address NAR/workspace uploads (skip upload if the node already has that hash) —
+- [x] Write `Record.PeakMemBytes` after runs so the "historical" estimation tier actually fires
+- [x] Persist the daemon's job map + leases (currently lost on restart)
+- [x] Content-address NAR/workspace uploads (skip upload if the node already has that hash) —
       this is what makes N-node fan-out fast instead of N× upload
 
 ---

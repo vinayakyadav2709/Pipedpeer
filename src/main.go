@@ -1153,6 +1153,7 @@ func runDaemon(args []string) {
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sig
+		server.StopWarmWorkers()
 		if hbClient != nil {
 			hbClient.Stop()
 		}
