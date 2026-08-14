@@ -244,6 +244,51 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	}
 }
 
+// TestPoolSpillDeadPeerFallsBackToLocal ensures that when a peer is unreachable
+// the chunk still completes locally instead of failing (D2/D3: a remote node
+// never subtracts capacity).
+func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
+	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	modDir := t.TempDir()
+	os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644)
+	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
+	emit := `
+import base64, pickle, sys
+sys.path.insert(0, sys.argv[1])
+from worker_mod import double
+sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
+`
+	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
+	if err != nil {
+		t.Fatalf("emit pickle: %v", err)
+	}
+
+	s := New("fallback-node-xxxxxxxx")
+	defer s.StopWarmWorkers()
+	// Point at an address that refuses connections.
+	s.pool.SetPeerFn(func(_ string) []string { return []string{"127.0.0.1:1"} })
+
+	var items []json.RawMessage
+	for i := 1; i <= 16; i++ {
+		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
+	}
+	results, err := s.pool.runChunk(runPath, storePath, string(pickled), items, false)
+	if err != nil {
+		t.Fatalf("chunk failed though a peer was down: %v", err)
+	}
+	if len(results) != 16 {
+		t.Fatalf("want 16 results after local fallback, got %d", len(results))
+	}
+}
+
 // TestPoolMapRejectsMissingStore checks the worker endpoint rejects requests
 // that don't name a valid store path (a trust guard: untrusted peers cannot
 // point it at arbitrary binaries).
