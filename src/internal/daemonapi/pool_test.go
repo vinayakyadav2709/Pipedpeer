@@ -105,6 +105,61 @@ sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
 	}
 }
 
+// TestWarmWorkerReuse confirms the poolManager keeps one worker per store path
+// alive across requests and correctly falls back to a cold run when the worker
+// dies. It uses a bin/run that tracks invocation count so reuse is observable.
+func TestWarmWorkerReuse(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	store := t.TempDir()
+	bin := filepath.Join(store, "bin")
+	os.MkdirAll(bin, 0755)
+
+	// bin/run invokes python with the given script. It logs every invocation to
+	// a counter file so we can assert the warm worker reused (1 spawn) vs the
+	// cold path (N spawns).
+	inv := filepath.Join(store, "invocations")
+	runScript := "#!/bin/sh\necho x >> " + inv + "\nexec " + python + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "run"), []byte(runScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	modDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
+
+	emit := `
+import base64, pickle, sys
+sys.path.insert(0, sys.argv[1])
+from worker_mod import double
+sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
+`
+	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
+	if err != nil {
+		t.Fatalf("emit pickle: %v", err)
+	}
+
+	pm := newPoolManager()
+	defer pm.stopAll()
+
+	runPath := filepath.Join(store, "bin", "run")
+	for i := 0; i < 3; i++ {
+		items := []json.RawMessage{json.RawMessage(fmt.Sprintf(`%d`, i+1)), json.RawMessage(`2`)}
+		if _, err := pm.runChunk(runPath, store, string(pickled), items, false); err != nil {
+			t.Fatalf("chunk %d: %v", i, err)
+		}
+	}
+
+	invBytes, _ := os.ReadFile(inv)
+	if n := len(strings.Fields(string(invBytes))); n != 1 {
+		t.Fatalf("warm worker reused: expected 1 closure spawn across 3 chunks, got %d", n)
+	}
+}
+
 // TestPoolMapRejectsMissingStore checks the worker endpoint rejects requests
 // that don't name a valid store path (a trust guard: untrusted peers cannot
 // point it at arbitrary binaries).

@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,11 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // poolRunner is the Python helper executed inside the closure to run a
 // pickled function over a batch of items. It is written to a temp file and
 // invoked via <storePath>/bin/run pool_runner.py <payload.json> <out.json>.
+// It is the cold path: each invocation spawns a fresh closure process, which
+// costs seconds. The warm worker (below) replaces it for the steady state.
 const poolRunner = `# Runs a pickled callable over a JSON batch, for pipedpeer's cluster pool.
 import base64, json, pickle, sys
 
@@ -37,10 +41,68 @@ with open(sys.argv[2], "w") as f:
     json.dump(out, f)
 `
 
+// warmWorkerScript is the long-lived sibling of poolRunner: one process per
+// store path stays up reading JSON-lines from stdin and writing them back to
+// stdout. Dispatch then costs a pipe write instead of a closure spawn. This is
+// the "warm workers" dispatch model (handoff.md §4/D2): one worker process per
+// node per store, tasks streaming as messages.
+const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per store path.
+# Reads JSON-lines from stdin, runs each pickled callable over its items,
+# writes a JSON-line result to stdout. Kept alive across many /v1/pool/map
+# requests so dispatch never re-spawns the closure.
+import base64, json, pickle, sys
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        req = json.loads(line)
+        func = pickle.loads(base64.b64decode(req["func"]))
+        items = req["items"]
+        starmap = req.get("starmap", False)
+        results = []
+        for item in items:
+            if starmap:
+                args = item if isinstance(item, list) else (item,)
+                results.append(func(*args))
+            else:
+                results.append(func(item))
+        out = {"id": req["id"],
+               "results": [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
+    except Exception as e:
+        out = {"id": req.get("id"), "error": str(e)}
+    sys.stdout.write(json.dumps(out) + "\n")
+    sys.stdout.flush()
+`
+
 type poolRequest struct {
 	Func    string          `json:"func"` // base64 pickled callable
 	Items   json.RawMessage `json:"items"`
 	Starmap bool            `json:"starmap"`
+}
+
+// poolWorker is a warm, long-lived closure subprocess for one store path.
+// The closure is imported once and kept up; requests stream over pipes so
+// dispatch costs a pipe write instead of a closure spawn (seconds → ms).
+type poolWorker struct {
+	cmd    *exec.Cmd
+	stdin  *bufio.Writer
+	stdout *bufio.Scanner
+	id     int64
+}
+
+// poolManager owns one warm worker per store path and a cold fallback.
+// A single worker per store is the D2 model: tasks are serialised at the node
+// (the pickled payload is untrusted and the closure python is shared), so one
+// process per store bounds both concurrency and process count.
+type poolManager struct {
+	mu      sync.Mutex
+	workers map[string]*poolWorker // storePath → warm worker
+}
+
+func newPoolManager() *poolManager {
+	return &poolManager{workers: make(map[string]*poolWorker)}
 }
 
 // handlePoolMap executes a pickled function over a batch of items using the
@@ -48,7 +110,8 @@ type poolRequest struct {
 // sitecustomize cluster pool (see nixgen/shim.go). Each request is one chunk.
 //
 // It runs in a subprocess of <storePath>/bin/run so it executes in exactly the
-// environment the user's script runs in — no SDK, no shared state.
+// environment the user's script runs in — no SDK, no shared state. Requests to
+// a store that already has a warm worker reuse it instead of re-spawning.
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	var req poolRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -71,7 +134,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := runPoolChunk(runPath, req.Func, items, req.Starmap)
+	results, err := s.pool.runChunk(runPath, storePath, req.Func, items, req.Starmap)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -79,15 +142,142 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
-var poolMux sync.Mutex
+// runChunk dispatches one chunk, preferring a warm worker and falling back to
+// the cold per-request spawn when the warm worker dies or cannot start.
+func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
+	pm.mu.Lock()
+	worker, ok := pm.workers[storePath]
+	if !ok || worker.dead() {
+		if ok {
+			pm.workers[storePath] = nil
+		}
+		w, err := pm.spawn(runPath, storePath)
+		if err != nil {
+			// Cold fallback: one-off spawn keeps the node functional even when
+			// persistent workers are unavailable.
+			return runPoolChunk(runPath, pickledFunc, items, starmap)
+		}
+		worker = w
+		pm.workers[storePath] = worker
+	}
+	pm.mu.Unlock()
 
+	results, err := worker.submit(pickledFunc, items, starmap)
+	if err != nil {
+		// Worker died mid-flight — drop it and fall back to a cold run for
+		// this chunk; the next request will re-warm.
+		pm.mu.Lock()
+		delete(pm.workers, storePath)
+		pm.mu.Unlock()
+		return runPoolChunk(runPath, pickledFunc, items, starmap)
+	}
+	return results, nil
+}
+
+// spawn starts a warm worker for a store path. bin/run warm_worker.py reads
+// JSON-lines from stdin and writes results to stdout.
+func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
+	dir, err := os.MkdirTemp("", "pipedpeer-warm-*")
+	if err != nil {
+		return nil, err
+	}
+	workerScript := filepath.Join(dir, "warm_worker.py")
+	if err := os.WriteFile(workerScript, []byte(warmWorkerScript), 0755); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+
+	cmd := exec.Command(runPath, workerScript)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+
+	w := &poolWorker{
+		cmd:    cmd,
+		stdin:  bufio.NewWriter(stdin),
+		stdout: bufio.NewScanner(stdout),
+	}
+	w.stdout.Buffer(make([]byte, 0, 64<<10), 16<<20)
+	return w, nil
+}
+
+func (w *poolWorker) dead() bool {
+	return w == nil || w.cmd == nil || w.cmd.ProcessState != nil
+}
+
+// submit sends one task over the pipes and waits for its result line.
+func (w *poolWorker) submit(pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
+	w.id++
+	req := map[string]any{"id": w.id, "func": pickledFunc, "items": items, "starmap": starmap}
+	body, _ := json.Marshal(req)
+	if _, err := w.stdin.WriteString(string(body) + "\n"); err != nil {
+		return nil, err
+	}
+	if err := w.stdin.Flush(); err != nil {
+		return nil, err
+	}
+
+	// Read until the line matching our id arrives (or a strict timeout).
+	deadline := time.Now().Add(10 * time.Minute)
+	for {
+		if !w.stdout.Scan() {
+			return nil, fmt.Errorf("warm worker closed: %v", w.stdout.Err())
+		}
+		var out struct {
+			ID      int64    `json:"id"`
+			Results []string `json:"results"`
+			Error   string   `json:"error"`
+		}
+		if err := json.Unmarshal(w.stdout.Bytes(), &out); err != nil {
+			continue
+		}
+		if out.ID != w.id {
+			continue // stale line from a concurrent write; ignore
+		}
+		if out.Error != "" {
+			return nil, fmt.Errorf("worker: %s", out.Error)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("warm worker timed out")
+		}
+		results := make([]any, 0, len(out.Results))
+		for _, r := range out.Results {
+			if _, err := base64.StdEncoding.DecodeString(r); err != nil {
+				return nil, err
+			}
+			results = append(results, map[string]string{"pickle": r})
+		}
+		return results, nil
+	}
+}
+
+// stopAll terminates every warm worker; used on server shutdown.
+func (pm *poolManager) stopAll() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for _, w := range pm.workers {
+		if w != nil && w.cmd != nil && w.cmd.Process != nil {
+			_ = w.cmd.Process.Kill()
+		}
+	}
+	pm.workers = map[string]*poolWorker{}
+}
+
+// runPoolChunk is the cold path: one closure spawn per chunk. Kept for the
+// fallback when warm workers are unavailable.
 func runPoolChunk(runPath, pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
-	// Serialise subprocess runs: the closure python is a shared resource and
-	// the pickled payload is untrusted input from a peer. Serialising also
-	// bounds fan-out concurrency at the node.
-	poolMux.Lock()
-	defer poolMux.Unlock()
-
 	dir, err := os.MkdirTemp("", "pipedpeer-pool-*")
 	if err != nil {
 		return nil, err

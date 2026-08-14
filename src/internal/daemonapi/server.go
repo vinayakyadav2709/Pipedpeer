@@ -94,6 +94,10 @@ type Server struct {
 	// narCache content-addresses imported Nix closures (see narcache.go)
 	narCache *narCache
 
+	// pool owns the warm worker processes for intercepted pool maps
+	// (see pool.go). One persistent closure subprocess per store path.
+	pool *poolManager
+
 	// state persists leases + jobs across restarts (see state.go)
 	state *state
 
@@ -213,6 +217,7 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		jobs:            make(map[string]*JobRecord),
 		store:           store,
 		narCache:        newNarCache(),
+		pool:            newPoolManager(),
 	}
 	s.buildRouter()
 	return s
@@ -316,6 +321,14 @@ func (s *Server) StopSweeper() {
 	select {
 	case s.stopSweep <- struct{}{}:
 	default:
+	}
+}
+
+// StopWarmWorkers terminates all warm pool worker processes. Safe to call on
+// shutdown; warm workers are opportunistic and will be re-spawned on demand.
+func (s *Server) StopWarmWorkers() {
+	if s.pool != nil {
+		s.pool.stopAll()
 	}
 }
 
