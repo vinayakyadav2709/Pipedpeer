@@ -13,6 +13,7 @@ const ShimSitecustomize = `# Auto-imported by Python at startup when on PYTHONPA
 import atexit
 import os
 import sys
+import threading
 import time
 import weakref
 
@@ -81,7 +82,7 @@ class _ClusterPool:
         cost = _measure_cost(func, head, starmap)
         if cost <= 0:
             return head_results + self._local(func, tail, starmap)
-        return head_results + self._spill(func, tail, starmap)
+        return head_results + self._race(func, tail, starmap, cost)
 
     def _local(self, func, items, starmap):
         _log("local %d items" % len(items))
@@ -89,33 +90,96 @@ class _ClusterPool:
             return self._ctx.starmap(func, items)
         return self._ctx.map(func, items)
 
-    def _spill(self, func, items, starmap):
-        _log("spilling %d items to %s" % (len(items), _URL))
+    def _race(self, func, items, starmap, per_item_cost):
+        # D2: local and remote each pull ~half the tail concurrently; when local
+        # finishes its share and a remote chunk is still in flight, an idle
+        # local core speculatively re-runs it — first result wins per item.
+        # Worst case (remote dead/absent) local eventually does everything, so
+        # this is never slower than a plain local Pool; a working remote halves
+        # the tail's wall time.
         self._spilled = True
-        chunks = _chunk(items, 64)
+        n = len(items)
+        slots = [None] * n
+        lock = threading.Lock()
+        chunk_size = _adaptive_chunk(per_item_cost)
+        chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
+
+        # Interleave chunk ownership so neither side is strictly first.
+        local_chunks = chunks[::2]
+        remote_chunks = chunks[1::2]
+
+        def fill(pairs):
+            """Run user func over (idx, item) pairs and first-wins into slots."""
+            idxs = [p[0] for p in pairs]
+            vals = [p[1] for p in pairs]
+            if starmap:
+                res = self._ctx.starmap(_apply, [(func, v) for v in vals])
+            else:
+                res = self._ctx.map(func, vals)
+            with lock:
+                for i, v in zip(idxs, res):
+                    if slots[i] is None:
+                        slots[i] = v
+
+        # Remote thread: dispatch remote chunks, first-wins into slots.
+        def remote_run():
+            for chunk in remote_chunks:
+                res = self._remote_chunk(func, chunk, starmap)
+                if res is None:
+                    continue
+                with lock:
+                    for orig_i, v in res:
+                        if slots[orig_i] is None:
+                            slots[orig_i] = v
+
+        # Local runs its share; when done, re-run any remote chunk still not
+        # filled (straggler tail). done is set once local has given every item a
+        # chance, so the caller can always return a complete result.
+        def local_run():
+            fill([p for c in local_chunks for p in c])
+            while True:
+                with lock:
+                    pending = [p for c in remote_chunks for p in c if slots[p[0]] is None]
+                if not pending:
+                    break
+                fill(pending)  # idle local cores re-run the stragglers
+            done.set()
+
+        done = threading.Event()
+        t_local = threading.Thread(target=local_run)
+        t_remote = threading.Thread(target=remote_run)
+        t_local.start()
+        t_remote.start()
+        done.wait()  # local guarantees a complete result
+        return slots
+
+    def _remote_chunk(self, func, chunk, starmap):
+        """Dispatch one chunk to the cluster; returns [(orig_idx, result), ...]
+        or None on failure (local already has the work covered). chunk is a list
+        of (orig_idx, item) pairs."""
         import json
         import urllib.request
         import base64
         import pickle
-        results = []
-        for chunk in chunks:
-            if starmap:
-                payload = [c[0] if isinstance(c, (list, tuple)) else (c,) for c in chunk]
-            else:
-                payload = chunk
-            body = json.dumps({"func": _pickle_func(func), "items": payload,
-                               "starmap": starmap}).encode()
-            req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                         headers={"Content-Type": "application/json",
-                                                  "X-Pipedpeer-Store": _STORE})
-            try:
-                with urllib.request.urlopen(req, timeout=600) as resp:
-                    for r in json.loads(resp.read())["results"]:
-                        results.append(pickle.loads(base64.b64decode(r["pickle"])))
-            except Exception as e:
-                _log("remote failed (%s); falling back to local chunk" % e)
-                results.extend(self._local(func, chunk, starmap))
-        return results
+        idxs = [p[0] for p in chunk]
+        vals = [p[1] for p in chunk]
+        if starmap:
+            payload = [c if isinstance(c, (list, tuple)) else (c,) for c in vals]
+        else:
+            payload = vals
+        body = json.dumps({"func": _pickle_func(func), "items": payload,
+                           "starmap": starmap}).encode()
+        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "X-Pipedpeer-Store": _STORE})
+        try:
+            with urllib.request.urlopen(req, timeout=600) as resp:
+                rs = json.loads(resp.read())["results"]
+                return [(idxs[i], pickle.loads(base64.b64decode(r["pickle"])))
+                        for i, r in enumerate(rs)]
+        except Exception as e:
+            _log("remote failed (%s); local covers it" % e)
+            return None
 
     def close(self):
         try:
@@ -143,6 +207,11 @@ def _pickle_func(func):
     return base64.b64encode(pickle.dumps(func)).decode()
 
 
+def _apply(func, item):
+    """Run func over one starmap item (a tuple of args)."""
+    return func(*item) if isinstance(item, tuple) else func(item)
+
+
 def _measure_cost(func, items, starmap):
     """Seconds per item, from running the first chunks locally."""
     try:
@@ -157,7 +226,20 @@ def _measure_cost(func, items, starmap):
         return -1.0
 
 
+def _adaptive_chunk(per_item_cost):
+    """Chunk size from measured per-item cost. Cheap items get large chunks
+    (amortise round-trips), costly items get small chunks (more parallelism).
+    Bounded to keep remote dispatch from dominating on either extreme."""
+    if per_item_cost <= 0:
+        return 64
+    # Target ~0.5s of work per remote chunk.
+    target = 0.5 / per_item_cost
+    return max(1, min(256, int(target)))
+
+
 def _chunk(seq, size):
+    if size <= 0:
+        size = 64
     return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 

@@ -117,18 +117,20 @@ terminal, and print a per-task summary line instead.
       cluster executor talking to the local daemon
 - [x] Register a `joblib` backend via its official plugin API (covers all of sklearn `n_jobs`)
 - [ ] Intercept `numpy.matmul`/`dot` above a high size threshold (block partitioning)
-- [ ] **Warm workers:** one persistent worker process per node per JobSet (one lease per node,
+- [x] **Warm workers:** one persistent worker process per node per JobSet (one lease per node,
       not per task); tasks stream as pickled messages over the existing WS channel. This turns
       dispatch from seconds (job provisioning) into milliseconds.
-- [ ] **Never-slower invariant** (`handoff.md` §4/D2): start local, measure, spill only when
+- [x] **Never-slower invariant** (`handoff.md` §4/D2): start local, measure, spill only when
       it clearly wins, local cores never stop pulling, speculative re-run for the straggler tail
 - [ ] **CI benchmark gate**: shim-on vs local-only on a small workload must be within noise
 - [ ] Adaptive batching: chunk size from measured per-item cost; faster nodes get bigger chunks
 
-Note (slice shipped `6e34c08`): the shim currently spills each chunk to the local daemon's
-`/v1/pool/map`, which executes the pickled function in the closure via `bin/run`. Local-first
-measure-then-spill is in; warm workers, multi-node spill, numpy blocking, the straggler-tail
-re-run, adaptive batching and the CI gate are still open.
+Note (shipped): the shim spills chunks to the local daemon's `/v1/pool/map`, which executes the
+pickled function via `bin/run`. Warm workers (`497a330`) keep one persistent closure process per
+store path, turning dispatch into a pipe write; multi-node spill (`71515b5`, `cb682a4`) splits
+chunks across healthy peers that share the closure, local always participating and dead peers
+falling back to local. Still open: numpy blocking, the straggler-tail re-run, adaptive batching
+and the CI gate.
 
 Explicitly **out of scope** (say so in the README): Ray-style actors, a distributed object
 store (intermediates route through the driver), dynamic/nested task graphs, and synchronised
