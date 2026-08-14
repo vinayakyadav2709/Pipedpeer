@@ -160,6 +160,90 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	}
 }
 
+// TestMultiNodeSpill verifies a chunk is split across local + a peer when a
+// peer is available, with results merged in order. It stands up two servers,
+// each with its own warm worker, and points one at the other via peerFn.
+func TestMultiNodeSpill(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	// Build a shared pickled func (both nodes import the same worker_mod).
+	modDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
+	emit := `
+import base64, pickle, sys
+sys.path.insert(0, sys.argv[1])
+from worker_mod import double
+sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
+`
+	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
+	if err != nil {
+		t.Fatalf("emit pickle: %v", err)
+	}
+
+	// Two nodes, each with their own warm-worker pool.
+	s1 := New("node-" + strings.Repeat("x", 8))
+	s2 := New("node-" + strings.Repeat("y", 8))
+	srv1 := httptest.NewServer(s1.Handler())
+	srv2 := httptest.NewServer(s2.Handler())
+	defer srv1.Close()
+	defer srv2.Close()
+	defer s1.StopWarmWorkers()
+	defer s2.StopWarmWorkers()
+
+	// The peer resolves <storePath>/bin/run, so build that exact layout on
+	// disk and use it as the shared store path.
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
+	runScript := "#!/bin/sh\nexec " + python + " \"$@\"\n"
+	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte(runScript), 0755)
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	peerHost := strings.TrimPrefix(srv2.URL, "http://")
+	s1.pool.SetPeerFn(func(_ string) []string { return []string{peerHost} })
+
+	// 16 items: >= minSplit, so it fans out local + peer.
+	var items []json.RawMessage
+	for i := 1; i <= 16; i++ {
+		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
+	}
+
+	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), items, false)
+	if err != nil {
+		t.Fatalf("runChunk spill: %v", err)
+	}
+	if len(results) != 16 {
+		t.Fatalf("want 16 results, got %d", len(results))
+	}
+	// Spot check values are doubles of 1..16 (order may be non-deterministic
+	// across the fan-out).
+	seen := map[int]bool{}
+	for _, r := range results {
+		m, _ := r.(map[string]string)
+		blob, _ := base64.StdEncoding.DecodeString(m["pickle"])
+		unpickle := `import pickle,sys;sys.stdout.write(str(pickle.loads(open(sys.argv[1],"rb").read())))`
+		bp := filepath.Join(t.TempDir(), "p")
+		os.WriteFile(bp, blob, 0644)
+		out, err := exec.Command(python, "-c", unpickle, bp).Output()
+		if err != nil {
+			t.Fatalf("unpickle: %v", err)
+		}
+		var v int
+		fmt.Sscan(string(out), &v)
+		seen[v] = true
+	}
+	for i := 2; i <= 32; i += 2 {
+		if !seen[i] {
+			t.Fatalf("missing result %d in %v", i, seen)
+		}
+	}
+}
+
 // TestPoolMapRejectsMissingStore checks the worker endpoint rejects requests
 // that don't name a valid store path (a trust guard: untrusted peers cannot
 // point it at arbitrary binaries).

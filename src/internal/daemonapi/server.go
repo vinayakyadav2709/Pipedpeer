@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sort"
 	"strconv"
@@ -330,6 +331,51 @@ func (s *Server) StopWarmWorkers() {
 	if s.pool != nil {
 		s.pool.stopAll()
 	}
+}
+
+// EnablePoolSpill lets a node forward pool-map sub-chunks to healthy peers for
+// the same store, in addition to running locally. It is opt-in: single-node
+// setups and tests leave it off, so behaviour is unchanged by default.
+func (s *Server) EnablePoolSpill() {
+	s.pool.SetPeerFn(func(storePath string) []string {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		var out []string
+		for _, ph := range s.peerHealths {
+			if ph.Status != "healthy" {
+				continue
+			}
+			if ph.Host == "" || ph.Port == 0 {
+				continue
+			}
+			// Only forward to peers that already imported this closure, else
+			// the remote POST fails with a missing-store 400. Checking the
+			// store endpoint is cheap (local cache) and keeps spill correct.
+			if !s.peerHasStore(ph, storePath) {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s:%d", ph.Host, ph.Port))
+		}
+		return out
+	})
+}
+
+// peerHasStore asks a peer whether it has the given closure cached.
+func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
+	url := fmt.Sprintf("http://%s:%d/v1/store/%s", ph.Host, ph.Port, url.PathEscape(storePath))
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Cached bool `json:"cached"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+		return false
+	}
+	return r.Cached
 }
 
 // EnablePersistence turns on cross-restart persistence of leases and jobs.
