@@ -91,6 +91,9 @@ type poolWorker struct {
 	stdin  *bufio.Writer
 	stdout *bufio.Scanner
 	id     int64
+	// mu serialises submits on this worker: stdin writes and stdout reads must
+	// not interleave when several fan-out goroutines hit the same store.
+	mu sync.Mutex
 }
 
 // poolManager owns one warm worker per store path and a cold fallback.
@@ -226,6 +229,12 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []
 				r, e = pm.runLocal(runPath, storePath, pickledFunc, p.items, starmap)
 			} else {
 				r, e = pm.runRemote(p.peer, storePath, pickledFunc, p.items, starmap)
+				if e != nil {
+					// A peer that fell out (died, dropped the closure, or is
+					// stale) must not fail the chunk: the work is ours to do.
+					// D2/D3 — a remote node adds capacity, never subtracts.
+					r, e = pm.runLocal(runPath, storePath, pickledFunc, p.items, starmap)
+				}
 			}
 			if e != nil {
 				errs[i] = e
@@ -361,6 +370,8 @@ func (w *poolWorker) dead() bool {
 
 // submit sends one task over the pipes and waits for its result line.
 func (w *poolWorker) submit(pickledFunc string, items []json.RawMessage, starmap bool) ([]any, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.id++
 	req := map[string]any{"id": w.id, "func": pickledFunc, "items": items, "starmap": starmap}
 	body, _ := json.Marshal(req)
@@ -371,8 +382,9 @@ func (w *poolWorker) submit(pickledFunc string, items []json.RawMessage, starmap
 		return nil, err
 	}
 
-	// Read until the line matching our id arrives (or a strict timeout).
-	deadline := time.Now().Add(10 * time.Minute)
+	// Read until the line matching our id arrives. Scan() returns false on EOF
+	// (worker exited), which surfaces as an error and lets the caller fall back
+	// to a cold run. A stuck worker is bounded by the work itself.
 	for {
 		if !w.stdout.Scan() {
 			return nil, fmt.Errorf("warm worker closed: %v", w.stdout.Err())
@@ -390,9 +402,6 @@ func (w *poolWorker) submit(pickledFunc string, items []json.RawMessage, starmap
 		}
 		if out.Error != "" {
 			return nil, fmt.Errorf("worker: %s", out.Error)
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("warm worker timed out")
 		}
 		results := make([]any, 0, len(out.Results))
 		for _, r := range out.Results {
