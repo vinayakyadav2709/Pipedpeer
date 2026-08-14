@@ -464,7 +464,12 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			Mounts: []ociMount{
 				{Destination: "/nix", Type: "bind", Source: "/nix", Options: []string{"rbind", "ro"}},
 				{Destination: "/proc", Type: "proc", Source: "proc"},
-				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "noexec"}},
+				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "mode=755"}},
+				// Python multiprocessing creates its SemLock in /dev/shm and
+				// mmaps it (POSIX shm), which needs a writable, executable tmpfs
+				// — the plain /dev tmpfs can't serve both. A dedicated /dev/shm
+				// with sticky mode 1777 is what a stock Linux distro ships.
+				{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"rw", "nosuid", "nodev", "mode=1777"}},
 				{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev"}},
 				{Destination: "/work", Type: "bind", Source: job.WorkDir, Options: []string{"rbind", "rw"}},
 				{Destination: "/home/root", Type: "bind", Source: homeDir, Options: []string{"rbind", "rw"}},
