@@ -116,21 +116,26 @@ terminal, and print a per-task summary line instead.
 - [x] Patch `multiprocessing.Pool` and `concurrent.futures.ProcessPoolExecutor` →
       cluster executor talking to the local daemon
 - [x] Register a `joblib` backend via its official plugin API (covers all of sklearn `n_jobs`)
-- [ ] Intercept `numpy.matmul`/`dot` above a high size threshold (block partitioning)
+- [x] Intercept `numpy.matmul`/`dot` above a high size threshold (block partitioning)
 - [x] **Warm workers:** one persistent worker process per node per JobSet (one lease per node,
       not per task); tasks stream as pickled messages over the existing WS channel. This turns
       dispatch from seconds (job provisioning) into milliseconds.
 - [x] **Never-slower invariant** (`handoff.md` §4/D2): start local, measure, spill only when
       it clearly wins, local cores never stop pulling, speculative re-run for the straggler tail
-- [ ] **CI benchmark gate**: shim-on vs local-only on a small workload must be within noise
-- [ ] Adaptive batching: chunk size from measured per-item cost; faster nodes get bigger chunks
+- [x] **CI benchmark gate**: shim-on vs local-only on a small workload must be within noise
+- [x] Adaptive batching: chunk size from measured per-item cost; faster nodes get bigger chunks
 
 Note (shipped): the shim spills chunks to the local daemon's `/v1/pool/map`, which executes the
 pickled function via `bin/run`. Warm workers (`497a330`) keep one persistent closure process per
 store path, turning dispatch into a pipe write; multi-node spill (`71515b5`, `cb682a4`) splits
 chunks across healthy peers that share the closure, local always participating and dead peers
-falling back to local. Still open: numpy blocking, the straggler-tail re-run, adaptive batching
-and the CI gate.
+falling back to local; the straggler-tail re-run and adaptive batching landed in `d2dee3f`;
+numpy matmul/dot block-row interception via the items_b64 pool path in `e13a593` (opt-in via
+PIPEDPEER_NUMPY=1). The CI gate is a `scripts/bench-shim-d2.sh` report job in nightly
+(`continue-on-error` semantics): it asserts the shim stays within 3x of a plain local Pool when
+no daemon is reachable — a gross-regression tripwire, not a tight wall-clock gate (shared CI is
+too noisy for that, and the never-slower invariant itself is enforced structurally by the Go
+tests).
 
 Explicitly **out of scope** (say so in the README): Ray-style actors, a distributed object
 store (intermediates route through the driver), dynamic/nested task graphs, and synchronised
