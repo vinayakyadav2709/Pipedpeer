@@ -35,26 +35,38 @@ Read `handoff.md` first for architecture and the reasoning behind these decision
 
 ---
 
+## ✅ Part 2c — Transparent interception: multi-node dispatch proven live
+
+All of Part 2c is shipped and verified end-to-end in the 3-node lab (`lab/`), including:
+
+- [x] Shim ships worker functions **by source** (`func_src`/`func_name`) plus pickled globals
+      (`extra_b64`, a dict — the fixed right-hand operand) so workers need no shim on path
+- [x] **One-hop fan-out** (`no_fanout`): the origin splits exactly once; forwarded chunks are
+      terminal and results funnel back to the origin (tree model). Each part is assigned a
+      **distinct** peer (part i prefers peers[i], falls back to the next best on failure), so
+      every healthy peer gets work. Multi-hop (Spark-style combiner nodes) is a later flag-flip.
+- [x] **Memory offload**: warm workers run from files (`{in_file, out_file}` messages) — payloads
+      and results never live in daemon RAM or pipes (fixes OOM kills / websocket 1006)
+- [x] **Memory admission**: the shim sends `required_mem`; a node refuses with 503 when it
+      cannot fit the working set and the shim falls back locally
+- [x] Live proof: 5000×5000 float32 matmul, `MATMUL_DONE` correct, zero fallbacks, all 3 labs
+      participate (`0a8623b`)
+
+### Remaining Part 2c trimmings
+- [ ] Torch dispatch live test (numpy proven; torch cuda branch exercised only in unit tests)
+- [ ] A unit test for the 503 admission path (currently verified only by live runs)
+
+---
+
 ## 🔜 Immediate next steps (start here)
 
-### 1. Verify and commit the in-flight refactor ⚠️ FIRST THING
+### 1. Cut the first stable release
+- [ ] One more live multi-node matmul + torch run on a clean lab for the record
+- [ ] Add the 503-admission unit test, then `go test -race ./...`
+- [ ] Promote `dev` → `main`, tag `v0.1.0` (release workflow fires on `v*`, stable channel)
+- [ ] Flip nightly integration off `continue-on-error` after ~a week of green
 
-`src/internal/app/env.go` (new) and `src/internal/app/run.go` (rewritten) are in the working
-tree, **build + vet clean but untested**.
-
-```bash
-cd src
-go test -count=1 ./...          # if green:
-go test -race -count=1 ./...
-gofmt -l .                      # must print nothing
-```
-
-- **Pass** → commit (suggested message: `Split environment build from task execution`) and go to step 2.
-- **Fail** → see `handoff.md` §5 for the three likely causes (most likely: a test calling
-  the old `daemonctl.DownloadResults` signature, which now returns `(*ResultManifest, error)`).
-  Fix forward; do not revert the split — Part 2b depends on it.
-
-### 2. Part 2b — `pipedpeer map` (scatter/gather)
+### 2. Part 2b — `pipedpeer map` (scatter/gather) — shipped
 
 The refactor gives you `BuildEnvironment()` (once) + `RunTask()` (per task). Build on it.
 
@@ -108,8 +120,10 @@ terminal, and print a per-task summary line instead.
 
 ### Part 2c — Transparent interception (**the headline feature**)
 
+**Completed** — see the ✅ section above for the live multi-node proof. Historical notes:
+
 `pipedpeer python main.py` distributes an **unmodified** script. No SDK — see `handoff.md`
-§4/D1 for why, and do not deviate from it.
+§4/D1 for why, and do not deviate from it. Original feature list (all shipped):
 
 - [x] Ship a `sitecustomize.py` inside the Nix closure, on `PYTHONPATH`, so Python
       auto-imports it before the user's first line
@@ -120,9 +134,6 @@ terminal, and print a per-task summary line instead.
 - [x] Intercept `torch.matmul`/`mm`/`Tensor.matmul`/`Tensor.mm` above a size threshold
       (block-row partitioning; worker computes on its GPU when available) — opt-in via
       `PIPEDPEER_TORCH=1`, the ML/GPU demo path
-- [x] **Warm workers:** one persistent worker process per node per JobSet (one lease per node,
-      not per task); tasks stream as pickled messages over the existing WS channel. This turns
-      dispatch from seconds (job provisioning) into milliseconds.
 - [x] **Never-slower invariant** (`handoff.md` §4/D2): start local, measure, spill only when
       it clearly wins, local cores never stop pulling, speculative re-run for the straggler tail
 - [x] **CI benchmark gate**: shim-on vs local-only on a small workload must be within noise
@@ -179,5 +190,3 @@ HTTP to :38080, no NAT traversal, no auth.
 
 ### Ongoing / operational
 - [ ] Flip nightly integration off `continue-on-error` after ~a week of green
-- [ ] Cut the first stable release: promote `dev` → `main`, tag `v0.1.0` (release workflow
-      fires on `v*` and publishes to the stable channel)
