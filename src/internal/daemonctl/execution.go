@@ -87,7 +87,7 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 
 // storeCached asks the daemon whether it already has a closure for storePath.
 func storeCached(host string, port int, storePath string) bool {
-	url := fmt.Sprintf("http://%s:%d/v1/store/%s", host, port, url.PathEscape(storePath))
+	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s", host, port, url.QueryEscape(storePath))
 	resp, err := http.Get(url)
 	if err != nil {
 		return false

@@ -1,10 +1,14 @@
 package daemonapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -17,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -336,11 +341,20 @@ func (s *Server) StopWarmWorkers() {
 // EnablePoolSpill lets a node forward pool-map sub-chunks to healthy peers for
 // the same store, in addition to running locally. It is opt-in: single-node
 // setups and tests leave it off, so behaviour is unchanged by default.
+//
+// The returned list is ranked best-first: fewer active jobs, then more
+// available memory. runChunk fans out to the best nodes first and falls
+// through to the next best on failure, so the k best nodes carry the work.
 func (s *Server) EnablePoolSpill() {
 	s.pool.SetPeerFn(func(storePath string) []string {
 		s.peersMu.RLock()
 		defer s.peersMu.RUnlock()
-		var out []string
+		type cand struct {
+			peer       string
+			activeJobs int
+			availMem   int64
+		}
+		var out []cand
 		for _, ph := range s.peerHealths {
 			if ph.Status != "healthy" {
 				continue
@@ -354,15 +368,27 @@ func (s *Server) EnablePoolSpill() {
 			if !s.peerHasStore(ph, storePath) {
 				continue
 			}
-			out = append(out, fmt.Sprintf("%s:%d", ph.Host, ph.Port))
+			out = append(out, cand{peer: fmt.Sprintf("%s:%d", ph.Host, ph.Port), activeJobs: ph.ActiveJobs, availMem: ph.AvailableMem})
 		}
-		return out
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].activeJobs != out[j].activeJobs {
+				return out[i].activeJobs < out[j].activeJobs
+			}
+			return out[i].availMem > out[j].availMem
+		})
+		res := make([]string, 0, len(out))
+		for _, c := range out {
+			res = append(res, c.peer)
+		}
+		return res
 	})
 }
 
-// peerHasStore asks a peer whether it has the given closure cached.
+// peerHasStore asks a peer whether it can actually run the given closure: the
+// store must be materialised (<storePath>/bin/run exists), not merely have its
+// NAR cached — a cached but un-imported closure would fail at pool-map time.
 func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
-	url := fmt.Sprintf("http://%s:%d/v1/store/%s", ph.Host, ph.Port, url.PathEscape(storePath))
+	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", ph.Host, ph.Port, url.QueryEscape(storePath))
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -376,6 +402,86 @@ func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
 		return false
 	}
 	return r.Cached
+}
+
+// broadcastClosure pushes a cached closure NAR to every healthy peer that does
+// not have it yet, so pool spill can fan a single task out to multiple nodes.
+// Best-effort and parallel: a peer that fails to import is simply not offered
+// spill work (runChunk always keeps the local part, so nothing is lost).
+func (s *Server) broadcastClosure(storePath string) {
+	narPath, ok := s.narCache.narFileFor(storePath)
+	if !ok {
+		return
+	}
+	s.peersMu.RLock()
+	var targets []PeerHealth
+	for _, ph := range s.peerHealths {
+		if ph.Status == "healthy" && ph.Host != "" && ph.Port != 0 {
+			targets = append(targets, *ph)
+		}
+	}
+	s.peersMu.RUnlock()
+	if len(targets) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for i := range targets {
+		ph := targets[i]
+		if s.peerHasStore(&ph, storePath) {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
+				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+					Msg("closure broadcast failed")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
+func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
+	f, err := os.Open(narPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	mp := multipart.NewWriter(&buf)
+	if err := mp.WriteField("store_path", storePath); err != nil {
+		return err
+	}
+	w, err := mp.CreateFormFile("nar", "closure.nar")
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(w, f); err != nil {
+		return err
+	}
+	mp.Close()
+
+	url := fmt.Sprintf("http://%s:%d/v1/store/import", ph.Host, ph.Port)
+	req, err := http.NewRequest("POST", url, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mp.FormDataContentType())
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("import %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("import %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // EnablePersistence turns on cross-restart persistence of leases and jobs.
@@ -533,7 +639,8 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
-	r.Get("/v1/store/{storePath:*}", s.handleStoreCheck)
+	r.Get("/v1/store", s.handleStoreCheck)
+	r.Post("/v1/store/import", s.handleStoreImport)
 	r.Post("/v1/pool/map", s.handlePoolMap)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)

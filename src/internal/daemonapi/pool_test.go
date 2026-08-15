@@ -1,17 +1,24 @@
 package daemonapi
 
 import (
+	"archive/tar"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRun writes a bin/run wrapper that executes the given python file with the
@@ -65,7 +72,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	}
 
 	items := []json.RawMessage{json.RawMessage(`1`), json.RawMessage(`2`), json.RawMessage(`3`)}
-	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), items, false, false)
+	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), "", "", "", items, false, false)
 	if err != nil {
 		t.Fatalf("runPoolChunk: %v", err)
 	}
@@ -150,7 +157,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	runPath := filepath.Join(store, "bin", "run")
 	for i := 0; i < 3; i++ {
 		items := []json.RawMessage{json.RawMessage(fmt.Sprintf(`%d`, i+1)), json.RawMessage(`2`)}
-		if _, err := pm.runChunk(runPath, store, string(pickled), items, false, false); err != nil {
+		if _, err := pm.runChunk(runPath, store, string(pickled), "", "", "", items, false, false); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
@@ -214,7 +221,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
 
-	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), items, false, false)
+	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false)
 	if err != nil {
 		t.Fatalf("runChunk spill: %v", err)
 	}
@@ -281,7 +288,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s.pool.runChunk(runPath, storePath, string(pickled), items, false, false)
+	results, err := s.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false)
 	if err != nil {
 		t.Fatalf("chunk failed though a peer was down: %v", err)
 	}
@@ -360,7 +367,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps([int(a) for a in sys.argv[1:]])).
 		items = append(items, json.RawMessage(fmt.Sprintf("%q", string(out))))
 	}
 
-	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), items, false, true)
+	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), "", "", "", items, false, true)
 	if err != nil {
 		t.Fatalf("runPoolChunk: %v", err)
 	}
@@ -398,5 +405,201 @@ sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
 	}
 	if !reflect.DeepEqual(got, []int{3, 7, 11}) {
 		t.Fatalf("want [3 7 11], got %v", got)
+	}
+}
+
+// TestClosureBroadcastEnablesSpill is the end-to-end multi-node path: a
+// closure uploaded to one node is broadcast to healthy peers, and the peer
+// then accepts pool spill work for that store. Without the broadcast the peer
+// would 400 on the missing store and the spill would silently stay local.
+func TestClosureBroadcastEnablesSpill(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	// Shared closure layout on both nodes: <store>/bin/run.
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
+	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	// A pickled function both nodes can import.
+	modDir := t.TempDir()
+	os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644)
+	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
+	emit := `
+import base64, pickle, sys
+sys.path.insert(0, sys.argv[1])
+from worker_mod import double
+sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
+`
+	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
+	if err != nil {
+		t.Fatalf("emit pickle: %v", err)
+	}
+
+	s1 := New("node-" + strings.Repeat("x", 8))
+	s2 := New("node-" + strings.Repeat("y", 8))
+	srv1 := httptest.NewServer(s1.Handler())
+	srv2 := httptest.NewServer(s2.Handler())
+	defer srv1.Close()
+	defer srv2.Close()
+	defer s1.StopWarmWorkers()
+	defer s2.StopWarmWorkers()
+
+	// s1 knows s2 as a healthy peer, so upload broadcasts the closure to it.
+	peerHost := strings.TrimPrefix(srv2.URL, "http://")
+	s1.peersMu.Lock()
+	s1.peerHealths = map[string]*PeerHealth{
+		peerHost: {Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost), Status: "healthy"},
+	}
+	s1.peersMu.Unlock()
+
+	// Simulate a submitter uploading the NAR closure to s1.
+	narPath := filepath.Join(t.TempDir(), "closure.nar")
+	os.WriteFile(narPath, []byte("fake-nar-bytes"), 0644)
+
+	// A real (empty-ish) workspace tar: handleJobUpload streams it as a tar.
+	workspaceTar := filepath.Join(t.TempDir(), "workspace.tar")
+	wf, err := os.Create(workspaceTar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(wf)
+	tw.WriteHeader(&tar.Header{Name: "main.py", Mode: 0644, Size: int64(len("print(1)")), Typeflag: tar.TypeReg})
+	tw.Write([]byte("print(1)"))
+	tw.Close()
+	wf.Close()
+
+	reqBody := &bytes.Buffer{}
+	mp := multipart.NewWriter(reqBody)
+	mp.WriteField("store_path", storePath)
+	mp.WriteField("script_path", "main.py")
+	fw, _ := mp.CreateFormFile("workspace", "workspace.tar")
+	wf2, _ := os.Open(workspaceTar)
+	io.Copy(fw, wf2)
+	wf2.Close()
+	nw, _ := mp.CreateFormFile("nar", "closure.nar")
+	nw.Write([]byte("fake-nar-bytes"))
+	mp.Close()
+
+	resp, err := http.Post(srv1.URL+"/v1/jobs/upload", mp.FormDataContentType(), reqBody)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upload status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// The broadcast is async; give it a moment to land on s2.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		path, cached := s2.narCache.narFileFor(storePath)
+		if cached {
+			_ = path
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("closure never broadcast to peer s2")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Now run a chunk with spill enabled: s1 must see s2 as a closure-sharing
+	// peer and fan out to it.
+	s1.EnablePoolSpill()
+	var items []json.RawMessage
+	for i := 1; i <= 16; i++ {
+		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
+	}
+	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false)
+	if err != nil {
+		t.Fatalf("runChunk: %v", err)
+	}
+	if len(results) != 16 {
+		t.Fatalf("want 16 results, got %d", len(results))
+	}
+
+	// At least one result must have come from s2's warm worker, proving the
+	// fan-out reached the peer. Count s2 worker spawns via its invocation log
+	// (the store's bin/run is shared; the pool writes no per-node log). Instead
+	// assert spill happened by asking s2's pool for worker count: s2 ran its
+	// part only if a worker exists there.
+	s2.pool.mu.Lock()
+	_, s2Ran := s2.pool.workers[storePath]
+	s2.pool.mu.Unlock()
+	if !s2Ran {
+		t.Fatal("peer never executed spill work: broadcast did not enable fan-out")
+	}
+}
+
+func mustPort(t *testing.T, hostport string) int {
+	t.Helper()
+	_, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := strconv.Atoi(port)
+	return p
+}
+
+// TestPoolSpillNextBestOnFailure verifies the failover chain: with two peers
+// ranked best-first, a dead best peer must fall through to the next best —
+// and its part must be picked up there, not silently absorbed locally.
+func TestPoolSpillNextBestOnFailure(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
+	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	modDir := t.TempDir()
+	os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644)
+	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
+	emit := `
+import base64, pickle, sys
+sys.path.insert(0, sys.argv[1])
+from worker_mod import double
+sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
+`
+	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
+	if err != nil {
+		t.Fatalf("emit pickle: %v", err)
+	}
+
+	s1 := New("node-" + strings.Repeat("x", 8))
+	s2 := New("node-" + strings.Repeat("y", 8))
+	srv2 := httptest.NewServer(s2.Handler())
+	defer srv2.Close()
+	defer s1.StopWarmWorkers()
+	defer s2.StopWarmWorkers()
+
+	alivePeer := strings.TrimPrefix(srv2.URL, "http://")
+	// Best first, but the best is dead (port 1 refuses connections).
+	s1.pool.SetPeerFn(func(_ string) []string { return []string{"127.0.0.1:1", alivePeer} })
+
+	var items []json.RawMessage
+	for i := 1; i <= 16; i++ {
+		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
+	}
+	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false)
+	if err != nil {
+		t.Fatalf("chunk failed: %v", err)
+	}
+	if len(results) != 16 {
+		t.Fatalf("want 16 results, got %d", len(results))
+	}
+	// The alive peer must have executed the failed best peer's share.
+	s2.pool.mu.Lock()
+	_, s2Ran := s2.pool.workers[storePath]
+	s2.pool.mu.Unlock()
+	if !s2Ran {
+		t.Fatal("next-best peer never executed: failover chain broken")
 	}
 }

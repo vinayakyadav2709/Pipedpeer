@@ -11,11 +11,23 @@ package nixgen
 const ShimSitecustomize = `# Auto-imported by Python at startup when on PYTHONPATH.
 # Patches parallel primitives to route through the local pipedpeer daemon.
 import atexit
+import functools
 import os
+import site
 import sys
 import threading
 import time
 import weakref
+
+# This file shadows the Nix-supplied sitecustomize.py (both are named
+# sitecustomize and only the first on PYTHONPATH is imported). The Nix one is
+# what adds NIX_PYTHONPATH — the python-with-packages env's site-packages, where
+# numpy/torch/etc. live — so without this the shim would silently strip the
+# env's packages and every import would fail. Do exactly what Nix's does.
+if "NIX_PYTHONPATH" in os.environ:
+    _nix_paths = os.environ.pop("NIX_PYTHONPATH", None)
+    if _nix_paths:
+        functools.reduce(lambda k, p: site.addsitedir(p, k), _nix_paths.split(":"), site._init_pathinfo())
 
 _ENABLED = os.environ.get("PIPEDPEER_SHIM") == "1"
 _URL = os.environ.get("PIPEDPEER_DAEMON_URL", "")
@@ -252,12 +264,24 @@ def _np_dispatch(blocks, other):
     import pickle
     import urllib.request
     try:
-        body = json.dumps({
-            "func": _pickle_func(_matmul_with),
-            "items": [base64.b64encode(pickle.dumps(b)).decode() for b in blocks],
+        # The worker runs the closure's python with no shim on its path, so the
+        # function ships as source (pickling by reference would resolve
+        # sitecustomize._matmul_with to the Nix sitecustomize and fail). The
+        # fixed right-hand operand rides along as a pickled global inside a
+        # dict: the worker does ns.update(pickle.loads(extra_b64)).
+        items = [base64.b64encode(pickle.dumps(b)).decode() for b in blocks]
+        req = {
+            "func_src": "import numpy as _np\ndef run(block):\n    return _np.matmul(block, _other)\n",
+            "func_name": "run",
+            "extra_b64": base64.b64encode(pickle.dumps({"_other": other})).decode(),
+            "items": items,
             "items_b64": True,
             "starmap": False,
-        }).encode()
+        }
+        # Admission control hint: the daemon refuses (503) when it cannot spare
+        # roughly the payload's size in RAM, and the shim falls back locally.
+        req["required_mem"] = 2 * (len(req["extra_b64"]) + sum(len(i) for i in items))
+        body = json.dumps(req).encode()
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
@@ -285,12 +309,26 @@ def _torch_dispatch(blocks, other):
     import pickle
     import urllib.request
     try:
-        body = json.dumps({
-            "func": _pickle_func(_torch_matmul_with),
-            "items": [base64.b64encode(pickle.dumps(b)).decode() for b in blocks],
+        # Ships by source, not by reference: the worker's closure python has no
+        # shim module on its path (see _np_dispatch). The fixed right-hand
+        # operand rides along as a pickled global inside a dict: the worker does
+        # ns.update(pickle.loads(extra_b64)).
+        items = [base64.b64encode(pickle.dumps(b)).decode() for b in blocks]
+        req = {
+            "func_src": "import torch as _th\n"
+                        "def run(block):\n"
+                        "    if _th.cuda.is_available():\n"
+                        "        block, other = block.cuda(), _other.cuda()\n"
+                        "        return _th.matmul(block, other).cpu()\n"
+                        "    return _th.matmul(block, _other)\n",
+            "func_name": "run",
+            "extra_b64": base64.b64encode(pickle.dumps({"_other": other})).decode(),
+            "items": items,
             "items_b64": True,
             "starmap": False,
-        }).encode()
+        }
+        req["required_mem"] = 2 * (len(req["extra_b64"]) + sum(len(i) for i in items))
+        body = json.dumps(req).encode()
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
@@ -382,6 +420,8 @@ def _install_numpy():
         return
 
     _MIN_BYTES = 32 * 1024 * 1024  # only intercept once there's real compute
+    _orig_matmul = _np.matmul
+    _orig_dot = _np.dot
 
     def _matmul(a, b, *args, **kw):
         import numpy as _np
@@ -395,7 +435,7 @@ def _install_numpy():
                 return _np.vstack(_np_dispatch(blocks, b))
             except Exception as e:
                 _log("numpy matmul fallback (%s)" % e)
-        return _np.matmul(a, b, *args, **kw)
+        return _orig_matmul(a, b, *args, **kw)
 
     def _dot(a, b, *args, **kw):
         import numpy as _np
@@ -409,7 +449,7 @@ def _install_numpy():
                 return _np.vstack(_np_dispatch(blocks, b))
             except Exception as e:
                 _log("numpy dot fallback (%s)" % e)
-        return _np.dot(a, b, *args, **kw)
+        return _orig_dot(a, b, *args, **kw)
 
     _np.matmul = _matmul
     _np.dot = _dot

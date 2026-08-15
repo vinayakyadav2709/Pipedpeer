@@ -278,6 +278,13 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	s.jobsMu.Unlock()
 	s.persist()
 
+	// Fan this closure out to healthy peers so pool spill can split a single
+	// task across multiple nodes. Synchronous and best-effort: the first pool
+	// dispatch must see peers that already hold the closure, else everything
+	// stays local; a peer that fails to import is simply not offered spill
+	// work, and local always runs its own part.
+	s.broadcastClosure(storePath)
+
 	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
 }
 
@@ -441,6 +448,11 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		for _, e := range cfg.Envs {
 			parts := strings.SplitN(e, "=", 2)
 			if len(parts) == 2 {
+				// Inside the sandbox the workdir is mounted at /work; rewrite
+				// any host-path env (PYTHONPATH for the shim) to match.
+				if strings.HasPrefix(parts[1], job.WorkDir) {
+					e = parts[0] + "=/work" + strings.TrimPrefix(parts[1], job.WorkDir)
+				}
 				env = append(env, e)
 			} else {
 				env = append(env, parts[0]+"="+os.Getenv(parts[0]))
