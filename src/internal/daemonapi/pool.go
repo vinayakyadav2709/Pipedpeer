@@ -252,8 +252,10 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 		items []json.RawMessage
 		// run is set only for the local part; remote parts POST instead.
 		runPath string
-		// peers is the ranked best-first candidate list for this part. The
-		// part tries each in order, skipping dead ones, before going local.
+		// peers is the candidate list for this part, its own primary peer
+		// first (part i prefers peers[i]), the rest as fallback in ranked
+		// order. The part tries each in order, skipping dead ones, before
+		// going local.
 		peers []string
 	}
 	var parts []part
@@ -284,7 +286,10 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 				if i == workers-1 {
 					parts = append(parts, part{items: chunk, runPath: runPath}) // local
 				} else {
-					parts = append(parts, part{items: chunk, peers: peers})
+					// Fan out to distinct peers: part i prefers peers[i], so
+					// every healthy peer gets work, not just the best one.
+					ordered := append(append([]string{}, peers[i:]...), peers[:i]...)
+					parts = append(parts, part{items: chunk, peers: ordered})
 				}
 			}
 		}
