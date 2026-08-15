@@ -25,7 +25,14 @@ import base64, json, pickle, sys
 with open(sys.argv[1]) as f:
     req = json.load(f)
 
-func = pickle.loads(base64.b64decode(req["func"]))
+    if req.get("func_src"):
+        ns = {}
+        if req.get("extra_b64"):
+            ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
+        exec(req["func_src"], ns)
+        func = ns[req.get("func_name", "run")]
+    else:
+        func = pickle.loads(base64.b64decode(req["func"]))
 items = req["items"]
 starmap = req.get("starmap", False)
 if req.get("items_b64"):
@@ -46,13 +53,17 @@ with open(sys.argv[2], "w") as f:
 
 // warmWorkerScript is the long-lived sibling of poolRunner: one process per
 // store path stays up reading JSON-lines from stdin and writing them back to
-// stdout. Dispatch then costs a pipe write instead of a closure spawn. This is
-// the "warm workers" dispatch model (handoff.md §4/D2): one worker process per
-// node per store, tasks streaming as messages.
+// stdout. Each line names an in_file (the payload JSON, written to disk by the
+// daemon so the full base64 blob never lives in daemon RAM) and an out_file
+// for results; the daemon reads the results file when done. This is the "warm
+// workers" dispatch model (handoff.md §4/D2): one worker process per node per
+// store, tasks streaming as messages.
 const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per store path.
-# Reads JSON-lines from stdin, runs each pickled callable over its items,
-# writes a JSON-line result to stdout. Kept alive across many /v1/pool/map
-# requests so dispatch never re-spawns the closure.
+# Reads JSON-lines from stdin: each is {"id": N, "in_file": ..., "out_file": ...}.
+# Runs the payload from in_file, writes the results JSON to out_file, then
+# answers with a tiny {"id": N, "done": true, "error": ...} line on stdout.
+# Kept alive across many /v1/pool/map requests so dispatch never re-spawns
+# the closure.
 import base64, json, pickle, sys
 
 for line in sys.stdin:
@@ -60,8 +71,17 @@ for line in sys.stdin:
     if not line:
         continue
     try:
-        req = json.loads(line)
-        func = pickle.loads(base64.b64decode(req["func"]))
+        msg = json.loads(line)
+        with open(msg["in_file"]) as f:
+            req = json.load(f)
+        if req.get("func_src"):
+            ns = {}
+            if req.get("extra_b64"):
+                ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
+            exec(req["func_src"], ns)
+            func = ns[req.get("func_name", "run")]
+        else:
+            func = pickle.loads(base64.b64decode(req["func"]))
         items = req["items"]
         starmap = req.get("starmap", False)
         if req.get("items_b64"):
@@ -73,21 +93,37 @@ for line in sys.stdin:
                 results.append(func(*args))
             else:
                 results.append(func(item))
-        out = {"id": req["id"],
-               "results": [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
+        out = {"id": msg["id"], "results":
+               [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
+        with open(msg["out_file"], "w") as f:
+            json.dump(out, f)
+        ack = {"id": msg["id"], "done": True}
     except Exception as e:
-        out = {"id": req.get("id"), "error": str(e)}
-    sys.stdout.write(json.dumps(out) + "\n")
+        ack = {"id": msg.get("id"), "done": False, "error": str(e)}
+    sys.stdout.write(json.dumps(ack) + "\n")
     sys.stdout.flush()
 `
 
 type poolRequest struct {
-	Func    string          `json:"func"` // base64 pickled callable
-	Items   json.RawMessage `json:"items"`
-	Starmap bool            `json:"starmap"`
+	Func     string `json:"func"`                // base64 pickled callable
+	FuncSrc  string `json:"func_src,omitempty"`  // Python source of the callable
+	FuncName string `json:"func_name,omitempty"` // name func_src defines
+	// ExtraB64 ships pickled globals merged into func_src's namespace (e.g. the
+	// fixed right-hand operand of a block matmul).
+	ExtraB64 string          `json:"extra_b64,omitempty"`
+	Items    json.RawMessage `json:"items"`
+	Starmap  bool            `json:"starmap"`
 	// ItemsB64 marks Items as base64-pickled objects (numpy arrays etc.) rather
 	// than plain JSON scalars, so block-partitioned numeric work can ship.
 	ItemsB64 bool `json:"items_b64,omitempty"`
+	// NoFanout tells the receiving daemon to run the chunk locally instead of
+	// splitting and forwarding it to peers. The origin splits exactly once;
+	// every forwarded chunk is terminal (one-hop fan-out).
+	NoFanout bool `json:"no_fanout,omitempty"`
+	// RequiredMemBytes is the submitter's estimate of the working set this
+	// chunk needs; the daemon refuses with 503 when it cannot spare that much,
+	// so an overloaded node never OOMs mid-chunk. The shim falls back locally.
+	RequiredMemBytes int64 `json:"required_mem,omitempty"`
 }
 
 // poolWorker is a warm, long-lived closure subprocess for one store path.
@@ -112,12 +148,18 @@ type poolManager struct {
 	workers map[string]*poolWorker // storePath → warm worker
 
 	// peerFn returns healthy peer daemon endpoints (host:port) that share the
-	// closure, used for multi-node spill. Nil disables spill (single node).
+	// closure, ordered best-first for spill. Nil disables spill (single node).
 	peerFn func(storePath string) []string
+
+	// deadPeers are peers that failed this chunk; later parts skip them and
+	// fall through to the next best candidate. Reset per runChunk so a peer
+	// that recovers mid-run is tried again.
+	deadMu    sync.Mutex
+	deadPeers map[string]bool
 }
 
 func newPoolManager() *poolManager {
-	return &poolManager{workers: make(map[string]*poolWorker)}
+	return &poolManager{workers: make(map[string]*poolWorker), deadPeers: make(map[string]bool)}
 }
 
 // SetPeerFn installs the function that returns peer daemon endpoints eligible
@@ -157,7 +199,26 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.pool.runChunk(runPath, storePath, req.Func, items, req.Starmap, req.ItemsB64)
+	// Admission control: refuse when the working set cannot fit, so an
+	// overloaded node never OOMs mid-chunk. The submitter falls back locally.
+	if req.RequiredMemBytes > 0 {
+		available := s.AvailableForJob()
+		if available < req.RequiredMemBytes {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"error": fmt.Sprintf("insufficient memory: need %d bytes, available %d bytes", req.RequiredMemBytes, available),
+			})
+			return
+		}
+	}
+
+	var results []any
+	var err error
+	if req.NoFanout {
+		// One-hop fan-out: the origin already split; this chunk is terminal.
+		results, err = s.pool.runLocal(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64)
+	} else {
+		results, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -168,9 +229,11 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 // runChunk dispatches one chunk, preferring a warm worker and falling back to
 // the cold per-request spawn when the warm worker dies or cannot start.
 // When healthy peers share the store, items are split across local + peers and
-// results are merged in input order — local is always one of the workers, so a
-// remote node adds capacity but never removes it (D2: never slower).
-func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+// results are merged in input order. Peers are tried best-first; a peer that
+// fails is skipped for the rest of the chunk and the next best takes its part.
+// Local is always the last resort, so remote nodes add capacity but never
+// remove it (D2: never slower).
+func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
 	// Peel off peers before taking the local worker lock so each local submit
 	// serialises only its own sub-chunk.
 	var peers []string
@@ -180,12 +243,18 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []
 	}
 	pm.mu.Unlock()
 
+	pm.deadMu.Lock()
+	pm.deadPeers = make(map[string]bool)
+	pm.deadMu.Unlock()
+
 	// One worker per participating node. Local is always included.
 	type part struct {
 		items []json.RawMessage
 		// run is set only for the local part; remote parts POST instead.
 		runPath string
-		peer    string
+		// peers is the ranked best-first candidate list for this part. The
+		// part tries each in order, skipping dead ones, before going local.
+		peers []string
 	}
 	var parts []part
 
@@ -215,7 +284,7 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []
 				if i == workers-1 {
 					parts = append(parts, part{items: chunk, runPath: runPath}) // local
 				} else {
-					parts = append(parts, part{items: chunk, peer: peers[i]})
+					parts = append(parts, part{items: chunk, peers: peers})
 				}
 			}
 		}
@@ -233,14 +302,23 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []
 			var r []any
 			var e error
 			if p.runPath != "" {
-				r, e = pm.runLocal(runPath, storePath, pickledFunc, p.items, starmap, itemsB64)
+				r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64)
 			} else {
-				r, e = pm.runRemote(p.peer, storePath, pickledFunc, p.items, starmap, itemsB64)
+				// Walk the ranked peer list; a failure falls through to the
+				// next best candidate. If every peer fails, the work is ours.
+				for _, peer := range p.peers {
+					if pm.peerDead(peer) {
+						continue
+					}
+					r, e = pm.runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64)
+					if e == nil {
+						break
+					}
+					pm.markPeerDead(peer)
+				}
 				if e != nil {
-					// A peer that fell out (died, dropped the closure, or is
-					// stale) must not fail the chunk: the work is ours to do.
 					// D2/D3 — a remote node adds capacity, never subtracts.
-					r, e = pm.runLocal(runPath, storePath, pickledFunc, p.items, starmap, itemsB64)
+					r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64)
 				}
 			}
 			if e != nil {
@@ -262,8 +340,22 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc string, items []
 	return results, nil
 }
 
+// peerDead reports whether a peer failed earlier in this chunk.
+func (pm *poolManager) peerDead(peer string) bool {
+	pm.deadMu.Lock()
+	defer pm.deadMu.Unlock()
+	return pm.deadPeers[peer]
+}
+
+// markPeerDead records that a peer failed so later parts skip it.
+func (pm *poolManager) markPeerDead(peer string) {
+	pm.deadMu.Lock()
+	defer pm.deadMu.Unlock()
+	pm.deadPeers[peer] = true
+}
+
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
-func (pm *poolManager) runLocal(runPath, storePath, pickledFunc string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
 	if !ok || worker.dead() {
@@ -274,21 +366,21 @@ func (pm *poolManager) runLocal(runPath, storePath, pickledFunc string, items []
 		if err != nil {
 			// Cold fallback: one-off spawn keeps the node functional even when
 			// persistent workers are unavailable.
-			return runPoolChunk(runPath, pickledFunc, items, starmap, itemsB64)
+			return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64)
 		}
 		worker = w
 		pm.workers[storePath] = worker
 	}
 	pm.mu.Unlock()
 
-	results, err := worker.submit(pickledFunc, items, starmap, itemsB64)
+	results, err := worker.submit(pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64)
 	if err != nil {
 		// Worker died mid-flight — drop it and fall back to a cold run for
 		// this chunk; the next request will re-warm.
 		pm.mu.Lock()
 		delete(pm.workers, storePath)
 		pm.mu.Unlock()
-		return runPoolChunk(runPath, pickledFunc, items, starmap, itemsB64)
+		return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64)
 	}
 	return results, nil
 }
@@ -296,8 +388,10 @@ func (pm *poolManager) runLocal(runPath, storePath, pickledFunc string, items []
 // runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
 // have the same closure already (peerFn filters for that). Failures are fatal
 // for the chunk: the caller returns them rather than silently dropping work.
-func (pm *poolManager) runRemote(peer, storePath, pickledFunc string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
-	payload := map[string]any{"func": pickledFunc, "items": items, "starmap": starmap, "items_b64": itemsB64}
+func (pm *poolManager) runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+	// no_fanout: the origin splits exactly once; a peer must never re-split and
+	// forward again (one-hop tree, results flow straight back to the origin).
+	payload := map[string]any{"func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64, "no_fanout": true}
 	body, _ := json.Marshal(payload)
 	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
@@ -375,40 +469,74 @@ func (w *poolWorker) dead() bool {
 	return w == nil || w.cmd == nil || w.cmd.ProcessState != nil
 }
 
-// submit sends one task over the pipes and waits for its result line.
-func (w *poolWorker) submit(pickledFunc string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+// submit sends one task over the pipes and waits for its result file. The
+// payload (base64 items can be ~100s of MB) is written to a temp file and the
+// worker is told the path, so the full blob never passes through the pipe or
+// lives in daemon RAM.
+func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.id++
-	req := map[string]any{"id": w.id, "func": pickledFunc, "items": items, "starmap": starmap, "items_b64": itemsB64}
-	body, _ := json.Marshal(req)
-	if _, err := w.stdin.WriteString(string(body) + "\n"); err != nil {
+
+	dir, err := os.MkdirTemp("", "pipedpeer-warm-task-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	inPath := filepath.Join(dir, "in.json")
+	outPath := filepath.Join(dir, "out.json")
+
+	req := map[string]any{"id": w.id, "func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(inPath, body, 0644); err != nil {
+		return nil, err
+	}
+
+	msg := map[string]any{"id": w.id, "in_file": inPath, "out_file": outPath}
+	line, _ := json.Marshal(msg)
+	if _, err := w.stdin.WriteString(string(line) + "\n"); err != nil {
 		return nil, err
 	}
 	if err := w.stdin.Flush(); err != nil {
 		return nil, err
 	}
 
-	// Read until the line matching our id arrives. Scan() returns false on EOF
+	// Read until the ack matching our id arrives. Scan() returns false on EOF
 	// (worker exited), which surfaces as an error and lets the caller fall back
-	// to a cold run. A stuck worker is bounded by the work itself.
+	// to a cold run.
 	for {
 		if !w.stdout.Scan() {
 			return nil, fmt.Errorf("warm worker closed: %v", w.stdout.Err())
 		}
-		var out struct {
-			ID      int64    `json:"id"`
-			Results []string `json:"results"`
-			Error   string   `json:"error"`
+		var ack struct {
+			ID    int64  `json:"id"`
+			Done  bool   `json:"done"`
+			Error string `json:"error"`
 		}
-		if err := json.Unmarshal(w.stdout.Bytes(), &out); err != nil {
+		if err := json.Unmarshal(w.stdout.Bytes(), &ack); err != nil {
 			continue
 		}
-		if out.ID != w.id {
+		if ack.ID != w.id {
 			continue // stale line from a concurrent write; ignore
 		}
-		if out.Error != "" {
-			return nil, fmt.Errorf("worker: %s", out.Error)
+		if ack.Error != "" {
+			return nil, fmt.Errorf("worker: %s", ack.Error)
+		}
+		if !ack.Done {
+			return nil, fmt.Errorf("worker: no done ack")
+		}
+		outBytes, err := os.ReadFile(outPath)
+		if err != nil {
+			return nil, err
+		}
+		var out struct {
+			Results []string `json:"results"`
+		}
+		if err := json.Unmarshal(outBytes, &out); err != nil {
+			return nil, err
 		}
 		results := make([]any, 0, len(out.Results))
 		for _, r := range out.Results {
@@ -435,7 +563,7 @@ func (pm *poolManager) stopAll() {
 
 // runPoolChunk is the cold path: one closure spawn per chunk. Kept for the
 // fallback when warm workers are unavailable.
-func runPoolChunk(runPath, pickledFunc string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
 	dir, err := os.MkdirTemp("", "pipedpeer-pool-*")
 	if err != nil {
 		return nil, err
@@ -447,7 +575,7 @@ func runPoolChunk(runPath, pickledFunc string, items []json.RawMessage, starmap,
 		return nil, err
 	}
 
-	payload := map[string]any{"func": pickledFunc, "items": items, "starmap": starmap, "items_b64": itemsB64}
+	payload := map[string]any{"func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64}
 	inPath := filepath.Join(dir, "in.json")
 	outPath := filepath.Join(dir, "out.json")
 	inBytes, _ := json.Marshal(payload)
