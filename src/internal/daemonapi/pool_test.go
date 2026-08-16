@@ -315,6 +315,54 @@ func TestPoolMapRejectsMissingStore(t *testing.T) {
 	}
 }
 
+// TestPoolMapAdmissionRefusesOverMemory verifies the admission control on
+// /v1/pool/map: a chunk whose required_mem exceeds the node's available memory
+// is refused with 503 (the shim falls back locally), so an overloaded node
+// never OOMs mid-chunk.
+func TestPoolMapAdmissionRefusesOverMemory(t *testing.T) {
+	store := fakeRun(t, t.TempDir())
+
+	s := New("pool-test-node")
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	body := fmt.Sprintf(`{"func":"eA==","items":[1,2],"required_mem":%d}`, int64(1)<<62)
+	req, err := http.NewRequest("POST", srv.URL+"/v1/pool/map", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Pipedpeer-Store", store)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		t.Fatalf("want 503 for over-memory chunk, got %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Sanity: the same request with a tiny required_mem passes admission and
+	// reaches execution (the func is a dummy, so the run itself may error — we
+	// only assert it is NOT the admission 503).
+	body = `{"func":"eA==","items":[1,2],"required_mem":1}`
+	req, err = http.NewRequest("POST", srv.URL+"/v1/pool/map", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Pipedpeer-Store", store)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		t.Fatal("tiny required_mem was refused by admission control")
+	}
+}
+
 // TestRunPoolChunkItemsB64 verifies the items_b64 transport: pickled objects
 // (the mechanism numpy block-partitioned matmul uses) ship as base64 blobs and
 // are unpickled by the worker before the callable runs. A pickled list stands in
