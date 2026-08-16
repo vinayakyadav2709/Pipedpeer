@@ -53,8 +53,13 @@ All of Part 2c is shipped and verified end-to-end in the 3-node lab (`lab/`), in
       participate (`0a8623b`)
 
 ### Remaining Part 2c trimmings
-- [ ] Torch dispatch live test (numpy proven; torch cuda branch exercised only in unit tests)
-- [ ] A unit test for the 503 admission path (currently verified only by live runs)
+- [x] Torch dispatch live test — 4000×4000 matmul on the 3-node lab, torch 2.12.0
+      closure, all 3 labs participated, zero fallbacks (PIPEDPEER_TORCH=1)
+- [x] A unit test for the 503 admission path (`TestPoolMapAdmissionRefusesOverMemory`)
+- [x] JobSet grouping — records already carry `job_set` (set by mapset.go) and
+      `pipedpeer jobs` already prints the column; real grouping stays cosmetic
+- [x] Nightly integration is already blocking (`continue-on-error: false`, landed in
+      `84d3ff9`) and has been green nightly since Aug 13
 
 ---
 
