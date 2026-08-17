@@ -31,6 +31,30 @@ When you submit a job:
 
 If a node dies mid-job, its lease expires and the job is placed somewhere else.
 
+## Transparent cluster acceleration
+
+`pipedpeer run --intercept` embeds a shim that routes your parallel primitives
+across the cluster with zero code changes. Each primitive is intercepted only
+when the cost model says the cluster wins (measured latency/bandwidth probe,
+cached per peer); otherwise it runs locally, exactly as before.
+
+| Your code | What happens instead |
+|---|---|
+| `multiprocessing.Pool.map/starmap/imap/apply` | Work is split into batches and fanned out to cluster nodes; results stream back in order |
+| `pandas.read_csv/read_parquet` (large files) | Chunked out-of-core reads across nodes, streamed back on demand |
+| `df.groupby(...).agg(...)` / `df.merge/join` | Hash-shuffle: each node reduces its share of the keys, partials are combined exactly at the origin |
+| `torch` training with `pipedpeer run --ddp K` | `K` ranks placed on the cluster; DDP process group, `DistributedDataParallel` wrapping and gradient sync happen transparently |
+| `joblib.Parallel` | Routed through the same cluster pool |
+
+The shim is a `sitecustomize` injected into the job's environment; nothing is
+installed on the nodes or in your interpreter.
+
+```bash
+pipedpeer run --script train.py --intercept          # cluster-parallel primitives
+pipedpeer run --script train.py --intercept --ddp 2  # transparent 2-rank DDP
+make lab-fail                                        # demo: kills a worker mid-pool-map, run survives
+```
+
 ## Install
 
 ```bash
@@ -101,6 +125,7 @@ make test             # unit tests
 make test-integration # integration tests (needs podman/docker)
 make fmt lint         # gofmt and go vet
 make lab-up           # 3-worker container cluster for local testing
+make lab-fail         # failure-injection demo (kills a worker mid-run)
 ```
 
 ## License

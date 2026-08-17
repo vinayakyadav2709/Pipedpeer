@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -239,6 +240,8 @@ func newRunCmd() *cobra.Command {
 			gpuID, _ := cmd.Flags().GetString("gpu-id")
 			gpuMemStr, _ := cmd.Flags().GetString("gpu-mem")
 			requiredCores, _ := cmd.Flags().GetInt("cores")
+			ddpNodes, _ := cmd.Flags().GetInt("ddp")
+			ddpPort, _ := cmd.Flags().GetInt("ddp-port")
 
 			if scriptPath == "" {
 				return fmt.Errorf("--script is required")
@@ -278,6 +281,31 @@ func newRunCmd() *cobra.Command {
 			}
 			if wasStarted {
 				fmt.Println("started daemon")
+			}
+
+			if ddpNodes > 1 {
+				return runDDP(ddpRunOptions{
+					Nodes:          ddpNodes,
+					MasterPort:     ddpPort,
+					DaemonPort:     daemonPort,
+					ScriptPath:     scriptPath,
+					ScriptArgs:     args,
+					JobName:        jobName,
+					Isolate:        isolate,
+					Intercept:      intercept,
+					RegistryURL:    registryURL,
+					PythonVersion:  pythonVersion,
+					Pkgs:           pkgs,
+					Envs:           envs,
+					GPUDevices:     gpuID,
+					RequireGPU:     requireGPU,
+					PreferGPU:      preferGPU,
+					RequiredGPUMem: requiredGPUMem,
+					RequiredCores:  requiredCores,
+					NoSelf:         noSelf,
+					Strategy:       strategy,
+					MemOverride:    memOverride,
+				})
 			}
 
 			var placementSource, placementReason string
@@ -461,7 +489,236 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().Bool("no-self", false, "Exclude self-node from placement")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
+	cmd.Flags().Int("ddp", 0, "Distributed training: run this many ranks across the cluster, DDP init transparently handled by the shim")
+	cmd.Flags().Int("ddp-port", 0, "Explicit MASTER_PORT for --ddp (default: probe a free ephemeral port)")
 	return cmd
+}
+
+type ddpRunOptions struct {
+	Nodes          int
+	MasterPort     int
+	DaemonPort     int
+	ScriptPath     string
+	ScriptArgs     []string
+	JobName        string
+	Isolate        bool
+	Intercept      bool
+	RegistryURL    string
+	PythonVersion  string
+	Pkgs           []string
+	Envs           []string
+	GPUDevices     string
+	RequireGPU     bool
+	PreferGPU      bool
+	RequiredGPUMem int64
+	RequiredCores  int
+	NoSelf         bool
+	Strategy       string
+	MemOverride    string
+}
+
+// runDDP launches a transparent multi-rank training run: rank 0 is placed by
+// the coordinator, ranks 1..K-1 come from the daemon's healthy node store,
+// and every rank gets RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT plus
+// PIPEDPEER_DDP=1, which makes the sitecustomize shim initialize the torch
+// process group and wrap DistributedDataParallel without touching user code.
+func runDDP(o ddpRunOptions) error {
+	if o.Nodes < 2 {
+		return fmt.Errorf("--ddp needs at least 2 ranks")
+	}
+	absScript, err := filepath.Abs(o.ScriptPath)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %v", err)
+	}
+
+	nodeID, err := identity.GetOrCreate()
+	if err != nil {
+		return err
+	}
+	if _, err := daemonctl.EnsureStarted(nodeID.NodeID, o.DaemonPort); err != nil {
+		return err
+	}
+
+	userMem := resourceest.ParseMemString(o.MemOverride)
+	resReq := resourceest.EstimateFromScript(o.ScriptPath, nil, userMem)
+
+	rrFn := func(count int) int {
+		url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", o.DaemonPort, count)
+		resp, err := http.Get(url)
+		if err != nil {
+			return 0
+		}
+		defer resp.Body.Close()
+		var result struct{ Index int }
+		json.NewDecoder(resp.Body).Decode(&result)
+		return result.Index
+	}
+
+	coord := coordinator.New(coordinator.Config{
+		RegistryURL:      o.RegistryURL,
+		SelfIdentity:     nodeID,
+		SelfSSH:          fmt.Sprintf("root@%s:22", detectLocalIP()),
+		SelfDaemon:       o.DaemonPort,
+		SelfLoad:         heartbeat.CollectLoad(0, 0),
+		JobName:          o.JobName,
+		RequiredMemBytes: resReq.MemBytes,
+		RequiredCores:    o.RequiredCores,
+		RequiredGPUMem:   o.RequiredGPUMem,
+		NoSelf:           o.NoSelf,
+		RequireGPU:       o.RequireGPU,
+		PreferGPU:        o.PreferGPU,
+		Strategy:         o.Strategy,
+		RoundRobinFn:     rrFn,
+	})
+
+	decision := coord.FindNode()
+	rank0 := decision.ChosenNode
+	if rank0.NodeID == "" {
+		return fmt.Errorf("no node eligible for rank 0: %s", decision.Reason)
+	}
+	if rank0.DaemonPort == 0 {
+		rank0.DaemonPort = o.DaemonPort
+	}
+
+	peers := make([]registry.NodeRecord, 0, o.Nodes-1)
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
+	if err == nil {
+		var all []registry.NodeRecord
+		if jerr := json.NewDecoder(resp.Body).Decode(&all); jerr == nil {
+			for _, n := range all {
+				if n.State != "healthy" || n.NodeID == rank0.NodeID {
+					continue
+				}
+				if o.RequireGPU && !ddpHasGPU(n) {
+					continue
+				}
+				peers = append(peers, n)
+			}
+			sort.Slice(peers, func(i, j int) bool {
+				return peers[i].Load.CPUPercent < peers[j].Load.CPUPercent
+			})
+		}
+		resp.Body.Close()
+	}
+	if len(peers) < o.Nodes-1 {
+		return fmt.Errorf("need %d healthy peers for ranks 1..%d (found %d) — join more nodes or lower --ddp",
+			o.Nodes-1, o.Nodes-1, len(peers))
+	}
+	peers = peers[:o.Nodes-1]
+
+	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
+	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
+		masterAddr = detectLocalIP()
+	}
+	masterPort := o.MasterPort
+	if masterPort == 0 {
+		// ponytail: probe a free ephemeral port locally and hand it over;
+		// rank 0's torch store binds it for real on the node, and --ddp-port
+		// is the explicit override if that ever races.
+		l, lerr := net.Listen("tcp", "0.0.0.0:0")
+		if lerr != nil {
+			return fmt.Errorf("could not probe a free master port: %v", lerr)
+		}
+		masterPort = l.Addr().(*net.TCPAddr).Port
+		l.Close()
+	}
+
+	fmt.Printf("=== Distributed training: %d ranks ===\n", o.Nodes)
+	fmt.Printf("rank 0: %s (%s:%d)\n", rank0.NodeID[:min(8, len(rank0.NodeID))], masterAddr, rank0.DaemonPort)
+	for i, n := range peers {
+		fmt.Printf("rank %d: %s (%s:%d)\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
+			ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
+	}
+	fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=gloo\n\n", masterAddr, masterPort)
+
+	env, err := app.BuildEnvironment(absScript, app.EnvOptions{
+		PythonVersion: o.PythonVersion,
+		Pkgs:          o.Pkgs,
+		Intercept:     true, // DDP transparency lives in the sitecustomize shim
+	}, func(step int, title string) {
+		if step == 1 {
+			fmt.Printf("[%d/7] %s\n", step, title)
+		} else {
+			fmt.Printf("\n[%d/7] %s\n", step, title)
+		}
+	})
+	if err != nil {
+		return err
+	}
+	defer env.Close()
+
+	jobSet := "ddp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if o.JobName != "" {
+		jobSet = "ddp-" + o.JobName
+	}
+
+	ranks := make([]registry.NodeRecord, 0, o.Nodes)
+	ranks = append(ranks, rank0)
+	ranks = append(ranks, peers...)
+
+	errs := make(chan error, o.Nodes)
+	for i, n := range ranks {
+		go func(i int, n registry.NodeRecord) {
+			rankEnvs := append([]string(nil), o.Envs...)
+			rankEnvs = append(rankEnvs,
+				"PIPEDPEER_DDP=1",
+				fmt.Sprintf("PIPEDPEER_RANK=%d", i),
+				fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", o.Nodes),
+				fmt.Sprintf("RANK=%d", i),
+				fmt.Sprintf("WORLD_SIZE=%d", o.Nodes),
+				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
+				fmt.Sprintf("MASTER_PORT=%d", masterPort),
+			)
+			opts := app.Options{
+				ScriptPath:        absScript,
+				DaemonHost:        ddpExtractHost(n.SSHEndpoint),
+				DaemonPort:        n.DaemonPort,
+				TargetID:          n.NodeID,
+				JobName:           o.JobName,
+				JobSet:            jobSet,
+				Isolate:           o.Isolate,
+				Intercept:         true,
+				GPU:               o.PreferGPU || o.RequireGPU,
+				GPUDevices:        o.GPUDevices,
+				Mode:              "script",
+				PythonVersion:     o.PythonVersion,
+				Envs:              rankEnvs,
+				Pkgs:              o.Pkgs,
+				ScriptArgs:        o.ScriptArgs,
+				ResultsDir:        filepath.Join(".", "results", fmt.Sprintf("ddp-rank-%d", i)),
+				PlacementSource:   "ddp",
+				EstimatedMemBytes: resReq.MemBytes,
+				EstimationTier:    resReq.Tier,
+			}
+			errs <- app.RunTask(env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+		}(i, n)
+	}
+
+	var firstErr error
+	for i := 0; i < o.Nodes; i++ {
+		if err := <-errs; err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("rank %d failed: %w", i, err)
+		}
+	}
+	return firstErr
+}
+
+func ddpHasGPU(n registry.NodeRecord) bool {
+	if n.Capabilities["gpu"] != "" && n.Capabilities["gpu"] != "none" {
+		return true
+	}
+	return n.Load.GPUModel != "" || len(n.Load.GPUs) > 0
+}
+
+func ddpExtractHost(endpoint string) string {
+	s := endpoint
+	if idx := strings.Index(s, "@"); idx >= 0 {
+		s = s[idx+1:]
+	}
+	if idx := strings.Index(s, ":"); idx >= 0 {
+		s = s[:idx]
+	}
+	return s
 }
 
 func newMapCmd() *cobra.Command {
