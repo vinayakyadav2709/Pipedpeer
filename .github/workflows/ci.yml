@@ -25,6 +25,11 @@ jobs:
           go-version-file: 'src/go.mod'
           cache-dependency-path: 'src/go.sum'
 
+      - name: Install Python deps for shim tests
+        run: |
+          python3 -m pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install --quiet pandas
+
       - name: Check formatting
         run: |
           unformatted="$(gofmt -l .)"
