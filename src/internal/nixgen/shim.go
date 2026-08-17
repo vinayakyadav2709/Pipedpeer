@@ -185,7 +185,7 @@ class _ClusterPool:
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
         try:
-            with urllib.request.urlopen(req, timeout=600) as resp:
+            with _daemon_open(req, 600) as resp:
                 rs = json.loads(resp.read())["results"]
                 return [(idxs[i], pickle.loads(base64.b64decode(r["pickle"])))
                         for i, r in enumerate(rs)]
@@ -285,7 +285,7 @@ def _np_dispatch(blocks, other):
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=1200) as resp:
+        with _daemon_open(req, 1200) as resp:
             rs = json.loads(resp.read())["results"]
         return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
     except Exception as e:
@@ -332,7 +332,7 @@ def _torch_dispatch(blocks, other):
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=1200) as resp:
+        with _daemon_open(req, 1200) as resp:
             rs = json.loads(resp.read())["results"]
         return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
     except Exception as e:
@@ -468,6 +468,20 @@ _IN_MERGE = False
 _BW_CACHE = {"t": 0.0, "bw": None}
 _BW_TTL = 300.0
 
+# The daemon always listens on loopback (http://127.0.0.1:<selfPort>), so its
+# requests must never be routed through an http(s)_proxy / no_proxy env proxy
+# (GH Actions runners and many sandboxes set these, which would otherwise
+# hijack or refuse loopback traffic and make the shim silently fall back to
+# local). Build a proxy-less opener and reuse it everywhere.
+_DaemonOpener = None
+def _daemon_open(req, timeout):
+    """Send req to the loopback daemon, bypassing any environment HTTP proxy."""
+    global _DaemonOpener
+    if _DaemonOpener is None:
+        import urllib.request
+        _DaemonOpener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _DaemonOpener.open(req, timeout=timeout)
+
 
 def _should_spill(nbytes, flops_per_byte):
     """Latency cost model: spill nbytes of work (flops_per_byte per byte) when
@@ -513,7 +527,7 @@ def _measure_bandwidth():
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with _daemon_open(req, 60) as resp:
             json.loads(resp.read())
         bw = sum(len(b) for b in blobs) / max(time.monotonic() - t0, 1e-6)
     except Exception:
@@ -577,7 +591,7 @@ def _groupby_shuffle(gb, spec, args, kw):
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=1800) as resp:
+        with _daemon_open(req, 1800) as resp:
             rs = json.loads(resp.read())["results"]
         parts.extend(pickle.loads(base64.b64decode(r["pickle"])) for r in rs)
     res = _pd.concat(parts)
@@ -696,7 +710,7 @@ def _merge_shuffle(left, right, kw):
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=1800) as resp:
+        with _daemon_open(req, 1800) as resp:
             rs = json.loads(resp.read())["results"]
         parts.extend(pickle.loads(base64.b64decode(r["pickle"])) for r in rs)
     res = _pd.concat(parts)
@@ -878,7 +892,7 @@ def _partitioned_read(func_src, extra, items, required_mem):
     req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                  headers={"Content-Type": "application/json",
                                           "X-Pipedpeer-Store": _STORE})
-    with urllib.request.urlopen(req, timeout=3600) as resp:
+    with _daemon_open(req, 3600) as resp:
         rs = json.loads(resp.read())["results"]
     return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
 
@@ -1029,7 +1043,7 @@ class _PartitionedFrame:
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=1800) as resp:
+        with _daemon_open(req, 1800) as resp:
             rs = json.loads(resp.read())["results"]
         return pickle.loads(base64.b64decode(rs[0]["pickle"]))
 
@@ -1048,7 +1062,7 @@ class _PartitionedFrame:
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=3600) as resp:
+        with _daemon_open(req, 3600) as resp:
             rs = json.loads(resp.read())["results"]
         dfs = [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
         return _pd.concat(dfs, ignore_index=True)
@@ -1094,7 +1108,7 @@ class _PartitionedFrame:
         req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                      headers={"Content-Type": "application/json",
                                               "X-Pipedpeer-Store": _STORE})
-        with urllib.request.urlopen(req, timeout=3600) as resp:
+        with _daemon_open(req, 3600) as resp:
             rs = json.loads(resp.read())["results"]
         parts = [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
         if has_mean:
@@ -1425,7 +1439,7 @@ def _partitioned_merge(pf, right, how="inner", on=None, left_on=None,
     req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                  headers={"Content-Type": "application/json",
                                           "X-Pipedpeer-Store": _STORE})
-    with urllib.request.urlopen(req, timeout=3600) as resp:
+    with _daemon_open(req, 3600) as resp:
         rs = json.loads(resp.read())["results"]
     res = _pd.concat([pickle.loads(base64.b64decode(r["pickle"])) for r in rs],
                      ignore_index=True)
