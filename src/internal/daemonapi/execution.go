@@ -157,6 +157,17 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
+// envsContain reports whether any env entry in envs starts with the given
+// key= prefix, so the daemon never clobbers a submitter-provided variable.
+func envsContain(envs []string, prefix string) bool {
+	for _, e := range envs {
+		if strings.HasPrefix(e, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
 		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
@@ -395,11 +406,16 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("PIPEDPEER_DAEMON_URL=http://127.0.0.1:%d", s.selfPort),
 			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
 			"PIPEDPEER_NODE_ID="+s.nodeID,
-			// ponytail: gate the spill path on; the local daemon is a valid
-			// /v1/pool/map target. Replace with real cluster node count when
-			// multi-node spill is wired.
-			"PIPEDPEER_NUM_SHARDS=1",
 		)
+		// The shim gates remote spill on PIPEDPEER_NUM_SHARDS != "0": the
+		// number of nodes that share this closure (1 at first exec, peers
+		// count once broadcastClosure has run). DDP runs set their own
+		// RANK/WORLD_SIZE/MASTER_ADDR/PEERS via cfg.Envs and must not be
+		// overridden here.
+		if !envsContain(cfg.Envs, "PIPEDPEER_NUM_SHARDS=") {
+			cfg.Envs = append(cfg.Envs,
+				fmt.Sprintf("PIPEDPEER_NUM_SHARDS=%d", s.pool.spillPeerCount(cfg.StorePath)+1))
+		}
 	}
 
 	if !cfg.Isolate {
@@ -507,19 +523,10 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			if cfg.GPUDevices != "" {
 				gpuDevices = cfg.GPUDevices
 			} else if gpuInfo.Count > 1 {
-				// With multiple GPUs, check if one is reserved for this task.
-				// This is set by the daemon's lease system when accepting a GPU task.
-				reservedGPU := ""
-				for _, e := range cfg.Envs {
-					if strings.HasPrefix(e, "PIPEDPEER_GPU_INDEX=") {
-						reservedGPU = strings.TrimPrefix(e, "PIPEDPEER_GPU_INDEX=")
-						break
-					}
-				}
-				if reservedGPU != "" {
-					gpuDevices = reservedGPU
-				} else {
-					// No reservation — expose the GPU with most free VRAM
+				// With multiple GPUs, use the one the lease reserved for this task
+				// (cfg.GPUDevices is set by the coordinator from the lease); no
+				// reservation means the GPU with most free VRAM.
+				if gpuDevices == "all" {
 					devices := gpu.PerDevice()
 					bestIdx := -1
 					var bestFree int64

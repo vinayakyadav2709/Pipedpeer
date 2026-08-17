@@ -1,4 +1,4 @@
-.PHONY: build install test test-integration fmt lint lab-up lab-down bootstrap
+.PHONY: build install test test-integration fmt lint lab-up lab-down lab-fail bootstrap
 
 build:
 	./scripts/build.sh
@@ -26,3 +26,6 @@ lab-up:
 
 lab-down:
 	./scripts/lab-down.sh
+
+lab-fail:
+	./scripts/lab-fail.sh
