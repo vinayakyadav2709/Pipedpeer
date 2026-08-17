@@ -1,9 +1,14 @@
 package daemonapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
+	"net/url"
+	"os"
 	"runtime"
 	"sort"
 	"strconv"
@@ -16,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -90,6 +96,16 @@ type Server struct {
 
 	// Node store (SQLite — single source of truth for all peers)
 	store *nodestore.Store
+
+	// narCache content-addresses imported Nix closures (see narcache.go)
+	narCache *narCache
+
+	// pool owns the warm worker processes for intercepted pool maps
+	// (see pool.go). One persistent closure subprocess per store path.
+	pool *poolManager
+
+	// state persists leases + jobs across restarts (see state.go)
+	state *state
 
 	// Peer health cache (populated by background poller)
 	peersMu     sync.RWMutex
@@ -206,6 +222,8 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		jobDir:          defaultJobDir(),
 		jobs:            make(map[string]*JobRecord),
 		store:           store,
+		narCache:        newNarCache(),
+		pool:            newPoolManager(),
 	}
 	s.buildRouter()
 	return s
@@ -312,6 +330,176 @@ func (s *Server) StopSweeper() {
 	}
 }
 
+// StopWarmWorkers terminates all warm pool worker processes. Safe to call on
+// shutdown; warm workers are opportunistic and will be re-spawned on demand.
+func (s *Server) StopWarmWorkers() {
+	if s.pool != nil {
+		s.pool.stopAll()
+	}
+}
+
+// EnablePoolSpill lets a node forward pool-map sub-chunks to healthy peers for
+// the same store, in addition to running locally. It is opt-in: single-node
+// setups and tests leave it off, so behaviour is unchanged by default.
+//
+// The returned list is ranked best-first: fewer active jobs, then more
+// available memory. runChunk fans out to the best nodes first and falls
+// through to the next best on failure, so the k best nodes carry the work.
+func (s *Server) EnablePoolSpill() {
+	s.pool.SetPeerFn(func(storePath string) []string {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		type cand struct {
+			peer       string
+			activeJobs int
+			availMem   int64
+		}
+		var out []cand
+		for _, ph := range s.peerHealths {
+			if ph.Status != "healthy" {
+				continue
+			}
+			if ph.Host == "" || ph.Port == 0 {
+				continue
+			}
+			// Only forward to peers that already imported this closure, else
+			// the remote POST fails with a missing-store 400. Checking the
+			// store endpoint is cheap (local cache) and keeps spill correct.
+			if !s.peerHasStore(ph, storePath) {
+				continue
+			}
+			out = append(out, cand{peer: fmt.Sprintf("%s:%d", ph.Host, ph.Port), activeJobs: ph.ActiveJobs, availMem: ph.AvailableMem})
+		}
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].activeJobs != out[j].activeJobs {
+				return out[i].activeJobs < out[j].activeJobs
+			}
+			return out[i].availMem > out[j].availMem
+		})
+		res := make([]string, 0, len(out))
+		for _, c := range out {
+			res = append(res, c.peer)
+		}
+		return res
+	})
+}
+
+// peerHasStore asks a peer whether it can actually run the given closure: the
+// store must be materialised (<storePath>/bin/run exists), not merely have its
+// NAR cached — a cached but un-imported closure would fail at pool-map time.
+func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
+	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", ph.Host, ph.Port, url.QueryEscape(storePath))
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Cached bool `json:"cached"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+		return false
+	}
+	return r.Cached
+}
+
+// broadcastClosure pushes a cached closure NAR to every healthy peer that does
+// not have it yet, so pool spill can fan a single task out to multiple nodes.
+// Best-effort and parallel: a peer that fails to import is simply not offered
+// spill work (runChunk always keeps the local part, so nothing is lost).
+func (s *Server) broadcastClosure(storePath string) {
+	narPath, ok := s.narCache.narFileFor(storePath)
+	if !ok {
+		return
+	}
+	s.peersMu.RLock()
+	var targets []PeerHealth
+	for _, ph := range s.peerHealths {
+		if ph.Status == "healthy" && ph.Host != "" && ph.Port != 0 {
+			targets = append(targets, *ph)
+		}
+	}
+	s.peersMu.RUnlock()
+	if len(targets) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for i := range targets {
+		ph := targets[i]
+		if s.peerHasStore(&ph, storePath) {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
+				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+					Msg("closure broadcast failed")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
+func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
+	f, err := os.Open(narPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var buf bytes.Buffer
+	mp := multipart.NewWriter(&buf)
+	if err := mp.WriteField("store_path", storePath); err != nil {
+		return err
+	}
+	w, err := mp.CreateFormFile("nar", "closure.nar")
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(w, f); err != nil {
+		return err
+	}
+	mp.Close()
+
+	url := fmt.Sprintf("http://%s:%d/v1/store/import", ph.Host, ph.Port)
+	req, err := http.NewRequest("POST", url, &buf)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", mp.FormDataContentType())
+	client := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("import %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("import %s returned %d: %s", url, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// EnablePersistence turns on cross-restart persistence of leases and jobs.
+// It is opt-in so the constructor stays side-effect-free for tests; the real
+// daemon calls it at startup. On enable it loads any previously saved state.
+func (s *Server) EnablePersistence() {
+	s.state = newState()
+	s.state.load(s.leases, s.jobs)
+}
+
+// persist snapshots the current leases and jobs to disk. Call after any
+// mutation so a crash or restart starts from the latest state.
+func (s *Server) persist() {
+	if s.state != nil {
+		s.state.save(s.leases, s.jobs)
+	}
+}
+
 // sweepExpired removes leases in "reserved" state past expiry + grace.
 // Running leases are NOT expired — only uncommitted reservations.
 // sweepExpired releases leases nobody is coming back for.
@@ -339,6 +527,7 @@ func (s *Server) sweepExpired() {
 			}
 		}
 	}
+	s.persist()
 }
 
 // SetRunningLeaseTTL overrides how long a running lease survives without a
@@ -450,6 +639,9 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
+	r.Get("/v1/store", s.handleStoreCheck)
+	r.Post("/v1/store/import", s.handleStoreImport)
+	r.Post("/v1/pool/map", s.handlePoolMap)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 
@@ -947,6 +1139,7 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 
 	s.leases[leaseID] = lease
 	s.mu.Unlock()
+	s.persist()
 
 	return acceptResponse{
 		Accepted:  true,
@@ -1045,6 +1238,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 	if time.Now().After(lease.ExpiresAt.Add(s.gracePeriod)) {
 		delete(s.leases, req.LeaseID)
 		s.mu.Unlock()
+		s.persist()
 		return commitResponse{Committed: false, NodeID: s.nodeID, Reason: "lease expired"}, http.StatusGone
 	}
 
@@ -1066,6 +1260,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 		if available < 0 {
 			delete(s.leases, req.LeaseID)
 			s.mu.Unlock()
+			s.persist()
 			return commitResponse{
 				Committed: false, NodeID: s.nodeID,
 				Reason: fmt.Sprintf("resources no longer available: available=%d", available),
@@ -1078,6 +1273,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 	lease.State = LeaseRunning
 	lease.RenewedAt = time.Now()
 	s.mu.Unlock()
+	s.persist()
 
 	return commitResponse{Committed: true, NodeID: s.nodeID}, http.StatusOK
 }
@@ -1098,6 +1294,7 @@ func (s *Server) processComplete(req completeRequest) {
 		delete(s.leases, leaseID)
 	}
 	s.mu.Unlock()
+	s.persist()
 }
 
 func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
@@ -1116,6 +1313,7 @@ func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
 
 	delete(s.leases, req.LeaseID)
 	s.mu.Unlock()
+	s.persist()
 
 	return map[string]string{"status": "cancelled"}, http.StatusOK
 }

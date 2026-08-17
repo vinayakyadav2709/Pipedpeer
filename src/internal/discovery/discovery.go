@@ -1,11 +1,15 @@
 package discovery
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // DiscoveredNode is a node found via LAN discovery.
@@ -33,8 +37,36 @@ type ServiceInfo struct {
 
 const (
 	broadcastPort = 38099
-	magicHeader   = "PIPEDPEER_DISC_V1"
+	// multicastGroup carries probes between daemons on the same host. A UDP
+	// broadcast sent to a port that several sockets share is delivered by the
+	// kernel to only ONE of them, so co-located daemons (a lab, containers on
+	// one machine, several devices behind one router) would never see each
+	// other. Multicast with SO_REUSEADDR delivers every probe to all joined
+	// sockets; broadcast stays for discovery across hosts.
+	multicastGroup = "239.255.0.99"
+	magicHeader    = "PIPEDPEER_DISC_V1"
 )
+
+// listenConfig reuses the port so several daemons on one host can share the
+// discovery address. Without REUSEADDR/REUSEPORT the second daemon fails to
+// bind and silently falls back to a random port, missing probes.
+var listenConfig = net.ListenConfig{
+	Control: func(network, address string, c syscall.RawConn) error {
+		var serr error
+		err := c.Control(func(fd uintptr) {
+			for _, opt := range []int{unix.SO_REUSEADDR, unix.SO_REUSEPORT} {
+				if e := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, opt, 1); e != nil {
+					serr = e
+					return
+				}
+			}
+		})
+		if serr != nil {
+			return serr
+		}
+		return err
+	},
+}
 
 // Advertiser broadcasts this node's presence on the LAN.
 type Advertiser struct {
@@ -54,23 +86,39 @@ func NewAdvertiser(info ServiceInfo) *Advertiser {
 
 // Start begins broadcasting presence and responding to discovery requests.
 func (a *Advertiser) Start() error {
-	conn, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", broadcastPort))
-	if err != nil {
-		// Port might be in use (multiple nodes on same machine in tests)
-		// Try with a random port as fallback
-		conn, err = net.ListenPacket("udp4", ":0")
-		if err != nil {
-			return fmt.Errorf("listen discovery: %w", err)
-		}
-	}
+	// Two listeners, one responder loop each: the multicast group catches
+	// probes from same-host daemons, the broadcast port catches probes from
+	// other machines. Both reuse the port so they never conflict.
+	a.doneCh = make(chan struct{}, 2)
 
+	mcast := &net.UDPAddr{IP: net.ParseIP(multicastGroup), Port: broadcastPort}
+	conn, err := listenConfig.ListenPacket(context.Background(), "udp4", mcast.String())
+	if err != nil {
+		return fmt.Errorf("listen multicast: %w", err)
+	}
 	go a.respondLoop(conn)
+
+	bc, err := listenConfig.ListenPacket(context.Background(), "udp4", fmt.Sprintf(":%d", broadcastPort))
+	if err != nil {
+		// Same-host share is handled by multicast; a free broadcast port is
+		// best-effort (another daemon already holds it and responds on it).
+		// Stop() waits on doneCh with a bounded timeout, so dropping the
+		// second listener just means one fewer response path.
+		a.doneCh <- struct{}{}
+		return nil
+	}
+	go a.respondLoop(bc)
 	return nil
 }
 
 func (a *Advertiser) respondLoop(conn net.PacketConn) {
-	defer close(a.doneCh)
 	defer conn.Close()
+	defer func() {
+		select {
+		case a.doneCh <- struct{}{}:
+		default:
+		}
+	}()
 
 	buf := make([]byte, 1024)
 	for {
@@ -91,7 +139,7 @@ func (a *Advertiser) respondLoop(conn net.PacketConn) {
 			continue
 		}
 
-		// Respond with our info
+		// Respond with our info, back to whoever probed.
 		data, _ := json.Marshal(a.info)
 		response := magicHeader + "|" + string(data)
 		_, _ = conn.WriteTo([]byte(response), addr)
@@ -100,8 +148,13 @@ func (a *Advertiser) respondLoop(conn net.PacketConn) {
 
 // Stop halts the advertiser.
 func (a *Advertiser) Stop() {
+	select {
+	case <-a.stopCh:
+		return
+	default:
+	}
 	close(a.stopCh)
-	<-a.doneCh
+	time.Sleep(600 * time.Millisecond)
 }
 
 // Discover finds nodes on the local network.
@@ -126,6 +179,9 @@ func Discover(timeout time.Duration) []DiscoveredNode {
 	for _, bcast := range localBroadcasts() {
 		_, _ = conn.WriteTo([]byte(magicHeader), &net.UDPAddr{IP: bcast, Port: broadcastPort})
 	}
+
+	// Same-host daemons: probe the multicast group too.
+	_, _ = conn.WriteTo([]byte(magicHeader), &net.UDPAddr{IP: net.ParseIP(multicastGroup), Port: broadcastPort})
 
 	// Collect responses
 	var mu sync.Mutex

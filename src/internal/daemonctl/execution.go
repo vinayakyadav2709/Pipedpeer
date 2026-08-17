@@ -1,12 +1,14 @@
 package daemonctl
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +26,8 @@ type ExecConfig struct {
 	StorePath  string   `json:"store_path"`
 	GPU        bool     `json:"gpu,omitempty"`
 	GPUDevices string   `json:"gpu_devices,omitempty"`
+	// Intercept enables the sitecustomize shim on the node.
+	Intercept bool `json:"intercept,omitempty"`
 }
 
 type outputMessage struct {
@@ -32,6 +36,9 @@ type outputMessage struct {
 	Error    string `json:"error,omitempty"`
 	Done     bool   `json:"done,omitempty"`
 	ExitCode int    `json:"exit_code"`
+	// PeakMemBytes mirrors the daemon's field so the client can learn the
+	// job's real footprint and record it for the historical estimation tier.
+	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
 }
 
 type uploadResponse struct {
@@ -40,6 +47,8 @@ type uploadResponse struct {
 }
 
 // UploadJob sends workspace tarball + NAR closure to the daemon.
+// If the daemon already has the store path cached (a prior task in the fan-out
+// shipped the same closure), the NAR is omitted and only the workspace travels.
 func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptPath string) (*uploadResponse, error) {
 	pr, pw := io.Pipe()
 	mp := multipart.NewWriter(pw)
@@ -49,9 +58,12 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 		defer mp.Close()
 
 		addFile(mp, "workspace", "workspace.tar", workspacePath)
-		addFile(mp, "nar", "closure.nar", narPath)
 		mp.WriteField("store_path", storePath)
 		mp.WriteField("script_path", scriptPath)
+
+		if !storeCached(host, port, storePath) {
+			addFile(mp, "nar", "closure.nar", narPath)
+		}
 	}()
 
 	url := fmt.Sprintf("http://%s:%d/v1/jobs/upload", host, port)
@@ -73,28 +85,47 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 	return &result, nil
 }
 
+// storeCached asks the daemon whether it already has a closure for storePath.
+func storeCached(host string, port int, storePath string) bool {
+	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s", host, port, url.QueryEscape(storePath))
+	resp, err := http.Get(url)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var r struct {
+		Cached bool `json:"cached"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+		return false
+	}
+	return r.Cached
+}
+
 // StreamExecute connects to the daemon WebSocket and streams job output to stdout/stderr.
 // Blocks until the job completes or context is cancelled.
-func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) error {
+// It returns the peak memory the job used (bytes) as reported by the daemon.
+func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (int64, error) {
 	url := fmt.Sprintf("ws://%s:%d/v1/jobs/%s/exec", host, port, jobID)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 	if err != nil {
-		return fmt.Errorf("websocket dial: %w", err)
+		return 0, fmt.Errorf("websocket dial: %w", err)
 	}
 	defer conn.Close()
 
 	if err := conn.WriteJSON(cfg); err != nil {
-		return fmt.Errorf("send config: %w", err)
+		return 0, fmt.Errorf("send config: %w", err)
 	}
 
+	var peakBytes int64
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				return nil
+				return peakBytes, nil
 			}
-			return fmt.Errorf("connection lost: %w", err)
+			return 0, fmt.Errorf("connection lost: %w", err)
 		}
 
 		var out outputMessage
@@ -103,44 +134,112 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		}
 
 		if out.Error != "" {
-			return fmt.Errorf("remote: %s", out.Error)
+			return 0, fmt.Errorf("remote: %s", out.Error)
 		}
 
 		fmt.Print(out.O)
 		fmt.Fprint(os.Stderr, out.E)
 
 		if out.Done {
-			if out.ExitCode != 0 {
-				return fmt.Errorf("remote job exited with code %d", out.ExitCode)
+			if out.PeakMemBytes > 0 {
+				peakBytes = out.PeakMemBytes
 			}
-			return nil
+			if out.ExitCode != 0 {
+				return peakBytes, fmt.Errorf("remote job exited with code %d", out.ExitCode)
+			}
+			return peakBytes, nil
 		}
 	}
 }
 
 // DownloadResults fetches output files from the daemon and saves them to outDir.
-func DownloadResults(host string, port int, jobID, outDir string) error {
+func DownloadResults(host string, port int, jobID, outDir string) (*ResultManifest, error) {
 	url := fmt.Sprintf("http://%s:%d/v1/jobs/%s/results", host, port, jobID)
 	resp, err := http.Get(url)
 	if err != nil {
-		return fmt.Errorf("download results: %w", err)
+		return nil, fmt.Errorf("download results: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("download rejected: %s", string(body))
+		return nil, fmt.Errorf("download rejected: %s", string(body))
 	}
 
 	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return err
+		return nil, err
 	}
 
-	cmd := exec.Command("tar", "-C", outDir, "-xf", "-")
-	cmd.Stdin = resp.Body
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return extractResults(resp.Body, outDir)
+}
+
+// ResultManifest records what a job sent back, so a run can report what it
+// touched instead of silently overwriting files in the submitter's project.
+type ResultManifest struct {
+	JobID   string   `json:"job_id,omitempty"`
+	OutDir  string   `json:"out_dir"`
+	New     []string `json:"new,omitempty"`
+	Updated []string `json:"updated,omitempty"`
+}
+
+// Count is the total number of files received.
+func (m *ResultManifest) Count() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.New) + len(m.Updated)
+}
+
+// extractResults unpacks a results tar into outDir, classifying each entry as
+// new or updated relative to what is already on disk. Entries that would
+// escape outDir are refused: the archive comes from another machine.
+func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
+	manifest := &ResultManifest{OutDir: outDir}
+	root, err := filepath.Abs(outDir)
+	if err != nil {
+		return nil, err
+	}
+
+	tr := tar.NewReader(body)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return manifest, nil
+		}
+		if err != nil {
+			return manifest, fmt.Errorf("read results: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		target := filepath.Join(root, filepath.FromSlash(hdr.Name))
+		if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return manifest, fmt.Errorf("refusing result path outside %s: %s", outDir, hdr.Name)
+		}
+
+		_, statErr := os.Stat(target)
+		existed := statErr == nil
+
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return manifest, err
+		}
+		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
+		if err != nil {
+			return manifest, err
+		}
+		if _, err := io.Copy(f, tr); err != nil {
+			f.Close()
+			return manifest, err
+		}
+		f.Close()
+
+		if existed {
+			manifest.Updated = append(manifest.Updated, hdr.Name)
+		} else {
+			manifest.New = append(manifest.New, hdr.Name)
+		}
+	}
 }
 
 // ExportNAR exports the full runtime closure of a store path to a NAR file.
@@ -181,7 +280,11 @@ func ExportNAR(storePath, destPath string) error {
 }
 
 // CreateWorkspaceTar creates a tarball of the project directory at destPath.
-func CreateWorkspaceTar(projectDir, destPath string) error {
+// It writes a sitecustomize.py into .pipedpeer/shim/ inside the archive, so a
+// node that enables the interception shim can put that dir on PYTHONPATH and
+// Python auto-imports it before the user's first line. shimContent empty means
+// no shim is embedded.
+func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 	ignoreFile := filepath.Join(projectDir, ".pipedpeerignore")
 
 	args := []string{"--exclude=.git", "--exclude=__pycache__", "--exclude=.venv",
@@ -197,7 +300,35 @@ func CreateWorkspaceTar(projectDir, destPath string) error {
 	}
 
 	args = append(args, "-cf", destPath, "-C", projectDir, ".")
-	cmd := exec.Command("tar", args...)
+	if err := exec.Command("tar", args...).Run(); err != nil {
+		return err
+	}
+
+	if shimContent != "" {
+		if err := appendShim(destPath, shimContent); err != nil {
+			return fmt.Errorf("append shim: %w", err)
+		}
+	}
+	return nil
+}
+
+// appendShim adds .pipedpeer/shim/sitecustomize.py as a member of an existing
+// tar archive. It stages the file in a temp dir and uses GNU tar's transform
+// to re-home it, so the user's project directory is never touched.
+func appendShim(destPath, content string) error {
+	stageDir, err := os.MkdirTemp("", "pipedpeer-shim-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stageDir)
+
+	stage := filepath.Join(stageDir, "sitecustomize.py")
+	if err := os.WriteFile(stage, []byte(content), 0755); err != nil {
+		return err
+	}
+
+	cmd := exec.Command("tar", "--append", "--file="+destPath,
+		"--transform=s,.*,.pipedpeer/shim/sitecustomize.py,", stage)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

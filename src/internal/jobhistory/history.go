@@ -23,6 +23,7 @@ type Record struct {
 	Detached       bool   `json:"detached"`
 	Isolate        bool   `json:"isolate"`
 	JobName        string `json:"job_name,omitempty"`
+	JobSet         string `json:"job_set,omitempty"` // groups fan-out tasks from one map run
 	RemoteJobDir   string `json:"remote_job_dir,omitempty"`
 	StorePath      string `json:"store_path,omitempty"`
 	RunPath        string `json:"run_path,omitempty"`
@@ -52,6 +53,7 @@ type JobSummary struct {
 	Stage      string
 	Detached   bool
 	JobName    string
+	JobSet     string
 	TargetID   string
 	ScriptPath string
 	Remote     string
@@ -132,6 +134,20 @@ func Finalize(dir string, r Record, runErr error) error {
 	return SaveRecord(dir, r)
 }
 
+// WriteManifest stores the list of files a job sent back alongside the job's
+// other history, and returns the path it was written to.
+func WriteManifest(dir string, manifest any) (string, error) {
+	b, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "results-manifest.json")
+	if err := os.WriteFile(path, b, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 func SaveText(dir, name, content string) error {
 	return os.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 }
@@ -189,6 +205,7 @@ func List(limit int) ([]JobSummary, error) {
 			Stage:      r.Stage,
 			Detached:   r.Detached,
 			JobName:    r.JobName,
+			JobSet:     r.JobSet,
 			TargetID:   r.TargetID,
 			ScriptPath: r.ScriptPath,
 			Remote:     r.Remote,

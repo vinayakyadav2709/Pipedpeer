@@ -34,7 +34,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 	}
 	if len(nixPkgs) == 0 {
 		return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }: {
     packages.%s.default =
@@ -55,7 +55,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 	}
 	pkgsList := strings.Join(psPkgs, "\n          ")
 	return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }: {
     packages.%s.default =

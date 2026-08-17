@@ -87,7 +87,7 @@ PY
 
 cat > /tmp/pipedpeer-it/job1/flake.nix <<'NIX'
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }: {
     packages.x86_64-linux.default =
@@ -106,7 +106,7 @@ NIX
 
 cat > /tmp/pipedpeer-it/job2/flake.nix <<'NIX'
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs = { self, nixpkgs }: {
     packages.x86_64-linux.default =
