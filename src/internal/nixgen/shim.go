@@ -406,54 +406,122 @@ def _install_torch():
 
 
 def _install_numpy():
-    # numpy block-row matmul: intercept A @ B above a size threshold, splitting
-    # A's rows across the cluster. Ships each block to the warm worker which
-    # already unpickles it (items_b64). Opt-in (PIPEDPEER_NUMPY=1): shipping a
-    # matrix over JSON+pickle only wins when the local BLAS is the bottleneck;
-    # a single warm worker running serial BLAS is otherwise slower than the
-    # local multithreaded BLAS, violating D2.
-    if os.environ.get("PIPEDPEER_NUMPY") != "1":
+    # numpy block-row matmul: intercept A @ B when the latency cost model says
+    # remote beats local, splitting A's rows across the cluster so a worker
+    # never allocates the whole global matrix. Each block ships to the warm
+    # worker which already unpickles it (items_b64). Default-on for the
+    # zero-code-change contract; PIPEDPEER_NUMPY=0 keeps everything local.
+    if os.environ.get("PIPEDPEER_NUMPY") == "0":
         return
     try:
         import numpy as _np
     except ImportError:
         return
 
-    _MIN_BYTES = 32 * 1024 * 1024  # only intercept once there's real compute
     _orig_matmul = _np.matmul
     _orig_dot = _np.dot
+    _orig_tensordot = _np.tensordot
+    # Capture the pre-patch callables directly: getattr(_np.linalg, name)
+    # after patching would resolve the wrapper itself and recurse forever.
+    _orig_linalg = {n: getattr(_np.linalg, n) for n in ("svd", "eig")}
+
+    def _mm_gate(a, b):
+        # Heavy compute only (matmul is ~N/4 flops per byte): the cost model
+        # keeps memory-bandwidth-bound element-wise math local by leaving it
+        # unpatched, and refuses to ship when the probe or peer count says no.
+        return (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
+                and a.shape[0] >= 8 and _URL and _ENABLED
+                and _should_spill(a.nbytes, 8))
+
+    def _mm_dispatch(a, b):
+        import numpy as _np
+        n_blocks = max(2, min(64, a.shape[0] // 8))
+        rows = max(1, a.shape[0] // n_blocks)
+        blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
+        return _np.vstack(_np_dispatch(blocks, b))
 
     def _matmul(a, b, *args, **kw):
         import numpy as _np
-        if (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
-                and a.nbytes >= _MIN_BYTES
-                and a.shape[0] >= 8 and _URL and _ENABLED):
+        if _mm_gate(a, b):
             try:
-                n_blocks = max(2, min(64, a.shape[0] // 8))
-                rows = max(1, a.shape[0] // n_blocks)
-                blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
-                return _np.vstack(_np_dispatch(blocks, b))
+                return _mm_dispatch(a, b)
             except Exception as e:
                 _log("numpy matmul fallback (%s)" % e)
         return _orig_matmul(a, b, *args, **kw)
 
     def _dot(a, b, *args, **kw):
         import numpy as _np
-        if (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
-                and a.nbytes >= _MIN_BYTES and a.shape[0] >= 8
-                and _URL and _ENABLED):
+        if _mm_gate(a, b):
             try:
-                n_blocks = max(2, min(64, a.shape[0] // 8))
-                rows = max(1, a.shape[0] // n_blocks)
-                blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
-                return _np.vstack(_np_dispatch(blocks, b))
+                return _mm_dispatch(a, b)
             except Exception as e:
                 _log("numpy dot fallback (%s)" % e)
         return _orig_dot(a, b, *args, **kw)
 
+    def _tensordot(a, b, axes=2, *args, **kw):
+        import numpy as _np
+        # 2D contraction forms are matmul semantics: (last, first) axes.
+        if _mm_gate(a, b) and axes in (((1,), (0,)), (1, 0), 1):
+            try:
+                return _mm_dispatch(a, b)
+            except Exception as e:
+                _log("numpy tensordot fallback (%s)" % e)
+        return _orig_tensordot(a, b, axes, *args, **kw)
+
+    def _linalg_offload(name, a, args, kw):
+        # Ship np.linalg.<name>(a) as a single noSplit item so it lands on the
+        # best peer (part 0 prefers peers[0], falling through to local on
+        # failure); a constrained orchestrator never materialises the matrix.
+        import base64
+        import json
+        import pickle
+        import urllib.request
+        extra = {"_fn": name, "_args": args, "_kw": kw}
+        extra_b64 = base64.b64encode(pickle.dumps(extra)).decode()
+        items = [base64.b64encode(pickle.dumps(a)).decode()]
+        req = {
+            # PIPEDPEER_NUMPY_NESTED: the worker's numpy is also patched, so
+            # the offloaded call must bypass the shim or it re-dispatches in a
+            # loop. The marker makes _linalg fall through to the original.
+            "func_src": ("import os\nimport numpy as _np\ndef run(x):\n"
+                         "    os.environ['PIPEDPEER_NUMPY_NESTED'] = '1'\n"
+                         "    return getattr(_np.linalg, _fn)(x, *_args, **_kw)\n"),
+            "func_name": "run",
+            "extra_b64": extra_b64,
+            "items": items,
+            "items_b64": True,
+            "starmap": False,
+            "no_split": True,
+        }
+        req["required_mem"] = 2 * (len(extra_b64) + sum(len(i) for i in items))
+        body = json.dumps(req).encode()
+        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "X-Pipedpeer-Store": _STORE})
+        with _daemon_open(req, 1200) as resp:
+            rs = json.loads(resp.read())["results"]
+        return pickle.loads(base64.b64decode(rs[0]["pickle"]))
+
+    def _linalg(name):
+        orig = _orig_linalg[name]
+        def wrapped(a, *args, **kw):
+            import numpy as _np
+            if (a.ndim == 2 and _URL and _ENABLED
+                    and not os.environ.get("PIPEDPEER_NUMPY_NESTED")
+                    and _should_spill(a.nbytes, 8)):
+                try:
+                    return _linalg_offload(name, a, args, kw)
+                except Exception as e:
+                    _log("numpy %s fallback (%s)" % (name, e))
+            return orig(a, *args, **kw)
+        return wrapped
+
     _np.matmul = _matmul
     _np.dot = _dot
-    _log("numpy matmul/dot interception installed")
+    _np.tensordot = _tensordot
+    _np.linalg.svd = _linalg("svd")
+    _np.linalg.eig = _linalg("eig")
+    _log("numpy matmul/dot/tensordot/svd/eig interception installed")
 
 
 # ---- distributed pandas: cost model, hash-shuffle groupby/merge, OOC ----
@@ -1607,26 +1675,115 @@ def _install():
         import joblib.parallel as _jp
     except ImportError:
         return
+    if not (_URL and _ENABLED) or int(_NUM_SHARDS) < 2:
+        _log("joblib backend skipped (no cluster peers)")
+        return
 
-    # Register a cluster backend via joblib's official register_backend API.
-    # joblib calls apply_async(compute_func, callback) where compute_func
-    # returns (result, compute_time) and callback receives that tuple.
+    def _jb_tasks(batch):
+        # joblib submits BatchedCalls whose .items are (func, args, kwargs)
+        # tuples; a bare callable is a single task.
+        items = getattr(batch, "items", None)
+        if items is None:
+            return [(batch, (), {})]
+        return items
+
+    def _jb_dispatch(batch):
+        # One joblib batch per /v1/pool/map round trip. The runner marks
+        # PIPEDPEER_JB_NESTED so worker-side joblib calls (RF fit inside a
+        # GridSearchCV task) run inline instead of recursing into the mesh.
+        # ponytail: sklearn passes X/y to every task, so the payload ships
+        # once per task; a memmap/temp-folder pass (like loky) is the upgrade.
+        import base64
+        import json
+        import pickle
+        import urllib.request
+        items = _jb_tasks(batch)
+        payload = [base64.b64encode(pickle.dumps(t)).decode() for t in items]
+        req = {
+            "func_src": ("import os\ndef run(items):\n"
+                         "    os.environ['PIPEDPEER_JB_NESTED'] = '1'\n"
+                         "    return [f(*a, **k) for f, a, k in items]\n"),
+            "func_name": "run",
+            "items": payload,
+            "items_b64": True,
+            "starmap": False,
+        }
+        req["required_mem"] = 2 * sum(len(p) for p in payload)
+        body = json.dumps(req).encode()
+        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
+                                     headers={"Content-Type": "application/json",
+                                              "X-Pipedpeer-Store": _STORE})
+        with _daemon_open(req, 600) as resp:
+            rs = json.loads(resp.read())["results"]
+        return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+
+    class _JBJob:
+        """Future-like object satisfying joblib's retrieve_result contract."""
+        __slots__ = ("results", "error")
+
+        def __init__(self, results=None, error=None):
+            self.results = results
+            self.error = error
+
     class _PipedpeerBackend(_jp.ParallelBackendBase):
+        supports_retrieve_callback = False
+        supports_timeout = False
+        supports_sharedmem = True
+        supports_return_generator = True
+
         def effective_n_jobs(self, n_jobs):
+            # The cluster is the "cpu count": batches are sized for the mesh.
+            if n_jobs < 0:
+                return int(_NUM_SHARDS)
             if n_jobs == 0:
-                n_jobs = os.cpu_count() or 1
+                return os.cpu_count() or 1
             return n_jobs
 
-        def apply_async(self, compute_func, callback=None):
-            if callback is None:
-                return _jp.apply_async_wrapper(compute_func, None)
-            return _jp.apply_async_wrapper(compute_func, callback)
+        def submit(self, func, callback=None):
+            if os.environ.get("PIPEDPEER_JB_NESTED") or not (_URL and _ENABLED):
+                try:
+                    job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
+                except BaseException as e:
+                    job = _JBJob(error=e)
+            else:
+                try:
+                    job = _JBJob(results=_jb_dispatch(func))
+                except BaseException as e:
+                    # D2/D3: a remote node adds capacity, never subtracts.
+                    _log("joblib remote failed (%s); local covers it" % e)
+                    try:
+                        job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
+                    except BaseException as e2:
+                        job = _JBJob(error=e2)
+            if callback is not None:
+                callback(job)
+            return job
+
+        def retrieve_result(self, job, timeout=None):
+            if job.error is not None:
+                raise job.error
+            return job.results
+
+    _ORIG_PARALLEL_INIT = _jp.Parallel.__init__
+
+    def _parallel_init(self, *args, **kw):
+        _ORIG_PARALLEL_INIT(self, *args, **kw)
+        # sklearn forces prefer="threads" in most fit paths, which would
+        # bypass a default backend entirely; force ours on any resolved
+        # backend once there is real parallel work and we are not already
+        # nested on a worker.
+        if (os.environ.get("PIPEDPEER_JB_NESTED")
+                or not (_URL and _ENABLED) or self.n_jobs in (0, 1)):
+            return
+        self._backend = _PipedpeerBackend(nesting_level=0)
 
     try:
-        _jp.register_backend("pipedpeer", lambda: _PipedpeerBackend(), nested=None)
-        _log("joblib backend 'pipedpeer' registered")
+        _jp.register_parallel_backend(
+            "pipedpeer", lambda *a, **k: _PipedpeerBackend(nesting_level=0), make_default=True)
+        _jp.Parallel.__init__ = _parallel_init
+        _log("joblib backend 'pipedpeer' installed as default")
     except Exception as e:
-        _log("joblib backend registration failed: %s" % e)
+        _log("joblib backend installation failed: %s" % e)
 _install()
 `
 
