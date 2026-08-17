@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -66,7 +67,7 @@ const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per
 # the closure. _CACHE persists across requests inside this process: func_src
 # can read it (via the injected _CACHE name) to store/retrieve chunk data
 # keyed by content hash, which is how out-of-core reads keep chunks on nodes.
-import base64, json, pickle, sys
+import base64, gc, json, pickle, sys
 
 _CACHE = {}
 
@@ -112,6 +113,14 @@ for line in sys.stdin:
         ack = {"id": msg["id"], "done": True}
     except Exception as e:
         ack = {"id": msg.get("id"), "done": False, "error": str(e)}
+    # Explicit release before the next chunk: a long-lived worker must not
+    # accumulate partitions while pipelining micro-chunks on a small node.
+    for _n in ("req", "items", "results"):
+        try:
+            exec("del " + _n)
+        except NameError:
+            pass
+    gc.collect()
     sys.stdout.write(json.dumps(ack) + "\n")
     sys.stdout.flush()
 `
@@ -211,8 +220,9 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 // environment the user's script runs in — no SDK, no shared state. Requests to
 // a store that already has a warm worker reuse it instead of re-spawning.
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
+	rawBody, _ := io.ReadAll(r.Body)
 	var req poolRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request: " + err.Error()})
 		return
 	}
@@ -231,15 +241,33 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad items: " + err.Error()})
 		return
 	}
+	if req.FuncSrc != "" && req.FuncName == "" {
+		req.FuncName = "run" // mirror the runner's default: func_src without func_name
+	}
 
-	// Admission control: refuse when the working set cannot fit, so an
-	// overloaded node never OOMs mid-chunk. The submitter falls back locally.
+	// Memory bounding for horizontal scaling on constrained nodes. The safe
+	// working set is 40% of free RAM (max_safe_chunk_size); anything larger
+	// runs as sequential micro-chunks so an 8-16GB node never OOMs mid-chunk.
+	// When even one micro-chunk cannot fit (asymmetric orchestrator: weak
+	// local, strong peers), the whole request is forwarded to the best peer —
+	// the orchestrator executes 0% heavy compute. 503 only when no peer can
+	// take it.
 	if req.RequiredMemBytes > 0 {
 		available := s.AvailableForJob()
 		if available < req.RequiredMemBytes {
+			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
+				if peer := s.pool.bestPeer(storePath); peer != "" && s.forwardPoolMap(w, rawBody, peer, storePath) {
+					return
+				}
+			}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 				"error": fmt.Sprintf("insufficient memory: need %d bytes, available %d bytes", req.RequiredMemBytes, available),
 			})
+			return
+		}
+		safe := int64(float64(available) * 0.4)
+		if safe > 0 && req.RequiredMemBytes > safe && len(items) > 1 {
+			s.runMicroChunks(w, runPath, storePath, req, items, safe)
 			return
 		}
 	}
@@ -263,6 +291,71 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// runMicroChunks splits a too-large request into sequential sub-batches sized
+// to max_safe_chunk_size (40% of free RAM) and concatenates results in input
+// order. Each sub-batch still fans out to peers; only the orchestrator's own
+// memory share is bounded, and the worker's explicit GC keeps RSS flat across
+// the pipeline.
+func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, req poolRequest, items []json.RawMessage, safe int64) {
+	n := int((req.RequiredMemBytes + safe - 1) / safe)
+	if n > len(items) {
+		n = len(items)
+	}
+	total := int64(len(items))
+	var results []any
+	for i := 0; i < n; i++ {
+		lo := total * int64(i) / int64(n)
+		hi := total * int64(i+1) / int64(n)
+		if lo == hi {
+			continue
+		}
+		sub := items[lo:hi]
+		var keys []string
+		if len(req.CacheKeys) > 0 {
+			keys = req.CacheKeys[lo:hi]
+		}
+		var part []any
+		var err error
+		switch {
+		case req.NoSplit:
+			part, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, sub, req.Starmap, req.ItemsB64, true, keys)
+		case req.NoFanout:
+			part, err = s.pool.runLocal(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, sub, req.Starmap, req.ItemsB64, keys)
+		default:
+			part, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, sub, req.Starmap, req.ItemsB64, false, keys)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		results = append(results, part...)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// forwardPoolMap relays the raw request to a peer (one hop) so a weak
+// orchestrator forwards heavy work instead of refusing it. Returns true when
+// the peer answered; the status and body are copied verbatim.
+func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, storePath string) bool {
+	fwd, err := http.NewRequest("POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
+	if err != nil {
+		return false
+	}
+	fwd.Header.Set("Content-Type", "application/json")
+	fwd.Header.Set("X-Pipedpeer-Store", storePath)
+	fwd.Header.Set("X-Pipedpeer-Forwarded", "1")
+	client := &http.Client{Timeout: 5 * time.Minute}
+	resp, err := client.Do(fwd)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
+	return true
 }
 
 // runChunk dispatches one chunk, preferring a warm worker and falling back to
@@ -409,6 +502,22 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 		results = append(results, r...)
 	}
 	return results, nil
+}
+
+// bestPeer returns the top-ranked healthy peer sharing a store ("" when none),
+// used to forward requests the local node cannot admit (asymmetric
+// orchestrator: 0% heavy compute runs locally when peers exist).
+func (pm *poolManager) bestPeer(storePath string) string {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.peerFn == nil {
+		return ""
+	}
+	ps := pm.peerFn(storePath)
+	if len(ps) == 0 {
+		return ""
+	}
+	return ps[0]
 }
 
 // peerDead reports whether a peer failed earlier in this chunk.
