@@ -505,7 +505,7 @@ def _should_spill(nbytes, flops_per_byte):
 
 
 def _measure_bandwidth():
-    """Effective bytes/sec to the cluster, cached 300s. Probes with 2MB through
+    """Effective bytes/sec to the cluster, cached 300s. Probes with 32KB through
     /v1/pool/map (the same path real work uses; 8 items so the daemon fans out
     to peers when they exist). None on failure means stay local."""
     now = time.monotonic()
@@ -516,7 +516,7 @@ def _measure_bandwidth():
     import pickle
     import urllib.request
     try:
-        blobs = [os.urandom(256 * 1024) for _ in range(8)]
+        blobs = [os.urandom(4 * 1024) for _ in range(8)]
         items = [base64.b64encode(pickle.dumps(b)).decode() for b in blobs]
         body = json.dumps({
             "func_src": "def run(x):\n    return len(x)\n",
