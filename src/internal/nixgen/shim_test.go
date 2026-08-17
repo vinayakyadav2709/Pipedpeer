@@ -195,7 +195,7 @@ class Handler(BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(n))
         if req.get("func_src") == "def run(x):\n    return len(x)\n":
             PROBES[0] += 1
-        if req.get("items_b64") and req.get("func_src", "").startswith("def run(raw):"):
+        if req.get("items_b64"):
             b = [len(i) for i in req["items"]]
             if b:
                 MAX_CHUNK[0] = max(MAX_CHUNK[0], max(b))
@@ -244,6 +244,13 @@ shim._OOC_CHUNK = 4096
 // runShimPython writes the shim plus a python script and runs it; any nonzero
 // exit or a missing sentinel fails the test.
 func runShimPython(t *testing.T, name, src string, wantSentinel string) {
+	runShimPythonEnv(t, name, src, wantSentinel)
+}
+
+// runShimPythonEnv is runShimPython with extra process env vars, needed when
+// the shim's install-time decisions (joblib backend, numpy patching) must see
+// a cluster before the preamble overrides the module attributes.
+func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...string) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -262,6 +269,7 @@ func runShimPython(t *testing.T, name, src string, wantSentinel string) {
 	}
 	cmd := exec.Command(python, script)
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir)
+	cmd.Env = append(cmd.Env, envs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s failed:\n%s\n%v", name, out, err)
@@ -402,6 +410,79 @@ if bw1 is not None:
     assert PROBES[0] == 1, "probe returned data but server never received it"
 print("COST-OK")
 `, "COST-OK")
+}
+
+// TestShimJoblibBackendDistributes (T7) runs an UNMODIFIED sklearn
+// RandomForestClassifier(n_jobs=-1).fit() plus a plain joblib.Parallel call
+// and requires the batches to reach the cluster (no multiprocessing.Pool
+// anywhere in the user script). Skipped when joblib/sklearn are missing.
+func TestShimJoblibBackendDistributes(t *testing.T) {
+	runShimPythonEnv(t, "t7", shimFakeDaemon+`
+import sitecustomize as shim
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+import joblib
+
+shim._ENABLED = True
+shim._URL = "http://127.0.0.1:%d" % PORT
+shim._STORE = ""
+
+rng = np.random.RandomState(0)
+X = rng.rand(200, 8)
+y = (X[:, 0] * 2 + X[:, 1] > 1).astype(int)
+rf = RandomForestClassifier(n_estimators=16, n_jobs=-1, random_state=0)
+rf.fit(X, y)
+p = rf.predict(X[:5])
+assert p.shape == (5,)
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(lambda a, b: a + b)(i, i) for i in range(12))
+assert res == [2 * i for i in range(12)], res
+assert MAX_CHUNK[0] > 0, "no joblib batch reached the cluster"
+print("JOBLIB-OK")
+`, "JOBLIB-OK",
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+}
+
+// TestShimNumPyInterception (T8) runs unmodified np.matmul/np.tensordot and
+// np.linalg.svd/eig on large arrays and requires: block-row slicing (workers
+// only ever see a row slice, never the full A), tensordot/svd/eig correctness
+// against local numpy, and svd/eig offloading the whole matrix to one worker.
+func TestShimNumPyInterception(t *testing.T) {
+	runShimPythonEnv(t, "t8", shimFakeDaemon+`
+import time
+import base64
+import sitecustomize as shim
+import numpy as np
+
+shim._ENABLED = True
+shim._URL = "http://127.0.0.1:%d" % PORT
+shim._STORE = ""
+# The fake daemon's loopback latency would make the cost model refuse to
+# spill; pin the cached bandwidth so the cost model chooses remote.
+shim._BW_CACHE["bw"] = 1e9
+shim._BW_CACHE["t"] = time.monotonic()
+
+rng = np.random.RandomState(1)
+A = rng.rand(2048, 2048)
+B = rng.rand(2048, 2048)
+b64A = len(base64.b64encode(A.tobytes()))
+
+C = np.matmul(A, B)            # dispatches block rows
+local = A @ B                  # @ operator is untouched: local reference
+assert np.allclose(C, local)
+assert 0 < MAX_CHUNK[0] < b64A, "block rows must be sliced below the full A"
+
+T = np.tensordot(A, B, axes=((1,), (0,)))
+assert np.allclose(T, local)
+
+U, S, Vh = np.linalg.svd(A)    # offloaded to one worker
+assert np.allclose(U @ np.diag(S) @ Vh, A, rtol=1e-4, atol=1e-4)
+assert MAX_CHUNK[0] >= b64A, "svd must ship the matrix to a worker"
+
+W, V = np.linalg.eig(A)
+assert np.allclose(A @ V, V * W, rtol=1e-4)
+print("NUMPY-OK")
+`, "NUMPY-OK",
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // TestShimDDPSync (T4) runs two gloo ranks over loopback through the shim's
