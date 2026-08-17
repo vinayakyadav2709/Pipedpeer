@@ -391,11 +391,15 @@ shim._measure_bandwidth = _real_bw
 assert PROBES[0] == 0
 bw1 = shim._measure_bandwidth()
 bw2 = shim._measure_bandwidth()
-# bw1 may be None when the probe fails (documented "stay local" fallback).
-# The invariant we're testing here is the cache: only one real probe fires per
-# TTL window, and both calls return the same value (cached or None).
+# bw1 may be None when the probe fails under load (documented "stay local" fallback).
+# Core cache invariant: both calls must return the same value regardless of outcome.
 assert bw1 == bw2, "cache broken: two calls returned different values"
-assert PROBES[0] == 1, "expected exactly one probe, got %d" % PROBES[0]
+# PROBES counts server-side arrivals: 1 when the request succeeded, 0 when it
+# threw before the server accepted it.  Either is valid; what must never happen
+# is PROBES > 1 (which would mean the second call bypassed the TTL cache).
+assert PROBES[0] in (0, 1), "unexpected probe count %d" % PROBES[0]
+if bw1 is not None:
+    assert PROBES[0] == 1, "probe returned data but server never received it"
 print("COST-OK")
 `, "COST-OK")
 }
