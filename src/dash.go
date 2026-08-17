@@ -22,8 +22,9 @@ type peerInfo struct {
 	DaemonPort  int    `json:"daemon_port"`
 	State       string `json:"state"`
 	Load        struct {
-		ActiveJobs        int   `json:"active_jobs"`
-		AvailableMemBytes int64 `json:"available_mem_bytes"`
+		ActiveJobs        int     `json:"active_jobs"`
+		AvailableMemBytes int64   `json:"available_mem_bytes"`
+		CPUPercent        float64 `json:"cpu_percent"`
 	} `json:"load"`
 	Source string `json:"source"`
 }
@@ -192,6 +193,23 @@ func (m dashModel) View() string {
 		peerRows,
 		[]float64{0.12, 0.24, 0.12, 0.07, 0.13, 0.10},
 	)
+
+	healthy, jobs, memAvail := 0, 0, int64(0)
+	var cpuSum float64
+	for _, p := range m.peers {
+		if p.State == "healthy" {
+			healthy++
+		}
+		jobs += p.ActiveJobs()
+		memAvail += p.AvailableMem()
+		cpuSum += p.Load.CPUPercent
+	}
+	avgCPU := 0.0
+	if len(m.peers) > 0 {
+		avgCPU = cpuSum / float64(len(m.peers))
+	}
+	s += dimStyle.Render(fmt.Sprintf("  workers %d/%d  jobs %d  mem avail %s  cpu avg %.0f%%",
+		healthy, len(m.peers), jobs, resourceest.FormatBytes(memAvail), avgCPU)) + "\n"
 
 	// ── Tasks table: live cluster leases first, then local history.
 	s += sectionStyle.Render("RECENT TASKS") + "\n"
