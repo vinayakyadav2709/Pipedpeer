@@ -63,8 +63,12 @@ const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per
 # Runs the payload from in_file, writes the results JSON to out_file, then
 # answers with a tiny {"id": N, "done": true, "error": ...} line on stdout.
 # Kept alive across many /v1/pool/map requests so dispatch never re-spawns
-# the closure.
+# the closure. _CACHE persists across requests inside this process: func_src
+# can read it (via the injected _CACHE name) to store/retrieve chunk data
+# keyed by content hash, which is how out-of-core reads keep chunks on nodes.
 import base64, json, pickle, sys
+
+_CACHE = {}
 
 for line in sys.stdin:
     line = line.strip()
@@ -74,10 +78,11 @@ for line in sys.stdin:
         msg = json.loads(line)
         with open(msg["in_file"]) as f:
             req = json.load(f)
+        ns = {}
+        if req.get("extra_b64"):
+            ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
+        ns["_CACHE"] = _CACHE
         if req.get("func_src"):
-            ns = {}
-            if req.get("extra_b64"):
-                ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
             exec(req["func_src"], ns)
             func = ns[req.get("func_name", "run")]
         else:
@@ -86,6 +91,13 @@ for line in sys.stdin:
         starmap = req.get("starmap", False)
         if req.get("items_b64"):
             items = [pickle.loads(base64.b64decode(i)) for i in items]
+        # cache_keys: item i is a content hash resolved from the process-wide
+        # chunk cache instead of the payload. A miss is an error: the submitter
+        # falls back to local work rather than running with wrong data.
+        if req.get("cache_keys"):
+            items = [ns["_CACHE"].get(k) for k in req["cache_keys"]]
+            if any(i is None for i in items):
+                raise KeyError("chunk cache miss")
         results = []
         for item in items:
             if starmap:
@@ -116,10 +128,19 @@ type poolRequest struct {
 	// ItemsB64 marks Items as base64-pickled objects (numpy arrays etc.) rather
 	// than plain JSON scalars, so block-partitioned numeric work can ship.
 	ItemsB64 bool `json:"items_b64,omitempty"`
+	// CacheKeys resolves items from the worker's persistent chunk cache (warm
+	// worker only) instead of the payload: item i is the content hash under
+	// which the chunk was previously stored. A miss fails the request; the
+	// shim falls back to local work. One per item, empty for payload items.
+	CacheKeys []string `json:"cache_keys,omitempty"`
 	// NoFanout tells the receiving daemon to run the chunk locally instead of
 	// splitting and forwarding it to peers. The origin splits exactly once;
 	// every forwarded chunk is terminal (one-hop fan-out).
 	NoFanout bool `json:"no_fanout,omitempty"`
+	// NoSplit keeps every item as its own routed unit: item i goes to peer i
+	// (items beyond the peer count are local), so the origin can pre-partition
+	// work (hash-shuffle buckets) and have each part land on exactly one node.
+	NoSplit bool `json:"no_split,omitempty"`
 	// RequiredMemBytes is the submitter's estimate of the working set this
 	// chunk needs; the daemon refuses with 503 when it cannot spare that much,
 	// so an overloaded node never OOMs mid-chunk. The shim falls back locally.
@@ -170,6 +191,18 @@ func (pm *poolManager) SetPeerFn(fn func(storePath string) []string) {
 	pm.peerFn = fn
 }
 
+// spillPeerCount returns how many healthy peers currently share the store
+// path. It drives PIPEDPEER_NUM_SHARDS so the shim knows how many nodes can
+// take work. Safe on a nil peerFn (returns 0).
+func (pm *poolManager) spillPeerCount(storePath string) int {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.peerFn == nil {
+		return 0
+	}
+	return len(pm.peerFn(storePath))
+}
+
 // handlePoolMap executes a pickled function over a batch of items using the
 // local closure, returning per-item results. It is the worker side of the
 // sitecustomize cluster pool (see nixgen/shim.go). Each request is one chunk.
@@ -213,11 +246,17 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 
 	var results []any
 	var err error
-	if req.NoFanout {
+	switch {
+	case req.NoSplit:
+		// Hash-shuffle routing: the origin pre-partitioned items into buckets
+		// (one per node); each item must land on exactly one node, so bypass
+		// the minSplit gate and route per item.
+		results, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64, true, req.CacheKeys)
+	case req.NoFanout:
 		// One-hop fan-out: the origin already split; this chunk is terminal.
-		results, err = s.pool.runLocal(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64)
-	} else {
-		results, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64)
+		results, err = s.pool.runLocal(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64, req.CacheKeys)
+	default:
+		results, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64, false, req.CacheKeys)
 	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -233,7 +272,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 // fails is skipped for the rest of the chunk and the next best takes its part.
 // Local is always the last resort, so remote nodes add capacity but never
 // remove it (D2: never slower).
-func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+//
+// With noSplit, items are not re-split: each item is one part routed to its
+// own preferred peer (part i prefers peers[i], wrapping past the peer count to
+// local), so a pre-partitioned payload (hash-shuffle buckets) lands one item
+// per node. Results are still returned in input order.
+func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64, noSplit bool, cacheKeys []string) ([]any, error) {
 	// Peel off peers before taking the local worker lock so each local submit
 	// serialises only its own sub-chunk.
 	var peers []string
@@ -260,9 +304,26 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 	}
 	var parts []part
 
-	if len(peers) == 0 {
+	switch {
+	case noSplit:
+		// One part per item, part i prefers peers[i] (rotating back through
+		// the list when there are more items than peers). Items past the peer
+		// count fall through to local via the empty runPath branch below —
+		// they simply take the local part of the rotation.
+		for i := range items {
+			p := part{items: items[i : i+1]}
+			if len(peers) > 0 {
+				idx := i % len(peers)
+				ordered := append(append([]string{}, peers[idx:]...), peers[:idx]...)
+				p.peers = ordered
+			} else {
+				p.runPath = runPath
+			}
+			parts = append(parts, p)
+		}
+	case len(peers) == 0:
 		parts = []part{{items: items, runPath: runPath}}
-	} else {
+	default:
 		// Split evenly across local + peers. A small chunk stays local (splitting
 		// would cost more than it saves); only fan out once there is real work.
 		const minSplit = 8
@@ -295,10 +356,13 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 		}
 	}
 
-	results := make([]any, 0, len(items))
-	mu := &sync.Mutex{}
-	var wg sync.WaitGroup
+	// Results are stored per part and concatenated in part order after the
+	// wait, so the response is always in input order regardless of which part
+	// finished first. The shim maps results back by index, so this order is
+	// load-bearing.
+	partResults := make([][]any, len(parts))
 	errs := make([]error, len(parts))
+	var wg sync.WaitGroup
 
 	for i, p := range parts {
 		wg.Add(1)
@@ -307,7 +371,7 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 			var r []any
 			var e error
 			if p.runPath != "" {
-				r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64)
+				r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64, cacheKeys)
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
@@ -315,7 +379,7 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 					if pm.peerDead(peer) {
 						continue
 					}
-					r, e = pm.runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64)
+					r, e = pm.runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64, cacheKeys)
 					if e == nil {
 						break
 					}
@@ -323,16 +387,14 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 				}
 				if e != nil {
 					// D2/D3 — a remote node adds capacity, never subtracts.
-					r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64)
+					r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64, cacheKeys)
 				}
 			}
 			if e != nil {
 				errs[i] = e
 				return
 			}
-			mu.Lock()
-			results = append(results, r...)
-			mu.Unlock()
+			partResults[i] = r
 		}(i, p)
 	}
 	wg.Wait()
@@ -341,6 +403,10 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 		if e != nil {
 			return nil, e
 		}
+	}
+	results := make([]any, 0, len(items))
+	for _, r := range partResults {
+		results = append(results, r...)
 	}
 	return results, nil
 }
@@ -360,7 +426,7 @@ func (pm *poolManager) markPeerDead(peer string) {
 }
 
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
-func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
 	if !ok || worker.dead() {
@@ -371,21 +437,21 @@ func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcNa
 		if err != nil {
 			// Cold fallback: one-off spawn keeps the node functional even when
 			// persistent workers are unavailable.
-			return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64)
+			return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64, cacheKeys)
 		}
 		worker = w
 		pm.workers[storePath] = worker
 	}
 	pm.mu.Unlock()
 
-	results, err := worker.submit(pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64)
+	results, err := worker.submit(pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64, cacheKeys)
 	if err != nil {
 		// Worker died mid-flight — drop it and fall back to a cold run for
 		// this chunk; the next request will re-warm.
 		pm.mu.Lock()
 		delete(pm.workers, storePath)
 		pm.mu.Unlock()
-		return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64)
+		return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64, cacheKeys)
 	}
 	return results, nil
 }
@@ -393,10 +459,13 @@ func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcNa
 // runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
 // have the same closure already (peerFn filters for that). Failures are fatal
 // for the chunk: the caller returns them rather than silently dropping work.
-func (pm *poolManager) runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+func (pm *poolManager) runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
 	// no_fanout: the origin splits exactly once; a peer must never re-split and
 	// forward again (one-hop tree, results flow straight back to the origin).
 	payload := map[string]any{"func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64, "no_fanout": true}
+	if len(cacheKeys) > 0 {
+		payload["cache_keys"] = cacheKeys
+	}
 	body, _ := json.Marshal(payload)
 	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
@@ -478,7 +547,7 @@ func (w *poolWorker) dead() bool {
 // payload (base64 items can be ~100s of MB) is written to a temp file and the
 // worker is told the path, so the full blob never passes through the pipe or
 // lives in daemon RAM.
-func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.id++
@@ -492,6 +561,9 @@ func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, ite
 	outPath := filepath.Join(dir, "out.json")
 
 	req := map[string]any{"id": w.id, "func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64}
+	if len(cacheKeys) > 0 {
+		req["cache_keys"] = cacheKeys
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -568,7 +640,7 @@ func (pm *poolManager) stopAll() {
 
 // runPoolChunk is the cold path: one closure spawn per chunk. Kept for the
 // fallback when warm workers are unavailable.
-func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool) ([]any, error) {
+func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
 	dir, err := os.MkdirTemp("", "pipedpeer-pool-*")
 	if err != nil {
 		return nil, err
@@ -581,6 +653,9 @@ func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, item
 	}
 
 	payload := map[string]any{"func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64}
+	if len(cacheKeys) > 0 {
+		payload["cache_keys"] = cacheKeys
+	}
 	inPath := filepath.Join(dir, "in.json")
 	outPath := filepath.Join(dir, "out.json")
 	inBytes, _ := json.Marshal(payload)
