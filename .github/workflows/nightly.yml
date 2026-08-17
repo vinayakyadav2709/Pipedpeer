@@ -68,13 +68,13 @@ jobs:
       - name: Test (race)
         run: go test -race -count=1 ./...
 
-  # Integration tests need a real Nix store and crun. Non-blocking until the
-  # runner setup has proven itself; flip continue-on-error off once it has.
+  # Integration tests need a real Nix store and crun. Now blocking: a failing
+  # integration run must fail the nightly so a regression can't ship silently.
   integration:
     needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
+    continue-on-error: false
     steps:
       - name: Checkout dev
         uses: actions/checkout@v7
@@ -105,6 +105,22 @@ jobs:
 
       - name: Run integration tests
         run: ./scripts/test-integration.sh
+
+  # D2 shim-overhead report. Never-slower is structurally enforced by the Go
+  # tests; this only trips on a gross regression (shim > 3x a plain local Pool
+  # with no daemon reachable), so it is a report, not a tight wall-clock gate.
+  d2-bench:
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout dev
+        uses: actions/checkout@v7
+        with:
+          ref: dev
+
+      - name: Measure shim overhead
+        run: ./scripts/bench-shim-d2.sh
 
   release:
     needs: [check, test]

@@ -619,3 +619,35 @@ func TestGPUPreferenceDoesNotAffectNoGPUScenario(t *testing.T) {
 		}
 	}
 }
+
+// TestNoSelfExcludesLocalNodeFromAnySource: --no-self must exclude the local
+// machine even when it surfaces via discovery or the daemon node store, not
+// just via buildSelfNode. Otherwise "distribute to OTHER devices" silently
+// keeps placing on the local machine.
+func TestNoSelfExcludesLocalNodeFromAnySource(t *testing.T) {
+	c := New(Config{
+		SelfIdentity: testIdentity(), // NodeID "self-node-uuid"
+		SelfSSH:      "root@localhost:22",
+		NoSelf:       true,
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{
+				// The local machine also announces itself on the LAN.
+				{NodeID: "self-node-uuid", SSHEndpoint: "root@localhost:22", DaemonPort: 38080, State: "healthy"},
+				{NodeID: "remote-node", SSHEndpoint: "root@10.0.1.7:22", DaemonPort: 38080, State: "healthy"},
+			}
+		},
+	})
+
+	decision := c.FindNode()
+	if decision.ChosenNode.NodeID == "self-node-uuid" {
+		t.Fatalf("--no-self must not place on the local machine, got %s", decision.ChosenNode.NodeID)
+	}
+	if decision.ChosenNode.NodeID != "remote-node" {
+		t.Fatalf("expected placement on the remote node, got %s", decision.ChosenNode.NodeID)
+	}
+	for _, cand := range decision.Candidates {
+		if cand.Node.NodeID == "self-node-uuid" {
+			t.Fatal("self node must not appear as a candidate under --no-self")
+		}
+	}
+}

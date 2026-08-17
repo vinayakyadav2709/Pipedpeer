@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,6 +30,9 @@ type ExecConfig struct {
 	StorePath  string   `json:"store_path"`
 	GPU        bool     `json:"gpu,omitempty"`
 	GPUDevices string   `json:"gpu_devices,omitempty"` // e.g. "0" or "0,1" or "all"
+	// Intercept enables the sitecustomize shim: PYTHONPATH gains the workspace's
+	// .pipedpeer/shim dir and the shim's envs are injected.
+	Intercept bool `json:"intercept,omitempty"`
 }
 
 // OCI config structures for crun bundle generation.
@@ -84,6 +88,10 @@ type OutputMessage struct {
 	Error    string `json:"error,omitempty"`
 	Done     bool   `json:"done,omitempty"`
 	ExitCode int    `json:"exit_code"`
+	// PeakMemBytes is the largest RSS (process tree, bytes) seen while running.
+	// It is set on the Done frame so the submitter can learn a job's real
+	// footprint and feed the historical estimation tier.
+	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
 }
 
 // JobRecord tracks a single uploaded job on the daemon.
@@ -95,6 +103,26 @@ type JobRecord struct {
 	ScriptPath string
 	Status     string
 	CreatedAt  time.Time
+	// Uploaded stamps every file the submitter sent, keyed by path relative to
+	// WorkDir. Results are diffed against it so only what the job actually
+	// produced or changed travels back.
+	Uploaded map[string]FileStamp
+}
+
+// FileStamp identifies a file version well enough to tell whether a job
+// rewrote it. Size plus modification time is what tar itself preserves.
+type FileStamp struct {
+	Size    int64
+	ModTime time.Time
+}
+
+func stampOf(info os.FileInfo) FileStamp {
+	return FileStamp{Size: info.Size(), ModTime: info.ModTime()}
+}
+
+// changed reports whether the file on disk differs from what was uploaded.
+func (f FileStamp) changed(other FileStamp) bool {
+	return f.Size != other.Size || !f.ModTime.Equal(other.ModTime)
 }
 
 // UploadResponse is returned by POST /v1/jobs/upload.
@@ -120,6 +148,13 @@ func defaultJobDir() string {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// pathExists reports whether a path exists on disk. Used to short-circuit NAR
+// re-imports when a prior task already materialised the closure.
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
@@ -160,12 +195,20 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer workspaceFile.Close()
 
-	narFile, _, err := r.FormFile("nar")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required: " + err.Error()})
+	// The NAR is optional if this node already has the closure cached (same
+	// store path from a previous task in the fan-out). When present, cache it.
+	var narPath string
+	if narFile, _, err := r.FormFile("nar"); err == nil {
+		defer narFile.Close()
+		narPath, err = s.narCache.store(storePath, narFile)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cache nar: " + err.Error()})
+			return
+		}
+	} else if cached, _ := s.narCache.narFileFor(storePath); cached == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required (not cached on this node)"})
 		return
 	}
-	defer narFile.Close()
 
 	jobID := generateLeaseID()
 	jobDir := filepath.Join(s.jobDir, jobID)
@@ -176,6 +219,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uploaded := make(map[string]FileStamp)
 	tr := tar.NewReader(workspaceFile)
 	for {
 		hdr, err := tr.Next()
@@ -203,17 +247,19 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 			}
 			io.Copy(f, tr)
 			f.Close()
+			if rel, err := filepath.Rel(workDir, cleanTarget); err == nil {
+				if info, err := os.Stat(cleanTarget); err == nil {
+					uploaded[filepath.ToSlash(rel)] = stampOf(info)
+				}
+			}
 		}
 	}
 
-	narPath := filepath.Join(jobDir, "closure.nar")
-	narDest, err := os.Create(narPath)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "save nar: " + err.Error()})
-		return
+	// If the closure wasn't cached before, it is now (stored above). Resolve the
+	// cached NAR path for this job record.
+	if narPath == "" {
+		narPath, _ = s.narCache.narFileFor(storePath)
 	}
-	io.Copy(narDest, narFile)
-	narDest.Close()
 
 	s.jobsMu.Lock()
 	if s.jobs == nil {
@@ -227,8 +273,17 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		ScriptPath: scriptPath,
 		Status:     "uploaded",
 		CreatedAt:  time.Now(),
+		Uploaded:   uploaded,
 	}
 	s.jobsMu.Unlock()
+	s.persist()
+
+	// Fan this closure out to healthy peers so pool spill can split a single
+	// task across multiple nodes. Synchronous and best-effort: the first pool
+	// dispatch must see peers that already hold the closure, else everything
+	// stays local; a peer that fails to import is simply not offered spill
+	// work, and local always runs its own part.
+	s.broadcastClosure(storePath)
 
 	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
 }
@@ -296,13 +351,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out, err := importNAR(nixPath, narFile)
-	if err != nil {
-		writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
-		s.jobsMu.Lock()
-		job.Status = "failed"
-		s.jobsMu.Unlock()
-		return
+	// If the closure's run entrypoint already exists in the local store, a
+	// prior task in this fan-out imported it — skip the (expensive) re-import.
+	if runEntry := filepath.Join(job.StorePath, "bin", "run"); !pathExists(runEntry) {
+		out, err := importNAR(nixPath, narFile)
+		if err != nil {
+			writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
+			s.jobsMu.Lock()
+			job.Status = "failed"
+			s.jobsMu.Unlock()
+			return
+		}
 	}
 
 	s.jobsMu.Lock()
@@ -324,6 +383,24 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	var exitCode int
+	var peakBytes int64
+
+	// Interception: put the workspace shim on PYTHONPATH and enable it. The
+	// isolated path rebuilds env from scratch below, so this only feeds the
+	// non-isolated branch; both honour cfg.Intercept.
+	if cfg.Intercept {
+		cfg.Envs = append(cfg.Envs,
+			"PYTHONPATH="+filepath.Join(job.WorkDir, ".pipedpeer", "shim"),
+			"PIPEDPEER_SHIM=1",
+			fmt.Sprintf("PIPEDPEER_DAEMON_URL=http://127.0.0.1:%d", s.selfPort),
+			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
+			"PIPEDPEER_NODE_ID="+s.nodeID,
+			// ponytail: gate the spill path on; the local daemon is a valid
+			// /v1/pool/map target. Replace with real cluster node count when
+			// multi-node spill is wired.
+			"PIPEDPEER_NUM_SHARDS=1",
+		)
+	}
 
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
@@ -351,7 +428,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				outCh <- OutputMessage{E: scanner.Text() + "\n"}
 			}
 		}()
+		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		cmd.Wait()
+		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	} else {
 		bundleDir := filepath.Join(filepath.Dir(job.WorkDir), "oci-bundle")
@@ -365,9 +444,15 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"HOME=/home/root",
 			"PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin",
 		}
+		_ = cfg.Intercept // shim envs already in cfg.Envs above
 		for _, e := range cfg.Envs {
 			parts := strings.SplitN(e, "=", 2)
 			if len(parts) == 2 {
+				// Inside the sandbox the workdir is mounted at /work; rewrite
+				// any host-path env (PYTHONPATH for the shim) to match.
+				if strings.HasPrefix(parts[1], job.WorkDir) {
+					e = parts[0] + "=/work" + strings.TrimPrefix(parts[1], job.WorkDir)
+				}
 				env = append(env, e)
 			} else {
 				env = append(env, parts[0]+"="+os.Getenv(parts[0]))
@@ -391,7 +476,12 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			Mounts: []ociMount{
 				{Destination: "/nix", Type: "bind", Source: "/nix", Options: []string{"rbind", "ro"}},
 				{Destination: "/proc", Type: "proc", Source: "proc"},
-				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "noexec"}},
+				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "mode=755"}},
+				// Python multiprocessing creates its SemLock in /dev/shm and
+				// mmaps it (POSIX shm), which needs a writable, executable tmpfs
+				// — the plain /dev tmpfs can't serve both. A dedicated /dev/shm
+				// with sticky mode 1777 is what a stock Linux distro ships.
+				{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"rw", "nosuid", "nodev", "mode=1777"}},
 				{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "nodev"}},
 				{Destination: "/work", Type: "bind", Source: job.WorkDir, Options: []string{"rbind", "rw"}},
 				{Destination: "/home/root", Type: "bind", Source: homeDir, Options: []string{"rbind", "rw"}},
@@ -494,11 +584,13 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				outCh <- OutputMessage{E: scanner.Text() + "\n"}
 			}
 		}()
+		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		cmd.Wait()
+		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	outCh <- OutputMessage{Done: true, ExitCode: exitCode}
+	outCh <- OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
 	close(outCh)
 	<-writerDone
 	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -510,6 +602,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		job.Status = "failed"
 	}
 	s.jobsMu.Unlock()
+	s.persist()
 }
 
 // handleJobResults handles GET /v1/jobs/{id}/results.
@@ -527,12 +620,58 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-results.tar", jobID))
 
-	cmd := exec.Command("tar", "-C", job.WorkDir, "-cf", "-", ".")
-	cmd.Stdout = w
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return
+	if err := writeResultsTar(w, job); err != nil {
+		// Headers are already out, so the client sees a truncated archive and
+		// reports the read error. Log for the node operator.
+		fmt.Fprintf(os.Stderr, "results tar for %s failed: %v\n", jobID, err)
 	}
+}
+
+// writeResultsTar streams the files a job created or modified. Sending the
+// whole work dir back would overwrite the submitter's own source files with
+// copies of what they just uploaded, and makes every task in a fan-out
+// re-transfer the entire project.
+func writeResultsTar(w io.Writer, job *JobRecord) error {
+	tw := tar.NewWriter(w)
+	defer tw.Close()
+
+	return filepath.WalkDir(job.WorkDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(job.WorkDir, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+
+		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
+			return nil
+		}
+
+		hdr, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return nil
+		}
+		hdr.Name = rel
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		_, err = io.Copy(tw, f)
+		return err
+	})
 }
 
 // importNAR imports a closure into the local Nix store.
