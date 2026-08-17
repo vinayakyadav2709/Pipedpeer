@@ -44,10 +44,15 @@ cached per peer); otherwise it runs locally, exactly as before.
 | `pandas.read_csv/read_parquet` (large files) | Chunked out-of-core reads across nodes, streamed back on demand |
 | `df.groupby(...).agg(...)` / `df.merge/join` | Hash-shuffle: each node reduces its share of the keys, partials are combined exactly at the origin |
 | `torch` training with `pipedpeer run --ddp K` | `K` ranks placed on the cluster; DDP process group, `DistributedDataParallel` wrapping and gradient sync happen transparently |
-| `joblib.Parallel` | Routed through the same cluster pool |
+| `joblib.Parallel` / `sklearn` (e.g. `RandomForestClassifier(n_jobs=-1)`) | Job batches routed through the same cluster pool; sklearn's thread preference is overridden only inside the shim |
+| `np.matmul` / `np.dot` / `np.tensordot` (large arrays) | Block-row slicing: each worker computes its share, origin concatenates |
+| `np.linalg.svd` / `np.linalg.eig` (large 2-D) | Whole matrix offloaded to one worker |
 
 The shim is a `sitecustomize` injected into the job's environment; nothing is
-installed on the nodes or in your interpreter.
+installed on the nodes or in your interpreter. On constrained nodes, payloads
+that exceed 40% of free RAM run as sequential micro-chunks; if even one
+micro-chunk cannot fit locally, the request is forwarded to a healthy peer
+instead of failing.
 
 ```bash
 pipedpeer run --script train.py --intercept          # cluster-parallel primitives
