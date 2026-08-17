@@ -249,6 +249,9 @@ func runShimPython(t *testing.T, name, src string, wantSentinel string) {
 	if err != nil {
 		t.Skip("python3 not available")
 	}
+	if _, err := exec.Command(python, "-c", "import pandas").CombinedOutput(); err != nil {
+		t.Skipf("pandas not available: %v", err)
+	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
 		t.Fatal(err)
