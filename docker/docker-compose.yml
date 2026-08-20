@@ -1,0 +1,77 @@
+services:
+  worker1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: pp-worker1
+    hostname: worker1
+    networks: [ppnet]
+    gpus: all
+    # All four containers share ONE host /nix/store (bind-mounted, seeded once
+    # by demo-test.sh). The orchestrator builds the closure into the shared
+    # store, so workers never nix-store --import — the per-worker ~8GB import
+    # OOM that killed this rig is gone. mem_limit is now just a guard on torch
+    # runtime RAM, not the import peak.
+    mem_limit: 10g
+    memswap_limit: 14g
+    environment:
+      # All workers share this one host's RAM — fan closure imports serially
+      # so a multi-GB CUDA closure doesn't OOM the box (real machines stay
+      # parallel; this flag only matters on a shared-RAM rig).
+      PIPEDPEER_SERIAL_CLOSURE_IMPORTS: "1"
+    volumes:
+      - /var/lib/pipedpeer-nixstore:/nix/store
+    command: ["sh", "-c", "pipedpeer start && sleep infinity"]
+
+  worker2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: pp-worker2
+    hostname: worker2
+    networks: [ppnet]
+    gpus: all
+    mem_limit: 10g
+    memswap_limit: 14g
+    environment:
+      PIPEDPEER_SERIAL_CLOSURE_IMPORTS: "1"
+    volumes:
+      - /var/lib/pipedpeer-nixstore:/nix/store
+    command: ["sh", "-c", "pipedpeer start && sleep infinity"]
+
+  worker3:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: pp-worker3
+    hostname: worker3
+    networks: [ppnet]
+    gpus: all
+    mem_limit: 10g
+    memswap_limit: 14g
+    environment:
+      PIPEDPEER_SERIAL_CLOSURE_IMPORTS: "1"
+    volumes:
+      - /var/lib/pipedpeer-nixstore:/nix/store
+    command: ["sh", "-c", "pipedpeer start && sleep infinity"]
+
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: pp-orch
+    hostname: orch
+    networks: [ppnet]
+    # Builds the CUDA closure locally (pip download + import torch check), so
+    # it gets the biggest share of RAM.
+    mem_limit: 6g
+    environment:
+      PIPEDPEER_SERIAL_CLOSURE_IMPORTS: "1"
+    volumes:
+      - ../pipedpeer-demo:/workspace
+      - /var/lib/pipedpeer-nixstore:/nix/store
+    command: ["sh", "-c", "sleep infinity"]
+
+networks:
+  ppnet:
+    driver: bridge

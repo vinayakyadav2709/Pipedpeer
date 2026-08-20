@@ -3,6 +3,7 @@ package daemonapi
 import (
 	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,6 +169,19 @@ func envsContain(envs []string, prefix string) bool {
 	return false
 }
 
+// gpuDriverLibDir returns the directory holding the GPU driver's shared
+// libraries (libcuda.so.1), or "" if none is found. The container runtime
+// mounts them at a host-specific path; this probes the common ones.
+func gpuDriverLibDir() string {
+	candidates := []string{"/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/local/nvidia/lib64"}
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, "libcuda.so.1")); err == nil {
+			return dir
+		}
+	}
+	return ""
+}
+
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
 		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
@@ -216,7 +230,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cache nar: " + err.Error()})
 			return
 		}
-	} else if cached, _ := s.narCache.narFileFor(storePath); cached == "" {
+	} else if cached, _ := s.narCache.narFileFor(storePath); cached == "" && !pathExists(filepath.Join(storePath, "bin", "run")) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required (not cached on this node)"})
 		return
 	}
@@ -294,7 +308,13 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	// dispatch must see peers that already hold the closure, else everything
 	// stays local; a peer that fails to import is simply not offered spill
 	// work, and local always runs its own part.
-	s.broadcastClosure(storePath)
+	//
+	// DDP ranks upload directly to their own node and every rank does the same,
+	// so the closure is already where it will run — skip the broadcast and keep
+	// it off the other (non-executing) peers.
+	if r.FormValue("skip_broadcast") != "1" {
+		s.broadcastClosure(storePath)
+	}
 
 	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
 }
@@ -340,31 +360,32 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		conn.WriteMessage(websocket.TextMessage, data)
 	}
 
-	// Import NAR into local Nix store
-	narFile, err := os.Open(job.NarPath)
-	if err != nil {
-		writeWS(OutputMessage{Error: "open nar: " + err.Error()})
-		s.jobsMu.Lock()
-		job.Status = "failed"
-		s.jobsMu.Unlock()
-		return
-	}
-	defer narFile.Close()
-
-	// Import NAR into local Nix store — uses nix multicall binary
-	// invoked as nix-store via argv[0].
-	nixPath, err := exec.LookPath("nix")
-	if err != nil {
-		writeWS(OutputMessage{Error: "nix not found"})
-		s.jobsMu.Lock()
-		job.Status = "failed"
-		s.jobsMu.Unlock()
-		return
-	}
-
 	// If the closure's run entrypoint already exists in the local store, a
-	// prior task in this fan-out imported it — skip the (expensive) re-import.
-	if runEntry := filepath.Join(job.StorePath, "bin", "run"); !pathExists(runEntry) {
+	// prior task (or a shared /nix/store volume) already materialised it —
+	// skip the (expensive) NAR open + re-import entirely.
+	runEntry := filepath.Join(job.StorePath, "bin", "run")
+	if !pathExists(runEntry) {
+		narFile, err := os.Open(job.NarPath)
+		if err != nil {
+			writeWS(OutputMessage{Error: "open nar: " + err.Error()})
+			s.jobsMu.Lock()
+			job.Status = "failed"
+			s.jobsMu.Unlock()
+			return
+		}
+		defer narFile.Close()
+
+		// Import NAR into local Nix store — uses nix multicall binary
+		// invoked as nix-store via argv[0].
+		nixPath, err := exec.LookPath("nix")
+		if err != nil {
+			writeWS(OutputMessage{Error: "nix not found"})
+			s.jobsMu.Lock()
+			job.Status = "failed"
+			s.jobsMu.Unlock()
+			return
+		}
+
 		out, err := importNAR(nixPath, narFile)
 		if err != nil {
 			writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
@@ -395,6 +416,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 	var exitCode int
 	var peakBytes int64
+
+	// Driver libs for the GPU (libcuda.so.1 et al) are mounted by the container
+	// runtime into a host-specific dir (/usr/lib64 on Fedora hosts, etc.) that
+	// may not be in the job's ld search path. torch dlopens them at runtime, so
+	// put the dir on LD_LIBRARY_PATH for GPU jobs (the run wrapper prepends its
+	// nix libs, so this is additive).
+	if cfg.GPU {
+		if dir := gpuDriverLibDir(); dir != "" && !envsContain(cfg.Envs, "LD_LIBRARY_PATH=") {
+			cfg.Envs = append(cfg.Envs, "LD_LIBRARY_PATH="+dir+os.Getenv("LD_LIBRARY_PATH"))
+		}
+	}
 
 	// Interception: put the workspace shim on PYTHONPATH and enable it. The
 	// isolated path rebuilds env from scratch below, so this only feeds the
@@ -437,11 +469,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			for scanner.Scan() {
 				outCh <- OutputMessage{O: scanner.Text() + "\n"}
 			}
+			if err := scanner.Err(); err != nil {
+				outCh <- OutputMessage{Error: "stdout scanner: " + err.Error()}
+			}
 		}()
 		go func() {
 			scanner := bufio.NewScanner(stderr)
 			for scanner.Scan() {
 				outCh <- OutputMessage{E: scanner.Text() + "\n"}
+			}
+			if err := scanner.Err(); err != nil {
+				outCh <- OutputMessage{Error: "stderr scanner: " + err.Error()}
 			}
 		}()
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
@@ -584,11 +622,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			for scanner.Scan() {
 				outCh <- OutputMessage{O: scanner.Text() + "\n"}
 			}
+			if err := scanner.Err(); err != nil {
+				outCh <- OutputMessage{Error: "stdout scanner: " + err.Error()}
+			}
 		}()
 		go func() {
 			scanner := bufio.NewScanner(stderr)
 			for scanner.Scan() {
 				outCh <- OutputMessage{E: scanner.Text() + "\n"}
+			}
+			if err := scanner.Err(); err != nil {
+				outCh <- OutputMessage{Error: "stderr scanner: " + err.Error()}
 			}
 		}()
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
@@ -610,6 +654,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	}
 	s.jobsMu.Unlock()
 	s.persist()
+	releaseHeapAfterWork()
 }
 
 // handleJobResults handles GET /v1/jobs/{id}/results.
@@ -692,10 +737,25 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 		if _, err := nar.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("rewind nar: %w", err)
 		}
+		var src io.Reader = nar
+		// The NAR is gzipped at export time (torch is a 6.6GB uncompressed
+		// closure); decompress it for nix-store --import. Fall back to raw in
+		// case a peer has a legacy uncompressed copy.
+		br := bufio.NewReader(nar)
+		if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
+			zr, zerr := gzip.NewReader(br)
+			if zerr != nil {
+				return nil, fmt.Errorf("open gzip nar: %w", zerr)
+			}
+			defer zr.Close()
+			src = zr
+		} else {
+			src = br
+		}
 		cmd := &exec.Cmd{
 			Path:  nixPath,
 			Args:  append([]string{"nix-store"}, args...),
-			Stdin: nar,
+			Stdin: src,
 		}
 		return cmd.CombinedOutput()
 	}

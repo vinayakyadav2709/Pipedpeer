@@ -107,6 +107,95 @@ func TestPoolMapMicroChunks(t *testing.T) {
 	}
 }
 
+// TestWarmWorkerCacheStaysUnderBudget posts a stream of chunks whose func_src
+// stuffs 100KB into the process-wide _CACHE per item. The cache's byte budget
+// must cap it (evicting oldest first) so a long out-of-core read can never OOM
+// the warm worker; every returned size must stay at or under the budget.
+func TestWarmWorkerCacheStaysUnderBudget(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	fakeRun(t, storePath)
+
+	// Small budget so eviction triggers within a handful of inserts.
+	t.Setenv("PIPEDPEER_CACHE_BUDGET", "300000")
+
+	s := New("node-" + strings.Repeat("c", 8))
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	defer s.StopWarmWorkers()
+
+	var items []any
+	for i := 1; i <= 30; i++ {
+		items = append(items, i)
+	}
+	status, sizes := postPoolMapBigInts(t, srv.URL, storePath, map[string]any{
+		"func_src": "def run(x):\n    _CACHE['k' + str(x)] = b'x' * 100000\n    return _CACHE._bytes\n",
+		"items":    items,
+		"starmap":  false,
+	})
+	if status != http.StatusOK {
+		t.Fatalf("cache budget: status %d, want 200", status)
+	}
+	if len(sizes) != 30 {
+		t.Fatalf("want 30 results, got %d", len(sizes))
+	}
+	for i, size := range sizes {
+		if size > 300000 {
+			t.Fatalf("result %d: cache grew to %d bytes, over the 300000 budget", i, size)
+		}
+	}
+	// 30 x 100KB = 3MB without eviction; staying at or under budget means the
+	// LRU eviction is actually dropping entries.
+	if sizes[29] >= 3*100000 {
+		t.Fatalf("cache never evicted: final size %d", sizes[29])
+	}
+}
+
+// postPoolMapBigInts is like postPoolMap but decodes arbitrary int results
+// (which pickle with a 4-byte payload instead of the small-int opcode).
+func postPoolMapBigInts(t *testing.T, url, storePath string, body map[string]any) (int, []int64) {
+	t.Helper()
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest("POST", url+"/v1/pool/map", bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Pipedpeer-Store", storePath)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("pool/map: %v", err)
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Results []struct {
+			Pickle string `json:"pickle"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return resp.StatusCode, nil
+	}
+	vals := make([]int64, 0, len(out.Results))
+	for _, r := range out.Results {
+		raw, err := base64.StdEncoding.DecodeString(r.Pickle)
+		if err != nil {
+			t.Fatalf("bad base64 pickle: %v", err)
+		}
+		// Small ints pickle as [header] K <value> .; larger as [header] J <int32> .
+		var v int64
+		switch {
+		case len(raw) >= 3 && raw[len(raw)-3] == 'K':
+			v = int64(raw[len(raw)-2])
+		case len(raw) >= 6 && raw[len(raw)-6] == 'J':
+			v = int64(int32(raw[len(raw)-5])<<24 | int32(raw[len(raw)-4])<<16 |
+				int32(raw[len(raw)-3])<<8 | int32(raw[len(raw)-2]))
+		default:
+			t.Fatalf("unexpected pickle payload %q", r.Pickle)
+		}
+		vals = append(vals, v)
+	}
+	return resp.StatusCode, vals
+}
+
 // TestPoolMapForwardToPeer (T11) simulates an asymmetric orchestrator: the
 // local node's free memory cannot admit the payload, a healthy peer can. The
 // request must be forwarded whole to the peer (0% heavy compute locally) and

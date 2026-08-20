@@ -1,7 +1,6 @@
 package daemonapi
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -83,7 +83,9 @@ type Server struct {
 	// Job execution tracking
 	jobDir string
 	jobsMu sync.Mutex
-	jobs   map[string]*JobRecord
+
+	lastJobPrune time.Time
+	jobs         map[string]*JobRecord
 
 	// NATS subscriptions (nil if NATS not configured)
 	natsSubs []*nats.Subscription
@@ -93,6 +95,11 @@ type Server struct {
 
 	// Maximum concurrent tasks this node will hold (0 = unlimited)
 	maxConcurrent atomic.Int64
+
+	// Serial closure fan-out: imports closures on peers one at a time.
+	// Only needed when every peer shares one physical host (docker demo rig);
+	// real machines import into their own RAM, so default stays parallel.
+	serialImports atomic.Bool
 
 	// Node store (SQLite — single source of truth for all peers)
 	store *nodestore.Store
@@ -250,6 +257,13 @@ func (s *Server) MaxConcurrentJobs() int {
 	return int(s.maxConcurrent.Load())
 }
 
+// SetSerialClosureImports makes closure fan-out import on peers one at a time.
+// Off by default (parallel, correct on separate machines); the docker demo rig
+// sets it on because all peers share one host's RAM.
+func (s *Server) SetSerialClosureImports(on bool) {
+	s.serialImports.Store(on)
+}
+
 func (s *Server) Handler() http.Handler {
 	return s.router
 }
@@ -315,11 +329,59 @@ func (s *Server) StartSweeper() {
 			select {
 			case <-ticker.C:
 				s.sweepExpired()
+				// Completed job dirs accumulate on long-lived daemons; prune
+				// them hourly (retention is generous: a dir untouched for
+				// JobRetention is a finished job, whatever its record says).
+				if time.Since(s.lastJobPrune) > time.Hour {
+					s.lastJobPrune = time.Now()
+					if n, err := s.PruneCompletedJobDirs(JobRetention); err == nil && n > 0 {
+						log.Info().Int("n", n).Msg("pruned stale job dir(s)")
+					}
+				}
 			case <-s.stopSweep:
 				return
 			}
 		}
 	}()
+}
+
+// JobRetention is how long finished job directories survive on a daemon
+// before the sweeper removes them.
+const JobRetention = 7 * 24 * time.Hour
+
+// PruneCompletedJobDirs removes job directories (and their in-memory records)
+// not touched within olderThan. Dir names are job IDs, so the jobs map can be
+// reconciled by name.
+func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
+	entries, err := os.ReadDir(s.jobDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	cutoff := time.Now().Add(-olderThan)
+	removed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if !info.ModTime().Before(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(s.jobDir, e.Name())); err != nil {
+			return removed, err
+		}
+		s.jobsMu.Lock()
+		delete(s.jobs, e.Name())
+		s.jobsMu.Unlock()
+		removed++
+	}
+	return removed, nil
 }
 
 // StopSweeper stops the background lease sweeper.
@@ -425,6 +487,21 @@ func (s *Server) broadcastClosure(storePath string) {
 		return
 	}
 
+	// Serial mode imports one peer at a time (shared-RAM rig); default parallel.
+	if s.serialImports.Load() {
+		for i := range targets {
+			ph := targets[i]
+			if s.peerHasStore(&ph, storePath) {
+				continue
+			}
+			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
+				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+					Msg("closure broadcast failed")
+			}
+		}
+		return
+	}
+
 	var wg sync.WaitGroup
 	for i := range targets {
 		ph := targets[i]
@@ -451,22 +528,23 @@ func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 	}
 	defer f.Close()
 
-	var buf bytes.Buffer
-	mp := multipart.NewWriter(&buf)
-	if err := mp.WriteField("store_path", storePath); err != nil {
-		return err
-	}
-	w, err := mp.CreateFormFile("nar", "closure.nar")
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(w, f); err != nil {
-		return err
-	}
-	mp.Close()
+	pr, pw := io.Pipe()
+	mp := multipart.NewWriter(pw)
+	go func() {
+		defer pw.Close()
+		if err := mp.WriteField("store_path", storePath); err != nil {
+			return
+		}
+		w, err := mp.CreateFormFile("nar", "closure.nar")
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(w, f)
+		mp.Close()
+	}()
 
 	url := fmt.Sprintf("http://%s:%d/v1/store/import", ph.Host, ph.Port)
-	req, err := http.NewRequest("POST", url, &buf)
+	req, err := http.NewRequest("POST", url, pr)
 	if err != nil {
 		return err
 	}
@@ -1150,11 +1228,6 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	}, http.StatusOK
 }
 
-// freeCores estimates CPU cores not currently in use on this node.
-func (s *Server) freeCores() float64 {
-	return freeCoresFromLoad(heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem()))
-}
-
 // freeCoresFromLoad derives free cores from an already-collected load sample,
 // so admission can reuse one sample instead of re-reading the host.
 func freeCoresFromLoad(load registry.LoadInfo) float64 {
@@ -1167,17 +1240,6 @@ func freeCoresFromLoad(load registry.LoadInfo) float64 {
 		return 0
 	}
 	return free
-}
-
-// reserveGPU picks the free GPU with the most available VRAM, skipping devices
-// already held by a live lease. Returns -1 when nothing satisfies minVRAM.
-func (s *Server) reserveGPU(minVRAM int64) int {
-	devices := gpu.PerDevice()
-	gpuPresent := gpu.Detect().Vendor != gpu.VendorNone
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.reserveGPULocked(devices, gpuPresent, minVRAM)
 }
 
 // reserveGPULocked is reserveGPU's body with the caller holding s.mu, so the

@@ -102,6 +102,11 @@ func (c *narCache) store(storePath string, src io.Reader) (string, error) {
 // runnable=1 the answer only counts the store as present when it is actually
 // materialised and executable (pool spill depends on that; the NAR cache alone
 // would let a peer pass the check but fail at pool-map time).
+//
+// The runnable check looks at the store path directly, not the NAR cache: with
+// a shared /nix/store volume the closure is on disk but never has a local NAR,
+// and a broadcast must not push it again (ponytail: shared-store rig shortcut;
+// a per-node store still works because bin/run is only present after import).
 func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
 	storePath := r.URL.Query().Get("path")
 	if storePath == "" {
@@ -109,7 +114,7 @@ func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path, cached := s.narCache.narFileFor(storePath)
-	if cached && r.URL.Query().Get("runnable") == "1" {
+	if r.URL.Query().Get("runnable") == "1" {
 		cached = pathExists(filepath.Join(storePath, "bin", "run"))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cached": cached, "nar_path": path})

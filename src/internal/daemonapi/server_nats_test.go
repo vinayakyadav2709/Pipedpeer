@@ -97,7 +97,7 @@ func TestNATSAcceptCommitComplete(t *testing.T) {
 
 	// 3. Complete via NATS
 	completeReq, _ := json.Marshal(completeRequest{LeaseID: ar.LeaseID, Status: "succeeded"})
-	msg, err = bus.Request("pipedpeer.daemon.nats-node.complete", completeReq, 2*time.Second)
+	_, err = bus.Request("pipedpeer.daemon.nats-node.complete", completeReq, 2*time.Second)
 	if err != nil {
 		t.Fatalf("nats complete request: %v", err)
 	}

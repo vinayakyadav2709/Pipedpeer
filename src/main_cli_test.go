@@ -52,21 +52,13 @@ func TestRunCheckOnlyAutoStartsDaemon(t *testing.T) {
 	// First start the daemon so it has a node-id to accept against
 	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
 
-	// Read the auto-generated node ID
-	idBytes, err := os.ReadFile(filepath.Join(xdg, "pipedpeer", "node_identity.json"))
-	if err != nil {
-		t.Fatalf("read identity: %v", err)
-	}
-	nodeID := extractNodeID(t, idBytes)
-
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 
 	out := runCLIWithEnv(t,
 		stateDir, xdg,
 		"run",
 		"--script", scriptPath,
-		"--host", "127.0.0.1",
-		"--target-id", nodeID,
+		"--host", fmt.Sprintf("127.0.0.1:%d", port),
 		"--daemon-port", fmt.Sprintf("%d", port),
 		"--check-only",
 	)
@@ -81,7 +73,7 @@ func TestRunCheckOnlyAutoStartsDaemon(t *testing.T) {
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 }
 
-func TestRunCheckOnlyRejectsWrongTargetID(t *testing.T) {
+func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	stateDir := t.TempDir()
 	xdg := t.TempDir()
 	port := freePort(t)
@@ -91,20 +83,21 @@ func TestRunCheckOnlyRejectsWrongTargetID(t *testing.T) {
 	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
 	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
 
+	// --remote excludes this machine, and with nothing else in the cluster
+	// the run must fail loudly instead of queuing forever.
 	_, errOut, err := runCLIEWithEnv(t,
 		stateDir, xdg,
 		"run",
 		"--script", scriptPath,
-		"--host", "127.0.0.1",
-		"--target-id", "different-node",
 		"--daemon-port", fmt.Sprintf("%d", port),
+		"--remote",
 		"--check-only",
 	)
 	if err == nil {
-		t.Fatalf("expected rejection error, got none")
+		t.Fatalf("expected error when no eligible remote node, got none")
 	}
-	if !strings.Contains(errOut, "job rejected by remote daemon") {
-		t.Fatalf("expected rejection error output, got: %s", errOut)
+	if !strings.Contains(errOut, "no eligible node found") {
+		t.Fatalf("expected 'no eligible node found' error, got: %s", errOut)
 	}
 }
 

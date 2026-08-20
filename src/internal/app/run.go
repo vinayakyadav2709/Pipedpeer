@@ -35,6 +35,11 @@ type Options struct {
 	// Intercept embeds the sitecustomize shim and routes parallel primitives
 	// (multiprocessing.Pool, ProcessPoolExecutor, joblib) through the cluster.
 	Intercept bool
+	// SkipBroadcast tells the target daemon not to fan the closure out to the
+	// other healthy peers. DDP ranks upload directly to their own node and the
+	// other ranks already get their copy the same way, so broadcasting would
+	// push the closure to nodes that don't execute it.
+	SkipBroadcast bool
 	// Coordinator placement diagnostics
 	PlacementSource string
 	DegradedMode    bool
@@ -151,7 +156,7 @@ func RunTask(env *Environment, task Task) (runErr error) {
 	note("      Script: %s\n", env.ScriptRel)
 
 	uploadResp, err := daemonctl.UploadJob(opts.DaemonHost, opts.DaemonPort,
-		env.WorkspaceTar, env.NarPath, env.StorePath, env.ScriptRel)
+		env.WorkspaceTar, env.NarPath, env.StorePath, env.ScriptRel, opts.SkipBroadcast)
 	if err != nil {
 		return fmt.Errorf("upload failed: %v", err)
 	}
@@ -170,11 +175,13 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		Intercept:  opts.Intercept,
 	}
 
-	peakBytes, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
+	peakBytes, stdoutText, stderrText, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
 	if err != nil {
 		return fmt.Errorf("execution failed: %v", err)
 	}
 	historyRecord.PeakMemBytes = peakBytes
+	_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutText)
+	_ = jobhistory.SaveText(historyDir, "stderr.log", stderrText)
 
 	resultsDir := opts.ResultsDir
 	if resultsDir == "" {

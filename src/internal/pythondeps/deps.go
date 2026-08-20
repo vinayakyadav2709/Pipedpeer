@@ -122,6 +122,21 @@ func HasGPUImports(scriptPath string) bool {
 	return false
 }
 
+// HasDistributedImports reports whether the script looks like a distributed
+// training script: it must touch torch.distributed or DistributedDataParallel.
+// The token scanner only sees top-level modules, so this scans raw source text
+// for the DDP markers.
+func HasDistributedImports(scriptPath string) bool {
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return false
+	}
+	src := string(data)
+	return strings.Contains(src, "torch.distributed") ||
+		strings.Contains(src, "DistributedDataParallel") ||
+		strings.Contains(src, "torch.dist")
+}
+
 func ExtractImports(scriptPath string) []string {
 	scan := ExtractImportScan(scriptPath)
 	return scan.ExternalDeps
