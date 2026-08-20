@@ -119,11 +119,9 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	fmt.Printf("      Store path: %s\n", storePath)
 
 	env.NarPath = filepath.Join(tmpDir, "closure.nar")
-	if err := daemonctl.ExportNAR(storePath, env.NarPath); err != nil {
-		env.Close()
-		return nil, fmt.Errorf("nix store export failed: %v", err)
-	}
-	fmt.Printf("      Exported closure to %s\n", env.NarPath)
+	// The NAR is not exported here: UploadJob exports it on demand only when a
+	// target daemon lacks the closure (shared stores mean most uploads skip it
+	// entirely), so a 6GB gzip export doesn't run on every repeated run.
 
 	env.WorkspaceTar = filepath.Join(tmpDir, "workspace.tar")
 	shimContent := ""

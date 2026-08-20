@@ -49,6 +49,29 @@ func TestGenerateFlakeForArchAarch64(t *testing.T) {
 	}
 }
 
+func TestGenerateFlakeSklearnPinnedOnX8664(t *testing.T) {
+	flake := GenerateFlakeForArch([]string{"numpy", "scikit-learn"}, "", "x86_64-linux")
+	if !strings.Contains(flake, `version = "1.9.0"`) {
+		t.Fatalf("expected sklearn 1.9.0 wheel override, got:\n%s", flake)
+	}
+	if !strings.Contains(flake, "manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl") {
+		t.Fatalf("expected manylinux x86_64 wheel in flake")
+	}
+	if !strings.Contains(flake, "ps.numpy") {
+		t.Fatalf("expected numpy still mapped plainly")
+	}
+}
+
+func TestGenerateFlakeSklearnUnpinnedOnOtherArch(t *testing.T) {
+	flake := GenerateFlakeForArch([]string{"scikit-learn"}, "", "aarch64-linux")
+	if strings.Contains(flake, `version = "1.9.0"`) {
+		t.Fatalf("did not expect wheel override on non-x86_64 arch:\n%s", flake)
+	}
+	if !strings.Contains(flake, "ps.scikit-learn") {
+		t.Fatalf("expected plain ps.scikit-learn on aarch64")
+	}
+}
+
 func TestNixArchReturnsValidFormat(t *testing.T) {
 	arch := NixArch()
 	if !strings.Contains(arch, "-") {

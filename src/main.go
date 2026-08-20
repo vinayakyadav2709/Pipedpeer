@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -68,6 +69,7 @@ func main() {
 		newRegistryCmd(),
 		newNodesCmd(),
 		newPingCmd(),
+		newTrafficCmd(),
 		newTasksCmd(),
 		newMapCmd(),
 	)
@@ -585,6 +587,7 @@ func runDDP(o ddpRunOptions) error {
 	if err == nil {
 		var all []registry.NodeRecord
 		if jerr := json.NewDecoder(resp.Body).Decode(&all); jerr == nil {
+			var gpuPeers, cpuPeers []registry.NodeRecord
 			for _, n := range all {
 				if n.State != "healthy" || n.NodeID == rank0.NodeID {
 					continue
@@ -592,11 +595,22 @@ func runDDP(o ddpRunOptions) error {
 				if o.RequireGPU && !ddpHasGPU(n) {
 					continue
 				}
-				peers = append(peers, n)
+				if o.PreferGPU && ddpHasGPU(n) {
+					gpuPeers = append(gpuPeers, n)
+				} else {
+					cpuPeers = append(cpuPeers, n)
+				}
 			}
-			sort.Slice(peers, func(i, j int) bool {
-				return peers[i].Load.CPUPercent < peers[j].Load.CPUPercent
+			// Prefer GPU peers when GPU work is wanted (force or inferred),
+			// falling back to CPU peers only if there aren't enough GPU ones —
+			// a DDP all-reduce must not mix devices silently.
+			sort.Slice(gpuPeers, func(i, j int) bool {
+				return gpuPeers[i].Load.CPUPercent < gpuPeers[j].Load.CPUPercent
 			})
+			sort.Slice(cpuPeers, func(i, j int) bool {
+				return cpuPeers[i].Load.CPUPercent < cpuPeers[j].Load.CPUPercent
+			})
+			peers = append(gpuPeers, cpuPeers...)
 		}
 		resp.Body.Close()
 	}
@@ -678,6 +692,7 @@ func runDDP(o ddpRunOptions) error {
 				JobSet:            jobSet,
 				Isolate:           o.Isolate,
 				Intercept:         true,
+				SkipBroadcast:     true,
 				GPU:               o.PreferGPU || o.RequireGPU,
 				GPUDevices:        o.GPUDevices,
 				Mode:              "script",
@@ -983,6 +998,22 @@ func newJobsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	pruneCmd := &cobra.Command{
+		Use:   "prune",
+		Short: "Delete job history entries not touched within --older-than",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			olderThan, _ := cmd.Flags().GetDuration("older-than")
+			n, err := jobhistory.Prune(olderThan)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("pruned %d job history entr(ies) older than %s\n", n, olderThan)
+			return nil
+		},
+	}
+	pruneCmd.Flags().Duration("older-than", 7*24*time.Hour,
+		"Delete entries untouched for this long")
+	cmd.AddCommand(pruneCmd)
 	cmd.Flags().Int("limit", 20, "Max jobs to show")
 	return cmd
 }
@@ -1258,6 +1289,87 @@ func truncate(s string, n int) string {
 	return s[:n-3] + "..."
 }
 
+// newTrafficCmd renders this node's pool-map traffic ledger from the daemon
+// log: every chunk received (and from whom), every chunk forwarded to a peer,
+// and every fan-out split. Run it on any node to see that node's side of the
+// ledger. The shim's side (what your run sent) is in the job output instead:
+// pipedpeer job --id <ID> --output.
+func newTrafficCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "traffic",
+		Short: "Show this node's pool-map traffic ledger",
+		Long:  "Prints the [pool] lines from this node's daemon log.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			watch, _ := cmd.Flags().GetBool("watch")
+			limit, _ := cmd.Flags().GetInt("limit")
+			logFile := daemonctl.DefaultPaths().LogFile
+			if _, err := os.Stat(logFile); err != nil {
+				return fmt.Errorf("daemon log not found at %s (is the daemon running?)", logFile)
+			}
+			if watch {
+				return tailTraffic(logFile)
+			}
+			data, err := os.ReadFile(logFile)
+			if err != nil {
+				return err
+			}
+			var out []string
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.Contains(line, "[pool]") {
+					out = append(out, line)
+				}
+			}
+			if len(out) > limit {
+				out = out[len(out)-limit:]
+			}
+			for _, line := range out {
+				fmt.Println(line)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolP("watch", "f", false, "Follow new entries (tail -f)")
+	cmd.Flags().Int("limit", 50, "Max entries to show")
+	return cmd
+}
+
+// tailTraffic follows the daemon log from the end, printing [pool] lines as
+// they arrive. Ponytail: a plain poll loop; log file is written by the
+// daemonctl-managed process, no rotation handling (the daemon re-opens on
+// restart and Start() truncates).
+func tailTraffic(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
+	buf := make([]byte, 4096)
+	var pending []byte
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			pending = append(pending, buf[:n]...)
+			for {
+				idx := bytes.IndexByte(pending, '\n')
+				if idx < 0 {
+					break
+				}
+				line := pending[:idx]
+				pending = pending[idx+1:]
+				if bytes.Contains(line, []byte("[pool]")) {
+					fmt.Println(string(line))
+				}
+			}
+		}
+		if err != nil {
+			time.Sleep(time.Second)
+		}
+	}
+}
+
 func newPingCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ping <host:port> [host:port ...]",
@@ -1336,6 +1448,9 @@ func runDaemon(args []string) {
 	server := daemonapi.New(nodeID.NodeID)
 	server.EnablePersistence()
 	server.SetMaxConcurrentJobs(maxConcurrent)
+	if v := os.Getenv("PIPEDPEER_SERIAL_CLOSURE_IMPORTS"); v == "1" {
+		server.SetSerialClosureImports(true)
+	}
 
 	var bus *natsbus.Bus
 	natsCfg := natsbus.Config{

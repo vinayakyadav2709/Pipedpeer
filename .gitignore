@@ -8,3 +8,7 @@ __pycache__/
 *.pyc
 node_modules/
 codedb.snapshot
+docker/logs/
+docker/workspaces/
+.freebuff/
+pipedpeer-demo/data.csv
