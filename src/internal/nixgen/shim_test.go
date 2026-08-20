@@ -176,6 +176,7 @@ import base64
 import json
 import os
 import pickle
+import struct
 import sys
 import tempfile
 import threading
@@ -192,26 +193,62 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
-        req = json.loads(self.rfile.read(n))
+        data = self.rfile.read(n)
+        nl = data.find(b"\n")
+        req = json.loads(data if nl < 0 else data[:nl])
+        frames = bool(req.get("items_frames"))
         if req.get("func_src") == "def run(x):\n    return len(x)\n":
             PROBES[0] += 1
-        if req.get("items_b64"):
-            b = [len(i) for i in req["items"]]
+        if frames:
+            rest = data[nl + 1:]
+            def rf(rest):
+                nn = struct.unpack(">I", rest[:4])[0]
+                return rest[4:4 + nn], rest[4 + nn:]
+            g = b""
+            if req.get("globals"):
+                g, rest = rf(rest)
+            raw = []
+            for _ in range(req["items_frames"]):
+                f, rest = rf(rest)
+                raw.append(f)
+            b = [len(f) for f in raw]
             if b:
                 MAX_CHUNK[0] = max(MAX_CHUNK[0], max(b))
+        else:
+            g = b""
+            if req.get("items_b64"):
+                b = [len(i) for i in req["items"]]
+                if b:
+                    MAX_CHUNK[0] = max(MAX_CHUNK[0], max(b))
         ns = {}
-        if req.get("extra_b64"):
+        if g:
+            ns.update(pickle.loads(g))
+        elif req.get("extra_b64"):
             ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
         ns["_CACHE"] = CACHE
-        exec(req["func_src"], ns)
-        func = ns[req.get("func_name", "run")]
-        items = req["items"]
-        if req.get("items_b64"):
-            items = [pickle.loads(base64.b64decode(i)) for i in items]
-        if req.get("cache_keys"):
-            items = [CACHE.get(k) for k in req["cache_keys"]]
-        results = [func(i) for i in items]
-        body = json.dumps({"results": [{"pickle": base64.b64encode(pickle.dumps(r)).decode()} for r in results]}).encode()
+        saved = os.environ.get("PIPEDPEER_NUMPY_NESTED")
+        try:
+            exec(req["func_src"], ns)
+            func = ns[req.get("func_name", "run")]
+            if frames:
+                items = [pickle.loads(f) for f in raw]
+            else:
+                items = req["items"]
+                if req.get("items_b64"):
+                    items = [pickle.loads(base64.b64decode(i)) for i in items]
+                if req.get("cache_keys"):
+                    items = [CACHE.get(k) for k in req["cache_keys"]]
+            results = [func(i) for i in items]
+        finally:
+            if saved is None:
+                os.environ.pop("PIPEDPEER_NUMPY_NESTED", None)
+            else:
+                os.environ["PIPEDPEER_NUMPY_NESTED"] = saved
+        if frames:
+            out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
+            body = b'{"results_frames": %d}\n' % len(results) + out
+        else:
+            body = json.dumps({"results": [{"pickle": base64.b64encode(pickle.dumps(r)).decode()} for r in results]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -349,7 +386,8 @@ func TestShimOutOfCoreIntegrity(t *testing.T) {
 csv = os.path.join(TMP, "lines.csv")
 with open(csv, "wb") as f:
     f.write(b"k,v\n" + b"".join(b"k%d,%d\n" % (i % 5, i) for i in range(1000)))
-offs = shim._csv_offsets(csv, 0, 37)
+ranges = list(shim._csv_ranges(csv, 0))
+offs = [ranges[0][0]] + [b for _, b in ranges]
 assert offs[0] == 4, offs
 data = open(csv, "rb").read()
 lines = 0
@@ -466,6 +504,13 @@ A = rng.rand(2048, 2048)
 B = rng.rand(2048, 2048)
 b64A = len(base64.b64encode(A.tobytes()))
 
+# Honest cost model at realistic BLAS speeds: local dgemm beats the transport
+# for matmul, but svd offloads (LAPACK is ~100x slower per flop).
+assert not shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
+assert shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
+# Force every offload so the slicing/frames mechanics below are exercised.
+shim._numpy_should_offload = lambda *a, **k: True
+
 C = np.matmul(A, B)            # dispatches block rows
 local = A @ B                  # @ operator is untouched: local reference
 assert np.allclose(C, local)
@@ -476,7 +521,7 @@ assert np.allclose(T, local)
 
 U, S, Vh = np.linalg.svd(A)    # offloaded to one worker
 assert np.allclose(U @ np.diag(S) @ Vh, A, rtol=1e-4, atol=1e-4)
-assert MAX_CHUNK[0] >= b64A, "svd must ship the matrix to a worker"
+assert MAX_CHUNK[0] >= A.nbytes, "svd must ship the matrix to a worker"
 
 W, V = np.linalg.eig(A)
 assert np.allclose(A @ V, V * W, rtol=1e-4)

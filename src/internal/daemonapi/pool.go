@@ -3,41 +3,181 @@ package daemonapi
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+// Frames wire format. A frames body is a small JSON header line followed by
+// length-prefixed raw pickle frames:
+//
+//	{header json, "items_frames": N}\n[globals frame][item frame]...
+//
+// frame = [4-byte big-endian length][raw bytes]. The header carries only small
+// metadata (function source, flags, counts); all bulk data travels as frames,
+// so big items never go through base64 or a giant JSON parse. Both requests
+// and responses use it; legacy base64-in-JSON bodies are still accepted and
+// emitted when the submitter did not opt in (small payloads keep the old path).
+func putFrame(buf []byte, payload []byte) []byte {
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(payload)))
+	return append(buf, payload...)
+}
+
+// readFrame pulls one length-prefixed frame off src.
+func readFrame(src []byte) ([]byte, []byte, error) {
+	if len(src) < 4 {
+		return nil, nil, fmt.Errorf("truncated frame header")
+	}
+	n := int(binary.BigEndian.Uint32(src[:4]))
+	src = src[4:]
+	if len(src) < n {
+		return nil, nil, fmt.Errorf("truncated frame payload (need %d, have %d)", n, len(src))
+	}
+	return src[:n], src[n:], nil
+}
+
+// parseFrames reads the globals frame (when present) and itemCount item frames.
+func parseFrames(body []byte, hasGlobals bool, itemCount int) ([]byte, []json.RawMessage, error) {
+	rest := body
+	var globals []byte
+	var err error
+	if hasGlobals {
+		if globals, rest, err = readFrame(rest); err != nil {
+			return nil, nil, err
+		}
+	}
+	items := make([]json.RawMessage, 0, itemCount)
+	for i := 0; i < itemCount; i++ {
+		var f []byte
+		if f, rest, err = readFrame(rest); err != nil {
+			return nil, nil, err
+		}
+		items = append(items, f)
+	}
+	return globals, items, nil
+}
+
+// buildFrames assembles a frames body from a header line and optional globals.
+func buildFrames(header []byte, globals []byte, items []json.RawMessage) []byte {
+	buf := make([]byte, 0, 1024)
+	buf = append(buf, header...)
+	buf = append(buf, '\n')
+	if globals != nil {
+		buf = putFrame(buf, globals)
+	}
+	for _, it := range items {
+		buf = putFrame(buf, it)
+	}
+	return buf
+}
+
+// chunk is the unit of pool work threaded through dispatch. items are opaque
+// raw pickle bytes (frames mode) or legacy base64 pickles (itemsB64); globals
+// is a raw pickle frame that every worker unpickles into the func_src
+// namespace before running (e.g. a fixed matmul operand shared by all items).
+type chunk struct {
+	pickledFunc, funcSrc, funcName, extraB64 string
+	items                                    []json.RawMessage
+	globals                                  []byte
+	frames                                   bool
+	starmap                                  bool
+	itemsB64                                 bool
+	noSplit                                  bool
+	noFanout                                 bool
+	requiredMem                              int64
+	cacheKeys                                []string
+	itemKeys                                 []string
+	chunkDir                                 string
+}
+
+// chunkDirFor returns the on-disk chunk cache dir for a store path. Chunks
+// written here survive warm-worker respawns, so cache_keys still resolve after
+// a worker dies. The dir is under the daemon state dir, not the (read-only)
+// nix store.
+func chunkDirFor(storePath string) string {
+	sum := sha256.Sum256([]byte(storePath))
+	return filepath.Join(os.TempDir(), "pipedpeer", "chunkcache", hex.EncodeToString(sum[:8]))
+}
+
 // poolRunner is the Python helper executed inside the closure to run a
 // pickled function over a batch of items. It is written to a temp file and
-// invoked via <storePath>/bin/run pool_runner.py <payload.json> <out.json>.
+// invoked via <storePath>/bin/run pool_runner.py <payload.bin> <out.bin>.
 // It is the cold path: each invocation spawns a fresh closure process, which
 // costs seconds. The warm worker (below) replaces it for the steady state.
-const poolRunner = `# Runs a pickled callable over a JSON batch, for pipedpeer's cluster pool.
-import base64, json, pickle, sys
+// Accepts both the frames wire format (header line + length-prefixed raw
+// pickle frames) and the legacy base64-in-JSON batch.
+const poolRunner = `# Runs a pickled callable over a batch, for pipedpeer's cluster pool.
+import base64, hashlib, json, os, pickle, struct, sys
 
-with open(sys.argv[1]) as f:
-    req = json.load(f)
+with open(sys.argv[1], "rb") as f:
+    data = f.read()
 
-    if req.get("func_src"):
-        ns = {}
-        if req.get("extra_b64"):
-            ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
-        exec(req["func_src"], ns)
-        func = ns[req.get("func_name", "run")]
+nl = data.find(b"\n")
+req = json.loads(data if nl < 0 else data[:nl])
+frames = bool(req.get("items_frames"))
+if frames:
+    rest = data[nl + 1:]
+    def read_frame(rest):
+        n = struct.unpack(">I", rest[:4])[0]
+        return rest[4:4 + n], rest[4 + n:]
+    if req.get("globals"):
+        g, rest = read_frame(rest)
     else:
-        func = pickle.loads(base64.b64decode(req["func"]))
-items = req["items"]
+        g = b""
+    raw = []
+    for _ in range(req["items_frames"]):
+        f, rest = read_frame(rest)
+        raw.append(f)
+    items = [pickle.loads(r) for r in raw]
+else:
+    req = json.loads(data)
+    g = b""
+    items = req["items"]
+
+ns = {"_CACHE": {}}
+ns["_CHUNK_DIR"] = req.get("chunk_dir", "")
+if g:
+    ns.update(pickle.loads(g))
+elif req.get("extra_b64"):
+    ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
+if req.get("func_src"):
+    exec(req["func_src"], ns)
+    func = ns[req.get("func_name", "run")]
+else:
+    func = pickle.loads(base64.b64decode(req["func"]))
 starmap = req.get("starmap", False)
-if req.get("items_b64"):
+if not frames and req.get("items_b64"):
     items = [pickle.loads(base64.b64decode(i)) for i in items]
+
+if req.get("cache_keys"):
+    items = []
+    for k in req["cache_keys"]:
+        v = ns["_CACHE"].get(k)
+        if v is None and ns["_CHUNK_DIR"]:
+            p = os.path.join(ns["_CHUNK_DIR"], hashlib.sha256(k.encode()).hexdigest())
+            if os.path.exists(p):
+                with open(p, "rb") as f:
+                    v = pickle.load(f)
+                ns["_CACHE"][k] = v
+        items.append(v)
+    if any(i is None for i in items):
+        missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
+        raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, ns["_CHUNK_DIR"]))
 
 results = []
 for item in items:
@@ -47,9 +187,14 @@ for item in items:
     else:
         results.append(func(item))
 
-out = {"results": [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
-with open(sys.argv[2], "w") as f:
-    json.dump(out, f)
+if frames:
+    out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
+    with open(sys.argv[2], "wb") as f:
+        f.write(b'{"results_frames": %d}\n' % len(results) + out)
+else:
+    out = {"results": [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
+    with open(sys.argv[2], "w") as f:
+        json.dump(out, f)
 `
 
 // warmWorkerScript is the long-lived sibling of poolRunner: one process per
@@ -61,15 +206,91 @@ with open(sys.argv[2], "w") as f:
 // store, tasks streaming as messages.
 const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per store path.
 # Reads JSON-lines from stdin: each is {"id": N, "in_file": ..., "out_file": ...}.
-# Runs the payload from in_file, writes the results JSON to out_file, then
+# Runs the payload from in_file, writes the results to out_file, then
 # answers with a tiny {"id": N, "done": true, "error": ...} line on stdout.
 # Kept alive across many /v1/pool/map requests so dispatch never re-spawns
 # the closure. _CACHE persists across requests inside this process: func_src
 # can read it (via the injected _CACHE name) to store/retrieve chunk data
 # keyed by content hash, which is how out-of-core reads keep chunks on nodes.
-import base64, gc, json, pickle, sys
+# in_file/out_file use the frames wire format (header line + length-prefixed
+# raw pickle frames) for heavy chunks and legacy base64 JSON for small ones.
+import base64, gc, hashlib, json, os, pickle, struct, sys, traceback
 
-_CACHE = {}
+# ponytail: FIFO-eviction byte budget instead of a true LRU — the point is to
+# never OOM the worker from accumulating parsed chunks, and a dict preserves
+# insertion order so evicting from the front is O(1). Budget defaults to ~35%
+# of free RAM and can be overridden with PIPEDPEER_CACHE_BUDGET. If chunk
+# hit-rates ever drop (daemon re-ships the same chunk because it was evicted),
+# upgrade to an OrderedDict.move_to_end LRU on __getitem__/__setitem__ —
+# same budget math, just reorders instead of evicting the wrong entry.
+class _BoundedCache(dict):
+    def __init__(self):
+        super().__init__()
+        self._bytes = 0
+        budget = os.environ.get("PIPEDPEER_CACHE_BUDGET", "").strip()
+        if budget:
+            try:
+                self.budget = int(float(budget))
+            except ValueError:
+                self.budget = self._default_budget()
+        else:
+            self.budget = self._default_budget()
+
+    @staticmethod
+    def _default_budget():
+        try:
+            avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            return int(avail * 0.35)
+        except (ValueError, OSError):
+            return 2 << 30
+
+    @staticmethod
+    def _size_of(v):
+        try:
+            return int(v.memory_usage(deep=True).sum())
+        except Exception:
+            try:
+                return sys.getsizeof(v)
+            except Exception:
+                return 1024
+
+    def __setitem__(self, k, v):
+        if k in self:
+            self._bytes -= self._size_of(self[k])
+        super().__setitem__(k, v)
+        self._bytes += self._size_of(v)
+        while self._bytes > self.budget and len(self) > 1:
+            oldest = next(iter(self))
+            self._bytes -= self._size_of(self[oldest])
+            del self[oldest]
+
+_CACHE = _BoundedCache()
+_CHUNK_DIR = ""
+
+def load_req(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    nl = data.find(b"\n")
+    req = json.loads(data if nl < 0 else data[:nl])
+    frames = bool(req.get("items_frames"))
+    if not frames:
+        req = json.loads(data)
+        # Legacy requests carry globals as extra_b64 (base64 pickle); return an
+        # empty bytes g so the caller's extra_b64 branch decodes them. Passing
+        # extra_b64 here would make pickle.loads(g) choke on a str.
+        return req, frames, req["items"], b""
+    rest = data[nl + 1:]
+    def read_frame(rest):
+        n = struct.unpack(">I", rest[:4])[0]
+        return rest[4:4 + n], rest[4 + n:]
+    g = b""
+    if req.get("globals"):
+        g, rest = read_frame(rest)
+    raw = []
+    for _ in range(req["items_frames"]):
+        f, rest = read_frame(rest)
+        raw.append(f)
+    return req, frames, [pickle.loads(r) for r in raw], g
 
 for line in sys.stdin:
     line = line.strip()
@@ -77,28 +298,41 @@ for line in sys.stdin:
         continue
     try:
         msg = json.loads(line)
-        with open(msg["in_file"]) as f:
-            req = json.load(f)
+        req, frames, items, g = load_req(msg["in_file"])
+        _CHUNK_DIR = req.get("chunk_dir", "")
         ns = {}
-        if req.get("extra_b64"):
+        if g:
+            ns.update(pickle.loads(g))
+        elif req.get("extra_b64"):
             ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
         ns["_CACHE"] = _CACHE
+        ns["_CHUNK_DIR"] = _CHUNK_DIR
         if req.get("func_src"):
             exec(req["func_src"], ns)
             func = ns[req.get("func_name", "run")]
         else:
             func = pickle.loads(base64.b64decode(req["func"]))
-        items = req["items"]
         starmap = req.get("starmap", False)
-        if req.get("items_b64"):
+        if not frames and req.get("items_b64"):
             items = [pickle.loads(base64.b64decode(i)) for i in items]
         # cache_keys: item i is a content hash resolved from the process-wide
-        # chunk cache instead of the payload. A miss is an error: the submitter
-        # falls back to local work rather than running with wrong data.
+        # chunk cache (or the on-disk fallback) instead of the payload. A miss
+        # is an error: the submitter falls back to local work rather than
+        # running with wrong data.
         if req.get("cache_keys"):
-            items = [ns["_CACHE"].get(k) for k in req["cache_keys"]]
+            items = []
+            for k in req["cache_keys"]:
+                v = _CACHE.get(k)
+                if v is None and _CHUNK_DIR:
+                    p = os.path.join(_CHUNK_DIR, hashlib.sha256(k.encode()).hexdigest())
+                    if os.path.exists(p):
+                        with open(p, "rb") as f:
+                            v = pickle.load(f)
+                        _CACHE[k] = v
+                items.append(v)
             if any(i is None for i in items):
-                raise KeyError("chunk cache miss")
+                missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
+                raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, _CHUNK_DIR))
         results = []
         for item in items:
             if starmap:
@@ -106,13 +340,18 @@ for line in sys.stdin:
                 results.append(func(*args))
             else:
                 results.append(func(item))
-        out = {"id": msg["id"], "results":
-               [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
-        with open(msg["out_file"], "w") as f:
-            json.dump(out, f)
+        if frames:
+            out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
+            with open(msg["out_file"], "wb") as f:
+                f.write(b'{"results_frames": %d}\n' % len(results) + out)
+        else:
+            out = {"id": msg["id"], "results":
+                   [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
+            with open(msg["out_file"], "w") as f:
+                json.dump(out, f)
         ack = {"id": msg["id"], "done": True}
     except Exception as e:
-        ack = {"id": msg.get("id"), "done": False, "error": str(e)}
+        ack = {"id": msg.get("id"), "done": False, "error": str(e) + "\n" + traceback.format_exc()}
     # Explicit release before the next chunk: a long-lived worker must not
     # accumulate partitions while pipelining micro-chunks on a small node.
     for _n in ("req", "items", "results"):
@@ -142,6 +381,13 @@ type poolRequest struct {
 	// which the chunk was previously stored. A miss fails the request; the
 	// shim falls back to local work. One per item, empty for payload items.
 	CacheKeys []string `json:"cache_keys,omitempty"`
+	// ItemKeys gives each item an affinity key (content hash of the raw chunk,
+	// or empty for payload items). In noSplit routing the key picks the peer
+	// via a stable hash, so a chunk always lands on the same node regardless
+	// of which batch/request carried it — cache_keys fetches for the same key
+	// then resolve on that same node. Position-based routing (item i → peer
+	// i%len(peers)) is used when no keys are present.
+	ItemKeys []string `json:"item_keys,omitempty"`
 	// NoFanout tells the receiving daemon to run the chunk locally instead of
 	// splitting and forwarding it to peers. The origin splits exactly once;
 	// every forwarded chunk is terminal (one-hop fan-out).
@@ -154,6 +400,15 @@ type poolRequest struct {
 	// chunk needs; the daemon refuses with 503 when it cannot spare that much,
 	// so an overloaded node never OOMs mid-chunk. The shim falls back locally.
 	RequiredMemBytes int64 `json:"required_mem,omitempty"`
+	// ItemsFrames marks a frames-mode body (see putFrame): the request body is
+	// a small JSON header line + optional globals frame + ItemsFrames item
+	// frames. The header above it must NOT contain "items" — bulk data lives
+	// in the frames so it never touches base64 or a giant JSON parse.
+	ItemsFrames int `json:"items_frames,omitempty"`
+	// Globals says the body starts with a globals frame every worker unpickles
+	// into the func_src namespace before running (fixed operands shared by all
+	// items; only valid in frames mode).
+	Globals bool `json:"globals,omitempty"`
 }
 
 // poolWorker is a warm, long-lived closure subprocess for one store path.
@@ -192,6 +447,27 @@ func newPoolManager() *poolManager {
 	return &poolManager{workers: make(map[string]*poolWorker), deadPeers: make(map[string]bool)}
 }
 
+// releaseHeapAfterWork forces Go to return freed heap to the OS after heavy
+// requests (chunk bodies and script output can be hundreds of MB), throttled
+// so a burst of micro-chunks doesn't pay a full GC per request. Go keeps freed
+// heap resident until the next GC cycle; without this the daemon's RSS would
+// linger near the peak of the last big job and starve the other containers on
+// a shared-RAM rig.
+var lastHeapRelease atomic.Int64
+
+func releaseHeapAfterWork() {
+	const minInterval = 30 * time.Second
+	now := time.Now().UnixNano()
+	prev := lastHeapRelease.Load()
+	if now-prev < int64(minInterval) {
+		return
+	}
+	if lastHeapRelease.CompareAndSwap(prev, now) {
+		runtime.GC()
+		debug.FreeOSMemory()
+	}
+}
+
 // SetPeerFn installs the function that returns peer daemon endpoints eligible
 // to run chunks for a store path. Without it, all work stays local.
 func (pm *poolManager) SetPeerFn(fn func(storePath string) []string) {
@@ -221,10 +497,42 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 // a store that already has a warm worker reuse it instead of re-spawning.
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	rawBody, _ := io.ReadAll(r.Body)
+	defer releaseHeapAfterWork()
 	var req poolRequest
-	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request: " + err.Error()})
-		return
+	// Frames bodies: the header is the first line and the frames follow it.
+	// Legacy bodies are compact JSON with no literal newline, so the first
+	// newline split is a safe discriminator.
+	var items []json.RawMessage
+	var globals []byte
+	frames := false
+	if nl := bytes.IndexByte(rawBody, '\n'); nl > 0 {
+		var probe struct {
+			ItemsFrames int  `json:"items_frames"`
+			Globals     bool `json:"globals"`
+		}
+		if err := json.Unmarshal(rawBody[:nl], &probe); err == nil && probe.ItemsFrames > 0 {
+			frames = true
+			if err := json.Unmarshal(rawBody[:nl], &req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request: " + err.Error()})
+				return
+			}
+			var err error
+			globals, items, err = parseFrames(rawBody[nl+1:], probe.Globals, probe.ItemsFrames)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad frames: " + err.Error()})
+				return
+			}
+		}
+	}
+	if !frames {
+		if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request: " + err.Error()})
+			return
+		}
+		if err := json.Unmarshal(req.Items, &items); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad items: " + err.Error()})
+			return
+		}
 	}
 
 	// The store path / run wrapper comes from the request environment. The
@@ -236,14 +544,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var items []json.RawMessage
-	if err := json.Unmarshal(req.Items, &items); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad items: " + err.Error()})
-		return
-	}
 	if req.FuncSrc != "" && req.FuncName == "" {
 		req.FuncName = "run" // mirror the runner's default: func_src without func_name
 	}
+	log.Printf("[pool] received pool/map from %s: items=%d b64=%v cache_keys=%d required_mem=%d forwarded=%q",
+		r.RemoteAddr, len(items), req.ItemsB64, len(req.CacheKeys), req.RequiredMemBytes,
+		r.Header.Get("X-Pipedpeer-Forwarded"))
 
 	// Memory bounding for horizontal scaling on constrained nodes. The safe
 	// working set is 40% of free RAM (max_safe_chunk_size); anything larger
@@ -256,8 +562,11 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		available := s.AvailableForJob()
 		if available < req.RequiredMemBytes {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
-				if peer := s.pool.bestPeer(storePath); peer != "" && s.forwardPoolMap(w, rawBody, peer, storePath) {
-					return
+				if peer := s.pool.bestPeer(storePath); peer != "" {
+					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
+					if s.forwardPoolMap(w, rawBody, peer, storePath) {
+						return
+					}
 				}
 			}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
@@ -267,30 +576,73 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		}
 		safe := int64(float64(available) * 0.4)
 		if safe > 0 && req.RequiredMemBytes > safe && len(items) > 1 {
-			s.runMicroChunks(w, runPath, storePath, req, items, safe)
+			ch := &chunk{
+				pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
+				extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
+				starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
+				noFanout: req.NoFanout, requiredMem: req.RequiredMemBytes,
+				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
+				chunkDir: chunkDirFor(storePath),
+			}
+			s.runMicroChunks(w, runPath, storePath, ch, safe)
 			return
 		}
 	}
 
 	var results []any
 	var err error
+	ch := &chunk{
+		pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
+		extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
+		starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
+		noFanout: req.NoFanout, requiredMem: req.RequiredMemBytes,
+		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
+		chunkDir: chunkDirFor(storePath),
+	}
+	if err := os.MkdirAll(ch.chunkDir, 0755); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	switch {
-	case req.NoSplit:
+	case ch.noSplit:
 		// Hash-shuffle routing: the origin pre-partitioned items into buckets
 		// (one per node); each item must land on exactly one node, so bypass
 		// the minSplit gate and route per item.
-		results, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64, true, req.CacheKeys)
+		results, err = s.pool.runChunk(runPath, storePath, ch)
 	case req.NoFanout:
 		// One-hop fan-out: the origin already split; this chunk is terminal.
-		results, err = s.pool.runLocal(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64, req.CacheKeys)
+		results, err = s.pool.runLocal(runPath, storePath, ch)
 	default:
-		results, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, items, req.Starmap, req.ItemsB64, false, req.CacheKeys)
+		results, err = s.pool.runChunk(runPath, storePath, ch)
 	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	if frames {
+		// Frames response: small header line + raw pickle result frames.
+		hdr := fmt.Sprintf("{\"results_frames\": %d}\n", len(results))
+		w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
+		w.WriteHeader(http.StatusOK)
+		body := make([]byte, 0, 1024)
+		body = append(body, hdr...)
+		for _, r := range results {
+			body = putFrame(body, resultPickle(r))
+		}
+		w.Write(body)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+}
+
+// resultPickle extracts the raw pickle bytes a result carries. Results are
+// standardised on raw pickle bytes internally; only the wire edges base64.
+func resultPickle(r any) []byte {
+	m, ok := r.(map[string]string)
+	if !ok {
+		return nil
+	}
+	return []byte(m["pickle"])
 }
 
 // runMicroChunks splits a too-large request into sequential sub-batches sized
@@ -298,12 +650,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 // order. Each sub-batch still fans out to peers; only the orchestrator's own
 // memory share is bounded, and the worker's explicit GC keeps RSS flat across
 // the pipeline.
-func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, req poolRequest, items []json.RawMessage, safe int64) {
-	n := int((req.RequiredMemBytes + safe - 1) / safe)
-	if n > len(items) {
-		n = len(items)
+func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, ch *chunk, safe int64) {
+	n := int((ch.requiredMem + safe - 1) / safe)
+	if n > len(ch.items) {
+		n = len(ch.items)
 	}
-	total := int64(len(items))
+	total := int64(len(ch.items))
 	var results []any
 	for i := 0; i < n; i++ {
 		lo := total * int64(i) / int64(n)
@@ -311,20 +663,27 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 		if lo == hi {
 			continue
 		}
-		sub := items[lo:hi]
+		sub := *ch
+		sub.items = ch.items[lo:hi]
 		var keys []string
-		if len(req.CacheKeys) > 0 {
-			keys = req.CacheKeys[lo:hi]
+		if len(ch.cacheKeys) > 0 {
+			keys = ch.cacheKeys[lo:hi]
 		}
+		sub.cacheKeys = keys
+		var ikeys []string
+		if len(ch.itemKeys) > 0 {
+			ikeys = ch.itemKeys[lo:hi]
+		}
+		sub.itemKeys = ikeys
 		var part []any
 		var err error
 		switch {
-		case req.NoSplit:
-			part, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, sub, req.Starmap, req.ItemsB64, true, keys)
-		case req.NoFanout:
-			part, err = s.pool.runLocal(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, sub, req.Starmap, req.ItemsB64, keys)
+		case sub.noSplit:
+			part, err = s.pool.runChunk(runPath, storePath, &sub)
+		case sub.noFanout:
+			part, err = s.pool.runLocal(runPath, storePath, &sub)
 		default:
-			part, err = s.pool.runChunk(runPath, storePath, req.Func, req.FuncSrc, req.FuncName, req.ExtraB64, sub, req.Starmap, req.ItemsB64, false, keys)
+			part, err = s.pool.runChunk(runPath, storePath, &sub)
 		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -370,7 +729,7 @@ func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, sto
 // own preferred peer (part i prefers peers[i], wrapping past the peer count to
 // local), so a pre-partitioned payload (hash-shuffle buckets) lands one item
 // per node. Results are still returned in input order.
-func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64, noSplit bool, cacheKeys []string) ([]any, error) {
+func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk) ([]any, error) {
 	// Peel off peers before taking the local worker lock so each local submit
 	// serialises only its own sub-chunk.
 	var peers []string
@@ -386,7 +745,9 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 
 	// One worker per participating node. Local is always included.
 	type part struct {
-		items []json.RawMessage
+		// c is the chunk with items narrowed to this part's share. Globals and
+		// mode flags travel with it so every worker gets the full context.
+		c *chunk
 		// run is set only for the local part; remote parts POST instead.
 		runPath string
 		// peers is the candidate list for this part, its own primary peer
@@ -396,32 +757,69 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 		peers []string
 	}
 	var parts []part
+	items := ch.items
+	noSplit := ch.noSplit
 
 	switch {
 	case noSplit:
-		// One part per item, part i prefers peers[i] (rotating back through
-		// the list when there are more items than peers). Items past the peer
-		// count fall through to local via the empty runPath branch below —
-		// they simply take the local part of the rotation.
+		// One part per item. Item i's peer is chosen by its affinity key when
+		// one is present (stable hash over the key, so the same chunk always
+		// lands on the same node and later cache_keys fetches resolve there),
+		// otherwise positionally (peer i, rotating back through the list when
+		// there are more items than peers). Items past the peer count fall
+		// through to local via the empty runPath branch below.
+		//
+		// The affinity index must be computed over a STABLE peer order
+		// (lexicographic), not the load-ranked order: the load ranking shifts
+		// between the parse and the combine requests, so hash % len would land
+		// the same key on different nodes and every cache_keys fetch would miss.
+		// The load order is still used for fallback ranking after the stable
+		// affinity target.
+		stablePeers := append([]string{}, peers...)
+		sort.Strings(stablePeers)
 		for i := range items {
-			p := part{items: items[i : i+1]}
+			sub := *ch
+			sub.items = items[i : i+1]
+			// Narrow the keys to this part's single item: the remote worker
+			// resolves cache_keys from its own _CACHE, so broadcasting the full
+			// list makes it demand chunks that live on other peers (miss).
+			if len(sub.cacheKeys) > 0 {
+				sub.cacheKeys = sub.cacheKeys[i : i+1]
+			}
+			if len(sub.itemKeys) > 0 {
+				sub.itemKeys = sub.itemKeys[i : i+1]
+			}
+			p := part{c: &sub}
 			if len(peers) > 0 {
-				idx := i % len(peers)
-				ordered := append(append([]string{}, peers[idx:]...), peers[:idx]...)
-				p.peers = ordered
+				target := ""
+				if key := affinityKey(ch, i); key != "" {
+					target = stablePeers[int(affinityHash(key)%uint32(len(stablePeers)))]
+				} else {
+					target = peers[i%len(peers)]
+				}
+				for j, peer := range peers {
+					if peer == target {
+						ordered := append(append([]string{}, peers[j:]...), peers[:j]...)
+						p.peers = ordered
+						break
+					}
+				}
+				if p.peers == nil {
+					p.peers = []string{target}
+				}
 			} else {
 				p.runPath = runPath
 			}
 			parts = append(parts, p)
 		}
 	case len(peers) == 0:
-		parts = []part{{items: items, runPath: runPath}}
+		parts = []part{{c: ch, runPath: runPath}}
 	default:
 		// Split evenly across local + peers. A small chunk stays local (splitting
 		// would cost more than it saves); only fan out once there is real work.
 		const minSplit = 8
 		if len(items) < minSplit {
-			parts = []part{{items: items, runPath: runPath}}
+			parts = []part{{c: ch, runPath: runPath}}
 		} else {
 			workers := len(peers) + 1
 			base := len(items) / workers
@@ -435,19 +833,28 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 				if size == 0 {
 					continue
 				}
-				chunk := items[idx : idx+size]
+				sub := *ch
+				sub.items = items[idx : idx+size]
 				idx += size
 				if i == workers-1 {
-					parts = append(parts, part{items: chunk, runPath: runPath}) // local
+					parts = append(parts, part{c: &sub, runPath: runPath}) // local
 				} else {
 					// Fan out to distinct peers: part i prefers peers[i], so
 					// every healthy peer gets work, not just the best one.
 					ordered := append(append([]string{}, peers[i:]...), peers[:i]...)
-					parts = append(parts, part{items: chunk, peers: ordered})
+					parts = append(parts, part{c: &sub, peers: ordered})
 				}
 			}
 		}
 	}
+
+	remote := 0
+	for _, pt := range parts {
+		if len(pt.peers) > 0 {
+			remote++
+		}
+	}
+	log.Printf("[pool] chunk: %d items -> %d part(s), %d remote, %d local", len(items), len(parts), remote, len(parts)-remote)
 
 	// Results are stored per part and concatenated in part order after the
 	// wait, so the response is always in input order regardless of which part
@@ -464,7 +871,7 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 			var r []any
 			var e error
 			if p.runPath != "" {
-				r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64, cacheKeys)
+				r, e = pm.runLocal(runPath, storePath, p.c)
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
@@ -472,7 +879,7 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 					if pm.peerDead(peer) {
 						continue
 					}
-					r, e = pm.runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64, cacheKeys)
+					r, e = pm.runRemote(peer, storePath, p.c)
 					if e == nil {
 						break
 					}
@@ -480,11 +887,12 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 				}
 				if e != nil {
 					// D2/D3 — a remote node adds capacity, never subtracts.
-					r, e = pm.runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64, p.items, starmap, itemsB64, cacheKeys)
+					r, e = pm.runLocal(runPath, storePath, p.c)
 				}
 			}
 			if e != nil {
 				errs[i] = e
+				log.Printf("[pool] part %d failed: %v", i, e)
 				return
 			}
 			partResults[i] = r
@@ -502,6 +910,30 @@ func (pm *poolManager) runChunk(runPath, storePath, pickledFunc, funcSrc, funcNa
 		results = append(results, r...)
 	}
 	return results, nil
+}
+
+// affinityKey returns the routing key for noSplit item i: the cache key when
+// the request resolves cached chunks, else the item's own affinity key, else
+// "" for positional routing.
+func affinityKey(ch *chunk, i int) string {
+	if len(ch.cacheKeys) > 0 && i < len(ch.cacheKeys) {
+		return ch.cacheKeys[i]
+	}
+	if len(ch.itemKeys) > 0 && i < len(ch.itemKeys) {
+		return ch.itemKeys[i]
+	}
+	return ""
+}
+
+// affinityHash is a stable FNV-1a hash (NOT Go's randomized maphash): the
+// same key must route to the same peer across daemon restarts and requests.
+func affinityHash(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
 }
 
 // bestPeer returns the top-ranked healthy peer sharing a store ("" when none),
@@ -535,32 +967,36 @@ func (pm *poolManager) markPeerDead(peer string) {
 }
 
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
-func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
+func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, error) {
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
 	if !ok || worker.dead() {
 		if ok {
+			log.Printf("[pool] warm worker for store %s was dead; respawning", storePath)
 			pm.workers[storePath] = nil
 		}
+		log.Printf("[pool] spawning warm worker for store %s", storePath)
 		w, err := pm.spawn(runPath, storePath)
 		if err != nil {
+			log.Printf("[pool] warm worker spawn failed: %v", err)
 			// Cold fallback: one-off spawn keeps the node functional even when
 			// persistent workers are unavailable.
-			return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64, cacheKeys)
+			return runPoolChunk(runPath, ch)
 		}
 		worker = w
 		pm.workers[storePath] = worker
 	}
 	pm.mu.Unlock()
 
-	results, err := worker.submit(pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64, cacheKeys)
+	results, err := worker.submit(ch)
 	if err != nil {
 		// Worker died mid-flight — drop it and fall back to a cold run for
 		// this chunk; the next request will re-warm.
+		log.Printf("[pool] warm worker submit failed for store %s: %v", storePath, err)
 		pm.mu.Lock()
 		delete(pm.workers, storePath)
 		pm.mu.Unlock()
-		return runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64, items, starmap, itemsB64, cacheKeys)
+		return runPoolChunk(runPath, ch)
 	}
 	return results, nil
 }
@@ -568,20 +1004,40 @@ func (pm *poolManager) runLocal(runPath, storePath, pickledFunc, funcSrc, funcNa
 // runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
 // have the same closure already (peerFn filters for that). Failures are fatal
 // for the chunk: the caller returns them rather than silently dropping work.
-func (pm *poolManager) runRemote(peer, storePath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
+func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, error) {
 	// no_fanout: the origin splits exactly once; a peer must never re-split and
 	// forward again (one-hop tree, results flow straight back to the origin).
-	payload := map[string]any{"func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64, "no_fanout": true}
-	if len(cacheKeys) > 0 {
-		payload["cache_keys"] = cacheKeys
+	var body []byte
+	if ch.frames {
+		sub := *ch
+		sub.noFanout = true
+		hdr, _ := json.Marshal(map[string]any{
+			"func_src": ch.funcSrc, "func_name": ch.funcName, "func": ch.pickledFunc,
+			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
+			"required_mem": ch.requiredMem, "no_fanout": true,
+			"cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys, "chunk_dir": ch.chunkDir,
+		})
+		body = buildFrames(hdr, ch.globals, ch.items)
+	} else {
+		payload := map[string]any{"func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName, "extra_b64": ch.extraB64, "items": ch.items, "starmap": ch.starmap, "items_b64": ch.itemsB64, "no_fanout": true, "chunk_dir": ch.chunkDir}
+		if len(ch.cacheKeys) > 0 {
+			payload["cache_keys"] = ch.cacheKeys
+		}
+		if len(ch.itemKeys) > 0 {
+			payload["item_keys"] = ch.itemKeys
+		}
+		body, _ = json.Marshal(payload)
 	}
-	body, _ := json.Marshal(payload)
 	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
 	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if ch.frames {
+		req.Header.Set("Content-Type", "application/vnd.pipedpeer.frames")
+	} else {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("X-Pipedpeer-Store", storePath)
 
 	client := &http.Client{Timeout: 5 * time.Minute}
@@ -593,10 +1049,42 @@ func (pm *poolManager) runRemote(peer, storePath, pickledFunc, funcSrc, funcName
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("peer %s returned %d", peer, resp.StatusCode)
 	}
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if ch.frames {
+		// Frames response: header line + result frames.
+		nl := bytes.IndexByte(body, '\n')
+		if nl < 0 {
+			return nil, fmt.Errorf("peer %s: bad frames response", peer)
+		}
+		var out struct {
+			ResultsFrames int `json:"results_frames"`
+		}
+		if err := json.Unmarshal(body[:nl], &out); err != nil || out.ResultsFrames <= 0 {
+			return nil, fmt.Errorf("peer %s: bad frames response: %v", peer, err)
+		}
+		var frames [][]byte
+		rest := body[nl+1:]
+		for i := 0; i < out.ResultsFrames; i++ {
+			var f []byte
+			f, rest, err = readFrame(rest)
+			if err != nil {
+				return nil, fmt.Errorf("peer %s: %v", peer, err)
+			}
+			frames = append(frames, f)
+		}
+		results := make([]any, 0, len(frames))
+		for _, f := range frames {
+			results = append(results, map[string]string{"pickle": string(f)})
+		}
+		return results, nil
+	}
 	var out struct {
 		Results []map[string]string `json:"results"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&out); err != nil {
 		return nil, err
 	}
 	results := make([]any, 0, len(out.Results))
@@ -653,10 +1141,11 @@ func (w *poolWorker) dead() bool {
 }
 
 // submit sends one task over the pipes and waits for its result file. The
-// payload (base64 items can be ~100s of MB) is written to a temp file and the
+// payload (pickled items can be ~100s of MB) is written to a temp file and the
 // worker is told the path, so the full blob never passes through the pipe or
-// lives in daemon RAM.
-func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
+// lives in daemon RAM. Frames chunks ship as a header line + length-prefixed
+// raw pickle frames; legacy chunks keep the base64 JSON encoding.
+func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.id++
@@ -666,16 +1155,30 @@ func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, ite
 		return nil, err
 	}
 	defer os.RemoveAll(dir)
-	inPath := filepath.Join(dir, "in.json")
-	outPath := filepath.Join(dir, "out.json")
+	inPath := filepath.Join(dir, "in.bin")
+	outPath := filepath.Join(dir, "out.bin")
 
-	req := map[string]any{"id": w.id, "func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64}
-	if len(cacheKeys) > 0 {
-		req["cache_keys"] = cacheKeys
-	}
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
+	var body []byte
+	if ch.frames {
+		hdr, _ := json.Marshal(map[string]any{
+			"id": w.id, "func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName,
+			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
+			"required_mem": ch.requiredMem, "cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys,
+			"chunk_dir": ch.chunkDir,
+		})
+		body = buildFrames(hdr, ch.globals, ch.items)
+	} else {
+		req := map[string]any{"id": w.id, "func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName, "extra_b64": ch.extraB64, "items": ch.items, "starmap": ch.starmap, "items_b64": ch.itemsB64, "chunk_dir": ch.chunkDir}
+		if len(ch.cacheKeys) > 0 {
+			req["cache_keys"] = ch.cacheKeys
+		}
+		if len(ch.itemKeys) > 0 {
+			req["item_keys"] = ch.itemKeys
+		}
+		body, err = json.Marshal(req)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := os.WriteFile(inPath, body, 0644); err != nil {
 		return nil, err
@@ -718,6 +1221,29 @@ func (w *poolWorker) submit(pickledFunc, funcSrc, funcName, extraB64 string, ite
 		if err != nil {
 			return nil, err
 		}
+		if ch.frames {
+			nl := bytes.IndexByte(outBytes, '\n')
+			if nl < 0 {
+				return nil, fmt.Errorf("worker: bad frames output")
+			}
+			var out struct {
+				ResultsFrames int `json:"results_frames"`
+			}
+			if err := json.Unmarshal(outBytes[:nl], &out); err != nil {
+				return nil, err
+			}
+			rest := outBytes[nl+1:]
+			results := make([]any, 0, out.ResultsFrames)
+			for i := 0; i < out.ResultsFrames; i++ {
+				var f []byte
+				f, rest, err = readFrame(rest)
+				if err != nil {
+					return nil, err
+				}
+				results = append(results, map[string]string{"pickle": string(f)})
+			}
+			return results, nil
+		}
 		var out struct {
 			Results []string `json:"results"`
 		}
@@ -749,7 +1275,12 @@ func (pm *poolManager) stopAll() {
 
 // runPoolChunk is the cold path: one closure spawn per chunk. Kept for the
 // fallback when warm workers are unavailable.
-func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, items []json.RawMessage, starmap, itemsB64 bool, cacheKeys []string) ([]any, error) {
+func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
+	if ch.chunkDir != "" {
+		if err := os.MkdirAll(ch.chunkDir, 0755); err != nil {
+			return nil, err
+		}
+	}
 	dir, err := os.MkdirTemp("", "pipedpeer-pool-*")
 	if err != nil {
 		return nil, err
@@ -761,14 +1292,28 @@ func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, item
 		return nil, err
 	}
 
-	payload := map[string]any{"func": pickledFunc, "func_src": funcSrc, "func_name": funcName, "extra_b64": extraB64, "items": items, "starmap": starmap, "items_b64": itemsB64}
-	if len(cacheKeys) > 0 {
-		payload["cache_keys"] = cacheKeys
+	inPath := filepath.Join(dir, "in.bin")
+	outPath := filepath.Join(dir, "out.bin")
+	var body []byte
+	if ch.frames {
+		hdr, _ := json.Marshal(map[string]any{
+			"func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName,
+			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
+			"required_mem": ch.requiredMem, "cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys,
+			"chunk_dir": ch.chunkDir,
+		})
+		body = buildFrames(hdr, ch.globals, ch.items)
+	} else {
+		payload := map[string]any{"func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName, "extra_b64": ch.extraB64, "items": ch.items, "starmap": ch.starmap, "items_b64": ch.itemsB64, "chunk_dir": ch.chunkDir}
+		if len(ch.cacheKeys) > 0 {
+			payload["cache_keys"] = ch.cacheKeys
+		}
+		if len(ch.itemKeys) > 0 {
+			payload["item_keys"] = ch.itemKeys
+		}
+		body, _ = json.Marshal(payload)
 	}
-	inPath := filepath.Join(dir, "in.json")
-	outPath := filepath.Join(dir, "out.json")
-	inBytes, _ := json.Marshal(payload)
-	if err := os.WriteFile(inPath, inBytes, 0644); err != nil {
+	if err := os.WriteFile(inPath, body, 0644); err != nil {
 		return nil, err
 	}
 
@@ -781,6 +1326,29 @@ func runPoolChunk(runPath, pickledFunc, funcSrc, funcName, extraB64 string, item
 	outBytes, err := os.ReadFile(outPath)
 	if err != nil {
 		return nil, err
+	}
+	if ch.frames {
+		nl := bytes.IndexByte(outBytes, '\n')
+		if nl < 0 {
+			return nil, fmt.Errorf("pool run: bad frames output")
+		}
+		var out struct {
+			ResultsFrames int `json:"results_frames"`
+		}
+		if err := json.Unmarshal(outBytes[:nl], &out); err != nil {
+			return nil, err
+		}
+		rest := outBytes[nl+1:]
+		results := make([]any, 0, out.ResultsFrames)
+		for i := 0; i < out.ResultsFrames; i++ {
+			var f []byte
+			f, rest, err = readFrame(rest)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, map[string]string{"pickle": string(f)})
+		}
+		return results, nil
 	}
 	var out struct {
 		Results []string `json:"results"` // base64-pickled results

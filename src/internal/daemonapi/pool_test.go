@@ -74,7 +74,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	}
 
 	items := []json.RawMessage{json.RawMessage(`1`), json.RawMessage(`2`), json.RawMessage(`3`)}
-	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), "", "", "", items, false, false, nil)
+	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), &chunk{pickledFunc: string(pickled), items: items})
 	if err != nil {
 		t.Fatalf("runPoolChunk: %v", err)
 	}
@@ -159,7 +159,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	runPath := filepath.Join(store, "bin", "run")
 	for i := 0; i < 3; i++ {
 		items := []json.RawMessage{json.RawMessage(fmt.Sprintf(`%d`, i+1)), json.RawMessage(`2`)}
-		if _, err := pm.runChunk(runPath, store, string(pickled), "", "", "", items, false, false, false, nil); err != nil {
+		if _, err := pm.runChunk(runPath, store, &chunk{pickledFunc: string(pickled), items: items}); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
@@ -223,7 +223,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
 
-	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false, false, nil)
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
 	if err != nil {
 		t.Fatalf("runChunk spill: %v", err)
 	}
@@ -290,7 +290,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false, false, nil)
+	results, err := s.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
 	if err != nil {
 		t.Fatalf("chunk failed though a peer was down: %v", err)
 	}
@@ -417,7 +417,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps([int(a) for a in sys.argv[1:]])).
 		items = append(items, json.RawMessage(fmt.Sprintf("%q", string(out))))
 	}
 
-	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), string(pickled), "", "", "", items, false, true, nil)
+	results, err := runPoolChunk(filepath.Join(store, "bin", "run"), &chunk{pickledFunc: string(pickled), items: items, itemsB64: true})
 	if err != nil {
 		t.Fatalf("runPoolChunk: %v", err)
 	}
@@ -544,18 +544,16 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		t.Fatalf("upload status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// The broadcast is async; give it a moment to land on s2.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		path, cached := s2.narCache.narFileFor(storePath)
-		if cached {
-			_ = path
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("closure never broadcast to peer s2")
-		}
-		time.Sleep(50 * time.Millisecond)
+	// This test's two nodes share one store path on the host filesystem, so s2
+	// is already runnable for it. A broadcast must NOT push the NAR again — the
+	// shared-store shortcut (D) is exactly what kills the redundant 6.6GB push
+	// on the demo rig. Assert the broadcast skipped s2 and the spill still fans
+	// out to it.
+	if !s2.peerHasStore(&PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost)}, storePath) {
+		t.Fatal("s2 should be runnable for the shared store path")
+	}
+	if _, cached := s2.narCache.narFileFor(storePath); cached {
+		t.Fatal("broadcast pushed the NAR to a peer that already holds the closure")
 	}
 
 	// Now run a chunk with spill enabled: s1 must see s2 as a closure-sharing
@@ -565,7 +563,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false, false, nil)
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
 	if err != nil {
 		t.Fatalf("runChunk: %v", err)
 	}
@@ -583,6 +581,52 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	s2.pool.mu.Unlock()
 	if !s2Ran {
 		t.Fatal("peer never executed spill work: broadcast did not enable fan-out")
+	}
+}
+
+// TestClosureBroadcastPushesToLackingPeer covers the per-node-store topology
+// (production: each node has its own /nix/store): a peer that does NOT have the
+// closure must still receive it via broadcast, or spill would silently stay
+// local. The shared-store shortcut only applies when bin/run already exists.
+func TestClosureBroadcastPushesToLackingPeer(t *testing.T) {
+	s1 := New("node-" + strings.Repeat("x", 8))
+	s2 := New("node-" + strings.Repeat("y", 8))
+	srv1 := httptest.NewServer(s1.Handler())
+	srv2 := httptest.NewServer(s2.Handler())
+	defer srv1.Close()
+	defer srv2.Close()
+	defer s1.StopWarmWorkers()
+	defer s2.StopWarmWorkers()
+
+	peerHost := strings.TrimPrefix(srv2.URL, "http://")
+	s1.peersMu.Lock()
+	s1.peerHealths = map[string]*PeerHealth{
+		peerHost: {Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost), Status: "healthy"},
+	}
+	s1.peersMu.Unlock()
+
+	// s2 has no copy of this store path (absent on disk AND in its NAR cache),
+	// so the runnable check must report false and the broadcast must push.
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "absent-on-s2")
+	narPath := filepath.Join(t.TempDir(), "closure.nar")
+	os.WriteFile(narPath, []byte("fake-nar-bytes"), 0644)
+
+	if s2.peerHasStore(&PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost)}, storePath) {
+		t.Fatal("s2 must not be runnable for an absent store path")
+	}
+
+	// handleStoreImport caches the NAR before materialising it, so a push is
+	// proven by the cache landing even though the fake NAR cannot be imported.
+	_ = importStoreOnPeer(&PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost)}, storePath, narPath)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, cached := s2.narCache.narFileFor(storePath); cached {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("broadcast did not push the closure to a peer lacking it")
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -685,7 +729,7 @@ sys.stdout.write(json.dumps(out))
 	for i := 1; i <= 12; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false, false, nil)
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
 	if err != nil {
 		t.Fatalf("runChunk: %v", err)
 	}
@@ -810,7 +854,7 @@ sys.stdout.write(json.dumps(out))
 		json.RawMessage(`1`), json.RawMessage(`2`),
 		json.RawMessage(`3`), json.RawMessage(`4`),
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, "", "", "", "", items, false, false, true, nil)
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{items: items, noSplit: true})
 	if err != nil {
 		t.Fatalf("no_split runChunk: %v", err)
 	}
@@ -899,7 +943,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, string(pickled), "", "", "", items, false, false, false, nil)
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
 	if err != nil {
 		t.Fatalf("chunk failed: %v", err)
 	}
@@ -912,5 +956,95 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	s2.pool.mu.Unlock()
 	if !s2Ran {
 		t.Fatal("next-best peer never executed: failover chain broken")
+	}
+}
+
+// TestPoolMapFramesRoundTrip exercises the frames wire format end to end:
+// a frames request (header line + globals frame + item frames) posted to
+// /v1/pool/map must parse, reach a warm worker through the frames in_file,
+// and return a frames response (header + raw pickle result frames).
+func TestPoolMapFramesRoundTrip(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	store := fakeRun(t, t.TempDir())
+
+	s := New("pool-test-frames")
+	defer s.StopWarmWorkers()
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	emit := `
+import base64, pickle, sys
+sys.stdout.write(base64.b64encode(pickle.dumps({"_m": 10})).decode() + "\n" +
+                 "\n".join(base64.b64encode(pickle.dumps(v)).decode() for v in (1, 2)))
+`
+	out, err := exec.Command(python, "-c", emit).Output()
+	if err != nil {
+		t.Fatalf("emit pickles: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	globals, _ := base64.StdEncoding.DecodeString(lines[0])
+	var items []json.RawMessage
+	for _, l := range lines[1:] {
+		b, _ := base64.StdEncoding.DecodeString(l)
+		items = append(items, b)
+	}
+
+	hdr := []byte(`{"func_src": "def run(x):\n    return x + _m\n", "func_name": "run", "items_frames": 2, "globals": true}`)
+	body := buildFrames(hdr, globals, items)
+
+	req, err := http.NewRequest("POST", srv.URL+"/v1/pool/map", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/vnd.pipedpeer.frames")
+	req.Header.Set("X-Pipedpeer-Store", store)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("frames request got %d: %s", resp.StatusCode, string(b))
+	}
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	nl := bytes.IndexByte(bodyBytes, '\n')
+	if nl < 0 {
+		t.Fatal("frames response has no header line")
+	}
+	var outHdr struct {
+		ResultsFrames int `json:"results_frames"`
+	}
+	if err := json.Unmarshal(bodyBytes[:nl], &outHdr); err != nil || outHdr.ResultsFrames != 2 {
+		t.Fatalf("bad frames response header %q: %v", bodyBytes[:nl], err)
+	}
+	rest := bodyBytes[nl+1:]
+	unpickle := `
+import pickle, sys
+sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
+`
+	for i, want := range []int{11, 12} {
+		f, r, err := readFrame(rest)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		rest = r
+		bp := filepath.Join(t.TempDir(), "r.pkl")
+		if err := os.WriteFile(bp, f, 0644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := exec.Command(python, "-c", unpickle, bp).Output()
+		if err != nil {
+			t.Fatalf("unpickle: %v", err)
+		}
+		var v int
+		fmt.Sscan(string(got), &v)
+		if v != want {
+			t.Fatalf("result[%d] = %d, want %d", i, v, want)
+		}
 	}
 }

@@ -2,7 +2,6 @@ package coordinator
 
 import (
 	"net/http/httptest"
-	"strconv"
 	"testing"
 	"time"
 
@@ -452,15 +451,6 @@ func gpuNode(id, gpuType string) registry.NodeRecord {
 	return registry.NodeRecord{
 		NodeID: id, SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
 		Capabilities: map[string]string{"gpu": gpuType, "gpu_count": "1"},
-		Load:         registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
-		HealthScore:  1.0, State: "healthy",
-	}
-}
-
-func gpuNodeMulti(id, gpuType string, count int) registry.NodeRecord {
-	return registry.NodeRecord{
-		NodeID: id, SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
-		Capabilities: map[string]string{"gpu": gpuType, "gpu_count": strconv.Itoa(count)},
 		Load:         registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
 		HealthScore:  1.0, State: "healthy",
 	}

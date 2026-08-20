@@ -112,7 +112,7 @@ tasks:
         echo "Bursting 10 tasks..." | tee -a "$LOG"
         TASKS=10
         for t in $(seq 1 $TASKS); do
-          ../bin/pipedpeer run --no-self --isolate=false --script ../test_project/dispatch_t${t}.py \
+          ../bin/pipedpeer run --remote --isolate=false --script ../test_project/dispatch_t${t}.py \
             > .task/logs/task${t}.log 2>&1 &
         done
         wait

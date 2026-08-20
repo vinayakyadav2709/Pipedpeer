@@ -257,37 +257,31 @@ def _chunk(seq, size):
 
 def _np_dispatch(blocks, other):
     """Run [np.matmul(block, other) for block in blocks] over the cluster via
-    the warm-worker /v1/pool/map path (items_b64: blocks ship as pickled numpy).
-    Falls back to local on any failure so an absent cluster never breaks math."""
-    import base64
-    import json
+    the warm-worker /v1/pool/map path. Blocks and the fixed operand ship as
+    raw pickle frames; the daemon splits the blocks across peers. Falls back
+    to local on any failure so an absent cluster never breaks math."""
     import pickle
-    import urllib.request
     try:
         # The worker runs the closure's python with no shim on its path, so the
         # function ships as source (pickling by reference would resolve
         # sitecustomize._matmul_with to the Nix sitecustomize and fail). The
-        # fixed right-hand operand rides along as a pickled global inside a
-        # dict: the worker does ns.update(pickle.loads(extra_b64)).
-        items = [base64.b64encode(pickle.dumps(b)).decode() for b in blocks]
-        req = {
-            "func_src": "import numpy as _np\ndef run(block):\n    return _np.matmul(block, _other)\n",
+        # fixed right-hand operand rides along as a globals frame the worker
+        # unpickles into the namespace before running.
+        items = [pickle.dumps(b) for b in blocks]
+        globals_pickle = pickle.dumps({"_other": other})
+        header = {
+            "func_src": ("import os\nimport numpy as _np\ndef run(block):\n"
+                         "    os.environ['PIPEDPEER_NUMPY_NESTED'] = '1'\n"
+                         "    return _np.matmul(block, _other)\n"),
             "func_name": "run",
-            "extra_b64": base64.b64encode(pickle.dumps({"_other": other})).decode(),
-            "items": items,
-            "items_b64": True,
-            "starmap": False,
+            "items_frames": len(items),
+            "globals": True,
         }
         # Admission control hint: the daemon refuses (503) when it cannot spare
         # roughly the payload's size in RAM, and the shim falls back locally.
-        req["required_mem"] = 2 * (len(req["extra_b64"]) + sum(len(i) for i in items))
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 1200) as resp:
-            rs = json.loads(resp.read())["results"]
-        return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+        header["required_mem"] = _pool_required(globals_pickle, items)
+        blobs = _pool_send(header, globals_pickle, items, 1200)
+        return [pickle.loads(p) for p in blobs]
     except Exception as e:
         _log("numpy remote failed (%s); local fallback" % e)
         import numpy as _np
@@ -302,39 +296,31 @@ def _matmul_with(block, other):
 def _torch_dispatch(blocks, other):
     """Run [torch.matmul(block, other) for block in blocks] over the cluster.
     Uses GPU on the worker when available (moves both tensors to cuda before
-    matmul) so ML tensor work utilises remote GPUs fully. Falls back to local
-    on any failure so an absent cluster never breaks the model."""
-    import base64
-    import json
+    matmul) so ML tensor work utilises remote GPUs fully. Blocks and the fixed
+    operand ship as raw pickle frames. Falls back to local on any failure so an
+    absent cluster never breaks the model."""
     import pickle
-    import urllib.request
     try:
         # Ships by source, not by reference: the worker's closure python has no
         # shim module on its path (see _np_dispatch). The fixed right-hand
-        # operand rides along as a pickled global inside a dict: the worker does
-        # ns.update(pickle.loads(extra_b64)).
-        items = [base64.b64encode(pickle.dumps(b)).decode() for b in blocks]
-        req = {
-            "func_src": "import torch as _th\n"
-                        "def run(block):\n"
-                        "    if _th.cuda.is_available():\n"
-                        "        block, other = block.cuda(), _other.cuda()\n"
-                        "        return _th.matmul(block, other).cpu()\n"
-                        "    return _th.matmul(block, _other)\n",
+        # operand rides along as a globals frame the worker unpickles first.
+        items = [pickle.dumps(b) for b in blocks]
+        globals_pickle = pickle.dumps({"_other": other})
+        header = {
+            "func_src": ("import os\nimport torch as _th\n"
+                         "def run(block):\n"
+                         "    os.environ['PIPEDPEER_NUMPY_NESTED'] = '1'\n"
+                         "    if _th.cuda.is_available():\n"
+                         "        block, other = block.cuda(), _other.cuda()\n"
+                         "        return _th.matmul(block, other).cpu()\n"
+                         "    return _th.matmul(block, _other)\n"),
             "func_name": "run",
-            "extra_b64": base64.b64encode(pickle.dumps({"_other": other})).decode(),
-            "items": items,
-            "items_b64": True,
-            "starmap": False,
+            "items_frames": len(items),
+            "globals": True,
         }
-        req["required_mem"] = 2 * (len(req["extra_b64"]) + sum(len(i) for i in items))
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 1200) as resp:
-            rs = json.loads(resp.read())["results"]
-        return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+        header["required_mem"] = _pool_required(globals_pickle, items)
+        blobs = _pool_send(header, globals_pickle, items, 1200)
+        return [pickle.loads(p) for p in blobs]
     except Exception as e:
         _log("torch remote failed (%s); local fallback" % e)
         import torch as _th
@@ -360,10 +346,9 @@ _TORCH_ORIG_MM = None
 def _install_torch():
     # torch block-row matmul/mm: intercept large 2D tensor ops and split A's
     # rows across the cluster, each block computed on the worker (on GPU when
-    # the worker has one), results cat'd back. Opt-in via PIPEDPEER_TORCH=1 —
-    # same D2 reasoning as numpy: shipping tensors only pays off when local
-    # compute is the bottleneck, and a worker with a GPU is the point.
-    if os.environ.get("PIPEDPEER_TORCH") != "1" or os.environ.get("PIPEDPEER_DDP") == "1":
+    # the worker has one), results cat'd back. DDP ranks skip this — gradient
+    # sync must not race with offloaded matmul.
+    if os.environ.get("PIPEDPEER_DDP") == "1":
         return
     try:
         import torch as _th
@@ -382,7 +367,8 @@ def _install_torch():
         import torch as _th
         if (a.dim() == 2 and b.dim() == 2 and a.shape[1] == b.shape[0]
                 and a.element_size() * a.nelement() >= _MIN_BYTES
-                and a.shape[0] >= 8 and _URL and _ENABLED):
+                and a.shape[0] >= 8 and _URL and _ENABLED
+                and not os.environ.get("PIPEDPEER_NUMPY_NESTED")):
             try:
                 n_blocks = max(2, min(64, a.shape[0] // 8))
                 rows = max(1, a.shape[0] // n_blocks)
@@ -409,10 +395,8 @@ def _install_numpy():
     # numpy block-row matmul: intercept A @ B when the latency cost model says
     # remote beats local, splitting A's rows across the cluster so a worker
     # never allocates the whole global matrix. Each block ships to the warm
-    # worker which already unpickles it (items_b64). Default-on for the
-    # zero-code-change contract; PIPEDPEER_NUMPY=0 keeps everything local.
-    if os.environ.get("PIPEDPEER_NUMPY") == "0":
-        return
+    # worker which already unpickles it (items_b64). Default-on: the cost model
+    # guarantees offload is never slower than running locally.
     try:
         import numpy as _np
     except ImportError:
@@ -426,18 +410,22 @@ def _install_numpy():
     _orig_linalg = {n: getattr(_np.linalg, n) for n in ("svd", "eig")}
 
     def _mm_gate(a, b):
-        # Heavy compute only (matmul is ~N/4 flops per byte): the cost model
-        # keeps memory-bandwidth-bound element-wise math local by leaving it
-        # unpatched, and refuses to ship when the probe or peer count says no.
+        # Heavy compute only (matmul is ~N/8 flops per byte at the shapes that
+        # matter): the BLAS-realistic cost model keeps bandwidth-bound element
+        # math local by leaving it unpatched, and refuses to ship when the
+        # probe or peer count says no. Round-trip factor 3: A in, the replicated
+        # operand B in, and the product C back.
         return (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
                 and a.shape[0] >= 8 and _URL and _ENABLED
-                and _should_spill(a.nbytes, 8))
+                and not os.environ.get("PIPEDPEER_NUMPY_NESTED")
+                and _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 8), 5, True, 200e9))
 
     def _mm_dispatch(a, b):
         import numpy as _np
         n_blocks = max(2, min(64, a.shape[0] // 8))
         rows = max(1, a.shape[0] // n_blocks)
         blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
+        _log('matmul: sending %d row blocks (%.0f MB) to cluster' % (len(blocks), a.nbytes / 1e6))
         return _np.vstack(_np_dispatch(blocks, b))
 
     def _matmul(a, b, *args, **kw):
@@ -472,14 +460,12 @@ def _install_numpy():
         # Ship np.linalg.<name>(a) as a single noSplit item so it lands on the
         # best peer (part 0 prefers peers[0], falling through to local on
         # failure); a constrained orchestrator never materialises the matrix.
-        import base64
-        import json
         import pickle
-        import urllib.request
         extra = {"_fn": name, "_args": args, "_kw": kw}
-        extra_b64 = base64.b64encode(pickle.dumps(extra)).decode()
-        items = [base64.b64encode(pickle.dumps(a)).decode()]
-        req = {
+        globals_pickle = pickle.dumps(extra)
+        items = [pickle.dumps(a)]
+        _log('%s: offloading %.0f MB matrix to one worker' % (name, a.nbytes / 1e6))
+        header = {
             # PIPEDPEER_NUMPY_NESTED: the worker's numpy is also patched, so
             # the offloaded call must bypass the shim or it re-dispatches in a
             # loop. The marker makes _linalg fall through to the original.
@@ -487,20 +473,13 @@ def _install_numpy():
                          "    os.environ['PIPEDPEER_NUMPY_NESTED'] = '1'\n"
                          "    return getattr(_np.linalg, _fn)(x, *_args, **_kw)\n"),
             "func_name": "run",
-            "extra_b64": extra_b64,
-            "items": items,
-            "items_b64": True,
-            "starmap": False,
+            "items_frames": len(items),
+            "globals": True,
             "no_split": True,
         }
-        req["required_mem"] = 2 * (len(extra_b64) + sum(len(i) for i in items))
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 1200) as resp:
-            rs = json.loads(resp.read())["results"]
-        return pickle.loads(base64.b64decode(rs[0]["pickle"]))
+        header["required_mem"] = _pool_required(globals_pickle, items)
+        blobs = _pool_send(header, globals_pickle, items, 1200)
+        return pickle.loads(blobs[0])
 
     def _linalg(name):
         orig = _orig_linalg[name]
@@ -508,7 +487,7 @@ def _install_numpy():
             import numpy as _np
             if (a.ndim == 2 and _URL and _ENABLED
                     and not os.environ.get("PIPEDPEER_NUMPY_NESTED")
-                    and _should_spill(a.nbytes, 8)):
+                    and _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 4), 3, False, 1.5e9)):
                 try:
                     return _linalg_offload(name, a, args, kw)
                 except Exception as e:
@@ -545,10 +524,14 @@ _DaemonOpener = None
 def _daemon_open(req, timeout):
     """Send req to the loopback daemon, bypassing any environment HTTP proxy."""
     global _DaemonOpener
+    import urllib.error
+    import urllib.request
     if _DaemonOpener is None:
-        import urllib.request
         _DaemonOpener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    return _DaemonOpener.open(req, timeout=timeout)
+    try:
+        return _DaemonOpener.open(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("daemon HTTP %d: %s" % (e.code, e.read())) from e
 
 
 def _should_spill(nbytes, flops_per_byte):
@@ -573,36 +556,86 @@ def _should_spill(nbytes, flops_per_byte):
 
 
 def _measure_bandwidth():
-    """Effective bytes/sec to the cluster, cached 300s. Probes with 32KB through
-    /v1/pool/map (the same path real work uses; 8 items so the daemon fans out
-    to peers when they exist). None on failure means stay local."""
+    """Effective bytes/sec to the cluster, cached 300s. Probes through the
+    same frames path real work uses (the base64-in-JSON path measured ~30MB/s
+    and the cost model then refused every spill; frames ships raw pickle).
+    64MB of blobs so the measurement is throughput-bound, not latency-bound.
+    None on failure means stay local."""
     now = time.monotonic()
     if now - _BW_CACHE["t"] < _BW_TTL:
         return _BW_CACHE["bw"]
-    import base64
-    import json
     import pickle
-    import urllib.request
     try:
-        blobs = [os.urandom(4 * 1024) for _ in range(8)]
-        items = [base64.b64encode(pickle.dumps(b)).decode() for b in blobs]
-        body = json.dumps({
+        blobs = [os.urandom(8 * 1024 * 1024) for _ in range(8)]
+        items = [pickle.dumps(b) for b in blobs]
+        hdr = {
             "func_src": "def run(x):\n    return len(x)\n",
-            "items": items, "items_b64": True, "starmap": False,
-            "required_mem": 16 * 1024 * 1024,
-        }).encode()
+            "items_frames": len(items),
+        }
         t0 = time.monotonic()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 60) as resp:
-            json.loads(resp.read())
+        _pool_send(hdr, None, items, 60)
         bw = sum(len(b) for b in blobs) / max(time.monotonic() - t0, 1e-6)
     except Exception:
         bw = None
     _BW_CACHE["t"] = now
     _BW_CACHE["bw"] = bw
     return bw
+
+
+def _pool_send(header, globals_pickle, items, timeout):
+    """POST a frames pool/map request: small JSON header line + optional
+    globals frame + length-prefixed raw pickle item frames. Returns the raw
+    pickle blobs of the results (frames response). Bulk data never touches
+    base64 or a giant JSON parse, which is what made the old encoding ~30MB/s."""
+    import json
+    import pickle
+    import struct
+    import urllib.request
+    body = json.dumps(header).encode() + b"\n"
+    if globals_pickle is not None:
+        body += struct.pack(">I", len(globals_pickle)) + globals_pickle
+    for it in items:
+        body += struct.pack(">I", len(it)) + it
+    req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
+                                 headers={"Content-Type": "application/vnd.pipedpeer.frames",
+                                          "X-Pipedpeer-Store": _STORE})
+    with _daemon_open(req, timeout) as resp:
+        data = resp.read()
+    nl = data.find(b"\n")
+    hdr = json.loads(data[:nl])
+    rest = data[nl + 1:]
+    out = []
+    for _ in range(hdr.get("results_frames", 0)):
+        n = struct.unpack(">I", rest[:4])[0]
+        out.append(rest[4:4 + n])
+        rest = rest[4 + n:]
+    return out
+
+
+def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_sec):
+    """BLAS-realistic cost model for numpy offloads, calibrated to real BLAS
+    throughput (matmul ~200 GFLOP/s, svd ~1.5 GFLOP/s on this cluster's numpy).
+    est_transfer counts the full round trip (in + out, plus the replicated
+    operand for matmul). Split work (matmul) spills only when remote beats
+    local, which at practical sizes it never does over the pool transport —
+    local BLAS is faster, so interception stays honest (D2: never slower).
+    Single-worker offloads (svd/eig) relocate compute for an asymmetric
+    orchestrator: worth it when shipping the matrix costs far less than the
+    local compute, since the origin node is freed entirely."""
+    if not (_URL and _ENABLED):
+        return False
+    K = int(_NUM_SHARDS)
+    if K < 2 or nbytes < 32 * 1024 * 1024:
+        return False
+    bw = _measure_bandwidth()
+    if not bw:
+        return False
+    est_local = nbytes * flops_per_byte / flops_per_sec
+    est_transfer = nbytes * round_trip / bw
+    if not split:
+        return est_transfer < est_local * 0.5
+    est_remote = est_local / K * 1.3
+    return est_local > est_transfer + est_remote
 
 
 def _groupby_worker_src():
@@ -612,6 +645,7 @@ def _groupby_worker_src():
 
 
 def _groupby_shuffle(gb, spec, args, kw):
+    _log('groupby: hash-shuffling %d rows across %d nodes' % (len(gb.obj), int(_NUM_SHARDS)))
     """Hash-shuffle a DataFrameGroupBy.agg: rows bucketed by hash(key)%K,
     bucket 0 aggregated locally, buckets 1..K-1 shipped as no_split items
     (item i -> peer i), so every key's rows land complete on one node and the
@@ -643,25 +677,20 @@ def _groupby_shuffle(gb, spec, args, kw):
                                    dropna=dropna).agg(spec, *args, **kw))
     remote = [df[buckets == b] for b in range(1, K) if (buckets == b).any()]
     if remote:
-        items = [base64.b64encode(pickle.dumps(d)).decode() for d in remote]
-        req = {
+        globals_pickle = pickle.dumps({
+            "_by": keys, "_as_index": as_index, "_dropna": dropna,
+            "_spec": spec, "_args": args, "_kwargs": kw,
+        })
+        header = {
             "func_src": _groupby_worker_src(),
             "func_name": "run",
-            "extra_b64": base64.b64encode(pickle.dumps({
-                "_by": keys, "_as_index": as_index, "_dropna": dropna,
-                "_spec": spec, "_args": args, "_kwargs": kw,
-            })).decode(),
-            "items": items, "items_b64": True, "starmap": False,
+            "items_frames": len(remote),
+            "globals": True,
             "no_split": True,
         }
-        req["required_mem"] = 2 * (len(req["extra_b64"]) + sum(len(i) for i in items))
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 1800) as resp:
-            rs = json.loads(resp.read())["results"]
-        parts.extend(pickle.loads(base64.b64decode(r["pickle"])) for r in rs)
+        header["required_mem"] = _pool_required(globals_pickle, [pickle.dumps(d) for d in remote])
+        blobs = _pool_send(header, globals_pickle, [pickle.dumps(d) for d in remote], 1800)
+        parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
     if as_index:
         return res.sort_index()
@@ -763,24 +792,20 @@ def _merge_shuffle(left, right, kw):
     finally:
         _IN_MERGE = False
     if items:
-        req = {
+        globals_pickle = pickle.dumps({"_mw": worker_kw})
+        header = {
             "func_src": ("import pandas as _pd\n"
                          "def run(item):\n"
                          "    L, R = item\n"
                          "    return _pd.merge(L, R, **_mw)\n"),
             "func_name": "run",
-            "extra_b64": base64.b64encode(pickle.dumps({"_mw": worker_kw})).decode(),
-            "items": [base64.b64encode(pickle.dumps(i)).decode() for i in items],
-            "items_b64": True, "starmap": False, "no_split": True,
+            "items_frames": len(items),
+            "globals": True,
+            "no_split": True,
         }
-        req["required_mem"] = 2 * (len(req["extra_b64"]) + sum(len(i) for i in req["items"]))
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 1800) as resp:
-            rs = json.loads(resp.read())["results"]
-        parts.extend(pickle.loads(base64.b64decode(r["pickle"])) for r in rs)
+        header["required_mem"] = _pool_required(globals_pickle, [pickle.dumps(i) for i in items])
+        blobs = _pool_send(header, globals_pickle, [pickle.dumps(i) for i in items], 1800)
+        parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
     if left_index or right_index:
         if sort:
@@ -804,8 +829,6 @@ def _merge_gate(left, right):
 
 
 def _install_pandas():
-    if os.environ.get("PIPEDPEER_PANDAS") != "1":
-        return
     try:
         import pandas as _pd
     except ImportError:
@@ -889,9 +912,37 @@ def _install_pandas():
 
 
 # ---- out-of-core reads: chunked parse + partitioned frame ----
-_OOC_CHUNK = 64 * 1024 * 1024
+_OOC_CHUNK = int(float(os.environ.get("PIPEDPEER_OOC_CHUNK") or (64 * 1024 * 1024)))
 _COMBINE_SAFE = ("sum", "count", "size", "mean", "min", "max", "first",
                  "last", "any", "all")
+_OOC_BATCH_MAX = int(os.environ.get("PIPEDPEER_OOC_BATCH_MAX") or 8)
+_OOC_BATCH_CACHE = {"t": 0.0, "n": 2}
+
+
+def _ooc_batch():
+    """Auto-size how many chunks ship per request: parse working set is ~5x a
+    chunk, and a node must never hold more than ~40% of its free RAM at once.
+    Probes the local daemon's /health available_mem, clamped to
+    [1, _OOC_BATCH_MAX]; falls back to 2 when the daemon is unreachable."""
+    now = time.monotonic()
+    if now - _OOC_BATCH_CACHE["t"] < 5.0:
+        return _OOC_BATCH_CACHE["n"]
+    n = 2
+    if _URL:
+        try:
+            import json
+            import urllib.request
+            with urllib.request.urlopen(_URL + "/health", timeout=2) as r:
+                h = json.loads(r.read().decode())
+                avail = h.get("available_mem") or 0
+                if avail > 0:
+                    n = max(1, int(0.4 * avail / (5 * _OOC_CHUNK)))
+        except Exception:
+            n = 2
+    n = min(n, _OOC_BATCH_MAX)
+    _OOC_BATCH_CACHE["t"] = now
+    _OOC_BATCH_CACHE["n"] = n
+    return n
 
 
 def _ooc_eligible(path):
@@ -914,65 +965,49 @@ def _ooc_eligible(path):
         return False
 
 
-def _csv_offsets(path, header, chunk_bytes):
-    """Byte ranges [offsets[i], offsets[i+1]) of the data rows, split at line
-    boundaries. The header line (header=0) is skipped by starting after the
-    first newline; every chunk then parses identically (names, header=None)."""
-    with open(path, "rb") as f:
-        head = f.read(4096)
-    start = 0
-    if header == 0:
-        nl = head.find(b"\n")
-        if nl < 0:
-            raise ValueError("no header line")
-        start = nl + 1
-    size = os.path.getsize(path)
-    offsets = [start]
-    pos = start
-    with open(path, "rb") as f:
-        while pos < size:
-            f.seek(pos)
-            data = f.read(chunk_bytes)
-            if not data:
-                break
-            nl = data.rfind(b"\n")
-            if nl < 0:
-                nl = len(data)  # ponytail: pathological single-line file
-            pos += nl + 1
-            offsets.append(pos)
-    return offsets
+def _pool_required(globals_pickle, items):
+    """Honest per-node working-set estimate for a noSplit/fanned-out chunk:
+    one node holds the globals plus the single largest item (parts are spread
+    across peers, so the request total overstates any one node). 2x covers
+    parse/output expansion. Keeps the daemon's admission control meaningful
+    instead of 503-ing large-but-spread reads."""
+    if items:
+        return 2 * (len(globals_pickle) + max(len(i) for i in items))
+    return 0
 
 
-def _partitioned_read(func_src, extra, items, required_mem):
-    import base64
-    import json
+def _partitioned_read(func_src, extra, keys, items):
+    """Send one batch of chunk frames. Batch sizes stay bounded (_ooc_batch),
+    so an out-of-core read never builds the whole file in memory; item_keys
+    pin each chunk to the peer the daemon's key-hash routing chooses, so a
+    later cache_keys fetch for the same key resolves on the node that parsed
+    it no matter which batch carried it."""
     import pickle
-    import urllib.request
-    req = {
+    globals_pickle = pickle.dumps(extra)
+    header = {
         "func_src": func_src,
         "func_name": "run",
-        "extra_b64": base64.b64encode(pickle.dumps(extra)).decode(),
-        "items": items, "items_b64": True, "starmap": False,
+        "items_frames": len(items),
+        "globals": True,
         "no_split": True,
+        "item_keys": keys,
     }
-    req["required_mem"] = 2 * (required_mem + sum(len(i) for i in items))
-    body = json.dumps(req).encode()
-    req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                 headers={"Content-Type": "application/json",
-                                          "X-Pipedpeer-Store": _STORE})
-    with _daemon_open(req, 3600) as resp:
-        rs = json.loads(resp.read())["results"]
-    return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+    header["required_mem"] = _pool_required(globals_pickle, items)
+    blobs = _pool_send(header, globals_pickle, items, 3600)
+    return [pickle.loads(p) for p in blobs]
 
 
 def _partitioned_read_csv(path, kw):
     """Chunk the file at line boundaries, parse each chunk on its own node (the
     parse working set is then one chunk), cache chunks in the workers' _CACHE
-    and return a _PartitionedFrame proxy over them."""
+    and return a _PartitionedFrame proxy over them. Reads and ships a bounded
+    batch of chunks at a time, so origin RAM never holds the whole file."""
     import base64
     import hashlib
+    import os
     import pickle
     import pandas as _pd
+    _log('read_csv: streaming %.0f MB out-of-core' % (os.path.getsize(path) / 1e6))
     header = kw.get("header", "infer")
     if header == "infer":
         header = 0
@@ -986,27 +1021,68 @@ def _partitioned_read_csv(path, kw):
     parse_kw = dict(kw)
     parse_kw.pop("header", None)
     parse_kw.pop("names", None)
-    keys = []
-    items = []
-    offsets = _csv_offsets(str(path), header, _OOC_CHUNK)
-    for start, end in zip(offsets[:-1], offsets[1:]):
-        with open(str(path), "rb") as f:
-            f.seek(start)
-            data = f.read(end - start)
-        items.append(base64.b64encode(pickle.dumps(data)).decode())
-        keys.append("df:" + hashlib.sha256(data).hexdigest())
     src = ("import hashlib\n"
            "import io\n"
+           "import os\n"
+           "import pickle\n"
            "import pandas as _pd\n"
            "def run(raw):\n"
            "    k = 'df:' + hashlib.sha256(raw).hexdigest()\n"
            "    if k not in _CACHE:\n"
            "        _CACHE[k] = _pd.read_csv(io.BytesIO(raw), names=_names, header=None, **_csv_kw)\n"
+           "        if globals().get('_CHUNK_DIR', ''):\n"
+           "            with open(os.path.join(globals()['_CHUNK_DIR'], hashlib.sha256(k.encode()).hexdigest()), 'wb') as f:\n"
+           "                pickle.dump(_CACHE[k], f)\n"
            "    return {'rows': len(_CACHE[k]), 'dtypes': {c: str(t) for c, t in _CACHE[k].dtypes.items()}}\n")
-    metas = _partitioned_read(src, {"_names": names, "_csv_kw": parse_kw},
-                              items, os.path.getsize(str(path)))
+    extra = {"_names": names, "_csv_kw": parse_kw}
+    all_keys = []
+    keys, items, metas = [], [], []
+    batch = _ooc_batch()
+    for start, end in _csv_ranges(str(path), header):
+        with open(str(path), "rb") as f:
+            f.seek(start)
+            data = f.read(end - start)
+        key = "df:" + hashlib.sha256(data).hexdigest()
+        all_keys.append(key)
+        keys.append(key)
+        items.append(pickle.dumps(data))
+        if len(items) == batch:
+            metas.extend(_partitioned_read(src, extra, keys, items))
+            keys, items = [], []
+    if items:
+        metas.extend(_partitioned_read(src, extra, keys, items))
     cols = names if names is not None else list(metas[0]["dtypes"])
-    return _PartitionedFrame(keys, cols, metas, str(path))
+    return _PartitionedFrame(all_keys, cols, metas, str(path))
+
+
+def _csv_ranges(path, header):
+    """Yield (start, end) byte ranges of the data rows, split at line
+    boundaries. The header line (header=0) is skipped by starting after the
+    first newline; every chunk then parses identically (names, header=None)."""
+    import os
+    with open(path, "rb") as f:
+        head = f.read(4096)
+    start = 0
+    if header == 0:
+        nl = head.find(b"\n")
+        if nl < 0:
+            raise ValueError("no header line")
+        start = nl + 1
+    size = os.path.getsize(path)
+    pos = start
+    with open(path, "rb") as f:
+        while pos < size:
+            f.seek(pos)
+            data = f.read(_OOC_CHUNK)
+            if not data:
+                break
+            nl = data.rfind(b"\n")
+            if nl < 0:
+                nl = len(data)  # ponytail: pathological single-line file
+            end = pos + nl + 1
+            yield start, end
+            start = end
+            pos = end
 
 
 def _partitioned_read_parquet(path, kw):
@@ -1015,29 +1091,43 @@ def _partitioned_read_parquet(path, kw):
     import base64
     import hashlib
     import io
+    import os
     import pickle
     import pandas as _pd
     import pyarrow.parquet as _pq
+    _log('read_parquet: streaming %.0f MB out-of-core' % (os.path.getsize(path) / 1e6))
     pf = _pq.ParquetFile(str(path))
-    items = []
-    keys = []
-    for i in range(pf.metadata.num_row_groups):
-        buf = io.BytesIO()
-        _pq.write_table(pf.read_row_group(i), buf)
-        data = buf.getvalue()
-        items.append(base64.b64encode(pickle.dumps(data)).decode())
-        keys.append("df:" + hashlib.sha256(data).hexdigest())
     src = ("import hashlib\n"
            "import io\n"
+           "import os\n"
+           "import pickle\n"
            "import pandas as _pd\n"
            "def run(raw):\n"
            "    k = 'df:' + hashlib.sha256(raw).hexdigest()\n"
            "    if k not in _CACHE:\n"
            "        _CACHE[k] = _pd.read_parquet(io.BytesIO(raw), **_pq_kw)\n"
+           "        if globals().get('_CHUNK_DIR', ''):\n"
+           "            with open(os.path.join(globals()['_CHUNK_DIR'], hashlib.sha256(k.encode()).hexdigest()), 'wb') as f:\n"
+           "                pickle.dump(_CACHE[k], f)\n"
            "    return {'rows': len(_CACHE[k]), 'dtypes': {c: str(t) for c, t in _CACHE[k].dtypes.items()}}\n")
-    metas = _partitioned_read(src, {"_pq_kw": kw}, items,
-                              os.path.getsize(str(path)))
-    return _PartitionedFrame(keys, list(metas[0]["dtypes"]), metas, str(path))
+    extra = {"_pq_kw": kw}
+    all_keys = []
+    keys, items, metas = [], [], []
+    batch = _ooc_batch()
+    for i in range(pf.metadata.num_row_groups):
+        buf = io.BytesIO()
+        _pq.write_table(pf.read_row_group(i), buf)
+        data = buf.getvalue()
+        key = "df:" + hashlib.sha256(data).hexdigest()
+        all_keys.append(key)
+        keys.append(key)
+        items.append(pickle.dumps(data))
+        if len(items) == batch:
+            metas.extend(_partitioned_read(src, extra, keys, items))
+            keys, items = [], []
+    if items:
+        metas.extend(_partitioned_read(src, extra, keys, items))
+    return _PartitionedFrame(all_keys, list(metas[0]["dtypes"]), metas, str(path))
 
 
 class _PartitionedFrame:
@@ -1153,6 +1243,7 @@ class _PartitionedFrame:
             for v in spec.values()))
         has_mean, spec_sum, spec_count = _mean_split(spec)
         n = len(self._keys)
+        _log('groupby: combining %d chunk partials from the cluster' % n)
         src = _combine_agg_worker_src(has_mean)
         extra = {"_by": by, "_as_index": as_index, "_dropna": dropna,
                  "_spec_sum": spec_sum, "_spec_count": spec_count,
@@ -1437,7 +1528,7 @@ class _PartitionedGroupBy:
     def __getattr__(self, name):
         if name.startswith("_"):
             raise AttributeError(name)
-        if name in _NAMED:
+        if name in self._NAMED:
             def _agg(*args, **kw):
                 return self.agg(name, *args, **kw)
             return _agg
@@ -1523,8 +1614,6 @@ def _partitioned_merge(pf, right, how="inner", on=None, left_on=None,
 
 
 def _install_io():
-    if os.environ.get("PIPEDPEER_PANDAS") != "1":
-        return
     try:
         import pandas as _pd
     except ImportError:
@@ -1570,7 +1659,6 @@ def _install_io():
 def _install_ddp():
     if os.environ.get("PIPEDPEER_DDP") != "1":
         return
-    os.environ["PIPEDPEER_TORCH"] = "0"  # DDP ranks must not offload matmul
     try:
         import torch as _th
     except ImportError:
@@ -1679,6 +1767,30 @@ def _install():
         _log("joblib backend skipped (no cluster peers)")
         return
 
+    import pickle
+    class _SafePickler(pickle.Pickler):
+        """Pickler subclass that replaces unpicklable _thread.lock objects
+        with fresh threading.Lock() — the remote worker gets a usable lock.
+        Safety net: shared-memory accumulator batches already run locally, but
+        any other lock-bearing object that reaches dispatch still ships."""
+        def reducer_override(self, obj):
+            import _thread, threading
+            if type(obj).__name__ == 'lock' and type(obj).__module__ == '_thread':
+                return (threading.Lock, ())
+            return NotImplemented
+
+    def _jb_has_shared_accumulator(batch):
+        # sklearn's _accumulate_prediction-style tasks ship as
+        # (bound_method, X, all_proba_list, threading.Lock): they mutate the
+        # shared list in place (the lock is the tell) and return None. Shipped
+        # to a remote worker the mutation lands on a copy and is lost, so any
+        # batch carrying a lock in its args must run in-process.
+        for t in _jb_tasks(batch):
+            if any(type(x).__module__ == "_thread" and type(x).__name__ == "lock"
+                   for x in t[1]):
+                return True
+        return False
+
     def _jb_tasks(batch):
         # joblib submits BatchedCalls whose .items are (func, args, kwargs)
         # tuples; a bare callable is a single task.
@@ -1686,6 +1798,13 @@ def _install():
         if items is None:
             return [(batch, (), {})]
         return items
+
+    def _safe_pickle(obj):
+        """Pickle an object, replacing unpicklable _thread.lock with fresh locks."""
+        import io as _io
+        buf = _io.BytesIO()
+        _SafePickler(buf, protocol=pickle.HIGHEST_PROTOCOL).dump(obj)
+        return buf.getvalue()
 
     def _jb_dispatch(batch):
         # One joblib batch per /v1/pool/map round trip. The runner marks
@@ -1698,11 +1817,13 @@ def _install():
         import pickle
         import urllib.request
         items = _jb_tasks(batch)
-        payload = [base64.b64encode(pickle.dumps(t)).decode() for t in items]
+        payload = [base64.b64encode(_safe_pickle(t)).decode() for t in items]
+        _log('joblib: dispatching %d tasks (%.0f KB) to cluster' % (len(items), sum(len(q) for q in payload) / 1024))
         req = {
-            "func_src": ("import os\ndef run(items):\n"
+            "func_src": ("import os\ndef run(item):\n"
                          "    os.environ['PIPEDPEER_JB_NESTED'] = '1'\n"
-                         "    return [f(*a, **k) for f, a, k in items]\n"),
+                         "    f, a, k = item\n"
+                         "    return f(*a, **k)\n"),
             "func_name": "run",
             "items": payload,
             "items_b64": True,
@@ -1746,15 +1867,21 @@ def _install():
                 except BaseException as e:
                     job = _JBJob(error=e)
             else:
-                try:
-                    job = _JBJob(results=_jb_dispatch(func))
-                except BaseException as e:
-                    # D2/D3: a remote node adds capacity, never subtracts.
-                    _log("joblib remote failed (%s); local covers it" % e)
+                if _jb_has_shared_accumulator(func):
+                    # _accumulate_prediction-style tasks mutate a shared list
+                    # guarded by the lock in their args; only in-process shared
+                    # memory makes the mutation visible, so run them locally.
+                    job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
+                else:
                     try:
-                        job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
-                    except BaseException as e2:
-                        job = _JBJob(error=e2)
+                        job = _JBJob(results=_jb_dispatch(func))
+                    except BaseException as e:
+                        # D2/D3: a remote node adds capacity, never subtracts.
+                        _log("joblib remote failed (%s); local covers it" % e)
+                        try:
+                            job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
+                        except BaseException as e2:
+                            job = _JBJob(error=e2)
             if callback is not None:
                 callback(job)
             return job
