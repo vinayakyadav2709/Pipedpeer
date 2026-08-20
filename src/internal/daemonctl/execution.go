@@ -2,6 +2,7 @@ package daemonctl
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -49,7 +50,16 @@ type uploadResponse struct {
 // UploadJob sends workspace tarball + NAR closure to the daemon.
 // If the daemon already has the store path cached (a prior task in the fan-out
 // shipped the same closure), the NAR is omitted and only the workspace travels.
-func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptPath string) (*uploadResponse, error) {
+func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptPath string, skipBroadcast bool) (*uploadResponse, error) {
+	// Export the NAR only when the target daemon lacks the closure: a gzip
+	// export of a multi-GB store is seconds-to-minutes of wasted work when a
+	// shared store (or a prior fan-out task) already gave every node a copy.
+	if narPath != "" && !storeCached(host, port, storePath) {
+		if err := ExportNAR(storePath, narPath); err != nil {
+			return nil, fmt.Errorf("nix store export failed: %v", err)
+		}
+	}
+
 	pr, pw := io.Pipe()
 	mp := multipart.NewWriter(pw)
 
@@ -60,8 +70,11 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 		addFile(mp, "workspace", "workspace.tar", workspacePath)
 		mp.WriteField("store_path", storePath)
 		mp.WriteField("script_path", scriptPath)
+		if skipBroadcast {
+			mp.WriteField("skip_broadcast", "1")
+		}
 
-		if !storeCached(host, port, storePath) {
+		if narPath != "" && !storeCached(host, port, storePath) {
 			addFile(mp, "nar", "closure.nar", narPath)
 		}
 	}()
@@ -87,7 +100,7 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 
 // storeCached asks the daemon whether it already has a closure for storePath.
 func storeCached(host string, port int, storePath string) bool {
-	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s", host, port, url.QueryEscape(storePath))
+	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", host, port, url.QueryEscape(storePath))
 	resp, err := http.Get(url)
 	if err != nil {
 		return false
@@ -105,27 +118,29 @@ func storeCached(host string, port int, storePath string) bool {
 // StreamExecute connects to the daemon WebSocket and streams job output to stdout/stderr.
 // Blocks until the job completes or context is cancelled.
 // It returns the peak memory the job used (bytes) as reported by the daemon.
-func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (int64, error) {
+func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (int64, string, string, error) {
 	url := fmt.Sprintf("ws://%s:%d/v1/jobs/%s/exec", host, port, jobID)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 	if err != nil {
-		return 0, fmt.Errorf("websocket dial: %w", err)
+		return 0, "", "", fmt.Errorf("websocket dial: %w", err)
 	}
 	defer conn.Close()
 
 	if err := conn.WriteJSON(cfg); err != nil {
-		return 0, fmt.Errorf("send config: %w", err)
+		return 0, "", "", fmt.Errorf("send config: %w", err)
 	}
 
 	var peakBytes int64
+	stdoutBuf := new(strings.Builder)
+	stderrBuf := new(strings.Builder)
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				return peakBytes, nil
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
 			}
-			return 0, fmt.Errorf("connection lost: %w", err)
+			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("connection lost: %w", err)
 		}
 
 		var out outputMessage
@@ -134,20 +149,22 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		}
 
 		if out.Error != "" {
-			return 0, fmt.Errorf("remote: %s", out.Error)
+			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote: %s", out.Error)
 		}
 
 		fmt.Print(out.O)
 		fmt.Fprint(os.Stderr, out.E)
+		stdoutBuf.WriteString(out.O)
+		stderrBuf.WriteString(out.E)
 
 		if out.Done {
 			if out.PeakMemBytes > 0 {
 				peakBytes = out.PeakMemBytes
 			}
 			if out.ExitCode != 0 {
-				return peakBytes, fmt.Errorf("remote job exited with code %d", out.ExitCode)
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote job exited with code %d", out.ExitCode)
 			}
-			return peakBytes, nil
+			return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
 		}
 	}
 }
@@ -270,10 +287,13 @@ func ExportNAR(storePath, destPath string) error {
 	}
 	defer f.Close()
 
+	gz := gzip.NewWriter(f)
+	defer gz.Close()
+
 	export := &exec.Cmd{
 		Path:   nixPath,
 		Args:   append([]string{"nix-store", "--export"}, paths...),
-		Stdout: f,
+		Stdout: gz,
 		Stderr: os.Stderr,
 	}
 	return export.Run()

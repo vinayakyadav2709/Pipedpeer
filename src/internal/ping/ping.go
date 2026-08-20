@@ -95,14 +95,14 @@ func Run(args []string, interval time.Duration) error {
 func printTable(targets []target) {
 	fmt.Println("  PIPEDPEER WORKER STATUS")
 	fmt.Println("  " + strings.Repeat("─", 72))
-	fmt.Printf("  %-5s %-22s %-7s %-8s %-10s %s\n",
-		"PORT", "NODE_ID", "JOBS", "RES_MEM", "AVAIL_MEM", "STATE")
+	fmt.Printf("  %-10s %-5s %-22s %-7s %-8s %-10s %s\n",
+		"HOST", "PORT", "NODE_ID", "JOBS", "RES_MEM", "AVAIL_MEM", "STATE")
 
 	for _, t := range targets {
 		h, err := poll(t.addr)
 		if err != nil {
-			fmt.Printf("  %-5s %-22s %-7s %-8s %-10s \033[31m%-6s\033[0m\n",
-				t.port, "-", "-", "-", "-", "DOWN")
+			fmt.Printf("  %-10s %-5s %-22s %-7s %-8s %-10s \033[31m%-6s\033[0m\n",
+				t.host, t.port, "-", "-", "-", "-", "DOWN")
 			continue
 		}
 		stateIcon := "OK"
@@ -115,8 +115,8 @@ func printTable(targets []target) {
 		if len(shortID) > 20 {
 			shortID = shortID[:20]
 		}
-		fmt.Printf("  %-5s %-22s %-7d %-8s %-10s %s%s\033[0m\n",
-			t.port, shortID, h.ActiveJobs,
+		fmt.Printf("  %-10s %-5s %-22s %-7d %-8s %-10s %s%s\033[0m\n",
+			t.host, t.port, shortID, h.ActiveJobs,
 			formatBytes(h.ReservedMem), formatBytes(h.AvailableMem),
 			stateColor, stateIcon)
 	}
