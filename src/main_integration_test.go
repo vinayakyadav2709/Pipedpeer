@@ -399,8 +399,8 @@ echo "hidden" > secret.txt
 		t.Fatalf("failed to read node identity from worker1")
 	}
 
-	// Run the compiled binary from inside worker1
-	out, err := dockerExecE(ctx, labDir, fmt.Sprintf("cd /tmp/sync-test && /pipedpeer run --script script.py --remote root@localhost:22 --target-id %s -e MY_VAR=testvar", nodeIDOut))
+	// Run the compiled binary from inside worker1 — no --host means self
+	out, err := dockerExecE(ctx, labDir, "cd /tmp/sync-test && /pipedpeer run --script script.py -e MY_VAR=testvar")
 	if err != nil {
 		t.Fatalf("cli run failed: %v\noutput: %s", err, out)
 	}

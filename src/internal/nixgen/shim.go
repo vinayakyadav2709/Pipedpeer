@@ -346,10 +346,9 @@ _TORCH_ORIG_MM = None
 def _install_torch():
     # torch block-row matmul/mm: intercept large 2D tensor ops and split A's
     # rows across the cluster, each block computed on the worker (on GPU when
-    # the worker has one), results cat'd back. Opt-in via PIPEDPEER_TORCH=1 —
-    # same D2 reasoning as numpy: shipping tensors only pays off when local
-    # compute is the bottleneck, and a worker with a GPU is the point.
-    if os.environ.get("PIPEDPEER_TORCH") != "1" or os.environ.get("PIPEDPEER_DDP") == "1":
+    # the worker has one), results cat'd back. DDP ranks skip this — gradient
+    # sync must not race with offloaded matmul.
+    if os.environ.get("PIPEDPEER_DDP") == "1":
         return
     try:
         import torch as _th
@@ -396,10 +395,8 @@ def _install_numpy():
     # numpy block-row matmul: intercept A @ B when the latency cost model says
     # remote beats local, splitting A's rows across the cluster so a worker
     # never allocates the whole global matrix. Each block ships to the warm
-    # worker which already unpickles it (items_b64). Default-on for the
-    # zero-code-change contract; PIPEDPEER_NUMPY=0 keeps everything local.
-    if os.environ.get("PIPEDPEER_NUMPY") == "0":
-        return
+    # worker which already unpickles it (items_b64). Default-on: the cost model
+    # guarantees offload is never slower than running locally.
     try:
         import numpy as _np
     except ImportError:
@@ -832,8 +829,6 @@ def _merge_gate(left, right):
 
 
 def _install_pandas():
-    if os.environ.get("PIPEDPEER_PANDAS") != "1":
-        return
     try:
         import pandas as _pd
     except ImportError:
@@ -917,9 +912,37 @@ def _install_pandas():
 
 
 # ---- out-of-core reads: chunked parse + partitioned frame ----
-_OOC_CHUNK = 64 * 1024 * 1024
+_OOC_CHUNK = int(float(os.environ.get("PIPEDPEER_OOC_CHUNK") or (64 * 1024 * 1024)))
 _COMBINE_SAFE = ("sum", "count", "size", "mean", "min", "max", "first",
                  "last", "any", "all")
+_OOC_BATCH_MAX = int(os.environ.get("PIPEDPEER_OOC_BATCH_MAX") or 8)
+_OOC_BATCH_CACHE = {"t": 0.0, "n": 2}
+
+
+def _ooc_batch():
+    """Auto-size how many chunks ship per request: parse working set is ~5x a
+    chunk, and a node must never hold more than ~40% of its free RAM at once.
+    Probes the local daemon's /health available_mem, clamped to
+    [1, _OOC_BATCH_MAX]; falls back to 2 when the daemon is unreachable."""
+    now = time.monotonic()
+    if now - _OOC_BATCH_CACHE["t"] < 5.0:
+        return _OOC_BATCH_CACHE["n"]
+    n = 2
+    if _URL:
+        try:
+            import json
+            import urllib.request
+            with urllib.request.urlopen(_URL + "/health", timeout=2) as r:
+                h = json.loads(r.read().decode())
+                avail = h.get("available_mem") or 0
+                if avail > 0:
+                    n = max(1, int(0.4 * avail / (5 * _OOC_CHUNK)))
+        except Exception:
+            n = 2
+    n = min(n, _OOC_BATCH_MAX)
+    _OOC_BATCH_CACHE["t"] = now
+    _OOC_BATCH_CACHE["n"] = n
+    return n
 
 
 def _ooc_eligible(path):
@@ -954,7 +977,7 @@ def _pool_required(globals_pickle, items):
 
 
 def _partitioned_read(func_src, extra, keys, items):
-    """Send one batch of chunk frames. Batch sizes stay bounded (_OOC_BATCH),
+    """Send one batch of chunk frames. Batch sizes stay bounded (_ooc_batch),
     so an out-of-core read never builds the whole file in memory; item_keys
     pin each chunk to the peer the daemon's key-hash routing chooses, so a
     later cache_keys fetch for the same key resolves on the node that parsed
@@ -972,9 +995,6 @@ def _partitioned_read(func_src, extra, keys, items):
     header["required_mem"] = _pool_required(globals_pickle, items)
     blobs = _pool_send(header, globals_pickle, items, 3600)
     return [pickle.loads(p) for p in blobs]
-
-
-_OOC_BATCH = 2
 
 
 def _partitioned_read_csv(path, kw):
@@ -1017,6 +1037,7 @@ def _partitioned_read_csv(path, kw):
     extra = {"_names": names, "_csv_kw": parse_kw}
     all_keys = []
     keys, items, metas = [], [], []
+    batch = _ooc_batch()
     for start, end in _csv_ranges(str(path), header):
         with open(str(path), "rb") as f:
             f.seek(start)
@@ -1025,7 +1046,7 @@ def _partitioned_read_csv(path, kw):
         all_keys.append(key)
         keys.append(key)
         items.append(pickle.dumps(data))
-        if len(items) == _OOC_BATCH:
+        if len(items) == batch:
             metas.extend(_partitioned_read(src, extra, keys, items))
             keys, items = [], []
     if items:
@@ -1092,6 +1113,7 @@ def _partitioned_read_parquet(path, kw):
     extra = {"_pq_kw": kw}
     all_keys = []
     keys, items, metas = [], [], []
+    batch = _ooc_batch()
     for i in range(pf.metadata.num_row_groups):
         buf = io.BytesIO()
         _pq.write_table(pf.read_row_group(i), buf)
@@ -1100,7 +1122,7 @@ def _partitioned_read_parquet(path, kw):
         all_keys.append(key)
         keys.append(key)
         items.append(pickle.dumps(data))
-        if len(items) == _OOC_BATCH:
+        if len(items) == batch:
             metas.extend(_partitioned_read(src, extra, keys, items))
             keys, items = [], []
     if items:
@@ -1592,8 +1614,6 @@ def _partitioned_merge(pf, right, how="inner", on=None, left_on=None,
 
 
 def _install_io():
-    if os.environ.get("PIPEDPEER_PANDAS") != "1":
-        return
     try:
         import pandas as _pd
     except ImportError:
@@ -1639,7 +1659,6 @@ def _install_io():
 def _install_ddp():
     if os.environ.get("PIPEDPEER_DDP") != "1":
         return
-    os.environ["PIPEDPEER_TORCH"] = "0"  # DDP ranks must not offload matmul
     try:
         import torch as _th
     except ImportError:

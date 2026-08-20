@@ -18,7 +18,7 @@ if device == "cuda":
 else:
     print("using CPU")
 
-n, d = 8_000, 64
+n, d = 60_000, 512
 X = torch.randn(n, d, device=device)
 y = (X[:, 0] * 2 + X[:, 1] - X[:, 2] > 0.5).float().unsqueeze(1)
 
@@ -27,11 +27,13 @@ class MLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d, 128),
+            nn.Linear(d, 2048),
             nn.ReLU(),
-            nn.Linear(128, 32),
+            nn.Linear(2048, 2048),
             nn.ReLU(),
-            nn.Linear(32, 1),
+            nn.Linear(2048, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, 1),
         )
 
     def forward(self, x):
@@ -42,7 +44,7 @@ model = MLP().to(device)
 opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
 loss_fn = nn.MSELoss()
 
-BATCH, EPOCHS = 200, 2
+BATCH, EPOCHS = 1024, 10
 steps_per_epoch = n // BATCH
 print("training ...")
 t0 = time.monotonic()
@@ -54,7 +56,7 @@ for epoch in range(EPOCHS):
         loss = loss_fn(model(xb), yb)
         loss.backward()
         opt.step()
-        if step % 10 == 0:
-            print(f"epoch {epoch} step {step:3d} loss {loss.item():.4f}")
+        if step % (steps_per_epoch // 10) == 0:
+            print(f"epoch {epoch} step {step:4d} loss {loss.item():.4f}")
 print(f"training done in {time.monotonic() - t0:.1f}s")
 print("final loss:", loss_fn(model(X[:1000]), y[:1000]).item())

@@ -216,7 +216,55 @@ const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per
 # raw pickle frames) for heavy chunks and legacy base64 JSON for small ones.
 import base64, gc, hashlib, json, os, pickle, struct, sys, traceback
 
-_CACHE = {}
+# ponytail: FIFO-eviction byte budget instead of a true LRU — the point is to
+# never OOM the worker from accumulating parsed chunks, and a dict preserves
+# insertion order so evicting from the front is O(1). Budget defaults to ~35%
+# of free RAM and can be overridden with PIPEDPEER_CACHE_BUDGET. If chunk
+# hit-rates ever drop (daemon re-ships the same chunk because it was evicted),
+# upgrade to an OrderedDict.move_to_end LRU on __getitem__/__setitem__ —
+# same budget math, just reorders instead of evicting the wrong entry.
+class _BoundedCache(dict):
+    def __init__(self):
+        super().__init__()
+        self._bytes = 0
+        budget = os.environ.get("PIPEDPEER_CACHE_BUDGET", "").strip()
+        if budget:
+            try:
+                self.budget = int(float(budget))
+            except ValueError:
+                self.budget = self._default_budget()
+        else:
+            self.budget = self._default_budget()
+
+    @staticmethod
+    def _default_budget():
+        try:
+            avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            return int(avail * 0.35)
+        except (ValueError, OSError):
+            return 2 << 30
+
+    @staticmethod
+    def _size_of(v):
+        try:
+            return int(v.memory_usage(deep=True).sum())
+        except Exception:
+            try:
+                return sys.getsizeof(v)
+            except Exception:
+                return 1024
+
+    def __setitem__(self, k, v):
+        if k in self:
+            self._bytes -= self._size_of(self[k])
+        super().__setitem__(k, v)
+        self._bytes += self._size_of(v)
+        while self._bytes > self.budget and len(self) > 1:
+            oldest = next(iter(self))
+            self._bytes -= self._size_of(self[oldest])
+            del self[oldest]
+
+_CACHE = _BoundedCache()
 _CHUNK_DIR = ""
 
 def load_req(path):

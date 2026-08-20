@@ -30,15 +30,15 @@ pipedpeer-demo/
 
 | # | Command (run in `pipedpeer-demo/`) |
 |---|---|
-| 1 | `pipedpeer run --script 01_sklearn_rf.py --intercept --no-self --isolate=false` |
-| 2 | `pipedpeer run --script 02_numpy_heavy.py --intercept --no-self --isolate=false` |
-| 3 | `pipedpeer run --script 03_pandas_ooc.py --intercept --no-self --isolate=false -e PIPEDPEER_PANDAS=1` |
-| 4 | `pipedpeer run --script 04_torch_ddp.py --intercept --ddp 3 --no-self --isolate=false` |
+| 1 | `pipedpeer run --script 01_sklearn_rf.py --intercept --remote --isolate=false` |
+| 2 | `pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false` |
+| 3 | `pipedpeer run --script 03_pandas_ooc.py --intercept --remote --isolate=false ` |
+| 4 | `pipedpeer run --script 04_torch_ddp.py --intercept --remote --ddp 3 --gpu force --isolate=false` |
 
 Notes:
-- `--no-self` keeps placement off the laptop (weak orchestrator).
+- `--remote` keeps placement off the laptop (weak orchestrator).
 - `--isolate=false` avoids needing crun on worker laptops.
-- `-e PIPEDPEER_PANDAS=1` is the pandas interception opt-in (script 3 only).
+- `` is the pandas interception opt-in (script 3 only).
 - `--ddp 3` = 3 transparent gloo ranks; intercept is forced on for DDP.
 - First live run per script is instant because setup.sh rehearsed it.
 - If a node disappears from `pipedpeer nodes` (no mDNS on some networks):
@@ -166,8 +166,8 @@ retry), the run still completes. `pipedpeer start` on that worker afterwards.
   re-run `setup.sh` rehearsal. (Spill only targets nodes whose store is
   materialized — by design.)
 - **DDP ranks fail to rendezvous** → gloo needs the master port reachable;
-  firewall may block the probed port. Pin it: `--ddp-port 29500` and allow it
-  inbound on the rank-0 worker.
+  firewall may block the probed port. Pin it once in the run command:
+  `--ddp-port 29500` and allow that one port inbound on the rank-0 worker.
 - **Isolation errors (crun missing)** → you forgot `--isolate=false`.
 - **First run still slow** → closures build in the rehearsal; if you skipped
   it, expect minutes of `[1/7]`/`[2/7]` Nix work on the first live run.
