@@ -92,17 +92,17 @@ func buildFrames(header []byte, globals []byte, items []json.RawMessage) []byte 
 // namespace before running (e.g. a fixed matmul operand shared by all items).
 type chunk struct {
 	pickledFunc, funcSrc, funcName, extraB64 string
-	items      []json.RawMessage
-	globals    []byte
-	frames     bool
-	starmap    bool
-	itemsB64   bool
-	noSplit    bool
-	noFanout   bool
-	requiredMem int64
-	cacheKeys  []string
-	itemKeys   []string
-	chunkDir   string
+	items                                    []json.RawMessage
+	globals                                  []byte
+	frames                                   bool
+	starmap                                  bool
+	itemsB64                                 bool
+	noSplit                                  bool
+	noFanout                                 bool
+	requiredMem                              int64
+	cacheKeys                                []string
+	itemKeys                                 []string
+	chunkDir                                 string
 }
 
 // chunkDirFor returns the on-disk chunk cache dir for a store path. Chunks
