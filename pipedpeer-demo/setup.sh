@@ -53,12 +53,12 @@ echo "=== cluster nodes (expect yourself + the N worker laptops, all healthy) ==
 echo
 echo "=== rehearsal pass (builds closures + warms stores on all workers) ==="
 run() { echo; echo "--- rehearsal: $1"; "$PIPE" run --script "$1" \
-      --intercept --no-self --isolate=false "${@:2}" 2>&1 | tail -8; }
+      --intercept --remote --isolate=false "${@:2}" 2>&1 | tail -8; }
 
 run 01_sklearn_rf.py
 run 02_numpy_heavy.py
-run 03_pandas_ooc.py -e PIPEDPEER_PANDAS=1
-run 04_torch_ddp.py --ddp 3
+run 03_pandas_ooc.py
+run 04_torch_ddp.py --ddp 3 --gpu force
 
 echo
 echo "=== DEMO READY ==="

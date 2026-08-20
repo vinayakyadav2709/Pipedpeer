@@ -123,7 +123,7 @@ run_demo() { # run_demo <name> <script> <extra-args> <grep>
   section "4. run $1"
   snapshot "$1-start"   # processes/logs/store/files before: the handoff
   timeout 5400 docker exec pp-orch sh -c \
-    "cd /workspace && pipedpeer run --script $2 --intercept --no-self --isolate=false $3" \
+    "cd /workspace && pipedpeer run --script $2 --intercept --remote --isolate=false $3" \
     > "$LOG/$1.out" 2>&1
   ec=$?
   [ "$ec" = 0 ] && echo "exit ok" || { echo "EXIT FAIL ($ec) — tail:"; tail -8 "$LOG/$1.out"; }
@@ -145,15 +145,17 @@ else
   PASS=$((PASS + 1)); echo "PASS: matmul stayed local (D2: local BLAS wins)"
 fi
 check "02 shim ledger: svd offload" "offloading" "$LOG/02_numpy_heavy.out"
-run_demo 03_pandas_ooc 03_pandas_ooc.py "-e PIPEDPEER_PANDAS=1 -e PIPEDPEER_OOC_MIN=5e8" "groupby('cat').mean()"
+run_demo 03_pandas_ooc 03_pandas_ooc.py "-e PIPEDPEER_OOC_MIN=5e8" "groupby('cat').mean()"
 check "03 result rows: all 4 categories" "gamma" "$LOG/03_pandas_ooc.out"
 check "03 shim ledger: ooc read" "read_csv: streaming" "$LOG/03_pandas_ooc.out"
 check "03 shim ledger: per-chunk combine" "combining" "$LOG/03_pandas_ooc.out"
 # DDP rank count for demo 04. This rig is 3 containers sharing ONE host's RAM
 # (plus the desktop), so keep it small locally — each rank is a torch process.
 # On real machines (each with its own RAM + GPU) bump this to the worker count.
+# --gpu force: 04 is the "does distributed GPU training actually work" proof,
+# so it must land on GPU nodes or fail loudly — never silently run on CPU.
 DDP="${DDP:-1}"
-run_demo 04_torch_ddp 04_torch_ddp.py "--ddp $DDP" "final loss:"
+run_demo 04_torch_ddp 04_torch_ddp.py "--ddp $DDP --gpu force" "final loss:"
 
 # --- 5. where did the work actually run? ------------------------------------
 section "5. placement proof: jobs list shows workers, not the orchestrator"
@@ -166,9 +168,9 @@ else
   FAIL=$((FAIL + 1)); echo "FAIL: $succ succeeded jobs (want >=4)"
 fi
 if awk 'NR>2 { print $3 }' "$LOG/jobs.txt" | grep -q "^orch$"; then
-  FAIL=$((FAIL + 1)); echo "FAIL: a job ran on the orchestrator (--no-self violated)"
+  FAIL=$((FAIL + 1)); echo "FAIL: a job ran on the orchestrator (--remote violated)"
 else
-  PASS=$((PASS + 1)); echo "PASS: every job executed on a worker node (--no-self honored)"
+  PASS=$((PASS + 1)); echo "PASS: every job executed on a worker node (--remote honored)"
 fi
 
 last_id=$(awk 'NR > 2 { print $1 }' "$LOG/jobs.txt" | head -1)
@@ -207,7 +209,7 @@ fi
 section "6. pipedpeer tasks --watch during a live run"
 docker exec -d pp-orch sh -c "pipedpeer tasks --watch > /tmp/tasks.log 2>&1"
 timeout 900 docker exec pp-orch sh -c \
-  "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --no-self --isolate=false" \
+  "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false" \
   > "$LOG/02b.out" 2>&1
 docker exec pp-orch sh -c "pkill -f 'tasks --watch' || true" >/dev/null 2>&1
 sleep 1
@@ -241,7 +243,7 @@ check "prune removed the old entry" "pruned 1" "$LOG/prune.txt"
 
 # --- 9. weak orchestrator: CPU proof ----------------------------------------
 section "9. CPU proof (docker stats during a heavy run)"
-docker exec -d pp-orch sh -c "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --no-self --isolate=false > /tmp/02c.out 2>&1"
+docker exec -d pp-orch sh -c "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false > /tmp/02c.out 2>&1"
 sleep 25
 for i in 1 2 3 4; do
   docker stats --no-stream pp-orch pp-worker1 pp-worker2 pp-worker3 >> "$LOG/stats.txt"

@@ -85,12 +85,12 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Rewrite into: run --script <script> --strategy round-robin --no-self --isolate=false
+		// Rewrite into: run --script <script> --strategy round-robin --remote --isolate=false
 		newArgs := []string{
 			"run",
 			"--script", scriptPath,
 			"--strategy", "round-robin",
-			"--no-self",
+			"--remote",
 			"--isolate=false",
 		}
 
@@ -224,19 +224,17 @@ func newRunCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scriptPath, _ := cmd.Flags().GetString("script")
 			daemonHost, _ := cmd.Flags().GetString("host")
-			targetID, _ := cmd.Flags().GetString("target-id")
 			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			intercept, _ := cmd.Flags().GetBool("intercept")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
-			mode, _ := cmd.Flags().GetString("mode")
 			pythonVersion, _ := cmd.Flags().GetString("python")
 			registryURL, _ := cmd.Flags().GetString("registry")
 			memOverride, _ := cmd.Flags().GetString("mem")
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
-			noSelf, _ := cmd.Flags().GetBool("no-self")
+			remote, _ := cmd.Flags().GetBool("remote")
 			strategy, _ := cmd.Flags().GetString("strategy")
 			gpuMode, _ := cmd.Flags().GetString("gpu")
 			gpuID, _ := cmd.Flags().GetString("gpu-id")
@@ -244,6 +242,7 @@ func newRunCmd() *cobra.Command {
 			requiredCores, _ := cmd.Flags().GetInt("cores")
 			ddpNodes, _ := cmd.Flags().GetInt("ddp")
 			ddpPort, _ := cmd.Flags().GetInt("ddp-port")
+			var targetID string
 
 			if scriptPath == "" {
 				return fmt.Errorf("--script is required")
@@ -285,46 +284,58 @@ func newRunCmd() *cobra.Command {
 				fmt.Println("started daemon")
 			}
 
-			if ddpNodes > 1 {
-				return runDDP(ddpRunOptions{
-					Nodes:          ddpNodes,
-					MasterPort:     ddpPort,
-					DaemonPort:     daemonPort,
-					ScriptPath:     scriptPath,
-					ScriptArgs:     args,
-					JobName:        jobName,
-					Isolate:        isolate,
-					Intercept:      intercept,
-					RegistryURL:    registryURL,
-					PythonVersion:  pythonVersion,
-					Pkgs:           pkgs,
-					Envs:           envs,
-					GPUDevices:     gpuID,
-					RequireGPU:     requireGPU,
-					PreferGPU:      preferGPU,
-					RequiredGPUMem: requiredGPUMem,
-					RequiredCores:  requiredCores,
-					NoSelf:         noSelf,
-					Strategy:       strategy,
-					MemOverride:    memOverride,
-				})
+			userMem := resourceest.ParseMemString(memOverride)
+			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
+			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
+				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
+
+			// DDP: --ddp N sets the max rank count; without it, DDP auto-activates
+			// when the script uses torch.distributed and ranks default to
+			// eligible/2 (a redundancy buffer, not a cap). Min is always 1
+			// (--ddp 1 is a plain single-node run).
+			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
+				eligible := ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
+				worldSize := max(1, eligible/2)
+				if ddpNodes > 1 {
+					worldSize = min(ddpNodes, eligible)
+				}
+				if worldSize >= 2 {
+					return runDDP(ddpRunOptions{
+						Nodes:          worldSize,
+						DaemonPort:     daemonPort,
+						MasterPort:     ddpPort,
+						ScriptPath:     scriptPath,
+						ScriptArgs:     args,
+						JobName:        jobName,
+						Isolate:        isolate,
+						Intercept:      intercept,
+						RegistryURL:    registryURL,
+						PythonVersion:  pythonVersion,
+						Pkgs:           pkgs,
+						Envs:           envs,
+						GPUDevices:     gpuID,
+						RequireGPU:     requireGPU,
+						PreferGPU:      preferGPU,
+						RequiredGPUMem: requiredGPUMem,
+						RequiredCores:  requiredCores,
+						NoSelf:         remote,
+						Strategy:       strategy,
+						MemOverride:    memOverride,
+					})
+				}
+				if ddpNodes > 1 {
+					fmt.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
+				}
 			}
 
+			estimatedMemBytes := resReq.MemBytes
+			estimationTier := resReq.Tier
 			var placementSource, placementReason string
 			var placementDegraded bool
 			var placementCandidates int
-			var estimatedMemBytes int64
-			var estimationTier string
 
-			if daemonHost == "" {
-				fmt.Println("[coordinator] No --host specified, discovering nodes...")
-
-				userMem := resourceest.ParseMemString(memOverride)
-				resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
-				estimatedMemBytes = resReq.MemBytes
-				estimationTier = resReq.Tier
-				fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
-					resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
+			if remote {
+				fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
 
 				rrFn := func(count int) int {
 					url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", daemonPort, count)
@@ -348,15 +359,21 @@ func newRunCmd() *cobra.Command {
 					RequiredMemBytes: resReq.MemBytes,
 					RequiredCores:    requiredCores,
 					RequiredGPUMem:   requiredGPUMem,
-					NoSelf:           noSelf,
+					NoSelf:           true,
 					RequireGPU:       requireGPU,
 					PreferGPU:        preferGPU,
 					Strategy:         strategy,
 					RoundRobinFn:     rrFn,
 				})
 
+				// A remote run must fail loudly when there is no node at all
+				// instead of queuing forever: the user can just drop --remote.
+				decision := coord.FindNode()
+				if decision.ChosenNode.NodeID == "" {
+					return fmt.Errorf("no eligible node found — run without --remote to execute on this machine")
+				}
+
 				if checkOnly {
-					decision := coord.FindNode()
 					fmt.Printf("[coordinator] Would place on node %s (%s)\n",
 						decision.ChosenNode.NodeID[:min(8, len(decision.ChosenNode.NodeID))], decision.Reason)
 					fmt.Println("checks complete")
@@ -390,7 +407,6 @@ func newRunCmd() *cobra.Command {
 						Intercept:         intercept,
 						GPU:               requestGPU,
 						GPUDevices:        devices,
-						Mode:              mode,
 						PythonVersion:     pythonVersion,
 						Envs:              envs,
 						Pkgs:              pkgs,
@@ -419,7 +435,20 @@ func newRunCmd() *cobra.Command {
 				return nil
 			}
 
-			placementSource = "explicit"
+			// Default: execute on this machine (chunks may still spill to peers
+			// through the shim). --host overrides with an explicit target.
+			if daemonHost == "" {
+				daemonHost = "127.0.0.1"
+				targetID = nodeID.NodeID
+				placementSource = "self"
+			} else {
+				resolvedHost, resolvedPort, resolvedID, err := resolveExplicitTarget(daemonPort, daemonHost)
+				if err != nil {
+					return err
+				}
+				daemonHost, daemonPort, targetID = resolvedHost, resolvedPort, resolvedID
+				placementSource = "explicit"
+			}
 
 			acceptResp, err := daemonctl.CheckRemoteAcceptance(daemonHost, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
 			if err != nil {
@@ -449,7 +478,6 @@ func newRunCmd() *cobra.Command {
 				Intercept:         intercept,
 				GPU:               requestGPU,
 				GPUDevices:        gpuID,
-				Mode:              mode,
 				PythonVersion:     pythonVersion,
 				Envs:              envs,
 				Pkgs:              pkgs,
@@ -472,34 +500,32 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("script", "", "Path to Python script")
-	cmd.Flags().String("host", "", "Daemon host (replaces --remote)")
-	cmd.Flags().String("target-id", "", "Remote node ID")
+	cmd.Flags().String("host", "", "Daemon host:port, or a registered node ID")
 	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
 	cmd.Flags().String("job-name", "", "Optional job name")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
-	cmd.Flags().Bool("intercept", false, "Intercept parallel primitives and route them across the cluster")
+	cmd.Flags().Bool("intercept", true, "Intercept parallel primitives and route them across the cluster")
 	cmd.Flags().String("gpu", "", "GPU mode: force (GPU node required), prefer (GPU first, CPU fallback), off (CPU only). Default: infer from script imports")
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
 	cmd.Flags().Int("cores", 0, "Minimum free CPU cores required on the target node")
 	cmd.Flags().Bool("check-only", false, "Only check acceptance, don't execute")
-	cmd.Flags().String("mode", "script", "Execution mode")
+	cmd.Flags().Bool("remote", false, "Run on another machine in the cluster (any node except this one); without this the script runs on this machine")
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("mem", "", "Memory requirement override")
-	cmd.Flags().Bool("no-self", false, "Exclude self-node from placement")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
-	cmd.Flags().Int("ddp", 0, "Distributed training: run this many ranks across the cluster, DDP init transparently handled by the shim")
-	cmd.Flags().Int("ddp-port", 0, "Explicit MASTER_PORT for --ddp (default: probe a free ephemeral port)")
+	cmd.Flags().Int("ddp", 0, "Distributed training: run up to this many ranks across the cluster (default: half the eligible nodes), DDP init transparently handled by the shim")
+	cmd.Flags().Int("ddp-port", 0, "DDP rendezvous master port (default: a free ephemeral port; pin it to pre-open a firewall rule)")
 	return cmd
 }
 
 type ddpRunOptions struct {
 	Nodes          int
-	MasterPort     int
 	DaemonPort     int
+	MasterPort     int
 	ScriptPath     string
 	ScriptArgs     []string
 	JobName        string
@@ -525,9 +551,6 @@ type ddpRunOptions struct {
 // PIPEDPEER_DDP=1, which makes the sitecustomize shim initialize the torch
 // process group and wrap DistributedDataParallel without touching user code.
 func runDDP(o ddpRunOptions) error {
-	if o.Nodes < 2 {
-		return fmt.Errorf("--ddp needs at least 2 ranks")
-	}
 	absScript, err := filepath.Abs(o.ScriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %v", err)
@@ -627,8 +650,8 @@ func runDDP(o ddpRunOptions) error {
 	masterPort := o.MasterPort
 	if masterPort == 0 {
 		// ponytail: probe a free ephemeral port locally and hand it over;
-		// rank 0's torch store binds it for real on the node, and --ddp-port
-		// is the explicit override if that ever races.
+		// rank 0's torch store binds it for real on the node. A pinned
+		// --ddp-port overrides this so firewalls can be pre-opened.
 		l, lerr := net.Listen("tcp", "0.0.0.0:0")
 		if lerr != nil {
 			return fmt.Errorf("could not probe a free master port: %v", lerr)
@@ -725,6 +748,72 @@ func ddpHasGPU(n registry.NodeRecord) bool {
 	return n.Load.GPUModel != "" || len(n.Load.GPUs) > 0
 }
 
+// ddpEligibleCount returns how many healthy nodes could host a DDP rank.
+// GPU nodes count when they fit the VRAM requirement; CPU nodes count as a
+// fallback when they fit the job's memory (plan C1: GPU preferred, CPU only
+// when it fits). requireGPU (--gpu force) hard-excludes CPU nodes.
+func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64) int {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	var all []registry.NodeRecord
+	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
+		return 0
+	}
+	count := 0
+	for _, n := range all {
+		if n.State != "healthy" {
+			continue
+		}
+		gpuOK := ddpHasGPU(n) &&
+			(requiredGPUMem <= 0 || n.Load.GPUMemBytes-n.Load.GPUMemUsedBytes >= requiredGPUMem)
+		cpuOK := !requireGPU &&
+			(requiredMem <= 0 || n.Load.AvailableMemBytes >= requiredMem)
+		if gpuOK || cpuOK {
+			count++
+		}
+	}
+	return count
+}
+
+// resolveExplicitTarget turns a --host value into (host, port, nodeID).
+// "host:port" is used as-is, with the node ID discovered from its /health
+// endpoint; a bare string that matches a registered node ID resolves to that
+// node's endpoint; otherwise it is treated as a hostname.
+func resolveExplicitTarget(daemonPort int, hostArg string) (string, int, string, error) {
+	if strings.Contains(hostArg, ":") {
+		var health struct {
+			NodeID string `json:"node_id"`
+		}
+		resp, err := http.Get(fmt.Sprintf("http://%s/health", hostArg))
+		if err != nil {
+			return "", 0, "", fmt.Errorf("could not reach daemon at %s: %w", hostArg, err)
+		}
+		defer resp.Body.Close()
+		_ = json.NewDecoder(resp.Body).Decode(&health)
+		host, portStr, _ := strings.Cut(hostArg, ":")
+		port, _ := strconv.Atoi(portStr)
+		return host, port, health.NodeID, nil
+	}
+
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
+	if err == nil {
+		var all []registry.NodeRecord
+		if err := json.NewDecoder(resp.Body).Decode(&all); err == nil {
+			for _, n := range all {
+				if n.NodeID == hostArg || strings.HasPrefix(n.NodeID, hostArg) {
+					resp.Body.Close()
+					return ddpExtractHost(n.SSHEndpoint), n.DaemonPort, n.NodeID, nil
+				}
+			}
+		}
+		resp.Body.Close()
+	}
+	return hostArg, daemonPort, "", nil
+}
+
 func ddpExtractHost(endpoint string) string {
 	s := endpoint
 	if idx := strings.Index(s, "@"); idx >= 0 {
@@ -751,12 +840,11 @@ func newMapCmd() *cobra.Command {
 			gpuMode, _ := cmd.Flags().GetString("gpu")
 			gpuID, _ := cmd.Flags().GetString("gpu-id")
 			gpuMemStr, _ := cmd.Flags().GetString("gpu-mem")
-			noSelf, _ := cmd.Flags().GetBool("no-self")
+			remote, _ := cmd.Flags().GetBool("remote")
 			strategy, _ := cmd.Flags().GetString("strategy")
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
 			pythonVersion, _ := cmd.Flags().GetString("python")
-			mode, _ := cmd.Flags().GetString("mode")
 			concurrency, _ := cmd.Flags().GetInt("concurrency")
 			resultsDir, _ := cmd.Flags().GetString("results-dir")
 			reduce, _ := cmd.Flags().GetString("reduce")
@@ -842,7 +930,7 @@ func newMapCmd() *cobra.Command {
 				JobName:          "map",
 				RequiredMemBytes: resReq.MemBytes,
 				RequiredGPUMem:   requiredGPUMem,
-				NoSelf:           noSelf,
+				NoSelf:           remote,
 				RequireGPU:       requireGPU,
 				PreferGPU:        preferGPU,
 				Strategy:         strategy,
@@ -873,7 +961,6 @@ func newMapCmd() *cobra.Command {
 				Isolate:           isolate,
 				GPU:               requestGPU,
 				GPUDevices:        gpuID,
-				Mode:              mode,
 				Envs:              envs,
 				Pkgs:              pkgs,
 				PlacementSource:   "coordinator",
@@ -910,6 +997,7 @@ func newMapCmd() *cobra.Command {
 	cmd.Flags().String("reduce", "", "Script run locally over gathered results")
 	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
+	cmd.Flags().Bool("remote", false, "Only scatter tasks to other machines (excludes this one)")
 	cmd.Flags().String("gpu", "", "GPU mode: force, prefer, off")
 	cmd.Flags().String("gpu-id", "", "Pin GPU device IDs")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM on a single GPU")
@@ -918,9 +1006,7 @@ func newMapCmd() *cobra.Command {
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("mem", "", "Memory requirement override")
-	cmd.Flags().Bool("no-self", false, "Exclude self-node from placement")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
-	cmd.Flags().String("mode", "script", "Execution mode")
 	return cmd
 }
 
