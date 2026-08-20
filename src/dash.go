@@ -48,7 +48,6 @@ type dashModel struct {
 
 var (
 	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	borderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	greenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	redStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	yellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
@@ -261,7 +260,7 @@ func (m dashModel) View() string {
 		}
 
 		stage := j.Stage
-		stageCol := whiteStyle
+		var stageCol lipgloss.Style
 		if j.Status == "running" {
 			if stage == "" {
 				stage = "running"

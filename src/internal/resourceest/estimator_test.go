@@ -87,11 +87,6 @@ func TestParseMemString(t *testing.T) {
 
 	for _, tc := range cases {
 		got := ParseMemString(tc.input)
-		// Allow small rounding differences from go-humanize
-		diff := got - tc.expected
-		if diff < 0 {
-			diff = -diff
-		}
 		// go-humanize may interpret GB as 10^9 vs GiB as 2^30. Accept either.
 		if tc.expected > 0 && got == 0 {
 			t.Errorf("ParseMemString(%q) = %d, want non-zero ~%d", tc.input, got, tc.expected)

@@ -260,3 +260,34 @@ func QueryPeakMem(scriptPath string, limit int) []int64 {
 	}
 	return peaks
 }
+
+// Prune removes history entries whose directory has not been modified within
+// olderThan (dir mtime ≈ when the run finished and its artifacts were
+// written). Returns the number of entries removed.
+func Prune(olderThan time.Duration) (int, error) {
+	entries, err := os.ReadDir(BaseDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	cutoff := time.Now().Add(-olderThan)
+	removed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.RemoveAll(filepath.Join(BaseDir(), e.Name())); err != nil {
+				return removed, err
+			}
+			removed++
+		}
+	}
+	return removed, nil
+}
