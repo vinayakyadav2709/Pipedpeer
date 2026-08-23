@@ -85,10 +85,10 @@ func main() {
 			os.Exit(1)
 		}
 
-		// Rewrite into: run --script <script> --strategy round-robin --remote --isolate=false
+		// Rewrite into: run <script> --strategy round-robin --remote --isolate=false
 		newArgs := []string{
 			"run",
-			"--script", scriptPath,
+			scriptPath,
 			"--strategy", "round-robin",
 			"--remote",
 			"--isolate=false",
@@ -134,7 +134,7 @@ func newStartCmd() *cobra.Command {
 		Use:   "start",
 		Short: "Start the local daemon process",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			port, _ := cmd.Flags().GetInt("daemon-port")
+			port, _ := cmd.Flags().GetInt("port")
 			maxConcurrent, _ := cmd.Flags().GetInt("max-concurrent")
 			nodeID, err := identity.GetOrCreate()
 			if err != nil {
@@ -156,7 +156,7 @@ func newStartCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().Int("daemon-port", 38080, "Local daemon port")
+	cmd.Flags().Int("port", 38080, "Local daemon port")
 	cmd.Flags().Int("max-concurrent", 0,
 		"Maximum tasks this node accepts at once (0 = unlimited; also settable via PIPEDPEER_MAX_CONCURRENT)")
 	return cmd
@@ -218,16 +218,21 @@ Use -y to skip the install confirmation prompt.`,
 
 func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "run",
+		Use:   "run <script.py> [args...]",
 		Short: "Submit and execute a task on a remote node",
-		Long:  "Submit a Python script for remote execution. Auto-discovers nodes if --host is not specified.",
+		Long: `Submit a Python script for remote execution. Auto-discovers nodes if --host is not specified.
+
+The first argument is the script path; the remaining arguments are passed
+through to the script itself (like python). Use -- to pass flags that start
+with a dash: pipedpeer run train.py -- --lr 0.1`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			scriptPath, _ := cmd.Flags().GetString("script")
+			scriptPath := args[0]
+			args = args[1:]
 			daemonHost, _ := cmd.Flags().GetString("host")
-			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			daemonPort, _ := cmd.Flags().GetInt("port")
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
-			intercept, _ := cmd.Flags().GetBool("intercept")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
 			pythonVersion, _ := cmd.Flags().GetString("python")
 			registryURL, _ := cmd.Flags().GetString("registry")
@@ -243,10 +248,6 @@ func newRunCmd() *cobra.Command {
 			ddpNodes, _ := cmd.Flags().GetInt("ddp")
 			ddpPort, _ := cmd.Flags().GetInt("ddp-port")
 			var targetID string
-
-			if scriptPath == "" {
-				return fmt.Errorf("--script is required")
-			}
 
 			// GPU requirement:
 			//   force  — only GPU nodes are eligible
@@ -308,7 +309,6 @@ func newRunCmd() *cobra.Command {
 						ScriptArgs:     args,
 						JobName:        jobName,
 						Isolate:        isolate,
-						Intercept:      intercept,
 						RegistryURL:    registryURL,
 						PythonVersion:  pythonVersion,
 						Pkgs:           pkgs,
@@ -404,7 +404,7 @@ func newRunCmd() *cobra.Command {
 						TargetID:          targetNodeID,
 						JobName:           jobName,
 						Isolate:           isolate,
-						Intercept:         intercept,
+						Intercept:         true,
 						GPU:               requestGPU,
 						GPUDevices:        devices,
 						PythonVersion:     pythonVersion,
@@ -475,7 +475,7 @@ func newRunCmd() *cobra.Command {
 				TargetID:          targetID,
 				JobName:           jobName,
 				Isolate:           isolate,
-				Intercept:         intercept,
+				Intercept:         true,
 				GPU:               requestGPU,
 				GPUDevices:        gpuID,
 				PythonVersion:     pythonVersion,
@@ -499,12 +499,10 @@ func newRunCmd() *cobra.Command {
 			return runErr
 		},
 	}
-	cmd.Flags().String("script", "", "Path to Python script")
 	cmd.Flags().String("host", "", "Daemon host:port, or a registered node ID")
-	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
+	cmd.Flags().Int("port", 38080, "Daemon API port")
 	cmd.Flags().String("job-name", "", "Optional job name")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
-	cmd.Flags().Bool("intercept", true, "Intercept parallel primitives and route them across the cluster")
 	cmd.Flags().String("gpu", "", "GPU mode: force (GPU node required), prefer (GPU first, CPU fallback), off (CPU only). Default: infer from script imports")
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
@@ -517,6 +515,7 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
+	_ = cmd.Flags().MarkHidden("strategy") // round-robin is only set internally by the python shorthand
 	cmd.Flags().Int("ddp", 0, "Distributed training: run up to this many ranks across the cluster (default: half the eligible nodes), DDP init transparently handled by the shim")
 	cmd.Flags().Int("ddp-port", 0, "DDP rendezvous master port (default: a free ephemeral port; pin it to pre-open a firewall rule)")
 	return cmd
@@ -530,7 +529,6 @@ type ddpRunOptions struct {
 	ScriptArgs     []string
 	JobName        string
 	Isolate        bool
-	Intercept      bool
 	RegistryURL    string
 	PythonVersion  string
 	Pkgs           []string
@@ -649,15 +647,16 @@ func runDDP(o ddpRunOptions) error {
 	}
 	masterPort := o.MasterPort
 	if masterPort == 0 {
-		// ponytail: probe a free ephemeral port locally and hand it over;
-		// rank 0's torch store binds it for real on the node. A pinned
-		// --ddp-port overrides this so firewalls can be pre-opened.
-		l, lerr := net.Listen("tcp", "0.0.0.0:0")
-		if lerr != nil {
-			return fmt.Errorf("could not probe a free master port: %v", lerr)
-		}
-		masterPort = l.Addr().(*net.TCPAddr).Port
-		l.Close()
+		// ponytail: fixed base port (torch convention 29500) so a firewall is
+		// opened ONCE for the small range instead of per-run. The port is
+		// negotiated live against the leader host: connection refused =
+		// nothing listening = safe to claim; occupied = next in range. Two
+		// simultaneous DDP runs whose leaders land on the same machine fit
+		// as long as they stay inside the span — beyond that, pin an exact
+		// --ddp-port. Future zero-firewall option: tunnel the rendezvous
+		// through the daemons' already-open 38080 channel (~a day of work,
+		// makes the orchestrator a relay, extra hop to debug).
+		masterPort = ddpPickMasterPort(masterAddr, 29500, 10)
 	}
 
 	fmt.Printf("=== Distributed training: %d ranks ===\n", o.Nodes)
@@ -738,7 +737,28 @@ func runDDP(o ddpRunOptions) error {
 			firstErr = fmt.Errorf("rank %d failed: %w", i, err)
 		}
 	}
+	if firstErr != nil {
+		fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n",
+			masterAddr, masterPort)
+	}
 	return firstErr
+}
+
+// ddpPickMasterPort picks the DDP rendezvous port by probing the leader host
+// live: an accepted dial means occupied (skip to the next), connection refused
+// means nothing is listening there yet — safe to claim for rank 0's store. A
+// dial timeout is ambiguous (firewall drop) and indistinguishable across the
+// whole range, so return the base and let the shim's bounded rendezvous
+// timeout surface it as a clear failure instead of hanging forever.
+func ddpPickMasterPort(host string, base, span int) int {
+	for p := base; p < base+span; p++ {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(p)), time.Second)
+		if err != nil {
+			return p
+		}
+		c.Close()
+	}
+	return base
 }
 
 func ddpHasGPU(n registry.NodeRecord) bool {
@@ -834,7 +854,7 @@ func newMapCmd() *cobra.Command {
 			"its own results directory and PIPEDPEER_SHARD_ID/NUM_SHARDS envs.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scriptPath, _ := cmd.Flags().GetString("script")
-			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			daemonPort, _ := cmd.Flags().GetInt("port")
 			registryURL, _ := cmd.Flags().GetString("registry")
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			gpuMode, _ := cmd.Flags().GetString("gpu")
@@ -995,7 +1015,7 @@ func newMapCmd() *cobra.Command {
 	cmd.Flags().Int("concurrency", 0, "Max concurrent tasks (default: all)")
 	cmd.Flags().String("results-dir", "", "Where per-task results are written")
 	cmd.Flags().String("reduce", "", "Script run locally over gathered results")
-	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
+	cmd.Flags().Int("port", 38080, "Daemon API port")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
 	cmd.Flags().Bool("remote", false, "Only scatter tasks to other machines (excludes this one)")
 	cmd.Flags().String("gpu", "", "GPU mode: force, prefer, off")
@@ -1007,6 +1027,7 @@ func newMapCmd() *cobra.Command {
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
+	_ = cmd.Flags().MarkHidden("strategy") // round-robin is only set internally by the python shorthand
 	return cmd
 }
 
@@ -1025,7 +1046,7 @@ func newDashboardCmd() *cobra.Command {
 		Use:   "dashboard",
 		Short: "Live unified view of all workers, peers, and recent tasks (Ctrl+C / q to exit)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			daemonPort, _ := cmd.Flags().GetInt("port")
 			interval, _ := cmd.Flags().GetDuration("interval")
 
 			nodeID, err := identity.GetOrCreate()
@@ -1049,7 +1070,7 @@ func newDashboardCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().Int("daemon-port", 38080, "Daemon API port")
+	cmd.Flags().Int("port", 38080, "Daemon API port")
 	cmd.Flags().Duration("interval", 2*time.Second, "Refresh interval (e.g. 1s, 2s, 500ms)")
 	return cmd
 }
@@ -1195,7 +1216,7 @@ func newRegistryCmd() *cobra.Command {
 func newNodesCmd() *cobra.Command {
 	// Bare "pipedpeer nodes" lists; subcommands manage membership.
 	listRun := func(cmd *cobra.Command, args []string) error {
-		daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+		daemonPort, _ := cmd.Flags().GetInt("port")
 		return printNodes(daemonPort)
 	}
 
@@ -1205,7 +1226,7 @@ func newNodesCmd() *cobra.Command {
 		Long:  "Nodes are auto-discovered on the LAN. Use 'nodes add' to register workers that discovery cannot reach.",
 		RunE:  listRun,
 	}
-	cmd.PersistentFlags().Int("daemon-port", 38080, "Local daemon API port")
+	cmd.PersistentFlags().Int("port", 38080, "Local daemon API port")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
@@ -1218,7 +1239,7 @@ func newNodesCmd() *cobra.Command {
 		Short: "Register a worker node",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			daemonPort, _ := cmd.Flags().GetInt("port")
 			host := args[0]
 			port, err := strconv.Atoi(args[1])
 			if err != nil || port < 1 || port > 65535 {
@@ -1243,7 +1264,7 @@ func newNodesCmd() *cobra.Command {
 		Use:   "remove [host]",
 		Short: "Remove nodes (--all clears everything, or give a host for manual entries)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			daemonPort, _ := cmd.Flags().GetInt("port")
 			all, _ := cmd.Flags().GetBool("all")
 
 			target := "_all"
@@ -1319,9 +1340,9 @@ func newTasksCmd() *cobra.Command {
 		Aliases: []string{"ps"},
 		Short:   "List tasks running across the cluster and the node running each",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("daemon-port")
+			daemonPort, _ := cmd.Flags().GetInt("port")
 			watch, _ := cmd.Flags().GetBool("watch")
-			interval, _ := cmd.Flags().GetInt("interval")
+			interval, _ := cmd.Flags().GetDuration("interval")
 
 			render := func() error {
 				tasks, err := fetchClusterTasks(daemonPort)
@@ -1358,13 +1379,13 @@ func newTasksCmd() *cobra.Command {
 				if err := render(); err != nil {
 					fmt.Printf("error: %v\n", err)
 				}
-				time.Sleep(time.Duration(interval) * time.Second)
+				time.Sleep(interval)
 			}
 		},
 	}
-	cmd.Flags().Int("daemon-port", 38080, "Local daemon API port")
+	cmd.Flags().Int("port", 38080, "Local daemon API port")
 	cmd.Flags().Bool("watch", false, "Refresh continuously")
-	cmd.Flags().Int("interval", 2, "Refresh interval in seconds when --watch is set")
+	cmd.Flags().Duration("interval", 2000*time.Millisecond, "Refresh interval (e.g. 500ms, 2000ms)")
 	return cmd
 }
 
@@ -1463,11 +1484,11 @@ func newPingCmd() *cobra.Command {
 		Long:  "Polls /health on each worker every second and displays a live status table.",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			intervalSec, _ := cmd.Flags().GetInt("interval")
-			return ping.Run(args, time.Duration(intervalSec)*time.Second)
+			interval, _ := cmd.Flags().GetDuration("interval")
+			return ping.Run(args, interval)
 		},
 	}
-	cmd.Flags().Int("interval", 1, "Poll interval in seconds")
+	cmd.Flags().Duration("interval", 1000*time.Millisecond, "Poll interval (e.g. 1000ms)")
 	return cmd
 }
 
@@ -1588,6 +1609,13 @@ func runDaemon(args []string) {
 	server.SetSelfInfo(sshEp, port, heartbeat.Capabilities(nodeID))
 	server.SetDiscoverFn(func() []daemonapi.NodeDiscovered {
 		found := discovery.Discover(1 * time.Second)
+		if len(found) == 0 {
+			// ponytail: UDP broadcast first (free when the network allows
+			// it); fall back to a direct /health sweep of the local subnet
+			// only when it comes up empty (AP client isolation, multicast
+			// filtering).
+			found = discovery.DiscoverTCP(port, 3*time.Second)
+		}
 		out := make([]daemonapi.NodeDiscovered, 0, len(found))
 		for _, n := range found {
 			out = append(out, daemonapi.NodeDiscovered{

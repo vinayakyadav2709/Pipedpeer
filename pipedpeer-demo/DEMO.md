@@ -30,10 +30,10 @@ pipedpeer-demo/
 
 | # | Command (run in `pipedpeer-demo/`) |
 |---|---|
-| 1 | `pipedpeer run --script 01_sklearn_rf.py --intercept --remote --isolate=false` |
-| 2 | `pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false` |
-| 3 | `pipedpeer run --script 03_pandas_ooc.py --intercept --remote --isolate=false ` |
-| 4 | `pipedpeer run --script 04_torch_ddp.py --intercept --remote --ddp 3 --gpu force --isolate=false` |
+| 1 | `pipedpeer run 01_sklearn_rf.py --remote --isolate=false` |
+| 2 | `pipedpeer run 02_numpy_heavy.py --remote --isolate=false` |
+| 3 | `pipedpeer run 03_pandas_ooc.py --remote --isolate=false ` |
+| 4 | `pipedpeer run 04_torch_ddp.py --remote --ddp 3 --gpu force --isolate=false` |
 
 Notes:
 - `--remote` keeps placement off the laptop (weak orchestrator).
@@ -165,9 +165,10 @@ retry), the run still completes. `pipedpeer start` on that worker afterwards.
 - **Pool fan-out silent / local-only** → peers must already have the closure;
   re-run `setup.sh` rehearsal. (Spill only targets nodes whose store is
   materialized — by design.)
-- **DDP ranks fail to rendezvous** → gloo needs the master port reachable;
-  firewall may block the probed port. Pin it once in the run command:
-  `--ddp-port 29500` and allow that one port inbound on the rank-0 worker.
+- **DDP ranks fail to rendezvous** → the leader (rank 0) hosts the meet-up on
+  port 29500 (next free up to 29510 if busy). Open the range once on each
+  worker: `sudo ufw allow 29500:29510/tcp`. Ranks fail within ~2 min with a
+  clear timeout instead of hanging; `--ddp-port` pins an exact port.
 - **Isolation errors (crun missing)** → you forgot `--isolate=false`.
 - **First run still slow** → closures build in the rehearsal; if you skipped
   it, expect minutes of `[1/7]`/`[2/7]` Nix work on the first live run.

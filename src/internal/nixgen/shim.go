@@ -1678,8 +1678,13 @@ def _install_ddp():
         backend = os.environ.get("PIPEDPEER_DDP_BACKEND", "gloo")
         if backend == "nccl" and not _th.cuda.is_available():
             backend = "gloo"
+        # Bound the rendezvous: torch's default is 30 minutes, which turns a
+        # firewalled master port into a silent infinite hang. Fail in minutes
+        # with a traceback instead; PIPEDPEER_DDP_TIMEOUT overrides (seconds).
+        from datetime import timedelta
+        _timeout = timedelta(seconds=int(os.environ.get("PIPEDPEER_DDP_TIMEOUT", "120")))
         _dist.init_process_group(backend=backend, init_method="env://",
-                                 rank=_RANK, world_size=_WORLD)
+                                 rank=_RANK, world_size=_WORLD, timeout=_timeout)
         _log("ddp process group ready (rank %d/%d, %s)" % (_RANK, _WORLD, backend))
 
     # Patch at Optimizer.__init__ instead of Optimizer.step: the concrete
