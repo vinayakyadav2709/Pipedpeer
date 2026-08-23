@@ -123,7 +123,7 @@ run_demo() { # run_demo <name> <script> <extra-args> <grep>
   section "4. run $1"
   snapshot "$1-start"   # processes/logs/store/files before: the handoff
   timeout 5400 docker exec pp-orch sh -c \
-    "cd /workspace && pipedpeer run --script $2 --intercept --remote --isolate=false $3" \
+    "cd /workspace && pipedpeer run $2 --remote --isolate=false $3" \
     > "$LOG/$1.out" 2>&1
   ec=$?
   [ "$ec" = 0 ] && echo "exit ok" || { echo "EXIT FAIL ($ec) — tail:"; tail -8 "$LOG/$1.out"; }
@@ -209,7 +209,7 @@ fi
 section "6. pipedpeer tasks --watch during a live run"
 docker exec -d pp-orch sh -c "pipedpeer tasks --watch > /tmp/tasks.log 2>&1"
 timeout 900 docker exec pp-orch sh -c \
-  "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false" \
+  "cd /workspace && pipedpeer run 02_numpy_heavy.py --remote --isolate=false" \
   > "$LOG/02b.out" 2>&1
 docker exec pp-orch sh -c "pkill -f 'tasks --watch' || true" >/dev/null 2>&1
 sleep 1
@@ -243,7 +243,7 @@ check "prune removed the old entry" "pruned 1" "$LOG/prune.txt"
 
 # --- 9. weak orchestrator: CPU proof ----------------------------------------
 section "9. CPU proof (docker stats during a heavy run)"
-docker exec -d pp-orch sh -c "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false > /tmp/02c.out 2>&1"
+docker exec -d pp-orch sh -c "cd /workspace && pipedpeer run 02_numpy_heavy.py --remote --isolate=false > /tmp/02c.out 2>&1"
 sleep 25
 for i in 1 2 3 4; do
   docker stats --no-stream pp-orch pp-worker1 pp-worker2 pp-worker3 >> "$LOG/stats.txt"

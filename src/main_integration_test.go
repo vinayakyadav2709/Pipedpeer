@@ -392,7 +392,7 @@ echo "hidden" > secret.txt
 	nodeIDOut := strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
 	if nodeIDOut == "" {
 		// Daemon hasn't created identity yet — start it explicitly first
-		dockerExec(t, ctx, labDir, "/pipedpeer start --daemon-port 38080 && sleep 2")
+		dockerExec(t, ctx, labDir, "/pipedpeer start --port 38080 && sleep 2")
 		nodeIDOut = strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
 	}
 	if nodeIDOut == "" {
@@ -400,7 +400,7 @@ echo "hidden" > secret.txt
 	}
 
 	// Run the compiled binary from inside worker1 — no --host means self
-	out, err := dockerExecE(ctx, labDir, "cd /tmp/sync-test && /pipedpeer run --script script.py -e MY_VAR=testvar")
+	out, err := dockerExecE(ctx, labDir, "cd /tmp/sync-test && /pipedpeer run script.py -e MY_VAR=testvar")
 	if err != nil {
 		t.Fatalf("cli run failed: %v\noutput: %s", err, out)
 	}

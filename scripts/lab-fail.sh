@@ -53,7 +53,7 @@ if __name__ == "__main__":
 EOF
 
 echo "launching intercept run..."
-"$cli" run --script /tmp/pipedpeer-fail-task.py --intercept > /tmp/pipedpeer-fail-run.log 2>&1 &
+"$cli" run /tmp/pipedpeer-fail-task.py > /tmp/pipedpeer-fail-run.log 2>&1 &
 runpid=$!
 
 # Wait until some worker is hosting the job, then kill a *different* worker

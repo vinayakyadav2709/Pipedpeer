@@ -20,7 +20,7 @@ func TestStartStopStatusLifecycle(t *testing.T) {
 
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 
-	out := runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
+	out := runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
 	if !strings.Contains(out, "started daemon") && !strings.Contains(out, "daemon already running") {
 		t.Fatalf("expected daemon start output, got: %s", out)
 	}
@@ -50,16 +50,16 @@ func TestRunCheckOnlyAutoStartsDaemon(t *testing.T) {
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 
 	// First start the daemon so it has a node-id to accept against
-	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
+	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
 
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 
 	out := runCLIWithEnv(t,
 		stateDir, xdg,
 		"run",
-		"--script", scriptPath,
+		scriptPath,
 		"--host", fmt.Sprintf("127.0.0.1:%d", port),
-		"--daemon-port", fmt.Sprintf("%d", port),
+		"--port", fmt.Sprintf("%d", port),
 		"--check-only",
 	)
 
@@ -80,7 +80,7 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	scriptPath := writeScript(t)
 
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
-	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
+	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
 	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
 
 	// --remote excludes this machine, and with nothing else in the cluster
@@ -88,8 +88,8 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	_, errOut, err := runCLIEWithEnv(t,
 		stateDir, xdg,
 		"run",
-		"--script", scriptPath,
-		"--daemon-port", fmt.Sprintf("%d", port),
+		scriptPath,
+		"--port", fmt.Sprintf("%d", port),
 		"--remote",
 		"--check-only",
 	)
@@ -374,15 +374,15 @@ func TestAutoPlacementSelectsSelf(t *testing.T) {
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 
 	// Start daemon first
-	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--daemon-port", fmt.Sprintf("%d", port))
+	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
 	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
 
 	// Run with --check-only, NO --host
 	out := runCLIWithEnv(t,
 		stateDir, xdg,
 		"run",
-		"--script", scriptPath,
-		"--daemon-port", fmt.Sprintf("%d", port),
+		scriptPath,
+		"--port", fmt.Sprintf("%d", port),
 		"--check-only",
 	)
 
