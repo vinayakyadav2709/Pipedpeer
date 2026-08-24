@@ -183,6 +183,33 @@ func gpuDriverLibDir() string {
 	return ""
 }
 
+// gpuDriverLibs lists the host GPU driver's shared objects. Only these get
+// into the sandbox: bind-mounting the whole directory would put the host's
+// glibc ahead of the closure's on the search path, and the two are not
+// interchangeable.
+//
+// The libraries are versioned (libcuda.so.1 -> libcuda.so.580.65.06) and torch
+// dlopens the SONAME, so both the link and its target have to travel.
+func gpuDriverLibs(dir string) []string {
+	if dir == "" {
+		return nil
+	}
+	var libs []string
+	for _, pattern := range []string{"libcuda.so*", "libnvidia-*.so*", "libnvcuvid.so*"} {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			continue
+		}
+		libs = append(libs, matches...)
+	}
+	return libs
+}
+
+// gpuDriverMountDir is where the driver libraries land inside the sandbox.
+// NixOS uses this path for exactly this purpose, so a closure that already
+// looks there finds them without help.
+const gpuDriverMountDir = "/run/opengl-driver/lib"
+
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
 		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
@@ -568,6 +595,25 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 					Major: d.Major, Minor: d.Minor,
 					Permissions: "rwm",
 				})
+			}
+
+			// The device nodes alone are not enough: without libcuda.so.1 the
+			// runtime has nothing to dlopen, so torch reports no CUDA device
+			// and silently trains on the CPU — a 17x slowdown that looks like
+			// a working run. nvidia-container-toolkit would bridge these, but
+			// crun on its own does not, and crun is the only runtime we
+			// require.
+			if libs := gpuDriverLibs(gpuDriverLibDir()); len(libs) > 0 {
+				for _, lib := range libs {
+					ociCfg.Mounts = append(ociCfg.Mounts, ociMount{
+						Destination: filepath.Join(gpuDriverMountDir, filepath.Base(lib)),
+						Type:        "bind",
+						Source:      lib,
+						Options:     []string{"rbind", "ro"},
+					})
+				}
+				ociCfg.Process.Env = append(ociCfg.Process.Env,
+					"LD_LIBRARY_PATH="+gpuDriverMountDir)
 			}
 			// Determine which GPU devices to expose
 			gpuDevices := "all"

@@ -115,3 +115,31 @@ func TestGeneratedFlakesPinNixpkgs(t *testing.T) {
 		})
 	}
 }
+
+// torch pulls its own tree into a pip site dir, but it imports numpy from the
+// surrounding nix env at runtime. A script whose only import is torch used to
+// produce an env with no packages at all, so torch logged "Failed to
+// initialize NumPy" and lost array interop.
+func TestTorchFlakeAlwaysIncludesNumpy(t *testing.T) {
+	tests := []struct {
+		name string
+		pkgs []string
+	}{
+		{"torch alone", []string{"torch"}},
+		{"torch with numpy already asked for", []string{"torch", "numpy"}},
+		{"torch beside something else", []string{"torch", "pandas"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flake := GenerateFlakeForArch(tt.pkgs, "python3", "x86_64-linux")
+			if !strings.Contains(flake, "ps.numpy") {
+				t.Fatalf("torch env without numpy:\n%s", flake)
+			}
+			if strings.Count(flake, "ps.numpy") != 1 {
+				t.Fatalf("numpy listed %d times, want 1:\n%s",
+					strings.Count(flake, "ps.numpy"), flake)
+			}
+		})
+	}
+}
