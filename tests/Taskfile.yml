@@ -50,34 +50,28 @@ tasks:
 
   send-task:
     desc: Run test project on lab worker
-    vars:
-      TARGET_ID:
-        sh: cat .task/id.txt 2>/dev/null || echo MISSING-run-fetch-id-first
     cmds:
-      - ../bin/pipedpeer run --host {{.HOST}} --daemon-port {{.PORT}} --target-id {{.TARGET_ID}} --isolate=false --script {{.SCRIPT}}
+      - ../bin/pipedpeer run --host {{.HOST}} --port {{.PORT}} --isolate=false {{.SCRIPT}}
 
   multi:
     desc: Send 3 tasks to the worker with status checks between each
-    vars:
-      TARGET_ID:
-        sh: cat .task/id.txt 2>/dev/null || echo MISSING-run-fetch-id-first
     cmds:
       - |
         echo 'Worker status before tasks:'
         curl -s http://{{.HOST}}:{{.PORT}}/health
         echo
         echo '-- Task 1/3 --'
-        ../bin/pipedpeer run --host {{.HOST}} --daemon-port {{.PORT}} --target-id {{.TARGET_ID}} --isolate=false --script ../test_project/task1.py
+        ../bin/pipedpeer run --host {{.HOST}} --port {{.PORT}} --isolate=false ../test_project/task1.py
         echo
         curl -s http://{{.HOST}}:{{.PORT}}/health
         echo
         echo '-- Task 2/3 --'
-        ../bin/pipedpeer run --host {{.HOST}} --daemon-port {{.PORT}} --target-id {{.TARGET_ID}} --isolate=false --script ../test_project/task2.py
+        ../bin/pipedpeer run --host {{.HOST}} --port {{.PORT}} --isolate=false ../test_project/task2.py
         echo
         curl -s http://{{.HOST}}:{{.PORT}}/health
         echo
         echo '-- Task 3/3 --'
-        ../bin/pipedpeer run --host {{.HOST}} --daemon-port {{.PORT}} --target-id {{.TARGET_ID}} --isolate=false --script ../test_project/task3.py
+        ../bin/pipedpeer run --host {{.HOST}} --port {{.PORT}} --isolate=false ../test_project/task3.py
         echo
         echo 'Final worker status:'
         curl -s http://{{.HOST}}:{{.PORT}}/health
@@ -112,7 +106,7 @@ tasks:
         echo "Bursting 10 tasks..." | tee -a "$LOG"
         TASKS=10
         for t in $(seq 1 $TASKS); do
-          ../bin/pipedpeer run --remote --isolate=false --script ../test_project/dispatch_t${t}.py \
+          ../bin/pipedpeer run --remote --isolate=false ../test_project/dispatch_t${t}.py \
             > .task/logs/task${t}.log 2>&1 &
         done
         wait

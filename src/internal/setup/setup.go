@@ -44,10 +44,38 @@ func getPrereqs() []prereq {
 		}},
 		{name: "crun", check: binaryCheck("crun"), install: func() error {
 			fmt.Println("    → Installing crun (OCI runtime)...")
-			cmd := exec.Command("nix-env", "-iA", "nixpkgs.crun")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			return cmd.Run()
+			// Modern Nix (Determinate) often ships without nix-env, and some
+			// machines have no nix at all — try each channel until LookPath
+			// confirms a usable crun.
+			attempts := [][]string{
+				{"nix", "profile", "install", "nixpkgs#crun"},
+				{"nix-env", "-iA", "nixpkgs.crun"},
+				{"apt-get", "install", "-y", "crun"},
+				{"dnf", "install", "-y", "crun"},
+			}
+			var lastErr error
+			for _, argv := range attempts {
+				if _, err := exec.LookPath(argv[0]); err != nil {
+					continue
+				}
+				// System package managers need root; nix installs per-user.
+				if argv[0] == "apt-get" || argv[0] == "dnf" {
+					if os.Geteuid() != 0 {
+						argv = append([]string{"sudo"}, argv...)
+					}
+				}
+				cmd := exec.Command(argv[0], argv[1:]...)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				lastErr = cmd.Run()
+				if lastErr == nil && binaryCheck("crun")() {
+					return nil
+				}
+			}
+			if lastErr == nil {
+				lastErr = fmt.Errorf("no installer available (tried nix, apt, dnf)")
+			}
+			return fmt.Errorf("crun install failed: %w", lastErr)
 		}},
 	}
 }

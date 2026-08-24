@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,63 @@ func TestExtractResultsClassifiesNewAndUpdated(t *testing.T) {
 	nested, err := os.ReadFile(filepath.Join(outDir, "output", "result.txt"))
 	if err != nil || string(nested) != "42" {
 		t.Errorf("nested file not written: %q (%v)", nested, err)
+	}
+}
+
+// TestExtractResultsAppliesDeletions confirms the .pipedpeer-deleted.json
+// entry removes exactly the listed files locally and reports them.
+func TestExtractResultsAppliesDeletions(t *testing.T) {
+	outDir := t.TempDir()
+	gone := filepath.Join(outDir, "delete_me.txt")
+	nested := filepath.Join(outDir, "sub", "also_gone.txt")
+	if err := os.MkdirAll(filepath.Dir(nested), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gone, []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nested, []byte("y"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := extractResults(tarOf(t, map[string]string{
+		"keep.txt":          "here",
+		deletedManifestName: `["delete_me.txt","sub/also_gone.txt"]`,
+	}), outDir)
+	if err != nil {
+		t.Fatalf("extractResults: %v", err)
+	}
+
+	for _, p := range []string{gone, nested} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("expected %s deleted, stat err=%v", p, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "keep.txt")); err != nil {
+		t.Errorf("keep.txt should survive: %v", err)
+	}
+	if len(manifest.Deleted) != 2 {
+		t.Errorf("expected 2 deletions reported, got %v", manifest.Deleted)
+	}
+}
+
+// TestExtractResultsRejectsDeletionEscape keeps a hostile manifest from
+// removing anything outside the sync root.
+func TestExtractResultsRejectsDeletionEscape(t *testing.T) {
+	outDir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "victim.txt")
+	if err := os.WriteFile(outside, []byte("precious"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := extractResults(tarOf(t, map[string]string{
+		deletedManifestName: `["../victim.txt"]`,
+	}), outDir)
+	if err == nil || !strings.Contains(err.Error(), "refusing deletion") {
+		t.Fatalf("expected deletion escape refusal, got %v", err)
+	}
+	if got, rerr := os.ReadFile(outside); rerr != nil || string(got) != "precious" {
+		t.Errorf("outside file was modified: %q (%v)", got, rerr)
 	}
 }
 

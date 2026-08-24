@@ -34,6 +34,10 @@ _URL = os.environ.get("PIPEDPEER_DAEMON_URL", "")
 _STORE = os.environ.get("PIPEDPEER_STORE_PATH", "")
 _NODE_ID = os.environ.get("PIPEDPEER_NODE_ID", "")
 _NUM_SHARDS = os.environ.get("PIPEDPEER_NUM_SHARDS", "0")
+# Where the job was submitted from (host:port of the submitter's daemon).
+# The executing node sinks this peer to the end of its spill order so an
+# idle orchestrator never outranks real workers; empty when unset.
+_SUBMITTER = os.environ.get("PIPEDPEER_SUBMITTER", "")
 
 
 def _log(msg):
@@ -598,7 +602,8 @@ def _pool_send(header, globals_pickle, items, timeout):
         body += struct.pack(">I", len(it)) + it
     req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                  headers={"Content-Type": "application/vnd.pipedpeer.frames",
-                                          "X-Pipedpeer-Store": _STORE})
+                                          "X-Pipedpeer-Store": _STORE,
+                                          "X-Pipedpeer-Submitter": _SUBMITTER})
     with _daemon_open(req, timeout) as resp:
         data = resp.read()
     nl = data.find(b"\n")
@@ -1678,8 +1683,13 @@ def _install_ddp():
         backend = os.environ.get("PIPEDPEER_DDP_BACKEND", "gloo")
         if backend == "nccl" and not _th.cuda.is_available():
             backend = "gloo"
+        # Bound the rendezvous: torch's default is 30 minutes, which turns a
+        # firewalled master port into a silent infinite hang. Fail in minutes
+        # with a traceback instead; PIPEDPEER_DDP_TIMEOUT overrides (seconds).
+        from datetime import timedelta
+        _timeout = timedelta(seconds=int(os.environ.get("PIPEDPEER_DDP_TIMEOUT", "120")))
         _dist.init_process_group(backend=backend, init_method="env://",
-                                 rank=_RANK, world_size=_WORLD)
+                                 rank=_RANK, world_size=_WORLD, timeout=_timeout)
         _log("ddp process group ready (rank %d/%d, %s)" % (_RANK, _WORLD, backend))
 
     # Patch at Optimizer.__init__ instead of Optimizer.step: the concrete

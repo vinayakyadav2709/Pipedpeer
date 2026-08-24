@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -430,8 +431,10 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 	// Interception: put the workspace shim on PYTHONPATH and enable it. The
 	// isolated path rebuilds env from scratch below, so this only feeds the
-	// non-isolated branch; both honour cfg.Intercept.
-	if cfg.Intercept {
+	// non-isolated branch; both honour cfg.Intercept. The --intercept flag
+	// is gone (always on); a job can still opt out per run by passing
+	// PIPEDPEER_SHIM=0 in its own Envs.
+	if cfg.Intercept && !envsContain(cfg.Envs, "PIPEDPEER_SHIM=0") {
 		cfg.Envs = append(cfg.Envs,
 			"PYTHONPATH="+filepath.Join(job.WorkDir, ".pipedpeer", "shim"),
 			"PIPEDPEER_SHIM=1",
@@ -447,6 +450,16 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		if !envsContain(cfg.Envs, "PIPEDPEER_NUM_SHARDS=") {
 			cfg.Envs = append(cfg.Envs,
 				fmt.Sprintf("PIPEDPEER_NUM_SHARDS=%d", s.pool.spillPeerCount(cfg.StorePath)+1))
+		}
+	}
+
+	// Isolation needs crun. If setup never managed to install it, degrade to
+	// unisolated execution with a loud warning instead of failing the job —
+	// the sandbox is a hardening layer, not a functional requirement.
+	if cfg.Isolate {
+		if _, err := exec.LookPath("crun"); err != nil {
+			outCh <- OutputMessage{E: "[pipedpeer] crun not found on this node — running unisolated\n"}
+			cfg.Isolate = false
 		}
 	}
 
@@ -683,11 +696,18 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 // whole work dir back would overwrite the submitter's own source files with
 // copies of what they just uploaded, and makes every task in a fan-out
 // re-transfer the entire project.
+// deletedManifestName is the tar entry carrying the list of files the job
+// deleted relative to its work dir. The CLI removes exactly these from the
+// submitter's folder after extraction — scoped to what this job uploaded,
+// so unrelated local files are never touched.
+const deletedManifestName = ".pipedpeer-deleted.json"
+
 func writeResultsTar(w io.Writer, job *JobRecord) error {
 	tw := tar.NewWriter(w)
 	defer tw.Close()
 
-	return filepath.WalkDir(job.WorkDir, func(path string, d fs.DirEntry, err error) error {
+	present := map[string]bool{}
+	walkErr := filepath.WalkDir(job.WorkDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -703,6 +723,7 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		present[rel] = true
 
 		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
 			return nil
@@ -724,6 +745,34 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		_, err = io.Copy(tw, f)
 		return err
 	})
+	if walkErr != nil {
+		return walkErr
+	}
+
+	// Deletion propagation: shipped out for this job but gone by the end of
+	// it. Only successful runs ever reach the results endpoint (execution.go
+	// returns before downloading on failure), so a crash cannot wipe files.
+	var deleted []string
+	for rel := range job.Uploaded {
+		if !present[rel] {
+			deleted = append(deleted, rel)
+		}
+	}
+	if len(deleted) == 0 {
+		return nil
+	}
+	sort.Strings(deleted)
+	payload, err := json.Marshal(deleted)
+	if err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: deletedManifestName, Mode: 0o644, Size: int64(len(payload)),
+	}); err != nil {
+		return err
+	}
+	_, err = tw.Write(payload)
+	return err
 }
 
 // importNAR imports a closure into the local Nix store.

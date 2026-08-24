@@ -20,7 +20,7 @@ echo "==> verify"
 
 echo "==> firewall: allow inbound daemon + peer traffic (adjust to taste)"
 # sudo ufw allow 38080/tcp          # pipedpeer daemon API
-# sudo ufw allow from 192.168.1.0/24 # your LAN subnet
+# sudo ufw allow 29500:29510/tcp    # DDP rendezvous — open once, every future --ddp run just works
 
 echo "==> worker is live. Watch it during the demo with:"
 echo "    htop"
