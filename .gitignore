@@ -12,3 +12,8 @@ docker/logs/
 docker/workspaces/
 .freebuff/
 pipedpeer-demo/data.csv
+
+# demo 05 file-sync outputs
+pipedpeer-demo/sync_note.txt
+pipedpeer-demo/created_by_job.txt
+pipedpeer-demo/delete_me.txt

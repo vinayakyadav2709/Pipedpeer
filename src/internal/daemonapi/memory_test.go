@@ -230,7 +230,7 @@ func TestPoolMapForwardToPeer(t *testing.T) {
 	defer s2.StopWarmWorkers()
 
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
-	s1.pool.SetPeerFn(func(_ string) []string { return []string{peerHost} })
+	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{peerHost} })
 
 	var items []any
 	for i := 1; i <= 40; i++ {

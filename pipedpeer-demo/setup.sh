@@ -52,8 +52,8 @@ echo "=== cluster nodes (expect yourself + the N worker laptops, all healthy) ==
 # the live demo starts instantly AND pool fan-out can reach every worker.
 echo
 echo "=== rehearsal pass (builds closures + warms stores on all workers) ==="
-run() { echo; echo "--- rehearsal: $1"; "$PIPE" run --script "$1" \
-      --intercept --remote --isolate=false "${@:2}" 2>&1 | tail -8; }
+run() { echo; echo "--- rehearsal: $1"; "$PIPE" run "$1" \
+      --remote --isolate=false "${@:2}" 2>&1 | tail -8; }
 
 run 01_sklearn_rf.py
 run 02_numpy_heavy.py

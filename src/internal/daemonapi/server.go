@@ -408,7 +408,7 @@ func (s *Server) StopWarmWorkers() {
 // available memory. runChunk fans out to the best nodes first and falls
 // through to the next best on failure, so the k best nodes carry the work.
 func (s *Server) EnablePoolSpill() {
-	s.pool.SetPeerFn(func(storePath string) []string {
+	s.pool.SetPeerFn(func(storePath, submitter string) []string {
 		s.peersMu.RLock()
 		defer s.peersMu.RUnlock()
 		type cand struct {
@@ -442,7 +442,7 @@ func (s *Server) EnablePoolSpill() {
 		for _, c := range out {
 			res = append(res, c.peer)
 		}
-		return res
+		return sinkPeerLast(res, submitter)
 	})
 }
 

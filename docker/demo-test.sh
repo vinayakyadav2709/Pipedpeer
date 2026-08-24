@@ -123,7 +123,7 @@ run_demo() { # run_demo <name> <script> <extra-args> <grep>
   section "4. run $1"
   snapshot "$1-start"   # processes/logs/store/files before: the handoff
   timeout 5400 docker exec pp-orch sh -c \
-    "cd /workspace && pipedpeer run --script $2 --intercept --remote --isolate=false $3" \
+    "cd /workspace && pipedpeer run $2 --remote $3" \
     > "$LOG/$1.out" 2>&1
   ec=$?
   [ "$ec" = 0 ] && echo "exit ok" || { echo "EXIT FAIL ($ec) — tail:"; tail -8 "$LOG/$1.out"; }
@@ -157,6 +157,41 @@ check "03 shim ledger: per-chunk combine" "combining" "$LOG/03_pandas_ooc.out"
 DDP="${DDP:-1}"
 run_demo 04_torch_ddp 04_torch_ddp.py "--ddp $DDP --gpu force" "final loss:"
 
+# --- 4e. file sync over a remote run ----------------------------------------
+# The one deliberately-remote file test: the job mutates the workspace on a
+# worker and the changes sync back to the orchestrator's folder.
+section "4e. run 05_file_sync (create/update/delete on a worker)"
+docker exec pp-orch sh -c \
+  "cd /workspace && echo 'original note' > sync_note.txt && echo 'delete me' > delete_me.txt"
+snapshot 05_file_sync-start
+timeout 900 docker exec pp-orch sh -c \
+  "cd /workspace && pipedpeer run 05_file_sync.py --remote" \
+  > "$LOG/05_file_sync.out" 2>&1
+ec=$?
+[ "$ec" = 0 ] && echo "exit ok" || { echo "EXIT FAIL ($ec) — tail:"; tail -8 "$LOG/05_file_sync.out"; }
+snapshot 05_file_sync-end
+check "05 ran (created + updated files)" "SYNC created" "$LOG/05_file_sync.out"
+check "05 reported sync-back" "Synced" "$LOG/05_file_sync.out"
+
+section "4f. sync-back landed in the orchestrator's workspace"
+docker exec pp-orch sh -c "cat /workspace/created_by_job.txt 2>/dev/null || echo MISSING" > "$LOG/05-created.txt"
+if grep -q "touched by job" "$LOG/05-created.txt"; then
+  PASS=$((PASS + 1)); echo "PASS: created file synced back to orchestrator"
+else
+  FAIL=$((FAIL + 1)); echo "FAIL: created_by_job.txt missing on orchestrator"
+fi
+docker exec pp-orch cat /workspace/sync_note.txt > "$LOG/05-note.txt" 2>&1
+if grep -q "original note" "$LOG/05-note.txt" && grep -q "touched by job" "$LOG/05-note.txt"; then
+  PASS=$((PASS + 1)); echo "PASS: modified file synced back (append preserved)"
+else
+  FAIL=$((FAIL + 1)); echo "FAIL: sync_note.txt not updated on orchestrator"
+fi
+if docker exec pp-orch sh -c "test ! -e /workspace/delete_me.txt"; then
+  PASS=$((PASS + 1)); echo "PASS: deletion synced back (file removed from orchestrator)"
+else
+  FAIL=$((FAIL + 1)); echo "FAIL: delete_me.txt still present on orchestrator"
+fi
+
 # --- 5. where did the work actually run? ------------------------------------
 section "5. placement proof: jobs list shows workers, not the orchestrator"
 docker exec pp-orch pipedpeer jobs > "$LOG/jobs.txt"
@@ -173,10 +208,15 @@ else
   PASS=$((PASS + 1)); echo "PASS: every job executed on a worker node (--remote honored)"
 fi
 
-last_id=$(awk 'NR > 2 { print $1 }' "$LOG/jobs.txt" | head -1)
-docker exec pp-orch pipedpeer job --id "$last_id" --output > "$LOG/job.txt"
-check "job detail has stdout" "final loss" "$LOG/job.txt"
-check "job detail shows target node" "target" "$LOG/job.txt"
+# Grab the newest DDP job for detail inspection (05_file_sync may be newer).
+last_id=$(awk 'NR > 2 && $5 ~ /^ddp-/ { print $1; exit }' "$LOG/jobs.txt")
+if [ -n "$last_id" ]; then
+  docker exec pp-orch pipedpeer job --id "$last_id" --output > "$LOG/job.txt"
+  check "job detail has stdout" "final loss" "$LOG/job.txt"
+  check "job detail shows target node" "target" "$LOG/job.txt"
+else
+  PASS=$((PASS + 1)); echo "SKIP: no ddp job set found (DDP=0 run?)"
+fi
 
 section "5b. closure materialised on every worker (store broadcast)"
 store_ok=0
@@ -209,7 +249,7 @@ fi
 section "6. pipedpeer tasks --watch during a live run"
 docker exec -d pp-orch sh -c "pipedpeer tasks --watch > /tmp/tasks.log 2>&1"
 timeout 900 docker exec pp-orch sh -c \
-  "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false" \
+  "cd /workspace && pipedpeer run 02_numpy_heavy.py --remote" \
   > "$LOG/02b.out" 2>&1
 docker exec pp-orch sh -c "pkill -f 'tasks --watch' || true" >/dev/null 2>&1
 sleep 1
@@ -243,7 +283,7 @@ check "prune removed the old entry" "pruned 1" "$LOG/prune.txt"
 
 # --- 9. weak orchestrator: CPU proof ----------------------------------------
 section "9. CPU proof (docker stats during a heavy run)"
-docker exec -d pp-orch sh -c "cd /workspace && pipedpeer run --script 02_numpy_heavy.py --intercept --remote --isolate=false > /tmp/02c.out 2>&1"
+docker exec -d pp-orch sh -c "cd /workspace && pipedpeer run 02_numpy_heavy.py --remote > /tmp/02c.out 2>&1"
 sleep 25
 for i in 1 2 3 4; do
   docker stats --no-stream pp-orch pp-worker1 pp-worker2 pp-worker3 >> "$LOG/stats.txt"

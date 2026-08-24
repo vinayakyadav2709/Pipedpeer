@@ -159,7 +159,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	runPath := filepath.Join(store, "bin", "run")
 	for i := 0; i < 3; i++ {
 		items := []json.RawMessage{json.RawMessage(fmt.Sprintf(`%d`, i+1)), json.RawMessage(`2`)}
-		if _, err := pm.runChunk(runPath, store, &chunk{pickledFunc: string(pickled), items: items}); err != nil {
+		if _, err := pm.runChunk(runPath, store, &chunk{pickledFunc: string(pickled), items: items}, ""); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
@@ -215,7 +215,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	runPath := filepath.Join(storePath, "bin", "run")
 
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
-	s1.pool.SetPeerFn(func(_ string) []string { return []string{peerHost} })
+	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{peerHost} })
 
 	// 16 items: >= minSplit, so it fans out local + peer.
 	var items []json.RawMessage
@@ -223,7 +223,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
 
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
 	if err != nil {
 		t.Fatalf("runChunk spill: %v", err)
 	}
@@ -284,13 +284,13 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	s := New("fallback-node-xxxxxxxx")
 	defer s.StopWarmWorkers()
 	// Point at an address that refuses connections.
-	s.pool.SetPeerFn(func(_ string) []string { return []string{"127.0.0.1:1"} })
+	s.pool.SetPeerFn(func(_, _ string) []string { return []string{"127.0.0.1:1"} })
 
 	var items []json.RawMessage
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
+	results, err := s.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
 	if err != nil {
 		t.Fatalf("chunk failed though a peer was down: %v", err)
 	}
@@ -563,7 +563,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
 	if err != nil {
 		t.Fatalf("runChunk: %v", err)
 	}
@@ -719,7 +719,7 @@ sys.stdout.write(json.dumps(out))
 
 	s1 := New("node-" + strings.Repeat("x", 8))
 	defer s1.StopWarmWorkers()
-	s1.pool.SetPeerFn(func(_ string) []string {
+	s1.pool.SetPeerFn(func(_, _ string) []string {
 		return []string{strings.TrimPrefix(peerSrv.URL, "http://")}
 	})
 
@@ -729,7 +729,7 @@ sys.stdout.write(json.dumps(out))
 	for i := 1; i <= 12; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
 	if err != nil {
 		t.Fatalf("runChunk: %v", err)
 	}
@@ -840,7 +840,7 @@ sys.stdout.write(json.dumps(out))
 
 	s1 := New("node-" + strings.Repeat("x", 8))
 	defer s1.StopWarmWorkers()
-	s1.pool.SetPeerFn(func(_ string) []string {
+	s1.pool.SetPeerFn(func(_, _ string) []string {
 		hosts := make([]string, 3)
 		for i := range srvs {
 			hosts[i] = strings.TrimPrefix(srvs[i].URL, "http://")
@@ -854,7 +854,7 @@ sys.stdout.write(json.dumps(out))
 		json.RawMessage(`1`), json.RawMessage(`2`),
 		json.RawMessage(`3`), json.RawMessage(`4`),
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{items: items, noSplit: true})
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{items: items, noSplit: true}, "")
 	if err != nil {
 		t.Fatalf("no_split runChunk: %v", err)
 	}
@@ -937,13 +937,13 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 
 	alivePeer := strings.TrimPrefix(srv2.URL, "http://")
 	// Best first, but the best is dead (port 1 refuses connections).
-	s1.pool.SetPeerFn(func(_ string) []string { return []string{"127.0.0.1:1", alivePeer} })
+	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{"127.0.0.1:1", alivePeer} })
 
 	var items []json.RawMessage
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items})
+	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
 	if err != nil {
 		t.Fatalf("chunk failed: %v", err)
 	}
@@ -1046,5 +1046,30 @@ sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
 		if v != want {
 			t.Fatalf("result[%d] = %d, want %d", i, v, want)
 		}
+	}
+}
+
+// TestSinkPeerLast keeps the submitting machine eligible but last in spill
+// order — an idle orchestrator must never outrank real workers.
+func TestSinkPeerLast(t *testing.T) {
+	peers := []string{"10.0.0.5:38080", "10.0.0.1:38080", "10.0.0.9:38080"}
+	got := sinkPeerLast(peers, "10.0.0.1:38080")
+	want := []string{"10.0.0.5:38080", "10.0.0.9:38080", "10.0.0.1:38080"}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+
+	if got := sinkPeerLast(peers, ""); len(got) != 3 {
+		t.Fatalf("empty submitter must be a no-op, got %v", got)
+	}
+
+	alone := sinkPeerLast([]string{"10.0.0.1:38080"}, "10.0.0.1:38080")
+	if len(alone) != 1 || alone[0] != "10.0.0.1:38080" {
+		t.Fatalf("submitter-only pool must stay intact, got %v", alone)
+	}
+
+	same := sinkPeerLast(peers, "not-in-list:1")
+	if len(same) != 3 || same[0] != peers[0] {
+		t.Fatalf("absent submitter must not reorder, got %v", same)
 	}
 }

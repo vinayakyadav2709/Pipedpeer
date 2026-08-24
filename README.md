@@ -33,7 +33,7 @@ If a node dies mid-job, its lease expires and the job is placed somewhere else.
 
 ## Transparent cluster acceleration
 
-`pipedpeer run --intercept` embeds a shim that routes your parallel primitives
+`pipedpeer run` embeds a shim that routes your parallel primitives
 across the cluster with zero code changes. Each primitive is intercepted only
 when the cost model says the cluster wins (measured latency/bandwidth probe,
 cached per peer); otherwise it runs locally, exactly as before.
@@ -55,8 +55,8 @@ micro-chunk cannot fit locally, the request is forwarded to a healthy peer
 instead of failing.
 
 ```bash
-pipedpeer run --script train.py --intercept          # cluster-parallel primitives
-pipedpeer run --script train.py --intercept --ddp 2  # transparent 2-rank DDP
+pipedpeer run train.py           # cluster-parallel primitives (interception always on)
+pipedpeer run train.py --ddp 2   # transparent 2-rank DDP
 make lab-fail                                        # demo: kills a worker mid-pool-map, run survives
 ```
 
@@ -91,7 +91,7 @@ Useful commands:
 | `pipedpeer setup` | Check prerequisites, install what's missing, start the daemon |
 | `pipedpeer start` / `stop` / `status` | Manage the local daemon |
 | `pipedpeer python <script>` | Run a script on the cluster |
-| `pipedpeer run --script <s> [flags]` | Same, with full control (GPU, memory, target node) |
+| `pipedpeer run <s> [flags]` | Same, with full control (GPU, memory, target node) |
 | `pipedpeer nodes list\|add\|remove` | Inspect and manage known nodes |
 | `pipedpeer tasks` (alias `ps`) | Live view of what is running cluster-wide |
 | `pipedpeer jobs` / `job --id <id>` | Job history and details |
