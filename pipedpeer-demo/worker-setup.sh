@@ -18,6 +18,14 @@ echo "==> verify"
 ./bin/pipedpeer status
 ./bin/pipedpeer nodes
 
+echo "==> nix: multi-user installs must accept unsigned closures from peers"
+if systemctl is-active --quiet nix-daemon 2>/dev/null; then
+  if ! nix config show require-sigs 2>/dev/null | grep -q false; then
+    echo "   run: echo 'require-sigs = false' | sudo tee -a /etc/nix/nix.custom.conf"
+    echo "        sudo systemctl restart nix-daemon"
+  fi
+fi
+
 echo "==> firewall: allow inbound daemon + peer traffic (adjust to taste)"
 # sudo ufw allow 38080/tcp          # pipedpeer daemon API
 # sudo ufw allow 29500:29510/tcp    # DDP rendezvous — open once, every future --ddp run just works
