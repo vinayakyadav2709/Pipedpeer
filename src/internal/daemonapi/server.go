@@ -816,6 +816,19 @@ type nodeResp struct {
 	Source       string            `json:"source"`
 }
 
+// staleAfter is how long a node may go unheard-from before /v1/nodes stops
+// reporting it healthy. The poller runs every 10s, so this is four missed
+// rounds: long enough to ride out a slow poll, far shorter than the
+// staleNodeTTL that eventually deletes the row.
+//
+// This is the death filter for everything that reads the endpoint. Stored
+// state is only ever as fresh as the last poll that wrote it, so a node whose
+// daemon dies keeps its 'healthy' row until something rewrites it — and while
+// the local daemon is down, nothing does. Callers filter on State == "healthy"
+// (Coordinator.FindNode, ddpEligibleCount) and would otherwise offer work to a
+// machine that has been gone for hours.
+const staleAfter = 45 * time.Second
+
 func toNodeResp(n nodestore.Node) nodeResp {
 	ssh := n.SSHEndpoint
 	if ssh == "" {
@@ -849,13 +862,18 @@ func toNodeResp(n nodestore.Node) nodeResp {
 		load.CPUPercent = n.CPUPercent
 	}
 
+	state := n.State
+	if state == "healthy" && time.Since(time.Unix(n.LastSeen, 0)) > staleAfter {
+		state = "stale"
+	}
+
 	return nodeResp{
 		NodeID:       n.NodeID,
 		SSHEndpoint:  ssh,
 		DaemonPort:   n.Port,
 		Capabilities: caps,
 		Load:         load,
-		State:        n.State,
+		State:        state,
 		HealthScore:  n.HealthScore,
 		Source:       n.Source,
 	}
