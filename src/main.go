@@ -726,6 +726,13 @@ func runDDP(o ddpRunOptions) error {
 				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
 				fmt.Sprintf("MASTER_PORT=%d", masterPort),
 				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s", net.JoinHostPort(detectLocalIP(), strconv.Itoa(o.DaemonPort))),
+				// Sync rides the lead rank's daemon on the one port that
+				// already works between every pair of nodes; ranks never
+				// open sockets of their own (MASTER_* stays only for the
+				// gloo escape hatch, PIPEDPEER_DDP_BACKEND=gloo).
+				fmt.Sprintf("PIPEDPEER_DDP_SYNC=http://%s/v1/ddp/sync",
+					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
+				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
 			)
 			opts := app.Options{
 				ScriptPath:        absScript,
