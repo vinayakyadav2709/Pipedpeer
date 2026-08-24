@@ -10,7 +10,14 @@ set -euo pipefail
 #   stable  (default) - latest tagged release
 #   nightly           - rolling prerelease built from the dev branch
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Only resolvable when run from a checkout. Piped (curl ... | bash) there is no
+# script path, so BASH_SOURCE is empty and the local build fallback is off.
+script_path="${BASH_SOURCE[0]:-}"
+if [[ -n "$script_path" && -f "$script_path" ]]; then
+  repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+else
+  repo_root=""
+fi
 
 CHANNEL="${PIPEDPEER_CHANNEL:-stable}"
 
@@ -109,7 +116,7 @@ download_and_install() {
   local out="$tmp_dir/$BINARY_NAME"
 
   if command -v curl >/dev/null 2>&1; then
-    curl -fL "$url" -o "$out"
+    curl -fsSL "$url" -o "$out"
   elif command -v wget >/dev/null 2>&1; then
     wget -qO "$out" "$url"
   else
@@ -121,6 +128,18 @@ download_and_install() {
 }
 
 local_build_install() {
+  if [[ -z "$repo_root" || ! -d "$repo_root/src" ]]; then
+    echo "Download failed: $release_url" >&2
+    echo "No local checkout available to build from." >&2
+    exit 1
+  fi
+
+  if ! command -v go >/dev/null 2>&1; then
+    echo "Download failed: $release_url" >&2
+    echo "Go is not installed, so the local build fallback is unavailable." >&2
+    exit 1
+  fi
+
   echo "Release artifact download unavailable; falling back to local build..."
   (
     cd "$repo_root/src"

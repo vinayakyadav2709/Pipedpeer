@@ -63,11 +63,18 @@ make lab-fail                                        # demo: kills a worker mid-
 ## Install
 
 ```bash
-# stable (tagged releases)
-./scripts/install-pipedpeer.sh
+# nightly (rolling build, republished on every push to dev)
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --channel nightly
 
-# nightly (rolling build from the dev branch)
-./scripts/install-pipedpeer.sh --channel nightly
+# stable (tagged releases)
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash
+```
+
+From a checkout, the same script works directly:
+
+```bash
+./scripts/install-pipedpeer.sh                    # stable
+./scripts/install-pipedpeer.sh --channel nightly  # nightly
 ```
 
 Requires Linux to *run* jobs (`crun` sandbox, Linux namespaces, GPU device

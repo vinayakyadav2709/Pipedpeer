@@ -1,6 +1,14 @@
 name: Nightly
 
 on:
+  # Every push to dev republishes the rolling nightly, so the install script's
+  # nightly channel always tracks the tip of dev. Paths that cannot change the
+  # binary are excluded to avoid pointless republishes.
+  push:
+    branches: [dev]
+    paths-ignore:
+      - 'landing/**'
+      - '**/*.md'
   schedule:
     - cron: '0 2 * * *'
   workflow_dispatch:

@@ -5,7 +5,7 @@ import { ParticleField, pulseParticleTypingImpulse } from "@/components/particle
 import dustyFieldSrc from "@/assets/figures/dusty-field.png";
 
 const INSTALL_CMD =
-  "curl -fsSL https://pipedpeer.gandhiva.online/install | bash";
+  "curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --channel nightly";
 
 export function EmptyInboxZeroShowcasePage() {
   const [copied, setCopied] = useState(false);
@@ -72,8 +72,8 @@ export function EmptyInboxZeroShowcasePage() {
           Pipe your data anywhere. Install in seconds.
         </p>
 
-        <div className="mt-2 flex w-full max-w-xl items-center gap-0 rounded-lg border border-border bg-card/80 backdrop-blur-sm">
-          <code className="flex-1 truncate px-4 py-3 text-left font-mono text-sm text-foreground/80 select-all">
+        <div className="mt-2 flex w-full max-w-2xl items-center gap-0 rounded-lg border border-border bg-card/80 backdrop-blur-sm">
+          <code className="flex-1 whitespace-pre-wrap break-all px-4 py-3 text-left font-mono text-xs sm:text-sm text-foreground/80 select-all">
             {INSTALL_CMD}
           </code>
           <Button
