@@ -90,3 +90,28 @@ func TestNixArchReturnsValidFormat(t *testing.T) {
 		t.Fatalf("unexpected architecture prefix in: %s", arch)
 	}
 }
+
+// The nixpkgs input has to be an exact revision. A branch resolves at build
+// time, so two nodes building the same script on different days land on
+// different store paths, and UploadJob's closure cache — which keys on the
+// store path — never hits. Every job then re-ships a multi-hundred-megabyte
+// NAR that should have travelled once.
+func TestGeneratedFlakesPinNixpkgs(t *testing.T) {
+	flakes := map[string]string{
+		"no packages":  GenerateFlakeForArch(nil, "", "x86_64-linux"),
+		"with numpy":   GenerateFlakeForArch([]string{"numpy"}, "python3", "x86_64-linux"),
+		"with torch":   GenerateFlakeForArch([]string{"torch"}, "python3", "x86_64-linux"),
+		"non-x86 arch": GenerateFlakeForArch([]string{"numpy"}, "python3", "aarch64-linux"),
+	}
+
+	for name, flake := range flakes {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(flake, nixpkgsRef) {
+				t.Fatalf("flake does not pin nixpkgs to %s:\n%s", nixpkgsRef, flake)
+			}
+			if strings.Contains(flake, "nixos-unstable") {
+				t.Fatalf("flake still tracks a moving branch:\n%s", flake)
+			}
+		})
+	}
+}

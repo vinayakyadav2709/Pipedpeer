@@ -24,6 +24,15 @@ func NixArch() string {
 	return nixArch + "-" + nixOS
 }
 
+// nixpkgsRef pins the package set every generated flake builds against.
+//
+// It has to be an exact revision, not a branch. A branch resolves at build
+// time, so two nodes that build the same script on different days produce
+// different store paths — and UploadJob's closure cache keys on the store
+// path, so instead of shipping the environment once it re-uploads a
+// multi-hundred-megabyte NAR for every job. Bump deliberately.
+const nixpkgsRef = "github:NixOS/nixpkgs/56c02bc00adcf003215cc4bd996d6efaf4cff188"
+
 func GenerateFlake(nixPkgs []string, pythonVersion string) string {
 	return GenerateFlakeForArch(nixPkgs, pythonVersion, NixArch())
 }
@@ -34,7 +43,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 	}
 	if len(nixPkgs) == 0 {
 		return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "`+nixpkgsRef+`";
 
   outputs = { self, nixpkgs }: {
     packages.%s.default =
@@ -90,7 +99,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 	pkgsList := strings.Join(psPkgs, "\n          ")
 	if torchCUDA {
 		return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "`+nixpkgsRef+`";
 
   outputs = { self, nixpkgs }: {
     packages.%s.default =
@@ -124,7 +133,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 `, nixSystem, nixSystem, pythonVersion, pkgsList)
 	}
 	return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.nixpkgs.url = "`+nixpkgsRef+`";
 
   outputs = { self, nixpkgs }: {
     packages.%s.default =
