@@ -668,3 +668,57 @@ print("DDP-SYNC-OK")
 		t.Fatalf("missing DDP-SYNC-OK: %q", out)
 	}
 }
+
+// PIPEDPEER_DISTRIBUTE=force must make the spill gates say yes without
+// consulting the cost model or the bandwidth probe: it exists so a demo can
+// show distribution on payloads the never-slower policy would keep local.
+func TestShimForceDistributeBypassesCostModel(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "sitecustomize.py")
+	if err := os.WriteFile(shim, []byte(ShimSitecustomize), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := filepath.Join(dir, "probe.py")
+	if err := os.WriteFile(script, []byte(`
+import sitecustomize as sc
+
+# 1 KB of work with modest flops: auto mode must refuse, force must accept.
+assert sc._should_spill(1024, 4) is True, "_should_spill ignored force"
+assert sc._numpy_should_offload(1024, 4, 2, True, 1e9) is True, "_numpy_should_offload ignored force"
+assert sc._spill_min() == 0, "force did not zero the spill floor"
+print("FORCE_OK")
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(python, script)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PIPEDPEER_SHIM=1",
+		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1", // never dialled: force skips the probe
+		"PIPEDPEER_NUM_SHARDS=2",
+		"PIPEDPEER_DISTRIBUTE=force",
+		"PYTHONPATH="+dir,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "FORCE_OK") {
+		t.Fatalf("force-mode probe failed: %v\n%s", err, out)
+	}
+
+	// And the floor must be overridable independently of force.
+	cmd = exec.Command(python, "-c",
+		"import sitecustomize as sc; assert sc._spill_min() == 5.0; print('MIN_OK')")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_SPILL_MIN=5", "PYTHONPATH="+dir)
+	out, err = cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "MIN_OK") {
+		t.Fatalf("PIPEDPEER_SPILL_MIN probe failed: %v\n%s", err, out)
+	}
+}

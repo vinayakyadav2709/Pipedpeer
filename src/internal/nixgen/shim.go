@@ -34,6 +34,25 @@ _URL = os.environ.get("PIPEDPEER_DAEMON_URL", "")
 _STORE = os.environ.get("PIPEDPEER_STORE_PATH", "")
 _NODE_ID = os.environ.get("PIPEDPEER_NODE_ID", "")
 _NUM_SHARDS = os.environ.get("PIPEDPEER_NUM_SHARDS", "0")
+# PIPEDPEER_DISTRIBUTE=force skips every cost model: any interceptable
+# operation over the size floor ships to the cluster even when local would
+# win. This deliberately breaks the never-slower invariant — it exists to
+# demonstrate distribution, not to be fast. "auto" (default) keeps the
+# cost models in charge.
+_FORCE = os.environ.get("PIPEDPEER_DISTRIBUTE", "auto") == "force"
+
+
+def _spill_min(default=32 * 1024 * 1024):
+    """Size floor (bytes) below which work never ships. PIPEDPEER_SPILL_MIN
+    overrides the 32 MB default; force mode drops it to 0 unless the env sets
+    an explicit floor."""
+    override = os.environ.get("PIPEDPEER_SPILL_MIN")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    return 0 if _FORCE else default
 # Where the job was submitted from (host:port of the submitter's daemon).
 # The executing node sinks this peer to the end of its spill order so an
 # idle orchestrator never outranks real workers; empty when unset.
@@ -284,6 +303,8 @@ def _np_dispatch(blocks, other):
         # Admission control hint: the daemon refuses (503) when it cannot spare
         # roughly the payload's size in RAM, and the shim falls back locally.
         header["required_mem"] = _pool_required(globals_pickle, items)
+        if _FORCE:
+            header["force"] = True
         blobs = _pool_send(header, globals_pickle, items, 1200)
         return [pickle.loads(p) for p in blobs]
     except Exception as e:
@@ -323,6 +344,8 @@ def _torch_dispatch(blocks, other):
             "globals": True,
         }
         header["required_mem"] = _pool_required(globals_pickle, items)
+        if _FORCE:
+            header["force"] = True
         blobs = _pool_send(header, globals_pickle, items, 1200)
         return [pickle.loads(p) for p in blobs]
     except Exception as e:
@@ -359,7 +382,7 @@ def _install_torch():
     except ImportError:
         return
 
-    _MIN_BYTES = 32 * 1024 * 1024
+    _MIN_BYTES = _spill_min()
 
     _orig_matmul = _th.matmul
     _orig_mm = _th.mm
@@ -482,6 +505,8 @@ def _install_numpy():
             "no_split": True,
         }
         header["required_mem"] = _pool_required(globals_pickle, items)
+        if _FORCE:
+            header["force"] = True
         blobs = _pool_send(header, globals_pickle, items, 1200)
         return pickle.loads(blobs[0])
 
@@ -546,8 +571,10 @@ def _should_spill(nbytes, flops_per_byte):
     if not (_URL and _ENABLED):
         return False
     K = int(_NUM_SHARDS)
-    if K < 2 or nbytes < 32 * 1024 * 1024:
+    if K < 2 or nbytes < _spill_min():
         return False
+    if _FORCE:
+        return True
     if flops_per_byte < 8 and nbytes <= 512 * 1024 * 1024:
         return False
     bw = _measure_bandwidth()
@@ -630,8 +657,10 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_s
     if not (_URL and _ENABLED):
         return False
     K = int(_NUM_SHARDS)
-    if K < 2 or nbytes < 32 * 1024 * 1024:
+    if K < 2 or nbytes < _spill_min():
         return False
+    if _FORCE:
+        return True
     bw = _measure_bandwidth()
     if not bw:
         return False
@@ -694,6 +723,8 @@ def _groupby_shuffle(gb, spec, args, kw):
             "no_split": True,
         }
         header["required_mem"] = _pool_required(globals_pickle, [pickle.dumps(d) for d in remote])
+        if _FORCE:
+            header["force"] = True
         blobs = _pool_send(header, globals_pickle, [pickle.dumps(d) for d in remote], 1800)
         parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
@@ -809,6 +840,8 @@ def _merge_shuffle(left, right, kw):
             "no_split": True,
         }
         header["required_mem"] = _pool_required(globals_pickle, [pickle.dumps(i) for i in items])
+        if _FORCE:
+            header["force"] = True
         blobs = _pool_send(header, globals_pickle, [pickle.dumps(i) for i in items], 1800)
         parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
@@ -961,6 +994,8 @@ def _ooc_eligible(path):
         override = os.environ.get("PIPEDPEER_OOC_MIN")
         if override:
             return size > float(override)
+        if _FORCE:
+            return size > _spill_min()
         with open("/proc/meminfo") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
@@ -998,6 +1033,8 @@ def _partitioned_read(func_src, extra, keys, items):
         "item_keys": keys,
     }
     header["required_mem"] = _pool_required(globals_pickle, items)
+    if _FORCE:
+        header["force"] = True
     blobs = _pool_send(header, globals_pickle, items, 3600)
     return [pickle.loads(p) for p in blobs]
 
@@ -1913,6 +1950,12 @@ def _install():
                 or not (_URL and _ENABLED) or self.n_jobs in (0, 1)):
             return
         self._backend = _PipedpeerBackend(nesting_level=0)
+        # Auto-batching sizes batches from measured duration, and against a
+        # synchronous remote submit it never grows past one task — a 1-item
+        # chunk is unsplittable, so nothing fans out. Under force, pin a batch
+        # size worth splitting.
+        if _FORCE and self.batch_size == 'auto':
+            self.batch_size = max(2, 4 * int(_NUM_SHARDS))
 
     try:
         _jp.register_parallel_backend(
