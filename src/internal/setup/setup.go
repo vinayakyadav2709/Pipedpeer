@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"strings"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
@@ -28,12 +30,67 @@ func binaryCheck(name string) func() bool {
 	}
 }
 
+// storeDir is where nix keeps the store. NIX_STORE_DIR overrides it for the
+// unusual setups that relocate it.
+func storeDir() string {
+	if dir := os.Getenv("NIX_STORE_DIR"); dir != "" {
+		return dir
+	}
+	return "/nix/store"
+}
+
+// nixUsable reports whether nix can actually build something. The binary being
+// on PATH is not enough: packaged builds (Fedora's nix-core RPM, for one)
+// install it without ever creating the store, so `nix build` fails on the
+// first real job while setup has already reported nix as fine.
+func nixUsable() bool {
+	if !binaryCheck("nix")() {
+		return false
+	}
+	info, err := os.Stat(storeDir())
+	return err == nil && info.IsDir()
+}
+
+// createNixStore makes the store directory owned by the invoking user. This is
+// the single-user layout, which is all the daemon needs — it builds as
+// whichever user runs it, not through nix-daemon.
+func createNixStore() error {
+	fmt.Printf("    → Creating the nix store at %s...\n", storeDir())
+
+	argv := []string{"install", "-d", "-m", "0755"}
+	if os.Geteuid() != 0 {
+		u, err := user.Current()
+		if err != nil {
+			return fmt.Errorf("looking up the current user: %w", err)
+		}
+		argv = append(argv, "-o", u.Uid, "-g", u.Gid)
+		argv = append([]string{"sudo"}, argv...)
+	}
+	// The store lives at <root>/store; create the root so nix owns both.
+	argv = append(argv, filepath.Dir(storeDir()))
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("could not create %s: %w", filepath.Dir(storeDir()), err)
+	}
+	return nil
+}
+
 func getPrereqs() []prereq {
 	return []prereq{
 		{name: "tar", check: binaryCheck("tar")},
 		{name: "bash", check: binaryCheck("bash")},
 		{name: "curl", check: binaryCheck("curl")},
-		{name: "nix", check: binaryCheck("nix"), install: func() error {
+		{name: "nix", check: nixUsable, install: func() error {
+			// A nix that is installed but storeless only needs the store:
+			// running a full installer over a packaged nix would leave two of
+			// them on the machine.
+			if binaryCheck("nix")() {
+				return createNixStore()
+			}
 			fmt.Println("    → Installing Nix (Determinate Systems installer)...")
 			cmd := exec.Command("sh", "-c",
 				`curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm`)
@@ -170,7 +227,10 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 			}
 
 			for _, p := range toInstall {
-				if p.name == "nix" {
+				// Only bail out when nix is still unusable from this process,
+				// which means a fresh install landed a binary that is not yet
+				// on our PATH. Creating a missing store needs no such dance.
+				if p.name == "nix" && !nixUsable() {
 					fmt.Println()
 					fmt.Println("  Nix installed. Restart your shell or run:")
 					fmt.Println("    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh")
