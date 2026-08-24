@@ -32,6 +32,7 @@ type Record struct {
 	ReceivedFiles  int    `json:"received_files,omitempty"`
 	NewFiles       int    `json:"new_files,omitempty"`
 	UpdatedFiles   int    `json:"updated_files,omitempty"`
+	DeletedFiles   int    `json:"deleted_files,omitempty"`
 	UnchangedFiles int    `json:"unchanged_files,omitempty"`
 	ManifestPath   string `json:"manifest_path,omitempty"`
 	// Coordinator placement diagnostics
