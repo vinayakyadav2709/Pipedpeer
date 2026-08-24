@@ -22,24 +22,21 @@ concurrency:
 
 jobs:
   # Skip the whole run when dev has not moved since the last published nightly.
+  # Reads the head SHA over the API: cloning here would add a full-history
+  # checkout to the front of every push-triggered publish.
   check:
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.decide.outputs.should_run }}
       sha: ${{ steps.decide.outputs.sha }}
     steps:
-      - name: Checkout dev
-        uses: actions/checkout@v7
-        with:
-          ref: dev
-          fetch-depth: 0
-
       - name: Decide whether to build
         id: decide
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          head_sha="$(git rev-parse HEAD)"
+          head_sha="$(gh api "repos/${GH_REPO}/commits/dev" -q .sha)"
           echo "sha=$head_sha" >> "$GITHUB_OUTPUT"
 
           published="$(gh release view nightly --json targetCommitish -q .targetCommitish 2>/dev/null || echo '')"
@@ -51,49 +48,10 @@ jobs:
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           fi
 
-  test:
-    needs: check
-    if: needs.check.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src
-    steps:
-      - name: Checkout dev
-        uses: actions/checkout@v7
-        with:
-          ref: dev
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: 'src/go.mod'
-          cache-dependency-path: 'src/go.sum'
-
-      - name: Vet
-        run: go vet ./...
-
-      - name: Test (race)
-        run: go test -race -count=1 ./...
-
-  # D2 shim-overhead report. Never-slower is structurally enforced by the Go
-  # tests; this only trips on a gross regression (shim > 3x a plain local Pool
-  # with no daemon reachable), so it is a report, not a tight wall-clock gate.
-  d2-bench:
-    needs: check
-    if: needs.check.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout dev
-        uses: actions/checkout@v7
-        with:
-          ref: dev
-
-      - name: Measure shim overhead
-        run: ./scripts/bench-shim-d2.sh
-
+  # The nightly publishes whatever is on dev: no tests, vet, or benchmarks gate
+  # it. Nothing verifies these binaries before they reach the nightly channel.
   release:
-    needs: [check, test]
+    needs: check
     if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     steps:

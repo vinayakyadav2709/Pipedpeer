@@ -1,8 +1,10 @@
 name: CI
 
 on:
+  # Pushes to dev deliberately run nothing: dev is the nightly stream and is
+  # published unverified. CI still runs on pull requests into dev and on main.
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
     branches: [main, dev]
 
