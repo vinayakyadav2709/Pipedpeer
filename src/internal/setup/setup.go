@@ -57,6 +57,14 @@ func nixUsable() bool {
 func createNixStore() error {
 	fmt.Printf("    → Creating the nix store at %s...\n", storeDir())
 
+	root := filepath.Dir(storeDir())
+
+	// No privilege needed when the root already exists and is ours (or when
+	// NIX_STORE_DIR points somewhere user-writable).
+	if err := os.MkdirAll(storeDir(), 0o755); err == nil {
+		return nil
+	}
+
 	argv := []string{"install", "-d", "-m", "0755"}
 	if os.Geteuid() != 0 {
 		u, err := user.Current()
@@ -66,15 +74,21 @@ func createNixStore() error {
 		argv = append(argv, "-o", u.Uid, "-g", u.Gid)
 		argv = append([]string{"sudo"}, argv...)
 	}
-	// The store lives at <root>/store; create the root so nix owns both.
-	argv = append(argv, filepath.Dir(storeDir()))
+	// Root needs privilege; once it is owned by the user, the store itself
+	// does not. Creating only the root is not enough — nixUsable checks the
+	// store dir, so setup would report nix missing forever and loop.
+	argv = append(argv, root)
 
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("could not create %s: %w", filepath.Dir(storeDir()), err)
+		return fmt.Errorf("could not create %s: %w", root, err)
+	}
+
+	if err := os.MkdirAll(storeDir(), 0o755); err != nil {
+		return fmt.Errorf("could not create %s: %w", storeDir(), err)
 	}
 	return nil
 }

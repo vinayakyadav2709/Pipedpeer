@@ -51,3 +51,23 @@ func TestStoreDirHonoursOverride(t *testing.T) {
 		t.Fatalf("override ignored: got %q", got)
 	}
 }
+
+// Creating only the store root is not enough: nixUsable checks the store dir
+// itself, so a createNixStore that stops at the root leaves setup reporting
+// nix missing forever — install, "✓ installed", still missing, loop.
+func TestCreateNixStoreSatisfiesTheCheck(t *testing.T) {
+	if !binaryCheck("nix")() {
+		t.Skip("nix is not on PATH")
+	}
+	t.Setenv("NIX_STORE_DIR", filepath.Join(t.TempDir(), "nix", "store"))
+
+	if nixUsable() {
+		t.Fatal("precondition: store should not exist yet")
+	}
+	if err := createNixStore(); err != nil {
+		t.Fatalf("createNixStore: %v", err)
+	}
+	if !nixUsable() {
+		t.Fatal("store created but nixUsable still false — setup would loop")
+	}
+}
