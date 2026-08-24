@@ -34,6 +34,10 @@ _URL = os.environ.get("PIPEDPEER_DAEMON_URL", "")
 _STORE = os.environ.get("PIPEDPEER_STORE_PATH", "")
 _NODE_ID = os.environ.get("PIPEDPEER_NODE_ID", "")
 _NUM_SHARDS = os.environ.get("PIPEDPEER_NUM_SHARDS", "0")
+# Where the job was submitted from (host:port of the submitter's daemon).
+# The executing node sinks this peer to the end of its spill order so an
+# idle orchestrator never outranks real workers; empty when unset.
+_SUBMITTER = os.environ.get("PIPEDPEER_SUBMITTER", "")
 
 
 def _log(msg):
@@ -598,7 +602,8 @@ def _pool_send(header, globals_pickle, items, timeout):
         body += struct.pack(">I", len(it)) + it
     req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                  headers={"Content-Type": "application/vnd.pipedpeer.frames",
-                                          "X-Pipedpeer-Store": _STORE})
+                                          "X-Pipedpeer-Store": _STORE,
+                                          "X-Pipedpeer-Submitter": _SUBMITTER})
     with _daemon_open(req, timeout) as resp:
         data = resp.read()
     nl = data.find(b"\n")

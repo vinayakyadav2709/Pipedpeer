@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -695,11 +696,18 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 // whole work dir back would overwrite the submitter's own source files with
 // copies of what they just uploaded, and makes every task in a fan-out
 // re-transfer the entire project.
+// deletedManifestName is the tar entry carrying the list of files the job
+// deleted relative to its work dir. The CLI removes exactly these from the
+// submitter's folder after extraction — scoped to what this job uploaded,
+// so unrelated local files are never touched.
+const deletedManifestName = ".pipedpeer-deleted.json"
+
 func writeResultsTar(w io.Writer, job *JobRecord) error {
 	tw := tar.NewWriter(w)
 	defer tw.Close()
 
-	return filepath.WalkDir(job.WorkDir, func(path string, d fs.DirEntry, err error) error {
+	present := map[string]bool{}
+	walkErr := filepath.WalkDir(job.WorkDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -715,6 +723,7 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		present[rel] = true
 
 		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
 			return nil
@@ -736,6 +745,34 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		_, err = io.Copy(tw, f)
 		return err
 	})
+	if walkErr != nil {
+		return walkErr
+	}
+
+	// Deletion propagation: shipped out for this job but gone by the end of
+	// it. Only successful runs ever reach the results endpoint (execution.go
+	// returns before downloading on failure), so a crash cannot wipe files.
+	var deleted []string
+	for rel := range job.Uploaded {
+		if !present[rel] {
+			deleted = append(deleted, rel)
+		}
+	}
+	if len(deleted) == 0 {
+		return nil
+	}
+	sort.Strings(deleted)
+	payload, err := json.Marshal(deleted)
+	if err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: deletedManifestName, Mode: 0o644, Size: int64(len(payload)),
+	}); err != nil {
+		return err
+	}
+	_, err = tw.Write(payload)
+	return err
 }
 
 // importNAR imports a closure into the local Nix store.

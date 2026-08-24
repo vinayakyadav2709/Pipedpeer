@@ -197,7 +197,12 @@ type ResultManifest struct {
 	OutDir  string   `json:"out_dir"`
 	New     []string `json:"new,omitempty"`
 	Updated []string `json:"updated,omitempty"`
+	Deleted []string `json:"deleted,omitempty"`
 }
+
+// deletedManifestName is the tar entry that carries the deletion list. Must
+// match the daemon's writer (internal/daemonapi/execution.go).
+const deletedManifestName = ".pipedpeer-deleted.json"
 
 // Count is the total number of files received.
 func (m *ResultManifest) Count() int {
@@ -210,6 +215,11 @@ func (m *ResultManifest) Count() int {
 // extractResults unpacks a results tar into outDir, classifying each entry as
 // new or updated relative to what is already on disk. Entries that would
 // escape outDir are refused: the archive comes from another machine.
+//
+// A .pipedpeer-deleted.json entry lists files the job deleted on the node;
+// they are removed locally after everything else is extracted. The list is
+// computed daemon-side from exactly what this job uploaded, so only job
+// artifacts are ever removed.
 func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
 	manifest := &ResultManifest{OutDir: outDir}
 	root, err := filepath.Abs(outDir)
@@ -221,12 +231,21 @@ func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return manifest, nil
+			break
 		}
 		if err != nil {
 			return manifest, fmt.Errorf("read results: %w", err)
 		}
 		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		if hdr.Name == deletedManifestName {
+			payload, rerr := io.ReadAll(tr)
+			if rerr != nil {
+				return manifest, fmt.Errorf("read deletion manifest: %w", rerr)
+			}
+			_ = json.Unmarshal(payload, &manifest.Deleted) // empty/garbled = no deletions
 			continue
 		}
 
@@ -257,6 +276,17 @@ func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
 			manifest.New = append(manifest.New, hdr.Name)
 		}
 	}
+
+	for _, rel := range manifest.Deleted {
+		target := filepath.Join(root, filepath.FromSlash(rel))
+		if target == root || !strings.HasPrefix(target, root+string(os.PathSeparator)) {
+			return manifest, fmt.Errorf("refusing deletion outside %s: %s", outDir, rel)
+		}
+		if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+			return manifest, err
+		}
+	}
+	return manifest, nil
 }
 
 // ExportNAR exports the full runtime closure of a store path to a NAR file.
