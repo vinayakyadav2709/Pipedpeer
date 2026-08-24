@@ -229,85 +229,92 @@ func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptAr
 
 // handleJobUpload processes POST /v1/jobs/upload.
 func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse form: " + err.Error()})
-		return
-	}
-
-	storePath := r.FormValue("store_path")
-	scriptPath := r.FormValue("script_path")
-	if storePath == "" || scriptPath == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "store_path and script_path are required"})
-		return
-	}
-
-	workspaceFile, _, err := r.FormFile("workspace")
+	// Stream the parts straight to their destinations instead of
+	// ParseMultipartForm. That call spools every byte past its memory cap to
+	// os.TempDir() before the handler sees any of it — on a tmpfs /tmp sized
+	// to half of RAM, a workspace with a big dataset filled it and the daemon
+	// rejected uploads it had plenty of disk for. The submitter writes the
+	// parts in order (workspace, fields, nar), so nothing needs a second pass.
+	mr, err := r.MultipartReader()
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "workspace file required: " + err.Error()})
-		return
-	}
-	defer workspaceFile.Close()
-
-	// The NAR is optional if this node already has the closure cached (same
-	// store path from a previous task in the fan-out). When present, cache it.
-	var narPath string
-	if narFile, _, err := r.FormFile("nar"); err == nil {
-		defer narFile.Close()
-		narPath, err = s.narCache.store(storePath, narFile)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cache nar: " + err.Error()})
-			return
-		}
-	} else if cached, _ := s.narCache.narFileFor(storePath); cached == "" && !pathExists(filepath.Join(storePath, "bin", "run")) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required (not cached on this node)"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse form: " + err.Error()})
 		return
 	}
 
 	jobID := generateLeaseID()
 	jobDir := filepath.Join(s.jobDir, jobID)
 	workDir := filepath.Join(jobDir, "work")
-
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mkdir: " + err.Error()})
 		return
 	}
+	fail := func(status int, msg string) {
+		os.RemoveAll(jobDir)
+		writeJSON(w, status, map[string]string{"error": msg})
+	}
 
+	var storePath, scriptPath, narPath, skipBroadcast string
+	var haveWorkspace bool
 	uploaded := make(map[string]FileStamp)
-	tr := tar.NewReader(workspaceFile)
+
+	readField := func(p io.Reader) string {
+		b, _ := io.ReadAll(io.LimitReader(p, 4096))
+		return string(b)
+	}
+
 	for {
-		hdr, err := tr.Next()
+		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tar read: " + err.Error()})
+			fail(http.StatusBadRequest, "failed to parse form: "+err.Error())
 			return
 		}
-		target := filepath.Join(workDir, hdr.Name)
-		cleanTarget := filepath.Clean(target)
-		cleanWork := filepath.Clean(workDir) + string(os.PathSeparator)
-		if !strings.HasPrefix(cleanTarget, cleanWork) {
-			continue
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			os.MkdirAll(target, os.FileMode(hdr.Mode))
-		case tar.TypeReg:
-			os.MkdirAll(filepath.Dir(target), 0755)
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(hdr.Mode))
+
+		switch part.FormName() {
+		case "store_path":
+			storePath = readField(part)
+		case "script_path":
+			scriptPath = readField(part)
+		case "skip_broadcast":
+			skipBroadcast = readField(part)
+		case "nar":
+			// The NAR is optional if this node already has the closure cached
+			// (same store path from a previous task in the fan-out).
+			if storePath == "" {
+				fail(http.StatusBadRequest, "store_path must precede nar")
+				return
+			}
+			narPath, err = s.narCache.store(storePath, part)
 			if err != nil {
-				continue
+				fail(http.StatusInternalServerError, "cache nar: "+err.Error())
+				return
 			}
-			io.Copy(f, tr)
-			f.Close()
-			if rel, err := filepath.Rel(workDir, cleanTarget); err == nil {
-				if info, err := os.Stat(cleanTarget); err == nil {
-					uploaded[filepath.ToSlash(rel)] = stampOf(info)
-				}
+		case "workspace":
+			haveWorkspace = true
+			if err := extractWorkspaceTar(part, workDir, uploaded); err != nil {
+				fail(http.StatusInternalServerError, "tar read: "+err.Error())
+				return
 			}
 		}
+		part.Close()
 	}
 
+	if storePath == "" || scriptPath == "" {
+		fail(http.StatusBadRequest, "store_path and script_path are required")
+		return
+	}
+	if !haveWorkspace {
+		fail(http.StatusBadRequest, "workspace file required")
+		return
+	}
+	if narPath == "" {
+		if cached, _ := s.narCache.narFileFor(storePath); cached == "" && !pathExists(filepath.Join(storePath, "bin", "run")) {
+			fail(http.StatusBadRequest, "nar file required (not cached on this node)")
+			return
+		}
+	}
 	// If the closure wasn't cached before, it is now (stored above). Resolve the
 	// cached NAR path for this job record.
 	if narPath == "" {
@@ -340,11 +347,50 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	// DDP ranks upload directly to their own node and every rank does the same,
 	// so the closure is already where it will run — skip the broadcast and keep
 	// it off the other (non-executing) peers.
-	if r.FormValue("skip_broadcast") != "1" {
+	if skipBroadcast != "1" {
 		s.broadcastClosure(storePath)
 	}
 
 	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
+}
+
+// extractWorkspaceTar unpacks the workspace stream into workDir, refusing
+// entries that escape it, and records a stamp per extracted file so results
+// can later be limited to what the job actually changed.
+func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]FileStamp) error {
+	tr := tar.NewReader(src)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(workDir, hdr.Name)
+		cleanTarget := filepath.Clean(target)
+		cleanWork := filepath.Clean(workDir) + string(os.PathSeparator)
+		if !strings.HasPrefix(cleanTarget, cleanWork) {
+			continue
+		}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			os.MkdirAll(target, os.FileMode(hdr.Mode))
+		case tar.TypeReg:
+			os.MkdirAll(filepath.Dir(target), 0755)
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(hdr.Mode))
+			if err != nil {
+				continue
+			}
+			io.Copy(f, tr)
+			f.Close()
+			if rel, err := filepath.Rel(workDir, cleanTarget); err == nil {
+				if info, err := os.Stat(cleanTarget); err == nil {
+					uploaded[filepath.ToSlash(rel)] = stampOf(info)
+				}
+			}
+		}
+	}
 }
 
 // handleJobExec handles WebSocket GET /v1/jobs/{id}/exec.
