@@ -65,7 +65,24 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: 'src/go.mod'
-          cache-dependency-path: 'src/go.sum'
+          cache: false
+
+      # setup-go's cache is keyed on go.sum alone, so it writes once and then
+      # only ever restores that first copy. That copy comes from a native
+      # linux/amd64 build, leaving the darwin and arm64 objects uncached and
+      # forcing goreleaser to recompile the dependency tree for three targets
+      # from scratch every run. The commit sha in the key makes each run save
+      # its own cache; restore-keys falls back to the most recent one.
+      - name: Cache Go build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: nightly-go-${{ hashFiles('src/go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            nightly-go-${{ hashFiles('src/go.sum') }}-
+            nightly-go-
 
       - name: Build snapshot artifacts
         uses: goreleaser/goreleaser-action@v7
