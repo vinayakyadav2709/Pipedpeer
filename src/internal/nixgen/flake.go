@@ -96,6 +96,24 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 		}
 		psPkgs = append(psPkgs, "ps."+pkg)
 	}
+	if torchCUDA {
+		// torch imports numpy at runtime for array interop. pip installs only
+		// torch's own tree into the site dir, so numpy has to come from the
+		// nix env — and when torch is a script's only import that env would
+		// otherwise be empty, leaving torch to warn "Failed to initialize
+		// NumPy" and quietly drop .numpy()/from_numpy().
+		hasNumpy := false
+		for _, p := range psPkgs {
+			if p == "ps.numpy" {
+				hasNumpy = true
+				break
+			}
+		}
+		if !hasNumpy {
+			psPkgs = append(psPkgs, "ps.numpy")
+		}
+	}
+
 	pkgsList := strings.Join(psPkgs, "\n          ")
 	if torchCUDA {
 		return fmt.Sprintf(`{

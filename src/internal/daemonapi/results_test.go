@@ -150,3 +150,51 @@ func TestResultsWithoutUploadRecordReturnsEverything(t *testing.T) {
 		t.Fatalf("expected file to be returned, got %q", got)
 	}
 }
+
+// A sandboxed GPU job gets /dev/nvidia* injected, but the device nodes are
+// useless without libcuda.so.1 to dlopen: torch reports no CUDA device and
+// trains on the CPU instead — measured at 17x slower, with no error anywhere.
+// nvidia-container-toolkit would bridge the libraries; crun, the only runtime
+// we require, does not.
+func TestGPUDriverLibsFindsVersionedSonames(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{
+		"libcuda.so", "libcuda.so.1", "libcuda.so.580.65.06",
+		"libnvidia-ml.so.1", "libnvcuvid.so.1",
+		"libc.so.6", "libstdc++.so.6", // host libs that must NOT travel
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := map[string]bool{}
+	for _, p := range gpuDriverLibs(dir) {
+		got[filepath.Base(p)] = true
+	}
+
+	for _, want := range []string{
+		"libcuda.so", "libcuda.so.1", "libcuda.so.580.65.06",
+		"libnvidia-ml.so.1", "libnvcuvid.so.1",
+	} {
+		if !got[want] {
+			t.Errorf("driver library %s did not make it into the sandbox", want)
+		}
+	}
+	// Shipping the host glibc would put it ahead of the closure's on the
+	// search path, and the two are not interchangeable.
+	for _, unwanted := range []string{"libc.so.6", "libstdc++.so.6"} {
+		if got[unwanted] {
+			t.Errorf("host library %s must not be mounted into the sandbox", unwanted)
+		}
+	}
+}
+
+func TestGPUDriverLibsEmptyWhenNoDriver(t *testing.T) {
+	if libs := gpuDriverLibs(""); libs != nil {
+		t.Fatalf("no driver dir should yield no mounts, got %v", libs)
+	}
+	if libs := gpuDriverLibs(t.TempDir()); len(libs) != 0 {
+		t.Fatalf("empty dir should yield no mounts, got %v", libs)
+	}
+}
