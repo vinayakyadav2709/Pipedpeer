@@ -143,3 +143,32 @@ func TestTorchFlakeAlwaysIncludesNumpy(t *testing.T) {
 		})
 	}
 }
+
+// The torch wheel download must stay a fixed-output derivation: FODs get
+// network access even under nix's default sandbox, so workers with a stock
+// nix install can build the env. A plain pip install inside a normal
+// derivation only worked with sandbox = false on every machine.
+func TestTorchFlakeUsesFixedOutputWheelDownload(t *testing.T) {
+	flake := GenerateFlakeForArch([]string{"torch"}, "python3", "x86_64-linux")
+
+	for _, needle := range []string{
+		"outputHash = \"" + torchWheelsHash + "\"",
+		"outputHashMode = \"recursive\"",
+		"pip download",
+		"--no-deps",
+		"pip install --no-cache-dir --no-index",
+		"torch==2.13.0+cu126",
+	} {
+		if !strings.Contains(flake, needle) {
+			t.Fatalf("torch flake missing %q:\n%s", needle, flake)
+		}
+	}
+
+	// Every requirement must be pinned, or the FOD hash drifts as the index
+	// moves and every torch env build starts failing with a hash mismatch.
+	for _, line := range strings.Split(strings.TrimSpace(torchRequirements), "\n") {
+		if !strings.Contains(line, "==") {
+			t.Fatalf("unpinned requirement %q", line)
+		}
+	}
+}
