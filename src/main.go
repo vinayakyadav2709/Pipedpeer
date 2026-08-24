@@ -1673,15 +1673,61 @@ func runDaemon(args []string) {
 	}
 }
 
+// detectLocalIP returns the address peers should use to reach this machine.
+// It is what the node advertises as its own endpoint and what a DDP rank 0
+// hands out as MASTER_ADDR, so an address nobody can dial is worse than
+// useless — every peer connects and hangs.
+//
+// Enumerating by interface rather than InterfaceAddrs matters: a /32 parked on
+// lo (Tailscale leaves 198.18.x there) is not in 127.0.0.0/8, so IsLoopback
+// passes it, and lo is interface index 1 so it is the first thing returned.
+// That address then reached peers as this node's endpoint.
+//
+// Preference order is by how widely routable an address is: a LAN address
+// beats a VPN one, because peers that can reach both should take the direct
+// path.
 func detectLocalIP() string {
-	addrs, err := net.InterfaceAddrs()
+	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "127.0.0.1"
 	}
-	for _, a := range addrs {
-		if ipNet, ok := a.(*net.IPNet); ok && !ipNet.IP.IsLoopback() && ipNet.IP.To4() != nil {
-			return ipNet.IP.String()
+
+	var lan, other string
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
 		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNet.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+				continue
+			}
+			// 198.18.0.0/15 is the RFC 2544 benchmarking range: never a real
+			// peer-reachable address, and exactly what gets parked on lo.
+			if ip[0] == 198 && (ip[1] == 18 || ip[1] == 19) {
+				continue
+			}
+			if ip.IsPrivate() && lan == "" {
+				lan = ip.String()
+			} else if other == "" {
+				other = ip.String()
+			}
+		}
+	}
+
+	if lan != "" {
+		return lan
+	}
+	if other != "" {
+		return other
 	}
 	return "127.0.0.1"
 }
