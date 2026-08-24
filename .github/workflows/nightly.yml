@@ -111,18 +111,27 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ needs.check.outputs.sha }}
         run: |
-          # Roll the nightly pointer: drop the previous release and its tag,
-          # then republish from the current dev commit.
-          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          # Move the tag first, then update the release in place. Deleting and
+          # recreating it left two failure modes: any error after the delete
+          # took the whole nightly channel offline, and creating a release and
+          # its tag in one call raced badly enough that GitHub served the
+          # assets under an "untagged-<hash>" path, 404ing every
+          # releases/download/nightly/ URL the install script uses.
+          git tag -f nightly "$SHA"
+          git push -f origin refs/tags/nightly
 
+          title="Nightly ($(date -u +%Y-%m-%d))"
           notes="Automated nightly build from \`dev\` @ \`${SHA}\`.
 
           Unstable: built from the development stream and not release tested.
           Install with: \`./scripts/install-pipedpeer.sh --channel nightly\`"
 
-          gh release create nightly \
-            --title "Nightly ($(date -u +%Y-%m-%d))" \
-            --notes "$notes" \
-            --prerelease \
-            --target "$SHA" \
-            upload/*
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --title "$title" --notes "$notes" --prerelease
+          else
+            # --verify-tag: the tag is pushed above, so refuse to invent one.
+            gh release create nightly --title "$title" --notes "$notes" \
+              --prerelease --verify-tag
+          fi
+
+          gh release upload nightly upload/* --clobber
