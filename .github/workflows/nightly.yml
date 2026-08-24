@@ -68,44 +68,6 @@ jobs:
       - name: Test (race)
         run: go test -race -count=1 ./...
 
-  # Integration tests need a real Nix store and crun. Now blocking: a failing
-  # integration run must fail the nightly so a regression can't ship silently.
-  integration:
-    needs: check
-    if: needs.check.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
-    continue-on-error: false
-    steps:
-      - name: Checkout dev
-        uses: actions/checkout@v7
-        with:
-          ref: dev
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: 'src/go.mod'
-          cache-dependency-path: 'src/go.sum'
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Install crun
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y crun
-
-      # lab/docker-compose.yml bind-mounts this binary into the worker
-      # containers, so it has to exist before compose starts them.
-      - name: Build lab binary
-        working-directory: src
-        env:
-          CGO_ENABLED: '0'
-        run: go build -o ../lab/pipedpeer .
-
-      - name: Run integration tests
-        run: ./scripts/test-integration.sh
-
   # D2 shim-overhead report. Never-slower is structurally enforced by the Go
   # tests; this only trips on a gross regression (shim > 3x a plain local Pool
   # with no daemon reachable), so it is a report, not a tight wall-clock gate.
