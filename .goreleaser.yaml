@@ -2,6 +2,13 @@ version: 2
 
 project_name: pipedpeer
 
+# The rolling "nightly" prerelease tag is not semver; without this, once the
+# tag exists every snapshot build resolves .Version to "nightly" and
+# incpatch fails.
+git:
+  ignore_tags:
+    - nightly
+
 builds:
   - id: pipedpeer
     dir: src
@@ -31,7 +38,7 @@ checksum:
   name_template: "checksums.txt"
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-nightly.{{ .Now.Format \"20060102\" }}-{{ .ShortCommit }}"
+  version_template: "{{ incpatch .Version }}-nightly.{{ .Now.Format \"20060102\" }}-{{ .ShortCommit }}"
 
 changelog:
   use: github
