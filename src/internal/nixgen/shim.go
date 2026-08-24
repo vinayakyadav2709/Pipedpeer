@@ -1710,6 +1710,59 @@ def _install_ddp():
     _NATIVE_DDP = []
     _WORLD = int(os.environ.get("PIPEDPEER_WORLD_SIZE", "1"))
     _RANK = int(os.environ.get("PIPEDPEER_RANK", "0"))
+    # daemon (default): every sync is one POST to the lead rank's daemon on
+    # the same port every other byte of pipedpeer traffic uses — no sockets
+    # of our own, no MASTER_PORT, nothing new to firewall. gloo/nccl remain
+    # as an escape hatch for clusters where torch's own mesh is preferable.
+    _BACKEND = os.environ.get("PIPEDPEER_DDP_BACKEND", "daemon")
+    _SYNC_URL = os.environ.get("PIPEDPEER_DDP_SYNC", "")
+    _GROUP = os.environ.get("PIPEDPEER_DDP_GROUP", "ddp")
+    # 1 = average gradients every step (exact DDP semantics). N>1 = local
+    # SGD: train locally, average weights every Nth step — the knob for
+    # high-latency links where a per-step round trip dominates.
+    _SYNC_EVERY = max(1, int(os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "1")))
+    _SEQ = [0]
+    _STEPN = {}
+    if _BACKEND == "daemon" and not _SYNC_URL:
+        _BACKEND = "gloo"  # no sync endpoint handed down; old transport
+
+    def _daemon_exchange(payload):
+        import base64
+        import json
+        import urllib.request
+        _SEQ[0] += 1
+        body = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
+                           "world": _WORLD,
+                           "data": base64.b64encode(payload).decode()}).encode()
+        req = urllib.request.Request(_SYNC_URL, data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=240) as resp:
+            out = json.loads(resp.read())
+        if "blobs" not in out:
+            raise RuntimeError("ddp sync failed: %s" % out)
+        return [base64.b64decode(b) for b in out["blobs"]]
+
+    def _daemon_allreduce(tensors):
+        """Average tensors across ranks in place, through the daemon channel."""
+        import pickle
+        arrs = [t.detach().cpu().numpy() for t in tensors]
+        blobs = _daemon_exchange(pickle.dumps(arrs, protocol=pickle.HIGHEST_PROTOCOL))
+        peers = [pickle.loads(b) for b in blobs]
+        for i, t in enumerate(tensors):
+            acc = peers[0][i].astype("float64", copy=True)
+            for pr in peers[1:]:
+                acc += pr[i]
+            acc /= len(peers)
+            t.data.copy_(_th.from_numpy(acc.astype(arrs[i].dtype)).to(t.device))
+
+    def _daemon_broadcast(tensors):
+        """Overwrite tensors with rank 0's values, through the daemon channel."""
+        import pickle
+        arrs = [t.detach().cpu().numpy() for t in tensors]
+        blobs = _daemon_exchange(pickle.dumps(arrs, protocol=pickle.HIGHEST_PROTOCOL))
+        lead = pickle.loads(blobs[0])
+        for i, t in enumerate(tensors):
+            t.data.copy_(_th.from_numpy(lead[i]).to(t.device))
     _STEPPED = weakref.WeakSet()
     _ORIG_FWD = _th.nn.Module.forward
     _FWD = weakref.WeakSet()
@@ -1720,6 +1773,27 @@ def _install_ddp():
         backend = os.environ.get("PIPEDPEER_DDP_BACKEND", "gloo")
         if backend == "nccl" and not _th.cuda.is_available():
             backend = "gloo"
+        # When the master is a Tailscale address (CGNAT 100.64.0.0/10), the
+        # ranks can only reach each other through the tunnel — but gloo
+        # advertises the default interface's LAN address, which the other
+        # city cannot dial, so the mesh never forms. Pin gloo (and tensor
+        # pipes) to the tunnel interface.
+        master = os.environ.get("MASTER_ADDR", "")
+        try:
+            first, second = (int(x) for x in master.split(".")[:2])
+            is_ts = first == 100 and 64 <= second <= 127
+        except Exception:
+            is_ts = False
+        if is_ts:
+            # if_nameindex works without /sys, which the sandbox doesn't mount.
+            try:
+                import socket as _sk
+                names = [n for _, n in _sk.if_nameindex()]
+            except Exception:
+                names = []
+            if "tailscale0" in names:
+                os.environ.setdefault("GLOO_SOCKET_IFNAME", "tailscale0")
+                os.environ.setdefault("TP_SOCKET_IFNAME", "tailscale0")
         # Bound the rendezvous: torch's default is 30 minutes, which turns a
         # firewalled master port into a silent infinite hang. Fail in minutes
         # with a traceback instead; PIPEDPEER_DDP_TIMEOUT overrides (seconds).
@@ -1742,6 +1816,25 @@ def _install_ddp():
         _orig_step = self.step
 
         def _step(*sa, **skw):
+            if _BACKEND == "daemon":
+                n = _STEPN.get(id(self), 0)
+                _STEPN[id(self)] = n + 1
+                params = [p for g in self.param_groups for p in g["params"]]
+                if self not in _STEPPED:
+                    _STEPPED.add(self)
+                    _daemon_allreduce([p.data for p in params])
+                    _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
+                         % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
+                if _SYNC_EVERY == 1:
+                    grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
+                             for p in params if p.grad is not None]
+                    if grads:
+                        _daemon_allreduce(grads)
+                    return _orig_step(*sa, **skw)
+                out = _orig_step(*sa, **skw)
+                if (n + 1) % _SYNC_EVERY == 0:
+                    _daemon_allreduce([p.data for p in params])
+                return out
             if not _dist.is_initialized():
                 _init_group()
             if self not in _STEPPED:
@@ -1763,12 +1856,22 @@ def _install_ddp():
         self.step = _step
 
     def _forward(self, *args, **kw):
-        if (_WORLD > 1 and not _NATIVE_DDP and self not in _FWD
-                and _dist.is_initialized()):
-            _FWD.add(self)
-            for buf in self._buffers.values():
-                if buf is not None and buf.is_floating_point() and buf.numel():
-                    _dist.broadcast(buf, src=0)
+        if _WORLD > 1 and not _NATIVE_DDP and self not in _FWD:
+            if _BACKEND == "daemon":
+                # Only sync once training is underway (mirrors the gloo
+                # branch, which waits for the process group): the optimizer's
+                # first step is the rendezvous.
+                if _STEPPED:
+                    _FWD.add(self)
+                    bufs = [b for b in self._buffers.values()
+                            if b is not None and b.is_floating_point() and b.numel()]
+                    if bufs:
+                        _daemon_broadcast(bufs)
+            elif _dist.is_initialized():
+                _FWD.add(self)
+                for buf in self._buffers.values():
+                    if buf is not None and buf.is_floating_point() and buf.numel():
+                        _dist.broadcast(buf, src=0)
         return _ORIG_FWD(self, *args, **kw)
 
     def _iter(self):

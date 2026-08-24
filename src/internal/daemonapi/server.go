@@ -92,6 +92,7 @@ type Server struct {
 
 	// Round-robin counter for cross-invocation persistence
 	rrCounter atomic.Int64
+	ddp       *ddpBoard
 
 	// Maximum concurrent tasks this node will hold (0 = unlimited)
 	maxConcurrent atomic.Int64
@@ -223,6 +224,7 @@ func NewWithConfig(nodeID string, leaseDuration, gracePeriod, sweepInterval time
 		leaseDuration:   leaseDuration,
 		gracePeriod:     gracePeriod,
 		sweepInterval:   sweepInterval,
+		ddp:             newDDPBoard(),
 		runningLeaseTTL: DefaultRunningLeaseTTL,
 		leases:          make(map[string]*Lease),
 		stopSweep:       make(chan struct{}),
@@ -329,6 +331,7 @@ func (s *Server) StartSweeper() {
 			select {
 			case <-ticker.C:
 				s.sweepExpired()
+				s.ddp.sweep(10 * time.Minute)
 				// Completed job dirs accumulate on long-lived daemons; prune
 				// them hourly (retention is generous: a dir untouched for
 				// JobRetention is a finished job, whatever its record says).
@@ -720,6 +723,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/store", s.handleStoreCheck)
 	r.Post("/v1/store/import", s.handleStoreImport)
 	r.Post("/v1/pool/map", s.handlePoolMap)
+	r.Post("/v1/ddp/sync", s.handleDDPSync)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 
