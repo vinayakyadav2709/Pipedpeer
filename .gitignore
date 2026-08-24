@@ -17,3 +17,9 @@ pipedpeer-demo/data.csv
 pipedpeer-demo/sync_note.txt
 pipedpeer-demo/created_by_job.txt
 pipedpeer-demo/delete_me.txt
+
+# local-only notes
+future.md
+handoff.md
+plan.md
+prompt.md
