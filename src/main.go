@@ -686,7 +686,11 @@ func runDDP(o ddpRunOptions) error {
 		fmt.Printf("rank %d: %s (%s:%d)\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
 			ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
 	}
-	fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=gloo\n\n", masterAddr, masterPort)
+	if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
+		fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=%s\n\n", masterAddr, masterPort, os.Getenv("PIPEDPEER_DDP_BACKEND"))
+	} else {
+		fmt.Printf("sync: daemon channel via %s:%d (no extra ports)\n\n", masterAddr, rank0.DaemonPort)
+	}
 
 	env, err := app.BuildEnvironment(absScript, app.EnvOptions{
 		PythonVersion: o.PythonVersion,
@@ -767,8 +771,11 @@ func runDDP(o ddpRunOptions) error {
 		}
 	}
 	if firstErr != nil {
-		fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n",
-			masterAddr, masterPort)
+		if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
+			fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n", masterAddr, masterPort)
+		} else {
+			fmt.Printf("[ddp] hint: sync runs on the lead daemon at %s:%d — check that every rank can curl that address, and `pipedpeer traffic` there for arriving /v1/ddp/sync posts\n", masterAddr, rank0.DaemonPort)
+		}
 	}
 	return firstErr
 }

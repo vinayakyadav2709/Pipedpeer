@@ -39,7 +39,9 @@ pipedpeer-demo/
 | 1 | `pipedpeer run 01_sklearn_rf.py --remote` |
 | 2 | `pipedpeer run 02_numpy_heavy.py --remote` |
 | 3 | `pipedpeer run 03_pandas_ooc/03_pandas_ooc.py --remote` |
-| 4 | `pipedpeer run 04_torch_ddp.py --remote --ddp 2` |
+| 4a | `pipedpeer run 04_torch_ddp.py --remote --ddp 3 --gpu off` — all THREE machines train as CPU ranks |
+| 4b | `pipedpeer run 04_torch_ddp.py --remote --ddp 2` — the two dGPU workers train, one rank per GPU |
+| 5 | `pipedpeer run 05_file_sync.py --remote` — runs on ONE worker; the file changes it makes there sync back to the laptop |
 
 Notes:
 - That's the whole workflow: the exact script you'd run locally, plus
@@ -47,10 +49,13 @@ Notes:
 - Interception is always on — numpy/pandas/sklearn/torch calls route to the
   cluster when the cost model says the cluster wins. GPU use is inferred from
   the script's imports, so 04 lands on GPUs without any flag.
-- `--ddp 2` = both dGPU workers train as one job, one rank per GPU; the
-  iGPU-only laptop is never an eligible rank (GPU is inferred from the torch
-  import, and only NVIDIA nodes qualify). DDP also auto-activates on
-  torch.distributed imports with half the eligible nodes if you omit it.
+- Torch runs twice on purpose: 4a (`--gpu off`) makes every machine a CPU
+  rank — including the iGPU laptop — to show the ring scales to any node;
+  4b drops the laptop (GPU is inferred from the torch import and only
+  NVIDIA nodes qualify) and shows the same script speed up on two GPUs.
+- Rank sync travels over the daemons' normal port (`/v1/ddp/sync`) — no
+  extra ports, no firewall prep. Narrate that: *"the gradient sync uses the
+  same single channel every other byte uses."*
 - Isolation is automatic too: nodes with crun sandbox jobs, nodes without it
   run unisolated with a one-line warning.
 - First live run per script is instant because setup.sh rehearsed it.
@@ -84,8 +89,10 @@ What to narrate, by metric:
 - **During 03 (pandas)** — `MEM AVAIL` on workers drops in small waves: the
   CSV is streamed as bounded chunks (0.4x free RAM), and `groupby` buckets are
   hash-shuffled per key so each node reduces its share exactly.
-- **During 04 (DDP)** — 2 `ACTIVE JOBS`, one rank per dGPU worker, for the
-  whole training loop; `nvidia-smi` on each worker shows the python process.
+- **During 4a (CPU DDP)** — 3 `ACTIVE JOBS`, one rank per machine including
+  the laptop; every CPU column climbs together.
+- **During 4b (GPU DDP)** — 2 `ACTIVE JOBS`, one rank per dGPU worker;
+  `nvidia-smi` on each worker shows the python process, the laptop stays flat.
 
 ## Act 3 — The Worker Node View (physical laptops)
 
@@ -100,8 +107,10 @@ On each worker laptop have `htop` full-screen. Key beats:
   *"single-node heavy offload: some math cannot be split."*
 - **Act 3d (pandas):** each worker's CPU spikes in bursts; memory stays
   flat-ish (chunked streaming, worker GC between chunks).
-- **Act 3e (DDP):** both workers spike for the whole run; every ~0.1s they
-  synchronize gradients. GPU utilisation is the beat here, not CPU.
+- **Act 3e (4a CPU DDP):** all three machines spike together for the whole
+  run — the one moment the laptop computes, say so out loud.
+- **Act 3f (4b GPU DDP):** both workers' GPUs light up (`nvidia-smi`), the
+  laptop goes flat again; same script, ~20x faster epochs.
 - Optional: `tail -f /tmp/pipedpeer/daemon.log` on one worker to show
   `pool/map` requests arriving.
 
@@ -194,10 +203,11 @@ retry), the run still completes. `pipedpeer start` on that worker afterwards.
 - **Pool fan-out silent / local-only** → peers must already have the closure;
   re-run `setup.sh` rehearsal. (Spill only targets nodes whose store is
   materialized — by design.)
-- **DDP ranks fail to rendezvous** → the leader (rank 0) hosts the meet-up on
-  port 29500 (next free up to 29510 if busy). Open the range once on each
-  worker: `sudo ufw allow 29500:29510/tcp`. Ranks fail within ~2 min with a
-  clear timeout instead of hanging; `--ddp-port` pins an exact port.
+- **DDP ranks fail to sync** → sync rides the lead rank's daemon
+  (`/v1/ddp/sync` on port 38080), so if `pipedpeer nodes` is healthy DDP has
+  everything it needs — check `pipedpeer traffic` on the lead node for the
+  arriving sync posts. Port 29500 only matters if you force the old
+  transport with `PIPEDPEER_DDP_BACKEND=gloo`.
 - **Worker rejects uploaded closures** (`lacks a signature by a trusted key`)
   → that worker runs multi-user nix and was set up with an old build. Re-run
   `pipedpeer setup -y` there: the nix-imports prerequisite now repairs the
