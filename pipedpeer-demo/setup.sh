@@ -62,6 +62,7 @@ run() { echo; echo "--- rehearsal: $1"; "$PIPE" run "$1" \
 run 01_sklearn_rf.py
 run 02_numpy_heavy.py
 run 03_pandas_ooc/03_pandas_ooc.py
+run 04_torch_ddp.py --ddp 3 --gpu off
 run 04_torch_ddp.py --ddp 2 --gpu force
 
 echo
