@@ -1,7 +1,9 @@
 # Pipedpeer live demo — choreography
 
-Goal: prove **zero code changes** and **weak orchestrator** on a 3-node LAN,
-with the audience watching the workers burn CPU while the laptop stays flat.
+Goal: prove **zero code changes** and **weak orchestrator** on a 3-node LAN —
+the laptop (orchestrator, iGPU only, never runs CUDA work) plus two dGPU
+workers — with the audience watching the workers burn CPU/GPU while the
+laptop stays flat.
 
 ## Layout
 
@@ -20,12 +22,14 @@ pipedpeer-demo/
 
 ## Before the audience (15–20 min)
 
-1. On each worker laptop (3 machines): `./worker-setup.sh`
+1. On each worker laptop (2 machines, both with an NVIDIA dGPU): `./worker-setup.sh`
 2. On the laptop: `./setup.sh` — generates `data.csv`, prints `pipedpeer nodes`,
    then rehearses all 4 scripts (builds Nix closures, uploads data, materializes
    the store on every worker — this is what makes the live run instant and lets
-   pool fan-out reach all 3 workers).
-3. Verify: `pipedpeer nodes` shows 4 nodes (self + 3 workers), all `healthy`.
+   pool fan-out reach both workers).
+3. Verify: `pipedpeer nodes` shows 3 nodes (self + 2 workers), all `healthy`,
+   and the GPU column lists the NVIDIA card on BOTH workers (the laptop shows
+   `-`: only NVIDIA dGPUs are advertised, an iGPU is not a CUDA target).
 4. Keep rehearsal outputs; they double as "expected values" for the live run.
 
 ## Execution commands (live)
@@ -35,7 +39,7 @@ pipedpeer-demo/
 | 1 | `pipedpeer run 01_sklearn_rf.py --remote` |
 | 2 | `pipedpeer run 02_numpy_heavy.py --remote` |
 | 3 | `pipedpeer run 03_pandas_ooc/03_pandas_ooc.py --remote` |
-| 4 | `pipedpeer run 04_torch_ddp.py --remote --ddp 3` |
+| 4 | `pipedpeer run 04_torch_ddp.py --remote --ddp 2` |
 
 Notes:
 - That's the whole workflow: the exact script you'd run locally, plus
@@ -43,7 +47,9 @@ Notes:
 - Interception is always on — numpy/pandas/sklearn/torch calls route to the
   cluster when the cost model says the cluster wins. GPU use is inferred from
   the script's imports, so 04 lands on GPUs without any flag.
-- `--ddp 3` = all three workers train as one job; DDP also auto-activates on
+- `--ddp 2` = both dGPU workers train as one job, one rank per GPU; the
+  iGPU-only laptop is never an eligible rank (GPU is inferred from the torch
+  import, and only NVIDIA nodes qualify). DDP also auto-activates on
   torch.distributed imports with half the eligible nodes if you omit it.
 - Isolation is automatic too: nodes with crun sandbox jobs, nodes without it
   run unisolated with a one-line warning.
@@ -67,35 +73,35 @@ the run command. Optionally a third pane: `pipedpeer tasks --watch`.
 
 What to narrate, by metric:
 
-- **Nodes table** — 4 rows (self + 3 workers). Before each run point at
-  `MEM AVAIL` (tens of GB on workers).
-- **During 01 (joblib/RF)** — `ACTIVE JOBS` on the 3 workers flips to 1 and
+- **Nodes table** — 3 rows (self + 2 workers). Before each run point at
+  `MEM AVAIL` (tens of GB on workers) and the GPU column on both workers.
+- **During 01 (joblib/RF)** — `ACTIVE JOBS` on both workers flips to 1 and
   tree-fit batches cycle: worker CPU columns spike, laptop's stays ~0%.
-- **During 02 (numpy)** — matmul: watch `MEM AVAIL` drop on all 3 workers as
+- **During 02 (numpy)** — matmul: watch `MEM AVAIL` drop on both workers as
   the row-block chunks are reserved (≈40 MB per slice), then release as each
   finishes; svd: only ONE worker's `MEM AVAIL` drops (134 MB matrix offload),
-  the other two idle — narrate the two distribution models.
+  the other idles — narrate the two distribution models.
 - **During 03 (pandas)** — `MEM AVAIL` on workers drops in small waves: the
   CSV is streamed as bounded chunks (0.4x free RAM), and `groupby` buckets are
   hash-shuffled per key so each node reduces its share exactly.
-- **During 04 (DDP)** — 3 `ACTIVE JOBS`, one per worker (ranks), for the whole
-  training loop.
+- **During 04 (DDP)** — 2 `ACTIVE JOBS`, one rank per dGPU worker, for the
+  whole training loop; `nvidia-smi` on each worker shows the python process.
 
 ## Act 3 — The Worker Node View (physical laptops)
 
 On each worker laptop have `htop` full-screen. Key beats:
 
-- **Act 3a (RF):** all 3 workers' cores climb to ~100% in lockstep (tree
-  batches land on each). Narrate: *"150 trees, ~50 on each machine, no
+- **Act 3a (RF):** both workers' cores climb to ~100% in lockstep (tree
+  batches land on each). Narrate: *"150 trees split across the machines, no
   user-side parallelism."*
-- **Act 3b (matmul):** the 3 workers alternate in waves — block-sliced rows.
+- **Act 3b (matmul):** the 2 workers alternate in waves — block-sliced rows.
 - **Act 3c (svd):** only one worker spikes; its memory climbs to ~700 MB
-  (134 MB matrix + LAPACK workspace) then drops. The other two are idle —
+  (134 MB matrix + LAPACK workspace) then drops. The other one is idle —
   *"single-node heavy offload: some math cannot be split."*
 - **Act 3d (pandas):** each worker's CPU spikes in bursts; memory stays
   flat-ish (chunked streaming, worker GC between chunks).
-- **Act 3e (DDP):** all 3 spike for the whole run; every ~0.1s they
-  synchronize gradients.
+- **Act 3e (DDP):** both workers spike for the whole run; every ~0.1s they
+  synchronize gradients. GPU utilisation is the beat here, not CPU.
 - Optional: `tail -f /tmp/pipedpeer/daemon.log` on one worker to show
   `pool/map` requests arriving.
 
@@ -121,7 +127,7 @@ Every hop now narrates itself:
   `[pipedpeer] svd: offloading 134 MB matrix to one worker`,
   `[pipedpeer] joblib: dispatching 150 tasks (12 MB) to cluster`,
   `[pipedpeer] read_csv: streaming 1700 MB out-of-core`,
-  `[pipedpeer] groupby: hash-shuffling 10,000,000 rows across 4 nodes`.
+  `[pipedpeer] groupby: hash-shuffling 10,000,000 rows across 3 nodes`.
   These stream live, so the audience reads exactly what the laptop sent.
 - **Each worker node:** `tail -f /tmp/pipedpeer/daemon.log` shows its ledger:
   `[pool] received pool/map from 192.168.1.10:...` (who sent it, how many
@@ -158,6 +164,21 @@ pipedpeer jobs prune                       # delete history older than 7 days
 pipedpeer jobs prune --older-than 24h      # ...or whatever you prefer
 ```
 
+## Distribution levers (rehearsal insurance)
+
+`auto` (the default) is the honest mode: the cost model ships work only when
+the cluster wins, so on a fast LAN the demos distribute on their own. If a
+gate declines something you want shown, force it:
+
+```bash
+pipedpeer run 01_sklearn_rf.py --distribute force     # every gate says yes
+pipedpeer run ... -e PIPEDPEER_SPILL_MIN=1000000      # explicit size floor (bytes)
+```
+
+Force skips the cost models and zeroes the 32 MB size floors — it can be
+slower than local (that is the point of the default), so on stage prefer
+`auto` first and keep `force` as the guarantee that the dashboards light up.
+
 ## Act 5 — Fault tolerance (optional, 1 min)
 
 Run 02 again, and 10 s in, `pipedpeer stop` on ONE worker laptop. Point at the
@@ -177,6 +198,11 @@ retry), the run still completes. `pipedpeer start` on that worker afterwards.
   port 29500 (next free up to 29510 if busy). Open the range once on each
   worker: `sudo ufw allow 29500:29510/tcp`. Ranks fail within ~2 min with a
   clear timeout instead of hanging; `--ddp-port` pins an exact port.
+- **Worker rejects uploaded closures** (`lacks a signature by a trusted key`)
+  → that worker runs multi-user nix (Determinate installer / nix-daemon).
+  `echo "require-sigs = false" | sudo tee -a /etc/nix/nix.custom.conf` and
+  `sudo systemctl restart nix-daemon` on the worker. Single-user installs are
+  unaffected.
 - **Isolation errors (crun missing)** → none possible: the node warns and
   runs unisolated. Install crun (`pipedpeer setup`) to get sandboxing back.
 - **First run still slow** → closures build in the rehearsal; if you skipped
