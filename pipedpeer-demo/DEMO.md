@@ -199,10 +199,9 @@ retry), the run still completes. `pipedpeer start` on that worker afterwards.
   worker: `sudo ufw allow 29500:29510/tcp`. Ranks fail within ~2 min with a
   clear timeout instead of hanging; `--ddp-port` pins an exact port.
 - **Worker rejects uploaded closures** (`lacks a signature by a trusted key`)
-  → that worker runs multi-user nix (Determinate installer / nix-daemon).
-  `echo "require-sigs = false" | sudo tee -a /etc/nix/nix.custom.conf` and
-  `sudo systemctl restart nix-daemon` on the worker. Single-user installs are
-  unaffected.
+  → that worker runs multi-user nix and was set up with an old build. Re-run
+  `pipedpeer setup -y` there: the nix-imports prerequisite now repairs the
+  config itself (require-sigs = false + nix-daemon restart, one sudo prompt).
 - **Isolation errors (crun missing)** → none possible: the node warns and
   runs unisolated. Install crun (`pipedpeer setup`) to get sandboxing back.
 - **First run still slow** → closures build in the rehearsal; if you skipped
