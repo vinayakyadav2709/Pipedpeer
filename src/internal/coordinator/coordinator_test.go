@@ -1,13 +1,39 @@
 package coordinator
 
 import (
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
+
+// fakeDaemon stands in for the local daemon's /v1/nodes and returns the port
+// to pass as SelfDaemon. Tests must never point SelfDaemon at the real default
+// port: FindNode queries http://127.0.0.1:<SelfDaemon>/v1/nodes, so a daemon
+// running on the developer's machine leaks its live cluster into every
+// placement assertion.
+func fakeDaemon(t *testing.T, nodes ...storedNode) int {
+	t.Helper()
+	if nodes == nil {
+		nodes = []storedNode{}
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(nodes)
+	}))
+	t.Cleanup(ts.Close)
+
+	port, err := strconv.Atoi(ts.URL[strings.LastIndex(ts.URL, ":")+1:])
+	if err != nil {
+		t.Fatalf("parsing port out of %s: %v", ts.URL, err)
+	}
+	return port
+}
 
 func testIdentity() identity.NodeIdentity {
 	return identity.NodeIdentity{
@@ -31,7 +57,7 @@ func TestSelectsLeastLoadedNode(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 50, MemPercent: 60, ActiveJobs: 3},
 		DiscoverFn:   fakeLAN,
 	})
@@ -50,7 +76,7 @@ func TestFallsBackToSelfWhenNoOtherNodes(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		DiscoverFn:   func() []registry.NodeRecord { return nil },
 	})
 
@@ -68,7 +94,7 @@ func TestSelfNodeUsesLoopback(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 	})
 
 	selfNode := registry.NodeRecord{NodeID: "self-node-uuid"}
@@ -104,7 +130,7 @@ func TestRegistryIntegrationAndCacheFallback(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     selfLoad,
 		DiscoverFn:   func() []registry.NodeRecord { return nil },
 	})
@@ -167,7 +193,7 @@ func TestDiagnosticsRecordAllCandidates(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		DiscoverFn:   fakeLAN,
 	})
 
@@ -184,7 +210,7 @@ func TestStaleCacheReturnsSelf(t *testing.T) {
 		RegistryURL:  "http://127.0.0.1:1", // unreachable
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		MaxCacheAge:  1 * time.Millisecond, // very short
 		DiscoverFn:   func() []registry.NodeRecord { return nil },
 	})
@@ -231,7 +257,7 @@ func TestDiscoveryAndRegistryOverlapDedup(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 90, MemPercent: 90},
 		DiscoverFn:   fakeLAN,
 	})
@@ -256,7 +282,7 @@ func TestRegistryDownNoCacheFallsToSelf(t *testing.T) {
 		RegistryURL:  "http://127.0.0.1:1", // unreachable
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		DiscoverFn:   func() []registry.NodeRecord { return nil },
 	})
 
@@ -279,7 +305,7 @@ func TestExplicitRemoteBypassesCoordinator(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 	})
 
 	explicit := registry.NodeRecord{
@@ -322,7 +348,7 @@ func TestCoordinatorRejectsInsufficientMemory(t *testing.T) {
 	c := New(Config{
 		SelfIdentity:     testIdentity(),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		SelfLoad:         registry.LoadInfo{CPUPercent: 90, MemPercent: 90, AvailableMemBytes: 200 * 1024 * 1024},
 		RequiredMemBytes: 2 * 1024 * 1024 * 1024, // Need 2GB
 		DiscoverFn:       fakeLAN,
@@ -366,7 +392,7 @@ func TestCoordinatorNoMemReqSkipsFilter(t *testing.T) {
 	c := New(Config{
 		SelfIdentity:     testIdentity(),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		SelfLoad:         registry.LoadInfo{CPUPercent: 90, MemPercent: 90},
 		RequiredMemBytes: 0, // no requirement
 		DiscoverFn:       fakeLAN,
@@ -404,7 +430,7 @@ func TestCoordinatorAllNodesRejectedNoneChosen(t *testing.T) {
 	c := New(Config{
 		SelfIdentity:     testIdentity(),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		SelfLoad:         registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 50 * 1024 * 1024}, // self also low
 		RequiredMemBytes: 10 * 1024 * 1024 * 1024,                                                // need 10GB, nobody has it
 		DiscoverFn:       fakeLAN,
@@ -468,7 +494,7 @@ func TestGPUNodeChosenFirstWhenPreferGPU(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		PreferGPU:    true,
 		SelfLoad:     registry.LoadInfo{CPUPercent: 50, MemPercent: 60, ActiveJobs: 3},
 		DiscoverFn: func() []registry.NodeRecord {
@@ -503,7 +529,7 @@ func TestRequireGPURejectsCPUNodes(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		RequireGPU:   true,
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{
@@ -531,7 +557,7 @@ func TestRequireGPUWithNoGPUNodeFails(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		RequireGPU:   true,
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{
@@ -560,7 +586,7 @@ func TestPreferGPUFallsBackToCPU(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		PreferGPU:    true,
 		SelfLoad:     registry.LoadInfo{CPUPercent: 50, MemPercent: 60, ActiveJobs: 3},
 		DiscoverFn: func() []registry.NodeRecord {
@@ -590,7 +616,7 @@ func TestGPUPreferenceDoesNotAffectNoGPUScenario(t *testing.T) {
 	c := New(Config{
 		SelfIdentity: testIdentity(),
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{
 				gpuNode("gpu-node", "nvidia"),
@@ -638,6 +664,48 @@ func TestNoSelfExcludesLocalNodeFromAnySource(t *testing.T) {
 	for _, cand := range decision.Candidates {
 		if cand.Node.NodeID == "self-node-uuid" {
 			t.Fatal("self node must not appear as a candidate under --no-self")
+		}
+	}
+}
+
+// The daemon's node store keeps a node's last known state, which outlives the
+// node: nothing rewrites a dead peer's 'healthy' row, and while the local
+// daemon is down nothing polls at all. FindNode trusts the state field it is
+// given, so /v1/nodes is responsible for applying the last_seen cutoff and
+// reporting a ghost as 'stale'. This pins the half of that contract that lives
+// here — anything not healthy is not a placement candidate.
+func TestDaemonNodesRejectedUnlessHealthy(t *testing.T) {
+	daemon := fakeDaemon(t,
+		storedNode{NodeRecord: registry.NodeRecord{
+			NodeID: "live-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+			Load:        registry.LoadInfo{CPUPercent: 5, MemPercent: 10, AvailableMemBytes: 8 << 30},
+			HealthScore: 1.0, State: "healthy",
+		}, Source: "discovery"},
+		storedNode{NodeRecord: registry.NodeRecord{
+			NodeID: "ghost-node", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 38080,
+			Load:        registry.LoadInfo{CPUPercent: 0, MemPercent: 0, AvailableMemBytes: 64 << 30},
+			HealthScore: 1.0, State: "stale",
+		}, Source: "discovery"},
+	)
+
+	c := New(Config{
+		SelfIdentity: testIdentity(),
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   daemon,
+		NoSelf:       true,
+		DiscoverFn:   func() []registry.NodeRecord { return nil },
+	})
+
+	decision := c.FindNode()
+
+	// The ghost is the emptiest machine in the list, so it would win on score
+	// if staleness were not filtering it out first.
+	if decision.ChosenNode.NodeID != "live-node" {
+		t.Fatalf("expected live-node, got %q", decision.ChosenNode.NodeID)
+	}
+	for _, cand := range decision.Candidates {
+		if cand.Node.NodeID == "ghost-node" {
+			t.Fatalf("a stale node must not be a placement candidate: %+v", cand)
 		}
 	}
 }

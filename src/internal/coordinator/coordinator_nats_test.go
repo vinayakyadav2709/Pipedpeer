@@ -56,7 +56,7 @@ func TestPlaceWithRetryNATSTransport(t *testing.T) {
 			Arch:     "x86_64-linux",
 		},
 		SelfSSH:    "root@localhost:22",
-		SelfDaemon: 38080,
+		SelfDaemon: fakeDaemon(t),
 		SelfLoad: registry.LoadInfo{
 			CPUPercent:        80, // self is loaded
 			MemPercent:        90,
@@ -136,7 +136,7 @@ func TestExecuteWithRetryNATSFullLifecycle(t *testing.T) {
 			Arch:     "x86_64-linux",
 		},
 		SelfSSH:    "root@localhost:22",
-		SelfDaemon: 38080,
+		SelfDaemon: fakeDaemon(t),
 		SelfLoad: registry.LoadInfo{
 			CPUPercent:        90,
 			MemPercent:        95,

@@ -114,7 +114,7 @@ func TestNodeDisconnectReconnectLifecycle(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 80, MemPercent: 80},
 	})
 
@@ -151,7 +151,7 @@ func TestSingleNodeSelfOnly(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 	})
 
 	decision := coord.FindNode()
@@ -195,7 +195,7 @@ func TestRegistryDownFallbackToCacheAndLAN(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 90, MemPercent: 90},
 		DiscoverFn:   fakeLAN,
 		MaxCacheAge:  5 * time.Second,
@@ -311,7 +311,7 @@ func TestActiveJobsReportedViaHeartbeat(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 10, ActiveJobs: 0},
 	})
 
@@ -363,7 +363,7 @@ func TestLeaseExpiryRedirectsTask(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 90, MemPercent: 90},
 	})
 
@@ -441,7 +441,7 @@ func TestCoordinatorPerTaskFreshData(t *testing.T) {
 		RegistryURL:  srv.URL,
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		SelfLoad:     registry.LoadInfo{CPUPercent: 50, MemPercent: 50},
 	})
 
@@ -562,7 +562,7 @@ func TestPlaceWithRetryGetsLease(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity: idSelf,
 		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   38080,
+		SelfDaemon:   fakeDaemon(t),
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{
 				{
@@ -648,7 +648,7 @@ func TestPlaceWithRetryQueuesAndRetries(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity:     idSelf,
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		RequiredMemBytes: requestMem,
 		RetryInterval:    50 * time.Millisecond,
 	})
@@ -709,7 +709,7 @@ func TestExecuteWithRetrySuccessFirstTry(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity:     makeID("submitter", "sub", "x86_64-linux"),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		RequiredMemBytes: 1024,
 		RetryInterval:    50 * time.Millisecond,
 		DiscoverFn: func() []registry.NodeRecord {
@@ -757,7 +757,7 @@ func TestExecuteWithRetryReschedulesOnFailure(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity:     makeID("submitter", "sub", "x86_64-linux"),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		RequiredMemBytes: 1024,
 		RetryInterval:    50 * time.Millisecond,
 		DiscoverFn: func() []registry.NodeRecord {
@@ -822,7 +822,7 @@ func TestExecuteWithRetryCancelStopsLoop(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity:     makeID("submitter", "sub", "x86_64-linux"),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		RequiredMemBytes: 1024,
 		RetryInterval:    50 * time.Millisecond,
 		DiscoverFn: func() []registry.NodeRecord {
@@ -872,7 +872,7 @@ func TestExecuteWithRetryNeverAutoCancel(t *testing.T) {
 	coord := New(Config{
 		SelfIdentity:     makeID("submitter", "sub", "x86_64-linux"),
 		SelfSSH:          "root@localhost:22",
-		SelfDaemon:       38080,
+		SelfDaemon:       fakeDaemon(t),
 		RequiredMemBytes: 1024,
 		RetryInterval:    20 * time.Millisecond,
 		ExecBackoffBase:  5 * time.Millisecond,
