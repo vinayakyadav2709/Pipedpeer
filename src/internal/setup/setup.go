@@ -93,6 +93,55 @@ func createNixStore() error {
 	return nil
 }
 
+// multiUserNix reports whether nix builds go through a root nix-daemon
+// (Determinate installer, distro multi-user setups). Single-user installs
+// never check closure signatures for the owning user, so they need nothing.
+func multiUserNix() bool {
+	out, err := exec.Command("systemctl", "is-active", "nix-daemon").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "active"
+}
+
+// acceptsUnsignedClosures reports whether this node can import a peer's
+// closure. Peer closures are unsigned NAR exports; a multi-user nix-daemon
+// refuses them ("lacks a signature by a trusted key") until require-sigs is
+// off, which means a stock worker cannot receive work at all — jobs upload
+// fine and then die at import. The proper fix is signing exports with a node
+// key (part of the identity work); until then setup repairs the config.
+func acceptsUnsignedClosures() bool {
+	if !multiUserNix() {
+		return true
+	}
+	out, err := exec.Command("nix", "config", "show", "require-sigs").Output()
+	return err == nil && strings.TrimSpace(string(out)) == "false"
+}
+
+func allowUnsignedClosures() error {
+	fmt.Println("    → Allowing unsigned peer closures (require-sigs = false)...")
+
+	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
+	// nix.custom.conf for local changes; plain multi-user installs edit
+	// nix.conf itself.
+	target := "/etc/nix/nix.conf"
+	if _, err := os.Stat("/etc/nix/nix.custom.conf"); err == nil {
+		target = "/etc/nix/nix.custom.conf"
+	}
+
+	script := fmt.Sprintf(
+		"echo 'require-sigs = false' >> %s && systemctl restart nix-daemon", target)
+	argv := []string{"sh", "-c", script}
+	if os.Geteuid() != 0 {
+		argv = append([]string{"sudo"}, argv...)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("could not update %s: %w", target, err)
+	}
+	return nil
+}
+
 func getPrereqs() []prereq {
 	return []prereq{
 		{name: "tar", check: binaryCheck("tar")},
@@ -113,6 +162,7 @@ func getPrereqs() []prereq {
 			cmd.Stdin = os.Stdin
 			return cmd.Run()
 		}},
+		{name: "nix-imports", check: acceptsUnsignedClosures, install: allowUnsignedClosures},
 		{name: "crun", check: binaryCheck("crun"), install: func() error {
 			fmt.Println("    → Installing crun (OCI runtime)...")
 			// Modern Nix (Determinate) often ships without nix-env, and some
