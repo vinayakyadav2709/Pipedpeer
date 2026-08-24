@@ -248,6 +248,10 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			ddpNodes, _ := cmd.Flags().GetInt("ddp")
 			ddpPort, _ := cmd.Flags().GetInt("ddp-port")
 			var targetID string
+			// This machine's daemon endpoint — stamped into job envs so the
+			// executing node can sink the orchestrator behind real workers
+			// in spill order (weak-orchestrator).
+			submitter := net.JoinHostPort(detectLocalIP(), strconv.Itoa(daemonPort))
 
 			// GPU requirement:
 			//   force  — only GPU nodes are eligible
@@ -290,13 +294,15 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
 
-			// DDP: --ddp N sets the max rank count; without it, DDP auto-activates
-			// when the script uses torch.distributed and ranks default to
-			// eligible/2 (a redundancy buffer, not a cap). Min is always 1
-			// (--ddp 1 is a plain single-node run).
+			// DDP: --ddp N caps the rank count; without it, DDP auto-activates
+			// when the script uses torch.distributed and every eligible node
+			// joins the ring. Min is always 1 (--ddp 1 is a plain run).
+			// ponytail: no redundancy margin yet — on a large cluster with
+			// flaky nodes, all-in means one death kills the run. If that ever
+			// bites, add a heuristic here (spare ranks, or eligible-N).
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
 				eligible := ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
-				worldSize := max(1, eligible/2)
+				worldSize := eligible
 				if ddpNodes > 1 {
 					worldSize = min(ddpNodes, eligible)
 				}
@@ -401,6 +407,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						ScriptPath:        scriptPath,
 						DaemonHost:        host,
 						DaemonPort:        port,
+						Submitter:         submitter,
 						TargetID:          targetNodeID,
 						JobName:           jobName,
 						Isolate:           isolate,
@@ -472,6 +479,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				ScriptPath:        scriptPath,
 				DaemonHost:        daemonHost,
 				DaemonPort:        daemonPort,
+				Submitter:         submitter,
 				TargetID:          targetID,
 				JobName:           jobName,
 				Isolate:           isolate,
@@ -516,8 +524,8 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
 	_ = cmd.Flags().MarkHidden("strategy") // round-robin is only set internally by the python shorthand
-	cmd.Flags().Int("ddp", 0, "Distributed training: run up to this many ranks across the cluster (default: half the eligible nodes), DDP init transparently handled by the shim")
-	cmd.Flags().Int("ddp-port", 0, "DDP rendezvous master port (default: a free ephemeral port; pin it to pre-open a firewall rule)")
+	cmd.Flags().Int("ddp", 0, "Distributed training: run up to this many ranks across the cluster (default: every eligible node joins the ring), DDP init transparently handled by the shim")
+	cmd.Flags().Int("ddp-port", 0, "DDP rendezvous master port (default: 29500, next free up to +9; pin an exact port to override)")
 	return cmd
 }
 
@@ -704,6 +712,7 @@ func runDDP(o ddpRunOptions) error {
 				fmt.Sprintf("WORLD_SIZE=%d", o.Nodes),
 				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
 				fmt.Sprintf("MASTER_PORT=%d", masterPort),
+				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s", net.JoinHostPort(detectLocalIP(), strconv.Itoa(o.DaemonPort))),
 			)
 			opts := app.Options{
 				ScriptPath:        absScript,
@@ -978,6 +987,7 @@ func newMapCmd() *cobra.Command {
 			base := app.Options{
 				DaemonHost:        "",
 				DaemonPort:        daemonPort,
+				Submitter:         net.JoinHostPort(detectLocalIP(), strconv.Itoa(daemonPort)),
 				Isolate:           isolate,
 				GPU:               requestGPU,
 				GPUDevices:        gpuID,
@@ -1158,6 +1168,7 @@ func newJobCmd() *cobra.Command {
 			fmt.Printf("received_files: %d\n", r.ReceivedFiles)
 			fmt.Printf("new_files: %d\n", r.NewFiles)
 			fmt.Printf("updated_files: %d\n", r.UpdatedFiles)
+			fmt.Printf("deleted_files: %d\n", r.DeletedFiles)
 			fmt.Printf("unchanged_files: %d\n", r.UnchangedFiles)
 			fmt.Printf("manifest_path: %s\n", r.ManifestPath)
 			fmt.Printf("history_dir: %s\n", dir)

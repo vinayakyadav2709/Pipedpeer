@@ -23,8 +23,12 @@ type Options struct {
 	Mode          string
 	PythonVersion string
 	Envs          []string
-	Pkgs          []string
-	ScriptArgs    []string
+	// Submitter is the submitting machine's daemon endpoint ("host:port").
+	// When set it travels to the executing node as PIPEDPEER_SUBMITTER so
+	// spill ranking sinks the orchestrator behind real workers.
+	Submitter  string
+	Pkgs       []string
+	ScriptArgs []string
 	// ResultsDir is where files the job produced are written. Defaults to the
 	// project root, which is what a single interactive run wants; a fan-out
 	// gives each task its own directory so tasks cannot overwrite each other.
@@ -162,6 +166,10 @@ func RunTask(env *Environment, task Task) (runErr error) {
 	}
 	note("      Uploaded job %s\n", uploadResp.JobID)
 
+	if opts.Submitter != "" {
+		opts.Envs = append(opts.Envs, "PIPEDPEER_SUBMITTER="+opts.Submitter)
+	}
+
 	stage(7, "Executing on remote...")
 	jobhistory.UpdateStage(historyDir, "executing")
 	execCfg := daemonctl.ExecConfig{
@@ -202,12 +210,13 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		historyRecord.ReceivedFiles = manifest.Count()
 		historyRecord.NewFiles = len(manifest.New)
 		historyRecord.UpdatedFiles = len(manifest.Updated)
+		historyRecord.DeletedFiles = len(manifest.Deleted)
 		historyRecord.ManifestPath = manifestPath
-		if manifest.Count() == 0 {
+		if manifest.Count() == 0 && len(manifest.Deleted) == 0 {
 			note("      No files changed on the remote\n")
 		} else {
-			note("      Synced %d file(s) to %s (%d new, %d updated)\n",
-				manifest.Count(), resultsDir, len(manifest.New), len(manifest.Updated))
+			note("      Synced %d file(s) to %s (%d new, %d updated, %d deleted)\n",
+				manifest.Count(), resultsDir, len(manifest.New), len(manifest.Updated), len(manifest.Deleted))
 		}
 	}
 

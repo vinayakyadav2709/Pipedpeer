@@ -434,7 +434,10 @@ type poolManager struct {
 
 	// peerFn returns healthy peer daemon endpoints (host:port) that share the
 	// closure, ordered best-first for spill. Nil disables spill (single node).
-	peerFn func(storePath string) []string
+	// submitter is the requesting job's origin endpoint ("host:port"); the
+	// implementation sinks it to the tail so an idle orchestrator never
+	// outranks real workers (weak-orchestrator: laptop stays flat).
+	peerFn func(storePath, submitter string) []string
 
 	// deadPeers are peers that failed this chunk; later parts skip them and
 	// fall through to the next best candidate. Reset per runChunk so a peer
@@ -470,7 +473,7 @@ func releaseHeapAfterWork() {
 
 // SetPeerFn installs the function that returns peer daemon endpoints eligible
 // to run chunks for a store path. Without it, all work stays local.
-func (pm *poolManager) SetPeerFn(fn func(storePath string) []string) {
+func (pm *poolManager) SetPeerFn(fn func(storePath, submitter string) []string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.peerFn = fn
@@ -485,7 +488,7 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 	if pm.peerFn == nil {
 		return 0
 	}
-	return len(pm.peerFn(storePath))
+	return len(pm.peerFn(storePath, ""))
 }
 
 // handlePoolMap executes a pickled function over a batch of items using the
@@ -538,6 +541,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	// The store path / run wrapper comes from the request environment. The
 	// submitter embeds it so we need no job context.
 	storePath := r.Header.Get("X-Pipedpeer-Store")
+	// Where the requesting job was submitted from ("host:port"); sunk to the
+	// tail of spill order so an idle orchestrator never outranks workers.
+	submitter := r.Header.Get("X-Pipedpeer-Submitter")
 	runPath := filepath.Join(storePath, "bin", "run")
 	if storePath == "" || !pathExists(runPath) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-Pipedpeer-Store header (or invalid store path)"})
@@ -562,7 +568,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		available := s.AvailableForJob()
 		if available < req.RequiredMemBytes {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
-				if peer := s.pool.bestPeer(storePath); peer != "" {
+				if peer := s.pool.bestPeer(storePath, submitter); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
 					if s.forwardPoolMap(w, rawBody, peer, storePath) {
 						return
@@ -584,7 +590,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
 			}
-			s.runMicroChunks(w, runPath, storePath, ch, safe)
+			s.runMicroChunks(w, runPath, storePath, ch, safe, submitter)
 			return
 		}
 	}
@@ -608,12 +614,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		// Hash-shuffle routing: the origin pre-partitioned items into buckets
 		// (one per node); each item must land on exactly one node, so bypass
 		// the minSplit gate and route per item.
-		results, err = s.pool.runChunk(runPath, storePath, ch)
+		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
 	case req.NoFanout:
 		// One-hop fan-out: the origin already split; this chunk is terminal.
 		results, err = s.pool.runLocal(runPath, storePath, ch)
 	default:
-		results, err = s.pool.runChunk(runPath, storePath, ch)
+		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
 	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -650,7 +656,7 @@ func resultPickle(r any) []byte {
 // order. Each sub-batch still fans out to peers; only the orchestrator's own
 // memory share is bounded, and the worker's explicit GC keeps RSS flat across
 // the pipeline.
-func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, ch *chunk, safe int64) {
+func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, ch *chunk, safe int64, submitter string) {
 	n := int((ch.requiredMem + safe - 1) / safe)
 	if n > len(ch.items) {
 		n = len(ch.items)
@@ -679,11 +685,11 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 		var err error
 		switch {
 		case sub.noSplit:
-			part, err = s.pool.runChunk(runPath, storePath, &sub)
+			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		case sub.noFanout:
 			part, err = s.pool.runLocal(runPath, storePath, &sub)
 		default:
-			part, err = s.pool.runChunk(runPath, storePath, &sub)
+			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -729,13 +735,13 @@ func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, sto
 // own preferred peer (part i prefers peers[i], wrapping past the peer count to
 // local), so a pre-partitioned payload (hash-shuffle buckets) lands one item
 // per node. Results are still returned in input order.
-func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk) ([]any, error) {
+func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter string) ([]any, error) {
 	// Peel off peers before taking the local worker lock so each local submit
 	// serialises only its own sub-chunk.
 	var peers []string
 	pm.mu.Lock()
 	if pm.peerFn != nil {
-		peers = pm.peerFn(storePath)
+		peers = pm.peerFn(storePath, submitter)
 	}
 	pm.mu.Unlock()
 
@@ -936,20 +942,42 @@ func affinityHash(s string) uint32 {
 	return h
 }
 
+// sinkPeerLast moves the submitting machine's endpoint to the tail of the
+// spill order (soft exclusion): an idle orchestrator otherwise outranks busy
+// workers and eats the compute --remote was supposed to keep off it. It stays
+// eligible so it still helps when no worker can take a chunk.
+func sinkPeerLast(peers []string, submitter string) []string {
+	if submitter == "" {
+		return peers
+	}
+	for i, p := range peers {
+		if p == submitter && i < len(peers)-1 {
+			out := append(peers[:i:i], peers[i+1:]...)
+			return append(out, submitter)
+		}
+	}
+	return peers
+}
+
 // bestPeer returns the top-ranked healthy peer sharing a store ("" when none),
 // used to forward requests the local node cannot admit (asymmetric
 // orchestrator: 0% heavy compute runs locally when peers exist).
-func (pm *poolManager) bestPeer(storePath string) string {
+func (pm *poolManager) bestPeer(storePath, submitter string) string {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.peerFn == nil {
 		return ""
 	}
-	ps := pm.peerFn(storePath)
-	if len(ps) == 0 {
-		return ""
+	ps := pm.peerFn(storePath, submitter)
+	for _, p := range ps {
+		if p != submitter {
+			return p
+		}
 	}
-	return ps[0]
+	if len(ps) > 0 {
+		return ps[0] // only the submitter shares this store — D2 fallback
+	}
+	return ""
 }
 
 // peerDead reports whether a peer failed earlier in this chunk.
