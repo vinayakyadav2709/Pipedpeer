@@ -99,6 +99,7 @@ type chunk struct {
 	itemsB64                                 bool
 	noSplit                                  bool
 	noFanout                                 bool
+	force                                    bool
 	requiredMem                              int64
 	cacheKeys                                []string
 	itemKeys                                 []string
@@ -109,6 +110,10 @@ type chunk struct {
 // written here survive warm-worker respawns, so cache_keys still resolve after
 // a worker dies. The dir is under the daemon state dir, not the (read-only)
 // nix store.
+// forceRotate spreads whole-chunk forced dispatches across peers: without
+// it every sub-minSplit chunk would land on the first peer in spill order.
+var forceRotate atomic.Int64
+
 func chunkDirFor(storePath string) string {
 	sum := sha256.Sum256([]byte(storePath))
 	return filepath.Join(os.TempDir(), "pipedpeer", "chunkcache", hex.EncodeToString(sum[:8]))
@@ -396,6 +401,10 @@ type poolRequest struct {
 	// (items beyond the peer count are local), so the origin can pre-partition
 	// work (hash-shuffle buckets) and have each part land on exactly one node.
 	NoSplit bool `json:"no_split,omitempty"`
+	// Force mirrors the shim's PIPEDPEER_DISTRIBUTE=force: the submitter wants
+	// distribution demonstrated, so small chunks that would normally stay
+	// local still fan out.
+	Force bool `json:"force,omitempty"`
 	// RequiredMemBytes is the submitter's estimate of the working set this
 	// chunk needs; the daemon refuses with 503 when it cannot spare that much,
 	// so an overloaded node never OOMs mid-chunk. The shim falls back locally.
@@ -586,7 +595,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 				extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
 				starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
-				noFanout: req.NoFanout, requiredMem: req.RequiredMemBytes,
+				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
 			}
@@ -601,7 +610,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 		extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
 		starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
-		noFanout: req.NoFanout, requiredMem: req.RequiredMemBytes,
+		noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 		chunkDir: chunkDirFor(storePath),
 	}
@@ -823,9 +832,23 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 	default:
 		// Split evenly across local + peers. A small chunk stays local (splitting
 		// would cost more than it saves); only fan out once there is real work.
-		const minSplit = 8
+		// force (PIPEDPEER_DISTRIBUTE=force) lowers the floor to a pair so a
+		// demo-sized chunk still visibly fans out, and a chunk too small even
+		// for that goes to a peer whole — rotated so successive one-task
+		// dispatches (joblib) spread across the cluster instead of pinning
+		// the first peer.
+		minSplit := 8
+		if ch.force {
+			minSplit = 2
+		}
 		if len(items) < minSplit {
-			parts = []part{{c: ch, runPath: runPath}}
+			if ch.force {
+				j := int(forceRotate.Add(1)) % len(peers)
+				ordered := append(append([]string{}, peers[j:]...), peers[:j]...)
+				parts = []part{{c: ch, peers: ordered}}
+			} else {
+				parts = []part{{c: ch, runPath: runPath}}
+			}
 		} else {
 			workers := len(peers) + 1
 			base := len(items) / workers

@@ -241,6 +241,18 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
 			remote, _ := cmd.Flags().GetBool("remote")
 			strategy, _ := cmd.Flags().GetString("strategy")
+			distribute, _ := cmd.Flags().GetString("distribute")
+			switch distribute {
+			case "", "auto":
+				// cost models decide — the default.
+			case "force":
+				// Skip the shim's cost models: every interceptable op ships to
+				// the cluster even when local would win. Demo knob, not a
+				// performance mode.
+				envs = append(envs, "PIPEDPEER_DISTRIBUTE=force")
+			default:
+				return fmt.Errorf("--distribute must be auto or force, got %q", distribute)
+			}
 			gpuMode, _ := cmd.Flags().GetString("gpu")
 			gpuID, _ := cmd.Flags().GetString("gpu-id")
 			gpuMemStr, _ := cmd.Flags().GetString("gpu-mem")
@@ -520,6 +532,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
+	cmd.Flags().String("distribute", "auto", "Distribution policy: auto (cost model decides, never slower) or force (always ship interceptable ops to the cluster; for demos)")
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
