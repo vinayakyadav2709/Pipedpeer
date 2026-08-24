@@ -16,6 +16,9 @@ fi
 echo "using pipedpeer: $PIPE"
 
 # --- data for script 03 -----------------------------------------------------
+# 03 has its own workspace dir (with its own .pipedpeerignore): the CSV must
+# ship with 03, but nothing else should drag ~1 GB into its upload.
+cd 03_pandas_ooc
 if [ ! -f data.csv ]; then
   echo "generating data.csv (~1.7 GB) with plain python3 + pandas ..."
   python3 - <<'PYEOF'
@@ -40,6 +43,7 @@ PYEOF
 else
   echo "data.csv already present: $(du -h data.csv | cut -f1)"
 fi
+cd ..
 
 # --- cluster sanity ---------------------------------------------------------
 echo
@@ -57,7 +61,7 @@ run() { echo; echo "--- rehearsal: $1"; "$PIPE" run "$1" \
 
 run 01_sklearn_rf.py
 run 02_numpy_heavy.py
-run 03_pandas_ooc.py
+run 03_pandas_ooc/03_pandas_ooc.py
 run 04_torch_ddp.py --ddp 3 --gpu force
 
 echo

@@ -11,7 +11,7 @@ codedb.snapshot
 docker/logs/
 docker/workspaces/
 .freebuff/
-pipedpeer-demo/data.csv
+pipedpeer-demo/**/data.csv
 
 # demo 05 file-sync outputs
 pipedpeer-demo/sync_note.txt
