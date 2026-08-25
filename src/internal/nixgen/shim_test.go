@@ -293,8 +293,14 @@ func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...stri
 	if err != nil {
 		t.Skip("python3 not available")
 	}
-	if _, err := exec.Command(python, "-c", "import pandas").CombinedOutput(); err != nil {
-		t.Skipf("pandas not available: %v", err)
+	// Only the tests that drive the pandas paths need pandas. Gating every
+	// caller on it made two unrelated tests skip for no reason, and a skip
+	// that nobody notices is how the shim's startup cost regressed.
+	if strings.Contains(src, "import pandas") || strings.Contains(src, "shimFakeDaemon") ||
+		strings.Contains(src, "pd.") {
+		if _, err := exec.Command(python, "-c", "import pandas").CombinedOutput(); err != nil {
+			t.Skipf("pandas not available: %v", err)
+		}
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
