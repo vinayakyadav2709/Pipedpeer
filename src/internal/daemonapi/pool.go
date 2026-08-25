@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -100,6 +101,7 @@ type chunk struct {
 	noSplit                                  bool
 	noFanout                                 bool
 	force                                    bool
+	originLocal                              bool
 	requiredMem                              int64
 	cacheKeys                                []string
 	itemKeys                                 []string
@@ -114,10 +116,89 @@ type chunk struct {
 // it every sub-minSplit chunk would land on the first peer in spill order.
 var forceRotate atomic.Int64
 
+// isLoopback reports whether a request came from this machine, which is how
+// the daemon tells a job's own shim apart from a peer forwarding work in.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func chunkDirFor(storePath string) string {
 	sum := sha256.Sum256([]byte(storePath))
 	return filepath.Join(os.TempDir(), "pipedpeer", "chunkcache", hex.EncodeToString(sum[:8]))
 }
+
+// chunkFanOut is shared by both worker scripts: it spreads one chunk's items
+// across the node's cores instead of walking them one at a time.
+//
+// A chunk used to run in a single process, so a 16-core peer contributed
+// exactly one core to a job. Spilling to it could therefore be slower than
+// keeping the work at home — distribution that measurably lost to doing
+// nothing, which is the opposite of the point. The kernel arrives as exec'd
+// source and is not importable, so it cannot be pickled out to workers; a
+// fork context inherits it through module globals instead, which is also why
+// this must never use spawn or forkserver.
+const chunkFanOut = `
+_FUNC = None
+_STARMAP = False
+
+
+def _call_one(item):
+    if _STARMAP:
+        return _FUNC(*(item if isinstance(item, (list, tuple)) else (item,)))
+    return _FUNC(item)
+
+
+def _mute_stdout():
+    # stdout is the warm worker's ack channel; a print() in user code would
+    # otherwise land in the middle of the protocol.
+    sys.stdout = sys.stderr
+
+
+def _fan_width(n_items, required_mem):
+    """How many processes to spread a chunk over: bounded by cores, by the
+    item count, and by the same 40%-of-free-RAM rule the daemon admits chunks
+    against, since running items side by side multiplies the working set."""
+    if n_items <= 1:
+        return 1
+    n = os.cpu_count() or 1
+    override = os.environ.get("PIPEDPEER_WORKER_PROCS", "").strip()
+    if override:
+        try:
+            n = max(1, int(override))
+        except ValueError:
+            pass
+    if required_mem > 0:
+        try:
+            avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+            per_item = max(1, required_mem // n_items)
+            n = min(n, max(1, int(avail * 0.4) // per_item))
+        except (ValueError, OSError):
+            pass
+    return max(1, min(n, n_items))
+
+
+def run_items(func, items, starmap, req):
+    global _FUNC, _STARMAP
+    _FUNC, _STARMAP = func, starmap
+    # The cache-backed reads keep parsed chunks in this process's _CACHE.
+    # Forked children would populate their own copy and the parent would miss
+    # on the next fetch, so those paths stay single-process.
+    stateful = bool(req.get("cache_keys") or req.get("item_keys"))
+    width = 1 if stateful else _fan_width(len(items), int(req.get("required_mem") or 0))
+    if width > 1:
+        try:
+            import multiprocessing
+            with multiprocessing.get_context("fork").Pool(width, _mute_stdout) as pool:
+                return pool.map(_call_one, items, chunksize=1)
+        except Exception:
+            pass
+    return [_call_one(item) for item in items]
+`
 
 // poolRunner is the Python helper executed inside the closure to run a
 // pickled function over a batch of items. It is written to a temp file and
@@ -128,6 +209,8 @@ func chunkDirFor(storePath string) string {
 // pickle frames) and the legacy base64-in-JSON batch.
 const poolRunner = `# Runs a pickled callable over a batch, for pipedpeer's cluster pool.
 import base64, hashlib, json, os, pickle, struct, sys
+
+` + chunkFanOut + `
 
 with open(sys.argv[1], "rb") as f:
     data = f.read()
@@ -184,13 +267,7 @@ if req.get("cache_keys"):
         missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
         raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, ns["_CHUNK_DIR"]))
 
-results = []
-for item in items:
-    if starmap:
-        args = item if isinstance(item, (list, tuple)) else (item,)
-        results.append(func(*args))
-    else:
-        results.append(func(item))
+results = run_items(func, items, starmap, req)
 
 if frames:
     out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
@@ -220,6 +297,8 @@ const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per
 # in_file/out_file use the frames wire format (header line + length-prefixed
 # raw pickle frames) for heavy chunks and legacy base64 JSON for small ones.
 import base64, gc, hashlib, json, os, pickle, struct, sys, traceback
+
+` + chunkFanOut + `
 
 # ponytail: FIFO-eviction byte budget instead of a true LRU — the point is to
 # never OOM the worker from accumulating parsed chunks, and a dict preserves
@@ -338,13 +417,7 @@ for line in sys.stdin:
             if any(i is None for i in items):
                 missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
                 raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, _CHUNK_DIR))
-        results = []
-        for item in items:
-            if starmap:
-                args = item if isinstance(item, (list, tuple)) else (item,)
-                results.append(func(*args))
-            else:
-                results.append(func(item))
+        results = run_items(func, items, starmap, req)
         if frames:
             out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
             with open(msg["out_file"], "wb") as f:
@@ -612,7 +685,8 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
 		noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
-		chunkDir: chunkDirFor(storePath),
+		chunkDir:    chunkDirFor(storePath),
+		originLocal: isLoopback(r.RemoteAddr) && r.Header.Get("X-Pipedpeer-Forwarded") == "",
 	}
 	if err := os.MkdirAll(ch.chunkDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -850,7 +924,18 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				parts = []part{{c: ch, runPath: runPath}}
 			}
 		} else {
+			// Keep a share for this node only when the work came from
+			// somewhere else. A chunk posted by a shim on this machine is the
+			// half of a race the local pool already declined to run: taking a
+			// share of it here would put the daemon's own worker processes on
+			// the same cores that pool is saturating, so the machine does the
+			// work twice over, oversubscribed, and spilling measures slower
+			// than never spilling at all. Every part still falls back to local
+			// if its peers fail, so nothing is stranded.
 			workers := len(peers) + 1
+			if ch.originLocal {
+				workers = len(peers)
+			}
 			base := len(items) / workers
 			extra := len(items) % workers
 			idx := 0
@@ -865,7 +950,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				sub := *ch
 				sub.items = items[idx : idx+size]
 				idx += size
-				if i == workers-1 {
+				if i == workers-1 && !ch.originLocal {
 					parts = append(parts, part{c: &sub, runPath: runPath}) // local
 				} else {
 					// Fan out to distinct peers: part i prefers peers[i], so

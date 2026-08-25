@@ -43,10 +43,133 @@ func fakeRun(t *testing.T, dir string) string {
 	return dir
 }
 
-// TestRunPoolChunk exercises the full worker path: pickled func + items in,
-// base64-pickled results out, matching what the sitecustomize shim sends and
-// expects.
-func TestRunPoolChunk(t *testing.T) {
+// doubleSrc is a kernel in the shape production ships: source plus the name it
+// defines. Kernels stopped travelling as by-reference pickles because a worker
+// runs from a scratch dir with neither the workspace nor the submitter's
+// __main__ importable, so the reference named nothing that existed there.
+const doubleSrc = "def double(x):\n    return x * 2\n"
+
+// spillCounter wraps a daemon handler and records every /v1/pool/map arrival
+// with the status it answered. Counting arrivals is the only way to tell a real
+// remote execution from runChunk's local fallback: when every remote part
+// fails, the fallback produces byte-identical results, so asserting on results
+// alone passes whether or not anything was ever distributed.
+type spillCounter struct {
+	mu       sync.Mutex
+	arrivals int
+	statuses []int
+}
+
+func (c *spillCounter) wrap(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/pool/map" {
+			h.ServeHTTP(w, r)
+			return
+		}
+		sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
+		h.ServeHTTP(sw, r)
+		c.mu.Lock()
+		c.arrivals++
+		c.statuses = append(c.statuses, sw.code)
+		c.mu.Unlock()
+	})
+}
+
+func (c *spillCounter) snapshot() (int, []int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.arrivals, append([]int(nil), c.statuses...)
+}
+
+// statusWriter remembers the status a handler wrote; a handler that only ever
+// calls Write has implicitly answered 200.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.code = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// unpickleInts decodes merged pool results into plain ints, preserving order,
+// so a test can assert results[i] belongs to items[i] rather than that some
+// unordered set of values came back.
+func unpickleInts(t *testing.T, results []any) []int {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	const unpickle = `import pickle,sys;sys.stdout.write(str(pickle.loads(open(sys.argv[1],"rb").read())))`
+	dir := t.TempDir()
+	out := make([]int, 0, len(results))
+	for i, r := range results {
+		m, ok := r.(map[string]string)
+		if !ok || m["pickle"] == "" {
+			t.Fatalf("bad result shape at %d: %#v", i, r)
+		}
+		blob, err := base64.StdEncoding.DecodeString(m["pickle"])
+		if err != nil {
+			t.Fatalf("bad pickle at %d: %v", i, err)
+		}
+		bp := filepath.Join(dir, fmt.Sprintf("r%d.pkl", i))
+		if err := os.WriteFile(bp, blob, 0644); err != nil {
+			t.Fatal(err)
+		}
+		o, err := exec.Command(python, "-c", unpickle, bp).Output()
+		if err != nil {
+			t.Fatalf("unpickle result %d: %v", i, err)
+		}
+		var v int
+		if _, err := fmt.Sscan(string(o), &v); err != nil {
+			t.Fatalf("parse result %d (%q): %v", i, o, err)
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// fakeNix puts a stand-in `nix` first on PATH. The real one imports a NAR into
+// /nix/store, which a test cannot use because its store paths are temp dirs.
+// The stand-in reads the same NAR off stdin and materialises the closure it
+// describes — first line the store path, the rest the bin/run script — so
+// handleStoreImport's materialise step runs for real instead of being skipped.
+func fakeNix(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"tmp=$(mktemp)\n" +
+		"cat > \"$tmp\"\n" +
+		"path=$(head -n 1 \"$tmp\")\n" +
+		"mkdir -p \"$path/bin\"\n" +
+		"tail -n +2 \"$tmp\" > \"$path/bin/run\"\n" +
+		"chmod 0755 \"$path/bin/run\"\n" +
+		"rm -f \"$tmp\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "nix"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// closureNAR builds the payload fakeNix understands: the store path followed by
+// the bin/run entrypoint the importing node must end up with.
+func closureNAR(t *testing.T, storePath string) []byte {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	return []byte(storePath + "\n#!/bin/sh\nexec " + python + " \"$@\"\n")
+}
+
+// TestRunPoolChunkLegacyPickledFunc covers the legacy by-reference protocol the
+// endpoint still accepts: a base64-pickled callable instead of func_src. It
+// only resolves where the defining module is importable in the worker, which is
+// why it is rigged here with PYTHONPATH and why no distributed test uses it —
+// production ships kernels as source.
+func TestRunPoolChunkLegacyPickledFunc(t *testing.T) {
 	store := fakeRun(t, t.TempDir())
 
 	// Pickle a real, importable function: write a module to a dir on PYTHONPATH
@@ -170,38 +293,28 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	}
 }
 
-// TestMultiNodeSpill verifies a chunk is split across local + a peer when a
-// peer is available, with results merged in order. It stands up two servers,
-// each with its own warm worker, and points one at the other via peerFn.
+// TestMultiNodeSpill verifies a chunk is split across local + a peer, that the
+// peer really ran its share, and that the merged results come back in strict
+// input order. It stands up two servers, each with its own warm worker, and
+// points one at the other via peerFn.
+//
+// The kernel ships as source, the way production sends it. A by-reference
+// pickle would only resolve on a peer that happens to have the defining module
+// importable — a condition a test can manufacture with PYTHONPATH and a real
+// worker never meets — and when it fails to resolve, runChunk re-runs the part
+// locally and the results are identical. Hence the arrival and warm-worker
+// assertions below: they are what distinguishes distribution from fallback.
 func TestMultiNodeSpill(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
 	}
 
-	// Build a shared pickled func (both nodes import the same worker_mod).
-	modDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
-	emit := `
-import base64, pickle, sys
-sys.path.insert(0, sys.argv[1])
-from worker_mod import double
-sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
-`
-	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
-	if err != nil {
-		t.Fatalf("emit pickle: %v", err)
-	}
-
 	// Two nodes, each with their own warm-worker pool.
 	s1 := New("node-" + strings.Repeat("x", 8))
 	s2 := New("node-" + strings.Repeat("y", 8))
-	srv1 := httptest.NewServer(s1.Handler())
-	srv2 := httptest.NewServer(s2.Handler())
-	defer srv1.Close()
+	peerCalls := &spillCounter{}
+	srv2 := httptest.NewServer(peerCalls.wrap(s2.Handler()))
 	defer srv2.Close()
 	defer s1.StopWarmWorkers()
 	defer s2.StopWarmWorkers()
@@ -223,40 +336,50 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
 
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", items: items}
+	results, err := s1.pool.runChunk(runPath, storePath, ch, "")
 	if err != nil {
 		t.Fatalf("runChunk spill: %v", err)
 	}
 	if len(results) != 16 {
 		t.Fatalf("want 16 results, got %d", len(results))
 	}
-	// Spot check values are doubles of 1..16 (order may be non-deterministic
-	// across the fan-out).
-	seen := map[int]bool{}
-	for _, r := range results {
-		m, _ := r.(map[string]string)
-		blob, _ := base64.StdEncoding.DecodeString(m["pickle"])
-		unpickle := `import pickle,sys;sys.stdout.write(str(pickle.loads(open(sys.argv[1],"rb").read())))`
-		bp := filepath.Join(t.TempDir(), "p")
-		os.WriteFile(bp, blob, 0644)
-		out, err := exec.Command(python, "-c", unpickle, bp).Output()
-		if err != nil {
-			t.Fatalf("unpickle: %v", err)
+
+	// Merged in input order: the shim maps results back by index, so a set
+	// check would hide a fan-out that returned everything shuffled.
+	for i, v := range unpickleInts(t, results) {
+		if want := (i + 1) * 2; v != want {
+			t.Fatalf("result[%d] = %d, want %d (input order broken)", i, v, want)
 		}
-		var v int
-		fmt.Sscan(string(out), &v)
-		seen[v] = true
 	}
-	for i := 2; i <= 32; i += 2 {
-		if !seen[i] {
-			t.Fatalf("missing result %d in %v", i, seen)
+
+	arrivals, statuses := peerCalls.snapshot()
+	if arrivals < 1 {
+		t.Fatal("no /v1/pool/map ever reached the peer: the chunk never left this node")
+	}
+	for i, st := range statuses {
+		if st != http.StatusOK {
+			t.Fatalf("peer answered %d for spill request %d: its part fell back to local", st, i)
 		}
+	}
+	// The peer must have executed, not merely accepted: a warm worker for the
+	// store only exists once a chunk actually ran there.
+	s2.pool.mu.Lock()
+	_, s2Ran := s2.pool.workers[storePath]
+	s2.pool.mu.Unlock()
+	if !s2Ran {
+		t.Fatal("peer never spawned a warm worker: nothing was executed remotely")
 	}
 }
 
 // TestPoolSpillDeadPeerFallsBackToLocal ensures that when a peer is unreachable
 // the chunk still completes locally instead of failing (D2/D3: a remote node
-// never subtracts capacity).
+// never subtracts capacity), with every value correct and in input order.
+//
+// The peer must genuinely have been attempted: a chunk that never tried to
+// spill would satisfy a bare length check just as well. runChunk records the
+// failure by marking the peer dead for the rest of the chunk, so that list is
+// the observable proof — the remote failure itself is not logged.
 func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -267,35 +390,39 @@ func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
 	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
 	runPath := filepath.Join(storePath, "bin", "run")
 
-	modDir := t.TempDir()
-	os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644)
-	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
-	emit := `
-import base64, pickle, sys
-sys.path.insert(0, sys.argv[1])
-from worker_mod import double
-sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
-`
-	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
-	if err != nil {
-		t.Fatalf("emit pickle: %v", err)
-	}
-
 	s := New("fallback-node-xxxxxxxx")
 	defer s.StopWarmWorkers()
 	// Point at an address that refuses connections.
-	s.pool.SetPeerFn(func(_, _ string) []string { return []string{"127.0.0.1:1"} })
+	const deadPeer = "127.0.0.1:1"
+	s.pool.SetPeerFn(func(_, _ string) []string { return []string{deadPeer} })
 
 	var items []json.RawMessage
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", items: items}
+	results, err := s.pool.runChunk(runPath, storePath, ch, "")
 	if err != nil {
 		t.Fatalf("chunk failed though a peer was down: %v", err)
 	}
 	if len(results) != 16 {
 		t.Fatalf("want 16 results after local fallback, got %d", len(results))
+	}
+	for i, v := range unpickleInts(t, results) {
+		if want := (i + 1) * 2; v != want {
+			t.Fatalf("result[%d] = %d, want %d (local fallback lost or reordered work)", i, v, want)
+		}
+	}
+
+	s.pool.deadMu.Lock()
+	dead := s.pool.deadPeers[deadPeer]
+	n := len(s.pool.deadPeers)
+	s.pool.deadMu.Unlock()
+	if !dead {
+		t.Fatal("the unreachable peer was never tried: the chunk stayed local without attempting spill")
+	}
+	if n != 1 {
+		t.Fatalf("want exactly 1 peer recorded as failed, got %d", n)
 	}
 }
 
@@ -458,57 +585,54 @@ sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
 	}
 }
 
-// TestClosureBroadcastEnablesSpill is the end-to-end multi-node path: a
-// closure uploaded to one node is broadcast to healthy peers, and the peer
-// then accepts pool spill work for that store. Without the broadcast the peer
-// would 400 on the missing store and the spill would silently stay local.
+// TestClosureBroadcastEnablesSpill is the end-to-end multi-node path: a closure
+// uploaded to one node is broadcast to a peer that does not have it, the peer
+// materialises it, and spill then fans work out to that peer. Without the
+// broadcast the peer would 400 on the missing store and the spill would
+// silently stay local.
+//
+// The closure must be absent at upload time or broadcastClosure's own gate
+// skips the peer and nothing is pushed — the two nodes share this process's
+// filesystem, so a store path that exists for one exists for both. What proves
+// the push is the peer's own NAR cache (its cache root is separate) and its
+// store becoming runnable only after the upload.
 func TestClosureBroadcastEnablesSpill(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
+	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not available")
 	}
+	fakeNix(t)
 
-	// Shared closure layout on both nodes: <store>/bin/run.
-	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
-	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
-	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
-	runPath := filepath.Join(storePath, "bin", "run")
-
-	// A pickled function both nodes can import.
-	modDir := t.TempDir()
-	os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644)
-	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
-	emit := `
-import base64, pickle, sys
-sys.path.insert(0, sys.argv[1])
-from worker_mod import double
-sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
-`
-	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
-	if err != nil {
-		t.Fatalf("emit pickle: %v", err)
-	}
-
+	// Separate cache roots: the pushing node's copy of the NAR must not be
+	// mistaken for the peer's.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	s1 := New("node-" + strings.Repeat("x", 8))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	s2 := New("node-" + strings.Repeat("y", 8))
+
+	peerCalls := &spillCounter{}
 	srv1 := httptest.NewServer(s1.Handler())
-	srv2 := httptest.NewServer(s2.Handler())
+	srv2 := httptest.NewServer(peerCalls.wrap(s2.Handler()))
 	defer srv1.Close()
 	defer srv2.Close()
 	defer s1.StopWarmWorkers()
 	defer s2.StopWarmWorkers()
 
+	// Nothing is on disk for this store path yet: only the broadcast can make
+	// the peer runnable for it.
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	runPath := filepath.Join(storePath, "bin", "run")
+	nar := closureNAR(t, storePath)
+
 	// s1 knows s2 as a healthy peer, so upload broadcasts the closure to it.
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
+	peer := &PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost), Status: "healthy"}
 	s1.peersMu.Lock()
-	s1.peerHealths = map[string]*PeerHealth{
-		peerHost: {Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost), Status: "healthy"},
-	}
+	s1.peerHealths = map[string]*PeerHealth{peerHost: peer}
 	s1.peersMu.Unlock()
 
-	// Simulate a submitter uploading the NAR closure to s1.
-	narPath := filepath.Join(t.TempDir(), "closure.nar")
-	os.WriteFile(narPath, []byte("fake-nar-bytes"), 0644)
+	if s1.peerHasStore(peer, storePath) {
+		t.Fatal("peer must not be runnable for the closure before the broadcast")
+	}
 
 	// A real (empty-ish) workspace tar: handleJobUpload streams it as a tar.
 	workspaceTar := filepath.Join(t.TempDir(), "workspace.tar")
@@ -531,7 +655,7 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	io.Copy(fw, wf2)
 	wf2.Close()
 	nw, _ := mp.CreateFormFile("nar", "closure.nar")
-	nw.Write([]byte("fake-nar-bytes"))
+	nw.Write(nar)
 	mp.Close()
 
 	resp, err := http.Post(srv1.URL+"/v1/jobs/upload", mp.FormDataContentType(), reqBody)
@@ -544,16 +668,14 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 		t.Fatalf("upload status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
-	// This test's two nodes share one store path on the host filesystem, so s2
-	// is already runnable for it. A broadcast must NOT push the NAR again — the
-	// shared-store shortcut (D) is exactly what kills the redundant 6.6GB push
-	// on the demo rig. Assert the broadcast skipped s2 and the spill still fans
-	// out to it.
-	if !s2.peerHasStore(&PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost)}, storePath) {
-		t.Fatal("s2 should be runnable for the shared store path")
+	// The upload broadcasts synchronously, so by now the peer must hold the NAR
+	// and have materialised it. Cached alone is not enough: pool spill needs
+	// bin/run to exist there or the request 400s.
+	if _, cached := s2.narCache.narFileFor(storePath); !cached {
+		t.Fatal("broadcast never pushed the NAR to a peer that lacked the closure")
 	}
-	if _, cached := s2.narCache.narFileFor(storePath); cached {
-		t.Fatal("broadcast pushed the NAR to a peer that already holds the closure")
+	if !s1.peerHasStore(peer, storePath) {
+		t.Fatal("peer cached the closure but cannot run it: spill would 400 on every chunk")
 	}
 
 	// Now run a chunk with spill enabled: s1 must see s2 as a closure-sharing
@@ -563,70 +685,111 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", items: items}
+	results, err := s1.pool.runChunk(runPath, storePath, ch, "")
 	if err != nil {
 		t.Fatalf("runChunk: %v", err)
 	}
 	if len(results) != 16 {
 		t.Fatalf("want 16 results, got %d", len(results))
 	}
+	for i, v := range unpickleInts(t, results) {
+		if want := (i + 1) * 2; v != want {
+			t.Fatalf("result[%d] = %d, want %d (input order broken)", i, v, want)
+		}
+	}
 
-	// At least one result must have come from s2's warm worker, proving the
-	// fan-out reached the peer. Count s2 worker spawns via its invocation log
-	// (the store's bin/run is shared; the pool writes no per-node log). Instead
-	// assert spill happened by asking s2's pool for worker count: s2 ran its
-	// part only if a worker exists there.
+	arrivals, statuses := peerCalls.snapshot()
+	if arrivals < 1 {
+		t.Fatal("peer never received spill work: broadcast did not enable fan-out")
+	}
+	for i, st := range statuses {
+		if st != http.StatusOK {
+			t.Fatalf("peer answered %d for spill request %d: the part fell back to local", st, i)
+		}
+	}
 	s2.pool.mu.Lock()
 	_, s2Ran := s2.pool.workers[storePath]
 	s2.pool.mu.Unlock()
 	if !s2Ran {
-		t.Fatal("peer never executed spill work: broadcast did not enable fan-out")
+		t.Fatal("peer never executed spill work on the broadcast closure")
 	}
 }
 
 // TestClosureBroadcastPushesToLackingPeer covers the per-node-store topology
 // (production: each node has its own /nix/store): a peer that does NOT have the
-// closure must still receive it via broadcast, or spill would silently stay
-// local. The shared-store shortcut only applies when bin/run already exists.
+// closure must receive it via broadcast and end up able to RUN it, or spill
+// would silently stay local. It drives broadcastClosure itself rather than
+// importStoreOnPeer, so the gate that decides which peers get a push is part of
+// what is under test — and the second broadcast proves the gate still holds,
+// since re-pushing costs a full closure upload (6.6GB on the demo rig) per job.
 func TestClosureBroadcastPushesToLackingPeer(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	fakeNix(t)
+
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	s1 := New("node-" + strings.Repeat("x", 8))
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	s2 := New("node-" + strings.Repeat("y", 8))
-	srv1 := httptest.NewServer(s1.Handler())
-	srv2 := httptest.NewServer(s2.Handler())
-	defer srv1.Close()
+
+	var importsMu sync.Mutex
+	imports := 0
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/store/import" {
+			importsMu.Lock()
+			imports++
+			importsMu.Unlock()
+		}
+		s2.Handler().ServeHTTP(w, r)
+	}))
 	defer srv2.Close()
 	defer s1.StopWarmWorkers()
 	defer s2.StopWarmWorkers()
 
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
+	peer := &PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost), Status: "healthy"}
 	s1.peersMu.Lock()
-	s1.peerHealths = map[string]*PeerHealth{
-		peerHost: {Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost), Status: "healthy"},
-	}
+	s1.peerHealths = map[string]*PeerHealth{peerHost: peer}
 	s1.peersMu.Unlock()
 
 	// s2 has no copy of this store path (absent on disk AND in its NAR cache),
 	// so the runnable check must report false and the broadcast must push.
 	storePath := filepath.Join(t.TempDir(), "nix", "store", "absent-on-s2")
-	narPath := filepath.Join(t.TempDir(), "closure.nar")
-	os.WriteFile(narPath, []byte("fake-nar-bytes"), 0644)
-
-	if s2.peerHasStore(&PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost)}, storePath) {
+	if _, err := s1.narCache.store(storePath, bytes.NewReader(closureNAR(t, storePath))); err != nil {
+		t.Fatalf("cache nar on s1: %v", err)
+	}
+	if s1.peerHasStore(peer, storePath) {
 		t.Fatal("s2 must not be runnable for an absent store path")
 	}
 
-	// handleStoreImport caches the NAR before materialising it, so a push is
-	// proven by the cache landing even though the fake NAR cannot be imported.
-	_ = importStoreOnPeer(&PeerHealth{Host: strings.Split(peerHost, ":")[0], Port: mustPort(t, peerHost)}, storePath, narPath)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, cached := s2.narCache.narFileFor(storePath); cached {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("broadcast did not push the closure to a peer lacking it")
-		}
-		time.Sleep(50 * time.Millisecond)
+	// broadcastClosure reports nothing and swallows per-peer failures by design
+	// (a peer that cannot import is simply not offered spill work), so the
+	// outcome is asserted on the peer instead. It waits for its pushes, so
+	// there is nothing to poll for.
+	s1.broadcastClosure(storePath)
+
+	if _, cached := s2.narCache.narFileFor(storePath); !cached {
+		t.Fatal("broadcast did not push the closure to a peer lacking it")
+	}
+	if !s1.peerHasStore(peer, storePath) {
+		t.Fatal("peer holds the NAR but cannot run the closure: pool spill would 400 on it")
+	}
+	importsMu.Lock()
+	n := imports
+	importsMu.Unlock()
+	if n != 1 {
+		t.Fatalf("want exactly 1 import push, got %d", n)
+	}
+
+	// The peer is runnable now, so the gate must skip it.
+	s1.broadcastClosure(storePath)
+	importsMu.Lock()
+	n = imports
+	importsMu.Unlock()
+	if n != 1 {
+		t.Fatalf("broadcast re-pushed a closure the peer already runs (%d imports)", n)
 	}
 }
 
@@ -805,10 +968,11 @@ sys.stdout.write(json.dumps(out))
 		t.Fatalf("parse pickles: %v", err)
 	}
 
-	// Three fake peers; each records which items it received.
+	// Three fake peers; each records which items (and affinity keys) it got.
 	type peerRec struct {
 		mu    sync.Mutex
 		items []int
+		keys  []string
 	}
 	peers := make([]*peerRec, 3)
 	srvs := make([]*httptest.Server, 3)
@@ -828,6 +992,7 @@ sys.stdout.write(json.dumps(out))
 			}
 			rec.mu.Lock()
 			rec.items = append(rec.items, items...)
+			rec.keys = append(rec.keys, req.ItemKeys...)
 			rec.mu.Unlock()
 			res := make([]map[string]string, 0, len(items))
 			for _, it := range items {
@@ -838,15 +1003,14 @@ sys.stdout.write(json.dumps(out))
 		defer srvs[i].Close()
 	}
 
+	hosts := make([]string, 3)
+	for i := range srvs {
+		hosts[i] = strings.TrimPrefix(srvs[i].URL, "http://")
+	}
+
 	s1 := New("node-" + strings.Repeat("x", 8))
 	defer s1.StopWarmWorkers()
-	s1.pool.SetPeerFn(func(_, _ string) []string {
-		hosts := make([]string, 3)
-		for i := range srvs {
-			hosts[i] = strings.TrimPrefix(srvs[i].URL, "http://")
-		}
-		return hosts
-	})
+	s1.pool.SetPeerFn(func(_, _ string) []string { return hosts })
 
 	// 4 items over 3 peers: part 0→peer0, part 1→peer1, part 2→peer2,
 	// part 3 wraps to peer0 (3 % 3 == 0).
@@ -903,7 +1067,69 @@ sys.stdout.write(json.dumps(out))
 			t.Fatalf("result[%d] = %d, want %d", i, v, (i+1)*2)
 		}
 	}
+
+	// Affinity routing: once items carry keys, position stops deciding and a
+	// stable hash over the key does. The hash must be taken against a
+	// lexicographically sorted peer list, never the load-ranked one peerFn
+	// hands back — that ranking shifts between the parse and the combine
+	// request, and a key that moves node makes every cache_keys fetch miss.
+	// So the peer list is deliberately re-ordered between the two requests
+	// below and each key must still land where it landed the first time.
+	stable := append([]string(nil), hosts...)
+	sort.Strings(stable)
+	keys := []string{"chunk-a", "chunk-b", "chunk-c", "chunk-d"}
+
+	calls := 0
+	s1.pool.SetPeerFn(func(_, _ string) []string {
+		calls++
+		if calls%2 == 0 {
+			// A different load ranking, same three peers.
+			return []string{hosts[2], hosts[0], hosts[1]}
+		}
+		return hosts
+	})
+
+	routes := make([]map[string]int, 2)
+	for req := range routes {
+		for _, rec := range peers {
+			rec.mu.Lock()
+			rec.items = nil
+			rec.keys = nil
+			rec.mu.Unlock()
+		}
+		res, err := s1.pool.runChunk(runPath, storePath, &chunk{items: items, itemKeys: keys, noSplit: true}, "")
+		if err != nil {
+			t.Fatalf("affinity runChunk %d: %v", req, err)
+		}
+		if len(res) != len(items) {
+			t.Fatalf("affinity request %d: want %d results, got %d", req, len(items), len(res))
+		}
+		routes[req] = map[string]int{}
+		for i, rec := range peers {
+			rec.mu.Lock()
+			for _, k := range rec.keys {
+				routes[req][k] = i
+			}
+			rec.mu.Unlock()
+		}
+		if len(routes[req]) != len(keys) {
+			t.Fatalf("affinity request %d: %d of %d keys reached a peer (%v)", req, len(routes[req]), len(keys), routes[req])
+		}
+	}
+	if !reflect.DeepEqual(routes[0], routes[1]) {
+		t.Fatalf("affinity routing moved with the peer ranking: %v then %v (every cache fetch would miss)", routes[0], routes[1])
+	}
+	for _, k := range keys {
+		want := stable[int(affinityHash(k)%uint32(len(stable)))]
+		if got := hosts[routes[0][k]]; got != want {
+			t.Fatalf("key %q routed to %s, want %s (affinity must hash against the stable peer order)", k, got, want)
+		}
+	}
 }
+
+// TestPoolSpillNextBestOnFailure checks the failover chain: the best peer is
+// dead, so its share must land on the next best peer rather than quietly
+// falling back to local. The kernel ships as source, as production sends it.
 func TestPoolSpillNextBestOnFailure(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -913,20 +1139,6 @@ func TestPoolSpillNextBestOnFailure(t *testing.T) {
 	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
 	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
 	runPath := filepath.Join(storePath, "bin", "run")
-
-	modDir := t.TempDir()
-	os.WriteFile(filepath.Join(modDir, "worker_mod.py"), []byte("def double(x):\n    return x * 2\n"), 0644)
-	t.Setenv("PYTHONPATH", modDir+string(os.PathListSeparator)+os.Getenv("PYTHONPATH"))
-	emit := `
-import base64, pickle, sys
-sys.path.insert(0, sys.argv[1])
-from worker_mod import double
-sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
-`
-	pickled, err := exec.Command(python, "-c", emit, modDir).Output()
-	if err != nil {
-		t.Fatalf("emit pickle: %v", err)
-	}
 
 	s1 := New("node-" + strings.Repeat("x", 8))
 	s2 := New("node-" + strings.Repeat("y", 8))
@@ -943,12 +1155,18 @@ sys.stdout.write(base64.b64encode(pickle.dumps(double)).decode())
 	for i := 1; i <= 16; i++ {
 		items = append(items, json.RawMessage(fmt.Sprintf(`%d`, i)))
 	}
-	results, err := s1.pool.runChunk(runPath, storePath, &chunk{pickledFunc: string(pickled), items: items}, "")
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", items: items}
+	results, err := s1.pool.runChunk(runPath, storePath, ch, "")
 	if err != nil {
 		t.Fatalf("chunk failed: %v", err)
 	}
 	if len(results) != 16 {
 		t.Fatalf("want 16 results, got %d", len(results))
+	}
+	for i, v := range unpickleInts(t, results) {
+		if want := (i + 1) * 2; v != want {
+			t.Fatalf("result[%d] = %d, want %d (input order broken)", i, v, want)
+		}
 	}
 	// The alive peer must have executed the failed best peer's share.
 	s2.pool.mu.Lock()

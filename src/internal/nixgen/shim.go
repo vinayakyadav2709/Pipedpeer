@@ -58,6 +58,8 @@ def _spill_min(default=32 * 1024 * 1024):
 # an over-large chunk left chunks[1::2] empty, so nothing shipped and nothing
 # said so. It is now a stated rule with a log line behind it.
 _POOL_MIN_WORK = float(os.environ.get("PIPEDPEER_POOL_MIN_WORK", "0.5"))
+# How many chunks may be in flight to the cluster at once.
+_REMOTE_INFLIGHT = max(1, int(os.environ.get("PIPEDPEER_REMOTE_INFLIGHT", "4")))
 # Where the job was submitted from (host:port of the submitter's daemon).
 # The executing node sinks this peer to the end of its spill order so an
 # idle orchestrator never outranks real workers; empty when unset.
@@ -183,7 +185,11 @@ class _ClusterPool:
         if not self._remote or len(items) <= self._measure_items:
             return self._local(func, items, starmap)
         # Measure the first few locally, then decide whether to spill the rest.
-        head, tail = items[:self._measure_items], items[self._measure_items:]
+        # The batch is as wide as the pool: measuring four items on a twenty
+        # core machine left sixteen cores idle for the length of one item, a
+        # serial bubble in front of every intercepted map.
+        head_n = max(self._measure_items, min(self._procs, len(items) // 2))
+        head, tail = items[:head_n], items[head_n:]
         t0 = time.monotonic()
         head_results = self._local(func, head, starmap)
         wall = time.monotonic() - t0
@@ -227,10 +233,18 @@ class _ClusterPool:
         n = len(items)
         slots = [None] * n
         lock = threading.Lock()
-        # Never let the whole tail become one chunk: ownership alternates, so a
-        # single chunk is dealt to the local side and the cluster is handed
-        # nothing at all. Halving the tail is the floor.
-        chunk_size = max(1, min(_adaptive_chunk(per_item_cost), (n + 1) // 2))
+        # A chunk has to be wide enough to fill the node that receives it. The
+        # adaptive size targets half a second of work taken one item at a
+        # time, which for an item costing about a second collapses to a single
+        # item per round trip: the peer then runs one item on one core and
+        # sixteen sit idle while the origin waits out the latency. Sizing to
+        # at least the local pool width uses this machine as the stand-in for
+        # a peer's core count, which is the best estimate the shim has.
+        #
+        # Capped at half the tail, because ownership alternates: one chunk
+        # would be dealt to the local side and the cluster handed nothing.
+        chunk_size = max(1, min(max(_adaptive_chunk(per_item_cost), self._procs),
+                                (n + 1) // 2))
         chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
 
         # Interleave chunk ownership so neither side is strictly first.
@@ -251,15 +265,29 @@ class _ClusterPool:
                         slots[i] = v
 
         # Remote thread: dispatch remote chunks, first-wins into slots.
+        # Chunks go out concurrently. Dispatching them one at a time capped
+        # the whole cluster's throughput at a single chunk, so a peer sat idle
+        # between round trips no matter how many cores it had.
+        def deliver(chunk):
+            res = self._remote_chunk(payload, chunk, starmap)
+            if res is None:
+                return
+            with lock:
+                for orig_i, v in res:
+                    if slots[orig_i] is None:
+                        slots[orig_i] = v
+
         def remote_run():
-            for chunk in remote_chunks:
-                res = self._remote_chunk(payload, chunk, starmap)
-                if res is None:
-                    continue
-                with lock:
-                    for orig_i, v in res:
-                        if slots[orig_i] is None:
-                            slots[orig_i] = v
+            if not remote_chunks:
+                return
+            width = max(1, min(_REMOTE_INFLIGHT, len(remote_chunks)))
+            if width == 1:
+                for chunk in remote_chunks:
+                    deliver(chunk)
+                return
+            import concurrent.futures as _cfut
+            with _cfut.ThreadPoolExecutor(max_workers=width) as ex:
+                list(ex.map(deliver, remote_chunks))
 
         # Local runs its share; when done, re-run any remote chunk still not
         # filled (straggler tail). done is set once local has given every item a
