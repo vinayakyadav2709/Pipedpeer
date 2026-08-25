@@ -937,6 +937,64 @@ sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
 // own part, part i prefers peers[i] (wrapping past the peer count), and no
 // item is re-split — the hash-shuffle contract that each bucket lands on
 // exactly one node.
+// TestPoolStatsRecordsChunkOrigin covers the counters that make distribution
+// checkable from outside the process. Without them the only trace of a chunk
+// arriving was a log line, so a harness wanting to know whether work had
+// reached a node had to shell in and grep — which is why the chaos test could
+// not tell a live cluster from an idle one.
+func TestPoolStatsRecordsChunkOrigin(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+	storePath := fakeRun(t, t.TempDir())
+	s := New("node-" + strings.Repeat("s", 8))
+
+	before := s.pool.stats.snapshot()
+	if before["chunks_received"] != 0 {
+		t.Fatalf("fresh node already reports %d chunks", before["chunks_received"])
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"func_src": doubleSrc, "func_name": "double",
+		"items": []any{1, 2, 3},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/pool/map", bytes.NewReader(body))
+	req.Header.Set("X-Pipedpeer-Store", storePath)
+	req.RemoteAddr = "127.0.0.1:5555"
+	rec := httptest.NewRecorder()
+	s.handlePoolMap(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pool/map: %d %s", rec.Code, rec.Body.String())
+	}
+
+	got := s.pool.stats.snapshot()
+	if got["chunks_received"] != 1 {
+		t.Errorf("chunks_received = %d, want 1", got["chunks_received"])
+	}
+	// Loopback and not forwarded: this is a job's own shim, not a peer.
+	if got["chunks_from_local_shim"] != 1 || got["chunks_from_peers"] != 0 {
+		t.Errorf("origin misattributed: local=%d peers=%d",
+			got["chunks_from_local_shim"], got["chunks_from_peers"])
+	}
+	if got["items_executed_here"] != 3 {
+		t.Errorf("items_executed_here = %d, want 3", got["items_executed_here"])
+	}
+
+	// And the same tally over HTTP, which is what a harness actually reads.
+	statRec := httptest.NewRecorder()
+	s.handlePoolStats(statRec, httptest.NewRequest(http.MethodGet, "/v1/pool/stats", nil))
+	if statRec.Code != http.StatusOK {
+		t.Fatalf("pool/stats: %d", statRec.Code)
+	}
+	var served map[string]int64
+	if err := json.Unmarshal(statRec.Body.Bytes(), &served); err != nil {
+		t.Fatalf("decoding stats: %v", err)
+	}
+	if served["chunks_received"] != 1 || served["items_executed_here"] != 3 {
+		t.Errorf("served stats disagree with the counters: %v", served)
+	}
+}
+
 func TestPoolMapNoSplitRoutesPerPeer(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -1289,5 +1347,49 @@ func TestSinkPeerLast(t *testing.T) {
 	same := sinkPeerLast(peers, "not-in-list:1")
 	if len(same) != 3 || same[0] != peers[0] {
 		t.Fatalf("absent submitter must not reorder, got %v", same)
+	}
+}
+
+// TestFanWidthRespectsFreeMemory pins the bound that keeps a wide chunk from
+// pushing a node over. Nothing below this enforces anything — the sandbox
+// carries no cgroup — so if this arithmetic is wrong the OOM killer is the
+// next line of defence.
+func TestFanWidthRespectsFreeMemory(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	probe := `
+import os, sys
+ns = {"os": os, "sys": sys}
+exec(sys.argv[1], ns)
+fan = ns["_fan_width"]
+
+# One item never forks.
+assert fan(1, 0) == 1, fan(1, 0)
+
+# An estimate far larger than RAM collapses the width to one.
+huge = ns["_free_bytes"]() * 100 or 1 << 60
+assert fan(64, huge) == 1, ("huge estimate not bounded", fan(64, huge))
+
+# No estimate must still be bounded by memory, not just by cores: with the
+# 256MB-per-item assumption a node cannot fan wider than its free RAM allows.
+free = ns["_free_bytes"]()
+if free > 0:
+    cap = max(1, int(free * 0.4) // (256 << 20))
+    assert fan(4096, 0) <= max(1, min(os.cpu_count() or 1, cap)), fan(4096, 0)
+
+# An explicit override wins, but never exceeds the item count.
+os.environ["PIPEDPEER_WORKER_PROCS"] = "3"
+assert fan(64, 0) == 3, fan(64, 0)
+assert fan(2, 0) == 2, fan(2, 0)
+print("fan-ok")
+`
+	out, err := exec.Command(python, "-c", probe, chunkFanOut).CombinedOutput()
+	if err != nil {
+		t.Fatalf("fan width probe failed:\n%s\n%v", out, err)
+	}
+	if !strings.Contains(string(out), "fan-ok") {
+		t.Fatalf("unexpected probe output: %q", out)
 	}
 }

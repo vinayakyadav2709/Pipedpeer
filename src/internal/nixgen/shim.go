@@ -79,8 +79,15 @@ def _log(msg):
 # signal to assert on. These counters are that signal: PIPEDPEER_RECEIPT names
 # a file to write them to at exit, and the tests fail on a receipt that shows
 # no remote work.
-_STATS = {"remote_items": 0, "local_items": 0, "remote_failures": 0,
-          "unshippable": 0, "parts": []}
+#
+# remote_items counts items a daemon reported running on ANOTHER machine.
+# dispatched_items counts everything handed to the cluster layer, which is a
+# weaker claim: a daemon with no eligible peers runs the chunk itself, and
+# calling that distributed work would be the same comfortable half-truth this
+# receipt exists to prevent. When the two differ, the gap is work that went
+# out to a socket and came straight back.
+_STATS = {"remote_items": 0, "local_items": 0, "dispatched_items": 0,
+          "remote_failures": 0, "unshippable": 0, "parts": []}
 _STATS_LOCK = threading.Lock()
 # The pid that actually intercepted something, claimed on the first record.
 # Pool workers and multiprocessing's own helper processes (the forkserver, on
@@ -95,18 +102,38 @@ def _claim_receipt():
         _RECEIPT_OWNER[0] = os.getpid()
 
 
-def _record(kind, items, ok, error="", ms=0.0):
-    """Record the outcome of one offload attempt."""
+def _record(kind, items, ok, error="", ms=0.0, receipt=None):
+    """Record the outcome of one offload attempt.
+
+    receipt is the daemon's own account of where the parts ran; without one
+    (an older daemon) the items are counted as dispatched but not as remote,
+    because we have no evidence either way and guessing in our own favour is
+    how this went unnoticed the first time."""
+    elsewhere = 0
+    here = 0
+    for p in (receipt or {}).get("parts", []):
+        if str(p.get("where", "")).startswith("peer:"):
+            elsewhere += int(p.get("items", 0))
+        else:
+            here += int(p.get("items", 0))
     with _STATS_LOCK:
         _claim_receipt()
         if ok:
-            _STATS["remote_items"] += items
+            _STATS["dispatched_items"] += items
+            _STATS["remote_items"] += elsewhere
+            _STATS["local_items"] += here
         elif error == "unshippable":
             _STATS["unshippable"] += items
         else:
             _STATS["remote_failures"] += 1
-        _STATS["parts"].append({"kind": kind, "items": items, "ok": ok,
-                                "error": error, "ms": round(ms, 1)})
+        entry = {"kind": kind, "items": items, "ok": ok,
+                 "error": error, "ms": round(ms, 1)}
+        if ok:
+            entry["ran_elsewhere"] = elsewhere
+            entry["ran_on_origin"] = here
+            if receipt:
+                entry["via"] = receipt.get("node", "")
+        _STATS["parts"].append(entry)
 
 
 def _record_local(items):
@@ -341,7 +368,8 @@ class _ClusterPool:
             }
             if _FORCE:
                 header["force"] = True
-            blobs = _pool_send(header, globals_pickle, items, 600)
+            info = {}
+            blobs = _pool_send(header, globals_pickle, items, 600, info)
             if len(blobs) != len(idxs):
                 raise RuntimeError("got %d results for %d items" % (len(blobs), len(idxs)))
             out = [(idxs[i], pickle.loads(b)) for i, b in enumerate(blobs)]
@@ -350,8 +378,14 @@ class _ClusterPool:
             _log("remote failed (%s); local covers it" % e)
             return None
         ms = (time.monotonic() - t0) * 1000
-        _record("pool", len(out), True, "", ms)
-        _log("remote ok: %d items in %.0f ms" % (len(out), ms))
+        receipt = info.get("receipt")
+        _record("pool", len(out), True, "", ms, receipt)
+        where = ""
+        if receipt:
+            peers = sorted({p.get("where", "")[5:] for p in receipt.get("parts", [])
+                            if str(p.get("where", "")).startswith("peer:")})
+            where = (" on " + ", ".join(peers)) if peers else " on the origin node"
+        _log("remote ok: %d items in %.0f ms%s" % (len(out), ms, where))
         return out
 
     def close(self):
@@ -836,7 +870,7 @@ def _measure_bandwidth():
     return bw
 
 
-def _pool_send(header, globals_pickle, items, timeout):
+def _pool_send(header, globals_pickle, items, timeout, out_header=None):
     """POST a frames pool/map request: small JSON header line + optional
     globals frame + length-prefixed raw pickle item frames. Returns the raw
     pickle blobs of the results (frames response). Bulk data never touches
@@ -858,6 +892,8 @@ def _pool_send(header, globals_pickle, items, timeout):
         data = resp.read()
     nl = data.find(b"\n")
     hdr = json.loads(data[:nl])
+    if out_header is not None:
+        out_header.update(hdr)
     rest = data[nl + 1:]
     out = []
     for _ in range(hdr.get("results_frames", 0)):

@@ -135,7 +135,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if frames:
             out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
-            return b'{"results_frames": %d}\n' % len(results) + out
+            # Stand in for a daemon that fanned the whole chunk to a peer, so
+            # the shim's "ran elsewhere" accounting is exercised.
+            receipt = json.dumps({"node": "fake-daemon", "parts": [
+                {"where": "peer:198.51.100.7:38080", "items": len(results), "ms": 1}]})
+            head = '{"results_frames": %d, "receipt": %s}\n' % (len(results), receipt)
+            return head.encode() + out
         return json.dumps({"results": [{"pickle": base64.b64encode(pickle.dumps(r)).decode()} for r in results]}).encode()
 
 srv = HTTPServer(("127.0.0.1", 0), Handler)
@@ -218,15 +223,18 @@ type poolRunResult struct {
 }
 
 type shimReceipt struct {
-	RemoteItems    int `json:"remote_items"`
-	LocalItems     int `json:"local_items"`
-	RemoteFailures int `json:"remote_failures"`
-	Unshippable    int `json:"unshippable"`
-	Parts          []struct {
-		Kind  string `json:"kind"`
-		Items int    `json:"items"`
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+	RemoteItems     int `json:"remote_items"`
+	LocalItems      int `json:"local_items"`
+	DispatchedItems int `json:"dispatched_items"`
+	RemoteFailures  int `json:"remote_failures"`
+	Unshippable     int `json:"unshippable"`
+	Parts           []struct {
+		Kind         string `json:"kind"`
+		Items        int    `json:"items"`
+		OK           bool   `json:"ok"`
+		Error        string `json:"error"`
+		RanElsewhere int    `json:"ran_elsewhere"`
+		Via          string `json:"via"`
 	} `json:"parts"`
 }
 
@@ -300,8 +308,13 @@ func assertDistributed(t *testing.T, res poolRunResult, wantSentinel string) {
 	if res.stats.Items == 0 {
 		t.Errorf("daemon executed no items")
 	}
+	if res.receipt.DispatchedItems == 0 {
+		t.Errorf("receipt records nothing dispatched to the cluster: %+v\nstderr:\n%s", res.receipt, res.stderr)
+	}
+	// The stronger claim: the daemon reported the work ran on another machine,
+	// not merely that it accepted the request.
 	if res.receipt.RemoteItems == 0 {
-		t.Errorf("receipt records no remotely-executed items: %+v\nstderr:\n%s", res.receipt, res.stderr)
+		t.Errorf("receipt records no items executed off this node: %+v\nstderr:\n%s", res.receipt, res.stderr)
 	}
 	if res.receipt.RemoteFailures > 0 {
 		t.Errorf("receipt records %d remote failures", res.receipt.RemoteFailures)
