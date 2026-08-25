@@ -107,38 +107,62 @@ def fig_sandbox():
 
 
 def fig_comparison():
-    """5.4 - Where PipedPeer sits against the usual alternatives."""
+    """5.4 - Where PipedPeer sits against the usual alternatives.
+
+    The lower block is the half that matters for honesty: on security,
+    reach, language coverage and maturity PipedPeer is the weakest system
+    in the table, and the figure says so.
+    """
     systems = ["PipedPeer", "Spark", "Ray", "Dask", "BOINC", "plain ssh"]
-    criteria = ["Unmodified\nPython", "No cluster\nsetup",
-                "No master\nnode", "Reproducible\nenvironment",
-                "Sandboxed", "Survives\nnode loss"]
-    #  2 = yes, 1 = partial, 0 = no
-    M_ = np.array([
-        [2, 2, 2, 2, 2, 2],   # PipedPeer
-        [0, 0, 0, 1, 0, 2],   # Spark
-        [1, 0, 0, 1, 0, 2],   # Ray
-        [1, 0, 0, 1, 0, 2],   # Dask
-        [0, 0, 0, 1, 1, 2],   # BOINC
-        [2, 1, 2, 0, 0, 0],   # ssh
-    ])
-    fig, ax = plt.subplots(figsize=(9.6, 4.1))
+    rows = [
+        # criterion,                          Piped Spark Ray Dask BOINC ssh
+        ("Runs unmodified Python",            [2, 0, 1, 1, 0, 2]),
+        ("No cluster to configure",           [2, 0, 0, 0, 0, 1]),
+        ("No head or master node",            [2, 0, 0, 0, 0, 2]),
+        ("Reproduces the environment",        [2, 1, 1, 1, 1, 0]),
+        ("Sandboxes each job",                [2, 0, 0, 0, 1, 0]),
+        ("Survives losing a node",            [2, 2, 2, 2, 2, 0]),
+        ("Authenticated and encrypted",       [0, 2, 1, 1, 2, 2]),
+        ("Works beyond one LAN",              [1, 2, 2, 2, 2, 2]),
+        ("Runtimes other than Python",        [0, 2, 1, 0, 2, 2]),
+        ("Proven in production use",          [0, 2, 2, 2, 2, 2]),
+    ]
+    SPLIT = 6            # rows below this are where PipedPeer is behind
+    labels = [r[0] for r in rows]
+    M_ = np.array([r[1] for r in rows])
+
+    fig, ax = plt.subplots(figsize=(8.2, 6.2))
     cmap = matplotlib.colors.ListedColormap(["#f4dcdc", "#fbf0d5", "#dcefe3"])
     ax.imshow(M_, cmap=cmap, vmin=0, vmax=2, aspect="auto")
-    for i in range(len(systems)):
-        for j in range(len(criteria)):
+    for i in range(len(rows)):
+        for j in range(len(systems)):
             ax.text(j, i, {2: "yes", 1: "partial", 0: "no"}[M_[i, j]],
-                    ha="center", va="center", fontsize=14,
+                    ha="center", va="center", fontsize=13,
                     color={2: GREEN, 1: GOLD, 0: RED}[M_[i, j]])
-    ax.set_xticks(range(len(criteria))); ax.set_xticklabels(criteria, fontsize=14)
-    ax.set_yticks(range(len(systems)))
-    ax.set_yticklabels(systems, fontsize=16,
-                       fontweight="bold")
-    ax.set_xticks(np.arange(-.5, len(criteria), 1), minor=True)
-    ax.set_yticks(np.arange(-.5, len(systems), 1), minor=True)
+
+    ax.set_xticks(range(len(systems)))
+    ax.set_xticklabels(systems, fontsize=13, fontweight="bold")
+    ax.xaxis.set_ticks_position("top")
+    ax.set_yticks(range(len(rows)))
+    ax.set_yticklabels(labels, fontsize=13)
+    ax.set_xticks(np.arange(-.5, len(systems), 1), minor=True)
+    ax.set_yticks(np.arange(-.5, len(rows), 1), minor=True)
     ax.grid(which="minor", color="white", linewidth=2)
     ax.tick_params(which="both", length=0)
-    for s in ax.spines.values():
-        s.set_visible(False)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+
+    # A heavy rule separating what PipedPeer does differently from what it
+    # is simply worse at.
+    ax.axhline(SPLIT - 0.5, color="#333333", linewidth=2.4)
+    # Group labels go in the right margin: on the left they collided with the
+    # criterion text.
+    ax.set_xlim(-0.5, len(systems) - 0.5 + 0.95)
+    ax.text(len(systems) - 0.5 + 0.42, (SPLIT - 1) / 2, "what it does\ndifferently",
+            rotation=270, ha="center", va="center", fontsize=12, color="#333333")
+    ax.text(len(systems) - 0.5 + 0.42, SPLIT + (len(rows) - SPLIT - 1) / 2,
+            "where it is\nbehind", rotation=270, ha="center", va="center",
+            fontsize=12, color=RED)
     fig.savefig(OUT / "fig_5.4_comparison.png"); plt.close(fig)
 
 
