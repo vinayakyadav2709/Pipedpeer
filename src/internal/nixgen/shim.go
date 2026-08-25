@@ -53,6 +53,11 @@ def _spill_min(default=32 * 1024 * 1024):
         except ValueError:
             pass
     return 0 if _FORCE else default
+# Dispatch floor for Pool work: a tail carrying less compute than this is not
+# worth a round trip and stays local. This used to be decided by accident —
+# an over-large chunk left chunks[1::2] empty, so nothing shipped and nothing
+# said so. It is now a stated rule with a log line behind it.
+_POOL_MIN_WORK = float(os.environ.get("PIPEDPEER_POOL_MIN_WORK", "0.5"))
 # Where the job was submitted from (host:port of the submitter's daemon).
 # The executing node sinks this peer to the end of its spill order so an
 # idle orchestrator never outranks real workers; empty when unset.
@@ -62,6 +67,65 @@ _SUBMITTER = os.environ.get("PIPEDPEER_SUBMITTER", "")
 def _log(msg):
     if _ENABLED:
         sys.stderr.write("[pipedpeer] " + msg + "\n")
+
+
+# What interception actually did, as opposed to what it was supposed to do.
+# Every primitive here can fall back to local work on failure, which makes the
+# results identical whether the cluster did all of the work or none of it —
+# that is precisely how Pool.map shipped for months distributing nothing.
+# Success was silent and failure was a log line nobody read, so there was no
+# signal to assert on. These counters are that signal: PIPEDPEER_RECEIPT names
+# a file to write them to at exit, and the tests fail on a receipt that shows
+# no remote work.
+_STATS = {"remote_items": 0, "local_items": 0, "remote_failures": 0,
+          "unshippable": 0, "parts": []}
+_STATS_LOCK = threading.Lock()
+# The pid that actually intercepted something, claimed on the first record.
+# Pool workers and multiprocessing's own helper processes (the forkserver, on
+# 3.14+) import this shim as well and reach exit with pristine counters; if
+# any of them wrote, it would erase the real receipt. Only the process that
+# did the work owns the file.
+_RECEIPT_OWNER = [None]
+
+
+def _claim_receipt():
+    if _RECEIPT_OWNER[0] is None:
+        _RECEIPT_OWNER[0] = os.getpid()
+
+
+def _record(kind, items, ok, error="", ms=0.0):
+    """Record the outcome of one offload attempt."""
+    with _STATS_LOCK:
+        _claim_receipt()
+        if ok:
+            _STATS["remote_items"] += items
+        elif error == "unshippable":
+            _STATS["unshippable"] += items
+        else:
+            _STATS["remote_failures"] += 1
+        _STATS["parts"].append({"kind": kind, "items": items, "ok": ok,
+                                "error": error, "ms": round(ms, 1)})
+
+
+def _record_local(items):
+    with _STATS_LOCK:
+        _claim_receipt()
+        _STATS["local_items"] += items
+
+
+@atexit.register
+def _write_receipt():
+    path = os.environ.get("PIPEDPEER_RECEIPT")
+    if not path or _RECEIPT_OWNER[0] != os.getpid():
+        return
+    import json
+    try:
+        with _STATS_LOCK:
+            body = json.dumps(_STATS)
+        with open(path, "w") as f:
+            f.write(body)
+    except Exception:
+        pass
 
 
 class _ClusterPool:
@@ -75,9 +139,18 @@ class _ClusterPool:
 
     def __init__(self, processes=None, initializer=None, initargs=(), maxtasksperchild=None):
         import multiprocessing.pool as _mp
-        self._remote = _URL and _ENABLED and _NUM_SHARDS != "0"
+        # NUM_SHARDS counts this node too, so "1" means there is nobody to
+        # spill to. Dispatching then posts work to our own daemon, which runs
+        # it through a single serialised warm worker while the local pool sits
+        # idle — strictly slower than doing it here.
+        try:
+            shards = int(_NUM_SHARDS)
+        except ValueError:
+            shards = 0
+        self._remote = bool(_URL) and _ENABLED and shards >= 2
+        self._procs = processes or os.cpu_count() or 1
         self._ctx = _mp.Pool(
-            processes=processes or os.cpu_count(),
+            processes=self._procs,
             initializer=initializer,
             initargs=initargs,
             maxtasksperchild=maxtasksperchild,
@@ -111,21 +184,39 @@ class _ClusterPool:
             return self._local(func, items, starmap)
         # Measure the first few locally, then decide whether to spill the rest.
         head, tail = items[:self._measure_items], items[self._measure_items:]
+        t0 = time.monotonic()
         head_results = self._local(func, head, starmap)
+        wall = time.monotonic() - t0
         if not tail:
             return head_results
-        cost = _measure_cost(func, head, starmap)
+        # Per-item cost comes from the batch we just ran, not from executing an
+        # item a third time. The batch occupied min(items, procs) lanes, so the
+        # wall clock covers that many items at once.
+        lanes = max(1, min(len(head), self._procs))
+        cost = wall * lanes / max(len(head), 1)
         if cost <= 0:
             return head_results + self._local(func, tail, starmap)
-        return head_results + self._race(func, tail, starmap, cost)
+
+        payload = _func_payload(func)
+        if payload is None:
+            _record("pool", len(tail), False, "unshippable")
+            _log("kernel %r cannot ship as source (lambda, closure, method or "
+                 "decorated); staying local" % getattr(func, "__name__", "?"))
+            return head_results + self._local(func, tail, starmap)
+        if not _FORCE and len(tail) * cost < _POOL_MIN_WORK:
+            _log("tail is %.2fs of work, below the %.2fs dispatch floor; staying local"
+                 % (len(tail) * cost, _POOL_MIN_WORK))
+            return head_results + self._local(func, tail, starmap)
+        return head_results + self._race(func, tail, starmap, cost, payload)
 
     def _local(self, func, items, starmap):
         _log("local %d items" % len(items))
+        _record_local(len(items))
         if starmap:
             return self._ctx.starmap(func, items)
         return self._ctx.map(func, items)
 
-    def _race(self, func, items, starmap, per_item_cost):
+    def _race(self, func, items, starmap, per_item_cost, payload):
         # D2: local and remote each pull ~half the tail concurrently; when local
         # finishes its share and a remote chunk is still in flight, an idle
         # local core speculatively re-runs it — first result wins per item.
@@ -136,7 +227,10 @@ class _ClusterPool:
         n = len(items)
         slots = [None] * n
         lock = threading.Lock()
-        chunk_size = _adaptive_chunk(per_item_cost)
+        # Never let the whole tail become one chunk: ownership alternates, so a
+        # single chunk is dealt to the local side and the cluster is handed
+        # nothing at all. Halving the tail is the floor.
+        chunk_size = max(1, min(_adaptive_chunk(per_item_cost), (n + 1) // 2))
         chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
 
         # Interleave chunk ownership so neither side is strictly first.
@@ -159,7 +253,7 @@ class _ClusterPool:
         # Remote thread: dispatch remote chunks, first-wins into slots.
         def remote_run():
             for chunk in remote_chunks:
-                res = self._remote_chunk(func, chunk, starmap)
+                res = self._remote_chunk(payload, chunk, starmap)
                 if res is None:
                     continue
                 with lock:
@@ -188,33 +282,49 @@ class _ClusterPool:
         done.wait()  # local guarantees a complete result
         return slots
 
-    def _remote_chunk(self, func, chunk, starmap):
+    def _remote_chunk(self, payload, chunk, starmap):
         """Dispatch one chunk to the cluster; returns [(orig_idx, result), ...]
         or None on failure (local already has the work covered). chunk is a list
-        of (orig_idx, item) pairs."""
-        import json
-        import urllib.request
-        import base64
+        of (orig_idx, item) pairs, payload is the _func_payload triple.
+
+        Everything here — including serialisation — sits inside the try. When
+        it did not, an unpicklable argument raised out of this method, killed
+        the dispatch thread and printed a traceback, which is the one thing
+        interception promises never to do."""
         import pickle
+        src, name, gvars = payload
         idxs = [p[0] for p in chunk]
         vals = [p[1] for p in chunk]
         if starmap:
-            payload = [c if isinstance(c, (list, tuple)) else (c,) for c in vals]
-        else:
-            payload = vals
-        body = json.dumps({"func": _pickle_func(func), "items": payload,
-                           "starmap": starmap}).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
+            vals = [v if isinstance(v, (list, tuple)) else (v,) for v in vals]
+        t0 = time.monotonic()
         try:
-            with _daemon_open(req, 600) as resp:
-                rs = json.loads(resp.read())["results"]
-                return [(idxs[i], pickle.loads(base64.b64decode(r["pickle"])))
-                        for i, r in enumerate(rs)]
+            globals_pickle = pickle.dumps(gvars)
+            items = [pickle.dumps(v) for v in vals]
+            header = {
+                "func_src": src,
+                "func_name": name,
+                "items_frames": len(items),
+                "globals": True,
+                "starmap": starmap,
+                # Admission control: the daemon 503s rather than OOM when it
+                # cannot spare this, and micro-chunks when it is over budget.
+                "required_mem": _pool_required(globals_pickle, items),
+            }
+            if _FORCE:
+                header["force"] = True
+            blobs = _pool_send(header, globals_pickle, items, 600)
+            if len(blobs) != len(idxs):
+                raise RuntimeError("got %d results for %d items" % (len(blobs), len(idxs)))
+            out = [(idxs[i], pickle.loads(b)) for i, b in enumerate(blobs)]
         except Exception as e:
+            _record("pool", len(idxs), False, str(e), (time.monotonic() - t0) * 1000)
             _log("remote failed (%s); local covers it" % e)
             return None
+        ms = (time.monotonic() - t0) * 1000
+        _record("pool", len(out), True, "", ms)
+        _log("remote ok: %d items in %.0f ms" % (len(out), ms))
+        return out
 
     def close(self):
         try:
@@ -236,29 +346,114 @@ class _ClusterPool:
         self.close()
 
 
-def _pickle_func(func):
-    import base64
+def _is_library_module(mod):
+    """True when the worker's closure holds this module too. The job's own
+    files travel with it but are not importable from a worker, so a function
+    defined in one has to ship as source; a stdlib or site-packages module is
+    present on both sides and can simply be imported."""
+    if mod is None:
+        return False
+    f = getattr(mod, "__file__", None)
+    if not f:
+        return True                       # builtin module: always present
+    try:
+        f = os.path.realpath(f)
+        for marker in ("site-packages", "dist-packages", "/nix/store/"):
+            if marker in f:
+                return True
+        return os.path.dirname(f) == os.path.dirname(os.path.realpath(os.__file__))
+    except Exception:
+        return False
+
+
+def _code_names(code):
+    """Every global name a code object reads, comprehensions included."""
+    import types
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names |= _code_names(const)
+    return names
+
+
+def _func_payload(func):
+    """Rebuild instructions for func as (source, name, globals), or None.
+
+    A worker runs the closure's python with neither the shim nor the job's
+    workspace on its path, so a by-reference pickle — __main__.work, or a
+    sibling module — names something that does not exist there and every
+    chunk fails. Shipping the source instead is what the numpy and pandas
+    paths have always done; this generalises it to user kernels: the
+    function's own source, the source of any helper or class that travels
+    with the job, an import line for every library module it names, and a
+    pickled frame of the module-level data it reads.
+
+    Returns None when the callable cannot be rebuilt this way — lambdas,
+    closures, nested defs, methods, decorated functions, partials, anything
+    written in C. Those stay local, which is correct but slow, and the
+    receipt counts them so "slow" is visible rather than mysterious.
+    """
+    import inspect
     import pickle
-    return base64.b64encode(pickle.dumps(func)).decode()
+    import textwrap
+    import types
+
+    if not isinstance(func, types.FunctionType):
+        return None
+    if func.__closure__:
+        return None
+    if "." in getattr(func, "__qualname__", func.__name__):
+        return None                       # method or nested def
+
+    imports, sources, gvars = [], [], {}
+    seen = set()
+    pending = [func]
+    while pending:
+        fn = pending.pop()
+        if fn.__name__ in seen:
+            continue
+        seen.add(fn.__name__)
+        try:
+            src = textwrap.dedent(inspect.getsource(fn))
+        except (OSError, TypeError):
+            return None
+        if src.lstrip().startswith("@"):
+            return None                   # decorator is not in co_names
+        sources.append(src)
+        modvars = vars(sys.modules.get(fn.__module__, None)) if sys.modules.get(fn.__module__) else {}
+        for name in _code_names(fn.__code__):
+            if name in seen or name not in modvars:
+                continue
+            val = modvars[name]
+            if isinstance(val, types.ModuleType):
+                seen.add(name)
+                imports.append("import %s as %s" % (val.__name__, name))
+                continue
+            travels = not _is_library_module(sys.modules.get(getattr(val, "__module__", None)))
+            if isinstance(val, types.FunctionType) and travels:
+                pending.append(val)       # helper defined alongside the kernel
+                continue
+            seen.add(name)
+            if isinstance(val, type) and travels:
+                try:
+                    sources.append(textwrap.dedent(inspect.getsource(val)))
+                except (OSError, TypeError):
+                    return None
+                continue
+            gvars[name] = val             # data, or an importable library object
+
+    src = "\n".join(imports + sources)
+    try:
+        compile(src, "<pipedpeer-kernel>", "exec")
+        pickle.dumps(gvars)
+    except Exception:
+        return None
+    return src, func.__name__, gvars
 
 
 def _apply(func, item):
     """Run func over one starmap item (a tuple of args)."""
     return func(*item) if isinstance(item, tuple) else func(item)
-
-
-def _measure_cost(func, items, starmap):
-    """Seconds per item, from running the first chunks locally."""
-    try:
-        t0 = time.monotonic()
-        if starmap:
-            func(*items[0])
-        else:
-            func(items[0])
-        dt = time.monotonic() - t0
-        return dt / max(len(items), 1)
-    except Exception:
-        return -1.0
 
 
 def _adaptive_chunk(per_item_cost):
@@ -1953,6 +2148,48 @@ def _defer(name, *fns):
     _PENDING_PATCHES[name] = fns
 
 
+def _make_cluster_executor(base):
+    """A ProcessPoolExecutor whose map() spills to the cluster.
+
+    Subclassing the real executor matters. The shim used to bind _ClusterPool
+    onto concurrent.futures.ProcessPoolExecutor wholesale, but _ClusterPool
+    takes processes= rather than max_workers= and has neither submit() nor
+    shutdown(), so constructing an executor by keyword or calling submit() on
+    one raised inside any job that touched the futures API. Everything except
+    map() is now the stock executor; only map() is intercepted, and its real
+    signature (several iterables, an iterator result) is honoured.
+    """
+
+    class _ClusterExecutor(base):
+        def __init__(self, max_workers=None, *a, **kw):
+            super().__init__(max_workers, *a, **kw)
+            self._pp_workers = max_workers
+            self._pp_pool = None
+
+        def map(self, fn, *iterables, timeout=None, chunksize=1):
+            if not iterables:
+                return iter(())
+            if len(iterables) == 1:
+                items, starmap = list(iterables[0]), False
+            else:
+                items, starmap = list(zip(*iterables)), True
+            if self._pp_pool is None:
+                # Lazy: the stock executor spawns its own workers on first
+                # submit, so a map-only executor never pays for two pools.
+                self._pp_pool = _ClusterPool(processes=self._pp_workers)
+            return iter(self._pp_pool._run(fn, items, starmap))
+
+        def shutdown(self, wait=True, **kw):
+            if self._pp_pool is not None:
+                self._pp_pool.close()
+                self._pp_pool = None
+            super().shutdown(wait, **kw)
+
+    _ClusterExecutor.__name__ = base.__name__
+    _ClusterExecutor.__qualname__ = base.__qualname__
+    return _ClusterExecutor
+
+
 def _install():
     if not _ENABLED:
         return
@@ -1965,7 +2202,7 @@ def _install():
     multiprocessing.Pool = _ClusterPool
 
     import concurrent.futures as _cf
-    _cf.ProcessPoolExecutor = _ClusterPool  # has map/apply; close() present
+    _cf.ProcessPoolExecutor = _make_cluster_executor(_cf.ProcessPoolExecutor)
 
 
 def _install_joblib():
