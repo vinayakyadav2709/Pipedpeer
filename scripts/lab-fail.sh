@@ -37,7 +37,16 @@ for port in 38081 38082 38083; do
 	"$cli" nodes add 127.0.0.1 "$port" >/dev/null 2>&1 || true
 done
 
-cat > /tmp/pipedpeer-fail-task.py <<'EOF'
+workdir="$(mktemp -d "${TMPDIR:-/tmp}/pipedpeer-fail.XXXXXX")"
+# Keep the lab teardown from the earlier trap; a second bare trap would replace it.
+trap 'rm -rf "$workdir"; "$repo_root/scripts/lab-down.sh" || true' EXIT
+task="$workdir/task.py"
+runlog="$workdir/run.log"
+# Anchor the workspace here, so the job ships this directory and not all of
+# $TMPDIR (findProjectRoot walks up looking for .pipedpeerignore or .git).
+: > "$workdir/.pipedpeerignore"
+
+cat > "$task" <<'EOF'
 import time
 from multiprocessing import Pool
 
@@ -53,7 +62,7 @@ if __name__ == "__main__":
 EOF
 
 echo "launching intercept run..."
-"$cli" run /tmp/pipedpeer-fail-task.py > /tmp/pipedpeer-fail-run.log 2>&1 &
+"$cli" run "$task" > "$runlog" 2>&1 &
 runpid=$!
 
 # Wait until some worker is hosting the job, then kill a *different* worker
@@ -103,13 +112,13 @@ set -e
 
 if [[ $run_status -ne 0 ]]; then
 	echo "FAIL: run exited $run_status"
-	tail -30 /tmp/pipedpeer-fail-run.log
+	tail -30 "$runlog"
 	exit 1
 fi
-if ! grep -q "POOL-OK" /tmp/pipedpeer-fail-run.log; then
+if ! grep -q "POOL-OK" "$runlog"; then
 	echo "FAIL: correct results never printed"
-	tail -30 /tmp/pipedpeer-fail-run.log
+	tail -30 "$runlog"
 	exit 1
 fi
-grep "POOL-OK" /tmp/pipedpeer-fail-run.log
+grep "POOL-OK" "$runlog"
 echo "PASS: pool.map completed correctly despite a dead worker"

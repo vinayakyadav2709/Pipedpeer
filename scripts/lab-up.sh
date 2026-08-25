@@ -29,12 +29,22 @@ fi
 
 echo "Using container runtime: $RUNTIME"
 
-if [ "$RUNTIME" = "podman" ]; then
-    if command -v podman-compose &>/dev/null; then
-        podman-compose up -d --build
+compose() {
+    if [ "$RUNTIME" = "podman" ]; then
+        if command -v podman-compose &>/dev/null; then
+            podman-compose "$@"
+        else
+            podman compose "$@"
+        fi
     else
-        podman compose up -d --build
+        docker compose "$@"
     fi
-else
-    docker compose up -d --build
-fi
+}
+
+# Tear the stack down before bringing it up. The fuser -k above kills the
+# daemon inside an already-running host-networked container, but compose then
+# sees the container as already defined and will not recreate it, so the lab
+# comes back with dead workers and every caller times out waiting on /health.
+compose down --remove-orphans 2>/dev/null || true
+
+compose up -d --build
