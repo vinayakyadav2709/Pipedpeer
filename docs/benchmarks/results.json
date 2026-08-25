@@ -196,6 +196,29 @@
           "returncode": 0
         }
       ]
+    },
+    "n9_svd_offload_speedup": {
+      "test_bed": "three daemons on one host, each pinned to disjoint physical cores with taskset: node A 2 cores (runs the job), nodes B and C 4 cores each. Jobs run unisolated because crun resets CPU affinity. Loopback network.",
+      "local_2core_seconds": [
+        8.045,
+        7.793,
+        7.593,
+        8.341
+      ],
+      "offloaded_seconds": [
+        6.191,
+        7.506,
+        6.511,
+        6.477
+      ],
+      "local_median": 7.919,
+      "offloaded_median": 6.494,
+      "speedup": 1.22,
+      "payload_mb": 54
+    },
+    "n8_poolmap_cannot_distribute": {
+      "finding": "multiprocessing.Pool interception cannot execute a user-defined function on a remote worker. _ClusterPool ships the function as a pickled reference; the pool worker runs warm_worker.py from a temp directory with neither the job's workspace on sys.path nor the user's module importable, so unpickling raises AttributeError (__main__ kernel) or ModuleNotFoundError (adjacent module). Every chunk 500s and the shim falls back to local, so results stay correct and no speedup is obtained.",
+      "evidence": "raw/N8_poolmap_fallback.txt"
     }
   }
 }

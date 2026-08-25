@@ -11,3 +11,6 @@
 
 # Generated job workspaces from a benchmark run
 benchmarks/raw/ws/
+
+# Generated job workspaces from a scaling run
+benchmarks/raw/ws-scaling/
