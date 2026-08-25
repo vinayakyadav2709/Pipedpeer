@@ -925,9 +925,32 @@ func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
 		return
 	}
-	if err := s.store.RemoveManual(host); err != nil {
+	// The target may be a host (manual entries) or a node ID — full or the
+	// short prefix `pipedpeer nodes` prints. Deleting nothing is an error:
+	// a 200 no-op left ghost nodes that "removal" could never clear.
+	n, err := s.store.RemoveManual(host)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	if n == 0 {
+		nodeID, err := s.store.ResolveNodeID(host)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+			return
+		}
+		if nodeID == "" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no node matches " + host})
+			return
+		}
+		if nodeID == s.nodeID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "refusing to remove this node's own entry"})
+			return
+		}
+		if err := s.store.DeleteNode(nodeID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
 }

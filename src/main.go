@@ -1299,8 +1299,8 @@ func newNodesCmd() *cobra.Command {
 	}
 
 	removeCmd := &cobra.Command{
-		Use:   "remove [host]",
-		Short: "Remove nodes (--all clears everything, or give a host for manual entries)",
+		Use:   "remove [host|node-id]",
+		Short: "Remove a node by host or node ID (short IDs from 'nodes list' work; --all clears everything)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			daemonPort, _ := cmd.Flags().GetInt("port")
 			all, _ := cmd.Flags().GetBool("all")
@@ -1321,6 +1321,13 @@ func newNodesCmd() *cobra.Command {
 			}
 			defer resp.Body.Close()
 			if resp.StatusCode != 200 {
+				var body struct {
+					Error string `json:"error"`
+				}
+				json.NewDecoder(resp.Body).Decode(&body)
+				if body.Error != "" {
+					return fmt.Errorf("%s", body.Error)
+				}
 				return fmt.Errorf("daemon rejected: %d", resp.StatusCode)
 			}
 			if all {
