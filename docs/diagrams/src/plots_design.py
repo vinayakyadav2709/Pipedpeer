@@ -190,7 +190,7 @@ def fig_cost_model():
     ax.annotate("payload below 32 MB", xy=(20, 60), fontsize=13, color=RED, rotation=90,
                 ha="center", va="center", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.annotate("under 8 flop/byte and up to 512 MB:\ntoo little work per byte moved",
-                xy=(4.6, 0.78), fontsize=13, color=RED, va="center", ha="left", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+                xy=(4.6, 0.60), fontsize=13, color=RED, va="bottom", ha="left", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
     for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 5.5, 900),
                           ("dense matmul", 200, 300), ("SVD", 1.5, 300)):
