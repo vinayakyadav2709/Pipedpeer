@@ -1895,20 +1895,80 @@ def _install_ddp():
     _log("ddp interception installed")
 
 
+_PENDING_PATCHES = {}
+
+
+class _PatchOnImport:
+    """Patch a library the first time the job imports it.
+
+    Importing torch costs ~1.7s. Paying that while the shim installs charged
+    it to every job, including jobs that never mention torch, which is the
+    opposite of the never-slower guarantee the shim exists to keep (and what
+    scripts/bench-shim-d2.sh gates). Watching for the import instead means a
+    library costs nothing until the script actually asks for it.
+    """
+
+    def find_spec(self, fullname, path=None, target=None):
+        fns = _PENDING_PATCHES.get(fullname)
+        if not fns:
+            return None
+        import importlib.util
+        # Step aside while the real finders resolve the module, or find_spec
+        # re-enters this method forever.
+        sys.meta_path.remove(self)
+        try:
+            spec = importlib.util.find_spec(fullname)
+        except Exception:
+            spec = None
+        finally:
+            sys.meta_path.insert(0, self)
+        if spec is None or getattr(spec, "loader", None) is None:
+            return None
+        if not hasattr(spec.loader, "exec_module"):
+            return None
+        _PENDING_PATCHES.pop(fullname, None)
+        _inner = spec.loader.exec_module
+
+        def exec_module(module):
+            _inner(module)
+            _run_patches(fullname, fns)
+
+        spec.loader.exec_module = exec_module
+        return spec
+
+
+def _run_patches(name, fns):
+    for fn in fns:
+        try:
+            fn()
+        except Exception as exc:
+            _log("%s interception unavailable: %s" % (name, exc))
+
+
+def _defer(name, *fns):
+    """Run fns now if name is already imported, else on its first import."""
+    if name in sys.modules:
+        _run_patches(name, fns)
+        return
+    _PENDING_PATCHES[name] = fns
+
+
 def _install():
     if not _ENABLED:
         return
-    _install_numpy()
-    _install_ddp()
-    _install_torch()
-    _install_pandas()
-    _install_io()
+    sys.meta_path.insert(0, _PatchOnImport())
+    _defer("numpy", _install_numpy)
+    _defer("torch", _install_ddp, _install_torch)
+    _defer("pandas", _install_pandas, _install_io)
+    _defer("joblib", _install_joblib)
     import multiprocessing
     multiprocessing.Pool = _ClusterPool
 
     import concurrent.futures as _cf
     _cf.ProcessPoolExecutor = _ClusterPool  # has map/apply; close() present
 
+
+def _install_joblib():
     try:
         import joblib.parallel as _jp
     except ImportError:
