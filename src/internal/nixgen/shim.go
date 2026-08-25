@@ -177,7 +177,9 @@ class _ClusterPool:
         except ValueError:
             shards = 0
         self._remote = bool(_URL) and _ENABLED and shards >= 2
-        self._procs = processes or os.cpu_count() or 1
+        self._requested = processes
+        self._init = (initializer, initargs, maxtasksperchild)
+        self._procs = _pool_width(processes)
         self._ctx = _mp.Pool(
             processes=self._procs,
             initializer=initializer,
@@ -188,6 +190,31 @@ class _ClusterPool:
         self._measure_items = 4
         self._spilled = False
         atexit.register(self.close)
+
+    def _resize(self):
+        """Re-size the local pool to what the machine can run right now.
+
+        A width chosen when the pool was built can be wrong by the time the
+        next map arrives: another job may have taken the memory, or released
+        it. multiprocessing.Pool cannot grow or shrink, so this rebuilds it
+        between calls; within a single map the width is fixed.
+        """
+        want = _pool_width(self._requested)
+        if want == self._procs:
+            return
+        import multiprocessing.pool as _mp
+        initializer, initargs, maxtasksperchild = self._init
+        try:
+            new = _mp.Pool(processes=want, initializer=initializer,
+                           initargs=initargs, maxtasksperchild=maxtasksperchild)
+        except Exception:
+            return                        # keep the working pool
+        old, self._ctx, self._procs = self._ctx, new, want
+        _log("local pool resized to %d workers" % want)
+        try:
+            old.terminate()
+        except Exception:
+            pass
 
     # ---- the four Pool workhorses ----
     def apply(self, func, args=(), kwds=None):
@@ -203,12 +230,33 @@ class _ClusterPool:
         return self._run(func, list(iterable), starmap=True)
 
     def imap(self, func, iterable, chunksize=None):
-        return iter(self.map(func, iterable))
+        return self._stream(func, iterable, False)
 
     def imap_unordered(self, func, iterable, chunksize=None):
-        return iter(self.map(func, iterable))
+        return self._stream(func, iterable, False)
+
+    def _stream(self, func, iterable, starmap):
+        """imap semantics: pull the source in batches and yield as each lands.
+
+        The old version handed the whole iterable to map() first. That holds
+        every item and every result in memory at once, and turns a generator
+        with no end - which imap explicitly supports - into a hang. Batches
+        are sized to be worth distributing while staying bounded: too small
+        and every batch falls under the dispatch floor and stays local.
+        """
+        batch, out = [], _imap_batch(self._procs)
+        for item in iterable:
+            batch.append(item)
+            if len(batch) >= out:
+                for r in self._run(func, batch, starmap):
+                    yield r
+                batch = []
+        if batch:
+            for r in self._run(func, batch, starmap):
+                yield r
 
     def _run(self, func, items, starmap=False):
+        self._resize()
         if not self._remote or len(items) <= self._measure_items:
             return self._local(func, items, starmap)
         # Measure the first few locally, then decide whether to spill the rest.
@@ -406,6 +454,49 @@ class _ClusterPool:
 
     def __exit__(self, *a):
         self.close()
+
+
+def _imap_batch(procs):
+    """Items to buffer before running a batch of a lazy imap."""
+    override = os.environ.get("PIPEDPEER_IMAP_BATCH", "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    return max(64, procs * 32)
+
+
+def _pool_width(requested):
+    """How many local workers to run.
+
+    A hand-picked process count is a guess about the machine the author had
+    in front of them, so by default it is ignored in favour of what this
+    machine can actually run: every core, bounded by free memory. Picking the
+    number is the work this is supposed to remove.
+
+    Some counts encode correctness rather than speed, though - a rate limit,
+    a resource that is not safe to touch twice, a model that only fits a few
+    times over - and those break rather than slow down when overridden.
+    PIPEDPEER_RESPECT_POOL_SIZE=1 hands the decision back.
+    """
+    cores = os.cpu_count() or 1
+    if os.environ.get("PIPEDPEER_RESPECT_POOL_SIZE") == "1" and requested:
+        return max(1, int(requested))
+    n = cores
+    try:
+        avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        # Nothing here knows the per-worker working set before the job runs,
+        # so assume a conservative 256MB rather than none: a box with many
+        # cores and little free memory must not fan out to all of them.
+        n = min(n, max(1, int(avail * 0.4) // (256 << 20)))
+    except (ValueError, OSError):
+        pass
+    if requested and int(requested) != n:
+        _log("using %d workers, not the %d requested (cores=%d); "
+             "set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count"
+             % (n, int(requested), cores))
+    return max(1, n)
 
 
 def _is_library_module(mod):

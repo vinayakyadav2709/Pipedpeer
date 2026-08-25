@@ -516,3 +516,133 @@ func TestShimPoolSingleNodeDoesNotDialItself(t *testing.T) {
 		t.Errorf("single-node run dialled the daemon %d times; it has nowhere to spill to", got)
 	}
 }
+
+// TestShimPoolSizesItselfNotAsAsked covers the promise that nobody should
+// have to pick a worker count. A hand-typed number is a guess about the
+// author's machine; the shim uses what this one can actually run. The escape
+// hatch matters just as much: some counts encode correctness, not speed, and
+// those break rather than slow down when overridden.
+func TestShimPoolSizesItselfNotAsAsked(t *testing.T) {
+	script := `
+import multiprocessing, os, time
+
+def work(x):
+    time.sleep(0.01)
+    return x
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(2) as pool:
+        got = pool.map(work, list(range(32)))
+        width = pool._procs
+    assert got == list(range(32)), "wrong results"
+    print("WIDTH %d CORES %d" % (width, os.cpu_count()))
+`
+	res := runPoolScript(t, map[string]string{"job.py": script}, "job.py")
+	var width, cores int
+	if _, err := fmt.Sscanf(strings.TrimSpace(res.stdout), "WIDTH %d CORES %d", &width, &cores); err != nil {
+		t.Fatalf("unexpected output %q (stderr: %s)", res.stdout, res.stderr)
+	}
+	if cores > 2 && width <= 2 {
+		t.Errorf("pool honoured the requested 2 workers on a %d-core box; the point is not having to pick", cores)
+	}
+	if width < 1 {
+		t.Errorf("nonsensical width %d", width)
+	}
+}
+
+// TestShimPoolRespectsSizeWhenAsked pins the opt-out.
+func TestShimPoolRespectsSizeWhenAsked(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import multiprocessing
+
+def work(x):
+    return x * 2
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(2) as pool:
+        assert pool.map(work, [1, 2, 3]) == [2, 4, 6]
+        print("WIDTH %d" % pool._procs)
+`
+	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(python, filepath.Join(dir, "job.py"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PYTHONPATH="+dir,
+		"PIPEDPEER_SHIM=1",
+		"PIPEDPEER_RESPECT_POOL_SIZE=1",
+		"PIPEDPEER_NUM_SHARDS=0",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "WIDTH 2") {
+		t.Errorf("opt-out ignored; wanted WIDTH 2, got %q", out)
+	}
+}
+
+// TestShimImapStaysLazy pins imap's contract. The shim used to materialise
+// the whole iterable before returning anything, which holds every item and
+// result in memory at once and turns an unbounded generator — which imap
+// explicitly supports — into a hang. Taking a few results from an infinite
+// source must return, not spin forever.
+func TestShimImapStaysLazy(t *testing.T) {
+	script := `
+import itertools, multiprocessing
+
+def work(x):
+    return x * 2
+
+if __name__ == "__main__":
+    seen = []
+    with multiprocessing.Pool(4) as pool:
+        # An endless source: materialising it never finishes.
+        for v in pool.imap(work, itertools.count()):
+            seen.append(v)
+            if len(seen) >= 8:
+                break
+        assert seen == [x * 2 for x in range(8)], seen
+        # A finite source still returns everything, in order.
+        assert list(pool.imap(work, range(40))) == [x * 2 for x in range(40)]
+    print("IMAP-OK")
+`
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(python, filepath.Join(dir, "job.py"))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=0",
+		"PIPEDPEER_IMAP_BATCH=4",
+	)
+	done := make(chan struct{})
+	var out []byte
+	go func() { out, _ = cmd.CombinedOutput(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("imap over an endless source never returned: it is still materialising")
+	}
+	if !strings.Contains(string(out), "IMAP-OK") {
+		t.Fatalf("imap test failed:\n%s", out)
+	}
+}
