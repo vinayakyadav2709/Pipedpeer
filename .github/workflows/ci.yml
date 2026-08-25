@@ -54,6 +54,20 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./scripts/bench-shim-d2.sh
 
+      # A green suite that skipped every test touching the cluster proves
+      # nothing. Six shim tests skip without pandas and they are exactly the
+      # ones exercising a remote path; the suite still printed ok.
+      - name: Distribution tests actually ran
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/check-skips.sh
+
+      # Interception must not cost more than it saves. With no peers this
+      # only checks the never-slower budget; with a cluster it becomes the
+      # manual-versus-automatic comparison.
+      - name: Pool benchmark (never-slower budget)
+        working-directory: ${{ github.workspace }}
+        run: BENCH_ITEMS=32 BENCH_SPIN=200000 ./scripts/bench-pool.sh
+
   build:
     runs-on: ubuntu-latest
     strategy:
