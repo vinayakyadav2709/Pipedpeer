@@ -11,11 +11,37 @@ import (
 )
 
 type Result struct {
-	Sandbox   string `json:"sandbox"`
-	TaskName  string `json:"task_name"`
-	Iteration int    `json:"iteration"`
+	Sandbox   string  `json:"sandbox"`
+	TaskName  string  `json:"task_name"`
+	Iteration int     `json:"iteration"`
 	TotalMs   float64 `json:"total_ms"`
-	ExitCode  int    `json:"exit_code"`
+	ExitCode  int     `json:"exit_code"`
+}
+
+// systemBinds exposes just enough of the host to run /bin/sh. Binding all of
+// / read-only does not work: bwrap then cannot create /work on a read-only
+// root. Without these the sandbox has no shell at all, every run exits
+// non-zero immediately, and the timings measure how fast the sandbox fails
+// rather than how fast it starts.
+func systemBinds() []string {
+	var out []string
+	for _, dir := range []string{"/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64"} {
+		fi, err := os.Lstat(dir)
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			// Merged-/usr systems: /bin -> usr/bin and friends.
+			target, err := os.Readlink(dir)
+			if err != nil {
+				continue
+			}
+			out = append(out, "--symlink", target, dir)
+			continue
+		}
+		out = append(out, "--ro-bind", dir, dir)
+	}
+	return out
 }
 
 type TaskDef struct {
@@ -51,16 +77,18 @@ func main() {
 
 		for i := 0; i < warmup+iterations; i++ {
 			start := time.Now()
-			args := []string{
+			args := append([]string{
 				"bwrap", "--die-with-parent",
 				"--unshare-pid", "--unshare-ipc", "--unshare-uts",
 				"--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+			}, systemBinds()...)
+			args = append(args,
 				"--bind", workDir, "/work", "--bind", workDir+"/home", "/home/root",
 				"--chdir", "/work",
 				"--setenv", "HOME", "/home/root",
 				"--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
 				"--", "/bin/sh", "-c", task.script,
-			}
+			)
 			cmd := exec.Command(args[0], args[1:]...)
 			cmd.Run()
 			elapsed := time.Since(start).Seconds() * 1000
@@ -100,6 +128,13 @@ func main() {
 				},
 				"hostname": "pipedpeer",
 				"mounts": []map[string]interface{}{
+					// Same reason as the bwrap --ro-bind above: the bundle
+					// rootfs is empty, so the shell has to be mounted in.
+					{"destination": "/usr", "type": "bind", "source": "/usr", "options": []string{"rbind", "ro"}},
+					{"destination": "/bin", "type": "bind", "source": "/bin", "options": []string{"rbind", "ro"}},
+					{"destination": "/lib", "type": "bind", "source": "/lib", "options": []string{"rbind", "ro"}},
+					{"destination": "/lib64", "type": "bind", "source": "/lib64", "options": []string{"rbind", "ro"}},
+					{"destination": "/etc", "type": "bind", "source": "/etc", "options": []string{"rbind", "ro"}},
 					{"destination": "/proc", "type": "proc", "source": "proc"},
 					{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "noexec"}},
 					{"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "nodev"}},
@@ -162,6 +197,19 @@ func main() {
 	}
 
 	// Save report
+	bad := 0
+	for _, r := range allResults {
+		if r.Iteration >= warmup && r.ExitCode != 0 {
+			bad++
+		}
+	}
+	if bad > 0 {
+		fmt.Fprintf(os.Stderr,
+			"\nrefusing to report: %d measured runs exited non-zero, so these\n"+
+				"timings are the cost of failing, not the cost of starting a sandbox.\n", bad)
+		os.Exit(1)
+	}
+
 	writeReport(allResults, tasks, warmup)
 }
 
@@ -174,8 +222,12 @@ func stats(samples []float64) (avg, min, max float64) {
 	sum := 0.0
 	for _, v := range samples {
 		sum += v
-		if v < min { min = v }
-		if v > max { max = v }
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
 	}
 	avg = sum / float64(len(samples))
 	return
