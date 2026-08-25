@@ -1,8 +1,9 @@
 # Pipedpeer live demo — choreography
 
-Goal: prove **zero code changes** on a 2-node LAN — the orchestrator machine
-plus one worker, both with an NVIDIA dGPU — with the audience watching plain
-Python scripts spread across both machines and light up both GPUs.
+Goal: prove **zero code changes** and **weak orchestrator** on 2 nodes — the
+orchestrator laptop (Intel iGPU only, never a CUDA target) plus one NVIDIA
+dGPU worker — with the audience watching plain Python scripts spread across
+both machines and light up the worker's GPU while the laptop stays flat.
 
 ## Layout
 
@@ -27,8 +28,40 @@ pipedpeer-demo/
    uploads data, materializes the store on the worker — this is what makes the
    live run instant and lets pool fan-out reach it).
 3. Verify: `pipedpeer nodes` shows 2 nodes (self + worker), both `healthy`,
-   and the GPU column lists the NVIDIA card on BOTH rows.
+   and the GPU column lists the NVIDIA card on the WORKER row (the laptop
+   shows `-`: only NVIDIA dGPUs are advertised, an Intel iGPU is not a CUDA
+   target).
 4. Keep rehearsal outputs; they double as "expected values" for the live run.
+
+## Getting the two machines talking (do this FIRST)
+
+Everything rides one port: the daemon on **38080**. Two ways to connect,
+try them in order:
+
+1. **Same Wi-Fi / LAN (fastest, preferred).** Put both laptops on the same
+   network, start both daemons (`pipedpeer start`), and they usually find
+   each other on their own. If `pipedpeer nodes` doesn't show the peer within
+   ~30 s, add it by hand from the orchestrator:
+   ```bash
+   pipedpeer nodes add <worker-lan-ip> 38080     # ip a | grep 192.168
+   ```
+2. **Tailscale (works on ANY network — venue Wi-Fi with client isolation,
+   phone hotspots, different networks entirely).** Both demo machines are
+   already in the tailnet; just make sure it's up on both:
+   ```bash
+   sudo tailscale up          # once per machine
+   tailscale status           # note each machine's 100.x.x.x address
+   pipedpeer nodes add <worker-tailscale-ip> 38080   # on the orchestrator
+   ```
+   A new machine joins with `curl -fsSL https://tailscale.com/install.sh | sh`
+   then `sudo tailscale up` (log in with the shared account). Traffic may
+   relay through Tailscale's DERP servers (~3 MB/s) — fine for every demo
+   except the first 03 upload (1.7 GB data.csv), so on a relayed link
+   rehearse 03 before leaving for the venue: the upload is one-time.
+
+Sanity check either way: `pipedpeer nodes` on the orchestrator shows the
+worker `healthy` with its NVIDIA GPU listed. That's the whole network setup —
+no port forwards, no firewall rules beyond allowing 38080 in.
 
 ## Execution commands (live)
 
@@ -38,7 +71,7 @@ pipedpeer-demo/
 | 2 | `pipedpeer run 02_numpy_heavy.py --remote` |
 | 3 | `pipedpeer run 03_pandas_ooc/03_pandas_ooc.py --remote` |
 | 4a | `pipedpeer run 04_torch_ddp.py --remote --ddp 2 --gpu off` — BOTH machines train as CPU ranks |
-| 4b | `pipedpeer run 04_torch_ddp.py --remote --ddp 2` — same script again, now one rank per dGPU |
+| 4b | `pipedpeer run 04_torch_ddp.py --remote` — same script again, no flags: GPU is inferred from the torch import, so it lands on the dGPU worker and trains on CUDA |
 | 5 | `pipedpeer run 05_file_sync.py --remote` — runs on the worker; the file changes it makes there sync back to the orchestrator |
 
 Notes:
@@ -48,9 +81,11 @@ Notes:
   cluster when the cost model says the cluster wins. GPU use is inferred from
   the script's imports, so 04 lands on GPUs without any flag.
 - Torch runs twice on purpose: 4a (`--gpu off`) trains one CPU rank per
-  machine — proof the ring works on any hardware; 4b is the identical script
-  with GPUs inferred from the torch import — one rank per dGPU, same loss,
-  much faster epochs.
+  machine — proof the sync ring works on any hardware, including the iGPU
+  laptop; 4b is the identical script with zero flags — pipedpeer infers GPU
+  from the torch import, sends the whole job to the one NVIDIA node, and the
+  script's own `using GPU:` line names the card. Same code, CPU ring one
+  minute, CUDA the next.
 - Rank sync travels over the daemons' normal port (`/v1/ddp/sync`) — no
   extra ports, no firewall prep. Narrate that: *"the gradient sync uses the
   same single channel every other byte uses."*
@@ -92,10 +127,11 @@ What to narrate, by metric:
   is streamed as bounded chunks (0.4x free RAM), and `groupby` buckets are
   hash-shuffled per key so each node reduces its share exactly.
 - **During 4a (CPU DDP)** — 2 `ACTIVE JOBS`, one rank per machine; both CPU
-  columns climb together for the whole run.
-- **During 4b (GPU DDP)** — 2 `ACTIVE JOBS` again, but now `nvidia-smi` on
-  each machine shows the python process and the CPU columns stay low — same
-  script, the ranks just landed on CUDA.
+  columns climb together for the whole run — the one moment the laptop
+  computes, say so out loud.
+- **During 4b (GPU offload)** — 1 `ACTIVE JOB` on the worker; `nvidia-smi`
+  there shows the python process, the laptop's CPU stays flat — same script,
+  it just landed on CUDA.
 
 ## Act 3 — The Worker Node View (physical machines)
 
@@ -113,11 +149,11 @@ beats:
 - **Act 3d (pandas):** the worker's CPU spikes in bursts; memory stays
   flat-ish (chunked streaming, worker GC between chunks).
 - **Act 3e (4a CPU DDP):** both machines spike together for the whole run.
-- **Act 3f (4b GPU DDP):** both GPUs light up (`nvidia-smi` shows the python
-  process on each), CPUs go quiet; same script, visibly faster epochs
-  (the demo model is sized for a ~1 minute run, so sync time — not
-  compute — sets the floor; the win to narrate is the GPUs doing in
-  milliseconds what the CPU ranks needed the whole step for).
+- **Act 3f (4b GPU offload):** the worker's GPU lights up (`nvidia-smi`
+  shows the python process), its CPUs go quiet, the laptop never moves;
+  the script prints `using GPU: NVIDIA GeForce RTX ...` on its own — point
+  at it. (The demo model is sized for a ~1 minute 4a run; on the GPU the
+  compute part collapses to seconds.)
 - Optional: `tail -f /tmp/pipedpeer/daemon.log` on the worker to show
   `pool/map` requests arriving.
 
