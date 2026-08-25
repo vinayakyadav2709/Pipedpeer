@@ -456,6 +456,28 @@ class _ClusterPool:
         self.close()
 
 
+def _avail_bytes():
+    """Memory this machine could actually give a new process.
+
+    Not SC_AVPHYS_PAGES: that counts only wholly free pages and ignores the
+    page cache, which the kernel hands back on demand. On any box with a warm
+    cache it reads several times too low - measured 2GB free against 21GB
+    available here - and every limit derived from it collapses. MemAvailable
+    is the kernel's own answer to this question.
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError):
+        return 0
+
+
 def _imap_batch(procs):
     """Items to buffer before running a batch of a lazy imap."""
     override = os.environ.get("PIPEDPEER_IMAP_BATCH", "").strip()
@@ -484,14 +506,12 @@ def _pool_width(requested):
     if os.environ.get("PIPEDPEER_RESPECT_POOL_SIZE") == "1" and requested:
         return max(1, int(requested))
     n = cores
-    try:
-        avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    avail = _avail_bytes()
+    if avail > 0:
         # Nothing here knows the per-worker working set before the job runs,
         # so assume a conservative 256MB rather than none: a box with many
         # cores and little free memory must not fan out to all of them.
         n = min(n, max(1, int(avail * 0.4) // (256 << 20)))
-    except (ValueError, OSError):
-        pass
     if requested and int(requested) != n:
         _log("using %d workers, not the %d requested (cores=%d); "
              "set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count"
