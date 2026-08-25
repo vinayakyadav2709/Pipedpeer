@@ -47,7 +47,7 @@ cd ..
 
 # --- cluster sanity ---------------------------------------------------------
 echo
-echo "=== cluster nodes (expect yourself + the other dGPU machine, both healthy) ==="
+echo "=== cluster nodes (expect yourself + the dGPU worker, both healthy) ==="
 "$PIPE" nodes
 
 # --- rehearsal pass ---------------------------------------------------------
@@ -63,7 +63,7 @@ run 01_sklearn_rf.py
 run 02_numpy_heavy.py
 run 03_pandas_ooc/03_pandas_ooc.py
 run 04_torch_ddp.py --ddp 2 --gpu off
-run 04_torch_ddp.py --ddp 2 --gpu force
+run 04_torch_ddp.py --gpu force
 
 echo
 echo "=== DEMO READY ==="
