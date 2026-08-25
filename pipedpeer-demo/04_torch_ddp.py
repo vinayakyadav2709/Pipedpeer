@@ -44,7 +44,7 @@ model = MLP().to(device)
 opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
 loss_fn = nn.MSELoss()
 
-BATCH, EPOCHS = 1024, 3
+BATCH, EPOCHS = 2048, 3
 steps_per_epoch = n // BATCH
 print("training ...")
 t0 = time.monotonic()
