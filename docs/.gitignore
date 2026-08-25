@@ -1,0 +1,13 @@
+# LaTeX build products
+*.aux
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Generated job workspaces from a benchmark run
+benchmarks/raw/ws/

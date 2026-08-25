@@ -1,0 +1,39 @@
+// Figure 4.5 - crun sandbox: what the job can and cannot see.
+digraph Sandbox {
+  rankdir=LR; bgcolor="white"; nodesep=0.18; ranksep=1.1;
+  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
+  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+
+  subgraph cluster_host {
+    label="Host"; labeljust=l; fontsize=13; fontname="Helvetica";
+    style="rounded"; color="#8a6d1f"; penwidth=1.6; bgcolor="#fdfaf0"; fontcolor="#8a6d1f";
+    node [fillcolor="#faf3dd", color="#8a6d1f"];
+    nix  [label="/nix/store\nthe built closure"];
+    work [label="job workspace\nuploaded project files"];
+    gpu  [label="GPU device nodes\nand driver libraries"];
+    net  [label="host network"];
+    { rank=same; nix; work; gpu; net; }
+  }
+
+  subgraph cluster_ct {
+    label="crun container"; labeljust=l; fontsize=13; fontname="Helvetica";
+    style="rounded"; color="#a33333"; penwidth=1.6; bgcolor="#fdf6f6"; fontcolor="#a33333";
+    node [fillcolor="#fbe9e9", color="#a33333"];
+    m1 [label="/nix          read only"];
+    m2 [label="/work         read write"];
+    m3 [label="/dev/shm      tmpfs, mode 1777\nrequired by multiprocessing"];
+    m4 [label="/tmp          tmpfs"];
+    m5 [label="/dev/nvidia*  device nodes"];
+    m6 [label="/run/opengl-driver/lib\nlibcuda, bound file by file so the\nhost C library cannot shadow the closure"];
+    ns [label="Namespaces\npid, ipc, uts, mount", fillcolor="#ffffff"];
+    no [label="Deliberately absent\nno user namespace, no network namespace,\nno cgroup limits, no seccomp filter,\njob runs as root", fillcolor="#ffffff", style="rounded,filled,dashed"];
+    { rank=same; m1; m2; m3; m4; m5; m6; ns; no; }
+  }
+
+  nix  -> m1 [label=" bind "];
+  work -> m2 [label=" bind "];
+  gpu  -> m5 [label=" device nodes "];
+  gpu  -> m6 [label=" driver libraries "];
+  net  -> no [label=" shared ", style=dashed, color="#a33333"];
+}

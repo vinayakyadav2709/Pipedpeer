@@ -1,0 +1,37 @@
+// Figure 3.3 - Level 1 DFD (decomposition of the daemon).
+digraph DFD1 {
+  rankdir=TB; bgcolor="white"; nodesep=0.35; ranksep=0.55;
+  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.09"];
+  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+
+  user [label="User", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a"];
+  peers [label="Peer nodes", shape=box3d, style=filled, fillcolor="#efedf7", color="#5b4b8a"];
+
+  p1 [label="1  Resolve environment\nscan imports, generate flake, build closure"];
+  p2 [label="2  Discover peers\nUDP multicast, TCP sweep, stored peers"];
+  p3 [label="3  Place task\nhard filters, score, reserve lease"];
+  p4 [label="4  Transfer\nclosure if absent, workspace always"];
+  p5 [label="5  Execute\ncrun sandbox, stream stdout and stderr"];
+  p6 [label="6  Distribute parallel work\ncost model, spill to peers", fillcolor="#fbe9e9", color="#a33333"];
+  p7 [label="7  Return results\nchanged files, deletion manifest"];
+
+  d1 [label="D1   Node store (SQLite)", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
+  d2 [label="D2   Closure cache (Nix store)", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
+  d3 [label="D3   Job history", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
+
+  user -> p1 [label=" script "];
+  p1 -> p3 [label=" store path "];
+  p2 -> d1 [label=" upsert "];
+  d1 -> p3 [label=" healthy peers "];
+  p3 -> p4 [label=" lease "];
+  p4 -> d2 [label=" import "];
+  p4 -> p5;
+  p5 -> p6 [label=" intercepted calls ", style=dashed];
+  p6 -> peers [label=" chunks ", style=dashed];
+  p5 -> p7;
+  p7 -> user [label=" result files "];
+  p7 -> d3 [label=" record ", style=dashed];
+  p2 -> peers [label=" probe ", style=dashed, constraint=false];
+  d2 -> peers [label=" broadcast ", style=dashed, constraint=false];
+}

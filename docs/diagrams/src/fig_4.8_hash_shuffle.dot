@@ -1,0 +1,26 @@
+// Figure 4.8 - Hash shuffle for groupby and join: no combiners needed.
+digraph Shuffle {
+  rankdir=TB; bgcolor="white"; nodesep=0.32; ranksep=0.50;
+  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
+  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+
+  df [label="Input frame"];
+  h  [label="Bucket every row by a hash of its key\nequal keys always hash to the same bucket",
+      fillcolor="#fdf6e3", color="#8a6d1f"];
+  b0 [label="Bucket 0\nkept local", fillcolor="#e3f3e9", color="#2f7d4f"];
+  b1 [label="Bucket 1\nto peer 1"];
+  b2 [label="Bucket 2\nto peer 2"];
+  a0 [label="Full aggregation\non this node", fillcolor="#e3f3e9", color="#2f7d4f"];
+  a1 [label="Full aggregation\non peer 1"];
+  a2 [label="Full aggregation\non peer 2"];
+  cat [label="Concatenate at the origin\nevery key was complete on exactly one node,\nso the result is exact for any aggregation",
+       fillcolor="#fdf6e3", color="#8a6d1f"];
+
+  df -> h;
+  h -> b0; h -> b1; h -> b2;
+  b0 -> a0; b1 -> a1; b2 -> a2;
+  a0 -> cat; a1 -> cat; a2 -> cat;
+  { rank=same; b0; b1; b2; }
+  { rank=same; a0; a1; a2; }
+}
