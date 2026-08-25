@@ -1,17 +1,18 @@
 // Figure 4.5 - crun sandbox: what the job can and cannot see.
 digraph Sandbox {
   rankdir=LR; bgcolor="white"; nodesep=0.20; ranksep=1.3;
-  node [fontname="Helvetica", fontsize=14, shape=box, style="rounded,filled",
+  node [fontname="Helvetica", fontsize=17, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
-  edge [fontname="Helvetica", fontsize=13, color="#555555"];
+  edge [fontname="Helvetica", fontsize=16, color="#555555"];
 
   subgraph cluster_host {
     label="Host"; labeljust=l; fontsize=16; fontname="Helvetica";
     style="rounded"; color="#8a6d1f"; penwidth=1.8; bgcolor="#fdfaf0"; fontcolor="#8a6d1f";
+    margin="26,22";
     node [fillcolor="#faf3dd", color="#8a6d1f"];
-    nix  [label="/nix/store\nthe built closure"];
-    work [label="job workspace\nuploaded files"];
-    gpu  [label="GPU devices\nand driver libraries"];
+    nix  [label="/nix/store"];
+    work [label="job workspace"];
+    gpu  [label="GPU devices\nand drivers"];
     net  [label="host network"];
     { rank=same; nix; work; gpu; net; }
   }
@@ -19,16 +20,17 @@ digraph Sandbox {
   subgraph cluster_ct {
     label="crun container"; labeljust=l; fontsize=16; fontname="Helvetica";
     style="rounded"; color="#a33333"; penwidth=1.8; bgcolor="#fdf6f6"; fontcolor="#a33333";
+    margin="26,22";
     node [fillcolor="#fbe9e9", color="#a33333"];
     m1 [label="/nix           read only"];
     m2 [label="/work          read write"];
-    m3 [label="/dev/shm       mode 1777\nmultiprocessing needs it"];
+    m3 [label="/dev/shm      mode 1777"];
     m4 [label="/tmp           scratch"];
     m5 [label="/dev/nvidia*   devices"];
-    m6 [label="/run/opengl-driver/lib\nbound file by file, so the host\nC library cannot shadow the closure"];
-    m7 [label="network        not isolated\nthe host's own interfaces"];
+    m6 [label="/run/opengl-driver/lib\nbound file by file"];
+    m7 [label="network       not isolated"];
     ns [label="Namespaces\npid, ipc, uts, mount", fillcolor="#ffffff"];
-    no [label="Deliberately absent\nno user namespace, no cgroup limits,\nno seccomp filter, job runs as root",
+    no [label="Deliberately absent\nno user namespace,\nno cgroup limits,\nno seccomp filter,\njob runs as root",
         fillcolor="#ffffff", style="rounded,filled,dashed"];
     { rank=same; m1; m2; m3; m4; m5; m6; m7; ns; no; }
   }

@@ -870,7 +870,9 @@ distribution described in Section~\ref{sec:intercept}.
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_4.5_sandbox.png}}
     \caption{What the job can and cannot see. The absences are as deliberate as
-    the mounts.}
+    the mounts. Shared memory is mounted world-writable because Python's
+    \texttt{multiprocessing} requires it, and the driver libraries are bound
+    file by file so that the host C library cannot shadow the closure's.}
     \label{fig:sandbox}
 \end{figure}
 

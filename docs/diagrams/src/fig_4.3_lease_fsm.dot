@@ -12,8 +12,8 @@ digraph LeaseFSM {
   run   [label="Running\nrenewed every 30 s\nreaped after 5 min idle", fillcolor="#e3f3e9", color="#2f7d4f"];
   gone  [label="Released", shape=doublecircle, style=filled, fillcolor="#f2f2f2", color="#666666", margin="0.10,0.08"];
 
-  start -> res [label="  accept  "];
-  res -> run   [label="  commit  "];
+  start -> res [xlabel="accept  "];
+  res -> run   [xlabel="commit  "];
   run -> gone  [label="  complete  "];
 
   // The two failure exits go on a second row so their labels have room.
