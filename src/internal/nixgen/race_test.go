@@ -11,6 +11,12 @@ import (
 // runRaceProbe drives the shim's _ClusterPool._race directly, stubbing
 // _remote_chunk, and asserts results equal a plain local map. mode controls the
 // remote stub: "ok" (all chunks succeed) or "dead" (every chunk fails).
+//
+// The stub tags the values it produces, so the two modes are distinguishable.
+// They were not before: the "ok" stub computed results in-process and the test
+// asserted only that the numbers were right, which the local side guarantees
+// on its own — so the passing test said nothing about whether a remote result
+// had ever reached the caller.
 func runRaceProbe(t *testing.T, mode string) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
@@ -23,31 +29,42 @@ func runRaceProbe(t *testing.T, mode string) {
 	}
 
 	src := `
-import sys
+import sys, time
 sys.path.insert(0, sys.argv[1])
 import shim_mod
 
 def double(x):
+    time.sleep(0.01)
     return x * 2
 
 mode = sys.argv[2]
 
 def main():
     items = list(range(40))
+
     class StubPool(shim_mod._ClusterPool):
-        def _remote_chunk(self, func, chunk, starmap):
+        def _remote_chunk(self, payload, chunk, starmap):
             if mode == "dead":
                 return None
-            idxs = [p[0] for p in chunk]
-            vals = [p[1] for p in chunk]
-            return [(i, func(*v) if isinstance(v, tuple) else func(v)) for i, v in zip(idxs, vals)]
+            # Tagged, and instant: the local side is sleeping, so these should
+            # win their slots and still be there at the end.
+            return [(i, ("R", v * 2)) for i, v in chunk]
+
+    payload = shim_mod._func_payload(double)
+    assert payload is not None, "a module-level function must be shippable"
 
     p = StubPool(processes=2)
     p._remote = True
-    p._STORE = "/nix/store/x"
-    r = p._race(double, items, False, 0.5)
-    assert r == list(map(double, items)), (r, list(map(double, items)))
+    r = p._race(double, items, False, 0.01, payload)
     p.close()
+
+    plain = [v[1] if isinstance(v, tuple) else v for v in r]
+    assert plain == list(map(lambda x: x * 2, items)), (plain[:8],)
+    remote_filled = [i for i, v in enumerate(r) if isinstance(v, tuple)]
+    if mode == "dead":
+        assert not remote_filled, "dead remote still filled slots %r" % (remote_filled,)
+    else:
+        assert remote_filled, "no remote result survived into the output"
     print("race-ok")
 
 if __name__ == "__main__":

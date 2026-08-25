@@ -187,7 +187,7 @@ if req.get("cache_keys"):
 results = []
 for item in items:
     if starmap:
-        args = item if isinstance(item, list) else (item,)
+        args = item if isinstance(item, (list, tuple)) else (item,)
         results.append(func(*args))
     else:
         results.append(func(item))
@@ -341,7 +341,7 @@ for line in sys.stdin:
         results = []
         for item in items:
             if starmap:
-                args = item if isinstance(item, list) else (item,)
+                args = item if isinstance(item, (list, tuple)) else (item,)
                 results.append(func(*args))
             else:
                 results.append(func(item))
