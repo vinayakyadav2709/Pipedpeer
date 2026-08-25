@@ -23,7 +23,11 @@ Everything needed to produce the major project report and the conference paper.
 python3 diagrams/src/plots_design.py
 python3 diagrams/src/plots_results.py
 for f in diagrams/src/*.dot; do
-  dot -Tpng -Gdpi=300 -Gmargin=0.14 "$f" -o "diagrams/$(basename "${f%.dot}").png"
+  out="diagrams/$(basename "${f%.dot}").png"
+  dot -Tpng -Gdpi=300 -Gmargin=0.14 "$f" -o "$out"
+  # Graphviz leaves the -Gmargin area transparent, which pdflatex can render
+  # as black. Flatten every figure onto white.
+  magick "$out" -background white -alpha remove -alpha off "$out"
 done
 
 # Documents (three passes, for the table of contents and cross-references)
