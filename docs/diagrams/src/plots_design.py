@@ -26,15 +26,15 @@ def fig_sequence():
     x = np.arange(len(actors)) * 3.0
     steps = [
         (0, 1, "run script.py", False),
-        (1, 1, "scan imports, build Nix closure", None),
-        (1, 1, "estimate memory requirement", None),
+        (1, 1, "scan imports, build closure", None),
+        (1, 1, "estimate memory need", None),
         (1, 2, "accept (capacity check)", False),
         (2, 1, "lease granted", True),
         (1, 2, "commit lease", False),
-        (1, 2, "upload workspace, closure if absent", False),
+        (1, 2, "upload workspace, closure if needed", False),
         (2, 3, "broadcast closure to peers", False),
         (1, 2, "open execution stream", False),
-        (2, 2, "run in crun sandbox", None),
+        (2, 2, "run in sandbox", None),
         (2, 3, "distribute parallel work", False),
         (3, 2, "partial results", True),
         (2, 1, "stdout and stderr, line by line", True),
@@ -76,7 +76,7 @@ def fig_sequence():
 
 def fig_scoring():
     """4.2 - How each term moves a node's score. Constants: coordinator.scoreNode."""
-    fig, (axl, axr) = plt.subplots(1, 2, figsize=(9.6, 3.8), gridspec_kw={"wspace": 0.34})
+    fig, (axl, axr) = plt.subplots(1, 2, figsize=(9.6, 3.8), gridspec_kw={"wspace": 0.40})
 
     # Load penalties and hardware bonuses, at their extremes.
     terms = ["CPU load", "Memory load", "Active jobs\n(per job)",
@@ -89,7 +89,8 @@ def fig_scoring():
                  color=(RED if b <= 0 else GREEN), alpha=0.75,
                  edgecolor="white", linewidth=0.8)
     axl.axvline(0, color="#333333", linewidth=1.0)
-    axl.set_yticks(y); axl.set_yticklabels(terms, fontsize=14)
+    axl.set_yticks(y); axl.set_yticklabels(terms, fontsize=13)
+    axl.tick_params(which="both", length=0)
     axl.set_xlabel("contribution to the score")
     axl.set_title("Range of each term", fontsize=17, loc="left")
     axl.set_xlim(-0.58, 0.13)
@@ -111,7 +112,9 @@ def fig_scoring():
         axr.annotate(f"{name}\nfinal {vals[-1]:.2f}", (len(vals) - 1, vals[-1]),
                      textcoords="offset points", xytext=(-6, 14 if colour == GREEN else 16),
                      ha="right", fontsize=14, color=colour)
-    axr.set_xticks(np.arange(len(labels) - 1)); axr.set_xticklabels(labels[:-1], fontsize=14)
+    axr.set_xticks(np.arange(len(labels) - 1))
+    axr.set_xticklabels(["base", "CPU", "mem", "jobs", "h/w"], fontsize=13)
+    axr.tick_params(which="both", length=0)
     axr.set_ylabel("running score"); axr.set_ylim(0, 1.45)
     axr.set_title("Two nodes scored", fontsize=17, loc="left")
     axr.grid(axis="y", alpha=0.25)
