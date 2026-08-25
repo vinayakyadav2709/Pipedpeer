@@ -102,6 +102,7 @@ type chunk struct {
 	noFanout                                 bool
 	force                                    bool
 	originLocal                              bool
+	prov                                     *provenance
 	requiredMem                              int64
 	cacheKeys                                []string
 	itemKeys                                 []string
@@ -159,26 +160,40 @@ def _mute_stdout():
     sys.stdout = sys.stderr
 
 
+def _free_bytes():
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError):
+        return 0
+
+
 def _fan_width(n_items, required_mem):
     """How many processes to spread a chunk over: bounded by cores, by the
     item count, and by the same 40%-of-free-RAM rule the daemon admits chunks
-    against, since running items side by side multiplies the working set."""
+    against, since running items side by side multiplies the working set.
+
+    The memory bound applies even when the caller sent no estimate. Trusting
+    cores alone in that case is how a node with plenty of cores and little
+    free RAM gets pushed over: nothing below this enforces a limit, because
+    the sandbox carries no cgroup at all, so this arithmetic is the only thing
+    standing between a wide chunk and the OOM killer. Unknown per-item cost is
+    assumed to be a conservative 256MB rather than zero."""
     if n_items <= 1:
         return 1
     n = os.cpu_count() or 1
     override = os.environ.get("PIPEDPEER_WORKER_PROCS", "").strip()
     if override:
         try:
-            n = max(1, int(override))
+            return max(1, min(int(override), n_items))
         except ValueError:
             pass
-    if required_mem > 0:
-        try:
-            avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    avail = _free_bytes()
+    if avail > 0:
+        if required_mem > 0:
             per_item = max(1, required_mem // n_items)
-            n = min(n, max(1, int(avail * 0.4) // per_item))
-        except (ValueError, OSError):
-            pass
+        else:
+            per_item = 256 << 20
+        n = min(n, max(1, int(avail * 0.4) // per_item))
     return max(1, min(n, n_items))
 
 
@@ -526,6 +541,84 @@ type poolManager struct {
 	// that recovers mid-run is tried again.
 	deadMu    sync.Mutex
 	deadPeers map[string]bool
+
+	stats poolStats
+}
+
+// provenance records where each part of a chunk actually ran, so the answer
+// travels home with the results.
+//
+// Without it the shim can only say it handed work to a daemon, which is not
+// the same claim: a daemon with no eligible peers runs the chunk itself, and
+// counting that as distributed work is exactly the sort of comfortable
+// half-truth that let a broken dispatch path look healthy. A receipt that
+// cannot tell "ran on another machine" from "posted to a socket" is not
+// evidence.
+type provenance struct {
+	mu    sync.Mutex
+	parts []provPart
+}
+
+// provPart.Where is "local" for work this node ran, or "peer:<host:port>".
+type provPart struct {
+	Where string `json:"where"`
+	Items int    `json:"items"`
+	Ms    int64  `json:"ms"`
+}
+
+func (p *provenance) record(where string, items int, ms int64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.parts = append(p.parts, provPart{Where: where, Items: items, Ms: ms})
+}
+
+func (p *provenance) snapshot() []provPart {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]provPart(nil), p.parts...)
+}
+
+// poolStats is this node's tally of pool work, served at /v1/pool/stats.
+//
+// Until it existed there was no way to ask a node what it had actually done:
+// a run that distributed everything and one that distributed nothing left the
+// same job history, and the only trace of a chunk arriving was a log line, so
+// anything wanting to check had to shell into the machine and grep. That is
+// how a completely broken dispatch path stayed invisible for months, and why
+// the chaos test could not tell a surviving cluster from an idle one.
+type poolStats struct {
+	mu             sync.Mutex
+	ChunksReceived int64 `json:"chunks_received"`
+	ChunksLocal    int64 `json:"chunks_from_local_shim"`
+	ChunksPeer     int64 `json:"chunks_from_peers"`
+	ItemsExecuted  int64 `json:"items_executed_here"`
+	PartsToPeers   int64 `json:"parts_sent_to_peers"`
+	PartsFailed    int64 `json:"parts_failed"`
+}
+
+func (p *poolStats) snapshot() map[string]int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return map[string]int64{
+		"chunks_received":        p.ChunksReceived,
+		"chunks_from_local_shim": p.ChunksLocal,
+		"chunks_from_peers":      p.ChunksPeer,
+		"items_executed_here":    p.ItemsExecuted,
+		"parts_sent_to_peers":    p.PartsToPeers,
+		"parts_failed":           p.PartsFailed,
+	}
+}
+
+func (p *poolStats) add(f func(*poolStats)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f(p)
 }
 
 func newPoolManager() *poolManager {
@@ -580,6 +673,13 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 // It runs in a subprocess of <storePath>/bin/run so it executes in exactly the
 // environment the user's script runs in — no SDK, no shared state. Requests to
 // a store that already has a warm worker reuse it instead of re-spawning.
+// handlePoolStats reports what pool work this node has actually done, so a
+// test or a demo can check where the work went without shelling in to grep a
+// log file.
+func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.pool.stats.snapshot())
+}
+
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	rawBody, _ := io.ReadAll(r.Body)
 	defer releaseHeapAfterWork()
@@ -638,6 +738,15 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[pool] received pool/map from %s: items=%d b64=%v cache_keys=%d required_mem=%d forwarded=%q",
 		r.RemoteAddr, len(items), req.ItemsB64, len(req.CacheKeys), req.RequiredMemBytes,
 		r.Header.Get("X-Pipedpeer-Forwarded"))
+	fromLocalShim := isLoopback(r.RemoteAddr) && r.Header.Get("X-Pipedpeer-Forwarded") == ""
+	s.pool.stats.add(func(p *poolStats) {
+		p.ChunksReceived++
+		if fromLocalShim {
+			p.ChunksLocal++
+		} else {
+			p.ChunksPeer++
+		}
+	})
 
 	// Memory bounding for horizontal scaling on constrained nodes. The safe
 	// working set is 40% of free RAM (max_safe_chunk_size); anything larger
@@ -686,7 +795,8 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 		chunkDir:    chunkDirFor(storePath),
-		originLocal: isLoopback(r.RemoteAddr) && r.Header.Get("X-Pipedpeer-Forwarded") == "",
+		originLocal: fromLocalShim,
+		prov:        &provenance{},
 	}
 	if err := os.MkdirAll(ch.chunkDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -701,6 +811,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	case req.NoFanout:
 		// One-hop fan-out: the origin already split; this chunk is terminal.
 		results, err = s.pool.runLocal(runPath, storePath, ch)
+		if err == nil {
+			ch.prov.record("local", len(ch.items), 0)
+		}
 	default:
 		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
 	}
@@ -709,8 +822,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if frames {
-		// Frames response: small header line + raw pickle result frames.
-		hdr := fmt.Sprintf("{\"results_frames\": %d}\n", len(results))
+		// Frames response: small header line + raw pickle result frames. The
+		// receipt rides in the header so the submitter learns where the work
+		// ran, not merely that it was accepted.
+		recJSON, _ := json.Marshal(ch.prov.snapshot())
+		hdr := fmt.Sprintf("{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
+			len(results), s.nodeID, recJSON)
 		w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
 		w.WriteHeader(http.StatusOK)
 		body := make([]byte, 0, 1024)
@@ -969,6 +1086,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		}
 	}
 	log.Printf("[pool] chunk: %d items -> %d part(s), %d remote, %d local", len(items), len(parts), remote, len(parts)-remote)
+	pm.stats.add(func(p *poolStats) { p.PartsToPeers += int64(remote) })
 
 	// Results are stored per part and concatenated in part order after the
 	// wait, so the response is always in input order regardless of which part
@@ -984,8 +1102,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			defer wg.Done()
 			var r []any
 			var e error
+			started := time.Now()
 			if p.runPath != "" {
 				r, e = pm.runLocal(runPath, storePath, p.c)
+				if e == nil {
+					ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
+				}
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
@@ -995,6 +1117,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					}
 					r, e = pm.runRemote(peer, storePath, p.c)
 					if e == nil {
+						ch.prov.record("peer:"+peer, len(p.c.items), time.Since(started).Milliseconds())
 						break
 					}
 					pm.markPeerDead(peer)
@@ -1002,10 +1125,14 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				if e != nil {
 					// D2/D3 — a remote node adds capacity, never subtracts.
 					r, e = pm.runLocal(runPath, storePath, p.c)
+					if e == nil {
+						ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
+					}
 				}
 			}
 			if e != nil {
 				errs[i] = e
+				pm.stats.add(func(p *poolStats) { p.PartsFailed++ })
 				log.Printf("[pool] part %d failed: %v", i, e)
 				return
 			}
@@ -1104,6 +1231,7 @@ func (pm *poolManager) markPeerDead(peer string) {
 
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
 func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, error) {
+	pm.stats.add(func(p *poolStats) { p.ItemsExecuted += int64(len(ch.items)) })
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
 	if !ok || worker.dead() {

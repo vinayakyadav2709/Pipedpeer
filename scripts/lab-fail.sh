@@ -34,13 +34,15 @@ else
 	exit 1
 fi
 
-# Chunk arrivals are logged by each worker's daemon; that log is the only
-# per-worker evidence of where work went.
-worker_log() {
-	"$runtime" exec "pipedpeer-lab-$1" cat /tmp/pipedpeer/daemon.log 2>/dev/null || true
-}
+# Each worker reports its own tally of pool work. Asking the daemon beats
+# grepping its log: the log lives inside the container at a path that depends
+# on how the daemon was started, and an assertion that silently finds nothing
+# is worse than no assertion at all.
 chunks_received() {
-	worker_log "$1" | grep -c "received pool/map" || true
+	curl -sf --max-time 3 "http://127.0.0.1:$((38080 + $1))/v1/pool/stats" 2>/dev/null |
+		python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("chunks_received", 0))
+except Exception: print(0)' 2>/dev/null || echo 0
 }
 
 "$repo_root/scripts/lab-up.sh"
@@ -167,6 +169,6 @@ echo
 grep "POOL-OK" "$runlog"
 echo "receipt: $remote_items items ran on the cluster, $local_items locally, $remote_failures chunk(s) lost"
 for idx in 1 2 3; do
-	echo "  worker $idx: $(chunks_received "$idx") chunk request(s)"
+	echo "  worker $idx: $(chunks_received "$idx") chunk request(s)$([[ "$idx" == "$kill_idx" ]] && echo ' (killed mid-flight)')"
 done
 echo "PASS: pool.map distributed real work and completed correctly despite losing a worker mid-flight"
