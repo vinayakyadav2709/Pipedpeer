@@ -27,13 +27,13 @@ class MLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d, 2048),
+            nn.Linear(d, 512),
             nn.ReLU(),
-            nn.Linear(2048, 2048),
+            nn.Linear(512, 512),
             nn.ReLU(),
-            nn.Linear(2048, 2048),
+            nn.Linear(512, 512),
             nn.ReLU(),
-            nn.Linear(2048, 1),
+            nn.Linear(512, 1),
         )
 
     def forward(self, x):
@@ -44,7 +44,7 @@ model = MLP().to(device)
 opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
 loss_fn = nn.MSELoss()
 
-BATCH, EPOCHS = 1024, 10
+BATCH, EPOCHS = 1024, 3
 steps_per_epoch = n // BATCH
 print("training ...")
 t0 = time.monotonic()

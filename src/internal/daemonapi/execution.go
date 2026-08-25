@@ -211,7 +211,9 @@ func gpuDriverLibs(dir string) []string {
 const gpuDriverMountDir = "/run/opengl-driver/lib"
 
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
-	cmd := "mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
+	// Same reasoning as the sandbox env: stdout is a pipe, and python would
+	// otherwise sit on a full training run's prints until exit.
+	cmd := "export PYTHONUNBUFFERED=1 && mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
 		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
 	for _, arg := range scriptArgs {
 		cmd += " " + shellQuote(arg)
@@ -583,6 +585,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		env := []string{
 			"HOME=/home/root",
 			"PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin",
+			// stdout is a pipe in here, so python block-buffers and a whole
+			// training run prints nothing until exit; the audience needs it live.
+			"PYTHONUNBUFFERED=1",
 		}
 		_ = cfg.Intercept // shim envs already in cfg.Envs above
 		for _, e := range cfg.Envs {
