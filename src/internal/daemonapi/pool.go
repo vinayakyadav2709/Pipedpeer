@@ -161,6 +161,19 @@ def _mute_stdout():
 
 
 def _free_bytes():
+    """Memory this node could actually give a new process.
+
+    Not SC_AVPHYS_PAGES: that counts only wholly free pages and ignores the
+    page cache, which the kernel reclaims on demand, so on a box with a warm
+    cache it reads several times too low and every limit built on it
+    collapses. MemAvailable is the kernel's own answer."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
     try:
         return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
     except (ValueError, OSError):
@@ -1033,7 +1046,13 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			minSplit = 2
 		}
 		if len(items) < minSplit {
-			if ch.force {
+			// Too small to divide. Send it whole to a peer anyway when it came
+			// from a shim on this machine: that shim already kept its own half
+			// and handed us this one to place elsewhere, so running it here
+			// competes with the pool that is mid-race, and the round trip
+			// bought nothing. Rotated so successive small dispatches spread
+			// instead of pinning the first peer.
+			if ch.force || ch.originLocal {
 				j := int(forceRotate.Add(1)) % len(peers)
 				ordered := append(append([]string{}, peers[j:]...), peers[:j]...)
 				parts = []part{{c: ch, peers: ordered}}

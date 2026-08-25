@@ -469,26 +469,57 @@ func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
 	return r.Cached
 }
 
-// broadcastClosure pushes a cached closure NAR to every healthy peer that does
-// not have it yet, so pool spill can fan a single task out to multiple nodes.
-// Best-effort and parallel: a peer that fails to import is simply not offered
-// spill work (runChunk always keeps the local part, so nothing is lost).
-func (s *Server) broadcastClosure(storePath string) {
-	narPath, ok := s.narCache.narFileFor(storePath)
-	if !ok {
-		return
-	}
+// healthyPeers returns the peers currently known to be up, and how many peers
+// the poller has any opinion about at all. The second number distinguishes
+// "everyone is down" from "we have not looked yet".
+func (s *Server) healthyPeers() ([]PeerHealth, int) {
 	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
 	var targets []PeerHealth
 	for _, ph := range s.peerHealths {
 		if ph.Status == "healthy" && ph.Host != "" && ph.Port != 0 {
 			targets = append(targets, *ph)
 		}
 	}
-	s.peersMu.RUnlock()
-	if len(targets) == 0 {
+	return targets, len(s.peerHealths)
+}
+
+// broadcastClosure pushes a cached closure NAR to every healthy peer that does
+// not have it yet, so pool spill can fan a single task out to multiple nodes.
+// Best-effort and parallel: a peer that fails to import is simply not offered
+// spill work (runChunk always keeps the local part, so nothing is lost).
+func (s *Server) broadcastClosure(storePath string) {
+	// Export from our own store when no upload filled the cache: a job that
+	// lands on the machine that built its closure uploads no NAR, and without
+	// one this node seeds no peers and nothing can ever spill.
+	narPath, ok := s.narCache.ensureLocal(storePath)
+	if !ok {
+		// Nothing to send means no peer can ever be offered spill work, and
+		// the run will look healthy while staying entirely local. Say so.
+		log.Warn().Str("store", storePath).
+			Msg("no closure archive to broadcast; peers cannot take pool work")
 		return
 	}
+	targets, known := s.healthyPeers()
+	if len(targets) == 0 && known == 0 {
+		// The poller has not finished its first cycle. A daemon that has just
+		// started still answers uploads, and /v1/nodes serves peer states
+		// persisted from a previous run, so both the submitter and the
+		// operator can see a healthy cluster while this map is still empty —
+		// and the closure then reaches nobody. Poll once, synchronously,
+		// rather than silently declining to broadcast.
+		s.pollAllNodes()
+		targets, known = s.healthyPeers()
+	}
+	if len(targets) == 0 {
+		// Usually a timing problem: the health poller has not run since the
+		// peers were added, so they are known but not yet marked healthy.
+		log.Warn().Int("known_peers", known).
+			Msg("no healthy peers to broadcast the closure to; pool work will stay local")
+		return
+	}
+	log.Info().Int("peers", len(targets)).Str("store", storePath).
+		Msg("broadcasting closure to peers")
 
 	// Serial mode imports one peer at a time (shared-RAM rig); default parallel.
 	if s.serialImports.Load() {
@@ -901,6 +932,11 @@ func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Poll it now rather than waiting for the next sweep. A peer that is
+	// known but not yet marked healthy is invisible to closure broadcast and
+	// to spill, so a job submitted in the seconds after `nodes add` runs
+	// entirely local and nothing explains why.
+	go s.pollAllNodes()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
 }
 

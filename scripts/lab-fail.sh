@@ -65,10 +65,58 @@ for port in "${ports[@]}"; do
 done
 echo "lab is up"
 
+# The node IDs of the workers that exist right now. Containers are recreated
+# on every lab-up, so yesterday's rows are still in the store under different
+# IDs; counting "healthy" lines would happily match those.
+want_ids=()
+for port in "${ports[@]}"; do
+	id="$(curl -sf --max-time 3 "http://127.0.0.1:$port/health" |
+		python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])' 2>/dev/null || true)"
+	[[ -n "$id" ]] && want_ids+=("$id")
+done
+if (( ${#want_ids[@]} == 0 )); then
+	echo "FAIL: no lab worker reported a node id"
+	exit 1
+fi
+
+# An already-running daemon on this port makes `start` a silent no-op, and the
+# run is then served by whatever was there - typically an older build pointing
+# at containers that no longer exist. `stop` only finds daemons started with
+# the same state dir, so do not rely on it.
+"$cli" stop >/dev/null 2>&1 || true
+fuser -k 38080/tcp >/dev/null 2>&1 || true
+sleep 2
 "$cli" start 2>/dev/null || true
+if ! curl -sf --max-time 3 "http://127.0.0.1:38080/health" >/dev/null 2>&1; then
+	echo "FAIL: no daemon answering on :38080"
+	exit 1
+fi
+
 for port in "${ports[@]}"; do
 	"$cli" nodes add 127.0.0.1 "$port" >/dev/null 2>&1 || true
 done
+
+# Wait until the daemon reports these exact workers healthy. /v1/nodes serves
+# state persisted from earlier runs, so a count is not evidence: a job started
+# against a stale view finds no peers holding the closure and runs entirely
+# local, with nothing in the output to say why.
+ready=0
+for _ in $(seq 1 40); do
+	nodes_json="$(curl -sf --max-time 3 "http://127.0.0.1:38080/v1/nodes" || echo '[]')"
+	ready="$(printf '%s' "$nodes_json" | python3 -c 'import json,sys
+want = set(sys.argv[1:])
+try: nodes = json.load(sys.stdin)
+except Exception: nodes = []
+print(sum(1 for n in nodes if n.get("node_id") in want and n.get("state") == "healthy"))' "${want_ids[@]}" 2>/dev/null || echo 0)"
+	[[ "${ready:-0}" -ge "${#want_ids[@]}" ]] && break
+	sleep 1
+done
+if [[ "${ready:-0}" -lt "${#want_ids[@]}" ]]; then
+	echo "FAIL: daemon sees $ready of ${#want_ids[@]} lab workers as healthy"
+	"$cli" nodes || true
+	exit 1
+fi
+echo "daemon sees all ${#want_ids[@]} lab workers"
 
 # Not $TMPDIR: on a tmpfs /tmp this workspace competes with the job's own
 # data for RAM, and the daemon has already had uploads rejected that way.
@@ -126,6 +174,14 @@ if [[ -z "$kill_idx" ]]; then
 	exit 1
 fi
 
+# Snapshot the tallies before the kill: a stopped worker cannot answer for
+# what it did, and reading them afterwards reports zero for the one node we
+# know did the work.
+counts=()
+for idx in 1 2 3; do
+	counts+=("$(chunks_received "$idx")")
+done
+
 echo "killing worker $kill_idx (:$((38080 + kill_idx))) while it holds chunks"
 "$runtime" stop "pipedpeer-lab-$kill_idx" >/dev/null 2>&1 || true
 
@@ -169,6 +225,8 @@ echo
 grep "POOL-OK" "$runlog"
 echo "receipt: $remote_items items ran on the cluster, $local_items locally, $remote_failures chunk(s) lost"
 for idx in 1 2 3; do
-	echo "  worker $idx: $(chunks_received "$idx") chunk request(s)$([[ "$idx" == "$kill_idx" ]] && echo ' (killed mid-flight)')"
+	note=""
+	[[ "$idx" == "$kill_idx" ]] && note=" (killed mid-flight)"
+	echo "  worker $idx: ${counts[$((idx - 1))]} chunk request(s) at kill time$note"
 done
 echo "PASS: pool.map distributed real work and completed correctly despite losing a worker mid-flight"

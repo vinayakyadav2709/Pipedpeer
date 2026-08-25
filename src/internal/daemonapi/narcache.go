@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -95,6 +97,73 @@ func (c *narCache) store(storePath string, src io.Reader) (string, error) {
 	c.save()
 	c.mu.Unlock()
 	return dst, nil
+}
+
+// ensureLocal returns a cached NAR for a store path, exporting it from this
+// node's own Nix store when nothing was ever uploaded.
+//
+// The cache is only filled by an upload, and the submitter skips uploading
+// whenever the target already has the closure — which is always true when the
+// job lands on the machine that built it. That node then has the closure and
+// no NAR, so it silently seeds none of its peers, none of them become
+// eligible for spill, and every chunk runs at home while the receipt happily
+// reports work "distributed" to a daemon that kept it. Exporting on demand
+// closes that hole; the result is cached, so the cost is paid once.
+func (c *narCache) ensureLocal(storePath string) (string, bool) {
+	if path, ok := c.narFileFor(storePath); ok {
+		return path, true
+	}
+	if storePath == "" {
+		return "", false
+	}
+	if _, err := os.Stat(filepath.Join(storePath, "bin", "run")); err != nil {
+		return "", false // not materialised here; nothing to export
+	}
+	nixPath, err := exec.LookPath("nix")
+	if err != nil {
+		return "", false
+	}
+	out, err := (&exec.Cmd{Path: nixPath, Args: []string{"nix-store", "-qR", storePath}}).Output()
+	if err != nil {
+		return "", false
+	}
+	paths := strings.Fields(string(out))
+	if len(paths) == 0 {
+		return "", false
+	}
+	if err := os.MkdirAll(c.dir, 0755); err != nil {
+		return "", false
+	}
+	tmp, err := os.CreateTemp(c.dir, "export-*.nar")
+	if err != nil {
+		return "", false
+	}
+	defer os.Remove(tmp.Name())
+	gz := gzip.NewWriter(tmp)
+	export := &exec.Cmd{
+		Path:   nixPath,
+		Args:   append([]string{"nix-store", "--export"}, paths...),
+		Stdout: gz,
+		Stderr: os.Stderr,
+	}
+	if err := export.Run(); err != nil {
+		tmp.Close()
+		return "", false
+	}
+	if err := gz.Close(); err != nil {
+		tmp.Close()
+		return "", false
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		tmp.Close()
+		return "", false
+	}
+	dst, err := c.store(storePath, tmp)
+	tmp.Close()
+	if err != nil {
+		return "", false
+	}
+	return dst, true
 }
 
 // handleStoreCheck reports whether the daemon already has a store path cached,
