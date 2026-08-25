@@ -634,20 +634,41 @@ These are the first valid numbers this benchmark has produced; see 6.2.
 
 See `fig_5.4_comparison.png`.
 
+**What PipedPeer does differently**
+
 | | PipedPeer | Spark | Ray | Dask | BOINC | ssh |
 |---|---|---|---|---|---|---|
 | Runs unmodified Python | yes | no | partial | partial | no | yes |
 | No cluster to configure | yes | no | no | no | no | partial |
 | No head or master node | yes | no | no | no | no | yes |
 | Reproduces the environment | yes | partial | partial | partial | partial | no |
-| Sandboxes the job | yes | no | no | no | partial | no |
-| Reschedules on node loss | yes | yes | yes | yes | yes | no |
+| Sandboxes each job | yes | no | no | no | partial | no |
+| Survives losing a node | yes | yes | yes | yes | yes | no |
 
-Spark, Ray and Dask are more capable at scale and have real schedulers, fault
-tolerance and years of production use; the axis on which PipedPeer differs is
-setup cost and code change, not raw capability. BOINC is closest in spirit but
-is a platform for specific projects, each with its own server infrastructure,
-not a general executor.
+**Where PipedPeer is behind**
+
+| | PipedPeer | Spark | Ray | Dask | BOINC | ssh |
+|---|---|---|---|---|---|---|
+| Authenticated and encrypted | **no** | yes | partial | partial | yes | yes |
+| Works beyond one LAN | partial | yes | yes | yes | yes | yes |
+| Runtimes other than Python | **no** | yes | partial | no | yes | yes |
+| Proven in production use | **no** | yes | yes | yes | yes | yes |
+
+The first table is the weaker half of the argument: those criteria are the ones
+the system was built to change, so it wins them by construction, and a reviewer
+should discount them accordingly. The second table is the one worth reading.
+PipedPeer is the only system here with **no authentication and no transport
+encryption at all**, which confines it to a network the user already trusts and
+is the single largest barrier to deploying it anywhere else. It is also the only
+one tied to one language and one subnet, and the only one with no production
+history: the others have years of deployment, this has a three-node lab.
+
+Spark, Ray and Dask are more capable at scale, with mature schedulers, richer
+fault tolerance and far more operational tooling. The honest summary is that
+PipedPeer sits at a different point on the curve rather than a better one,
+trading reach, security and maturity for the removal of setup cost and code
+change. BOINC is closest in spirit but is a platform for specific projects, each
+with its own server infrastructure, rather than a general executor.
 
 ### 5.9 Not measured
 

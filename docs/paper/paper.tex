@@ -348,7 +348,8 @@ results, the checksum matching the serial computation.
 
 \begin{table}[t]
 \centering
-\caption{PipedPeer against existing systems}
+\caption{PipedPeer against existing systems. The lower block is where it is
+the weaker system.}
 \label{tab:cmp}
 \renewcommand{\arraystretch}{1.2}
 \footnotesize
@@ -356,15 +357,32 @@ results, the checksum matching the serial computation.
 \toprule
 \textbf{Property} & \textbf{Ours} & \textbf{Spark} & \textbf{Dask} & \textbf{ssh} \\
 \midrule
+\multicolumn{5}{l}{\textit{What it does differently}} \\
 Runs unmodified Python     & yes & no  & partial & yes \\
 No cluster to configure    & yes & no  & no      & partial \\
 No head or master node     & yes & no  & no      & yes \\
 Reproduces the environment & yes & partial & partial & no \\
-Sandboxes the job          & yes & no  & no      & no \\
-Reschedules on node loss   & yes & yes & yes     & no \\
+Sandboxes each job         & yes & no  & no      & no \\
+Survives losing a node     & yes & yes & yes     & no \\
+\midrule
+\multicolumn{5}{l}{\textit{Where it is behind}} \\
+Authenticated, encrypted   & \textbf{no} & yes & partial & yes \\
+Works beyond one LAN       & partial & yes & yes & yes \\
+Runtimes beyond Python     & \textbf{no} & yes & no & yes \\
+Proven in production       & \textbf{no} & yes & yes & yes \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+The upper block lists the criteria the system was designed to change, so it
+wins them by construction and they should be discounted accordingly. The lower
+block is the informative half. Ours is the only system in the table with no
+authentication and no transport encryption whatsoever, which confines it to an
+already-trusted network; it is also the only one limited to one language and one
+subnet, and the only one without a production track record. Spark, Ray and Dask
+are substantially more capable at scale. The claim is not that this system is
+better, but that it occupies a different point on the curve, trading reach,
+security and maturity for the removal of setup cost and code change.
 
 \subsection{Threats to validity}
 
