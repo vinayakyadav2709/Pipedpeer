@@ -114,7 +114,10 @@ beats:
   flat-ish (chunked streaming, worker GC between chunks).
 - **Act 3e (4a CPU DDP):** both machines spike together for the whole run.
 - **Act 3f (4b GPU DDP):** both GPUs light up (`nvidia-smi` shows the python
-  process on each), CPUs go quiet; same script, ~20x faster epochs.
+  process on each), CPUs go quiet; same script, visibly faster epochs
+  (the demo model is sized for a ~1 minute run, so sync time — not
+  compute — sets the floor; the win to narrate is the GPUs doing in
+  milliseconds what the CPU ranks needed the whole step for).
 - Optional: `tail -f /tmp/pipedpeer/daemon.log` on the worker to show
   `pool/map` requests arriving.
 
