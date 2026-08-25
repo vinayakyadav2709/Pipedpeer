@@ -11,6 +11,7 @@ digraph SystemDesign {
   subgraph cluster_submit {
     label="Submitting node"; labeljust=l;
     style="rounded"; color="#1e50a0"; penwidth=2.0; fontcolor="#1e50a0"; bgcolor="#fafcff";
+    margin="26,20";
     build [label="Build the environment\nimports become a Nix closure"];
     place [label="Place the job\nfilter, score, take a lease"];
     coll  [label="Collect the results\nchanged files only"];
@@ -20,11 +21,12 @@ digraph SystemDesign {
   subgraph cluster_worker {
     label="Worker node"; labeljust=l;
     style="rounded"; color="#2f7d4f"; penwidth=2.0; fontcolor="#2f7d4f"; bgcolor="#f8fcf9";
+    margin="26,20";
     node [fillcolor="#e3f3e9", color="#2f7d4f"];
     admit [label="Admit the job\nlease and capacity check"];
     cache [label="Closure cache\nkeyed by store path"];
     sandbox [label="crun sandbox\nthe script and the shim", fillcolor="#fbe9e9", color="#a33333"];
-    admit -> cache [label="  needs this closure?  "];
+    admit -> cache [label="  present?  "];
     cache -> sandbox [label="  run  "];
   }
 

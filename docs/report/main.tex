@@ -142,7 +142,7 @@ We declare that the work titled \textbf{\projecttitle} is our own work carried o
 
 \noindent This project presents \textbf{PipedPeer}, a system that runs an unmodified Python script on another machine on the network, with no cluster to configure and nothing installed on any participant beyond a single binary. Two problems normally stand between a developer and the idle machines around them: reproducing the script's environment elsewhere, and rewriting the program against a cluster API. PipedPeer removes both.
 
-\noindent The environment is reproduced by building a \textbf{Nix closure} against a pinned package set, so the same script yields the same content-addressed store path on every machine and on any day. That store path is then used as a cluster-wide cache key: a worker that has seen an environment before pays nothing to set it up again. Measured on a three-node cluster, the first submission of a job took 12.00 seconds and later submissions of the same environment took 0.66 seconds, an eighteenfold reduction.
+\noindent The environment is reproduced by building a \textbf{Nix closure} against a pinned package set, so the same script yields the same content-addressed store path on every machine and on any day. That store path is then used as a cluster-wide cache key: a worker that has seen an environment before pays nothing to set it up again. Measured on a three-node cluster, the first submission of a job took 12.00 seconds and later submissions of the same environment took 0.65 seconds, an eighteenfold reduction.
 
 \noindent The program is distributed by \textbf{intercepting the parallel primitives it already uses}. A shim injected into the job's interpreter replaces \texttt{multiprocessing.Pool}, pandas \texttt{groupby} and \texttt{merge}, chunked file readers, NumPy linear algebra, \texttt{joblib} and torch data-parallel training. Interception is governed by a cost model that measures link bandwidth and ships work only when computing locally would cost more than moving it; dense matrix multiplication, for instance, is deliberately never shipped, because local BLAS beats the transport. Every remote path degrades to the local one, so using the cluster is never worse than not using it.
 
@@ -565,7 +565,7 @@ is registered, configured or installed.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.83\textwidth]{\figpath{fig_3.1_system_design.png}}
+    \includegraphics[width=0.81\textwidth]{\figpath{fig_3.1_system_design.png}}
     \caption{PipedPeer system design. The submitting side builds the environment
     and places the job; the worker admits it, caches the closure and runs it
     sandboxed. Both roles are the same binary.}
@@ -957,6 +957,13 @@ partials with a plain concatenation. There are no combiners, and consequently
 \emph{any} aggregation specification works, including those that have no
 combiner form at all. Bucket zero is kept local.
 
+\textbf{What exactness means here.} It means exactness of \emph{values}, not of
+row order. A concatenation of shuffle buckets does not reproduce pandas'
+documented join ordering, which is why the join tests sort both sides before
+comparing; a script that depends on the row order of a \texttt{merge} result can
+therefore see a different order under interception. Grouped aggregation is
+unaffected, and its tests assert frame equality directly.
+
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_4.8_hash_shuffle.png}}
@@ -1114,7 +1121,7 @@ The full suite was run with every optional Python library present.
 \toprule
 \textbf{Outcome} & \textbf{Count} & \textbf{Notes} \\
 \midrule
-Passed  & 246 & across 19 packages \\
+Passed  & 246 & across 18 packages \\
 Failed  & 0   & \\
 Skipped & 3   & two need an integration flag, one needs an NVIDIA GPU \\
 \bottomrule
@@ -1137,7 +1144,7 @@ Table~\ref{tab:whatproves} records what each establishes.
 \toprule
 \textbf{Test} & \textbf{Property established} \\
 \midrule
-Hash shuffle matches local & \texttt{groupby} and all four join types are frame-equal to local pandas \\
+Hash shuffle matches local & grouped aggregation is frame-equal to local pandas; the four join types are equal up to row order and index \\
 NumPy interception & matmul splits into row blocks, SVD ships whole, results match \\
 Cost model decisions & the decision boundaries hold at pinned bandwidths \\
 Joblib backend distributes & an unmodified \texttt{RandomForestClassifier} reaches the cluster \\
@@ -1266,8 +1273,8 @@ demonstrating the guarantee of Section~\ref{sec:ft} end to end.
     \label{fig:ressandbox}
 \end{figure}
 
-The OCI runtime costs roughly 20\,ms more per job than the lighter alternative.
-Measured against a 0.66 second warm job, let alone a 12 second cold one, this is
+The OCI runtime costs 15 to 20\,ms more per job than the lighter alternative.
+Measured against a 0.65 second warm job, let alone a 12 second cold one, this is
 not a figure worth optimising, and the OCI device model is what makes GPU
 passthrough possible.
 
@@ -1289,8 +1296,8 @@ write a report if any measured run fails.
 \toprule
 \textbf{Measure} & \textbf{Value} \\
 \midrule
-Go source & 24,700 lines across 73 files \\
-Internal packages & 19 \\
+Go source & 24,679 lines across 72 files \\
+Internal packages & 18 \\
 HTTP endpoints & 18 \\
 Embedded Python shim & approx.\ 1,900 lines \\
 Test files & 33 \\

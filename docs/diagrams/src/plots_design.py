@@ -44,10 +44,10 @@ def fig_sequence():
     fig, ax = plt.subplots(figsize=(9.2, 9.6))
     top, dy = 0.0, -0.74
     for i, a in enumerate(actors):
-        ax.add_patch(FancyBboxPatch((x[i] - 1.32, top), 2.64, 0.66,
+        ax.add_patch(FancyBboxPatch((x[i] - 1.32, top + 0.02), 2.64, 0.80,
                      boxstyle="round,pad=0.04", facecolor="#eef3fb",
                      edgecolor=BLUE, linewidth=1.2))
-        ax.text(x[i], top + 0.33, a, ha="center", va="center", fontsize=13)
+        ax.text(x[i], top + 0.42, a, ha="center", va="center", fontsize=13)
         ax.plot([x[i], x[i]], [top, top + dy * (len(steps) + 1.2)],
                 color=GREY, linewidth=0.9, linestyle=(0, (4, 4)), zorder=0)
     for k, (src, dst, label, back) in enumerate(steps):
@@ -69,7 +69,7 @@ def fig_sequence():
             ax.text((x[src] + x[dst]) / 2, y + 0.09, label, ha="center",
                     va="bottom", fontsize=13, color=colour, zorder=6,
                     bbox=dict(facecolor="white", edgecolor="none", pad=1.4))
-    ax.set_xlim(-1.8, x[-1] + 3.4); ax.set_ylim(top + dy * (len(steps) + 1.6), 0.85)
+    ax.set_xlim(-1.9, x[-1] + 1.7); ax.set_ylim(top + dy * (len(steps) + 1.4), 1.05)
     ax.axis("off")
     fig.savefig(OUT / "fig_3.5_sequence.png"); plt.close(fig)
 
@@ -141,8 +141,8 @@ def fig_race():
         ax.text(c * 0.55 + 0.5, 0, f"c{c}" if ok else f"c{c} lost",
                 ha="center", va="center", color=("white" if ok else "#555555"), fontsize=14)
     redo_x = (n - 1) * 0.55 + 1.15
-    ax.barh(1, 1.0, left=redo_x, height=0.42, color=GOLD, alpha=0.9, edgecolor="white")
-    ax.text(redo_x + 0.5, 1, f"c{dead} re-run", ha="center", va="center",
+    ax.barh(1, 1.45, left=redo_x, height=0.42, color=GOLD, alpha=0.9, edgecolor="white")
+    ax.text(redo_x + 0.72, 1, f"c{dead} re-run", ha="center", va="center",
             color="white", fontsize=14)
     ax.annotate("", xy=(redo_x, 0.78), xytext=(dead * 0.55 + 0.5, 0.22),
                 arrowprops=dict(arrowstyle="-|>", color=GOLD, linewidth=1.4,
@@ -166,8 +166,8 @@ def fig_cost_model():
     MIN_BYTES = 32 * 1024**2  # hard floor
     LOW_F, LOW_CAP = 8, 512 * 1024**2   # low-intensity carve-out
 
-    mb = np.logspace(np.log10(4), np.log10(4000), 600)      # payload, MB
-    f = np.logspace(np.log10(0.5), np.log10(2000), 600)     # flop per byte
+    mb = np.logspace(np.log10(4), np.log10(9000), 700)      # payload, MB
+    f = np.logspace(np.log10(0.5), np.log10(2000), 700)     # flop per byte
     MB, F = np.meshgrid(mb, f)
     nb = MB * 1024**2
 
@@ -183,12 +183,14 @@ def fig_cost_model():
                 colors=["#f6e7e7", "#e2f0e8"])
     ax.contour(MB, F, spill.astype(float), levels=[0.5], colors=[GREEN], linewidths=1.8)
 
-    ax.text(8, 500, "kept local", color=RED, fontsize=19, weight="bold")
-    ax.text(700, 700, "distributed", color=GREEN, fontsize=19, weight="bold")
+    ax.text(55, 2.5, "kept local", color=RED, fontsize=18, weight="bold",
+            ha="center", va="center",
+            bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+    ax.text(150, 700, "distributed", color=GREEN, fontsize=18, weight="bold", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.annotate("payload below 32 MB", xy=(20, 60), fontsize=13, color=RED, rotation=90,
-                ha="center", va="center")
+                ha="center", va="center", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.annotate("under 8 flop/byte and up to 512 MB:\ntoo little work per byte moved",
-                xy=(4.6, 0.78), fontsize=13, color=RED, va="center", ha="left")
+                xy=(4.6, 0.78), fontsize=13, color=RED, va="center", ha="left", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
     for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 5.5, 900),
                           ("dense matmul", 200, 300), ("SVD", 1.5, 300)):
@@ -196,7 +198,7 @@ def fig_cost_model():
         off = {"pandas join": (12, -5), "pandas groupby": (12, -5),
                "dense matmul": (12, -5), "SVD": (12, -5)}[name]
         ax.annotate(name, (mbv, fv), textcoords="offset points", xytext=off,
-                    ha="left", fontsize=13, color="#1e50a0")
+                    ha="left", fontsize=13, color="#1e50a0", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("payload size (MB, log scale)")

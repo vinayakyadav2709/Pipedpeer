@@ -15,6 +15,7 @@ digraph UseCase {
   subgraph cluster_sys {
     label="PipedPeer"; labelloc=b; labeljust=l; fontsize=18; fontname="Helvetica";
     style="rounded"; color="#1e50a0"; penwidth=1.8; bgcolor="#fbfcff"; fontcolor="#1e50a0";
+    margin="30,26";
     node [shape=ellipse, style=filled, fillcolor="#e7eefa", color="#3b6ea5",
           penwidth=1.2, width=0, height=0];
     u1 [label="Run a script on the cluster"];

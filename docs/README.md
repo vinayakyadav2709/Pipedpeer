@@ -59,6 +59,6 @@ results chapter was entirely unfilled placeholders.
 **No speedup figure is claimed anywhere.** The measurements were taken with all
 three workers as containers on one host, which cannot demonstrate multi-machine
 speedup. What that bed does measure honestly, it measures: the environment cache
-(12.00 s cold against 0.66 s warm), interception overhead, and correct
+(12.00 s cold against 0.65 s warm), interception overhead, and correct
 completion after a worker is killed mid-run. What is missing is listed rather
 than estimated.

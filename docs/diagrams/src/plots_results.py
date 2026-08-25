@@ -31,7 +31,7 @@ def fig_closure_cache():
            [cold, float(np.median(warm))], color=[RED, GREEN], width=0.55)
     ax.set_ylabel("seconds, end to end")
     for i, v in enumerate([cold, float(np.median(warm))]):
-        ax.text(i, v + cold * 0.03, f"{v:.2f} s", ha="center", fontsize=17)
+        ax.text(i, v + cold * 0.03, f"{v:.2f} s", ha="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.set_ylim(0, cold * 1.22)
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
@@ -55,7 +55,7 @@ def fig_shim_overhead():
     ax.bar(["interception off", "interception on"], [off, on],
            color=["#9bb8dd", BLUE], width=0.5)
     for i, v in enumerate([off, on]):
-        ax.text(i, v + off * 0.03, f"{v:.2f} s", ha="center", fontsize=17)
+        ax.text(i, v + off * 0.03, f"{v:.2f} s", ha="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.set_ylabel("seconds, end to end"); ax.set_ylim(0, max(on, off) * 1.25)
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
     ax.set_title(f"Whole job: {(on/off - 1) * 100:+.0f}% with interception on",
@@ -64,9 +64,9 @@ def fig_shim_overhead():
     # Startup tax before and after the lazy-patching fix (bench-shim-d2.sh).
     ax2.bar(["before fix", "after fix"], [21.6, 1.20], color=[RED, GREEN], width=0.5)
     ax2.axhline(3.0, color=GOLD, linestyle="--", linewidth=1.5)
-    ax2.text(0.5, 4.2, "3x budget", color=GOLD, fontsize=13, ha="center", va="bottom")
+    ax2.text(0.5, 5.6, "3x budget", color=GOLD, fontsize=13, ha="center", va="bottom", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     for i, v in enumerate([21.6, 1.20]):
-        ax2.text(i, v + 0.6, f"{v:.2f}x", ha="center", fontsize=17)
+        ax2.text(i, v + 0.9, f"{v:.2f}x", ha="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax2.set_ylabel("slowdown vs no shim"); ax2.set_ylim(0, 25)
     ax2.grid(axis="y", alpha=0.25); ax2.set_axisbelow(True)
     ax2.set_title("Startup, job that imports nothing heavy",
@@ -92,11 +92,11 @@ def fig_sandbox():
     ax.bar(x - w / 2, bw, w, label="bwrap", color="#9bb8dd")
     ax.bar(x + w / 2, cr, w, label="crun (what PipedPeer uses)", color=BLUE)
     for i in range(len(tasks)):
-        ax.text(i - w / 2, bw[i] + 0.7, f"{bw[i]:.1f}", ha="center", fontsize=14)
-        ax.text(i + w / 2, cr[i] + 0.7, f"{cr[i]:.1f}", ha="center", fontsize=14)
+        ax.text(i - w / 2, bw[i] + 0.9, f"{bw[i]:.1f}", ha="center", fontsize=13, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+        ax.text(i + w / 2, cr[i] + 0.9, f"{cr[i]:.1f}", ha="center", fontsize=13, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.set_xticks(x)
     ax.set_xticklabels(["trivial\n(echo)", "medium\n(shell loop)", "python\n(interpreter start)"])
-    ax.set_ylabel("milliseconds, median of 20")
+    ax.set_ylabel("milliseconds to start")
     ax.set_ylim(0, max(cr) * 1.25)
     ax.legend(frameon=True, framealpha=1.0, edgecolor="none",
               fontsize=13, loc="upper left")
@@ -154,7 +154,8 @@ def fig_comparison():
 
     # A heavy rule separating what PipedPeer does differently from what it
     # is simply worse at.
-    ax.axhline(SPLIT - 0.5, color="#333333", linewidth=2.4)
+    ax.plot([-0.5, len(systems) - 0.5], [SPLIT - 0.5] * 2,
+            color="#333333", linewidth=2.4, clip_on=False)
     # Group labels go in the right margin: on the left they collided with the
     # criterion text.
     ax.set_xlim(-0.5, len(systems) - 0.5 + 0.95)

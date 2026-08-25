@@ -2,21 +2,21 @@
 // Process 6 is placed before 7 so the numbering matches the reading order, and
 // the peer-facing edges leave from the right so none has to double back.
 digraph DFD1 {
-  rankdir=TB; bgcolor="white"; nodesep=0.40; ranksep=0.55;
-  node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+  rankdir=TB; bgcolor="white"; nodesep=0.28; ranksep=0.42;
+  node [fontname="Helvetica", fontsize=19, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
-  edge [fontname="Helvetica", fontsize=14, color="#555555"];
+  edge [fontname="Helvetica", fontsize=17, color="#555555"];
 
   user  [label="User", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
   peers [label="Peer nodes", shape=box3d, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
 
-  p1 [label="1  Resolve environment\nscan imports, build the closure"];
-  p2 [label="2  Discover peers\nUDP probes, TCP sweep, stored peers"];
-  p3 [label="3  Place task\nhard filters, score, reserve a lease"];
-  p4 [label="4  Transfer\nclosure if absent, workspace always"];
-  p5 [label="5  Execute\ncrun sandbox, stream the output"];
-  p6 [label="6  Distribute parallel work\ncost model, spill to peers", fillcolor="#fbe9e9", color="#a33333"];
-  p7 [label="7  Return results\nchanged files, deletion manifest"];
+  p1 [label="1  Resolve\nenvironment"];
+  p2 [label="2  Discover\npeers"];
+  p3 [label="3  Place task\nfilter, score, lease"];
+  p4 [label="4  Transfer\nclosure and workspace"];
+  p5 [label="5  Execute\nsandboxed"];
+  p6 [label="6  Distribute\nparallel work", fillcolor="#fbe9e9", color="#a33333"];
+  p7 [label="7  Return\nresults"];
 
   d1 [label="D1   Node store", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
   d2 [label="D2   Closure cache", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];

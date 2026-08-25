@@ -423,7 +423,14 @@ job paid about 1.7 s for torch whether or not it used it. See R3.
 
 **Why the shuffle is exact.** Rows are bucketed by a hash of the group or join
 key, so equal keys always land in the same bucket and therefore on the same
-node. Every key is complete on exactly one node, so each node's aggregation is a
+node.
+
+**The caveat this buys.** Exactness here means exactness of *values*, not of row
+order. A concatenation of shuffle buckets does not reproduce pandas' documented
+join ordering, which is why the join tests sort both sides before comparing. A
+script that depends on the row order of a `merge` result, which is not unusual,
+can therefore see a different order under interception. Grouped aggregation is
+unaffected: those tests assert frame equality directly. Every key is complete on exactly one node, so each node's aggregation is a
 complete aggregation and the origin combines partials with a plain
 concatenation. There are no combiners, and consequently **any** aggregation
 specification works, including ones with no combiner form. Bucket 0 stays local.
@@ -549,7 +556,7 @@ they run and pass. What each one establishes:
 
 | Test | Property |
 |---|---|
-| `TestShimHashShuffleMatchesLocal` | groupby and all four join types are frame-equal to local pandas |
+| `TestShimHashShuffleMatchesLocal` | grouped aggregation is frame-equal to local pandas; the four join types are equal **up to row order and index** (the test sorts both sides before comparing) |
 | `TestShimNumPyInterception` | matmul is split into row blocks; SVD ships whole; results match |
 | `TestShimCostModelDecisions` | the decision boundaries hold at pinned bandwidths |
 | `TestShimJoblibBackendDistributes` | an unmodified `RandomForestClassifier(n_jobs=-1)` reaches the cluster |
@@ -613,9 +620,9 @@ node mid-computation, which is the invariant of 4.9 demonstrated end to end.
 
 ### 5.6 Sandbox cost
 
-Median of 20 iterations: crun costs about 20 ms more per job than bwrap
+Median of 20 iterations: crun costs 15 to 20 ms more per job than bwrap
 (21.7 vs 5.1 ms trivial, 36.8 vs 16.9 ms for an interpreter start). Against a
-0.66 s warm job that is not worth optimising, and crun provides the OCI device
+0.65 s warm job that is not worth optimising, and crun provides the OCI device
 model that GPU passthrough needs. See `fig_5.3_sandbox_overhead.png`.
 
 These are the first valid numbers this benchmark has produced; see 6.2.
@@ -624,8 +631,8 @@ These are the first valid numbers this benchmark has produced; see 6.2.
 
 | | |
 |---|---|
-| Go | 24,700 lines across 73 files |
-| Internal packages | 19 |
+| Go | 24,679 lines across 72 files |
+| Internal packages | 18 |
 | HTTP endpoints | 18 |
 | Embedded Python shim | about 1,900 lines |
 | Test files / cases | 33 / 246 passing |
@@ -691,7 +698,7 @@ Recorded rather than left blank:
 PipedPeer runs an unmodified Python script on another machine with no cluster
 configuration, reproduces its environment exactly, and distributes the parallel
 work inside it without touching the source. The two measurements that carry the
-argument are the environment cache, 12.00 s cold against 0.66 s warm, and the
+argument are the environment cache, 12.00 s cold against 0.65 s warm, and the
 fault injection, correct results after losing a node mid-run. The design
 decision underneath the first is pinning nixpkgs so a store path names an
 environment identically on every node; the decision underneath the second is
@@ -765,7 +772,7 @@ already is, rather than only where capacity is.
 | Staleness thresholds | `daemonapi/server.go:834,1061` |
 | Discovery is UDP, not mDNS | `discovery/discovery.go:39-47` |
 | Import scan is a regex | `pythondeps/deps.go` |
-| Hash shuffle is exact | `TestShimHashShuffleMatchesLocal` |
+| Hash shuffle is exact in value | `TestShimHashShuffleMatchesLocal`; joins compared after sorting, so row order is not preserved |
 | DDP gradients are exactly the mean | `TestShimDDPSync` |
 | Remote failure degrades to local | `TestShimRaceCorrectWithDeadRemote`; 5.5 |
 | Dense matmul never ships | `docker/demo-test.sh` negative assertion; 5.3 |
