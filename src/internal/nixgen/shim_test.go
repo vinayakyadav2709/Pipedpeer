@@ -722,3 +722,45 @@ print("FORCE_OK")
 		t.Fatalf("PIPEDPEER_SPILL_MIN probe failed: %v\n%s", err, out)
 	}
 }
+
+// TestShimDoesNotImportHeavyLibsAtStartup pins the lazy-patching contract.
+//
+// The shim used to call _install_torch/_install_pandas/_install_numpy eagerly,
+// so every job paid for `import torch` (~1.7s here) even when the script never
+// mentioned torch. That is precisely the never-slower guarantee the shim
+// exists to keep, and scripts/bench-shim-d2.sh measured the tax at 21x before
+// the fix. Patching is now deferred to each library's first import.
+func TestShimDoesNotImportHeavyLibsAtStartup(t *testing.T) {
+	src := `
+import sys
+assert sys.modules.get("sitecustomize") is not None, "shim did not load"
+import sitecustomize as shim
+assert shim._ENABLED, "shim not enabled; this test would be vacuous"
+for mod in ("torch", "pandas", "numpy", "joblib", "sklearn"):
+    assert mod not in sys.modules, mod + " was imported at startup"
+print("LAZY-OK")
+`
+	runShimPythonEnv(t, "lazy_startup", src, "LAZY-OK",
+		"PIPEDPEER_SHIM=1",
+		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
+		"PIPEDPEER_NUM_SHARDS=3")
+}
+
+// TestShimPatchesOnFirstImport is the other half of that contract: deferring
+// the work must not lose it. numpy is patched only once the script imports it.
+func TestShimPatchesOnFirstImport(t *testing.T) {
+	src := `
+import sys
+import sitecustomize as shim
+assert shim._ENABLED, "shim not enabled; this test would be vacuous"
+assert "numpy" not in sys.modules, "numpy imported before the script asked"
+import numpy as np
+assert np.matmul.__module__ == "sitecustomize", np.matmul.__module__
+assert "numpy" not in shim._PENDING_PATCHES, "numpy patch still pending"
+print("PATCH-OK")
+`
+	runShimPythonEnv(t, "lazy_patch", src, "PATCH-OK",
+		"PIPEDPEER_SHIM=1",
+		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
+		"PIPEDPEER_NUM_SHARDS=3")
+}
