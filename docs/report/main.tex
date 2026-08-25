@@ -1,0 +1,1603 @@
+% ============================================================
+%  PipedPeer -- Major Project Report
+%  Sardar Patel Institute of Technology
+%  Department of Computer Engineering
+% ============================================================
+
+\documentclass[12pt,a4paper]{report}
+
+% -- Packages ----------------------------------------------------------------
+\usepackage[left=30mm,right=20mm,top=25mm,bottom=25mm]{geometry}
+% xcolor must load with the table option before colortbl-dependent commands
+% such as \rowcolors are used.
+\usepackage[table]{xcolor}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{setspace}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{tocloft}
+\usepackage{afterpage}
+\usepackage{pdflscape}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{microtype}
+\usepackage{etoolbox}
+\usepackage{hyperref}
+
+% -- Hyperref ----------------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue,
+  pdftitle={PipedPeer Major Project Report},
+  pdfauthor={Yateen Vaviya, Vinayak Yadav, Sahil Gupta}
+}
+
+\onehalfspacing
+
+% -- Page style --------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textit{PipedPeer: Zero-Configuration Distributed Task Execution}}
+\fancyhead[R]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% -- Chapter / section formatting --------------------------------------------
+\titleformat{\chapter}[display]
+  {\normalfont\Large\bfseries\centering}
+  {\chaptertitlename\ \thechapter}{10pt}{\Large}
+\titlespacing*{\chapter}{0pt}{-10pt}{20pt}
+
+% -- Listings ----------------------------------------------------------------
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  rulecolor=\color{gray!40},
+  backgroundcolor=\color{gray!5},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  commentstyle=\color{gray},
+  keywordstyle=\color{blue}\bfseries,
+  stringstyle=\color{orange!80!black}
+}
+
+% -- Table helpers -----------------------------------------------------------
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+
+% -- Colours -----------------------------------------------------------------
+\definecolor{headerblue}{RGB}{30,80,160}
+\definecolor{rowgray}{RGB}{245,245,245}
+
+% ============================================================
+%  VARIABLES
+% ============================================================
+\newcommand{\candone}{Yateen Vaviya}
+\newcommand{\candtwo}{Vinayak Yadav}
+\newcommand{\candthree}{Sahil Gupta}
+
+\newcommand{\uidone}{2023300251}
+\newcommand{\uidtwo}{2023300264}
+\newcommand{\uidthree}{2023300072}
+
+\newcommand{\guidename}{Prof. Rupali Sawant}
+
+\newcommand{\projecttitle}{PipedPeer: Zero-Configuration Distributed Computing via Recursive, Decentralised  Coordination}
+
+\newcommand{\institute}{Sardar Patel Institute of Technology}
+\newcommand{\department}{Department of Computer Engineering}
+\newcommand{\university}{University of Mumbai}
+\newcommand{\academicyear}{2024--2025}
+
+\newcommand{\figpath}[1]{../diagrams/#1}
+
+% ============================================================
+\begin{document}
+
+\input{be_title.tex}
+\newpage
+\input{be_certificate2.tex}
+\newpage
+
+%----------------------------------------------------------
+% DECLARATION
+%----------------------------------------------------------
+\section*{Declaration}
+\vspace{1cm}
+
+We declare that the work titled \textbf{\projecttitle} is our own work carried out under the guidance of \textbf{\guidename} at \institute. This work has not been submitted elsewhere for any degree.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}ccc}
+\textbf{\candone} & \textbf{\candtwo} & \textbf{\candthree} \\
+\textbf{\uidone} & \textbf{\uidtwo} & \textbf{\uidthree} \\
+\end{tabular*}
+\end{center}
+
+\newpage
+
+% -- Abstract ----------------------------------------------------------------
+\clearpage
+\thispagestyle{plain}
+\begin{center}
+  {\Large\bfseries ABSTRACT}
+\end{center}
+\vspace{1cm}
+
+\noindent This project presents \textbf{PipedPeer}, a system that runs an unmodified Python script on another machine on the network, with no cluster to configure and nothing installed on any participant beyond a single binary. Two problems normally stand between a developer and the idle machines around them: reproducing the script's environment elsewhere, and rewriting the program against a cluster API. PipedPeer removes both.
+
+\noindent The environment is reproduced by building a \textbf{Nix closure} against a pinned package set, so the same script yields the same content-addressed store path on every machine and on any day. That store path is then used as a cluster-wide cache key: a worker that has seen an environment before pays nothing to set it up again. Measured on a three-node cluster, the first submission of a job took 12.00 seconds and later submissions of the same environment took 0.66 seconds, an eighteenfold reduction.
+
+\noindent The program is distributed by \textbf{intercepting the parallel primitives it already uses}. A shim injected into the job's interpreter replaces \texttt{multiprocessing.Pool}, pandas \texttt{groupby} and \texttt{merge}, chunked file readers, NumPy linear algebra, \texttt{joblib} and torch data-parallel training. Interception is governed by a cost model that measures link bandwidth and ships work only when computing locally would cost more than moving it; dense matrix multiplication, for instance, is deliberately never shipped, because local BLAS beats the transport. Every remote path degrades to the local one, so using the cluster is never worse than not using it.
+
+\noindent Placement filters candidate nodes on architecture and GPU, then ranks them on live load and hardware. Work is reserved with a three-phase lease so that concurrent submitters cannot oversubscribe a node, and an expired lease is how the system recovers from a crashed peer. Each job runs inside a \texttt{crun} OCI sandbox. In fault-injection testing, a worker killed in the middle of a distributed \texttt{Pool.map} left the run to complete with correct results.
+
+\vspace{1cm}
+\noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, Transparent Interception, Nix, Content-Addressed Caching, OCI Sandboxing, Cost-Based Scheduling, Fault Tolerance.
+
+% -- TOC / LOF / LOT ---------------------------------------------------------
+\clearpage
+\tableofcontents
+
+\clearpage
+\listoffigures
+
+\clearpage
+\listoftables
+
+% ============================================================
+\chapter{Introduction}
+% ============================================================
+
+\section{Problem Statement}
+
+A developer with a laptop, a lab workstation and a spare desktop has a
+considerable amount of idle computing capacity and no practical way to use it.
+The frameworks that exist for distributed computation --- Apache Spark
+\cite{zaharia2010spark}, Ray \cite{moritz2018ray}, Dask \cite{rocklin2015dask}
+--- all presuppose a cluster that somebody has already configured: a head node,
+matching software on every worker, a scheduler process, and a trusted network.
+For a team that simply wants a script to finish sooner, that setup costs more
+than the job is worth. The alternative, \texttt{ssh} together with
+\texttt{rsync}, means reproducing the environment by hand on every machine and
+receiving no scheduling, no isolation and no fault tolerance in return.
+
+Two distinct problems sit underneath this, and they are usually attacked
+separately:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{The environment problem.} A script needs a particular
+  interpreter and a particular set of libraries. Making a remote machine match
+  the local one is the bulk of the work, and it is the reason ``just \texttt{ssh}
+  into it'' does not scale past a single machine.
+  \item \textbf{The code problem.} Even with a matching environment, using more
+  than one machine normally means rewriting the program against a cluster API.
+  A script that took an afternoon to write becomes a project.
+\end{enumerate}
+
+\textbf{\projecttitle} addresses both without asking the user to do anything.
+The environment is reproduced exactly by shipping a Nix closure, and the program
+is distributed without modification by intercepting the parallel primitives it
+already uses.
+
+\section{Objectives}
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item To run an unmodified Python script on the best available machine on the
+  network, with results appearing in the user's working directory as though the
+  script had run locally.
+  \item To reproduce the script's environment exactly on that machine, and to
+  pay the transfer cost at most once per environment per cluster.
+  \item To choose the machine from live capacity, treating architecture and GPU
+  availability as hard requirements and load, memory and hardware as a ranking.
+  \item To distribute the parallel work inside the script across the cluster
+  with no code changes, and only when doing so is genuinely faster than running
+  it locally.
+  \item To isolate each job, and to survive the loss of any node without losing
+  the run.
+  \item To require nothing on a new machine beyond a single binary.
+\end{enumerate}
+
+\section{Scope}
+
+The following are within scope and implemented:
+
+\begin{itemize}[leftmargin=*]
+  \item A Go daemon that performs peer discovery, placement, leasing, sandboxed
+  execution and result delivery, and a thin CLI client.
+  \item Peer discovery by UDP multicast and broadcast on the local subnet, with
+  a TCP health-probe sweep as a fallback and an optional standalone registry for
+  discovery across subnets.
+  \item Reproducible environments built as Nix closures against a pinned package
+  set, transferred at most once per environment per cluster and cached by store
+  path.
+  \item Placement by hard filters on architecture, GPU, memory, cores and VRAM,
+  followed by a score over live load and hardware, with a three-phase lease.
+  \item Per-job isolation in a \texttt{crun} OCI sandbox, including GPU device
+  and driver passthrough.
+  \item Transparent interception of \texttt{multiprocessing.Pool}, pandas
+  \texttt{groupby}, \texttt{merge} and chunked readers, NumPy linear algebra,
+  \texttt{joblib} and scikit-learn, and torch data-parallel training, governed by
+  a measured cost model.
+  \item Result synchronisation of changed files only, with deletions carried in
+  a manifest, and a live terminal dashboard.
+\end{itemize}
+
+The following are explicitly out of scope in the current implementation:
+authentication and transport encryption (Section~\ref{sec:security}), runtimes
+other than Python, discovery across the public internet without a registry, and
+any economic incentive mechanism.
+
+\section{Technologies Used}
+
+\begin{table}[H]
+\centering
+\caption{Technologies used in PipedPeer}
+\label{tab:tech}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{3.4cm} L{2.6cm} X}
+\toprule
+\textbf{Technology} & \textbf{Category} & \textbf{Purpose} \\
+\midrule
+Go 1.25 & Core language & Daemon, CLI and coordinator in one static binary \\
+\texttt{go-chi/chi} & HTTP & Routing for the daemon API \\
+\texttt{gorilla/websocket} & Streaming & Live stdout and stderr from a running job \\
+Nix (pinned) & Environments & Content-addressed closures; the store path is the cache key \\
+\texttt{crun} & Sandboxing & OCI container per job, including GPU device passthrough \\
+\texttt{modernc.org/sqlite} & Storage & Node store, in pure Go so the binary stays static \\
+\texttt{gopsutil} & Metrics & CPU, memory and process-tree measurements \\
+Cobra, Viper & CLI & Command structure and configuration \\
+Bubble Tea, Lip Gloss & TUI & Live dashboard of nodes and jobs \\
+NATS (embedded) & Messaging & Optional alternate transport for lease messages \\
+\texttt{zerolog} & Logging & Structured, levelled logging \\
+Python & Interception & The shim, embedded in the binary and injected per job \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Assumptions and Constraints}
+
+\begin{itemize}[leftmargin=*]
+  \item Every participating machine runs the same binary; nothing else is
+  installed on a worker.
+  \item Workers run Linux, since \texttt{crun} and the Nix store are
+  Linux-specific. The submitting side also builds for macOS as a client.
+  \item The network is trusted. There is no authentication, authorisation or
+  transport encryption. This is a deliberate scope decision, discussed in
+  Section~\ref{sec:security}.
+  \item Nix must be present on a worker to receive a closure;
+  \texttt{pipedpeer setup} installs it.
+  \item The submitting process must remain alive for the duration of a job: it
+  holds the lease and receives the output stream.
+\end{itemize}
+
+% ============================================================
+\chapter{Literature Survey}
+% ============================================================
+
+This chapter surveys work across the areas PipedPeer draws on: lightweight
+sandboxing and environment portability at the edge, messaging and actor-style
+fault tolerance, failure-transparent programming models, portability in the
+Python ecosystem, scheduling, and collaborative task offloading. Each entry
+closes with the bearing it has on the design decisions taken in
+Chapter~\ref{chap:design}.
+
+\subsection*{Paper 1: Web Application-Based WebAssembly Container Platform for Extreme Edge Computing}
+\addcontentsline{toc}{subsection}{Paper 1}
+\textbf{Authors:} S.~Sekigawa, C.~Sasaki, A.~Tagami \quad
+\textbf{In:} Proc.\ IEEE GLOBECOM, 2023~\cite{sekigawa2023}
+
+\noindent\textbf{Summary:} A platform that deploys WebAssembly modules as
+isolated compute units on edge nodes, sandboxing and executing user-submitted
+binaries without a container daemon such as Docker. Evaluation on constrained
+hardware shows acceptable latency with strong isolation.
+
+\noindent\textbf{Bearing on this work:} The paper's argument that a lightweight
+sandbox can replace a full container runtime is the one PipedPeer follows, but
+the conclusion differs. PipedPeer must run arbitrary CPython with native
+extensions, which Wasm cannot host, so it takes an OCI runtime (\texttt{crun})
+directly rather than a bytecode sandbox. Section~\ref{sec:sandbox} measures what
+that choice costs: roughly 20\,ms per job.
+
+\subsection*{Paper 2: WebAssembly for Edge Computing: Potential and Challenges}
+\addcontentsline{toc}{subsection}{Paper 2}
+\textbf{Authors:} M.~N.~Hoque, K.~A.~Harras \quad
+\textbf{In:} IEEE Commun.\ Standards Mag., vol.~6, no.~4, 2022~\cite{hoque2022}
+
+\noindent\textbf{Summary:} A survey weighing Wasm's near-native speed and memory
+sandboxing against containers and VMs, identifying WASI immaturity, limited
+file-system and networking APIs, and absent GPU support as the blocking gaps.
+
+\noindent\textbf{Bearing on this work:} These gaps are precisely why PipedPeer
+ships a complete native environment as a Nix closure rather than compiling user
+code to a portable bytecode. A Nix closure carries native dependencies and GPU
+libraries intact, which is a hard requirement for the machine-learning workloads
+in Section~\ref{sec:workloads}.
+
+\subsection*{Paper 3: A Cross-Architecture Evaluation of WebAssembly in the Cloud-Edge Continuum}
+\addcontentsline{toc}{subsection}{Paper 3}
+\textbf{Authors:} S.~Kakati, M.~Brorsson \quad
+\textbf{In:} Proc.\ IEEE/ACM CCGrid, 2024~\cite{kakati2024}
+
+\noindent\textbf{Summary:} Benchmarks Wasm runtimes across x86\_64, ARM64 and
+RISC-V, reporting 70--90\% of native performance and sub-10\,ms startup, with
+I/O-bound workloads suffering disproportionately from WASI syscall translation.
+
+\noindent\textbf{Bearing on this work:} PipedPeer targets heterogeneous
+architectures too, but resolves them at build time rather than at run time: the
+flake generator emits an architecture-specific closure, and architecture is a
+\emph{hard filter} during placement (Section~\ref{sec:placement}) rather than
+something the runtime papers over. Full native performance is retained.
+
+\subsection*{Paper 4: Design of Elixir-Based Edge Server for Responsive IoT Applications}
+\addcontentsline{toc}{subsection}{Paper 4}
+\textbf{Authors:} Y.~Li, S.~Fujita \quad
+\textbf{In:} Proc.\ IEEE CANDARW, 2023~\cite{li2023elixir}
+
+\noindent\textbf{Summary:} An IoT edge server built on Elixir and OTP, where
+supervisor trees restart failed processes automatically and the system stays
+available through individual crashes.
+
+\noindent\textbf{Bearing on this work:} Supervision is the model PipedPeer's
+retry loop follows: a failed placement is retried on the next-best node with
+exponential backoff, and the work is never dropped. The difference is where
+recovery state lives. PipedPeer has no supervisor process; recovery falls out of
+lease expiry (Section~\ref{sec:lease}), so there is nothing whose own failure
+needs supervising.
+
+\subsection*{Paper 5: A Synergistic Elixir-EDA-MQTT Framework for Smart Transportation}
+\addcontentsline{toc}{subsection}{Paper 5}
+\textbf{Authors:} Y.~Zhou, X.~Chen \quad
+\textbf{In:} Computers, vol.~16, no.~3, 2024~\cite{zhou2024}
+
+\noindent\textbf{Summary:} Combines Elixir concurrency, event-driven
+architecture and MQTT publish-subscribe, showing lower overhead than REST for
+high-frequency telemetry.
+
+\noindent\textbf{Bearing on this work:} An earlier iteration of PipedPeer used
+publish-subscribe messaging (NATS) as its dispatch transport for exactly the
+reasons this paper gives. Experience moved the system the other way: bulk
+transfer of closures, workspaces and results needs streaming and backpressure,
+so dispatch is now plain HTTP with a WebSocket for output, and messaging is
+retained only as an optional transport for small lease messages. The paper
+documents the case for the road not taken.
+
+\subsection*{Paper 6: WebAssembly with wasi-nn for Edge Machine Learning Inference}
+\addcontentsline{toc}{subsection}{Paper 6}
+\textbf{Authors:} J.~Bachmeier, V.~Yussupov, J.~Hen\ss, H.~Koziolek \quad
+\textbf{In:} Proc.\ ECSA, 2025~\cite{bachmeier2025}
+
+\noindent\textbf{Summary:} Evaluates Wasm with wasi-nn for edge inference,
+finding good portability for CPU inference and immaturity for GPU acceleration.
+
+\noindent\textbf{Bearing on this work:} Machine-learning jobs are a primary use
+case, which is why \texttt{torch} and \texttt{tensorflow} carry the largest
+entries in PipedPeer's memory-estimation table and why GPU passthrough is
+implemented at the OCI level. This paper's negative result on GPU support under
+Wasm supports the decision to ship a native CUDA-capable environment instead.
+
+\subsection*{Paper 7: Case Study of WebAssembly Runtimes for AI Applications on the Edge}
+\addcontentsline{toc}{subsection}{Paper 7}
+\textbf{Authors:} S.~E.~Khelifa, M.~Bagaa, A.~O.~Messaoud, A.~Ksentini \quad
+\textbf{In:} 2024~\cite{khelifa2024}
+
+\noindent\textbf{Summary:} Compares four Wasm runtimes for AI inference on edge
+devices, finding memory consumption to be the dominant constraint.
+
+\noindent\textbf{Bearing on this work:} Memory as the binding constraint is the
+assumption behind PipedPeer's four-tier memory estimator and behind admission
+control: a node refuses a job it cannot hold, and the pool executor splits a
+request that would exceed 40\% of available memory into sequential chunks
+instead of failing.
+
+\subsection*{Paper 8: Programming Models for Failure-Transparent Distributed Systems}
+\addcontentsline{toc}{subsection}{Paper 8}
+\textbf{Authors:} A.~Bergstr\"om \quad
+\textbf{In:} M.S.\ thesis, KTH Royal Institute of Technology, 2025~\cite{kth2025thesis}
+
+\noindent\textbf{Summary:} Surveys abstractions that hide distributed failure
+from application code --- actors, reactive streams, supervision --- handling
+crash and omission failures by retry, replication and migration without exposing
+failure semantics upward.
+
+\noindent\textbf{Bearing on this work:} This is the closest match to PipedPeer's
+central invariant. The user's script contains no failure handling at all, so
+every remote path must degrade to a working local one. Section~\ref{sec:ft} sets
+out the five layers that enforce this, and Section~\ref{sec:res-ft} shows a
+worker being killed mid-computation without affecting the result.
+
+\subsection*{Paper 9: Python Array API Standard}
+\addcontentsline{toc}{subsection}{Paper 9}
+\textbf{Authors:} A.~Meurer et al. \quad
+\textbf{In:} Proc.\ SciPy, 2023~\cite{arrayapi2023}
+
+\noindent\textbf{Summary:} A standardised array API letting the same code run on
+NumPy, CuPy or JAX without modification, so scripts become portable across
+computational backends.
+
+\noindent\textbf{Bearing on this work:} The goal is the same as PipedPeer's ---
+portability without code change --- but the mechanism is the mirror image. The
+Array API asks libraries to converge on one interface that users then adopt.
+PipedPeer changes nothing the user writes and instead substitutes the
+implementations behind the interfaces they already use. The comparison is drawn
+out in Section~\ref{sec:comparison}.
+
+\subsection*{Paper 10: iDDS: Intelligent Distributed Dispatch and Scheduling}
+\addcontentsline{toc}{subsection}{Paper 10}
+\textbf{Authors:} W.~Guan et al. \quad
+\textbf{In:} arXiv:2510.02930, 2025~\cite{idds2025}
+
+\noindent\textbf{Summary:} Workflow orchestration that assigns tasks to
+heterogeneous resources from real-time CPU, memory, data-locality and dependency
+constraints, driven by a task DAG.
+
+\noindent\textbf{Bearing on this work:} The scoring-based assignment is directly
+comparable to the placement function in Section~\ref{sec:placement}. Two
+differences are worth stating: PipedPeer has no DAG, because it schedules whole
+scripts rather than task graphs, and it has no scheduler process at all, the
+scoring being performed in the submitting client. Data locality, which iDDS
+treats as first-class, is absent from PipedPeer's placement and is noted as
+future work.
+
+\subsection*{Paper 11: Task Offloading in Multi-Hop Relay-Aided Multi-Access Edge Computing}
+\addcontentsline{toc}{subsection}{Paper 11}
+\textbf{Authors:} Y.~Deng, Z.~Chen, X.~Chen, Y.~Fang \quad
+\textbf{In:} IEEE Trans.\ Veh.\ Technol., vol.~72, no.~1, 2023~\cite{deng2023}
+
+\noindent\textbf{Summary:} Formulates joint task assignment and relay selection
+to minimise completion time under transmission and energy constraints.
+
+\noindent\textbf{Bearing on this work:} The offload-or-compute-locally trade-off
+is exactly what PipedPeer's cost model decides, and this paper's formulation of
+it as a comparison between transmission time and local computation time is the
+same shape as the inequality in Section~\ref{sec:cost}. PipedPeer measures link
+bandwidth at run time rather than assuming a channel model.
+
+\subsection*{Paper 12: Multi-Agent Deep Reinforcement Learning Based Dynamic Task Offloading}
+\addcontentsline{toc}{subsection}{Paper 12}
+\textbf{Authors:} H.~He, X.~Yang, X.~Mi, H.~Shen, X.~Liao \quad
+\textbf{In:} Sensors, vol.~24, no.~16, 2024~\cite{he2024}
+
+\noindent\textbf{Summary:} Each device learns an offloading policy from local
+observations without a central coordinator, beating centralised heuristics on
+the energy-delay trade-off.
+
+\noindent\textbf{Bearing on this work:} This establishes the ceiling PipedPeer's
+deterministic rule-based model gives up. The trade is deliberate: a learned
+policy needs training data and a training phase, which is incompatible with a
+tool whose value proposition is that a new machine joins by running one binary.
+It is a natural direction once a deployment produces enough history.
+
+\subsection*{Paper 13: Joint Optimization of Multi-User Partial Offloading and Resource Allocation}
+\addcontentsline{toc}{subsection}{Paper 13}
+\textbf{Authors:} D.~Yong, R.~Liu, X.~Jia, Y.~Gu \quad
+\textbf{In:} Sensors, vol.~23, no.~5, 2023~\cite{yong2023}
+
+\noindent\textbf{Summary:} Optimises the split between locally executed and
+offloaded portions of a task, finding partial offloading consistently better
+than all-or-nothing.
+
+\noindent\textbf{Bearing on this work:} This paper describes what PipedPeer now
+does. Interception splits a single script's work across nodes at the granularity
+of \texttt{Pool} chunks, hash-shuffle buckets and matrix row blocks, while the
+remainder runs locally --- partial offloading in the sense used here. The racing
+scheme in Section~\ref{sec:ft} goes further by keeping the local share
+speculative, so an unresponsive remote share costs nothing.
+
+\subsection*{Paper 14: Energy-Efficient Collaborative Task Offloading in MEC}
+\addcontentsline{toc}{subsection}{Paper 14}
+\textbf{Authors:} L.~Chen et al. \quad
+\textbf{In:} Ad Hoc Networks, vol.~169, 2025~\cite{adhoc2025}
+
+\noindent\textbf{Summary:} Devices cooperate by relaying tasks toward edge
+servers, with a learned policy cutting total energy against non-cooperative
+baselines.
+
+\noindent\textbf{Bearing on this work:} The symmetric model, where every device
+is both client and server, is PipedPeer's model too: one binary, and any node
+may submit or accept. PipedPeer also implements one-hop forwarding, where a node
+that cannot hold a request passes it to a healthier peer rather than refusing.
+
+\subsection*{Paper 15: Blockchain Enabled Task Offloading in Digital Twin Vehicular Edge Networks}
+\addcontentsline{toc}{subsection}{Paper 15}
+\textbf{Authors:} C.~Li, Q.~Chen, M.~Chen, Z.~Su, Y.~Ding, D.~Lan, A.~Taherkordi \quad
+\textbf{In:} J.\ Cloud Comput., vol.~12, no.~120, 2023~\cite{li2023blockchain}
+
+\noindent\textbf{Summary:} Smart contracts enforce service agreements between
+task submitters and edge workers, preventing free-riding in an untrusted
+network.
+
+\noindent\textbf{Bearing on this work:} PipedPeer assumes a trusted network and
+has no authentication at all (Section~\ref{sec:security}), which is the single
+largest barrier to running it anywhere but a LAN. This paper describes the class
+of mechanism that would be needed to lift that restriction, and its
+commit-and-verify structure resembles the existing three-phase lease.
+
+\subsection*{Paper 16: Congestion-Aware Distributed Task Offloading Using Graph Neural Networks}
+\addcontentsline{toc}{subsection}{Paper 16}
+\textbf{Authors:} Z.~Zhao, J.~Perazzone, G.~Verma, S.~Segarra \quad
+\textbf{In:} arXiv:2312.02471, 2023~\cite{zhao2023}
+
+\noindent\textbf{Summary:} Trains a graph neural network to produce distributed
+offloading policies from local neighbourhood observations, outperforming greedy
+baselines under congestion.
+
+\noindent\textbf{Bearing on this work:} PipedPeer scores each node independently
+on scalar metrics and is therefore blind to topology: two nodes with identical
+load score identically even if one is a slow hop away. Inter-node bandwidth is
+measured, but only in the shim's cost model and not during placement. Feeding a
+graph-structured view into placement is the most concrete extension this survey
+suggests.
+
+% ============================================================
+\chapter{Analysis}
+% ============================================================
+
+\section{System Architecture}
+
+PipedPeer follows a \textbf{daemon, not CLI} architecture. Every machine runs
+one long-lived daemon that handles discovery, admission, execution and result
+delivery. The \texttt{pipedpeer} command is a short-lived client.
+
+One consequence is worth stating early because it distinguishes the system from
+every framework in Chapter~2: \textbf{the coordinator is a library linked into
+the client, not a service}. There is no scheduler process, no head node and no
+master anywhere. A machine acts as submitter and worker simultaneously, and the
+same binary does both. A new participant joins by running that binary; nothing
+is registered, configured or installed.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_3.1_system_design.png}}
+    \caption{PipedPeer system design. The submitting side builds the environment
+    and places the job; the worker admits it, caches the closure and runs it
+    sandboxed. Both roles are the same binary.}
+    \label{fig:architecture}
+\end{figure}
+
+The subsystems are listed in Table~\ref{tab:subsystems}.
+
+\begin{table}[H]
+\centering
+\caption{Subsystems and their responsibilities}
+\label{tab:subsystems}
+\renewcommand{\arraystretch}{1.25}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{3.2cm} X}
+\toprule
+\textbf{Package} & \textbf{Responsibility} \\
+\midrule
+\texttt{coordinator} & Filters, scores and selects a node; takes the lease; retries on failure \\
+\texttt{daemonapi} & HTTP and WebSocket surface, lease manager, sandbox, pool executor, gradient exchange \\
+\texttt{discovery} & UDP multicast and broadcast probes, TCP health sweep fallback \\
+\texttt{nodestore} & SQLite record of known peers and their last observed capacity \\
+\texttt{nixgen} & Flake generation and the interception shim as an embedded asset \\
+\texttt{pythondeps} & Import scanning and import-to-package resolution \\
+\texttt{resourceest} & Four-tier memory estimate \\
+\texttt{jobhistory} & Per-job record, progress stage and result manifest \\
+\texttt{heartbeat} & Capability and load reporting \\
+\texttt{gpu} & Vendor detection and per-device telemetry \\
+\texttt{registry} & Optional standalone directory for discovery across subnets \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Data Flow Diagram}
+
+\subsection*{Level 0 --- Context Diagram}
+\addcontentsline{toc}{subsection}{Level 0 --- Context Diagram}
+
+At the highest level the system has three external entities: the \textbf{user},
+who submits a script and receives output and result files; \textbf{peer nodes},
+which supply capacity and return computed results; and an optional
+\textbf{registry}, which assists discovery when nodes are not on one subnet.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.82\textwidth]{\figpath{fig_3.2_dfd_level0.png}}
+    \caption{Level 0 DFD --- context diagram. The registry is dashed because the
+    system works without it.}
+    \label{fig:dfd0}
+\end{figure}
+
+\subsection*{Level 1 --- System Decomposition}
+\addcontentsline{toc}{subsection}{Level 1 --- System Decomposition}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.86\textwidth]{\figpath{fig_3.3_dfd_level1.png}}
+    \caption{Level 1 DFD --- seven processes over three data stores.}
+    \label{fig:dfd1}
+\end{figure}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{1 Resolve environment.} Scan the script's imports, generate a
+  flake, build the closure.
+  \item \textbf{2 Discover peers.} Probe the subnet and merge results into the
+  node store.
+  \item \textbf{3 Place task.} Apply hard filters, score the survivors, reserve
+  a lease on the best.
+  \item \textbf{4 Transfer.} Upload the workspace always, the closure only when
+  the worker lacks it.
+  \item \textbf{5 Execute.} Run inside a \texttt{crun} sandbox, streaming output
+  back line by line.
+  \item \textbf{6 Distribute parallel work.} Consult the cost model and spill
+  chunks to peers.
+  \item \textbf{7 Return results.} Send back changed files and a deletion
+  manifest.
+\end{itemize}
+
+\section{Use Case Diagram}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.88\textwidth]{\figpath{fig_3.4_use_case.png}}
+    \caption{Use cases. A peer daemon is an actor in its own right, because
+    every node serves closures and executes chunks for others.}
+    \label{fig:usecase}
+\end{figure}
+
+\section{Sequence Diagram}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{\figpath{fig_3.5_sequence.png}}
+    \caption{End-to-end execution of one job.}
+    \label{fig:sequence}
+\end{figure}
+
+\begin{enumerate}[leftmargin=*]
+  \item The user runs \texttt{pipedpeer run script.py}.
+  \item The client scans imports and builds a Nix closure locally, then
+  estimates the job's memory requirement.
+  \item It asks its own daemon for the list of healthy peers.
+  \item The coordinator filters and scores them and sends \texttt{accept} to the
+  best candidate, which checks its own capacity.
+  \item On acceptance the client sends \texttt{commit}, atomically reserving
+  capacity on that node.
+  \item It uploads the workspace, and the closure only if the worker does not
+  already hold it.
+  \item The worker broadcasts the closure to peers that lack it, so they become
+  eligible to receive spilled work.
+  \item Execution proceeds inside a sandbox, with stdout and stderr streamed
+  back a line at a time.
+  \item If the script uses a parallel primitive, the shim distributes it subject
+  to the cost model.
+  \item On exit, changed files and a deletion manifest return as an archive and
+  are extracted into the user's directory.
+\end{enumerate}
+
+% ============================================================
+\chapter{Design and Methodology}
+\label{chap:design}
+% ============================================================
+
+\section{Node Discovery}
+
+Three sources feed one table, and none blocks the others.
+
+\textbf{UDP probes.} The daemon opens two sockets on port \texttt{38099}, one
+joined to multicast group \texttt{239.255.0.99} and one bound for broadcast,
+both with \texttt{SO\_REUSEADDR} and \texttt{SO\_REUSEPORT}. The probe is a
+fixed magic string and the reply carries a JSON node descriptor. The multicast
+socket exists for a specific reason: a UDP broadcast to a shared port is
+delivered by the kernel to only one socket, so two daemons on the same host
+would never see each other. Multicast with port reuse reaches all of them.
+
+This mechanism is often described as mDNS, including in earlier documentation of
+this project. It is not: there is no DNS-SD, no service record and no conflict
+resolution. It is a bare request-response probe.
+
+\textbf{TCP fallback.} Access points with client isolation drop broadcast
+traffic without error. When the UDP probe returns nothing, the daemon sweeps
+each local subnet with concurrent health probes, 64 at a time with a 700\,ms
+timeout each.
+
+\textbf{Freshness.} A peer poller runs every 10\,s. Two thresholds apply, and
+they differ deliberately: after \textbf{45 seconds} without a successful health
+check --- four missed rounds --- a node stops being reported as healthy, which is
+the filter every other component reads; after \textbf{5 minutes} an
+auto-discovered row is deleted outright. Manually added peers are never removed
+by the second rule.
+
+\section{Placement and Scoring}
+\label{sec:placement}
+
+Candidates are merged from the node store, live discovery, the optional registry
+and the local node, deduplicated by node identifier. Five hard filters then run
+in order: architecture must match the closure; a GPU must be present if one was
+required; and free memory, free cores and free VRAM must each satisfy the
+request. Every rejection records a reason, which surfaces in
+\texttt{pipedpeer job}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.80\textwidth]{\figpath{fig_4.1_placement_flow.png}}
+    \caption{Placement: gather, filter, score, lease, retry. A task is never
+    dropped; when nothing is eligible it is queued and retried.}
+    \label{fig:placement}
+\end{figure}
+
+Survivors are scored. Writing $u_{\text{cpu}}$ and $u_{\text{mem}}$ for CPU and
+memory utilisation in percent, $n_{\text{jobs}}$ for the count of running jobs,
+and $\hat{c}, \hat{f}, \hat{m}, \hat{r}$ for the core count, clock speed, free
+memory and free-core ratio each normalised onto $[0,1]$ against a saturation
+point:
+
+\begin{equation}
+\label{eq:score}
+S = \Bigl(1 - \tfrac{u_{\text{cpu}}}{200} - \tfrac{u_{\text{mem}}}{200}
+    - 0.05\,n_{\text{jobs}}
+    + 0.10(\hat{c}-\tfrac12) + 0.06(\hat{f}-\tfrac12)
+    + 0.10(\hat{m}-\tfrac12) + 0.10(\hat{r}-\tfrac12)\Bigr)\cdot H
+\end{equation}
+
+where $H$ is the node's health score. Two properties matter more than the
+individual coefficients.
+
+\textbf{Load dominates hardware.} The two load terms can subtract $1.0$ between
+them, while the four hardware terms together move the score by at most $0.36$.
+A fast but busy machine therefore loses to a slower idle one, which is the
+intended behaviour on a network of workstations that people are also using.
+
+\textbf{Missing telemetry is neutral.} The normalisation returns $0.5$, the
+midpoint, for a value that is absent or non-positive, so a node that does not
+report its clock speed is neither rewarded nor punished. This is what makes the
+function safe across heterogeneous machines whose telemetry is uneven.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{\figpath{fig_4.2_scoring_weights.png}}
+    \caption{Left: the range each term can contribute. Right: the same function
+    applied to an idle strong node and a loaded weak one.}
+    \label{fig:scoring}
+\end{figure}
+
+When a GPU is requested, a second function contributes up to $0.8$ more, drawn
+from total VRAM, device count, free VRAM on the best device and compute
+capability, less a utilisation penalty.
+
+\section{The Lease Protocol}
+\label{sec:lease}
+
+Placement is a three-phase handshake, and its state machine is where crash
+recovery lives.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{\figpath{fig_4.3_lease_fsm.png}}
+    \caption{Lease states. Recovery is a consequence of expiry rather than a
+    separate mechanism.}
+    \label{fig:lease}
+\end{figure}
+
+An \texttt{accept} reserves capacity for 30 seconds with a 5 second grace
+period; a \texttt{commit} promotes the reservation to running, renewed every 30
+seconds and reaped after 5 minutes without renewal; \texttt{complete} releases
+it. A sweeper runs every 2 seconds.
+
+Two details carry the correctness argument. First, the admission check and the
+lease insertion happen \textbf{under a single lock}, so two submitters racing
+for the last slot cannot both succeed. Second, the concurrency limit counts
+reserved and running leases together, deliberately, so a burst of submitters
+cannot slip through the window between accept and commit.
+
+Recovery then needs no additional machinery. A submitter that dies stops
+renewing and the sweeper reclaims its slot. A worker that dies stops answering
+health checks, drops out of the healthy set after 45 seconds, and its in-flight
+connection fails, which the coordinator treats as a failed attempt and
+reschedules elsewhere.
+
+\section{Reproducing the Environment}
+\label{sec:env}
+
+\textbf{Import scanning.} The client extracts imports with a line-oriented
+regular expression rather than a full parse. This is worth stating precisely,
+because the consequence is a real limitation: only the top-level module token of
+each import is seen. Each name is then classified as a local file, a standard
+library module, or an external dependency, and external names are resolved to
+package names through a mapping table that handles cases such as
+\texttt{sklearn} to \texttt{scikit-learn} and \texttt{PIL} to \texttt{Pillow}.
+
+\textbf{The limitation, stated plainly.} A third-party import absent from that
+table resolves to nothing and is silently omitted from the closure. There is no
+package index lookup. A \texttt{uv.lock} file, which replaces detection entirely
+when present, and an explicit \texttt{-{}-pkg} flag are the escape hatches.
+
+\textbf{The keystone.} The generated flake pins an \emph{exact} nixpkgs
+revision, not a branch. The reasoning is the foundation of the entire caching
+layer. A branch resolves at build time, so two nodes building the same script on
+different days would produce different store paths; because the cache is keyed
+on the store path, the system would then re-ship a multi-hundred-megabyte
+archive for every job. Pinning an exact revision makes the store path a stable,
+content-derived name for an environment, identical across every machine and
+across time. Section~\ref{sec:res-cache} measures what that buys.
+
+Two deliberate exceptions exist, both restricted to x86\_64 Linux:
+scikit-learn is pinned to a specific wheel because the package set lags the
+version targeted, and torch is fetched as a CUDA wheel set inside a
+\emph{fixed-output derivation} with a recorded hash, because building it from
+source takes hours.
+
+\section{Closure Transfer and Cache Reuse}
+\label{sec:cache}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.62\textwidth]{\figpath{fig_4.4_closure_cache.png}}
+    \caption{The store path is the cluster-wide cache key. Most submissions ship
+    no environment at all.}
+    \label{fig:closure}
+\end{figure}
+
+Before uploading, the client asks the target whether it already holds the
+closure. Only on a negative answer is the closure exported and compressed.
+
+There are in fact \textbf{two different questions} a node can be asked, and both
+are needed. The first is whether the archive is in its cache. The second is
+whether the closure is \emph{materialised}, that is, whether its entry point
+exists on disk. A deployment with a shared store volume has the closure present
+without ever having cached an archive, so re-sending to it is wasted work; on a
+per-node store the entry point appears only after a real import. Either
+predicate alone is wrong for one of the two layouts.
+
+After an upload, the worker pushes the closure to peers that lack it. This is
+not merely an optimisation: work is only ever spilled to peers that already hold
+the closure, so the broadcast is what makes the cluster usable for the
+distribution described in Section~\ref{sec:intercept}.
+
+\section{Execution and Isolation}
+\label{sec:sandbox}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.5_sandbox.png}}
+    \caption{What the job can and cannot see. The absences are as deliberate as
+    the mounts.}
+    \label{fig:sandbox}
+\end{figure}
+
+Jobs run under \texttt{crun} in an OCI bundle: the store read-only, the
+workspace read-write, and temporary filesystems for scratch space. Shared memory
+is mounted world-writable specifically because Python's
+\texttt{multiprocessing} maps POSIX shared memory for its semaphores and fails
+without it.
+
+GPU support mounts the device nodes and then binds the driver libraries
+\emph{file by file} rather than binding the host library directory, because
+binding the directory would place the host C library ahead of the closure's on
+the search path. Without this, torch silently falls back to the CPU, which is
+indistinguishable from a working run except by its speed.
+
+\textbf{What the sandbox does not do.} There are no cgroup limits, no seccomp
+filter, no capability set, no user namespace and no network namespace. The job
+runs as root with access to the host network. The namespaces in use are process,
+IPC, hostname and mount. If \texttt{crun} is absent the daemon warns and runs the
+job unisolated: the sandbox is a hardening layer, not a correctness requirement.
+
+Results are diffed rather than copied wholesale. Only files created or modified
+during the run are returned, with deletions carried in a manifest, so a job
+cannot overwrite the submitter's own sources. Both the extraction on the worker
+and the extraction on the submitter refuse any path that escapes the target
+directory.
+
+\section{Transparent Interception}
+\label{sec:intercept}
+
+This is the system's distinguishing feature.
+
+\textbf{Delivery.} The shim is a Python file embedded in the binary. It is
+appended to the workspace archive under a hidden directory using an archive
+transform, so the user's project on disk is never modified, and the worker
+points the interpreter's module path at that directory. CPython imports it
+automatically before the user's first line. Nothing is installed on any node.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.6_shim_injection.png}}
+    \caption{How the shim reaches the interpreter and what it replaces.}
+    \label{fig:shim}
+\end{figure}
+
+\textbf{A hazard worth recording.} Nix ships its own module of the same name,
+and only the first on the path is imported. The shim would therefore suppress
+the one that adds the environment's package directories, and every import in the
+closure would fail. The shim replays that work explicitly before doing anything
+else.
+
+\textbf{Patching is deferred.} Each library is patched on its first import
+rather than when the shim installs itself. This matters: importing torch costs
+roughly 1.7 seconds, and paying it up front charged that cost to every job
+whether or not it used torch. Section~\ref{sec:res-shim} measures the
+difference.
+
+\begin{table}[H]
+\centering
+\caption{Intercepted primitives and their distribution strategies}
+\label{tab:intercept}
+\renewcommand{\arraystretch}{1.25}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{5.0cm} X}
+\toprule
+\textbf{Primitive} & \textbf{Strategy} \\
+\midrule
+\texttt{multiprocessing.Pool}, \texttt{ProcessPoolExecutor} & Measure a few items locally, then race the local and remote halves \\
+pandas \texttt{groupby().agg()}, \texttt{merge}, \texttt{join} & Hash shuffle on the key \\
+pandas \texttt{read\_csv}, \texttt{read\_parquet} & Chunked out-of-core reads cut at record boundaries \\
+\texttt{numpy.matmul}, \texttt{dot}, \texttt{tensordot} & Split into row blocks, concatenate at the origin \\
+\texttt{numpy.linalg.svd}, \texttt{eig} & Whole matrix offloaded to one worker \\
+\texttt{joblib.Parallel}, scikit-learn \texttt{n\_jobs} & One batch per request \\
+torch training loop & Gradients averaged across ranks \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Why the shuffle is exact.} Rows are bucketed by a hash of the grouping
+or join key, so equal keys always fall in the same bucket and therefore land on
+the same node. Every key is complete on exactly one node, so each node's
+aggregation is a \emph{complete} aggregation and the origin combines the
+partials with a plain concatenation. There are no combiners, and consequently
+\emph{any} aggregation specification works, including those that have no
+combiner form at all. Bucket zero is kept local.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.60\textwidth]{\figpath{fig_4.8_hash_shuffle.png}}
+    \caption{Hash shuffle. Correctness follows from key locality, not from
+    combiner algebra.}
+    \label{fig:shuffle}
+\end{figure}
+
+\textbf{Data-parallel training without a socket mesh.} Rather than let torch
+build its rank-to-rank mesh, which requires direct connections on its own ports
+between every pair of ranks, each rank posts its gradient to the lead node's
+ordinary daemon port and receives the full set once every rank has arrived. The
+daemon acts as a blackboard: it never interprets the payload, and averaging
+happens in the shim. This trades a little bandwidth for working on any network
+where the daemon port already works, which is the only assumption the rest of
+the system makes.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.86\textwidth]{\figpath{fig_4.10_ddp.png}}
+    \caption{Gradient exchange over the daemon port.}
+    \label{fig:ddp}
+\end{figure}
+
+\section{The Cost Model}
+\label{sec:cost}
+
+Interception is only worthwhile when the cluster actually wins, so every
+intercepted call is gated. Writing $b$ for the payload in bytes, $\phi$ for its
+arithmetic intensity in floating-point operations per byte, $B$ for measured
+link bandwidth and $K$ for the number of participating nodes, work is
+distributed only when
+
+\begin{equation}
+\label{eq:cost}
+\underbrace{\frac{b\phi}{R}}_{\text{compute locally}}
+\;>\;
+\underbrace{\frac{b}{B}}_{\text{move it}}
+\;+\;
+\underbrace{\frac{b\phi}{RK}\times 1.3}_{\text{compute remotely}}
+\end{equation}
+
+where $R$ is the effective local throughput and the factor $1.3$ charges 30\%
+overhead against the ideal parallel speedup. Three guards apply before the
+arithmetic: at least two nodes, a payload of at least 32\,MB, and a carve-out
+that refuses work of low arithmetic intensity below 512\,MB.
+
+Bandwidth is \emph{measured}, not assumed: 64\,MB of data is pushed through the
+real dispatch path and the result cached for five minutes. If the probe fails,
+the answer is to stay local.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.9_cost_model.png}}
+    \caption{Decision regions from Equation~\ref{eq:cost}. Dense matrix
+    multiplication sits in the distributed region on paper but is held local by
+    a separately calibrated model, because local BLAS beats the transport.}
+    \label{fig:cost}
+\end{figure}
+
+A second model calibrated against real BLAS throughput governs the NumPy path,
+and it produces a result worth highlighting because it is counter-intuitive:
+\textbf{dense matrix multiplication is never shipped}. Local BLAS runs at
+roughly 200 GFLOP/s, which no cluster transport can beat at practical sizes. The
+project treats this as a property to be tested rather than a missing feature:
+the demonstration suite fails if a matrix multiplication is ever seen leaving
+the node. Singular value decomposition, two orders of magnitude slower locally,
+does ship.
+
+\section{Fault Tolerance}
+\label{sec:ft}
+
+The invariant is that using the cluster is never worse than not using it. Five
+independent layers enforce it.
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{The race.} Chunks are dealt alternately to the local side and the
+  cluster, and results fill a slot table first-wins. Idle local cores re-run any
+  chunk the cluster has not yet returned, and the call returns only once the
+  local side has covered every item. A completely dead cluster therefore
+  degrades to a plain local pool.
+  \item \textbf{Per-primitive fallback.} Every intercepted call is wrapped; any
+  exception falls back to the original implementation.
+  \item \textbf{Peer fallback.} A failed peer is skipped for the remainder of
+  that chunk and the next candidate tried; if all fail, the work runs locally.
+  \item \textbf{Worker respawn.} A dead warm worker is restarted, falling back to
+  a one-shot process if that fails.
+  \item \textbf{Rescheduling.} A failed job is placed again with backoff doubling
+  from 2 seconds to a 2 minute ceiling. Tasks are never dropped.
+\end{enumerate}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{\figpath{fig_4.7_race_timeline.png}}
+    \caption{Racing local and remote work. The local side is always able to
+    finish alone, which is what makes the guarantee unconditional.}
+    \label{fig:race}
+\end{figure}
+
+Memory is bounded at the same time: a request larger than a node can hold is
+forwarded once to a healthier peer, and one exceeding 40\% of available memory
+is split into sequential chunks rather than refused.
+
+\section{Resource Estimation}
+
+Four tiers are consulted, the first that yields a value winning: an explicit
+override; the largest peak memory from the last five runs of the same script,
+plus 20\%; the sum of input file sizes times three plus a per-library baseline;
+or the baseline alone. The default when nothing is known is 512\,MB.
+
+The historical tier closes a feedback loop. The worker samples the job's process
+tree while it runs and records the peak, and that measurement sizes the next
+run's admission request.
+
+\section{Test Workloads}
+\label{sec:workloads}
+
+Ten dispatch scripts exercise placement and concurrency. Five demonstration
+workloads cover scikit-learn with \texttt{joblib}, NumPy linear algebra,
+out-of-core pandas, torch data-parallel training and file synchronisation. A
+three-node container lab and a four-container rig with a shared store provide
+the execution environments used in Chapter~\ref{chap:results}.
+
+% ============================================================
+\chapter{Results and Discussion}
+\label{chap:results}
+% ============================================================
+
+\section{Test Bed}
+
+All measurements were taken on 2026-08-25 on a single host running Linux 7.1.8
+with 20 logical cores and 16\,GiB of free memory, with three worker daemons in
+containers on ports 38081--38083 and the submitting daemon on port 38080.
+
+\textbf{One caveat governs this chapter.} All three workers are containers on
+one machine and therefore share one CPU, one memory system and the loopback
+interface. This test bed measures correctness, overhead, cache behaviour and
+fault tolerance honestly. It \emph{cannot} measure multi-machine speedup,
+because moving processor-bound work between containers on one host cannot make
+that host faster. \textbf{No speedup figure is claimed anywhere in this
+chapter.} Section~\ref{sec:notmeasured} lists what that leaves out. The same
+harness runs unchanged against separate machines.
+
+\section{Functional Verification}
+
+The full suite was run with every optional Python library present.
+
+\begin{table}[H]
+\centering
+\caption{Test suite results}
+\label{tab:tests}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{4.0cm} C{2.2cm} X}
+\toprule
+\textbf{Outcome} & \textbf{Count} & \textbf{Notes} \\
+\midrule
+Passed  & 246 & across 19 packages \\
+Failed  & 0   & \\
+Skipped & 3   & two need an integration flag, one needs an NVIDIA GPU \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Five interception tests had been skipping silently on any machine without
+pandas, torch and scikit-learn installed, which includes the project's own
+continuous integration job. The paths they cover were therefore unverified in
+automation. With the libraries present they run and pass;
+Table~\ref{tab:whatproves} records what each establishes.
+
+\begin{table}[H]
+\centering
+\caption{What the interception tests establish}
+\label{tab:whatproves}
+\renewcommand{\arraystretch}{1.25}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{6.2cm} X}
+\toprule
+\textbf{Test} & \textbf{Property established} \\
+\midrule
+Hash shuffle matches local & \texttt{groupby} and all four join types are frame-equal to local pandas \\
+NumPy interception & matmul splits into row blocks, SVD ships whole, results match \\
+Cost model decisions & the decision boundaries hold at pinned bandwidths \\
+Joblib backend distributes & an unmodified \texttt{RandomForestClassifier} reaches the cluster \\
+Out-of-core integrity & chunk boundaries fall on record boundaries; memory stays bounded \\
+Gradient synchronisation & two live ranks; each rank's gradient is exactly the mean \\
+Race with dead remote & every remote chunk failing still yields correct results \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Environment Cache}
+\label{sec:res-cache}
+
+This is the strongest measured result and the direct payoff of pinning the
+package set so that a store path names an environment identically everywhere
+(Section~\ref{sec:env}). The same job was submitted five times.
+
+\begin{table}[H]
+\centering
+\caption{End-to-end time for repeated submissions of one environment}
+\label{tab:cache}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{6.5cm} C{3.0cm} X}
+\toprule
+\textbf{Submission} & \textbf{Seconds} & \textbf{What was shipped} \\
+\midrule
+First, closure absent on the worker & 12.00 & closure and workspace \\
+Second to fifth, median            & 0.66  & workspace only \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+An \textbf{eighteenfold reduction}. The second submission finds the closure
+already materialised and ships nothing but the project files.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{\figpath{fig_5.1_closure_cache.png}}
+    \caption{Cold and warm submission of the same environment.}
+    \label{fig:rescache}
+\end{figure}
+
+\section{The Cost of Leaving Interception On}
+\label{sec:res-shim}
+
+Interception is on by default, so its cost when it decides \emph{not} to
+distribute is the number that matters for everyday use.
+
+\begin{table}[H]
+\centering
+\caption{Whole-job cost of interception on a workload the cost model declines}
+\label{tab:shimcost}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{6.5cm} C{3.0cm} X}
+\toprule
+\textbf{Configuration} & \textbf{Median seconds} & \\
+\midrule
+Interception disabled & 0.85 & \\
+Interception enabled  & 0.93 & $+9\%$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+A separate measurement covers interpreter startup for a job that never imports a
+heavy library. The shim previously imported torch while installing itself,
+roughly 1.7 seconds, and charged it to every job. The project sets itself a
+budget of $3\times$ for this overhead and was exceeding it sevenfold; the check
+that detects it is not run by continuous integration, so it had gone unnoticed.
+Deferring each library's patching to its first import corrects it.
+
+\begin{table}[H]
+\centering
+\caption{Interpreter startup overhead for a job that imports nothing heavy}
+\label{tab:startup}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{6.5cm} C{3.0cm} X}
+\toprule
+\textbf{Configuration} & \textbf{Slowdown} & \textbf{Within the $3\times$ budget?} \\
+\midrule
+Eager patching (previous behaviour) & $21.60\times$ & no \\
+Deferred patching (current)         & $1.20\times$  & yes \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{\figpath{fig_5.2_shim_overhead.png}}
+    \caption{Left: cost over a whole job. Right: interpreter startup, before and
+    after deferring library patching.}
+    \label{fig:resshim}
+\end{figure}
+
+\section{Work Crosses Node Boundaries}
+
+With distribution forced, all three workers logged incoming chunk requests
+(three, three and four respectively), confirming that interception, chunking and
+dispatch operate end to end across machines. No speedup is inferred from this,
+for the reason given in the test bed note.
+
+\section{Fault Tolerance}
+\label{sec:res-ft}
+
+A twenty-item parallel map was fanned across the cluster and a worker container
+was killed while the computation was in flight.
+
+\begin{lstlisting}[caption={Fault injection: a worker is killed mid-computation}, label={lst:fail}]
+killing worker on :38082 mid-flight
+POOL-OK sum=2470
+PASS: pool.map completed correctly despite a dead worker
+\end{lstlisting}
+
+The value 2470 is the correct sum of squares of the integers 0 to 19. The run
+completed with correct results despite losing a node during the computation,
+demonstrating the guarantee of Section~\ref{sec:ft} end to end.
+
+\section{Sandbox Cost}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.90\textwidth]{\figpath{fig_5.3_sandbox_overhead.png}}
+    \caption{Sandbox start cost, median of 20 iterations.}
+    \label{fig:ressandbox}
+\end{figure}
+
+The OCI runtime costs roughly 20\,ms more per job than the lighter alternative.
+Measured against a 0.66 second warm job, let alone a 12 second cold one, this is
+not a figure worth optimising, and the OCI device model is what makes GPU
+passthrough possible.
+
+These are the first valid numbers this benchmark has produced. It previously
+gave neither sandbox a root filesystem, so no shell existed inside either and
+all sixty measured runs exited with an error; the published timings were the
+cost of failing to start rather than the cost of starting. It now refuses to
+write a report if any measured run fails.
+
+\section{Scale of the Implementation}
+
+\begin{table}[H]
+\centering
+\caption{Implementation size}
+\label{tab:scale}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{X C{4.0cm}}
+\toprule
+\textbf{Measure} & \textbf{Value} \\
+\midrule
+Go source & 24,700 lines across 73 files \\
+Internal packages & 19 \\
+HTTP endpoints & 18 \\
+Embedded Python shim & approx.\ 1,900 lines \\
+Test files & 33 \\
+Passing test cases & 246 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Comparative Analysis}
+\label{sec:comparison}
+
+\begin{table}[H]
+\centering
+\caption{PipedPeer against existing systems}
+\label{tab:comparison}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{X C{1.7cm} C{1.3cm} C{1.3cm} C{1.3cm} C{1.4cm} C{1.3cm}}
+\toprule
+\textbf{Property} & \textbf{Piped\-Peer} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{BOINC} & \textbf{ssh} \\
+\midrule
+Runs unmodified Python     & yes & no  & partial & partial & no      & yes \\
+No cluster to configure    & yes & no  & no      & no      & no      & partial \\
+No head or master node     & yes & no  & no      & no      & no      & yes \\
+Reproduces the environment & yes & partial & partial & partial & partial & no \\
+Sandboxes the job          & yes & no  & no      & no      & partial & no \\
+Reschedules on node loss   & yes & yes & yes     & yes     & yes     & no \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.95\textwidth]{\figpath{fig_5.4_comparison.png}}
+    \caption{The same comparison in matrix form.}
+    \label{fig:rescomp}
+\end{figure}
+
+The comparison should be read carefully. Spark, Ray and Dask are more capable at
+scale, with mature schedulers, sophisticated fault tolerance and years of
+production use behind them; the axis on which PipedPeer differs is setup cost and
+code change, not raw capability. BOINC is closest in spirit, having pioneered
+volunteer computing, but it is a platform for specific projects each with its own
+server infrastructure rather than a general executor for arbitrary scripts.
+
+\section{What Was Not Measured}
+\label{sec:notmeasured}
+
+Recorded explicitly rather than left as gaps.
+
+\begin{table}[H]
+\centering
+\caption{Measurements not attempted, and why}
+\label{tab:notmeasured}
+\renewcommand{\arraystretch}{1.25}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{6.0cm} X}
+\toprule
+\textbf{Measurement} & \textbf{Why it is absent} \\
+\midrule
+Multi-machine speedup for parallel map and hash shuffle & every worker shares this one host's processor; needs separate machines \\
+Scaling of data-parallel training across ranks & as above; correctness is covered by the gradient test \\
+Peer discovery latency & the containers share the host's loopback, so the figure would not be meaningful \\
+GPU placement and VRAM-aware scoring & no GPU on this host \\
+The five demonstration workloads & they pull multi-gigabyte CUDA environments; not attempted here \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+% ============================================================
+\chapter{Conclusion and Future Work}
+% ============================================================
+
+\section{Conclusion}
+
+PipedPeer runs an unmodified Python script on another machine with no cluster to
+configure, reproduces its environment exactly, and distributes the parallel work
+inside it without the user touching the source. The contributions are:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{The store path as a cluster-wide cache key.} Pinning an exact
+  package set makes an environment's content-addressed name identical on every
+  machine and on any day, which turns environment transfer from a per-job cost
+  into a once-per-cluster cost. Measured at 12.00 seconds cold against 0.66
+  seconds warm.
+  \item \textbf{Transparent interception governed by a measured cost model.} The
+  parallel primitives a script already uses are substituted at import time and
+  distributed only when moving the data costs less than computing it locally,
+  with link bandwidth measured rather than assumed.
+  \item \textbf{Exactness without combiners.} Hash-shuffling on the key means
+  every key is complete on one node, so any aggregation works exactly, including
+  those with no combiner form.
+  \item \textbf{Placement without a scheduler.} Hard filters followed by a
+  bounded score, executed in the submitting client, with a three-phase lease
+  providing atomic reservation and crash recovery through expiry.
+  \item \textbf{An unconditional degradation guarantee.} Five independent layers
+  ensure that a remote path always has a working local path beneath it; a worker
+  killed mid-computation left the run to complete with correct results.
+\end{enumerate}
+
+The part most worth defending is the cost model. A system that distributed
+everything it could intercept would be slower than plain Python on most real
+workloads, because the transport rarely beats a modern BLAS or a warm page
+cache. Measuring bandwidth, declining to distribute dense matrix multiplication,
+and treating that refusal as a property to be tested rather than a missing
+feature is what makes always-on interception defensible.
+
+\section{Limitations of the Current System}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Local network scope.} Discovery is a UDP probe on the local
+  subnet; anything wider requires the registry or manually configured peers.
+  \item \textbf{Python only.} Other runtimes would need their own environment
+  packaging and their own interception layer.
+  \item \textbf{Linux workers.} The sandbox and the store are Linux-specific.
+  \item \textbf{The submitter must survive the job.} It holds the lease and
+  receives the output stream.
+  \item \textbf{Silent dependency omission.} A third-party import absent from the
+  resolver's table is dropped from the environment without a diagnostic
+  (Section~\ref{sec:env}). This is the most user-visible sharp edge.
+  \item \textbf{A thin sandbox.} No resource limits, no system call filtering and
+  no user namespace (Section~\ref{sec:sandbox}).
+  \item \textbf{Evaluation on one host.} No speedup figure is claimed
+  (Section~\ref{sec:notmeasured}).
+\end{itemize}
+
+\subsection*{Defects found while preparing this report}
+
+Three defects were found and corrected while the system was being documented,
+which is itself an argument for writing the measurements down:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item The shim imported torch while installing itself, taxing every job by
+  about 1.7 seconds and exceeding the project's own never-slower budget
+  sevenfold. The tripwire that detects this is not run by continuous
+  integration.
+  \item The sandbox benchmark gave neither sandbox a root filesystem, so all
+  sixty measured runs failed and the published timings measured the cost of
+  failing rather than the cost of starting.
+  \item The laboratory scripts were not idempotent and used a shared temporary
+  directory as a job workspace, so the fault-tolerance demonstration could not be
+  run a second time.
+\end{enumerate}
+
+\section{Security}
+\label{sec:security}
+
+PipedPeer assumes that every peer on the network is trusted. \textbf{There is no
+authentication, no authorisation and no transport encryption.} Any host able to
+reach the daemon port can execute arbitrary code as root on that machine, read
+the output and workspace of any job, and remove nodes from the directory. This
+is a deliberate scope decision for a tool intended for a network the user
+controls, not an oversight, and it is documented as such in the repository. It
+is also the single largest barrier to running the system anywhere else, and it
+is why authentication heads the list below.
+
+\section{Future Work}
+\label{sec:future}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Authentication and an encrypted transport.} A prerequisite for
+  any deployment beyond a trusted local network.
+  \item \textbf{Discovery beyond the subnet}, by distributed hash table or
+  traversal of network address translation, removing the dependence on a
+  registry.
+  \item \textbf{Locality-aware placement.} Placement currently scores capacity
+  only. Accounting for which node already holds the input data, as iDDS
+  \cite{idds2025} does, would reduce transfer for repeated work.
+  \item \textbf{Topology-aware placement.} Nodes are scored independently on
+  scalar metrics, so the scorer is blind to network distance. A
+  graph-structured representation \cite{zhao2023} would address this.
+  \item \textbf{Submitter fault tolerance}, allowing a submitter to disconnect
+  and collect results later.
+  \item \textbf{Additional runtimes} beyond Python.
+  \item \textbf{Measurement on separate machines}, to obtain the speedup figures
+  this evaluation deliberately does not claim.
+\end{itemize}
+
+% ============================================================
+\begin{thebibliography}{99}
+
+\bibitem{zaharia2010spark}
+M.~Zaharia, M.~Chowdhury, M.~J.~Franklin, S.~Shenker, and I.~Stoica,
+``Spark: Cluster computing with working sets,''
+\textit{Proc. 2nd USENIX Workshop on Hot Topics in Cloud Computing (HotCloud)}, 2010.
+
+\bibitem{moritz2018ray}
+P.~Moritz, R.~Nishihara, S.~Wang, A.~Tumanov, R.~Liaw, E.~Liang, M.~Elibol,
+Z.~Yang, W.~Paul, M.~I.~Jordan, and I.~Stoica,
+``Ray: A distributed framework for emerging AI applications,''
+\textit{Proc. 13th USENIX OSDI}, 2018, pp.~561--577.
+
+\bibitem{anderson2004boinc}
+D.~P.~Anderson,
+``BOINC: A system for public-resource computing and storage,''
+\textit{Proc. 5th IEEE/ACM Workshop on Grid Computing}, 2004, pp.~4--10.
+
+\bibitem{rocklin2015dask}
+M.~Rocklin,
+``Dask: Parallel computation with blocked algorithms and task scheduling,''
+\textit{Proc. 14th Python in Science Conference (SciPy)}, 2015, pp.~130--136.
+
+\bibitem{dolstra2004nix}
+E.~Dolstra, M.~de~Jonge, and E.~Visser,
+``Nix: A safe and policy-free system for software deployment,''
+\textit{Proc. 18th LISA}, 2004, pp.~79--92.
+
+\bibitem{dean2004mapreduce}
+J.~Dean and S.~Ghemawat,
+``MapReduce: Simplified data processing on large clusters,''
+\textit{Proc. 6th USENIX OSDI}, 2004, pp.~137--150.
+
+\bibitem{maymounkov2002kademlia}
+P.~Maymounkov and D.~Mazi\`eres,
+``Kademlia: A peer-to-peer information system based on the XOR metric,''
+\textit{Proc. 1st IPTPS}, 2002, pp.~53--65.
+
+\bibitem{oci2021}
+Open Container Initiative,
+``OCI Runtime Specification, v1.0.2,'' 2021. [Online]. Available:
+\url{https://github.com/opencontainers/runtime-spec}.
+
+\bibitem{nats}
+Synadia Communications,
+``NATS: Cloud native messaging.'' [Online]. Available: \url{https://nats.io}.
+
+\bibitem{sekigawa2023}
+S.~Sekigawa, C.~Sasaki, and A.~Tagami,
+``Web application-based WebAssembly container platform for extreme edge computing,''
+\textit{Proc. IEEE GLOBECOM}, 2023, pp.~3609--3614.
+
+\bibitem{hoque2022}
+M.~N.~Hoque and K.~A.~Harras,
+``WebAssembly for edge computing: Potential and challenges,''
+\textit{IEEE Commun.\ Standards Mag.}, vol.~6, no.~4, pp.~68--73, Dec.\ 2022.
+
+\bibitem{kakati2024}
+S.~Kakati and M.~Brorsson,
+``A cross-architecture evaluation of WebAssembly in the cloud-edge continuum,''
+\textit{Proc. IEEE/ACM CCGrid}, 2024, pp.~337--346.
+
+\bibitem{li2023elixir}
+Y.~Li and S.~Fujita,
+``Design of Elixir-based edge server for responsive IoT applications,''
+\textit{Proc. IEEE CANDARW}, 2023.
+
+\bibitem{zhou2024}
+Y.~Zhou and X.~Chen,
+``A synergistic Elixir-EDA-MQTT framework for advanced smart transportation systems,''
+\textit{Computers}, vol.~16, no.~3, 2024.
+
+\bibitem{bachmeier2025}
+J.~Bachmeier, V.~Yussupov, J.~Hen\ss, and H.~Koziolek,
+``WebAssembly with wasi-nn for edge machine learning inference: Experiences and lessons learned,''
+\textit{Proc. ECSA}, 2025, pp.~343--359.
+
+\bibitem{khelifa2024}
+S.~E.~Khelifa, M.~Bagaa, A.~O.~Messaoud, and A.~Ksentini,
+``Case study of WebAssembly runtimes for AI applications on the edge,'' 2024.
+
+\bibitem{kth2025thesis}
+A.~Bergstr\"om,
+``Programming models for failure-transparent distributed systems,''
+M.S.\ thesis, KTH Royal Institute of Technology, Stockholm, 2025. [Online]. Available:
+\url{https://www.diva-portal.org/smash/get/diva2:2013047/FULLTEXT01.pdf}.
+
+\bibitem{arrayapi2023}
+A.~Meurer, S.~Ho\ss{}feld, R.~Gommers, and the Consortium for Python Data API Standards,
+``Python array API standard: Toward array interoperability in the scientific Python ecosystem,''
+\textit{Proc. SciPy}, 2023. [Online]. Available:
+\url{https://proceedings.scipy.org/articles/gerudo-f2bc6f59-001}.
+
+\bibitem{idds2025}
+W.~Guan, T.~Maeno, F.~Barreiro Megino, T.~Wenaus, and A.~Klimentov,
+``iDDS: Intelligent distributed dispatch and scheduling for workflow orchestration,''
+arXiv:2510.02930, 2025. [Online]. Available: \url{https://arxiv.org/abs/2510.02930}.
+
+\bibitem{deng2023}
+Y.~Deng, Z.~Chen, X.~Chen, and Y.~Fang,
+``Task offloading in multi-hop relay-aided multi-access edge computing,''
+\textit{IEEE Trans.\ Veh.\ Technol.}, vol.~72, no.~1, pp.~1372--1376, Jan.\ 2023.
+
+\bibitem{he2024}
+H.~He, X.~Yang, X.~Mi, H.~Shen, and X.~Liao,
+``Multi-agent deep reinforcement learning based dynamic task offloading in a device-to-device mobile-edge computing network,''
+\textit{Sensors}, vol.~24, no.~16, 2024.
+
+\bibitem{yong2023}
+D.~Yong, R.~Liu, X.~Jia, and Y.~Gu,
+``Joint optimization of multi-user partial offloading strategy and resource allocation strategy in D2D-enabled MEC,''
+\textit{Sensors}, vol.~23, no.~5, 2023.
+
+\bibitem{adhoc2025}
+L.~Chen, Y.~Wang, H.~Zhang, and J.~Liu,
+``Energy-efficient collaborative task offloading in multi-access edge computing based on deep reinforcement learning,''
+\textit{Ad Hoc Networks}, vol.~169, 2025.
+
+\bibitem{li2023blockchain}
+C.~Li, Q.~Chen, M.~Chen, Z.~Su, Y.~Ding, D.~Lan, and A.~Taherkordi,
+``Blockchain enabled task offloading based on edge cooperation in the digital twin vehicular edge network,''
+\textit{J.\ Cloud Comput.}, vol.~12, no.~120, 2023.
+
+\bibitem{zhao2023}
+Z.~Zhao, J.~Perazzone, G.~Verma, and S.~Segarra,
+``Congestion-aware distributed task offloading in wireless multi-hop networks using graph neural networks,''
+arXiv:2312.02471, 2023.
+
+\end{thebibliography}
+
+\end{document}

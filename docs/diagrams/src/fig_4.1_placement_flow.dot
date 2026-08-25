@@ -1,0 +1,28 @@
+// Figure 4.1 - Placement pipeline: gather, filter, score, lease, retry.
+digraph Placement {
+  rankdir=TB; bgcolor="white"; nodesep=0.28; ranksep=0.38;
+  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
+  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+
+  gather [label="Gather candidates\nnode store, discovery, registry, self"];
+  f1 [label="Architecture matches closure?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
+  f2 [label="GPU present, if required?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
+  f3 [label="Free memory, cores and VRAM sufficient?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
+  score [label="Score survivors\nload penalties + hardware bonuses\n(GPU term added when requested)"];
+  lease [label="Reserve lease on best node\naccept, then commit"];
+  run   [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f"];
+  rej   [label="Rejected\nreason recorded", fillcolor="#fbe9e9", color="#a33333"];
+  wait  [label="No node has capacity\nqueue and retry every 30 s", fillcolor="#fbe9e9", color="#a33333"];
+
+  gather -> f1;
+  f1 -> f2 [label=" yes "];  f1 -> rej [label=" no ", constraint=false];
+  f2 -> f3 [label=" yes "];  f2 -> rej [label=" no ", constraint=false];
+  f3 -> score [label=" yes "]; f3 -> rej [label=" no ", constraint=false];
+  score -> lease [label=" highest score "];
+  score -> wait [label=" none eligible ", constraint=false];
+  lease -> run [label=" committed "];
+  lease -> score [label=" rejected: next candidate ", constraint=false, style=dashed, color="#a33333"];
+  run -> score [label=" failed: reschedule with backoff ", constraint=false, style=dashed, color="#a33333"];
+  wait -> gather [style=dashed, constraint=false];
+}

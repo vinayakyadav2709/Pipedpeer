@@ -1,0 +1,15 @@
+# pool/map receipts per worker (evidence that work crossed node boundaries)
+# collected 2026-08-25T13:52:56+05:30
+## pipedpeer-lab-1
+2026/08/25 08:21:18 [pool] received pool/map from 192.168.0.201:49164: items=2 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/08/25 08:21:27 [pool] received pool/map from 127.0.0.1:59420: items=8 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/08/25 08:21:27 [pool] received pool/map from 127.0.0.1:59430: items=1 b64=false cache_keys=0 required_mem=67109234 forwarded=""
+## pipedpeer-lab-2
+2026/08/25 08:21:18 [pool] received pool/map from 127.0.0.1:48442: items=8 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/08/25 08:21:18 [pool] received pool/map from 127.0.0.1:48458: items=1 b64=false cache_keys=0 required_mem=67109234 forwarded=""
+2026/08/25 08:21:27 [pool] received pool/map from 192.168.0.201:38670: items=2 b64=false cache_keys=0 required_mem=0 forwarded=""
+## pipedpeer-lab-3
+2026/08/25 08:21:18 [pool] received pool/map from 192.168.0.201:54004: items=2 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/08/25 08:21:18 [pool] received pool/map from 192.168.0.201:54004: items=1 b64=false cache_keys=0 required_mem=67109234 forwarded=""
+2026/08/25 08:21:27 [pool] received pool/map from 192.168.0.201:58010: items=2 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/08/25 08:21:27 [pool] received pool/map from 192.168.0.201:58010: items=1 b64=false cache_keys=0 required_mem=67109234 forwarded=""

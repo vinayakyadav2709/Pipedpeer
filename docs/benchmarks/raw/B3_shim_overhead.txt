@@ -1,0 +1,109 @@
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] local 200 items
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] local 200 items
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] local 200 items
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] local 200 items
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] torch matmul/mm interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] pandas groupby/merge/join interception installed
+[pipedpeer] pandas read_csv/read_parquet interception installed
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] joblib backend skipped (no cluster peers)
+[pipedpeer] local 200 items
+local-only best: 0.1465s
+shim-on   best: 2.9325s
+ratio: 20.0171x
+FAIL: shim overhead exceeds 3x — D2 (never slower) regression.

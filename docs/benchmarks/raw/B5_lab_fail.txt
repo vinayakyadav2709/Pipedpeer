@@ -1,0 +1,66 @@
+Building pipedpeer binary...
+Stopping host daemon if running...
+stopped daemon
+stopped daemon
+Using container runtime: podman
+STEP 1/3: FROM nixos/nix:2.31.3
+STEP 1/3: FROM nixos/nix:2.31.3
+STEP 1/3: FROM nixos/nix:2.31.3
+STEP 2/3: RUN nix-env -iA nixpkgs.crun
+STEP 2/3: RUN nix-env -iA nixpkgs.crun
+STEP 2/3: RUN nix-env -iA nixpkgs.crun
+--> Using cache 6be404222225caa5eb46bff3d703b8a998d44bde0c9dbee1846d61e46eabd61e
+--> 6be404222225
+--> Using cache 6be404222225caa5eb46bff3d703b8a998d44bde0c9dbee1846d61e46eabd61e
+--> 6be404222225
+STEP 3/3: CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+--> Using cache 3f81c5c46f9d39ad17d25a3a5fab0a4eb81a63289c92290cecc620b50f738319
+COMMIT lab_worker3
+STEP 3/3: CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+--> Using cache 6be404222225caa5eb46bff3d703b8a998d44bde0c9dbee1846d61e46eabd61e
+--> 6be404222225
+--> Using cache 3f81c5c46f9d39ad17d25a3a5fab0a4eb81a63289c92290cecc620b50f738319
+COMMIT lab_worker2
+STEP 3/3: CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+--> Using cache 3f81c5c46f9d39ad17d25a3a5fab0a4eb81a63289c92290cecc620b50f738319
+COMMIT lab_worker1
+--> 3f81c5c46f9d
+Successfully tagged localhost/lab_worker3:latest
+Successfully tagged localhost/lab_worker1:latest
+Successfully tagged localhost/lab_worker2:latest
+3f81c5c46f9d39ad17d25a3a5fab0a4eb81a63289c92290cecc620b50f738319
+--> 3f81c5c46f9d
+Successfully tagged localhost/lab_worker1:latest
+Successfully tagged localhost/lab_worker3:latest
+Successfully tagged localhost/lab_worker2:latest
+3f81c5c46f9d39ad17d25a3a5fab0a4eb81a63289c92290cecc620b50f738319
+--> 3f81c5c46f9d
+Successfully tagged localhost/lab_worker2:latest
+Successfully tagged localhost/lab_worker1:latest
+Successfully tagged localhost/lab_worker3:latest
+3f81c5c46f9d39ad17d25a3a5fab0a4eb81a63289c92290cecc620b50f738319
+3b6c58fe4057f30214ae288b924fce26326dea90aaa2bf17a65509bebc07fdd5
+1346fbb222660893f383cda6c070be6f55de61dd810a33778d4aa9bf11140db9
+e231d05b8a42df76a39347f66b8ebb3e82030f8f27d19fbc82ed820b48ae4a11
+6a579056d1f011b29ea651a18c133df41c38ee9e49b3eaccdb338c825e1de4a3
+pipedpeer-lab-1
+pipedpeer-lab-2
+pipedpeer-lab-3
+waiting for lab workers...
+lab is up
+started daemon (node-id=62d15a1f, port=38080)
+launching intercept run...
+warn: never saw the job land on a worker; killing worker 2 blindly
+killing worker on :38082 mid-flight
+POOL-OK sum=2470
+PASS: pool.map completed correctly despite a dead worker
+Using container runtime: podman
+time="2026-08-25T13:47:46+05:30" level=warning msg="StopSignal SIGTERM failed to stop container pipedpeer-lab-3 in 10 seconds, resorting to SIGKILL"
+pipedpeer-lab-2
+pipedpeer-lab-3
+time="2026-08-25T13:47:56+05:30" level=warning msg="StopSignal SIGTERM failed to stop container pipedpeer-lab-1 in 10 seconds, resorting to SIGKILL"
+pipedpeer-lab-1
+pipedpeer-lab-3
+pipedpeer-lab-2
+pipedpeer-lab-1
+3b6c58fe4057f30214ae288b924fce26326dea90aaa2bf17a65509bebc07fdd5
