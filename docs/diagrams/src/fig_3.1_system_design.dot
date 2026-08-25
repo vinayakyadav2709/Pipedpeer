@@ -1,41 +1,40 @@
 // Figure 3.1 - PipedPeer system design.
-// One message: every node runs the same daemon; the submitting side is a
-// short-lived client that places, ships and streams. Render at -Gdpi=300.
+// Every box is on the path: previously "Build environment", "Collect results"
+// and "Admit" were held in place by invisible edges and read as decoration.
 digraph SystemDesign {
-  rankdir=TB; compound=true; bgcolor="white";
-  nodesep=0.30; ranksep=0.60;
-  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.09"];
-  edge [fontname="Helvetica", fontsize=10, color="#555555"];
-  graph [fontname="Helvetica", fontsize=12];
+  rankdir=TB; compound=true; bgcolor="white"; nodesep=0.35; ranksep=0.42;
+  node [fontname="Helvetica", fontsize=16, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.20,0.13"];
+  edge [fontname="Helvetica", fontsize=14, color="#555555"];
+  graph [fontname="Helvetica", fontsize=18];
 
   subgraph cluster_submit {
-    label="Submitting node"; labeljust=l; fontsize=13;
-    style="rounded"; color="#1e50a0"; penwidth=1.8; fontcolor="#1e50a0"; bgcolor="#fafcff";
-    build [label="Build environment\nimports → Nix closure"];
-    place [label="Place\nfilter, score, lease"];
-    coll  [label="Collect results\nchanged files only"];
-    { rank=same; build; place; coll; }
-    build -> place -> coll [style=invis];
+    label="Submitting node"; labeljust=l;
+    style="rounded"; color="#1e50a0"; penwidth=2.0; fontcolor="#1e50a0"; bgcolor="#fafcff";
+    build [label="Build the environment\nimports become a Nix closure"];
+    place [label="Place the job\nfilter, score, take a lease"];
+    coll  [label="Collect the results\nchanged files only"];
+    build -> place [label="  store path  "];
   }
 
   subgraph cluster_worker {
-    label="Worker node"; labeljust=l; fontsize=13;
-    style="rounded"; color="#2f7d4f"; penwidth=1.8; fontcolor="#2f7d4f"; bgcolor="#f8fcf9";
-    admit [label="Admit\nlease + capacity check", fillcolor="#e3f3e9", color="#2f7d4f"];
-    cache [label="Closure cache\nkeyed by store path", fillcolor="#e3f3e9", color="#2f7d4f"];
-    sandbox [label="crun sandbox\nscript + interception shim", fillcolor="#fbe9e9", color="#a33333"];
-    { rank=same; admit; cache; sandbox; }
-    admit -> cache -> sandbox [style=invis];
+    label="Worker node"; labeljust=l;
+    style="rounded"; color="#2f7d4f"; penwidth=2.0; fontcolor="#2f7d4f"; bgcolor="#f8fcf9";
+    node [fillcolor="#e3f3e9", color="#2f7d4f"];
+    admit [label="Admit the job\nlease and capacity check"];
+    cache [label="Closure cache\nkeyed by store path"];
+    sandbox [label="crun sandbox\nthe script and the shim", fillcolor="#fbe9e9", color="#a33333"];
+    admit -> cache [label="  needs this closure?  "];
+    cache -> sandbox [label="  run  "];
   }
 
-  peers [label="Peer nodes\n(same daemon)", shape=box3d, fillcolor="#efedf7", color="#5b4b8a"];
+  peers [label="Peer nodes\nthe same daemon", shape=box3d, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
 
-  place -> admit [lhead=cluster_worker, penwidth=1.6, color="#1e50a0",
-                  label="  1. accept, commit\l  2. ship closure + files\l  3. run, stream output\l"];
-  sandbox -> coll [ltail=cluster_worker, style=dashed, penwidth=1.4, color="#1e50a0",
+  place -> admit [lhead=cluster_worker, penwidth=1.8, color="#1e50a0",
+                  label="  1. accept and commit\l  2. ship the closure and files\l  3. run, streaming the output\l"];
+  sandbox -> coll [ltail=cluster_worker, style=dashed, penwidth=1.6, color="#1e50a0", constraint=false,
                    label="  4. results  "];
 
-  cache   -> peers [style=dashed, label=" broadcast closure "];
-  sandbox -> peers [style=dashed, label=" distribute parallel work "];
+  cache   -> peers [style=dashed, label="  broadcast the closure  "];
+  sandbox -> peers [style=dashed, label="  distribute parallel work  "];
 }
