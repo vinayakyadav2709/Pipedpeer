@@ -212,15 +212,49 @@ func (s *Store) AddManual(host string, port int) error {
 	})
 }
 
-func (s *Store) RemoveManual(host string) error {
-	_, err := s.db.Exec(`DELETE FROM nodes WHERE is_manual = 1 AND host = ?`, host)
-	return err
+// RemoveManual deletes manual entries for a host and reports how many went.
+// The count matters: "removed" with zero rows is how ghosts survive cleanup.
+func (s *Store) RemoveManual(host string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM nodes WHERE is_manual = 1 AND host = ?`, host)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // DeleteNode removes a single node by ID, regardless of source.
 func (s *Store) DeleteNode(nodeID string) error {
 	_, err := s.db.Exec(`DELETE FROM nodes WHERE node_id = ?`, nodeID)
 	return err
+}
+
+// ResolveNodeID expands a node ID or unique prefix (the short form printed by
+// `pipedpeer nodes`) to the full ID. Returns "" when nothing matches and an
+// error when the prefix is ambiguous.
+func (s *Store) ResolveNodeID(idOrPrefix string) (string, error) {
+	rows, err := s.db.Query(
+		`SELECT node_id FROM nodes WHERE node_id = ? OR node_id LIKE ? LIMIT 2`,
+		idOrPrefix, idOrPrefix+"%")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		ids = append(ids, id)
+	}
+	switch len(ids) {
+	case 0:
+		return "", nil
+	case 1:
+		return ids[0], nil
+	default:
+		return "", fmt.Errorf("node id %q is ambiguous", idOrPrefix)
+	}
 }
 
 func (s *Store) RemoveAll() error {

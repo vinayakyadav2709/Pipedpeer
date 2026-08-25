@@ -192,6 +192,34 @@ func TestDeleteNode(t *testing.T) {
 	}
 }
 
+// Removal must say when it deleted nothing — a 200 no-op is how ghost node
+// entries survived cleanup — and short ID prefixes must resolve like the ones
+// `pipedpeer nodes` prints.
+func TestRemoveReportsCountsAndResolvesPrefixes(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertNode(Node{NodeID: "2b74d935-b039-4adb", Host: "10.0.0.9", Port: 38081, Source: "manual", IsManual: true})
+	_ = s.UpsertNode(Node{NodeID: "2b7fffff-0000-0000", Host: "10.0.0.9", Port: 38082, Source: "discovery"})
+
+	if n, err := s.RemoveManual("no-such-host"); err != nil || n != 0 {
+		t.Fatalf("no-op remove: n=%d err=%v, want 0 rows", n, err)
+	}
+
+	if _, err := s.ResolveNodeID("2b7"); err == nil {
+		t.Fatal("ambiguous prefix must error, not pick one")
+	}
+	id, err := s.ResolveNodeID("2b74d935")
+	if err != nil || id != "2b74d935-b039-4adb" {
+		t.Fatalf("prefix resolve: id=%q err=%v", id, err)
+	}
+	if id, _ := s.ResolveNodeID("ffffffff"); id != "" {
+		t.Fatalf("unknown prefix resolved to %q", id)
+	}
+
+	if n, err := s.RemoveManual("10.0.0.9"); err != nil || n != 1 {
+		t.Fatalf("manual remove by host: n=%d err=%v, want 1 (discovery entry must survive)", n, err)
+	}
+}
+
 // An existing database created before caps_json/load_json existed must migrate
 // in place rather than failing to open.
 func TestMigrationFromPreviousSchema(t *testing.T) {
