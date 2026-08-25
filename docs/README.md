@@ -23,7 +23,7 @@ Everything needed to produce the major project report and the conference paper.
 python3 diagrams/src/plots_design.py
 python3 diagrams/src/plots_results.py
 for f in diagrams/src/*.dot; do
-  dot -Tpng -Gdpi=300 "$f" -o "diagrams/$(basename "${f%.dot}").png"
+  dot -Tpng -Gdpi=300 -Gmargin=0.14 "$f" -o "diagrams/$(basename "${f%.dot}").png"
 done
 
 # Documents (three passes, for the table of contents and cross-references)
