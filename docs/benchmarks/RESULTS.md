@@ -35,9 +35,10 @@ The three skips are `TestConcurrentJobsAndSharedNumpyCache` and
 `TestIntegrationFullSyncAndExecute` (both need `PIPEDPEER_INTEGRATION=1`) and
 `TestDetectNVIDIA` (no NVIDIA GPU on this host).
 
-Five interception tests had been skipping silently on any machine without
-pandas, torch and scikit-learn, which includes the project's own CI matrix job
-that does not install them. With the libraries present they run and pass:
+Five interception tests skip on any machine without pandas, torch and
+scikit-learn. CI does install those, so they run there; they had been skipping
+silently for anyone running the suite on a bare machine. With the libraries
+present they pass:
 `TestShimHashShuffleMatchesLocal`, `TestShimOutOfCoreIntegrity`,
 `TestShimCostModelDecisions`, `TestShimJoblibBackendDistributes`,
 `TestShimNumPyInterception`.
@@ -56,7 +57,7 @@ The strongest measured result. The same trivial job submitted five times.
 | 4th | 0.64 |
 | 5th | 0.66 |
 
-Median once warm: **0.66 s, against 12.00 s cold, an 18x reduction.** This is
+Median once warm: **0.65 s, against 12.00 s cold, an 18x reduction.** This is
 the payoff from keying the cache on the Nix store path: the second submission
 finds the closure already present on the worker and ships nothing but the
 workspace. Figure `fig_5.1_closure_cache.png`.
@@ -83,7 +84,8 @@ that never imports a heavy library:
 
 The shim used to import torch while installing itself, about 1.7 s on this
 host, charged to every job whether or not it mentioned torch. The project's own
-3x budget was being exceeded sevenfold and nothing in CI ran the check.
+3x budget was being exceeded sevenfold and no workflow ran the check that
+detects it. That check is now a step in CI.
 Figure `fig_5.2_shim_overhead.png`.
 
 ## R4  Work really does cross node boundaries
@@ -124,7 +126,7 @@ results despite losing a node mid-computation. Raw: `raw/B5_lab_fail.txt`.
 | medium (shell loop) | 8.0 ms | 23.7 ms |
 | python (interpreter start) | 16.9 ms | 36.8 ms |
 
-crun costs roughly 20 ms more per job than bwrap. Against a 0.66 s warm job,
+crun costs 15 to 20 ms more per job than bwrap. Against a 0.65 s warm job,
 let alone a 12 s cold one, that is not a number worth optimising, and crun buys
 the OCI device model that GPU passthrough needs. Figure
 `fig_5.3_sandbox_overhead.png`.

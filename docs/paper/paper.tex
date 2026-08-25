@@ -58,7 +58,7 @@ set, so the same script yields an identical store path on every machine and on
 any day; that path is then used as a cluster-wide cache key, turning environment
 transfer from a per-job cost into a once-per-cluster cost. On a three-node
 cluster the first submission of a job took 12.00\,s and subsequent submissions
-of the same environment took 0.66\,s, an eighteenfold reduction. Second, the
+of the same environment took 0.65\,s, an eighteenfold reduction. Second, the
 parallel primitives the script already uses are substituted at import time by a
 shim injected into the job's interpreter, and are distributed only when a cost
 model fed by a measured bandwidth probe finds that moving the data costs less
@@ -94,22 +94,28 @@ normally requires rewriting the program.
 PipedPeer removes both. Its contributions are:
 
 \begin{enumerate}
-\item \textbf{The store path as a cluster-wide cache key.} Pinning an exact
-package set makes an environment's content-addressed name identical across
-machines and across time, which is what allows a closure to be transferred once
-per cluster rather than once per job (Section~\ref{sec:env}).
+\item \textbf{Peer-to-peer closure distribution keyed by store path.}
+Content-addressed store paths and substitution are Nix's, not ours
+\cite{dolstra2004nix}; what we add is pushing a closure between peers rather
+than pulling from a cache, a two-predicate presence check that is correct both
+for per-node stores and for a shared store, and the use of that check to decide
+which peers are eligible to receive distributed work (Section~\ref{sec:env}).
 \item \textbf{Transparent interception under a measured cost model.} Parallel
 primitives are substituted at import time and distributed only when the
 arithmetic favours it, with link bandwidth measured rather than assumed
 (Sections~\ref{sec:intercept}, \ref{sec:cost}).
-\item \textbf{Exact aggregation without combiners.} Hash-shuffling on the
-grouping key places every key complete on one node, so any aggregation is exact,
-including those with no combiner form (Section~\ref{sec:shuffle}).
+\item \textbf{A shuffle-only aggregation path.} Hash partitioning on the key
+is standard \cite{dean2004mapreduce}; the choice here is to use \emph{only}
+that path and never a combiner, which keeps every aggregation exact in value,
+including user-defined ones, at the cost of always paying a full shuffle
+(Section~\ref{sec:shuffle}).
 \item \textbf{Placement without a scheduler.} Hard filters followed by a bounded
 score, evaluated in the submitting client, with a three-phase lease providing
 atomic reservation and recovery through expiry (Section~\ref{sec:placement}).
-\item \textbf{An unconditional degradation guarantee}, enforced structurally
-rather than by error handling (Section~\ref{sec:ft}).
+\item \textbf{A correctness-preserving fallback on every distributed path},
+structural for the parallel-map race and by exception handling elsewhere, so a
+failed or absent cluster changes the running time but never the result
+(Section~\ref{sec:ft}).
 \end{enumerate}
 
 \section{Related Work}
@@ -118,7 +124,19 @@ Spark~\cite{zaharia2010spark}, Ray~\cite{moritz2018ray} and
 Dask~\cite{rocklin2015dask} are mature and considerably more capable at scale
 than the system described here; they differ in requiring a configured cluster
 and, for Spark and to a lesser degree the others, a program written against
-their API. BOINC~\cite{anderson2004boinc} pioneered volunteer computing but is a
+their API.
+
+Two of them address the same two problems we do, and the distinction is narrow
+enough to state precisely. Ray ships a drop-in
+\texttt{ray.util.multiprocessing.Pool} and a \texttt{joblib} backend, and its
+runtime environments ship and cache per-job dependencies; Modin~\cite{petersohn2020modin}
+provides distributed pandas behind the pandas API. Each requires the user to
+change an import line and to have a cluster already running. What is different
+here is that no line of the user's program changes at all, because substitution
+happens in \texttt{sitecustomize} before the first user statement executes, and
+that the decision to distribute is gated on a measured cost model rather than
+taken whenever the API is used. We are not aware of prior work that combines
+import-time substitution of unmodified code with a per-call cost gate. BOINC~\cite{anderson2004boinc} pioneered volunteer computing but is a
 platform for specific projects, each with its own server infrastructure, rather
 than a general executor. Nix~\cite{dolstra2004nix} contributes the
 content-addressed store on which our caching argument rests.
@@ -234,10 +252,14 @@ For grouping and joining, rows are bucketed by a hash of the key. Equal keys
 hash equally, so every key lands complete on exactly one node. Each node's
 aggregation is therefore a complete aggregation over the keys it holds, and the
 origin combines partials by concatenation alone. No combiner algebra is
-involved, and consequently \emph{any} aggregation specification is exact,
-including user-defined reductions that admit no combiner. This is a stronger
-guarantee than the partial-aggregation strategies used by systems that push
-combiners to the workers.
+involved, and consequently \emph{any} aggregation specification is exact in
+value, including user-defined reductions that admit no combiner. Systems that
+push combiners to the workers also fall back to a full shuffle for
+non-combinable aggregations, so this is not a stronger guarantee than theirs; it
+is the same guarantee reached by always taking the slower path, which suits a
+shim that cannot inspect the user's aggregation function. Exactness here is of
+values, not row order: concatenating buckets does not reproduce pandas'
+documented join ordering.
 
 \subsection{Data-Parallel Training Without a Socket Mesh}
 
@@ -286,8 +308,11 @@ Singular value decomposition, two orders of magnitude slower locally, does move.
 \section{Degradation Guarantee}
 \label{sec:ft}
 
-Using the cluster must never be worse than not using it. Five independent layers
-enforce this. Chunks of a parallel map are dealt alternately to the local side
+Using the cluster must never change the result, and must not leave the caller
+worse off than a local run when the cluster is slow or absent. The timing half
+of that is bounded rather than absolute: Section~\ref{sec:res-shim} measures the
+cost of leaving interception on at a few per cent of a short job, and only the
+parallel-map path has a structural bound. Five layers apply. Chunks of a parallel map are dealt alternately to the local side
 and the cluster and fill a result table first-wins, with idle local cores
 re-running any chunk the cluster has not returned; the call returns only once
 the local side has covered every item, so a wholly unresponsive cluster degrades
@@ -310,7 +335,7 @@ design argument rests on.
 \subsection{Environment cache}
 
 The same job submitted five times took 12.00\,s on the first submission and a
-median of 0.66\,s thereafter, an \textbf{eighteenfold reduction}
+median of 0.65\,s thereafter, an \textbf{eighteenfold reduction}
 (Fig.~\ref{fig:cache}). The first submission ships the closure; the rest find it
 materialised and ship only the project files. This is the direct consequence of
 pinning the package set so that a store path names an environment identically
@@ -324,6 +349,7 @@ everywhere.
 \end{figure}
 
 \subsection{Cost of leaving interception on}
+\label{sec:res-shim}
 
 Since interception is on by default, its cost when the model declines to
 distribute is what most users pay. On a workload the model declines, a whole
@@ -338,9 +364,11 @@ to its first import brings this to $1.20\times$.
 \subsection{Correctness and fault tolerance}
 
 The suite passes 246 test cases with none failing. Distribution correctness is
-established by comparison against local execution: grouped aggregation and all
-four join types are frame-equal to local pandas, and each rank's gradient in
-data-parallel training is exactly the mean across ranks.
+established by comparison against local execution: grouped aggregation is
+frame-equal to local pandas, the four join types are equal up to row order (a
+concatenation of shuffle buckets does not reproduce pandas' join ordering), and
+each rank's gradient in data-parallel training is exactly the mean across
+ranks.
 
 Under fault injection, a twenty-item parallel map was distributed across the
 cluster and a worker was killed mid-computation. The run completed with correct
@@ -353,23 +381,23 @@ the weaker system.}
 \label{tab:cmp}
 \renewcommand{\arraystretch}{1.2}
 \footnotesize
-\begin{tabularx}{\columnwidth}{X C{0.9cm} C{0.8cm} C{0.8cm} C{0.9cm}}
+\begin{tabularx}{\columnwidth}{X C{0.75cm} C{0.7cm} C{0.6cm} C{0.7cm} C{0.7cm}}
 \toprule
-\textbf{Property} & \textbf{Ours} & \textbf{Spark} & \textbf{Dask} & \textbf{ssh} \\
+\textbf{Property} & \textbf{Ours} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{ssh} \\
 \midrule
-\multicolumn{5}{l}{\textit{What it does differently}} \\
-Runs unmodified Python     & yes & no  & partial & yes \\
-No cluster to configure    & yes & no  & no      & partial \\
-No head or master node     & yes & no  & no      & yes \\
-Reproduces the environment & yes & partial & partial & no \\
-Sandboxes each job         & yes & no  & no      & no \\
-Survives losing a node     & yes & yes & yes     & no \\
+\multicolumn{6}{l}{\textit{What it does differently}} \\
+Runs unmodified Python     & yes & no  & part. & part. & yes \\
+No cluster to configure    & yes & no  & no    & no    & part. \\
+No head or master node     & yes & no  & no    & no    & yes \\
+Reproduces the environment & yes & part. & part. & part. & no \\
+Sandboxes each job         & part. & no & no   & no    & no \\
+Survives losing a node     & yes & yes & yes   & yes   & no \\
 \midrule
-\multicolumn{5}{l}{\textit{Where it is behind}} \\
-Authenticated, encrypted   & \textbf{no} & yes & partial & yes \\
-Works beyond one LAN       & partial & yes & yes & yes \\
-Runtimes beyond Python     & \textbf{no} & yes & no & yes \\
-Proven in production       & \textbf{no} & yes & yes & yes \\
+\multicolumn{6}{l}{\textit{Where it is behind}} \\
+Authenticated, encrypted   & \textbf{no} & yes & part. & part. & yes \\
+Works beyond one LAN       & part. & yes & yes & yes & yes \\
+Runtimes beyond Python     & \textbf{no} & yes & part. & no & yes \\
+Proven in production       & \textbf{no} & yes & yes & yes & yes \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -435,6 +463,10 @@ to obtain the speedup figures this evaluation deliberately does not claim.
 \bibitem{he2024} H.~He, X.~Yang, X.~Mi, H.~Shen, and X.~Liao, ``Multi-agent deep reinforcement learning based dynamic task offloading in a D2D mobile-edge computing network,'' \textit{Sensors}, vol.~24, no.~16, 2024.
 
 \bibitem{zhao2023} Z.~Zhao, J.~Perazzone, G.~Verma, and S.~Segarra, ``Congestion-aware distributed task offloading in wireless multi-hop networks using graph neural networks,'' arXiv:2312.02471, 2023.
+
+\bibitem{petersohn2020modin} D.~Petersohn et al., ``Towards scalable dataframe systems,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~2033--2046, 2020.
+
+\bibitem{dean2004mapreduce} J.~Dean and S.~Ghemawat, ``MapReduce: Simplified data processing on large clusters,'' in \textit{Proc. 6th USENIX OSDI}, 2004, pp.~137--150.
 
 \bibitem{kth2025thesis} A.~Bergstr\"om, ``Programming models for failure-transparent distributed systems,'' M.S. thesis, KTH Royal Institute of Technology, 2025.
 

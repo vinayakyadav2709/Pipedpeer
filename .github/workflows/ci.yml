@@ -47,6 +47,13 @@ jobs:
       - name: Test (race)
         run: go test -race -count=1 ./...
 
+      # The shim is supposed to cost nothing when a job never touches an
+      # interceptable library. Nothing enforced that, and it regressed to 21x
+      # by importing torch at startup. Gate it here.
+      - name: Shim overhead (never-slower budget)
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/bench-shim-d2.sh
+
   build:
     runs-on: ubuntu-latest
     strategy:
