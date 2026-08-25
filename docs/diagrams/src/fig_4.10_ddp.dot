@@ -1,30 +1,26 @@
 // Figure 4.10 - Data parallel training: gradients meet on the daemon port.
+// The explanatory note lives in the caption, not the canvas: as a free-floating
+// node it forced the graph a quarter wider and shrank every label.
 digraph DDP {
-  rankdir=TB; bgcolor="white"; nodesep=0.40; ranksep=0.55;
-  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
-  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+  rankdir=TB; bgcolor="white"; nodesep=0.55; ranksep=0.60;
+  node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
+  edge [fontname="Helvetica", fontsize=14, color="#555555"];
 
-  r0 [label="Rank 0\nown data shard", fillcolor="#e3f3e9", color="#2f7d4f"];
-  r1 [label="Rank 1\nown data shard"];
-  r2 [label="Rank 2\nown data shard"];
+  r0 [label="Rank 0\nits own data shard"];
+  r1 [label="Rank 1\nits own data shard"];
+  r2 [label="Rank 2\nits own data shard"];
 
-  board [label="Lead node daemon, ordinary daemon port\ncollects one gradient blob per rank,\nreleases the full set once all have arrived",
-         fillcolor="#fdf6e3", color="#8a6d1f"];
+  board [label="Lead node daemon, on the ordinary daemon port\nholds one gradient blob per rank and releases\nthe whole set once every rank has arrived",
+         fillcolor="#fdf6e3", color="#8a6d1f", penwidth=1.5];
 
-  avg [label="Each rank averages the set itself\nand steps its optimiser\nweights stay identical across ranks",
-       fillcolor="#fdf6e3", color="#8a6d1f"];
+  avg [label="Every rank averages the set it receives\nand steps its own optimiser, so the weights\nstay identical across ranks",
+       fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
-  note [label="No rank-to-rank sockets and no extra ports:\nthe one port that already works between\nevery pair of nodes carries the sync",
-        shape=note, fillcolor="#ffffff", color="#888888", fontsize=10];
+  r0 -> board [label="  gradients  "];
+  r1 -> board [label="  gradients  "];
+  r2 -> board [label="  gradients  "];
+  board -> avg [label="  the full set, once all ranks are in  ", penwidth=1.5];
 
-  r0 -> board [label=" gradients "];
-  r1 -> board [label=" gradients "];
-  r2 -> board [label=" gradients "];
-  board -> avg [label=" all ranks present "];
-  avg -> r0 [style=dashed, constraint=false];
-  avg -> r1 [style=dashed, constraint=false];
-  avg -> r2 [style=dashed, constraint=false];
   { rank=same; r0; r1; r2; }
-  { rank=same; board; note; }
 }

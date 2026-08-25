@@ -14,7 +14,7 @@ import pathlib
 OUT = pathlib.Path(__file__).resolve().parents[1]
 BLUE, GREEN, RED, GOLD, GREY = "#1e50a0", "#2f7d4f", "#a33333", "#8a6d1f", "#666666"
 plt.rcParams.update({
-    "font.family": "DejaVu Sans", "font.size": 10,
+    "font.family": "DejaVu Sans", "font.size": 15,
     "axes.spines.top": False, "axes.spines.right": False,
     "figure.dpi": 300, "savefig.dpi": 300, "savefig.bbox": "tight",
 })
@@ -28,7 +28,7 @@ def fig_sequence():
         (0, 1, "run script.py", False),
         (1, 1, "scan imports, build Nix closure", None),
         (1, 1, "estimate memory requirement", None),
-        (1, 2, "accept  (capacity check)", False),
+        (1, 2, "accept (capacity check)", False),
         (2, 1, "lease granted", True),
         (1, 2, "commit lease", False),
         (1, 2, "upload workspace, closure if absent", False),
@@ -44,10 +44,10 @@ def fig_sequence():
     fig, ax = plt.subplots(figsize=(9.2, 9.6))
     top, dy = 0.0, -0.74
     for i, a in enumerate(actors):
-        ax.add_patch(FancyBboxPatch((x[i] - 1.05, top), 2.1, 0.52,
+        ax.add_patch(FancyBboxPatch((x[i] - 1.32, top), 2.64, 0.66,
                      boxstyle="round,pad=0.04", facecolor="#eef3fb",
                      edgecolor=BLUE, linewidth=1.2))
-        ax.text(x[i], top + 0.26, a, ha="center", va="center", fontsize=10)
+        ax.text(x[i], top + 0.33, a, ha="center", va="center", fontsize=13)
         ax.plot([x[i], x[i]], [top, top + dy * (len(steps) + 1.2)],
                 color=GREY, linewidth=0.9, linestyle=(0, (4, 4)), zorder=0)
     for k, (src, dst, label, back) in enumerate(steps):
@@ -58,14 +58,17 @@ def fig_sequence():
                     [y, y, y - 0.20, y - 0.20], color=GOLD, linewidth=1.3)
             ax.annotate("", xy=(x[src] + 0.04, y - 0.20), xytext=(x[src] + 0.22, y - 0.20),
                         arrowprops=dict(arrowstyle="-|>", color=GOLD, linewidth=1.3))
-            ax.text(x[src] + w + 0.16, y - 0.10, label, va="center", fontsize=9, color=GOLD)
+            ax.text(x[src] + w + 0.16, y - 0.10, label, va="center", fontsize=13,
+                    color=GOLD, zorder=6,
+                    bbox=dict(facecolor="white", edgecolor="none", pad=1.4))
         else:
             colour = GREEN if back else BLUE
             ax.annotate("", xy=(x[dst], y), xytext=(x[src], y),
                         arrowprops=dict(arrowstyle="-|>", color=colour, linewidth=1.4,
                                         linestyle="--" if back else "-"))
             ax.text((x[src] + x[dst]) / 2, y + 0.09, label, ha="center",
-                    va="bottom", fontsize=9, color=colour)
+                    va="bottom", fontsize=13, color=colour, zorder=6,
+                    bbox=dict(facecolor="white", edgecolor="none", pad=1.4))
     ax.set_xlim(-1.8, x[-1] + 3.4); ax.set_ylim(top + dy * (len(steps) + 1.6), 0.85)
     ax.axis("off")
     fig.savefig(OUT / "fig_3.5_sequence.png"); plt.close(fig)
@@ -86,11 +89,12 @@ def fig_scoring():
                  color=(RED if b <= 0 else GREEN), alpha=0.75,
                  edgecolor="white", linewidth=0.8)
     axl.axvline(0, color="#333333", linewidth=1.0)
-    axl.set_yticks(y); axl.set_yticklabels(terms, fontsize=9)
+    axl.set_yticks(y); axl.set_yticklabels(terms, fontsize=14)
     axl.set_xlabel("contribution to the score")
-    axl.set_title("Range of each term", fontsize=11, loc="left")
+    axl.set_title("Range of each term", fontsize=17, loc="left")
     axl.set_xlim(-0.58, 0.13)
     axl.spines["left"].set_visible(False)
+    axl.grid(axis="x", alpha=0.25)
 
     # Worked example: an idle strong node against a loaded weak one.
     labels = ["base", "CPU", "memory", "jobs", "hardware", "final"]
@@ -106,10 +110,10 @@ def fig_scoring():
                  linewidth=1.8, markersize=5)
         axr.annotate(f"{name}\nfinal {vals[-1]:.2f}", (len(vals) - 1, vals[-1]),
                      textcoords="offset points", xytext=(-6, 14 if colour == GREEN else 16),
-                     ha="right", fontsize=9, color=colour)
-    axr.set_xticks(np.arange(len(labels) - 1)); axr.set_xticklabels(labels[:-1], fontsize=9)
+                     ha="right", fontsize=14, color=colour)
+    axr.set_xticks(np.arange(len(labels) - 1)); axr.set_xticklabels(labels[:-1], fontsize=14)
     axr.set_ylabel("running score"); axr.set_ylim(0, 1.45)
-    axr.set_title("Two nodes scored", fontsize=11, loc="left")
+    axr.set_title("Two nodes scored", fontsize=17, loc="left")
     axr.grid(axis="y", alpha=0.25)
     fig.savefig(OUT / "fig_4.2_scoring_weights.png"); plt.close(fig)
 
@@ -126,28 +130,29 @@ def fig_race():
         ax.barh(1, 1.0, left=c * 0.55, height=0.42, color=GREEN, alpha=0.8,
                 edgecolor="white")
         ax.text(c * 0.55 + 0.5, 1, f"c{c}", ha="center", va="center",
-                color="white", fontsize=9)
+                color="white", fontsize=14)
     for c in remote_chunks:
         ok = c != dead
         ax.barh(0, 1.0, left=c * 0.55, height=0.42,
                 color=(BLUE if ok else "#cccccc"), alpha=0.85, edgecolor="white")
-        ax.text(c * 0.55 + 0.5, 0, f"c{c}" + ("" if ok else "  lost"),
-                ha="center", va="center", color=("white" if ok else "#555555"), fontsize=9)
+        ax.text(c * 0.55 + 0.5, 0, f"c{c}" if ok else f"c{c} lost",
+                ha="center", va="center", color=("white" if ok else "#555555"), fontsize=14)
     redo_x = (n - 1) * 0.55 + 1.15
     ax.barh(1, 1.0, left=redo_x, height=0.42, color=GOLD, alpha=0.9, edgecolor="white")
     ax.text(redo_x + 0.5, 1, f"c{dead} re-run", ha="center", va="center",
-            color="white", fontsize=9)
+            color="white", fontsize=14)
     ax.annotate("", xy=(redo_x, 0.78), xytext=(dead * 0.55 + 0.5, 0.22),
                 arrowprops=dict(arrowstyle="-|>", color=GOLD, linewidth=1.4,
                                 linestyle="--", connectionstyle="arc3,rad=-0.25"))
     ax.text(redo_x + 0.55, 0.55, "idle local cores pick up\nany chunk still missing",
-            fontsize=9, color=GOLD, va="center")
+            fontsize=14, color=GOLD, va="center")
     ax.set_yticks([0, 1]); ax.set_yticklabels(["cluster", "local"])
+    ax.tick_params(which="both", length=0)
     ax.set_xlabel("time")
     ax.set_xticks([])
-    ax.set_ylim(-0.55, 1.75); ax.set_xlim(-0.15, redo_x + 3.6)
+    ax.set_ylim(-0.45, 1.55); ax.set_xlim(-0.12, redo_x + 2.7)
     ax.set_title("Alternate chunks are owned by each side; the local side is "
-                 "always able to finish alone", fontsize=10, loc="left")
+                 "always able to finish alone", fontsize=16, loc="left")
     ax.spines["left"].set_visible(False); ax.spines["bottom"].set_visible(False)
     fig.savefig(OUT / "fig_4.7_race_timeline.png"); plt.close(fig)
 
@@ -170,32 +175,33 @@ def fig_cost_model():
     spill &= nb >= MIN_BYTES
     spill &= ~((F < LOW_F) & (nb <= LOW_CAP))
 
-    fig, ax = plt.subplots(figsize=(7.8, 4.6))
+    fig, ax = plt.subplots(figsize=(8.6, 5.4))
     ax.contourf(MB, F, spill.astype(float), levels=[-0.5, 0.5, 1.5],
                 colors=["#f6e7e7", "#e2f0e8"])
     ax.contour(MB, F, spill.astype(float), levels=[0.5], colors=[GREEN], linewidths=1.8)
 
-    ax.text(8, 500, "kept local", color=RED, fontsize=12, weight="bold")
-    ax.text(700, 700, "distributed", color=GREEN, fontsize=12, weight="bold")
-    ax.annotate("payload below 32 MB", xy=(20, 3), fontsize=9, color=RED, rotation=90,
+    ax.text(8, 500, "kept local", color=RED, fontsize=19, weight="bold")
+    ax.text(700, 700, "distributed", color=GREEN, fontsize=19, weight="bold")
+    ax.annotate("payload below 32 MB", xy=(20, 60), fontsize=13, color=RED, rotation=90,
                 ha="center", va="center")
-    ax.annotate("under 8 flop/byte and 512 MB:\ntoo little work per byte moved",
-                xy=(60, 1.6), fontsize=9, color=RED, va="center")
+    ax.annotate("under 8 flop/byte and up to 512 MB:\ntoo little work per byte moved",
+                xy=(4.6, 0.78), fontsize=13, color=RED, va="center", ha="left")
 
-    for name, fv, mbv in (("pandas join", 2, 800), ("pandas groupby", 4, 800),
-                          ("dense matmul", 200, 400), ("SVD", 1.5, 300)):
+    for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 5.5, 900),
+                          ("dense matmul", 200, 300), ("SVD", 1.5, 300)):
         ax.plot(mbv, fv, "o", color="#1e50a0", markersize=7, zorder=5)
-        ax.annotate(name, (mbv, fv), textcoords="offset points",
-                    xytext=(10, 6 if name == "SVD" else -3),
-                    fontsize=9, color="#1e50a0")
+        off = {"pandas join": (12, -5), "pandas groupby": (12, -5),
+               "dense matmul": (12, -5), "SVD": (12, -5)}[name]
+        ax.annotate(name, (mbv, fv), textcoords="offset points", xytext=off,
+                    ha="left", fontsize=13, color="#1e50a0")
 
     ax.set_xscale("log"); ax.set_yscale("log")
     ax.set_xlabel("payload size (MB, log scale)")
     ax.set_ylabel("arithmetic intensity (flop per byte, log scale)")
-    ax.set_xlim(4, 4000); ax.set_ylim(0.5, 2000)
+    ax.set_xlim(4, 9000); ax.set_ylim(0.5, 2000)
     ax.grid(alpha=0.2, which="both")
     ax.set_title("Decision regions at three nodes on a 500 MB/s link",
-                 fontsize=11, loc="left")
+                 fontsize=17, loc="left")
     fig.savefig(OUT / "fig_4.9_cost_model.png"); plt.close(fig)
 
 

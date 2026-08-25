@@ -1,20 +1,21 @@
-// Figure 4.8 - Hash shuffle for groupby and join: no combiners needed.
+// Figure 4.8 - Hash shuffle for grouping and joining: no combiners needed.
 digraph Shuffle {
-  rankdir=TB; bgcolor="white"; nodesep=0.32; ranksep=0.50;
-  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
-  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+  rankdir=TB; bgcolor="white"; nodesep=0.45; ranksep=0.52;
+  node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11",
+        width=2.1, fixedsize=false];
+  edge [fontname="Helvetica", fontsize=14, color="#555555"];
 
   df [label="Input frame"];
-  h  [label="Bucket every row by a hash of its key\nequal keys always hash to the same bucket",
+  h  [label="Bucket every row by a hash of its key\nequal keys always reach the same bucket",
       fillcolor="#fdf6e3", color="#8a6d1f"];
   b0 [label="Bucket 0\nkept local", fillcolor="#e3f3e9", color="#2f7d4f"];
   b1 [label="Bucket 1\nto peer 1"];
   b2 [label="Bucket 2\nto peer 2"];
-  a0 [label="Full aggregation\non this node", fillcolor="#e3f3e9", color="#2f7d4f"];
-  a1 [label="Full aggregation\non peer 1"];
-  a2 [label="Full aggregation\non peer 2"];
-  cat [label="Concatenate at the origin\nevery key was complete on exactly one node,\nso the result is exact for any aggregation",
+  a0 [label="Aggregate\nhere", fillcolor="#e3f3e9", color="#2f7d4f"];
+  a1 [label="Aggregate\non peer 1"];
+  a2 [label="Aggregate\non peer 2"];
+  cat [label="Concatenate at the origin\nevery key was complete on one node, so the\nresult is exact for any aggregation",
        fillcolor="#fdf6e3", color="#8a6d1f"];
 
   df -> h;

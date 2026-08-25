@@ -1,22 +1,27 @@
 // Figure 4.4 - Closure transfer: the store path is the cluster-wide cache key.
+// Two columns rather than one, so the figure is not a full page tall.
 digraph ClosureCache {
-  rankdir=TB; bgcolor="white"; nodesep=0.30; ranksep=0.42;
-  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
-  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+  rankdir=TB; bgcolor="white"; nodesep=0.40; ranksep=0.48;
+  node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
+  edge [fontname="Helvetica", fontsize=14, color="#555555"];
 
-  pin  [label="Pinned nixpkgs revision\nsame inputs give the same store path\non every node, on any day", fillcolor="#fdf6e3", color="#8a6d1f"];
-  bld  [label="Build closure locally\n/nix/store/<hash>-run"];
-  ask  [label="Does the target already have it?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
-  skip [label="Ship nothing\nworkspace only", fillcolor="#e3f3e9", color="#2f7d4f"];
-  exp  [label="Export and compress\nnix-store --export | gzip"];
-  imp  [label="Import on the worker\ncache the archive by store path"];
-  bcast[label="Broadcast to peers that lack it\nso they become eligible for spill work"];
-  run  [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f"];
+  pin  [label="Pinned package set\nthe same inputs give the same store path\non every machine, on any day",
+        fillcolor="#fdf6e3", color="#8a6d1f"];
+  bld  [label="Build the closure locally"];
+  ask  [label="Does the target already have it?", shape=diamond,
+        fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
+  skip [label="Ship nothing but the workspace"];
+  exp  [label="Export and compress the closure"];
+  imp  [label="Import it on the worker\nand cache it by store path"];
+  bcast[label="Push it to peers that lack it\nso they can receive spilled work"];
+  run  [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
   pin -> bld -> ask;
-  ask -> skip [label="  yes: bin/run present  "];
+  ask -> skip [label="  yes  "];
   ask -> exp  [label="  no  "];
   exp -> imp -> bcast;
-  skip -> run; bcast -> run;
+  skip -> run;
+  bcast -> run;
+  { rank=same; skip; exp; }
 }

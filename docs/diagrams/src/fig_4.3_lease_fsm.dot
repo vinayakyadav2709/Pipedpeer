@@ -1,18 +1,25 @@
 // Figure 4.3 - Lease state machine on the worker.
+// Laid out over two rows: a single row gives a 6:1 strip whose labels are
+// unreadable once scaled to the text width.
 digraph LeaseFSM {
-  rankdir=LR; bgcolor="white"; nodesep=0.5; ranksep=1.0;
-  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.16,0.10"];
-  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+  rankdir=LR; bgcolor="white"; nodesep=0.45; ranksep=0.85;
+  node [fontname="Helvetica", fontsize=13, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.3, margin="0.20,0.13"];
+  edge [fontname="Helvetica", fontsize=12, color="#555555"];
 
-  start [label="", shape=circle, width=0.22, style=filled, fillcolor="#333333", color="#333333"];
+  start [label="", shape=circle, width=0.26, style=filled, fillcolor="#333333", color="#333333"];
   res   [label="Reserved\ncapacity held\nexpires after 30 s"];
   run   [label="Running\nrenewed every 30 s\nreaped after 5 min idle", fillcolor="#e3f3e9", color="#2f7d4f"];
-  gone  [label="Released", shape=doublecircle, width=0.5, fixedsize=false, fillcolor="#f2f2f2", color="#666666"];
+  gone  [label="Released", shape=doublecircle, style=filled, fillcolor="#f2f2f2", color="#666666", margin="0.10,0.08"];
 
-  start -> res [label=" accept "];
-  res -> run  [label=" commit "];
-  run -> gone [label=" complete "];
-  res -> gone [label=" cancel, or expiry\l after a 5 s grace\l"];
-  run -> gone [label=" submitter stops renewing\l (crash recovery)\l", style=dashed, color="#a33333"];
+  start -> res [label="  accept  "];
+  res -> run   [label="  commit  "];
+  run -> gone  [label="  complete  "];
+
+  // The two failure exits go on a second row so their labels have room.
+  res -> gone [label="  cancel, or expiry after a 5 s grace  "];
+  run -> gone [label="  submitter stops renewing\l  (crash recovery)\l",
+               style=dashed, color="#a33333", fontcolor="#a33333"];
+
+  { rank=same; start; res; run; }
 }

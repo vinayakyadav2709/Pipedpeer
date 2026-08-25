@@ -1,28 +1,29 @@
 // Figure 4.6 - How the interception shim reaches the interpreter.
 digraph ShimInject {
-  rankdir=TB; bgcolor="white"; nodesep=0.28; ranksep=0.45;
-  node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.1, margin="0.14,0.08"];
-  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+  rankdir=TB; bgcolor="white"; nodesep=0.24; ranksep=0.42;
+  node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.16,0.10"];
+  edge [fontname="Helvetica", fontsize=13, color="#555555"];
 
-  emb  [label="Shim source embedded in the binary\nno install on any node"];
-  tar  [label="Appended to the workspace archive\nas .pipedpeer/shim/sitecustomize.py\nthe user's project is never modified"];
-  env  [label="Worker sets PYTHONPATH to that directory"];
-  imp  [label="CPython imports sitecustomize\nbefore the user's first line runs", fillcolor="#fdf6e3", color="#8a6d1f"];
+  emb  [label="Shim source embedded in the binary\nnothing is installed on any node"];
+  tar  [label="Appended to the workspace archive\nthe user's project is never modified"];
+  env  [label="Worker points PYTHONPATH at it"];
+  imp  [label="CPython imports it before the\nuser's first line", fillcolor="#fdf6e3", color="#8a6d1f"];
   nixp [label="Re-adds the Nix package paths it shadows\nwithout this, every import in the closure fails",
         fillcolor="#fdf6e3", color="#8a6d1f"];
   patch[label="Patches the parallel entry points", fillcolor="#fbe9e9", color="#a33333"];
 
-  p1 [label="multiprocessing.Pool\nProcessPoolExecutor", fillcolor="#fbe9e9", color="#a33333"];
-  p2 [label="pandas\ngroupby, merge, readers", fillcolor="#fbe9e9", color="#a33333"];
-  p3 [label="numpy and torch\nmatmul, svd, eig", fillcolor="#fbe9e9", color="#a33333"];
-  p4 [label="joblib and sklearn\nParallel, n_jobs", fillcolor="#fbe9e9", color="#a33333"];
-  p5 [label="torch optimiser\ndata parallel training", fillcolor="#fbe9e9", color="#a33333"];
+  p1 [label="multiprocessing\nPool", fillcolor="#fbe9e9", color="#a33333"];
+  p2 [label="pandas\ngroupby, merge", fillcolor="#fbe9e9", color="#a33333"];
+  p3 [label="numpy, torch\nmatmul, svd", fillcolor="#fbe9e9", color="#a33333"];
+  p4 [label="joblib\nsklearn", fillcolor="#fbe9e9", color="#a33333"];
+  p5 [label="torch\ndata parallel", fillcolor="#fbe9e9", color="#a33333"];
 
-  user [label="Unmodified user script", fillcolor="#e3f3e9", color="#2f7d4f"];
+  user [label="The unmodified user script calls these names\nand reaches the cluster without knowing it",
+        fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
   emb -> tar -> env -> imp -> nixp -> patch;
   patch -> p1; patch -> p2; patch -> p3; patch -> p4; patch -> p5;
-  p1 -> user [style=invis]; p3 -> user [style=invis]; p5 -> user [style=invis];
+  p1 -> user; p2 -> user; p3 -> user; p4 -> user; p5 -> user;
   { rank=same; p1; p2; p3; p4; p5; }
 }

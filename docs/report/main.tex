@@ -565,7 +565,7 @@ is registered, configured or installed.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.92\textwidth]{\figpath{fig_3.1_system_design.png}}
+    \includegraphics[width=0.83\textwidth]{\figpath{fig_3.1_system_design.png}}
     \caption{PipedPeer system design. The submitting side builds the environment
     and places the job; the worker admits it, caches the closure and runs it
     sandboxed. Both roles are the same binary.}
@@ -611,7 +611,7 @@ which supply capacity and return computed results; and an optional
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.82\textwidth]{\figpath{fig_3.2_dfd_level0.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_3.2_dfd_level0.png}}
     \caption{Level 0 DFD --- context diagram. The registry is dashed because the
     system works without it.}
     \label{fig:dfd0}
@@ -622,7 +622,7 @@ which supply capacity and return computed results; and an optional
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.86\textwidth]{\figpath{fig_3.3_dfd_level1.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_3.3_dfd_level1.png}}
     \caption{Level 1 DFD --- seven processes over three data stores.}
     \label{fig:dfd1}
 \end{figure}
@@ -648,7 +648,7 @@ which supply capacity and return computed results; and an optional
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.88\textwidth]{\figpath{fig_3.4_use_case.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_3.4_use_case.png}}
     \caption{Use cases. A peer daemon is an actor in its own right, because
     every node serves closures and executes chunks for others.}
     \label{fig:usecase}
@@ -658,7 +658,7 @@ which supply capacity and return computed results; and an optional
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\textwidth]{\figpath{fig_3.5_sequence.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_3.5_sequence.png}}
     \caption{End-to-end execution of one job.}
     \label{fig:sequence}
 \end{figure}
@@ -729,7 +729,7 @@ request. Every rejection records a reason, which surfaces in
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.80\textwidth]{\figpath{fig_4.1_placement_flow.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.1_placement_flow.png}}
     \caption{Placement: gather, filter, score, lease, retry. A task is never
     dropped; when nothing is eligible it is queued and retried.}
     \label{fig:placement}
@@ -764,7 +764,7 @@ function safe across heterogeneous machines whose telemetry is uneven.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\textwidth]{\figpath{fig_4.2_scoring_weights.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.2_scoring_weights.png}}
     \caption{Left: the range each term can contribute. Right: the same function
     applied to an idle strong node and a loaded weak one.}
     \label{fig:scoring}
@@ -782,7 +782,7 @@ recovery lives.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.90\textwidth]{\figpath{fig_4.3_lease_fsm.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.3_lease_fsm.png}}
     \caption{Lease states. Recovery is a consequence of expiry rather than a
     separate mechanism.}
     \label{fig:lease}
@@ -841,7 +841,7 @@ source takes hours.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.62\textwidth]{\figpath{fig_4.4_closure_cache.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.4_closure_cache.png}}
     \caption{The store path is the cluster-wide cache key. Most submissions ship
     no environment at all.}
     \label{fig:closure}
@@ -959,7 +959,7 @@ combiner form at all. Bucket zero is kept local.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.60\textwidth]{\figpath{fig_4.8_hash_shuffle.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.8_hash_shuffle.png}}
     \caption{Hash shuffle. Correctness follows from key locality, not from
     combiner algebra.}
     \label{fig:shuffle}
@@ -976,7 +976,7 @@ the system makes.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.86\textwidth]{\figpath{fig_4.10_ddp.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.10_ddp.png}}
     \caption{Gradient exchange over the daemon port.}
     \label{fig:ddp}
 \end{figure}
@@ -1050,7 +1050,7 @@ independent layers enforce it.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\textwidth]{\figpath{fig_4.7_race_timeline.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_4.7_race_timeline.png}}
     \caption{Racing local and remote work. The local side is always able to
     finish alone, which is what makes the guarantee unconditional.}
     \label{fig:race}
@@ -1176,7 +1176,7 @@ already materialised and ships nothing but the project files.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\textwidth]{\figpath{fig_5.1_closure_cache.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_5.1_closure_cache.png}}
     \caption{Cold and warm submission of the same environment.}
     \label{fig:rescache}
 \end{figure}
@@ -1228,7 +1228,7 @@ Deferred patching (current)         & $1.20\times$  & yes \\
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\textwidth]{\figpath{fig_5.2_shim_overhead.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_5.2_shim_overhead.png}}
     \caption{Left: cost over a whole job. Right: interpreter startup, before and
     after deferring library patching.}
     \label{fig:resshim}
@@ -1261,7 +1261,7 @@ demonstrating the guarantee of Section~\ref{sec:ft} end to end.
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.90\textwidth]{\figpath{fig_5.3_sandbox_overhead.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_5.3_sandbox_overhead.png}}
     \caption{Sandbox start cost, median of 20 iterations.}
     \label{fig:ressandbox}
 \end{figure}
@@ -1324,7 +1324,7 @@ Reschedules on node loss   & yes & yes & yes     & yes     & yes     & no \\
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.95\textwidth]{\figpath{fig_5.4_comparison.png}}
+    \includegraphics[width=0.92\textwidth]{\figpath{fig_5.4_comparison.png}}
     \caption{The same comparison in matrix form.}
     \label{fig:rescomp}
 \end{figure}
