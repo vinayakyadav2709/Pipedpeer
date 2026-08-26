@@ -2220,6 +2220,9 @@ def _install_ddp():
     # Said once. The condition holds for every step of the run, and a warning
     # repeated 88 times is a warning nobody reads.
     _WARNED_SAME_WORK = [False]
+    # Said when it changes rather than every step: a ring that has lost a rank
+    # stays lost, and one line per step is a line nobody reads.
+    _LAST_RANKS = [0]
 
     # Gradients as signed bytes rather than half floats: half the bytes again
     # on a link where bytes are the whole cost. What quantisation drops is
@@ -2439,6 +2442,13 @@ def _install_ddp():
         agreed = _reply.get("sync_every", 0)
         if agreed and agreed != _SYNC_TUNED[0]:
             _SYNC_TUNED[0] = int(agreed)
+        _ranks = int(_reply.get("ranks", 0) or 0)
+        if _ranks and _ranks < _WORLD and _LAST_RANKS[0] != _ranks:
+            _LAST_RANKS[0] = _ranks
+            _log("ddp: this step averaged %d of %d ranks — the others did not answer "
+                 "in time. The run continues on the ranks that did; a smaller average "
+                 "is a smaller step in the same direction, and every rank applies the "
+                 "identical result, so nothing drifts." % (_ranks, _WORLD))
         if _reply.get("same_work") and not _WARNED_SAME_WORK[0]:
             _WARNED_SAME_WORK[0] = True
             _log("ddp: every rank produced the SAME gradients, so every rank is "
