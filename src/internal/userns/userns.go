@@ -96,11 +96,12 @@ func diagnose() string {
 		// Reached even though creating the namespace succeeded: what is
 		// denied is the privilege inside it.
 		//
-		// UNVERIFIED: the diagnosis is measured (gcp1 has the sysctl set and
-		// fails exactly here), but neither remedy below has been run on a
-		// restricted machine - applying them needs root on a box that is
-		// serving other things. Both are the documented Ubuntu remedies;
-		// treat the wording as advice, not as a tested procedure.
+		// The narrow profile is verified: installed on an Ubuntu 26.04
+		// machine that failed exactly here, after which crun built its
+		// namespace and a job ran end to end. Note that the profile need only
+		// name the pipedpeer binary - crun, which pipedpeer execs, inherits
+		// it. The machine-wide sysctl is the documented alternative and has
+		// not been tried, because the profile made it unnecessary.
 		// Ubuntu 24.04 and later. There is no unprivileged way around this:
 		// the kernel asks AppArmor, and AppArmor's answer depends on a
 		// profile that only root can install. The narrow profile is offered
