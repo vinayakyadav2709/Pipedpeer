@@ -568,7 +568,25 @@ type poolManager struct {
 	deadMu    sync.Mutex
 	deadPeers map[string]bool
 
+	// rates is what every peer has actually managed, measured from the parts
+	// already sent to it. Sizing shares from advertised core counts alone
+	// ignores how loaded a peer is and how slow the link to it is, which are
+	// usually the things that decide whether sending it work helps at all.
+	rates *rateModel
+
+	// coresFn reports a peer's advertised core count, used only as a prior
+	// until that peer has been measured once.
+	coresFn func(peer string) int
+
 	stats poolStats
+}
+
+// peerCores is the prior for an unmeasured peer.
+func (pm *poolManager) peerCores(peer string) int {
+	if pm.coresFn == nil {
+		return 0
+	}
+	return pm.coresFn(peer)
 }
 
 // provenance records where each part of a chunk actually ran, so the answer
@@ -648,7 +666,11 @@ func (p *poolStats) add(f func(*poolStats)) {
 }
 
 func newPoolManager() *poolManager {
-	return &poolManager{workers: make(map[string]*poolWorker), deadPeers: make(map[string]bool)}
+	return &poolManager{
+		workers:   make(map[string]*poolWorker),
+		deadPeers: make(map[string]bool),
+		rates:     newRateModel(),
+	}
 }
 
 // releaseHeapAfterWork forces Go to return freed heap to the OS after heavy
@@ -1094,32 +1116,43 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			// work twice over, oversubscribed, and spilling measures slower
 			// than never spilling at all. Every part still falls back to local
 			// if its peers fail, so nothing is stranded.
-			workers := len(peers) + 1
-			if ch.originLocal {
-				workers = len(peers)
-			}
-			base := len(items) / workers
-			extra := len(items) % workers
+			// Sizes follow measured speed, not headcount. An equal split
+			// across a 20-core box and a 4-core box makes the fast one finish
+			// and wait, so the chunk takes as long as the slowest
+			// participant - which is how adding a machine used to make a job
+			// slower. The scheduler equalises finish times instead, and
+			// declines any peer that cannot start before the rest are done.
+			shares := pm.planShares(items, peers, !ch.originLocal)
 			idx := 0
-			for i := 0; i < workers; i++ {
-				size := base
-				if i < extra {
-					size++
-				}
-				if size == 0 {
+			for _, sh := range shares {
+				if sh.Items == 0 || idx >= len(items) {
 					continue
 				}
+				end := min(idx+sh.Items, len(items))
 				sub := *ch
-				sub.items = items[idx : idx+size]
-				idx += size
-				if i == workers-1 && !ch.originLocal {
-					parts = append(parts, part{c: &sub, runPath: runPath}) // local
-				} else {
-					// Fan out to distinct peers: part i prefers peers[i], so
-					// every healthy peer gets work, not just the best one.
-					ordered := append(append([]string{}, peers[i:]...), peers[:i]...)
-					parts = append(parts, part{c: &sub, peers: ordered})
+				sub.items = items[idx:end]
+				idx = end
+				if sh.Device.ID == localDeviceID {
+					parts = append(parts, part{c: &sub, runPath: runPath})
+					continue
 				}
+				// Preferred peer first, then the rest as fallbacks: a part
+				// whose peer dies still runs somewhere rather than failing.
+				ordered := []string{sh.Device.ID}
+				for _, p := range peers {
+					if p != sh.Device.ID {
+						ordered = append(ordered, p)
+					}
+				}
+				parts = append(parts, part{c: &sub, peers: ordered})
+			}
+			// Anything rounding left over goes to the first part rather than
+			// being dropped; losing items here is silent and corrupts results.
+			if idx < len(items) && len(parts) > 0 {
+				last := parts[len(parts)-1]
+				extra := *last.c
+				extra.items = append(append([]json.RawMessage{}, last.c.items...), items[idx:]...)
+				parts[len(parts)-1].c = &extra
 			}
 		}
 	}
@@ -1151,7 +1184,9 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			if p.runPath != "" {
 				r, e = pm.runLocal(runPath, storePath, p.c)
 				if e == nil {
-					ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
+					d := time.Since(started)
+					ch.prov.record("local", len(p.c.items), d.Milliseconds())
+					pm.rates.observe(localDeviceID, len(p.c.items), d)
 				}
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
@@ -1162,7 +1197,11 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					}
 					r, e = pm.runRemote(peer, storePath, p.c)
 					if e == nil {
-						ch.prov.record("peer:"+peer, len(p.c.items), time.Since(started).Milliseconds())
+						d := time.Since(started)
+						ch.prov.record("peer:"+peer, len(p.c.items), d.Milliseconds())
+						// Timed end to end, so the round trip and the closure
+						// transfer are in the number rather than assumed away.
+						pm.rates.observe(peer, len(p.c.items), d)
 						break
 					}
 					pm.markPeerDead(peer)
@@ -1171,6 +1210,9 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					// D2/D3 — a remote node adds capacity, never subtracts.
 					r, e = pm.runLocal(runPath, storePath, p.c)
 					if e == nil {
+						// Deliberately not measured: this ran locally after a
+						// peer failed, so the elapsed time includes the failed
+						// attempt and would libel this node's own speed.
 						ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
 					}
 				}

@@ -168,6 +168,9 @@ type PeerHealth struct {
 	ActiveJobs   int    `json:"active_jobs"`
 	AvailableMem int64  `json:"available_mem"`
 	Source       string `json:"source"` // "manual", "discovery", "registry"
+	// TotalCPUs is the peer's core count, used only as the prior for how much
+	// pool work to give it before anything has actually been measured there.
+	TotalCPUs int `json:"total_cpus"`
 }
 
 // --- Request/Response types ---
@@ -432,6 +435,20 @@ func (s *Server) StopWarmWorkers() {
 // available memory. runChunk fans out to the best nodes first and falls
 // through to the next best on failure, so the k best nodes carry the work.
 func (s *Server) EnablePoolSpill() {
+	// The prior for a peer nobody has measured yet. Replaced by an actual
+	// measurement as soon as one part comes back from it, which is why a
+	// rough answer here is enough: it only has to be good enough to justify
+	// a first dispatch.
+	s.pool.coresFn = func(peer string) int {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		for addr, ph := range s.peerHealths {
+			if addr == peer {
+				return ph.TotalCPUs
+			}
+		}
+		return 0
+	}
 	s.pool.SetPeerFn(func(storePath, submitter string) []string {
 		s.peersMu.RLock()
 		defer s.peersMu.RUnlock()
@@ -1203,6 +1220,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.Status = "healthy"
 	ph.ActiveJobs = h.ActiveJobs
 	ph.AvailableMem = h.AvailableMem
+	ph.TotalCPUs = h.Load.TotalCPUs
 
 	capsJSON, _ := json.Marshal(h.Capabilities)
 	loadJSON, _ := json.Marshal(h.Load)
