@@ -2,9 +2,19 @@
 """Tiny distributed MLP training loop.
 
 Plain PyTorch. No distributed.init_process_group, no DistributedDataParallel
-import, no rank logic — `pipedpeer run --ddp 3` makes this transparently a
-3-rank DDP run (weight sync after every Optimizer.step via the shim hook).
+import — `pipedpeer run --ddp 3` makes this transparently a 3-rank DDP run
+(weight sync after every Optimizer.step via the shim hook).
+
+It does need to say which slice of the data it is training on. Sharding is
+automatic for a DataLoader, whose sampler the shim can swap; a script like
+this one, which indexes its tensors directly, has to do it itself. Without the
+three lines below every rank trains on the whole dataset, the averaged
+gradient equals the single-process gradient exactly, and the run is correct,
+slower than one machine, and silent about it. Measured before they were added:
+97.7s across two machines against 55.0s on one, with the losses agreeing to
+six digits.
 """
+import os
 import time
 
 import torch
@@ -21,6 +31,15 @@ else:
 n, d = 60_000, 512
 X = torch.randn(n, d, device=device)
 y = (X[:, 0] * 2 + X[:, 1] - X[:, 2] > 0.5).float().unsqueeze(1)
+
+# Each rank takes a disjoint slice. Both variables are 0 and 1 outside a
+# distributed run, so this is a no-op on one machine.
+rank = int(os.environ.get("PIPEDPEER_RANK", 0))
+world = int(os.environ.get("PIPEDPEER_WORLD_SIZE", 1))
+if world > 1:
+    X, y = X[rank::world], y[rank::world]
+    n = X.shape[0]
+    print(f"rank {rank}/{world} training on {n} of {n * world} samples")
 
 
 class MLP(nn.Module):

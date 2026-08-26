@@ -44,8 +44,9 @@ type ddpEntry struct {
 	// individual payloads are dropped, so the lead daemon holds one buffer
 	// instead of one model per rank. result is computed once, when the last
 	// rank arrives, and served to every waiter.
-	acc    *ddpAccumulator
-	result []byte
+	acc         *ddpAccumulator
+	result      []byte
+	resultScale float64
 	// seen tracks which ranks have contributed, since acc keeps only a count
 	// and a rank that retried must not be folded in twice.
 	seen map[int]bool
@@ -59,6 +60,17 @@ type ddpEntry struct {
 	// estimate of how much of its run sync is eating, and the rank suffering
 	// most is the one setting the pace for everybody.
 	syncEvery int
+
+	// fingerprint detects ranks doing identical work. Sharding only happens
+	// automatically for DataLoader-based code; a script that slices its
+	// tensors by hand - which both bundled training demos do - leaves every
+	// rank computing the same batch. The gradients are then identical, the
+	// average equals the single-process gradient exactly, and the run is
+	// correct, slower, and silent about it. This is the only place holding
+	// every rank's contribution, so it is the only place that can notice.
+	fingerprint uint64
+	sameWork    bool
+	checked     bool
 }
 
 type ddpBoard struct {
@@ -92,6 +104,15 @@ type ddpSyncRequest struct {
 	// Reduce mode only.
 	DType ddpDType `json:"dtype,omitempty"`
 	Count int      `json:"count,omitempty"`
+	// Scale is the int8 quantisation step this rank used. Each rank picks its
+	// own from its own values, so it travels with the payload.
+	Scale float64 `json:"scale,omitempty"`
+	// Kind is "grads" or "weights". Only gradients are checked for ranks
+	// duplicating work: the run opens by broadcasting the initial weights,
+	// and those are identical by construction whenever the script seeds its
+	// generator - which every sane training script does. Fingerprinting that
+	// sync reported duplicated work on a correctly sharded run.
+	Kind string `json:"kind,omitempty"`
 	// SyncEvery is this rank's proposal for how often to average. Ranks
 	// measure their own link and compute independently and so arrive at
 	// different numbers; averaging at different points in each rank's step
@@ -193,7 +214,18 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		// model until the last one shows up is what made the lead daemon's
 		// memory scale with the ring.
 		if !e.seen[req.Rank] {
-			if addErr := e.acc.add(blob); addErr != nil {
+			// Only worth doing early: ranks that duplicate work do it from
+			// the first step, and hashing every payload forever would put a
+			// pass over the model into every sync.
+			if req.Kind == "grads" && req.Seq <= ddpFingerprintSeqs {
+				h := fnv1a(blob)
+				if len(e.seen) == 0 {
+					e.fingerprint, e.sameWork, e.checked = h, true, true
+				} else if h != e.fingerprint {
+					e.sameWork = false
+				}
+			}
+			if addErr := e.acc.add(blob, req.Scale); addErr != nil {
 				// Recorded rather than returned to this rank alone: the
 				// others are blocked on a result that is now never coming,
 				// and a timeout three minutes later would name nothing.
@@ -204,7 +236,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		complete = e.err != nil || len(e.seen) == e.world
 		if complete && e.err == nil && e.result == nil {
-			e.result, e.err = e.acc.mean()
+			e.result, e.resultScale, e.err = e.acc.mean()
 			e.acc = nil // the sum is no longer needed; let it go now
 		}
 	} else {
@@ -234,7 +266,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 
 	s.ddp.mu.Lock()
 	if e.acc != nil || e.result != nil || e.err != nil {
-		result, rerr, agreedEvery := e.result, e.err, e.syncEvery
+		result, rerr, agreedEvery, rscale := e.result, e.err, e.syncEvery, e.resultScale
+		sameWork := e.checked && e.sameWork && e.world > 1
 		e.fetched[req.Rank] = true
 		if len(e.fetched) == e.world || rerr != nil {
 			delete(s.ddp.entries, key)
@@ -244,7 +277,9 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": rerr.Error()})
 			return
 		}
-		body := []byte(fmt.Sprintf("{\"reduced\": true, \"sync_every\": %d}\n", agreedEvery))
+		body := []byte(fmt.Sprintf(
+			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"same_work\": %t}\n",
+			agreedEvery, rscale, sameWork))
 		body = putFrame(body, result)
 		w.Header().Set("Content-Type", DDPReduceContentType)
 		w.WriteHeader(http.StatusOK)
@@ -281,4 +316,24 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 func jsonInt(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// ddpFingerprintSeqs is how many early syncs are checked for ranks doing
+// identical work.
+const ddpFingerprintSeqs = 3
+
+// fnv1a is FNV-1a 64. Enough to tell "these two models are the same" from
+// "these two models differ", which is the only question being asked, and fast
+// enough to run over a model without showing up beside a network round trip.
+func fnv1a(b []byte) uint64 {
+	const (
+		offset = 14695981039346656037
+		prime  = 1099511628211
+	)
+	h := uint64(offset)
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= prime
+	}
+	return h
 }

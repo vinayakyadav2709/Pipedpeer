@@ -36,6 +36,12 @@ const (
 	ddpF16 ddpDType = "float16"
 	ddpF32 ddpDType = "float32"
 	ddpF64 ddpDType = "float64"
+	// ddpI8 is fp16 halved again: values are scaled into a signed byte, with
+	// the scale carried in the header. Halving the bytes halves the sync on a
+	// link where sync is the whole cost, and the error it introduces is not
+	// lost - the shim carries it forward and folds it into the next step, so
+	// what is dropped is delayed rather than discarded.
+	ddpI8 ddpDType = "int8"
 )
 
 func (d ddpDType) size() int {
@@ -46,6 +52,8 @@ func (d ddpDType) size() int {
 		return 4
 	case ddpF64:
 		return 8
+	case ddpI8:
+		return 1
 	}
 	return 0
 }
@@ -66,8 +74,9 @@ func newDDPAccumulator(dtype ddpDType, n int) *ddpAccumulator {
 	return &ddpAccumulator{dtype: dtype, sum: make([]float64, n)}
 }
 
-// add folds one rank's payload into the running sum.
-func (a *ddpAccumulator) add(payload []byte) error {
+// add folds one rank's payload into the running sum. scale is meaningful only
+// for int8, where each rank picks its own from its own values.
+func (a *ddpAccumulator) add(payload []byte, scale float64) error {
 	want := len(a.sum) * a.dtype.size()
 	if len(payload) != want {
 		return fmt.Errorf("payload is %d bytes, want %d for %d %s values",
@@ -86,6 +95,13 @@ func (a *ddpAccumulator) add(payload []byte) error {
 		for i := range a.sum {
 			a.sum[i] += math.Float64frombits(binary.LittleEndian.Uint64(payload[i*8:]))
 		}
+	case ddpI8:
+		if scale <= 0 {
+			return fmt.Errorf("int8 payload needs a positive scale")
+		}
+		for i := range a.sum {
+			a.sum[i] += float64(int8(payload[i])) * scale
+		}
 	default:
 		return fmt.Errorf("unsupported dtype %q", a.dtype)
 	}
@@ -93,10 +109,15 @@ func (a *ddpAccumulator) add(payload []byte) error {
 	return nil
 }
 
-// mean divides by the number of contributors and encodes at the wire width.
-func (a *ddpAccumulator) mean() ([]byte, error) {
+// mean divides by the number of contributors and encodes at the wire width,
+// returning the scale when the width needs one.
+//
+// Every rank gets these identical bytes, so quantising the reply adds noise to
+// the update without letting the ranks drift apart - they still hold exactly
+// the same model afterwards, which is the property that matters.
+func (a *ddpAccumulator) mean() ([]byte, float64, error) {
 	if a.count == 0 {
-		return nil, fmt.Errorf("no ranks contributed")
+		return nil, 0, fmt.Errorf("no ranks contributed")
 	}
 	inv := 1 / float64(a.count)
 	out := make([]byte, len(a.sum)*a.dtype.size())
@@ -113,10 +134,33 @@ func (a *ddpAccumulator) mean() ([]byte, error) {
 		for i, v := range a.sum {
 			binary.LittleEndian.PutUint64(out[i*8:], math.Float64bits(v*inv))
 		}
+	case ddpI8:
+		peak := 0.0
+		for _, v := range a.sum {
+			if m := math.Abs(v * inv); m > peak {
+				peak = m
+			}
+		}
+		if peak == 0 {
+			return out, 1, nil // all zeros; any positive scale decodes correctly
+		}
+		scale := peak / 127
+		for i, v := range a.sum {
+			q := math.Round(v * inv / scale)
+			// Clamp rather than wrap: a wrapped gradient flips sign, and a
+			// gradient that flips sign is worse than one that saturates.
+			if q > 127 {
+				q = 127
+			} else if q < -127 {
+				q = -127
+			}
+			out[i] = byte(int8(q))
+		}
+		return out, scale, nil
 	default:
-		return nil, fmt.Errorf("unsupported dtype %q", a.dtype)
+		return nil, 0, fmt.Errorf("unsupported dtype %q", a.dtype)
 	}
-	return out, nil
+	return out, 0, nil
 }
 
 // float16ToFloat32 decodes IEEE 754 binary16. Written out rather than pulled
