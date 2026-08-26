@@ -31,6 +31,11 @@ type ExecConfig struct {
 	GPUDevices string   `json:"gpu_devices,omitempty"`
 	// Intercept enables the sitecustomize shim on the node.
 	Intercept bool `json:"intercept,omitempty"`
+	// MemLimitBytes caps the sandbox's memory via cgroups. Everything else
+	// about memory here is an estimate checked at admission; this is the only
+	// part the kernel enforces, and without it a job that outgrows its
+	// estimate takes the whole machine down rather than itself.
+	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
 }
 
 type outputMessage struct {

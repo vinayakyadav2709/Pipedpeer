@@ -185,6 +185,10 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		GPU:        opts.GPU,
 		GPUDevices: opts.GPUDevices,
 		Intercept:  opts.Intercept,
+		// Headroom over the estimate: the estimator is deliberately rough,
+		// and a cap that trips on a job that would have fitted is worse than
+		// no cap. This only has to catch runaway growth.
+		MemLimitBytes: memLimitFor(opts.EstimatedMemBytes),
 	}
 
 	peakBytes, stdoutText, stderrText, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
@@ -229,4 +233,22 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		fmt.Printf("History: %s\n", historyDir)
 	}
 	return nil
+}
+
+// memLimitFor turns a memory estimate into a cgroup ceiling.
+//
+// Doubling it is deliberate. The estimate comes from import baselines or the
+// last run's peak, both approximations, and a limit that kills a job which
+// would have completed is a worse failure than the one it prevents. The point
+// is to stop a runaway allocation taking the machine down with it, not to
+// hold jobs to their forecast.
+func memLimitFor(estimate int64) int64 {
+	if estimate <= 0 {
+		return 0 // nothing to go on: leave it uncapped rather than guess
+	}
+	const floor = 512 << 20
+	if limit := estimate * 2; limit > floor {
+		return limit
+	}
+	return floor
 }

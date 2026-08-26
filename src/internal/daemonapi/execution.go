@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/rs/zerolog/log"
 	"io"
 	"io/fs"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,6 +39,10 @@ type ExecConfig struct {
 	// Intercept enables the sitecustomize shim: PYTHONPATH gains the workspace's
 	// .pipedpeer/shim dir and the shim's envs are injected.
 	Intercept bool `json:"intercept,omitempty"`
+	// MemLimitBytes caps the sandbox via cgroups; 0 leaves it uncapped.
+	// Everything else about memory here is an estimate checked at admission;
+	// this is the only part the kernel enforces.
+	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
 }
 
 // OCI config structures for crun bundle generation.
@@ -70,8 +76,26 @@ type ociMount struct {
 	Options     []string `json:"options,omitempty"`
 }
 type ociLinux struct {
-	Namespaces []ociNamespace `json:"namespaces"`
-	Devices    []ociDevice    `json:"devices,omitempty"`
+	Namespaces  []ociNamespace `json:"namespaces"`
+	Devices     []ociDevice    `json:"devices,omitempty"`
+	Resources   *ociResources  `json:"resources,omitempty"`
+	CgroupsPath string         `json:"cgroupsPath,omitempty"`
+}
+
+// ociResources carries the only memory bound the kernel actually enforces.
+// Admission control and the 40%-of-free-RAM chunk rule are both estimates
+// made before the fact; a job that outgrows its estimate used to take the
+// machine down with it, because nothing below those estimates said no.
+type ociResources struct {
+	Memory *ociMemory `json:"memory,omitempty"`
+}
+
+type ociMemory struct {
+	Limit int64 `json:"limit,omitempty"`
+	// Swap is pinned to Limit so the job cannot escape the cap by swapping,
+	// which on a machine with swap turns an OOM into thrashing that takes
+	// every other job on the node down with it.
+	Swap int64 `json:"swap,omitempty"`
 }
 type ociNamespace struct {
 	Type string `json:"type"`
@@ -659,6 +683,18 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 
+		// The one memory bound the kernel enforces. Everything else is an
+		// estimate made before the job ran: admission checks a forecast, and
+		// the 40%-of-free-RAM chunk rule bounds a payload, but neither can
+		// stop a job that simply allocates more than it said it would. Until
+		// now nothing did, so one job's runaway allocation was every other
+		// job on the node's problem too.
+		parent, canCap := cgroupParent()
+		if applyMemLimit(&ociCfg, cfg.MemLimitBytes, parent, canCap, jobID) {
+			log.Info().Int64("bytes", cfg.MemLimitBytes).Str("job", jobID).
+				Msg("job memory capped by cgroup")
+		}
+
 		if cfg.GPU {
 			gpuInfo := gpu.Detect()
 			for _, d := range gpuInfo.Devices {
@@ -935,4 +971,97 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 		return out, err
 	}
 	return run("--import")
+}
+
+// cgroupParent returns a cgroup this process may create children under, and
+// whether a memory limit can be enforced at all.
+//
+// The obvious answer, the cgroup root, is only writable by root: a daemon
+// running as an ordinary user got "create /sys/fs/cgroup/pipedpeer:
+// permission denied" and the job failed outright, which is a worse outcome
+// than the unbounded memory the limit was meant to prevent. Under cgroup v2
+// the user's own scope is delegated, so children of it can be created
+// without privilege — that is where job cgroups belong.
+//
+// Probed once. A machine without cgroup v2, or without delegation, gets no
+// limit and one warning rather than a broken sandbox.
+var cgroupParentOnce struct {
+	sync.Once
+	path string
+	ok   bool
+}
+
+func cgroupParent() (string, bool) {
+	cgroupParentOnce.Do(func() {
+		data, err := os.ReadFile("/proc/self/cgroup")
+		if err != nil {
+			log.Warn().Err(err).Msg("no cgroup v2: jobs run without a memory limit")
+			return
+		}
+		var own string
+		for _, line := range strings.Split(string(data), "\n") {
+			// cgroup v2 has exactly one entry, "0::<path>". A v1 hierarchy
+			// lists numbered controllers instead, and is not handled.
+			if strings.HasPrefix(line, "0::") {
+				own = strings.TrimPrefix(line, "0::")
+				break
+			}
+		}
+		if own == "" {
+			log.Warn().Msg("cgroup v1 or unknown layout: jobs run without a memory limit")
+			return
+		}
+		root := filepath.Join("/sys/fs/cgroup", own)
+		probe := filepath.Join(root, "pipedpeer-probe")
+		if err := os.Mkdir(probe, 0o755); err != nil && !os.IsExist(err) {
+			log.Warn().Err(err).Str("cgroup", own).
+				Msg("cgroup not delegated: jobs run without a memory limit")
+			return
+		}
+		defer os.Remove(probe)
+
+		// Creating the cgroup is not enough: a child only gets memory.max if
+		// the parent has handed the memory controller down via
+		// subtree_control. crun's error for the gap is "open `memory.max`
+		// for writing: No such file or directory", and it fails the job -
+		// so this has to be settled here rather than discovered at run time.
+		if _, err := os.Stat(filepath.Join(probe, "memory.max")); err != nil {
+			// Try to delegate it. This fails with EBUSY on a cgroup that
+			// holds processes, which is the ordinary case for a daemon
+			// running as a user: cgroup v2 forbids a non-root cgroup from
+			// having both member processes and controllers enabled for its
+			// children. Running the daemon as root, or under a systemd unit
+			// with Delegate=yes, is what makes limits enforceable.
+			_ = os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte("+memory"), 0o644)
+			if _, err := os.Stat(filepath.Join(probe, "memory.max")); err != nil {
+				log.Warn().Str("cgroup", own).
+					Msg("memory controller not delegated to child cgroups: jobs run " +
+						"without a memory limit (run the daemon as root or under a " +
+						"systemd unit with Delegate=yes to enforce one)")
+				return
+			}
+		}
+		cgroupParentOnce.path, cgroupParentOnce.ok = own, true
+	})
+	return cgroupParentOnce.path, cgroupParentOnce.ok
+}
+
+// applyMemLimit puts a cgroup memory cap on the bundle, and reports whether
+// it did. Split out from bundle assembly so the decision can be tested
+// without a delegated cgroup hierarchy, which most machines do not have:
+// rootless podman on a user session cannot hand the memory controller to
+// child cgroups at all, so the enforcing path is unreachable there.
+//
+// Swap is pinned to the same value deliberately. Left alone, a job that hits
+// its cap starts swapping instead of failing, and thrashing takes every other
+// job on the node down with it rather than just itself.
+func applyMemLimit(cfg *ociConfig, limit int64, parent string, canCap bool, jobID string) bool {
+	if limit <= 0 || !canCap || cfg.Linux == nil {
+		return false
+	}
+	cfg.Linux.Resources = &ociResources{
+		Memory: &ociMemory{Limit: limit, Swap: limit},
+	}
+	cfg.Linux.CgroupsPath = filepath.Join(parent, "pipedpeer", jobID)
+	return true
 }

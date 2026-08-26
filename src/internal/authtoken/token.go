@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"flag"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -62,6 +63,16 @@ func Current() string {
 		return cached
 	}
 	loaded = true
+	if underTest() {
+		// A test binary must never pick up the operator's real secret. It
+		// did: every package whose tests start or call a daemon began
+		// getting 401s on a machine where a token was configured, and in the
+		// coordinator that presented as a ten-minute timeout rather than an
+		// error — a failure about the developer's machine, not the code.
+		// Tests that mean to exercise auth call Set(), which fills the cache
+		// directly and is unaffected by this.
+		return cached
+	}
 	if v := strings.TrimSpace(os.Getenv(EnvVar)); v != "" {
 		cached = v
 		return cached
@@ -71,6 +82,15 @@ func Current() string {
 		cached = strings.TrimSpace(string(b))
 	}
 	return cached
+}
+
+// underTest reports whether this process is a `go test` binary. Those are
+// linked as <package>.test; the testing flags are not registered yet during
+// package initialisation, so the name is the reliable signal.
+func underTest() bool {
+	return strings.HasSuffix(os.Args[0], ".test") ||
+		strings.Contains(os.Args[0], "/_test/") ||
+		flag.Lookup("test.v") != nil
 }
 
 // Set writes a token, or clears it when tok is empty.
