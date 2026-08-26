@@ -30,6 +30,11 @@ for i in 1 2 3; do
 done
 sleep 1
 
+# Workers are recreated on every run, so each gets a new certificate and last
+# run's pin is stale. Refusing them is correct for real machines and pure
+# friction here, where the daemons are disposable by design.
+"$bin" auth forget --all >/dev/null 2>&1 || true
+
 mkdir -p "$labdir"
 rm -f "$labdir/pipedpeer"
 cp "$bin" "$labdir/pipedpeer"
