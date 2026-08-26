@@ -251,3 +251,163 @@ func TestPunchKeepsSendingAfterItSucceeds(t *testing.T) {
 		t.Error("the peer saw nothing after the path opened: we went quiet immediately")
 	}
 }
+
+// TestFilteringIsMeasuredSeparatelyFromMapping covers the distinction that
+// made an earlier verdict wrong.
+//
+// Mapping - the address a router presents - is the half a public STUN server
+// can answer, and net-check used to report "no relay needed" on the strength
+// of it alone. Whether the router accepts a packet from a host it has never
+// written to is a different question and the one an introduced peer's first
+// packet depends on. Measured on a phone-tethered machine: endpoint-
+// independent mapping, and nothing inbound arrives at all.
+func TestFilteringIsMeasuredSeparatelyFromMapping(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = ReflectPair(ctx, a, b) }()
+	go func() { _ = ReflectPair(ctx, b, a) }()
+
+	got, err := Probe(ctx, []string{a.LocalAddr().String(), b.LocalAddr().String()}, 2*time.Second)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	// Loopback accepts anything, so the cross-address reply arrives.
+	if got.Filter != FilterOpen {
+		t.Errorf("filter = %q, want %q: the reflector answered from an address "+
+			"this socket never wrote to, and on loopback that must arrive",
+			got.Filter, FilterOpen)
+	}
+}
+
+// TestFilteringUnknownAgainstAPlainReflector. A reflector that cannot answer
+// from elsewhere - or a public STUN server - leaves the question open, and
+// "unknown" has to be distinguishable from "restricted" or the report claims
+// a measurement it never made.
+func TestFilteringUnknownAgainstAPlainReflector(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	a, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No sibling: these cannot run the filtering test.
+	go func() { _ = ReflectPair(ctx, a, nil) }()
+	go func() { _ = ReflectPair(ctx, b, nil) }()
+
+	got, err := Probe(ctx, []string{a.LocalAddr().String(), b.LocalAddr().String()}, time.Second)
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if got.Mapping != EndpointIndependent {
+		t.Errorf("mapping = %q; the reflectors both saw the same source", got.Mapping)
+	}
+	if got.Filter == FilterOpen {
+		t.Error("reported open filtering though no reflector answered from " +
+			"anywhere else; that verdict was never measured")
+	}
+}
+
+// TestFilterTestRunsBeforeTheMappingProbes pins down the ordering the test's
+// validity rests on.
+//
+// The filtering test asks one reflector to answer from another address, and
+// that address is only a stranger while this socket has never written to it.
+// The mapping probes write to every server. Run in the wrong order the test
+// measures nothing and says "accepts strangers" about everything - which it
+// did, on a phone-tethered link that accepted nothing at all.
+func TestFilterTestRunsBeforeTheMappingProbes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// b records whether it had been written to before it was asked to answer
+	// on a's behalf.
+	writtenToB := make(chan struct{}, 1)
+	crossReply := make(chan bool, 1)
+
+	b, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	a, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			_, from, err := b.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			select {
+			case writtenToB <- struct{}{}:
+			default:
+			}
+			reply, _ := json.Marshal(Reflection{You: from.String(), From: b.LocalAddr().String()})
+			_, _ = b.WriteTo(reply, from)
+		}
+	}()
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, from, err := a.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			var msg probeMsg
+			_ = json.Unmarshal(buf[:n], &msg)
+			if msg.FromOther {
+				// Record whether b had already been contacted directly when
+				// the cross-reply was requested.
+				var already bool
+				select {
+				case <-writtenToB:
+					already = true
+					writtenToB <- struct{}{}
+				default:
+				}
+				select {
+				case crossReply <- already:
+				default:
+				}
+				reply, _ := json.Marshal(Reflection{You: from.String(), From: b.LocalAddr().String()})
+				_, _ = b.WriteTo(reply, from)
+				continue
+			}
+			reply, _ := json.Marshal(Reflection{You: from.String(), From: a.LocalAddr().String()})
+			_, _ = a.WriteTo(reply, from)
+		}
+	}()
+
+	if _, err := Probe(ctx, []string{a.LocalAddr().String(), b.LocalAddr().String()}, time.Second); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+
+	select {
+	case already := <-crossReply:
+		if already {
+			t.Error("the filtering test ran after the mapping probes had already " +
+				"written to the second address, so the reply was not from a stranger " +
+				"and the verdict measures nothing")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the filtering test never ran")
+	}
+}
