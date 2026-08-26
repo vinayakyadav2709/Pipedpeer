@@ -532,7 +532,7 @@ func (s *Server) broadcastClosure(storePath string) {
 			if s.peerHasStore(&ph, storePath) {
 				continue
 			}
-			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
+			if err := s.importStoreOnPeer(&ph, storePath, narPath); err != nil {
 				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
 					Msg("closure broadcast failed")
 			}
@@ -549,7 +549,7 @@ func (s *Server) broadcastClosure(storePath string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
+			if err := s.importStoreOnPeer(&ph, storePath, narPath); err != nil {
 				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
 					Msg("closure broadcast failed")
 			}
@@ -559,7 +559,7 @@ func (s *Server) broadcastClosure(storePath string) {
 }
 
 // importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
-func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
+func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 	// Send only what this peer lacks. The whole-closure archive is keyed on
 	// the top-level store path, so two environments differing by one package
 	// share none of it and every byte of python, numpy and the interpreter
@@ -569,7 +569,7 @@ func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 	// Best-effort throughout: any failure here falls back to the whole
 	// archive, which is correct, just larger.
 	partial := false
-	if diff, ok := diffNARFor(ph, storePath); ok {
+	if diff, ok := srv.diffNARFor(ph, storePath); ok {
 		defer os.RemoveAll(filepath.Dir(diff))
 		narPath, partial = diff, true
 	}
@@ -1677,20 +1677,38 @@ func rewriteHost(endpoint, host string) string {
 // missing, and reports whether it is worth using. The caller keeps the whole
 // archive when this declines, so every failure mode here is a slower
 // transfer rather than a broken one.
-func diffNARFor(ph *PeerHealth, storePath string) (string, bool) {
+func (s *Server) diffNARFor(ph *PeerHealth, storePath string) (string, bool) {
+	// Register the closure in the local store first. It arrives as a cached
+	// archive and is otherwise only imported at exec time, so until then this
+	// node cannot answer questions about its own contents - nix says "path is
+	// not valid" - and every transfer falls back to the whole archive. Doing
+	// it here rather than before the peer loop keeps the "peer already has
+	// it" check answering about the peer.
+	_ = s.materializeClosure(storePath)
+
+	// Each decline is logged: a transfer that quietly sends everything looks
+	// exactly like one that sent only what was needed, and the whole point of
+	// this path is the difference between those two.
 	paths, err := closurePaths(storePath)
 	if err != nil || len(paths) == 0 {
+		log.Info().Err(err).Str("store", storePath).
+			Msg("cannot list closure paths; sending the whole archive")
 		return "", false
 	}
 	missing, ok := peerMissingPaths(ph.Host, ph.Port, paths)
 	if !ok {
-		return "", false // older peer: it does not know the question
+		log.Info().Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+			Msg("peer did not answer which paths it lacks; sending the whole archive")
+		return "", false
 	}
 	if len(missing) == 0 {
-		return "", false // it has everything; the caller's own gate handles that
+		log.Info().Msg("peer already has every path; nothing to send")
+		return "", false
 	}
 	if len(missing) == len(paths) {
-		return "", false // shares nothing, so a diff saves nothing
+		log.Info().Int("paths", len(paths)).
+			Msg("peer shares no paths with this closure; a diff would save nothing")
+		return "", false
 	}
 	dir, err := userdir.Scratch("nardiff-*")
 	if err != nil {
