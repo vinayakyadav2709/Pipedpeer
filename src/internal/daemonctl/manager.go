@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"net/http"
 	"os"
@@ -85,7 +86,16 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	if maxConcurrent > 0 {
 		args = append(args, "--max-concurrent", strconv.Itoa(maxConcurrent))
 	}
-	cmd := exec.Command(exe, args...)
+	// Start inside a delegated user scope when this process is not already in
+	// one. Without it the daemon inherits an ssh session scope that systemd
+	// owns as root, no job cgroup can be created, and every job runs with an
+	// unenforced memory limit. `systemd-run --user` needs no privilege - it
+	// talks to the caller's own systemd manager - and returns nil on machines
+	// with no systemd, where the daemon starts exactly as it did before.
+	argv := append([]string{exe}, args...)
+	argv = append(cgroups.ScopePrefix("pipedpeer-daemon-"+strconv.Itoa(port)), argv...)
+
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

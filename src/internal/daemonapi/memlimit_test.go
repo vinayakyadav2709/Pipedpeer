@@ -14,10 +14,10 @@ import (
 // it said it would, and until this existed nothing could — one job's runaway
 // allocation was every other job on the node's problem.
 //
-// Kernel enforcement itself cannot be exercised here: rootless podman on a
-// user session cannot delegate the memory controller to child cgroups, so
-// the enforcing path is unreachable on an ordinary developer machine. What
-// is tested is the decision and the shape of the config crun receives.
+// This test covers the decision and the shape of the config crun receives.
+// Kernel enforcement is a property of the cgroup tree, not of this function;
+// it is covered by TestPrepareEnforcesMemoryLimit in internal/cgroups, which
+// skips itself when the machine has no delegated hierarchy.
 func TestApplyMemLimit(t *testing.T) {
 	base := func() ociConfig {
 		return ociConfig{Linux: &ociLinux{
@@ -27,7 +27,7 @@ func TestApplyMemLimit(t *testing.T) {
 
 	t.Run("applied when a limit is set and cgroups allow it", func(t *testing.T) {
 		cfg := base()
-		if !applyMemLimit(&cfg, 512<<20, "/user.slice/scope", true, "job-1") {
+		if !applyMemLimit(&cfg, 512<<20, "/user.slice/scope/pipedpeer", true, "job-1") {
 			t.Fatal("limit not applied")
 		}
 		if cfg.Linux.Resources == nil || cfg.Linux.Resources.Memory == nil {

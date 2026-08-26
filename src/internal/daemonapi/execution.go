@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"github.com/rs/zerolog/log"
 	"io"
@@ -116,6 +117,10 @@ type OutputMessage struct {
 	Error    string `json:"error,omitempty"`
 	Done     bool   `json:"done,omitempty"`
 	ExitCode int    `json:"exit_code"`
+	// OOMKilled says the kernel killed the job for exceeding MemLimitBytes,
+	// so the client can say that instead of reporting a signal number.
+	OOMKilled     bool  `json:"oom_killed,omitempty"`
+	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
 	// PeakMemBytes is the largest RSS (process tree, bytes) seen while running.
 	// It is set on the Done frame so the submitter can learn a job's real
 	// footprint and feed the historical estimation tier.
@@ -585,6 +590,13 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Tracked across the branch so a job killed by its own memory cap can be
+	// reported as that, rather than as a bare "exited with code 137" the user
+	// has no way to interpret.
+	var capBytes int64
+	var capParent string
+	var oomBefore int64
+
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
 		cmd := exec.Command("sh", "-c", runCmd)
@@ -702,10 +714,24 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		// stop a job that simply allocates more than it said it would. Until
 		// now nothing did, so one job's runaway allocation was every other
 		// job on the node's problem too.
-		parent, canCap := cgroupParent()
+		parent, canCap, why := cgroups.Prepare()
 		if applyMemLimit(&ociCfg, cfg.MemLimitBytes, parent, canCap, jobID) {
 			log.Info().Int64("bytes", cfg.MemLimitBytes).Str("job", jobID).
-				Msg("job memory capped by cgroup")
+				Str("cgroup", parent).Msg("job memory capped by cgroup")
+			capBytes, capParent = cfg.MemLimitBytes, parent
+			// memory.events is hierarchical, so the parent's counter covers
+			// every job cgroup beneath it. Snapshotting it here turns "some
+			// job was OOM-killed at some point" into "a kill happened while
+			// this job ran", which is what makes the attribution safe.
+			oomBefore = oomKills(parent)
+		} else if !canCap {
+			// One warning per daemon, not per job: the reason never changes
+			// within a process, and a silent unlimited sandbox is exactly the
+			// thing this whole path exists to stop.
+			noCapOnce.Do(func() {
+				log.Warn().Str("reason", why).Msg("jobs run without an enforced memory limit; " +
+					"start the daemon with `pipedpeer start` on a systemd machine to get one")
+			})
 		}
 
 		if cfg.GPU {
@@ -821,7 +847,15 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	outCh <- OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
+	done := OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
+	// 137 is SIGKILL. With a cap in force and a fresh kill recorded under our
+	// cgroup, the cause is the cap; without the counter moving it could just
+	// as well have been an operator's kill -9, so it is not claimed.
+	if exitCode == 137 && capBytes > 0 && oomKills(capParent) > oomBefore {
+		done.OOMKilled = true
+		done.MemLimitBytes = capBytes
+	}
+	outCh <- done
 	close(outCh)
 	<-writerDone
 	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
@@ -991,84 +1025,13 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 	return run("--import")
 }
 
-// cgroupParent returns a cgroup this process may create children under, and
-// whether a memory limit can be enforced at all.
-//
-// The obvious answer, the cgroup root, is only writable by root: a daemon
-// running as an ordinary user got "create /sys/fs/cgroup/pipedpeer:
-// permission denied" and the job failed outright, which is a worse outcome
-// than the unbounded memory the limit was meant to prevent. Under cgroup v2
-// the user's own scope is delegated, so children of it can be created
-// without privilege — that is where job cgroups belong.
-//
-// Probed once. A machine without cgroup v2, or without delegation, gets no
-// limit and one warning rather than a broken sandbox.
-var cgroupParentOnce struct {
-	sync.Once
-	path string
-	ok   bool
-}
-
-func cgroupParent() (string, bool) {
-	cgroupParentOnce.Do(func() {
-		data, err := os.ReadFile("/proc/self/cgroup")
-		if err != nil {
-			log.Warn().Err(err).Msg("no cgroup v2: jobs run without a memory limit")
-			return
-		}
-		var own string
-		for _, line := range strings.Split(string(data), "\n") {
-			// cgroup v2 has exactly one entry, "0::<path>". A v1 hierarchy
-			// lists numbered controllers instead, and is not handled.
-			if strings.HasPrefix(line, "0::") {
-				own = strings.TrimPrefix(line, "0::")
-				break
-			}
-		}
-		if own == "" {
-			log.Warn().Msg("cgroup v1 or unknown layout: jobs run without a memory limit")
-			return
-		}
-		root := filepath.Join("/sys/fs/cgroup", own)
-		probe := filepath.Join(root, "pipedpeer-probe")
-		if err := os.Mkdir(probe, 0o755); err != nil && !os.IsExist(err) {
-			log.Warn().Err(err).Str("cgroup", own).
-				Msg("cgroup not delegated: jobs run without a memory limit")
-			return
-		}
-		defer os.Remove(probe)
-
-		// Creating the cgroup is not enough: a child only gets memory.max if
-		// the parent has handed the memory controller down via
-		// subtree_control. crun's error for the gap is "open `memory.max`
-		// for writing: No such file or directory", and it fails the job -
-		// so this has to be settled here rather than discovered at run time.
-		if _, err := os.Stat(filepath.Join(probe, "memory.max")); err != nil {
-			// Try to delegate it. This fails with EBUSY on a cgroup that
-			// holds processes, which is the ordinary case for a daemon
-			// running as a user: cgroup v2 forbids a non-root cgroup from
-			// having both member processes and controllers enabled for its
-			// children. Running the daemon as root, or under a systemd unit
-			// with Delegate=yes, is what makes limits enforceable.
-			_ = os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), []byte("+memory"), 0o644)
-			if _, err := os.Stat(filepath.Join(probe, "memory.max")); err != nil {
-				log.Warn().Str("cgroup", own).
-					Msg("memory controller not delegated to child cgroups: jobs run " +
-						"without a memory limit (run the daemon as root or under a " +
-						"systemd unit with Delegate=yes to enforce one)")
-				return
-			}
-		}
-		cgroupParentOnce.path, cgroupParentOnce.ok = own, true
-	})
-	return cgroupParentOnce.path, cgroupParentOnce.ok
-}
+// noCapOnce keeps the "no memory limit" warning to one line per daemon.
+var noCapOnce sync.Once
 
 // applyMemLimit puts a cgroup memory cap on the bundle, and reports whether
-// it did. Split out from bundle assembly so the decision can be tested
-// without a delegated cgroup hierarchy, which most machines do not have:
-// rootless podman on a user session cannot hand the memory controller to
-// child cgroups at all, so the enforcing path is unreachable there.
+// it did. parent comes from cgroups.Prepare, which has already proved that a
+// child of it gets a writable memory.max; split out from bundle assembly so
+// the decision can be tested on a machine with no delegated hierarchy.
 //
 // Swap is pinned to the same value deliberately. Left alone, a job that hits
 // its cap starts swapping instead of failing, and thrashing takes every other
@@ -1080,6 +1043,30 @@ func applyMemLimit(cfg *ociConfig, limit int64, parent string, canCap bool, jobI
 	cfg.Linux.Resources = &ociResources{
 		Memory: &ociMemory{Limit: limit, Swap: limit},
 	}
-	cfg.Linux.CgroupsPath = filepath.Join(parent, "pipedpeer", jobID)
+	cfg.Linux.CgroupsPath = filepath.Join(parent, jobID)
 	return true
+}
+
+// oomKills reads the cumulative oom_kill counter for a cgroup and everything
+// under it. Unreadable counts as zero: the caller only ever compares two
+// samples, and a missing file makes the comparison decline to attribute
+// rather than attribute wrongly.
+func oomKills(parent string) int64 {
+	if parent == "" {
+		return 0
+	}
+	data, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", parent, "memory.events"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[0] == "oom_kill" {
+			n, err := strconv.ParseInt(f[1], 10, 64)
+			if err == nil {
+				return n
+			}
+		}
+	}
+	return 0
 }
