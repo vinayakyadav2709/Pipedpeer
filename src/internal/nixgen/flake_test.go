@@ -6,7 +6,7 @@ import (
 )
 
 func TestGenerateFlakeWithoutPackages(t *testing.T) {
-	flake := GenerateFlake(nil, "")
+	flake := GenerateFlake(nil, "", true)
 	if !strings.Contains(flake, "pkgs.python3") {
 		t.Fatalf("expected plain python runtime in flake")
 	}
@@ -16,7 +16,7 @@ func TestGenerateFlakeWithoutPackages(t *testing.T) {
 }
 
 func TestGenerateFlakeWithPackages(t *testing.T) {
-	flake := GenerateFlake([]string{"numpy", "pandas"}, "python310")
+	flake := GenerateFlake([]string{"numpy", "pandas"}, "python310", true)
 	if !strings.Contains(flake, "pkgs.python310.withPackages") {
 		t.Fatalf("expected withPackages section with python310")
 	}
@@ -26,21 +26,21 @@ func TestGenerateFlakeWithPackages(t *testing.T) {
 }
 
 func TestGenerateFlakePythonVersionDefault(t *testing.T) {
-	flake := GenerateFlake([]string{"numpy"}, "")
+	flake := GenerateFlake([]string{"numpy"}, "", true)
 	if !strings.Contains(flake, "pkgs.python3.withPackages") {
 		t.Fatalf("expected default python3 when version is empty, got:\n%s", flake)
 	}
 }
 
 func TestGenerateFlakePythonVersionExplicit(t *testing.T) {
-	flake := GenerateFlake(nil, "python311")
+	flake := GenerateFlake(nil, "python311", true)
 	if !strings.Contains(flake, "pkgs.python311") {
 		t.Fatalf("expected python311 in flake, got:\n%s", flake)
 	}
 }
 
 func TestGenerateFlakeForArchAarch64(t *testing.T) {
-	flake := GenerateFlakeForArch([]string{"numpy"}, "", "aarch64-linux")
+	flake := GenerateFlakeForArch([]string{"numpy"}, "", "aarch64-linux", true)
 	if !strings.Contains(flake, "packages.aarch64-linux.default") {
 		t.Fatalf("expected aarch64-linux in flake, got:\n%s", flake)
 	}
@@ -50,7 +50,7 @@ func TestGenerateFlakeForArchAarch64(t *testing.T) {
 }
 
 func TestGenerateFlakeSklearnPinnedOnX8664(t *testing.T) {
-	flake := GenerateFlakeForArch([]string{"numpy", "scikit-learn"}, "", "x86_64-linux")
+	flake := GenerateFlakeForArch([]string{"numpy", "scikit-learn"}, "", "x86_64-linux", true)
 	if !strings.Contains(flake, `version = "1.9.0"`) {
 		t.Fatalf("expected sklearn 1.9.0 wheel override, got:\n%s", flake)
 	}
@@ -63,7 +63,7 @@ func TestGenerateFlakeSklearnPinnedOnX8664(t *testing.T) {
 }
 
 func TestGenerateFlakeSklearnUnpinnedOnOtherArch(t *testing.T) {
-	flake := GenerateFlakeForArch([]string{"scikit-learn"}, "", "aarch64-linux")
+	flake := GenerateFlakeForArch([]string{"scikit-learn"}, "", "aarch64-linux", true)
 	if strings.Contains(flake, `version = "1.9.0"`) {
 		t.Fatalf("did not expect wheel override on non-x86_64 arch:\n%s", flake)
 	}
@@ -98,10 +98,10 @@ func TestNixArchReturnsValidFormat(t *testing.T) {
 // NAR that should have travelled once.
 func TestGeneratedFlakesPinNixpkgs(t *testing.T) {
 	flakes := map[string]string{
-		"no packages":  GenerateFlakeForArch(nil, "", "x86_64-linux"),
-		"with numpy":   GenerateFlakeForArch([]string{"numpy"}, "python3", "x86_64-linux"),
-		"with torch":   GenerateFlakeForArch([]string{"torch"}, "python3", "x86_64-linux"),
-		"non-x86 arch": GenerateFlakeForArch([]string{"numpy"}, "python3", "aarch64-linux"),
+		"no packages":  GenerateFlakeForArch(nil, "", "x86_64-linux", true),
+		"with numpy":   GenerateFlakeForArch([]string{"numpy"}, "python3", "x86_64-linux", true),
+		"with torch":   GenerateFlakeForArch([]string{"torch"}, "python3", "x86_64-linux", true),
+		"non-x86 arch": GenerateFlakeForArch([]string{"numpy"}, "python3", "aarch64-linux", true),
 	}
 
 	for name, flake := range flakes {
@@ -132,7 +132,7 @@ func TestTorchFlakeAlwaysIncludesNumpy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			flake := GenerateFlakeForArch(tt.pkgs, "python3", "x86_64-linux")
+			flake := GenerateFlakeForArch(tt.pkgs, "python3", "x86_64-linux", true)
 			if !strings.Contains(flake, "ps.numpy") {
 				t.Fatalf("torch env without numpy:\n%s", flake)
 			}
@@ -149,7 +149,7 @@ func TestTorchFlakeAlwaysIncludesNumpy(t *testing.T) {
 // nix install can build the env. A plain pip install inside a normal
 // derivation only worked with sandbox = false on every machine.
 func TestTorchFlakeUsesFixedOutputWheelDownload(t *testing.T) {
-	flake := GenerateFlakeForArch([]string{"torch"}, "python3", "x86_64-linux")
+	flake := GenerateFlakeForArch([]string{"torch"}, "python3", "x86_64-linux", true)
 
 	for _, needle := range []string{
 		"outputHash = \"" + torchWheelsHash + "\"",
@@ -170,5 +170,37 @@ func TestTorchFlakeUsesFixedOutputWheelDownload(t *testing.T) {
 		if !strings.Contains(line, "==") {
 			t.Fatalf("unpinned requirement %q", line)
 		}
+	}
+}
+
+// TestTorchWithoutGPUSkipsCUDAClosure pins what importing torch costs.
+//
+// The CUDA branch fired on the mere presence of the import, so a script that
+// never touched a device still shipped the whole wheel set — torch plus
+// cuBLAS, cuDNN, NCCL, triton and the toolkit, several gigabytes — to every
+// node that ran it, even under --gpu off. Wanting a GPU and importing torch
+// are different claims.
+func TestTorchWithoutGPUSkipsCUDAClosure(t *testing.T) {
+	cpu := GenerateFlakeForArch([]string{"torch"}, "", "x86_64-linux", false)
+	if strings.Contains(cpu, "download.pytorch.org") || strings.Contains(cpu, "torchwheels") {
+		t.Error("a CPU job is still fetching the CUDA wheel set")
+	}
+	if !strings.Contains(cpu, "ps.torch") {
+		t.Error("CPU job lost torch entirely; it should come from nixpkgs")
+	}
+
+	gpu := GenerateFlakeForArch([]string{"torch"}, "", "x86_64-linux", true)
+	if !strings.Contains(gpu, "download.pytorch.org") {
+		t.Error("a GPU job is not fetching the CUDA wheels")
+	}
+	// torch imports numpy for array interop; the wheel set does not carry it.
+	if !strings.Contains(gpu, "ps.numpy") {
+		t.Error("CUDA closure is missing numpy")
+	}
+
+	// The two must not collide in the Nix store, or one would be served from
+	// the other's cache entry.
+	if cpu == gpu {
+		t.Error("CPU and GPU closures are identical")
 	}
 }

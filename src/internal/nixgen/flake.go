@@ -76,11 +76,14 @@ typing-extensions==4.16.0
 // torchWheelsHash is the recursive sha256 of the torchRequirements wheel set.
 const torchWheelsHash = "sha256-0C73Ki7qj6q3wK78ocYCu0AhcSsBtZvidwS4pG33zS8="
 
-func GenerateFlake(nixPkgs []string, pythonVersion string) string {
-	return GenerateFlakeForArch(nixPkgs, pythonVersion, NixArch())
+// GenerateFlake builds the environment. gpu selects torch's build: the CUDA
+// wheel set costs several gigabytes, so a script that imports torch without
+// wanting a GPU should not pay for it.
+func GenerateFlake(nixPkgs []string, pythonVersion string, gpu bool) string {
+	return GenerateFlakeForArch(nixPkgs, pythonVersion, NixArch(), gpu)
 }
 
-func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem string) string {
+func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem string, gpu bool) string {
 	if pythonVersion == "" {
 		pythonVersion = "python3"
 	}
@@ -127,7 +130,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 }))`)
 			continue
 		}
-		if pkg == "torch" && nixSystem == "x86_64-linux" {
+		if pkg == "torch" && nixSystem == "x86_64-linux" && gpu {
 			// nixpkgs' ps.torch builds from source (nvcc + triton-llvm: hours).
 			// Instead fetch the official CUDA wheels (cu126) in a fixed-output
 			// derivation — FODs are allowed network even under nix's default
@@ -135,6 +138,13 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 			// then pip-install them offline into a site dir. The run wrapper
 			// prepends the site to PYTHONPATH. Requires the host NVIDIA
 			// driver; the daemon bind-mounts it into sandboxed jobs.
+			//
+			// Only when a GPU was actually asked for. This used to fire on
+			// the mere presence of the import, so a script that never touched
+			// a device still shipped the whole CUDA wheel set - cuBLAS, cuDNN,
+			// NCCL, triton, the toolkit - to every node that ran it. Without a
+			// GPU the closure falls through to nixpkgs' ps.torch, which is
+			// CPU-only and comes from the binary cache.
 			torchCUDA = true
 			continue
 		}

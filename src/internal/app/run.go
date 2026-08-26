@@ -12,12 +12,15 @@ import (
 )
 
 type Options struct {
-	ScriptPath    string
-	DaemonHost    string
-	DaemonPort    int
-	TargetID      string
-	JobName       string
-	Isolate       bool
+	ScriptPath string
+	DaemonHost string
+	DaemonPort int
+	TargetID   string
+	JobName    string
+	Isolate    bool
+	// GPU means this job wants a device: it drives placement and selects the
+	// CUDA build of torch. Off, the closure is several gigabytes smaller —
+	// importing torch is not the same as wanting a GPU.
 	GPU           bool
 	GPUDevices    string
 	Mode          string
@@ -79,6 +82,7 @@ func Run(opts Options) (runErr error) {
 		PythonVersion: opts.PythonVersion,
 		Pkgs:          opts.Pkgs,
 		Intercept:     opts.Intercept,
+		GPU:           opts.GPU,
 	}, func(step int, title string) {
 		if step == 1 {
 			fmt.Printf("[%d/7] %s\n", step, title)
