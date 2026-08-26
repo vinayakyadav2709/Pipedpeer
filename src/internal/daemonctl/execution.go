@@ -40,11 +40,13 @@ type ExecConfig struct {
 }
 
 type outputMessage struct {
-	O        string `json:"o,omitempty"`
-	E        string `json:"e,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Done     bool   `json:"done,omitempty"`
-	ExitCode int    `json:"exit_code"`
+	O             string `json:"o,omitempty"`
+	E             string `json:"e,omitempty"`
+	Error         string `json:"error,omitempty"`
+	Done          bool   `json:"done,omitempty"`
+	ExitCode      int    `json:"exit_code"`
+	OOMKilled     bool   `json:"oom_killed,omitempty"`
+	MemLimitBytes int64  `json:"mem_limit_bytes,omitempty"`
 	// PeakMemBytes mirrors the daemon's field so the client can learn the
 	// job's real footprint and record it for the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
@@ -175,6 +177,14 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		if out.Done {
 			if out.PeakMemBytes > 0 {
 				peakBytes = out.PeakMemBytes
+			}
+			if out.OOMKilled {
+				// Without this the user sees "exited with code 137" and has
+				// no way to know the node protected itself on purpose.
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+					"job ran out of memory: the kernel killed it for exceeding its %s limit. "+
+						"Raise it with --mem, or reduce what the script holds in memory at once",
+					humanBytes(out.MemLimitBytes))
 			}
 			if out.ExitCode != 0 {
 				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote job exited with code %d", out.ExitCode)
@@ -462,4 +472,16 @@ func addFile(mp *multipart.Writer, fieldName, fileName, filePath string) {
 	}
 	defer f.Close()
 	io.Copy(w, f)
+}
+
+// humanBytes renders a byte count the way the --mem flag accepts it.
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1fG", float64(n)/float64(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.0fM", float64(n)/float64(1<<20))
+	default:
+		return fmt.Sprintf("%d bytes", n)
+	}
 }

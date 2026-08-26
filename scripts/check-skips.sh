@@ -29,10 +29,19 @@ must_run=(
 	TestShimPatchesOnFirstImport
 )
 
-log="$(mktemp "${TMPDIR:-/var/tmp}/pipedpeer-skipcheck.XXXXXX")"
+# Not $TMPDIR: /tmp is a tmpfs of limited size on these machines, and a -v
+# run of the whole suite is not small.
+scratch="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
+mkdir -p "$scratch"
+log="$(mktemp "$scratch/pipedpeer-skipcheck.XXXXXX")"
 trap 'rm -f "$log"' EXIT
 
-go test -v -count=1 ./internal/nixgen/ ./internal/daemonapi/ > "$log" 2>&1 || {
+# internal/cgroups is included for its skip line, not for must_run: its
+# enforcement test needs a systemd user manager to delegate a cgroup, which a
+# CI container does not have. It relaunches itself into a delegated scope
+# wherever one is available, so on any developer machine it does run - and if
+# it skips, the "skipped this run" list below says so out loud.
+go test -v -count=1 ./internal/nixgen/ ./internal/daemonapi/ ./internal/cgroups/ > "$log" 2>&1 || {
 	echo "FAIL: tests did not pass"
 	tail -40 "$log"
 	exit 1
