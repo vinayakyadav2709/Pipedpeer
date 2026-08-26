@@ -1028,3 +1028,86 @@ func TestPlaceWithRetryChoosesANodeAndReserves(t *testing.T) {
 		t.Errorf("worker still reports %d active job(s) after completion", got)
 	}
 }
+
+// TestExecuteWithRetryHandsTheExecutorAReachableDaemon is the un-stubbed path.
+//
+// Every other executor in this file returns a canned result without touching a
+// daemon, so nothing checks the host and port ExecuteWithRetry passes in. Those
+// are the whole point of the call - the executor's job is to go and talk to the
+// node that was just leased - and a wrong endpoint would surface as a run that
+// fails somewhere far away with a connection error.
+func TestExecuteWithRetryHandsTheExecutorAReachableDaemon(t *testing.T) {
+	daemon := daemonapi.NewWithConfig("worker-1", 5*time.Second, 2*time.Second, 100*time.Millisecond)
+	daemonSrv := httptest.NewServer(daemon.Handler())
+	defer daemonSrv.Close()
+
+	host, portStr, ok := strings.Cut(strings.TrimPrefix(daemonSrv.URL, "http://"), ":")
+	if !ok {
+		t.Fatalf("cannot split %q", daemonSrv.URL)
+	}
+	daemonPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		SelfIdentity: identity.NodeIdentity{NodeID: "submitter", Hostname: "submitter", Arch: "x86_64-linux"},
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   fakeDaemon(t),
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{{
+				NodeID:      "worker-1",
+				SSHEndpoint: "root@" + host + ":22",
+				DaemonPort:  daemonPort,
+				Load: registry.LoadInfo{
+					CPUPercent: 5, AvailableMemBytes: 8 * 1024 * 1024 * 1024, TotalCPUs: 8,
+				},
+				HealthScore: 1.0, State: "healthy",
+			}}
+		},
+		RequiredMemBytes: 1024,
+		RetryInterval:    50 * time.Millisecond,
+		NoSelf:           true,
+	}
+	coord := New(cfg)
+
+	var reachedHost string
+	var reachedPort int
+	var reachedNode string
+	executor := func(h string, p int, nodeID string) error {
+		reachedHost, reachedPort, reachedNode = h, p, nodeID
+		// Actually use them. A stub that ignores its arguments cannot tell a
+		// correct endpoint from a nonsense one.
+		resp, err := http.Get(fmt.Sprintf("http://%s:%d/health", h, p))
+		if err != nil {
+			return fmt.Errorf("the endpoint handed to the executor is not reachable: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("/health on the leased node answered %d", resp.StatusCode)
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	res, err := coord.ExecuteWithRetry(ctx, executor, nil)
+	if err != nil {
+		t.Fatalf("ExecuteWithRetry: %v", err)
+	}
+	if res == nil {
+		t.Fatal("no result")
+	}
+	if reachedHost != host || reachedPort != daemonPort {
+		t.Errorf("executor was given %s:%d, want %s:%d", reachedHost, reachedPort, host, daemonPort)
+	}
+	if reachedNode != "worker-1" {
+		t.Errorf("executor was told the node is %q, want worker-1", reachedNode)
+	}
+
+	// The lifecycle is closed out, not left holding a slot on the worker.
+	if got := daemon.ActiveJobs(); got != 0 {
+		t.Errorf("worker still reports %d active job(s); the lease was not completed", got)
+	}
+}

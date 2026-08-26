@@ -237,14 +237,38 @@ func TestCoordinatorNATSCommitAndComplete(t *testing.T) {
 		t.Fatal("expected non-empty lease_id")
 	}
 
-	// Commit via NATS — coordinator has bus set, but CommitLease currently uses HTTP
-	// CommitLease uses NATS via the bus if available (through PublishJSON for complete)
-	// For now just verify the lease exists
 	lease, ok := daemon.GetLease(leaseID)
 	if !ok {
 		t.Fatal("lease should exist on daemon")
 	}
 	if lease.State != daemonapi.LeaseReserved {
 		t.Fatalf("expected reserved, got %s", lease.State)
+	}
+
+	// Commit and complete, over NATS, which is what this test is named for. It
+	// used to stop at the assertion above with a comment saying CommitLease
+	// went over HTTP - which stopped being true, and nothing noticed because
+	// nothing called it. Passing the node id is what selects the bus path;
+	// without it CommitLease falls back to HTTP against a port nothing is
+	// listening on, so this also pins that the id is threaded through.
+	if err := coord.CommitLease("", leaseID, nodeID); err != nil {
+		t.Fatalf("commit over NATS: %v", err)
+	}
+	lease, ok = daemon.GetLease(leaseID)
+	if !ok {
+		t.Fatal("lease vanished after commit")
+	}
+	if lease.State != daemonapi.LeaseRunning {
+		t.Fatalf("lease is %s after commit, want %s", lease.State, daemonapi.LeaseRunning)
+	}
+	if got := daemon.ActiveJobs(); got != 1 {
+		t.Errorf("daemon reports %d running job(s) after commit, want 1", got)
+	}
+
+	if err := coord.CompleteLease("", leaseID, "succeeded", nodeID); err != nil {
+		t.Fatalf("complete over NATS: %v", err)
+	}
+	if got := daemon.ActiveJobs(); got != 0 {
+		t.Errorf("daemon reports %d running job(s) after completion, want 0", got)
 	}
 }
