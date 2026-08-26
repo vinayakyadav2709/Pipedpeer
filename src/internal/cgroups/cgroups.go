@@ -183,10 +183,36 @@ func ScopePrefix(unit string) []string {
 	return scopeArgv(unit)
 }
 
+// clearStaleScope removes a scope left behind by a previous daemon.
+//
+// systemd refuses to create a transient unit whose name is already known -
+// "Unit pipedpeer-daemon-38080.scope was already loaded or has a fragment
+// file" - and --collect does not always reach a scope whose processes were
+// killed rather than exited. The daemon then fails to start, every time,
+// with an error that names systemd rather than anything the user did. Since
+// the caller only reaches here when no daemon of ours is running, anything
+// still holding this name is dead by definition.
+func clearStaleScope(unit string) {
+	if !strings.HasSuffix(unit, ".scope") {
+		unit += ".scope"
+	}
+	for _, args := range [][]string{
+		{"--user", "stop", unit},
+		{"--user", "reset-failed", unit},
+	} {
+		cmd := exec.Command("systemctl", args...)
+		cmd.Stdout, cmd.Stderr = nil, nil
+		_ = cmd.Run()
+	}
+}
+
 // scopeArgv builds the launcher prefix. Separate from ScopePrefix so its shape
 // can be tested on a machine that does not happen to need a scope - which is
 // most of them, including the one the test suite relaunches itself onto.
 func scopeArgv(unit string) []string {
+	// Before the name is used, not after: systemd refuses a transient unit
+	// whose name it already knows.
+	clearStaleScope(unit)
 	argv := []string{
 		"systemd-run", "--user", "--quiet", "--collect",
 		"--scope", "--unit=" + unit,
