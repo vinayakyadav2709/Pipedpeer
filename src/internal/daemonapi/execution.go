@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"io"
 	"io/fs"
 	"net/http"
@@ -517,6 +518,14 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
 			"PIPEDPEER_NODE_ID="+s.nodeID,
 		)
+		// The job talks back to this daemon for every intercepted primitive,
+		// so it needs the token too. Without it interception would 401 and
+		// fall back to local work, which looks like a slow job rather than a
+		// misconfiguration.
+		if tok := authtoken.Current(); tok != "" && !envsContain(cfg.Envs, authtoken.EnvVar+"=") {
+			cfg.Envs = append(cfg.Envs, authtoken.EnvVar+"="+tok)
+		}
+
 		// The shim gates remote spill on PIPEDPEER_NUM_SHARDS != "0": the
 		// number of nodes that share this closure (1 at first exec, peers
 		// count once broadcastClosure has run). DDP runs set their own

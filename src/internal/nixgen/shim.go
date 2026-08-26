@@ -64,6 +64,9 @@ _REMOTE_INFLIGHT = max(1, int(os.environ.get("PIPEDPEER_REMOTE_INFLIGHT", "4")))
 # The executing node sinks this peer to the end of its spill order so an
 # idle orchestrator never outranks real workers; empty when unset.
 _SUBMITTER = os.environ.get("PIPEDPEER_SUBMITTER", "")
+# Shared secret for the daemon API. Empty when the daemon is open; when it is
+# not, an intercepted call without it 401s and the work quietly runs here.
+_TOKEN = os.environ.get("PIPEDPEER_TOKEN", "")
 
 
 def _log(msg):
@@ -919,7 +922,13 @@ _BW_TTL = 300.0
 # local). Build a proxy-less opener and reuse it everywhere.
 _DaemonOpener = None
 def _daemon_open(req, timeout):
-    """Send req to the loopback daemon, bypassing any environment HTTP proxy."""
+    """Send req to the loopback daemon, bypassing any environment HTTP proxy.
+
+    The shared secret is attached here rather than at each call site: there
+    are half a dozen of those and a new one that forgot would 401, fall back
+    to local work, and look like a slow job rather than a misconfiguration."""
+    if _TOKEN and not req.has_header("X-pipedpeer-token"):
+        req.add_header("X-Pipedpeer-Token", _TOKEN)
     global _DaemonOpener
     import urllib.error
     import urllib.request
@@ -1340,7 +1349,8 @@ def _ooc_batch():
         try:
             import json
             import urllib.request
-            with urllib.request.urlopen(_URL + "/health", timeout=2) as r:
+            hreq = urllib.request.Request(_URL + "/health")
+            with _daemon_open(hreq, 2) as r:
                 h = json.loads(r.read().decode())
                 avail = h.get("available_mem") or 0
                 if avail > 0:
@@ -2106,6 +2116,8 @@ def _install_ddp():
                            "data": base64.b64encode(payload).decode()}).encode()
         req = urllib.request.Request(_SYNC_URL, data=body,
                                      headers={"Content-Type": "application/json"})
+        if _TOKEN:
+            req.add_header("X-Pipedpeer-Token", _TOKEN)
         with urllib.request.urlopen(req, timeout=240) as resp:
             out = json.loads(resp.read())
         if "blobs" not in out:

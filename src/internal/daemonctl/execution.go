@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -121,7 +122,14 @@ func storeCached(host string, port int, storePath string) bool {
 func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (int64, string, string, error) {
 	url := fmt.Sprintf("ws://%s:%d/v1/jobs/%s/exec", host, port, jobID)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
+	// The websocket dialer does not go through http.DefaultTransport, so the
+	// shared secret has to be attached by hand here; without it the upgrade
+	// is refused and the job fails with a bare "bad handshake".
+	var wsHeaders http.Header
+	if tok := authtoken.Current(); tok != "" {
+		wsHeaders = http.Header{authtoken.Header: []string{tok}}
+	}
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, wsHeaders)
 	if err != nil {
 		return 0, "", "", fmt.Errorf("websocket dial: %w", err)
 	}
