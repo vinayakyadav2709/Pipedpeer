@@ -34,12 +34,28 @@ else
 	exit 1
 fi
 
+# Once a token is configured, an unauthenticated probe gets 401 and `curl -sf`
+# reports that as a plain failure - which reads as "the daemon is down" when
+# it is answering perfectly well. Anything talking to this host's daemon has
+# to carry the token; the lab workers are fresh containers with none.
+pp_token="$("$cli" auth show 2>/dev/null | head -1)"
+case "$pp_token" in
+	*"no token set"*) pp_token="" ;;
+esac
+pp_curl() {
+	if [[ -n "$pp_token" ]]; then
+		curl -H "X-Pipedpeer-Token: $pp_token" "$@"
+	else
+		curl "$@"
+	fi
+}
+
 # Each worker reports its own tally of pool work. Asking the daemon beats
 # grepping its log: the log lives inside the container at a path that depends
 # on how the daemon was started, and an assertion that silently finds nothing
 # is worse than no assertion at all.
 chunks_received() {
-	curl -sf --max-time 3 "http://127.0.0.1:$((38080 + $1))/v1/pool/stats" 2>/dev/null |
+	pp_curl -sf --max-time 3 "http://127.0.0.1:$((38080 + $1))/v1/pool/stats" 2>/dev/null |
 		python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("chunks_received", 0))
 except Exception: print(0)' 2>/dev/null || echo 0
@@ -87,7 +103,15 @@ fi
 fuser -k 38080/tcp >/dev/null 2>&1 || true
 sleep 2
 "$cli" start 2>/dev/null || true
-if ! curl -sf --max-time 3 "http://127.0.0.1:38080/health" >/dev/null 2>&1; then
+up=0
+for _ in $(seq 1 30); do
+	if pp_curl -sf --max-time 3 "http://127.0.0.1:38080/health" >/dev/null 2>&1; then
+		up=1
+		break
+	fi
+	sleep 1
+done
+if [[ $up -ne 1 ]]; then
 	echo "FAIL: no daemon answering on :38080"
 	exit 1
 fi
@@ -102,7 +126,7 @@ done
 # local, with nothing in the output to say why.
 ready=0
 for _ in $(seq 1 40); do
-	nodes_json="$(curl -sf --max-time 3 "http://127.0.0.1:38080/v1/nodes" || echo '[]')"
+	nodes_json="$(pp_curl -sf --max-time 3 "http://127.0.0.1:38080/v1/nodes" || echo '[]')"
 	ready="$(printf '%s' "$nodes_json" | python3 -c 'import json,sys
 want = set(sys.argv[1:])
 try: nodes = json.load(sys.stdin)

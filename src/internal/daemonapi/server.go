@@ -31,6 +31,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -276,7 +277,23 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) ListenAndServe(port int) error {
 	addr := fmt.Sprintf(":%d", port)
-	return http.ListenAndServe(addr, s.Handler())
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	// Serve TLS and plain HTTP on the same port. The token says who may talk
+	// to this daemon but nothing about who may listen, and it travels in the
+	// request itself - so on any network the operator does not own, which is
+	// the point of running beyond a LAN at all, an observer collects it and
+	// becomes a member. Accepting both means a cluster encrypts itself as its
+	// nodes are updated, instead of every daemon having to switch at the same
+	// moment with anything missed simply going silent.
+	cert, certErr := tlsid.EnsureCert()
+	if certErr != nil {
+		log.Warn().Err(certErr).Msg("no TLS certificate; serving plain HTTP only")
+		return (&http.Server{Handler: s.Handler()}).Serve(ln)
+	}
+	return (&http.Server{Handler: s.Handler()}).Serve(tlsid.NewListener(ln, &cert))
 }
 
 // BindNATS subscribes to NATS subjects for this node's lease operations.
@@ -1160,6 +1177,15 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", node.Host, node.Port))
 	if err != nil {
+		// A pin mismatch is not the same as a machine being down, and
+		// reporting it as "unreachable" sends the operator to check cables
+		// for a node that is answering. It means the peer's certificate
+		// changed - a reinstall, or someone in the middle - and only they
+		// can tell which.
+		if strings.Contains(err.Error(), "certificate for") {
+			log.Warn().Str("peer", fmt.Sprintf("%s:%d", node.Host, node.Port)).Err(err).
+				Msg("peer certificate changed; run `pipedpeer auth forget <host:port>` if it was reinstalled")
+		}
 		ph.Status = "unreachable"
 		s.store.MarkUnreachable(node.NodeID)
 		return ph

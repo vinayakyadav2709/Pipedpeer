@@ -39,13 +39,19 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 )
 
 func main() {
 	// Before anything dials out. The daemon path returns just below, so
-	// installing this later left the daemon itself - the process that does
-	// nearly all the peer traffic - authenticating none of its own calls,
-	// which reads as every peer being unreachable.
+	// installing these later left the daemon itself - the process that does
+	// nearly all the peer traffic - neither authenticating nor encrypting
+	// its own calls, which reads as every peer being unreachable.
+	//
+	// TLS first, then the token: the token wrapper delegates to whatever it
+	// wraps, so this order puts the secret inside the encrypted connection
+	// rather than beside it.
+	tlsid.Install()
 	authtoken.Install()
 
 	if len(os.Args) > 1 && os.Args[1] == "__daemon__" {
