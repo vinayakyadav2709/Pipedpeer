@@ -3,6 +3,7 @@ package identity
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -117,7 +118,7 @@ func identityPath() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "node_identity.json")
+		return filepath.Join(userdir.Data(), "node_identity.json")
 	}
 	return filepath.Join(home, ".local", "share", "pipedpeer", "node_identity.json")
 }

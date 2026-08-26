@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -374,7 +375,7 @@ func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 // tar archive. It stages the file in a temp dir and uses GNU tar's transform
 // to re-home it, so the user's project directory is never touched.
 func appendShim(destPath, content string) error {
-	stageDir, err := os.MkdirTemp("", "pipedpeer-shim-*")
+	stageDir, err := userdir.Scratch("shim-*")
 	if err != nil {
 		return err
 	}

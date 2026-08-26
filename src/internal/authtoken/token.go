@@ -25,6 +25,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // Header is where the token travels. Not a cookie and not a query parameter:
@@ -42,14 +44,7 @@ var (
 )
 
 func tokenPath() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "pipedpeer", "auth_token")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "auth_token")
-	}
-	return filepath.Join(home, ".local", "share", "pipedpeer", "auth_token")
+	return filepath.Join(userdir.Data(), "auth_token")
 }
 
 // Current returns the configured token, or "" when the daemon is open.

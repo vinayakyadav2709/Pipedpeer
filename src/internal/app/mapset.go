@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/csv"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"os"
 	"os/exec"
@@ -131,7 +132,7 @@ func tasksFromSplit(spec MapSpec) ([]MapTask, string, error) {
 
 	dir := spec.ShardDir
 	if dir == "" {
-		dir, err = os.MkdirTemp("", "pipedpeer-shards-*")
+		dir, err = userdir.Scratch("shards-*")
 		if err != nil {
 			return nil, "", err
 		}

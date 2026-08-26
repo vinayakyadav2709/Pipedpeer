@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"net/http"
 	"os"
 	"os/exec"
@@ -31,7 +32,9 @@ type Paths struct {
 func DefaultPaths() Paths {
 	base := os.Getenv("PIPEDPEER_DAEMON_STATE_DIR")
 	if base == "" {
-		base = filepath.Join(os.TempDir(), "pipedpeer")
+		// Not $TMPDIR: this is where the pid, port and log live, and a tmpfs
+		// loses them on reboot while charging RAM for them meanwhile.
+		base = userdir.State()
 	}
 	return Paths{
 		PIDFile:  filepath.Join(base, "daemon.pid"),
