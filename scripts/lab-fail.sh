@@ -157,6 +157,7 @@ receipt="$workdir/receipt.json"
 : > "$workdir/.pipedpeerignore"
 
 cat > "$task" <<'EOF'
+import os
 import time
 from multiprocessing import Pool
 
@@ -165,9 +166,14 @@ def work(i):
     return i * i
 
 if __name__ == "__main__":
+    # More items than this machine's pool can cover in one round, so work
+    # genuinely has to leave it. With twenty the local pool absorbed nearly
+    # everything and at most one chunk ever reached a worker, which made a
+    # three-node lab indistinguishable from a one-node one.
+    n = int(os.environ.get("LAB_ITEMS", "80"))
     with Pool(8) as p:
-        out = p.map(work, range(20))
-    assert out == [i * i for i in range(20)], out
+        out = p.map(work, range(n))
+    assert out == [i * i for i in range(n)], out
     print("POOL-OK sum=%d" % sum(out))
 EOF
 
@@ -197,6 +203,13 @@ if [[ -z "$kill_idx" ]]; then
 	tail -30 "$runlog"
 	exit 1
 fi
+
+# Let the fan-out settle before judging it. The search above stops at the
+# first worker holding anything, which is by construction one worker - reading
+# the tallies at that instant measures how quickly the first chunk arrived,
+# not how widely the work spread.
+settle="${LAB_SETTLE_SECS:-6}"
+sleep "$settle"
 
 # Snapshot the tallies before the kill: a stopped worker cannot answer for
 # what it did, and reading them afterwards reports zero for the one node we
@@ -242,6 +255,35 @@ if [[ "$remote_items" -eq 0 ]]; then
 	echo "FAIL: receipt shows no work executed off this process (local=$local_items)."
 	echo "      Correct results here mean only that local fallback covered everything."
 	cat "$receipt"
+	exit 1
+fi
+
+# One worker taking everything is not a fan-out, and it is exactly what a
+# broken peer ranking looks like: the run distributes, the receipt is non-zero,
+# and the cluster is being used as one slow machine. The counts were
+# snapshotted before the kill, so they describe the healthy state.
+workers_used=0
+for idx in 1 2 3; do
+	if [[ "${counts[$((idx - 1))]}" -gt 0 ]]; then
+		workers_used=$((workers_used + 1))
+	fi
+done
+if [[ "$workers_used" -lt 2 ]]; then
+	echo "FAIL: only $workers_used worker received chunks before the kill."
+	echo "      The run distributed, but to one node - a fan-out that is not fanning"
+	echo "      out, which reads identically to a healthy cluster in the receipt."
+	for idx in 1 2 3; do
+		echo "        worker $idx: ${counts[$((idx - 1))]} chunk request(s)"
+	done
+	exit 1
+fi
+
+# The killed worker must have been holding chunks, which is the whole premise.
+# Asserted rather than assumed: the search above takes the first worker with a
+# non-zero count, and a race could leave it at zero by snapshot time.
+if [[ "${counts[$((kill_idx - 1))]}" -eq 0 ]]; then
+	echo "FAIL: the worker that was killed held no chunks at the time, so losing it"
+	echo "      demonstrated nothing about surviving a loss."
 	exit 1
 fi
 
