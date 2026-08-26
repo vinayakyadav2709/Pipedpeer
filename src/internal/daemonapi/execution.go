@@ -386,7 +386,20 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 // entries that escape it, and records a stamp per extracted file so results
 // can later be limited to what the job actually changed.
 func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]FileStamp) error {
-	tr := tar.NewReader(src)
+	// Sniff rather than require: workspaces are gzipped now, but a submitter
+	// on an older build sends them plain, and a cluster is rarely upgraded
+	// all at once. Peeking two bytes lets either land on either side.
+	br := bufio.NewReader(src)
+	var in io.Reader = br
+	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
+		gz, err := gzip.NewReader(br)
+		if err != nil {
+			return err
+		}
+		defer gz.Close()
+		in = gz
+	}
+	tr := tar.NewReader(in)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -839,7 +852,12 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-results.tar", jobID))
 
-	if err := writeResultsTar(w, job); err != nil {
+	// Results carry whatever the job produced - model checkpoints, CSVs,
+	// logs - and travel back over the same link the closure came in on.
+	w.Header().Set("Content-Encoding", "gzip")
+	gzw := gzip.NewWriter(w)
+	defer gzw.Close()
+	if err := writeResultsTar(gzw, job); err != nil {
 		// Headers are already out, so the client sees a truncated archive and
 		// reports the read error. Log for the node operator.
 		fmt.Fprintf(os.Stderr, "results tar for %s failed: %v\n", jobID, err)
