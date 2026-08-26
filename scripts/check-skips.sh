@@ -36,21 +36,28 @@ mkdir -p "$scratch"
 log="$(mktemp "$scratch/pipedpeer-skipcheck.XXXXXX")"
 trap 'rm -f "$log"' EXIT
 
-# internal/cgroups is included for its skip line, not for must_run: its
-# enforcement test needs a systemd user manager to delegate a cgroup, which a
-# CI container does not have. It relaunches itself into a delegated scope
-# wherever one is available, so on any developer machine it does run - and if
-# it skips, the "skipped this run" list below says so out loud.
-go test -v -count=1 ./internal/nixgen/ ./internal/daemonapi/ ./internal/cgroups/ > "$log" 2>&1 || {
+# Everything, not a chosen few. The point is to see what did not run, and a
+# package left off the list is a package whose skips are invisible - which is
+# how two integration tests gated on PIPEDPEER_INTEGRATION sat unrun in CI
+# without appearing anywhere. must_run below is still the set that must not be
+# among them.
+go test -v -count=1 ./... > "$log" 2>&1 || {
 	echo "FAIL: tests did not pass"
 	tail -40 "$log"
 	exit 1
 }
 
-skipped="$(grep -E '^\s*--- SKIP' "$log" | sed -E 's/.*SKIP: ([^ ]+).*/\1/' || true)"
+skipped="$(grep -E '^\s*--- SKIP' "$log" | sed -E 's/.*SKIP: ([^ ]+).*/\1/' | sort -u || true)"
 if [[ -n "$skipped" ]]; then
-	echo "skipped this run:"
+	echo "skipped this run ($(printf '%s\n' "$skipped" | wc -l) test(s)):"
+	# With the reason, because "skipped" on its own does not say whether the
+	# machine could have run it. Most of these are a missing python package,
+	# which is a thing somebody can fix.
+	grep -B1 -E '^\s*--- SKIP' "$log" |
+		grep -E '^\s+[a-z_]+\.go:[0-9]+:' | sed 's/^ */    /' | sort -u | head -20 || true
 	echo "$skipped" | sed 's/^/  /'
+	echo
+	echo "  scripts/test-on-host.sh <host> runs these where their dependencies are."
 fi
 
 missing=()
