@@ -265,7 +265,7 @@ const punchRound = 4 * time.Second
 // relay passed every connection test and corrupted the first bytes of every
 // payload.
 func newRelayTestCmd() *cobra.Command {
-	var server, node, peer, token, path string
+	var server, peer, token, path string
 	var localPort int
 
 	cmd := &cobra.Command{
@@ -275,12 +275,9 @@ func newRelayTestCmd() *cobra.Command {
 			if server == "" {
 				return fmt.Errorf("--relay is required")
 			}
-			if node == "" {
-				id, err := identity.GetOrCreate()
-				if err != nil {
-					return err
-				}
-				node = id.ShortID()
+			key, err := identity.Key()
+			if err != nil {
+				return fmt.Errorf("this machine has no signing key: %w", err)
 			}
 			if token == "" {
 				token = authtoken.Current()
@@ -297,7 +294,7 @@ func newRelayTestCmd() *cobra.Command {
 				return tlsid.CheckOrPin(server, rawCerts[0])
 			}
 
-			client, err := relay.Dial(ctx, server, cluster, node, verify,
+			client, err := relay.Dial(ctx, server, cluster, key, verify,
 				relay.LocalDialer(fmt.Sprintf("127.0.0.1:%d", localPort)))
 			if err != nil {
 				return err
@@ -307,8 +304,9 @@ func newRelayTestCmd() *cobra.Command {
 
 			if peer == "" {
 				fmt.Printf("connected to the relay as %s in cluster %s; serving this "+
-					"machine's daemon on :%d to peers.\nRun with --peer on the other "+
-					"machine to make a request.\n", node, cluster, localPort)
+					"machine's daemon on :%d to peers.\nThat address is the fingerprint "+
+					"of this node's key - pass it as --peer on the other machine.\n",
+					client.Node(), cluster, localPort)
 				<-ctx.Done()
 				return nil
 			}
@@ -346,8 +344,8 @@ func newRelayTestCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&server, "relay", "", "relay address, host:port")
-	cmd.Flags().StringVar(&node, "node", "", "this node's name")
-	cmd.Flags().StringVar(&peer, "peer", "", "peer to reach (omit to serve only)")
+	cmd.Flags().StringVar(&peer, "peer", "",
+		"peer's key fingerprint (omit to serve only)")
 	cmd.Flags().StringVar(&token, "token", "", "cluster token")
 	cmd.Flags().StringVar(&path, "path", "/health", "path to request")
 	cmd.Flags().IntVar(&localPort, "daemon-port", 38080, "local daemon port to expose")
