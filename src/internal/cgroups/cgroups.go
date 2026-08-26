@@ -180,12 +180,94 @@ func ScopePrefix(unit string) []string {
 	if os.Getenv("XDG_RUNTIME_DIR") == "" && os.Getenv("DBUS_SESSION_BUS_ADDRESS") == "" {
 		return nil
 	}
-	return []string{
+	return scopeArgv(unit)
+}
+
+// scopeArgv builds the launcher prefix. Separate from ScopePrefix so its shape
+// can be tested on a machine that does not happen to need a scope - which is
+// most of them, including the one the test suite relaunches itself onto.
+func scopeArgv(unit string) []string {
+	argv := []string{
 		"systemd-run", "--user", "--quiet", "--collect",
 		"--scope", "--unit=" + unit,
 		"--property=Delegate=yes",
-		"--",
 	}
+	for _, p := range ceilingProperties() {
+		argv = append(argv, "--property="+p)
+	}
+	return append(argv, "--")
+}
+
+// ceilingProperties bound what the daemon and everything it spawns may use.
+//
+// This is not the same limit as the one on a job. A job runs in a sandbox
+// whose cgroup is capped from its own estimate; the daemon's warm pool
+// workers are ordinary child processes, in the daemon's cgroup, and until now
+// nothing bounded them at all. That is not a theoretical gap: a pool
+// benchmark on a developer machine drove the machine into a global OOM, and
+// the kernel picked a victim by score - it killed the user's unrelated dev
+// server, not the pipedpeer worker that had asked for the memory.
+//
+// A ceiling on the scope makes the kernel choose inside our own subtree
+// instead. Whatever else is true, running pipedpeer should not be able to
+// take down what the machine was already doing.
+func ceilingProperties() []string {
+	// Swap is refused outright. The machine that OOMed had filled 14 GiB of
+	// zram before anything died, and a box that is swapping this hard is
+	// already unusable - failing a job is the better outcome, and the same
+	// reasoning already governs the per-job limit.
+	props := []string{"MemorySwapMax=0"}
+
+	if v := os.Getenv(MemoryMaxEnv); v != "" {
+		if v == "max" || v == "infinity" {
+			return props[:0] // opt out entirely, swap included
+		}
+		return append(props, "MemoryMax="+v)
+	}
+	total := totalMemBytes()
+	if total <= 0 {
+		return props
+	}
+	// Half the machine by default. Enough for the workloads this is for,
+	// while leaving a desktop the room it needs to survive one of them.
+	//
+	// Deliberately no MemoryHigh. Setting one looks strictly better - reclaim
+	// and throttle before killing, turning "job died" into "job got slower" -
+	// and measurement said otherwise. With swap refused and a compute
+	// workload's memory being almost entirely anonymous, there is nothing for
+	// the kernel to reclaim, so MemoryHigh throttles without ever making
+	// progress: a 3 GiB allocation under a 1 GiB MemoryHigh sat at 998 MiB
+	// with 7381 throttle events, zero kills, and 88% memory pressure, for
+	// minutes. A stalled daemon is worse than a failed job, so the hard cap
+	// is left to do its work.
+	return append(props, "MemoryMax="+strconv.FormatInt(total/2, 10))
+}
+
+// MemoryMaxEnv overrides the daemon's memory ceiling. Accepts anything
+// systemd does, plus "max" to remove the ceiling and the swap ban with it.
+const MemoryMaxEnv = "PIPEDPEER_MEMORY_MAX"
+
+// totalMemBytes reads MemTotal, or 0 when it cannot.
+func totalMemBytes() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			return 0
+		}
+		kb, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
 }
 
 var prepareOnce struct {
