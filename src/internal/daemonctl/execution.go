@@ -66,10 +66,37 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 	// Export the NAR only when the target daemon lacks the closure: a gzip
 	// export of a multi-GB store is seconds-to-minutes of wasted work when a
 	// shared store (or a prior fan-out task) already gave every node a copy.
-	if narPath != "" && !storeCached(host, port, storePath) {
+	//
+	// When it does lack it, try to send only the store paths it does not
+	// already have. A closure that differs from one the node holds by a
+	// single package shares almost all of its paths with it, and without this
+	// every one of them crosses again.
+	//
+	// Each of the three outcomes says so. Without that there is no way to
+	// tell a run that shipped a whole environment from one that shipped
+	// nothing: both print "Uploading to daemon" and differ only in how long
+	// they take.
+	sendNAR := narPath != "" && !storeCached(host, port, storePath)
+	seeded := false
+	if sendNAR {
+		// sent > 0, not merely ok: the node reporting no missing paths while
+		// its cache check said the closure was not runnable means it holds a
+		// store path that is there but incomplete. Sending the whole archive
+		// repairs that; sending nothing would leave the job to fail on a
+		// missing bin/run.
+		if sent, total, ok := seedClosure(host, port, storePath); ok && sent > 0 {
+			// The node now has every path, so the job needs no archive.
+			fmt.Printf("      Sent %d of %d store paths (the node had the rest)\n", sent, total)
+			sendNAR, seeded = false, true
+		}
+	}
+	if sendNAR {
+		fmt.Println("      Sending the whole closure (the node shares none of it)")
 		if err := ExportNAR(storePath, narPath); err != nil {
 			return nil, fmt.Errorf("nix store export failed: %v", err)
 		}
+	} else if narPath != "" && !seeded {
+		fmt.Println("      Closure already on the node; nothing to send")
 	}
 
 	pr, pw := io.Pipe()
@@ -86,7 +113,7 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 			mp.WriteField("skip_broadcast", "1")
 		}
 
-		if narPath != "" && !storeCached(host, port, storePath) {
+		if sendNAR {
 			addFile(mp, "nar", "closure.nar", narPath)
 		}
 	}()
