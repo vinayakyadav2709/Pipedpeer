@@ -575,6 +575,50 @@ print("NUMPY-OK")
 		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
+// TestShimNumPyRespectsTheCostModelsNo is the other half of T8.
+//
+// That test checks the cost model's arithmetic, and then overrides it to
+// always-true so the slicing and framing mechanics get exercised. What neither
+// covered is whether the interception actually consults the model: an
+// implementation that ignored it and shipped everything would satisfy both,
+// and would send a matrix across the wire to do work that is faster locally.
+func TestShimNumPyRespectsTheCostModelsNo(t *testing.T) {
+	runShimPythonEnv(t, "t8b", shimFakeDaemon+`
+import time
+import sitecustomize as shim
+import numpy as np
+
+shim._ENABLED = True
+shim._URL = "http://127.0.0.1:%d" % PORT
+shim._STORE = ""
+shim._BW_CACHE["bw"] = 1e9
+shim._BW_CACHE["t"] = time.monotonic()
+
+rng = np.random.RandomState(1)
+A = rng.rand(512, 512)
+B = rng.rand(512, 512)
+
+# The model says no to everything. Nothing may cross the wire, and the answers
+# must still be right - "stayed local" is only acceptable if it also computed.
+shim._numpy_should_offload = lambda *a, **k: False
+
+before = POOL_CALLS[0]
+C = np.matmul(A, B)
+U, S, Vh = np.linalg.svd(A)
+W, V = np.linalg.eig(A)
+after = POOL_CALLS[0]
+
+assert after == before, (
+    "%d pool call(s) were made while the cost model refused every offload; the "
+    "interception is not consulting it" % (after - before))
+assert np.allclose(C, A @ B), "matmul returned the wrong answer while local"
+assert np.allclose(U @ np.diag(S) @ Vh, A, rtol=1e-4, atol=1e-4), "svd wrong while local"
+assert np.allclose(A @ V, V * W, rtol=1e-4), "eig wrong while local"
+print("NUMPY-LOCAL-OK")
+`, "NUMPY-LOCAL-OK",
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+}
+
 // TestShimDDPSync (T4) runs two gloo ranks over loopback through the shim's
 // transparent DDP and requires: identical weights across ranks, and each
 // rank's synced gradient equal to the exact (g0+g1)/2 of the single-process
