@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 )
 
 // newAuthCmd manages the shared secret that gates the daemon API.
@@ -75,6 +76,31 @@ func newAuthCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(set, show, clear)
+	forget := &cobra.Command{
+		Use:   "forget [host:port|--all]",
+		Short: "Drop a peer's pinned certificate after it was reinstalled",
+		Long: "A peer's certificate is pinned on first contact, so a changed one\n" +
+			"is refused: it is either a reinstalled daemon or someone in the\n" +
+			"middle, and only you can tell those apart. Use this when you know\n" +
+			"it was the former.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			all, _ := cmd.Flags().GetBool("all")
+			if all {
+				n := tlsid.ForgetAll()
+				fmt.Fprintf(os.Stderr, "forgot %d pinned peer(s)\n", n)
+				return nil
+			}
+			if len(args) != 1 {
+				return fmt.Errorf("give a host:port, or --all")
+			}
+			tlsid.Forget(args[0])
+			fmt.Fprintf(os.Stderr, "forgot %s; it will be pinned again on next contact\n", args[0])
+			return nil
+		},
+	}
+	forget.Flags().Bool("all", false, "Forget every pinned peer")
+
+	cmd.AddCommand(set, show, clear, forget)
 	return cmd
 }

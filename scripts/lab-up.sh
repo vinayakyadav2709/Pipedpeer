@@ -6,6 +6,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 echo "Building pipedpeer binary..."
 cd "$repo_root/src"
 CGO_ENABLED=0 go build -o "$repo_root/lab/pipedpeer" .
+# Lab workers are recreated on every run, so each gets a new certificate and
+# the pin from last time is stale. That refusal is correct for real machines
+# and pure friction here, where the daemons are disposable by design.
+"$repo_root/bin/pipedpeer" auth forget --all >/dev/null 2>&1 || true
+
 echo "Stopping host daemon if running..."
 cd "$repo_root"
 ./bin/pipedpeer stop 2>/dev/null || true
