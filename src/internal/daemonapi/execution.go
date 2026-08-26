@@ -591,9 +591,20 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		os.MkdirAll(filepath.Join(rootfsDir, "proc"), 0755)
 		os.MkdirAll(filepath.Join(rootfsDir, "sys"), 0755)
 
+		// HOME has to exist, not just be named: torch resolves a cache
+		// directory under it during `import torch`.
+		os.MkdirAll(filepath.Join(rootfsDir, "home", "root"), 0755)
+
 		args := append([]string{runPath, cfg.ScriptPath}, cfg.Args...)
 		env := []string{
 			"HOME=/home/root",
+			// There is no /etc/passwd in this rootfs, so getpass.getuser()
+			// has nothing to fall back to and raises. torch calls it while
+			// importing, which turned every job here into "OSError: No
+			// username set in the environment" - an error about the sandbox
+			// wearing the costume of a problem with the user's code.
+			"USER=root",
+			"LOGNAME=root",
 			"PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin",
 			// stdout is a pipe in here, so python block-buffers and a whole
 			// training run prints nothing until exit; the audience needs it live.

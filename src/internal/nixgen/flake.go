@@ -106,7 +106,11 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 
 	var psPkgs []string
 	torchCUDA := false
+	hasTorch := false
 	for _, pkg := range nixPkgs {
+		if pkg == "torch" {
+			hasTorch = true
+		}
 		if pkg == "scikit-learn" && nixSystem == "x86_64-linux" {
 			// nixpkgs-unstable still ships scikit-learn 1.8.x; pin the cp314
 			// manylinux wheel to match the host dev environment (1.9.0) so the
@@ -142,20 +146,28 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 			// Only when a GPU was actually asked for. This used to fire on
 			// the mere presence of the import, so a script that never touched
 			// a device still shipped the whole CUDA wheel set - cuBLAS, cuDNN,
-			// NCCL, triton, the toolkit - to every node that ran it. Without a
-			// GPU the closure falls through to nixpkgs' ps.torch, which is
-			// CPU-only and comes from the binary cache.
+			// NCCL, triton, the toolkit - to every node that ran it.
+			//
+			// Without a GPU the closure falls through to nixpkgs' ps.torch.
+			// The warning above about building from source is about the
+			// CUDA-enabled variant; the default CPU build substitutes: a
+			// dry-run against this pinned revision fetches 208 MiB for 940
+			// MiB unpacked and builds only the env derivation, against 6.6 GB
+			// unpacked for the wheel set.
 			torchCUDA = true
 			continue
 		}
 		psPkgs = append(psPkgs, "ps."+pkg)
 	}
-	if torchCUDA {
-		// torch imports numpy at runtime for array interop. pip installs only
-		// torch's own tree into the site dir, so numpy has to come from the
-		// nix env — and when torch is a script's only import that env would
-		// otherwise be empty, leaving torch to warn "Failed to initialize
-		// NumPy" and quietly drop .numpy()/from_numpy().
+	if hasTorch {
+		// torch needs numpy for array interop, and pipedpeer needs it more
+		// than most torch users do: the shim's gradient exchange moves
+		// tensors through .numpy(). Without it a DDP run dies at the first
+		// sync with "Numpy is not available", having already trained a step.
+		//
+		// The CUDA wheels do not carry numpy (pip installs only torch's own
+		// tree), and neither does nixpkgs' CPU torch, so both builds need it
+		// added here - it was previously added only for CUDA.
 		hasNumpy := false
 		for _, p := range psPkgs {
 			if p == "ps.numpy" {

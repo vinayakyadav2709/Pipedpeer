@@ -188,6 +188,12 @@ func TestTorchWithoutGPUSkipsCUDAClosure(t *testing.T) {
 	if !strings.Contains(cpu, "ps.torch") {
 		t.Error("CPU job lost torch entirely; it should come from nixpkgs")
 	}
+	// The shim's gradient exchange moves tensors through .numpy(), so a DDP
+	// run without numpy trains one step and dies at the first sync. nixpkgs'
+	// CPU torch does not pull it in on its own.
+	if !strings.Contains(cpu, "ps.numpy") {
+		t.Error("CPU closure is missing numpy; DDP sync would fail at the first exchange")
+	}
 
 	gpu := GenerateFlakeForArch([]string{"torch"}, "", "x86_64-linux", true)
 	if !strings.Contains(gpu, "download.pytorch.org") {
