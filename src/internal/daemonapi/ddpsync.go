@@ -55,11 +55,21 @@ type ddpEntry struct {
 	// that one rank, because the others are blocked waiting for a result that
 	// is never coming.
 	err error
+	// partialAt is when this round gives up waiting for everybody. A rank
+	// that has died is indistinguishable from one that is merely slow, and
+	// waiting three minutes to find out means one lost machine takes the
+	// whole run with it.
+	partialAt time.Time
+
 	// syncEvery is the agreed averaging interval: the largest any rank
 	// proposed. Largest rather than smallest because the proposal is a rank's
 	// estimate of how much of its run sync is eating, and the rank suffering
 	// most is the one setting the pace for everybody.
 	syncEvery int
+
+	// partial is how many ranks actually contributed when a round completed
+	// short-handed; zero when everybody arrived.
+	partial int
 
 	// fingerprint detects ranks doing identical work. Sharding only happens
 	// automatically for DataLoader-based code; a script that slices its
@@ -182,12 +192,13 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	e, ok := s.ddp.entries[key]
 	if !ok {
 		e = &ddpEntry{
-			blobs:   make(map[int][]byte),
-			fetched: make(map[int]bool),
-			seen:    make(map[int]bool),
-			done:    make(chan struct{}),
-			world:   req.World,
-			created: time.Now(),
+			blobs:     make(map[int][]byte),
+			fetched:   make(map[int]bool),
+			seen:      make(map[int]bool),
+			done:      make(chan struct{}),
+			world:     req.World,
+			created:   time.Now(),
+			partialAt: time.Now().Add(ddpPartialAfter),
 		}
 		if mode == ddpModeReduce {
 			if req.Count <= 0 || req.DType.size() == 0 {
@@ -209,7 +220,13 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		e.syncEvery = req.SyncEvery
 	}
 	var complete bool
-	if e.acc != nil {
+	if e.result != nil || e.err != nil {
+		// The round finished without us - either everyone else arrived and
+		// this rank was slow, or it completed short-handed. Either way the
+		// answer exists and is the same one every other rank applied, so
+		// taking it home keeps this rank in step rather than diverging.
+		complete = true
+	} else if e.acc != nil {
 		// Folded in on arrival and the payload dropped: holding every rank's
 		// model until the last one shows up is what made the lead daemon's
 		// memory scale with the ring.
@@ -250,6 +267,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			close(e.done)
 		}
 	}
+	partialAt := e.partialAt
 	s.ddp.mu.Unlock()
 
 	if !complete {
@@ -257,7 +275,19 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		case <-e.done:
 		case <-r.Context().Done():
 			return
-		case <-time.After(3 * time.Minute):
+		case <-time.After(time.Until(partialAt)):
+			// Long enough to rule out an ordinary slow step, short enough
+			// that a dead rank does not cost the run. Complete with whoever
+			// turned up: averaging over fewer ranks is a smaller step in the
+			// same direction, and every rank still receives the identical
+			// result, so nobody drifts.
+			if !s.completePartial(key) {
+				writeJSON(w, http.StatusGatewayTimeout, map[string]string{
+					"error": "ddp sync timed out and too few ranks had arrived to " +
+						"average anything"})
+				return
+			}
+		case <-time.After(ddpHardTimeout):
 			writeJSON(w, http.StatusGatewayTimeout,
 				map[string]string{"error": "ddp sync timed out waiting for peer ranks"})
 			return
@@ -268,6 +298,14 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	if e.acc != nil || e.result != nil || e.err != nil {
 		result, rerr, agreedEvery, rscale := e.result, e.err, e.syncEvery, e.resultScale
 		sameWork := e.checked && e.sameWork && e.world > 1
+		// How many ranks the result actually averages. Equal to the world
+		// size unless the round completed short-handed, and the shim says so
+		// when it is not - a run quietly training on half its machines is
+		// exactly the kind of thing that should never be discovered later.
+		ranks := e.world
+		if e.partial > 0 {
+			ranks = e.partial
+		}
 		e.fetched[req.Rank] = true
 		if len(e.fetched) == e.world || rerr != nil {
 			delete(s.ddp.entries, key)
@@ -278,8 +316,9 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body := []byte(fmt.Sprintf(
-			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"same_work\": %t}\n",
-			agreedEvery, rscale, sameWork))
+			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"same_work\": %t, "+
+				"\"ranks\": %d}\n",
+			agreedEvery, rscale, sameWork, ranks))
 		body = putFrame(body, result)
 		w.Header().Set("Content-Type", DDPReduceContentType)
 		w.WriteHeader(http.StatusOK)
@@ -336,4 +375,45 @@ func fnv1a(b []byte) uint64 {
 		h *= prime
 	}
 	return h
+}
+
+// ddpPartialAfter is how long a sync waits for every rank before going ahead
+// with the ones present. A dead rank and a slow one look identical from here,
+// and the old three-minute wait meant one lost machine stalled the run and
+// then failed it.
+var ddpPartialAfter = 45 * time.Second
+
+// ddpHardTimeout bounds the whole wait, for the case where partial completion
+// is not possible either.
+const ddpHardTimeout = 3 * time.Minute
+
+// completePartial finishes a round with whoever has contributed, and reports
+// whether there was enough to average.
+//
+// Under the lock and idempotent: several ranks reach their deadline at about
+// the same moment, and only the first should compute the result - the others
+// must find it already there rather than averaging a second time.
+func (s *Server) completePartial(key string) bool {
+	s.ddp.mu.Lock()
+	defer s.ddp.mu.Unlock()
+
+	e := s.ddp.entries[key]
+	if e == nil {
+		return false
+	}
+	if e.result != nil || e.err != nil {
+		return true // somebody else already finished it
+	}
+	if e.acc == nil || e.acc.count == 0 {
+		return false
+	}
+	e.result, e.resultScale, e.err = e.acc.mean()
+	e.partial = e.acc.count
+	e.acc = nil
+	select {
+	case <-e.done:
+	default:
+		close(e.done)
+	}
+	return e.err == nil
 }
