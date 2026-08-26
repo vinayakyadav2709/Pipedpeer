@@ -352,6 +352,119 @@ func newRelayTestCmd() *cobra.Command {
 	return cmd
 }
 
+// newRelayConnectCmd makes a remote peer look like a local one.
+//
+// Everything in pipedpeer already speaks HTTP to a host and port - health
+// polling, closure upload, pool spill, gradient sync. Rather than teach each
+// of them about relays, this puts a local port in front of a remote peer:
+// every connection to it becomes a stream through the relay to that peer's
+// daemon. `pipedpeer nodes add 127.0.0.1 <port>` then works unchanged, and the
+// rest of the system never learns the difference.
+func newRelayConnectCmd() *cobra.Command {
+	var server, peer, token string
+	var listen int
+	var daemonPort int
+
+	cmd := &cobra.Command{
+		Use:   "relay-connect",
+		Short: "Expose a remote peer's daemon on a local port, through the relay",
+		Long: "Serves this machine's daemon to peers, and - with --peer - puts a local " +
+			"port in front of theirs. Register that port with `pipedpeer nodes add " +
+			"127.0.0.1 <port>` and jobs, pool work and training all travel over it.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if server == "" {
+				return fmt.Errorf("--relay is required")
+			}
+			key, err := identity.Key()
+			if err != nil {
+				return err
+			}
+			if token == "" {
+				token = authtoken.Current()
+			}
+			cluster := rendezvous.ClusterID(token)
+
+			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
+			verify := func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return fmt.Errorf("relay presented no certificate")
+				}
+				return tlsid.CheckOrPin(server, rawCerts[0])
+			}
+
+			client, err := relay.Dial(ctx, server, cluster, key, verify,
+				relay.LocalDialer(fmt.Sprintf("127.0.0.1:%d", daemonPort)))
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+			go func() { _ = client.Serve(ctx) }()
+
+			fmt.Printf("this node is %s in cluster %s; its daemon on :%d is reachable "+
+				"through the relay\n", client.Node(), cluster, daemonPort)
+
+			if peer == "" {
+				fmt.Println("no --peer given: serving only. Give the other machine this " +
+					"node's address above.")
+				<-ctx.Done()
+				return nil
+			}
+
+			ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", listen))
+			if err != nil {
+				return fmt.Errorf("local port for %s: %w", peer, err)
+			}
+			defer ln.Close()
+			fmt.Printf("peer %s is now at 127.0.0.1:%d — register it with:\n"+
+				"    pipedpeer nodes add 127.0.0.1 %d\n", peer, listen, listen)
+
+			go func() { <-ctx.Done(); ln.Close() }()
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
+					continue
+				}
+				go proxyToPeer(ctx, client, peer, c)
+			}
+		},
+	}
+	cmd.Flags().StringVar(&server, "relay", "", "relay address, host:port")
+	cmd.Flags().StringVar(&peer, "peer", "", "peer's key fingerprint")
+	cmd.Flags().StringVar(&token, "token", "", "cluster token")
+	cmd.Flags().IntVar(&listen, "listen", 39001, "local port to put in front of the peer")
+	cmd.Flags().IntVar(&daemonPort, "daemon-port", 38080, "this machine's daemon port")
+	return cmd
+}
+
+// proxyToPeer carries one local connection to the peer and back.
+func proxyToPeer(ctx context.Context, client *relay.Client, peer string, local net.Conn) {
+	defer local.Close()
+	st, err := client.Open(ctx, peer)
+	if err != nil {
+		return
+	}
+	defer st.Close()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(st, local)
+		// Half-close so the far daemon sees the end of the request rather
+		// than waiting for a body that is not coming.
+		_ = st.Stream.Close()
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(local, st)
+		done <- struct{}{}
+	}()
+	<-done
+}
+
 // newRendezvousCmd runs the public half: a reflector that tells whoever asks
 // where their packets appear to come from.
 func newRendezvousCmd() *cobra.Command {

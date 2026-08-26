@@ -103,6 +103,7 @@ func main() {
 		newNetPunchCmd(),
 		newNetJoinCmd(),
 		newRelayTestCmd(),
+		newRelayConnectCmd(),
 		newRendezvousCmd(),
 		newTrafficCmd(),
 		newTasksCmd(),
