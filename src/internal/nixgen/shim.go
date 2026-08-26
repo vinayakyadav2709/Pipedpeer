@@ -2274,13 +2274,58 @@ def _install_ddp():
         return _SYNC_TUNED[0]
 
     def _ddp_report():
+        """The receipt for a training run, and its verdict.
+
+        Distributing is not automatically worth it, and the failure is silent:
+        the loss comes out right either way. Each rank computes 1/world of the
+        data, so one machine would have taken world x the compute; the ring
+        takes compute + sync. It pays for itself only while
+
+            sync < compute x (world - 1)
+
+        which is a number this run has measured rather than a rule of thumb.
+        Measured on two machines over a home link it predicts both outcomes:
+        fp16 sync 607ms against 557ms of compute, ring slower (71.1s vs 55.0s);
+        int8 sync 319ms, ring faster (53.0s vs 55.0s). On a GPU, where the same
+        step takes 25ms, no encoding gets sync under 25ms and one card wins by
+        20x - which is worth being told rather than discovering from a
+        stopwatch.
+        """
         if not _DDP_STATS["syncs"]:
             return
+        sync_total = _DDP_STATS["sync_sec"]
         _log("ddp: %d sync(s), %.1fs total (%.0f ms each), %.1f MiB sent, %.1f MiB received"
-             % (_DDP_STATS["syncs"], _DDP_STATS["sync_sec"],
-                1000.0 * _DDP_STATS["sync_sec"] / _DDP_STATS["syncs"],
+             % (_DDP_STATS["syncs"], sync_total,
+                1000.0 * sync_total / _DDP_STATS["syncs"],
                 _DDP_STATS["sent_bytes"] / 1048576.0,
                 _DDP_STATS["recv_bytes"] / 1048576.0))
+        if _WORLD < 2 or _STEP_SEC[1] < 2:
+            return
+        compute = _STEP_SEC[0]
+        alone = compute * _WORLD          # one machine would do every shard
+        together = compute + sync_total
+        if together <= 0:
+            return
+        speedup = alone / together
+        # "alone" is this rank doing every shard at its own speed, which is
+        # what can be measured from here - not what the fastest machine in the
+        # ring would manage. On a mixed cluster the slower rank's estimate is
+        # generous, so the comparison is stated as what it is rather than as a
+        # speed-up against the best single node. Measured: this said 1.24x on
+        # a run that beat a single fast machine by 1.02x.
+        if speedup >= 1.05:
+            _log("ddp: the ring paid for itself — %.1fs of compute and %.1fs of "
+                 "sync across %d ranks, against about %.1fs for THIS machine to "
+                 "have done the whole dataset (%.2fx). A faster machine on its own "
+                 "may still beat that."
+                 % (compute, sync_total, _WORLD, alone, speedup))
+        else:
+            _log("ddp: the ring did NOT pay for itself — %.1fs of compute and "
+                 "%.1fs of sync across %d ranks, against about %.1fs for THIS "
+                 "machine alone. Syncing costs more than the extra machines save.%s"
+                 % (compute, sync_total, _WORLD, alone,
+                    "" if _INT8_GRADS else
+                    " PIPEDPEER_DDP_INT8=1 halves the bytes on the wire."))
 
     import atexit as _atexit_ddp
     _atexit_ddp.register(_ddp_report)
