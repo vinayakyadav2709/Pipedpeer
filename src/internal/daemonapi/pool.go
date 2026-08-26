@@ -262,6 +262,11 @@ if frames:
     for _ in range(req["items_frames"]):
         f, rest = read_frame(rest)
         raw.append(f)
+    # items_zlib: the submitter found this payload compressible and said so,
+    # rather than either side guessing. Dense float arrays are sent raw.
+    if req.get("items_zlib"):
+        import zlib
+        raw = [zlib.decompress(r) for r in raw]
     items = [pickle.loads(r) for r in raw]
 else:
     req = json.loads(data)
@@ -405,6 +410,11 @@ def load_req(path):
     for _ in range(req["items_frames"]):
         f, rest = read_frame(rest)
         raw.append(f)
+    # items_zlib: the submitter found this payload compressible and said so,
+    # rather than either side guessing. Dense float arrays are sent raw.
+    if req.get("items_zlib"):
+        import zlib
+        raw = [zlib.decompress(r) for r in raw]
     return req, frames, [pickle.loads(r) for r in raw], g
 
 for line in sys.stdin:
@@ -696,8 +706,22 @@ func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.pool.stats.snapshot())
 }
 
+// maxPoolBody bounds a single /v1/pool/map request. The body is read whole
+// into memory before anything looks at it, so without a ceiling a peer -
+// or a bug in chunk sizing - can push this daemon into the OOM killer with
+// one request, taking every other job on the node with it. The shim's own
+// chunks are bounded by the 40%-of-free-RAM rule long before this; the
+// ceiling is here for everything that is not the shim behaving.
+const maxPoolBody = 2 << 30 // 2 GiB
+
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
-	rawBody, _ := io.ReadAll(r.Body)
+	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxPoolBody))
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+			"error": fmt.Sprintf("pool request body exceeds %d bytes", maxPoolBody),
+		})
+		return
+	}
 	defer releaseHeapAfterWork()
 	var req poolRequest
 	// Frames bodies: the header is the first line and the frames follow it.
@@ -803,7 +827,6 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var results []any
-	var err error
 	ch := &chunk{
 		pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 		extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,

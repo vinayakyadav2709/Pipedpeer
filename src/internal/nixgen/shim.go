@@ -990,6 +990,34 @@ def _measure_bandwidth():
     return bw
 
 
+def _maybe_compress(items, header):
+    """Compress item frames when it pays for itself.
+
+    Whether it does depends entirely on the payload. A pandas frame of
+    strings or categoricals shrinks by most of its size; a dense float array
+    is already incompressible and every byte of CPU spent on it is waste. So
+    try, keep the result only if it is meaningfully smaller, and record the
+    choice in the header rather than guessing again on the other side.
+
+    The daemon relays these bytes without looking inside them, so this is
+    settled entirely between the shim and the worker - no wire change.
+    """
+    if not items:
+        return items
+    raw_total = sum(len(i) for i in items)
+    if raw_total < 1 << 20:
+        return items                  # too small for the CPU to be worth it
+    import zlib
+    try:
+        packed = [zlib.compress(i, 1) for i in items]
+    except Exception:
+        return items
+    if sum(len(p) for p in packed) > raw_total * 0.9:
+        return items                  # not worth the decompression on the far side
+    header["items_zlib"] = True
+    return packed
+
+
 def _pool_send(header, globals_pickle, items, timeout, out_header=None):
     """POST a frames pool/map request: small JSON header line + optional
     globals frame + length-prefixed raw pickle item frames. Returns the raw
@@ -999,6 +1027,7 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None):
     import pickle
     import struct
     import urllib.request
+    items = _maybe_compress(items, header)
     body = json.dumps(header).encode() + b"\n"
     if globals_pickle is not None:
         body += struct.pack(">I", len(globals_pickle)) + globals_pickle

@@ -646,3 +646,54 @@ if __name__ == "__main__":
 		t.Fatalf("imap test failed:\n%s", out)
 	}
 }
+
+// TestShimCompressesCompressiblePayloadsOnly covers the decision, not just
+// the mechanism. Compression pays for itself on a frame of repeated strings
+// and is pure waste on a dense float array, which is already incompressible —
+// so the shim measures rather than assuming, and tells the worker which it
+// chose instead of leaving both sides to guess.
+func TestShimCompressesCompressiblePayloadsOnly(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	probe := `
+import pickle, random, sys, zlib
+sys.path.insert(0, sys.argv[1])
+import shim_mod
+
+# Highly repetitive and genuinely large: worth compressing. (A list of one
+# repeated string would not be — pickle memoises it down to a few bytes.)
+repetitive = [pickle.dumps(b"abcdefgh" * 400000) for _ in range(3)]
+header = {}
+out = shim_mod._maybe_compress(list(repetitive), header)
+assert header.get("items_zlib"), "repetitive payload was not compressed"
+assert sum(map(len, out)) < sum(map(len, repetitive)) * 0.9, "no real saving"
+assert [zlib.decompress(o) for o in out] == repetitive, "does not round-trip"
+
+# Random bytes: incompressible, so compressing is pure CPU cost.
+noise = [pickle.dumps(random.randbytes(2 << 20)) for _ in range(2)]
+header = {}
+out = shim_mod._maybe_compress(list(noise), header)
+assert not header.get("items_zlib"), "incompressible payload was compressed anyway"
+assert out == noise, "payload altered despite declining to compress"
+
+# Small payloads are not worth the round trip through zlib at all.
+small = [pickle.dumps("hello")]
+header = {}
+out = shim_mod._maybe_compress(list(small), header)
+assert not header.get("items_zlib") and out == small
+print("compress-ok")
+`
+	out, err := exec.Command(python, "-c", probe, dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed:\n%s\n%v", out, err)
+	}
+	if !strings.Contains(string(out), "compress-ok") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+}
