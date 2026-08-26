@@ -185,6 +185,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 CACHE = {}
 PROBES = [0]
 MAX_CHUNK = [0]
+# How many pool requests arrived. MAX_CHUNK alone cannot separate two phases of
+# a test: it is a running maximum, so a phase that distributed nothing leaves it
+# untouched and the assertion still passes on the earlier phase's work.
+POOL_CALLS = [0]
 TMP = tempfile.mkdtemp(prefix="pp-shim-")
 
 class Handler(BaseHTTPRequestHandler):
@@ -211,10 +215,24 @@ class Handler(BaseHTTPRequestHandler):
             for _ in range(req["items_frames"]):
                 f, rest = rf(rest)
                 raw.append(f)
+            POOL_CALLS[0] += 1
+            # Sizes are measured on the wire, before decompression: the point
+            # of MAX_CHUNK is what actually crossed.
             b = [len(f) for f in raw]
             if b:
                 MAX_CHUNK[0] = max(MAX_CHUNK[0], max(b))
+            # The shim compresses a payload when it measures it as
+            # compressible and says so in the header. This fake daemon did not
+            # honour that flag, so every compressed chunk arrived here as a
+            # zlib stream and pickle.loads failed with "invalid load key, 'x'"
+            # - 0x78 being a zlib header. It went unnoticed because the tests
+            # that send compressible payloads skip wherever pandas is missing,
+            # which is most machines.
+            if req.get("items_zlib"):
+                import zlib
+                raw = [zlib.decompress(r) for r in raw]
         else:
+            POOL_CALLS[0] += 1
             g = b""
             if req.get("items_b64"):
                 b = [len(i) for i in req["items"]]
@@ -443,13 +461,17 @@ shim._measure_bandwidth = _real_bw
 assert PROBES[0] == 0
 bw1 = shim._measure_bandwidth()
 bw2 = shim._measure_bandwidth()
-# bw1 may be None when the probe fails under load (documented "stay local" fallback).
-# Core cache invariant: both calls must return the same value regardless of outcome.
+# Both calls must return the same value: that is the TTL cache doing its job.
 assert bw1 == bw2, "cache broken: two calls returned different values"
-# PROBES counts server-side arrivals: 1 when the request succeeded, 0 when it
-# threw before the server accepted it.  Either is valid; what must never happen
-# is PROBES > 1 (which would mean the second call bypassed the TTL cache).
-assert PROBES[0] in (0, 1), "unexpected probe count %d" % PROBES[0]
+# Exactly one probe reached the server. This used to accept 0 or 1, on the
+# grounds that the probe might fail under load - which also accepted a
+# _measure_bandwidth that never contacted anything at all, and the cost model
+# is built entirely on what it returns. The daemon here is a local fake that
+# answers every time; measured stable over repeated runs, so the tolerance was
+# caution rather than a real failure mode. If this ever does flake, the fix is
+# to make the fake answer reliably, not to widen the assertion back out.
+assert PROBES[0] == 1, "expected exactly one probe, got %d" % PROBES[0]
+assert bw1 is not None, "the probe reached the server but produced no bandwidth"
 if bw1 is not None:
     assert PROBES[0] == 1, "probe returned data but server never received it"
 print("COST-OK")
@@ -474,12 +496,29 @@ shim._STORE = ""
 rng = np.random.RandomState(0)
 X = rng.rand(200, 8)
 y = (X[:, 0] * 2 + X[:, 1] > 1).astype(int)
+# Two phases, asserted separately. They used to share one "MAX_CHUNK > 0" at
+# the end, which is a running maximum - so the sklearn phase satisfied it and
+# the lambda phase's result was never examined at all.
 rf = RandomForestClassifier(n_estimators=16, n_jobs=-1, random_state=0)
 rf.fit(X, y)
 p = rf.predict(X[:5])
 assert p.shape == (5,)
+sklearn_calls = POOL_CALLS[0]
+assert sklearn_calls > 0, "sklearn's joblib batches never reached the cluster"
+
+# A lambda cannot be shipped - it has no importable definition and no source
+# the shim can send - so this phase is expected to stay local. What matters is
+# that it stays *correct*, and that the shim does not claim to have distributed
+# it.
+before = POOL_CALLS[0]
 res = joblib.Parallel(n_jobs=-1)(joblib.delayed(lambda a, b: a + b)(i, i) for i in range(12))
 assert res == [2 * i for i in range(12)], res
+lambda_calls = POOL_CALLS[0] - before
+assert lambda_calls == 0, (
+    "a lambda was shipped to the cluster (%d call(s)); it has no definition the "
+    "worker could resolve, so this would have failed remotely and fallen back "
+    "silently" % lambda_calls)
+
 assert MAX_CHUNK[0] > 0, "no joblib batch reached the cluster"
 print("JOBLIB-OK")
 `, "JOBLIB-OK",
