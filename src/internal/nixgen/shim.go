@@ -2150,6 +2150,11 @@ def _install_ddp():
     _FWD = weakref.WeakSet()
     _ORIG_ITER = _th.utils.data.DataLoader.__iter__
     _EPOCHS = weakref.WeakKeyDictionary()
+    # Keyed by id() rather than the loader itself: the decision is cheap to
+    # recompute but must not be repeated per epoch, and a DataLoader is not
+    # reliably hashable once a user subclasses it.
+    _SHARDED = {}
+    import itertools
 
     def _init_group():
         backend = os.environ.get("PIPEDPEER_DDP_BACKEND", "gloo")
@@ -2256,12 +2261,59 @@ def _install_ddp():
                         _dist.broadcast(buf, src=0)
         return _ORIG_FWD(self, *args, **kw)
 
+    def _shard(self):
+        """Give this rank a disjoint slice of the data.
+
+        Averaging gradients over ranks that all read the SAME data is not
+        data-parallel training: every rank recomputes the same work and the
+        averaged gradient equals the single-process one, so N machines buy
+        nothing but a slower step. Sharding is what makes the ring worth
+        having, and it only happened before if the user had built a
+        DistributedSampler themselves - which the bundled demo did not.
+
+        The sampler swap is preferred because a skipped batch is still a
+        loaded batch: the dataset would be read in full on every rank.
+        DataLoader forbids assigning .sampler after construction, but the
+        BatchSampler it wraps is an ordinary object, so batched loaders take
+        that path and only the unbatched ones fall back to striding.
+        """
+        ds = getattr(self, "dataset", None)
+        if ds is None:
+            return None
+        shuffle = isinstance(getattr(self, "sampler", None),
+                             _th.utils.data.RandomSampler)
+        try:
+            sampler = _th.utils.data.distributed.DistributedSampler(
+                ds, num_replicas=_WORLD, rank=_RANK, shuffle=shuffle)
+        except Exception as e:
+            _log("ddp: cannot shard this dataset (%s); every rank reads all of it" % e)
+            return None
+        bs = getattr(self, "batch_sampler", None)
+        if bs is not None and hasattr(bs, "sampler"):
+            bs.sampler = sampler
+            _log("ddp: sharding %d samples across %d ranks" % (len(ds), _WORLD))
+            return sampler
+        return False        # sharding needed, but only striding is available
+
     def _iter(self):
         sampler = getattr(self, "sampler", None)
-        if (_WORLD > 1 and not _NATIVE_DDP
-                and isinstance(sampler, _th.utils.data.distributed.DistributedSampler)):
-            sampler.set_epoch(_EPOCHS.get(self, 0))
-            _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
+        if _WORLD > 1 and not _NATIVE_DDP:
+            if not isinstance(sampler, _th.utils.data.distributed.DistributedSampler):
+                shard = _SHARDED.get(id(self))
+                if shard is None:
+                    shard = self._pp_shard()
+                    _SHARDED[id(self)] = shard
+                if shard is False:
+                    # No sampler to swap: hand out every _WORLD-th batch. The
+                    # slices are still disjoint, which is what correctness
+                    # needs; only the loading is wasteful.
+                    epoch = _EPOCHS.get(self, 0)
+                    _EPOCHS[self] = epoch + 1
+                    return itertools.islice(_ORIG_ITER(self), _RANK, None, _WORLD)
+                sampler = shard
+            if isinstance(sampler, _th.utils.data.distributed.DistributedSampler):
+                sampler.set_epoch(_EPOCHS.get(self, 0))
+                _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
         return _ORIG_ITER(self)
 
     def _ddp_init(self, *a, **kw):
@@ -2273,6 +2325,7 @@ def _install_ddp():
     _th.nn.parallel.DistributedDataParallel.__init__ = _ddp_init
     _th.optim.Optimizer.__init__ = _opt_init
     _th.nn.Module.forward = _forward
+    _th.utils.data.DataLoader._pp_shard = _shard
     _th.utils.data.DataLoader.__iter__ = _iter
     _log("ddp interception installed")
 
