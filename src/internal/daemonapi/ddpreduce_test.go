@@ -186,3 +186,89 @@ func TestFloat16RoundsToNearestEven(t *testing.T) {
 		t.Errorf("%v rounded to %v, want %v (nearest even)", mid2, got, want)
 	}
 }
+
+func encodeI8(vals []float32, scale float64) []byte {
+	out := make([]byte, len(vals))
+	for i, v := range vals {
+		q := math.Round(float64(v) / scale)
+		if q > 127 {
+			q = 127
+		} else if q < -127 {
+			q = -127
+		}
+		out[i] = byte(int8(q))
+	}
+	return out
+}
+
+func decodeI8(b []byte, scale float64) []float32 {
+	out := make([]float32, len(b))
+	for i := range out {
+		out[i] = float32(float64(int8(b[i])) * scale)
+	}
+	return out
+}
+
+// TestInt8AveragesAcrossRanksWithDifferentScales. Each rank quantises against
+// its own largest value, so the scales differ and the daemon has to decode
+// each contribution with the scale it arrived with. Using one rank's scale for
+// all of them would silently rescale everyone else's gradients.
+func TestInt8AveragesAcrossRanksWithDifferentScales(t *testing.T) {
+	a := newDDPAccumulator(ddpI8, 3)
+	// Rank A's values peak at 10; rank B's at 1000.
+	if err := a.add(encodeI8([]float32{10, 5, 0}, 10.0/127), 10.0/127); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.add(encodeI8([]float32{1000, 500, 0}, 1000.0/127), 1000.0/127); err != nil {
+		t.Fatal(err)
+	}
+	out, scale, err := a.mean()
+	if err != nil {
+		t.Fatalf("mean: %v", err)
+	}
+	got := decodeI8(out, scale)
+	want := []float32{505, 252.5, 0}
+	for i := range want {
+		// int8 carries about two significant digits, so compare relatively.
+		if want[i] == 0 {
+			if math.Abs(float64(got[i])) > 5 {
+				t.Errorf("element %d = %v, want 0", i, got[i])
+			}
+			continue
+		}
+		rel := math.Abs(float64(got[i]-want[i]) / float64(want[i]))
+		if rel > 0.02 {
+			t.Errorf("element %d = %v, want about %v (relative error %.3f)", i, got[i], want[i], rel)
+		}
+	}
+}
+
+// TestInt8NeedsAScale: decoding bytes without the scale they were made with
+// produces plausible-looking numbers of entirely the wrong magnitude, which
+// training would absorb rather than reject.
+func TestInt8NeedsAScale(t *testing.T) {
+	a := newDDPAccumulator(ddpI8, 2)
+	if err := a.add([]byte{1, 2}, 0); err == nil {
+		t.Error("an int8 payload was accepted with no scale")
+	}
+	if err := a.add([]byte{1, 2}, -1); err == nil {
+		t.Error("an int8 payload was accepted with a negative scale")
+	}
+}
+
+// TestInt8ClampsRatherThanWraps. A wrapped byte flips the sign of a gradient,
+// and a gradient pointing the wrong way is worse than one that saturates.
+func TestInt8ClampsRatherThanWraps(t *testing.T) {
+	a := newDDPAccumulator(ddpI8, 1)
+	// A single huge value against a tiny scale: the mean must saturate.
+	if err := a.add(encodeI8([]float32{1e6}, 1.0), 1.0); err != nil {
+		t.Fatal(err)
+	}
+	out, scale, err := a.mean()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeI8(out, scale)[0]; got <= 0 {
+		t.Errorf("a saturating positive value decoded to %v; it wrapped", got)
+	}
+}
