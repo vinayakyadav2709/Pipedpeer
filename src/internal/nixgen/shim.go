@@ -2497,17 +2497,36 @@ def _install_ddp():
         prev = _ERR.get(key)
         if prev is not None and prev.shape == flat.shape:
             flat += prev
-        peak = float(_np_ddp.abs(flat).max()) if flat.size else 0.0
-        scale = peak / 127.0 if peak > 0 else 1.0
-        q = _np_ddp.clip(_np_ddp.round(flat / scale), -127, 127).astype("int8")
+
+        # A scale per tensor, not one for the model. Layers differ in gradient
+        # magnitude by an order of magnitude or more, so a single scale lets
+        # the largest set the step size for every other: measured on the demo,
+        # hidden layers near 1e-2 alongside an output layer near 3e-1 were left
+        # with four quantisation levels between them, and the final loss went
+        # from 0.087 to 0.127.
+        q = _np_ddp.empty(flat.size, dtype="int8")
+        dequant = _np_ddp.empty(flat.size, dtype="float32")
+        scales = []
+        off = 0
+        for n in sizes:
+            seg = flat[off:off + n]
+            peak = float(_np_ddp.abs(seg).max()) if n else 0.0
+            sc = peak / 127.0 if peak > 0 else 1.0
+            scales.append(sc)
+            qs = _np_ddp.clip(_np_ddp.round(seg / sc), -127, 127).astype("int8")
+            q[off:off + n] = qs
+            dequant[off:off + n] = qs.astype("float32") * sc
+            off += n
+
         # Whatever quantisation lost, minus nothing: carried to the next step.
-        _ERR[key] = flat - q.astype("float32") * scale
+        _ERR[key] = flat - dequant
 
         _t0 = _t.monotonic()
         _SEQ[0] += 1
         header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
                              "world": _WORLD, "dtype": "int8", "kind": "grads",
-                             "count": int(q.size), "scale": scale,
+                             "count": int(q.size), "scale": scales[0],
+                             "scales": scales, "counts": [int(n) for n in sizes],
                              "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
@@ -2532,8 +2551,16 @@ def _install_ddp():
                  "overhead. Shard it: X, y = X[rank::world], y[rank::world]")
         rest = data[nl + 1:]
         n = struct.unpack(">I", rest[:4])[0]
-        out_scale = float(reply.get("scale", 1.0)) or 1.0
-        mean = _np_ddp.frombuffer(rest[4:4 + n], dtype="int8").astype("float32") * out_scale
+        raw_mean = _np_ddp.frombuffer(rest[4:4 + n], dtype="int8").astype("float32")
+        out_scales = reply.get("scales") or [float(reply.get("scale", 1.0)) or 1.0]
+        if len(out_scales) == len(sizes):
+            mean = _np_ddp.empty(raw_mean.size, dtype="float32")
+            off = 0
+            for i, seg_n in enumerate(sizes):
+                mean[off:off + seg_n] = raw_mean[off:off + seg_n] * out_scales[i]
+                off += seg_n
+        else:
+            mean = raw_mean * out_scales[0]
         _DDP_STATS["syncs"] += 1
         _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
         _DDP_STATS["sent_bytes"] += len(body)

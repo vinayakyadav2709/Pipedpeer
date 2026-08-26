@@ -63,6 +63,17 @@ func (d ddpDType) size() int {
 // ring that is the difference between a working node and an OOM.
 type ddpAccumulator struct {
 	dtype ddpDType
+	// segments are the tensor boundaries, for int8 where each tensor carries
+	// its own scale.
+	//
+	// One scale for the whole model is the obvious encoding and it is badly
+	// wrong: a network's layers differ in gradient magnitude by an order of
+	// magnitude or more, so the largest layer sets the step size and the rest
+	// quantise to a handful of levels. Measured on the demo - an output layer
+	// peaking near 3e-1 alongside hidden layers near 1e-2 leaves those hidden
+	// layers with four levels between them, and the final loss moved from
+	// 0.087 to 0.127.
+	segments []int
 	// sum is always float64 regardless of the wire width. Adding N float16
 	// values in float16 loses precision the averaging is supposed to
 	// preserve, and this buffer exists once per group, not once per rank.
@@ -74,9 +85,59 @@ func newDDPAccumulator(dtype ddpDType, n int) *ddpAccumulator {
 	return &ddpAccumulator{dtype: dtype, sum: make([]float64, n)}
 }
 
+// withSegments records the tensor boundaries a payload is divided into. The
+// lengths must add up to the element count, or a scale would be applied to the
+// wrong values.
+func (a *ddpAccumulator) withSegments(counts []int) error {
+	total := 0
+	for _, c := range counts {
+		if c <= 0 {
+			return fmt.Errorf("segment length %d is not positive", c)
+		}
+		total += c
+	}
+	if total != len(a.sum) {
+		return fmt.Errorf("segments total %d values, payload declares %d", total, len(a.sum))
+	}
+	a.segments = counts
+	return nil
+}
+
 // add folds one rank's payload into the running sum. scale is meaningful only
 // for int8, where each rank picks its own from its own values.
 func (a *ddpAccumulator) add(payload []byte, scale float64) error {
+	return a.addSegmented(payload, []float64{scale})
+}
+
+// addSegmented folds one rank's payload in, decoding each tensor with its own
+// scale.
+func (a *ddpAccumulator) addSegmented(payload []byte, scales []float64) error {
+	if a.dtype == ddpI8 && len(a.segments) > 1 {
+		if len(scales) != len(a.segments) {
+			return fmt.Errorf("%d scale(s) for %d segment(s)", len(scales), len(a.segments))
+		}
+		want := len(a.sum)
+		if len(payload) != want {
+			return fmt.Errorf("payload is %d bytes, want %d int8 values", len(payload), want)
+		}
+		off := 0
+		for i, n := range a.segments {
+			sc := scales[i]
+			if sc <= 0 {
+				return fmt.Errorf("segment %d has a non-positive scale", i)
+			}
+			for j := 0; j < n; j++ {
+				a.sum[off+j] += float64(int8(payload[off+j])) * sc
+			}
+			off += n
+		}
+		a.count++
+		return nil
+	}
+	return a.addFlat(payload, scales[0])
+}
+
+func (a *ddpAccumulator) addFlat(payload []byte, scale float64) error {
 	want := len(a.sum) * a.dtype.size()
 	if len(payload) != want {
 		return fmt.Errorf("payload is %d bytes, want %d for %d %s values",
@@ -107,6 +168,46 @@ func (a *ddpAccumulator) add(payload []byte, scale float64) error {
 	}
 	a.count++
 	return nil
+}
+
+// meanSegmented is mean with a scale per tensor.
+func (a *ddpAccumulator) meanSegmented() ([]byte, []float64, error) {
+	if a.dtype != ddpI8 || len(a.segments) <= 1 {
+		b, sc, err := a.mean()
+		return b, []float64{sc}, err
+	}
+	if a.count == 0 {
+		return nil, nil, fmt.Errorf("no ranks contributed")
+	}
+	inv := 1 / float64(a.count)
+	out := make([]byte, len(a.sum))
+	scales := make([]float64, len(a.segments))
+
+	off := 0
+	for i, n := range a.segments {
+		peak := 0.0
+		for j := 0; j < n; j++ {
+			if m := math.Abs(a.sum[off+j] * inv); m > peak {
+				peak = m
+			}
+		}
+		sc := 1.0
+		if peak > 0 {
+			sc = peak / 127
+		}
+		scales[i] = sc
+		for j := 0; j < n; j++ {
+			q := math.Round(a.sum[off+j] * inv / sc)
+			if q > 127 {
+				q = 127
+			} else if q < -127 {
+				q = -127
+			}
+			out[off+j] = byte(int8(q))
+		}
+		off += n
+	}
+	return out, scales, nil
 }
 
 // mean divides by the number of contributors and encodes at the wire width,
