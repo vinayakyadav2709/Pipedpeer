@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/ddpplace"
@@ -346,7 +347,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					worldSize = min(ddpNodes, eligible)
 				}
 				if worldSize >= 2 {
-					return runDDP(ddpRunOptions{
+					err := runDDP(ddpRunOptions{
 						Nodes:          worldSize,
 						DaemonPort:     daemonPort,
 						MasterPort:     ddpPort,
@@ -367,8 +368,13 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						Strategy:       strategy,
 						MemOverride:    memOverride,
 					})
-				}
-				if ddpNodes > 1 {
+					// A ring that measures slower than one machine falls
+					// through to the ordinary single-node path below.
+					if !errors.Is(err, errRingNotWorthIt) {
+						return err
+					}
+					fmt.Printf("[coordinator] running on one node: every ring available measures slower\n")
+				} else if ddpNodes > 1 {
 					fmt.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
 				}
 			}
@@ -657,8 +663,11 @@ func runDDP(o ddpRunOptions) error {
 	// it, and it also serves as the rendezvous master.
 	ring := ddpChooseRing(o, rank0)
 	if len(ring) < 2 {
-		return fmt.Errorf("need %d healthy peers for ranks 1..%d (found %d) — join more nodes or lower --ddp",
-			o.Nodes-1, o.Nodes-1, max(0, len(ring)-1))
+		// Measurement says one machine beats any ring available. That is an
+		// answer, not a failure: erroring out here left the user with nothing
+		// to show for a perfectly runnable job, on the grounds that the
+		// cluster was not worth using. The caller runs it on one node.
+		return errRingNotWorthIt
 	}
 	if len(ring) < o.Nodes {
 		// Fewer ranks than asked for, because more would be slower. Said out
@@ -747,6 +756,16 @@ func runDDP(o ddpRunOptions) error {
 					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
 				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
 			)
+			// Every rank posts its gradients to the lead rank's daemon, so
+			// every rank needs the credential that daemon requires. Without
+			// this the sync is refused with 401 - and because the refusal
+			// arrives before the request body has finished uploading, what
+			// the user sees is a BrokenPipeError from deep inside urllib,
+			// which names neither authentication nor the daemon. DDP was
+			// simply broken on any cluster with a token set.
+			if tok := authtoken.Current(); tok != "" {
+				rankEnvs = append(rankEnvs, "PIPEDPEER_TOKEN="+tok)
+			}
 			opts := app.Options{
 				ScriptPath:        absScript,
 				DaemonHost:        ddpExtractHost(n.SSHEndpoint),
@@ -1797,6 +1816,10 @@ func ensureUserBinOnPath() {
 	}
 	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// errRingNotWorthIt says every ring available measures slower than a single
+// machine, so the caller should run the job normally rather than fail.
+var errRingNotWorthIt = errors.New("a single node is faster than any ring available")
 
 // ddpChoosePeers picks the nodes that will take ranks 1..N-1.
 //

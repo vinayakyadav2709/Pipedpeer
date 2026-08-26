@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 )
 
 func ddpPost(t *testing.T, ts *httptest.Server, group string, seq int64, rank, world int, data string) (int, []string) {
@@ -206,5 +208,51 @@ func TestDDPSyncBinaryFramesRoundTrip(t *testing.T) {
 				t.Errorf("rank %d blob %d = %x, want %x", rank, i, got, payloads[i])
 			}
 		}
+	}
+}
+
+// TestDDPSyncNeedsATokenWhenOneIsSet pins down the failure mode rather than
+// the fix, because the fix lives in the launcher and the symptom lived here.
+//
+// Every rank posts its gradients to the lead rank's daemon. When that daemon
+// requires a token and the rank has not been given one, the request is
+// refused - and the refusal arrives while the body is still uploading, so the
+// client sees a BrokenPipeError from inside urllib rather than anything about
+// authentication. DDP was broken on every cluster with a token set, and the
+// error named neither the daemon nor the credential.
+func TestDDPSyncNeedsATokenWhenOneIsSet(t *testing.T) {
+	if err := authtoken.Set("test-token-for-ddp"); err != nil {
+		t.Skipf("NOT VERIFIED: cannot set a token here: %v", err)
+	}
+	defer authtoken.Set("")
+
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	body := []byte(`{"group":"g","seq":1,"rank":0,"world":1}` + "\n")
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/ddp/sync", bytes.NewReader(body))
+	req.Header.Set("Content-Type", DDPFramesContentType)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated sync returned %d, want 401 — this test cannot "+
+			"be guarding anything if the endpoint is open", resp.StatusCode)
+	}
+
+	req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/ddp/sync", bytes.NewReader(body))
+	req2.Header.Set("Content-Type", DDPFramesContentType)
+	req2.Header.Set(authtoken.Header, "test-token-for-ddp")
+	resp2, err := ts.Client().Do(req2)
+	if err != nil {
+		t.Fatalf("authenticated request failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode == http.StatusUnauthorized {
+		t.Error("the token was rejected; ranks carrying it still could not sync")
 	}
 }

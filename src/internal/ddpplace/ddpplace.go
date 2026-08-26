@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"sync"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/schedule"
@@ -250,18 +249,19 @@ func probeAll(ctx context.Context, cands []Candidate, token string, probeMillis 
 	}
 	scores := make([]float64, len(cands))
 	ok := make([]bool, len(cands))
-	var wg sync.WaitGroup
 
+	// One at a time, not all at once. Probing concurrently is quicker and is
+	// what this did first, but it measures the wrong thing whenever the
+	// candidates share hardware - several daemons on one host, which is an
+	// ordinary deployment and exactly what the local test cluster is. Run
+	// together they contend for the same cores, so each reads low by a
+	// different amount and the ranking is decided by the contention rather
+	// than by the machines. Sequential costs one probe window per node.
 	for i, c := range cands {
-		wg.Add(1)
-		go func(i int, c Candidate) {
-			defer wg.Done()
-			if s, err := probe(ctx, c, token, probeMillis); err == nil && s > 0 {
-				scores[i], ok[i] = s, true
-			}
-		}(i, c)
+		if s, err := probe(ctx, c, token, probeMillis); err == nil && s > 0 {
+			scores[i], ok[i] = s, true
+		}
 	}
-	wg.Wait()
 
 	var sum, n float64
 	for i := range cands {
