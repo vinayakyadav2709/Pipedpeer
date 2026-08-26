@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"io"
 	"net"
 	"net/http"
@@ -41,6 +42,12 @@ import (
 )
 
 func main() {
+	// Before anything dials out. The daemon path returns just below, so
+	// installing this later left the daemon itself - the process that does
+	// nearly all the peer traffic - authenticating none of its own calls,
+	// which reads as every peer being unreachable.
+	authtoken.Install()
+
 	if len(os.Args) > 1 && os.Args[1] == "__daemon__" {
 		runDaemon(os.Args[2:])
 		return
@@ -72,6 +79,7 @@ func main() {
 		newTrafficCmd(),
 		newTasksCmd(),
 		newMapCmd(),
+		newAuthCmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE

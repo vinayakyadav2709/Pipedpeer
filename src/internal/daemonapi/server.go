@@ -23,6 +23,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
@@ -738,6 +739,10 @@ func (s *Server) GetLease(leaseID string) (Lease, bool) {
 func (s *Server) buildRouter() {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+	// No-op until a token is configured, so an existing cluster keeps working
+	// until its operator opts in. Once one is set, every endpoint here is
+	// behind it — including /health, which is how peers decide who exists.
+	r.Use(authtoken.Middleware)
 
 	r.Get("/health", s.handleHealth)
 	r.Post("/v1/accept", s.handleAccept)
