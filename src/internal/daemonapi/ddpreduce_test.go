@@ -272,3 +272,81 @@ func TestInt8ClampsRatherThanWraps(t *testing.T) {
 		t.Errorf("a saturating positive value decoded to %v; it wrapped", got)
 	}
 }
+
+// TestPerTensorScalesPreservePrecision is the fix for a real accuracy loss.
+//
+// One scale for the whole model lets the largest layer set the quantisation
+// step for every other. On the training demo, hidden layers with gradients
+// near 1e-2 sat alongside an output layer near 3e-1, which left the hidden
+// layers four levels between them, and the final loss moved from 0.087 to
+// 0.127 - a 45% degradation reported as if it were the encoding's ordinary
+// cost.
+func TestPerTensorScalesPreservePrecision(t *testing.T) {
+	// A big-magnitude tensor followed by a small one, as a network's output
+	// and hidden layers are.
+	big := []float32{0.30, -0.30, 0.15}
+	small := []float32{0.010, -0.008, 0.004}
+
+	// Per-tensor: each gets its own step.
+	seg := newDDPAccumulator(ddpI8, len(big)+len(small))
+	if err := seg.withSegments([]int{len(big), len(small)}); err != nil {
+		t.Fatal(err)
+	}
+	bigScale, smallScale := 0.30/127, 0.010/127
+	payload := append(encodeI8(big, bigScale), encodeI8(small, smallScale)...)
+	if err := seg.addSegmented(payload, []float64{bigScale, smallScale}); err != nil {
+		t.Fatal(err)
+	}
+	out, scales, err := seg.meanSegmented()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scales) != 2 {
+		t.Fatalf("got %d scales, want one per tensor", len(scales))
+	}
+	gotSmall := decodeI8(out[len(big):], scales[1])
+
+	// Single scale, which is what this replaces.
+	flat := newDDPAccumulator(ddpI8, len(big)+len(small))
+	globalScale := 0.30 / 127
+	if err := flat.add(append(encodeI8(big, globalScale), encodeI8(small, globalScale)...), globalScale); err != nil {
+		t.Fatal(err)
+	}
+	flatOut, flatScale, err := flat.mean()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flatSmall := decodeI8(flatOut[len(big):], flatScale)
+
+	segErr, flatErr := 0.0, 0.0
+	for i := range small {
+		segErr += math.Abs(float64(gotSmall[i] - small[i]))
+		flatErr += math.Abs(float64(flatSmall[i] - small[i]))
+	}
+	if segErr >= flatErr {
+		t.Errorf("per-tensor scaling was no better on the small tensor: error %.2e "+
+			"against %.2e for a single scale", segErr, flatErr)
+	}
+	// And it should be far better, not marginally: the whole point is that the
+	// small tensor gets the full range of the byte.
+	if flatErr/segErr < 5 {
+		t.Errorf("per-tensor scaling is only %.1fx better; the small tensor should "+
+			"be recovering most of its precision", flatErr/segErr)
+	}
+}
+
+// TestSegmentsMustCoverThePayload. A scale applied to the wrong values is
+// silently wrong arithmetic, so a mismatch has to be refused rather than
+// truncated.
+func TestSegmentsMustCoverThePayload(t *testing.T) {
+	a := newDDPAccumulator(ddpI8, 10)
+	if err := a.withSegments([]int{3, 3}); err == nil {
+		t.Error("segments totalling 6 were accepted for a 10-value payload")
+	}
+	if err := a.withSegments([]int{5, 0, 5}); err == nil {
+		t.Error("a zero-length segment was accepted")
+	}
+	if err := a.withSegments([]int{4, 6}); err != nil {
+		t.Errorf("segments that do cover the payload were refused: %v", err)
+	}
+}

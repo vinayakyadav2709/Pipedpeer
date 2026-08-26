@@ -44,9 +44,10 @@ type ddpEntry struct {
 	// individual payloads are dropped, so the lead daemon holds one buffer
 	// instead of one model per rank. result is computed once, when the last
 	// rank arrives, and served to every waiter.
-	acc         *ddpAccumulator
-	result      []byte
-	resultScale float64
+	acc          *ddpAccumulator
+	result       []byte
+	resultScale  float64
+	resultScales []float64
 	// seen tracks which ranks have contributed, since acc keeps only a count
 	// and a rank that retried must not be folded in twice.
 	seen map[int]bool
@@ -117,6 +118,11 @@ type ddpSyncRequest struct {
 	// Scale is the int8 quantisation step this rank used. Each rank picks its
 	// own from its own values, so it travels with the payload.
 	Scale float64 `json:"scale,omitempty"`
+	// Scales and Counts give each tensor its own quantisation step. One scale
+	// for a whole model lets the largest layer set the step size for every
+	// other, which costs most of the precision - see ddpreduce.go.
+	Scales []float64 `json:"scales,omitempty"`
+	Counts []int     `json:"counts,omitempty"`
 	// Kind is "grads" or "weights". Only gradients are checked for ranks
 	// duplicating work: the run opens by broadcasting the initial weights,
 	// and those are identical by construction whenever the script seeds its
@@ -208,6 +214,14 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			e.acc = newDDPAccumulator(req.DType, req.Count)
+			if len(req.Counts) > 1 {
+				if err := e.acc.withSegments(req.Counts); err != nil {
+					s.ddp.mu.Unlock()
+					writeJSON(w, http.StatusBadRequest,
+						map[string]string{"error": "segment lengths: " + err.Error()})
+					return
+				}
+			}
 		}
 		s.ddp.entries[key] = e
 	}
@@ -242,7 +256,11 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 					e.sameWork = false
 				}
 			}
-			if addErr := e.acc.add(blob, req.Scale); addErr != nil {
+			scales := req.Scales
+			if len(scales) == 0 {
+				scales = []float64{req.Scale}
+			}
+			if addErr := e.acc.addSegmented(blob, scales); addErr != nil {
 				// Recorded rather than returned to this rank alone: the
 				// others are blocked on a result that is now never coming,
 				// and a timeout three minutes later would name nothing.
@@ -253,7 +271,10 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		complete = e.err != nil || len(e.seen) == e.world
 		if complete && e.err == nil && e.result == nil {
-			e.result, e.resultScale, e.err = e.acc.mean()
+			e.result, e.resultScales, e.err = e.acc.meanSegmented()
+			if len(e.resultScales) > 0 {
+				e.resultScale = e.resultScales[0]
+			}
 			e.acc = nil // the sum is no longer needed; let it go now
 		}
 	} else {
@@ -297,6 +318,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	s.ddp.mu.Lock()
 	if e.acc != nil || e.result != nil || e.err != nil {
 		result, rerr, agreedEvery, rscale := e.result, e.err, e.syncEvery, e.resultScale
+		rscales, _ := json.Marshal(e.resultScales)
 		sameWork := e.checked && e.sameWork && e.world > 1
 		// How many ranks the result actually averages. Equal to the world
 		// size unless the round completed short-handed, and the shim says so
@@ -316,9 +338,9 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body := []byte(fmt.Sprintf(
-			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"same_work\": %t, "+
-				"\"ranks\": %d}\n",
-			agreedEvery, rscale, sameWork, ranks))
+			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"scales\": %s, "+
+				"\"same_work\": %t, \"ranks\": %d}\n",
+			agreedEvery, rscale, rscales, sameWork, ranks))
 		body = putFrame(body, result)
 		w.Header().Set("Content-Type", DDPReduceContentType)
 		w.WriteHeader(http.StatusOK)
