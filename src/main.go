@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/ddpplace"
 	"io"
 	"net"
 	"net/http"
@@ -650,43 +651,24 @@ func runDDP(o ddpRunOptions) error {
 		rank0.DaemonPort = o.DaemonPort
 	}
 
-	peers := make([]registry.NodeRecord, 0, o.Nodes-1)
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
-	if err == nil {
-		var all []registry.NodeRecord
-		if jerr := json.NewDecoder(resp.Body).Decode(&all); jerr == nil {
-			var gpuPeers, cpuPeers []registry.NodeRecord
-			for _, n := range all {
-				if n.State != "healthy" || n.NodeID == rank0.NodeID {
-					continue
-				}
-				if o.RequireGPU && !ddpHasGPU(n) {
-					continue
-				}
-				if o.PreferGPU && ddpHasGPU(n) {
-					gpuPeers = append(gpuPeers, n)
-				} else {
-					cpuPeers = append(cpuPeers, n)
-				}
-			}
-			// Prefer GPU peers when GPU work is wanted (force or inferred),
-			// falling back to CPU peers only if there aren't enough GPU ones —
-			// a DDP all-reduce must not mix devices silently.
-			sort.Slice(gpuPeers, func(i, j int) bool {
-				return gpuPeers[i].Load.CPUPercent < gpuPeers[j].Load.CPUPercent
-			})
-			sort.Slice(cpuPeers, func(i, j int) bool {
-				return cpuPeers[i].Load.CPUPercent < cpuPeers[j].Load.CPUPercent
-			})
-			peers = append(gpuPeers, cpuPeers...)
-		}
-		resp.Body.Close()
-	}
-	if len(peers) < o.Nodes-1 {
+	// Rank 0 is a candidate like any other. The coordinator picks it for
+	// availability rather than speed, and on an uneven cluster that put the
+	// slowest machine in the ring's most important seat: every rank waits for
+	// it, and it also serves as the rendezvous master.
+	ring := ddpChooseRing(o, rank0)
+	if len(ring) < 2 {
 		return fmt.Errorf("need %d healthy peers for ranks 1..%d (found %d) — join more nodes or lower --ddp",
-			o.Nodes-1, o.Nodes-1, len(peers))
+			o.Nodes-1, o.Nodes-1, max(0, len(ring)-1))
 	}
-	peers = peers[:o.Nodes-1]
+	if len(ring) < o.Nodes {
+		// Fewer ranks than asked for, because more would be slower. Said out
+		// loud: silently running a smaller ring than requested is the kind of
+		// thing that should never be discovered from a log file.
+		fmt.Printf("      Using %d rank(s) rather than %d: the rest would slow the ring down\n",
+			len(ring), o.Nodes)
+		o.Nodes = len(ring)
+	}
+	rank0, peers := ring[0], ring[1:o.Nodes]
 
 	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
 	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
@@ -1814,4 +1796,97 @@ func ensureUserBinOnPath() {
 		return
 	}
 	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// ddpChoosePeers picks the nodes that will take ranks 1..N-1.
+//
+// This used to be a gate followed by a sort: keep GPU nodes if the job wants a
+// GPU, otherwise CPU nodes, order by reported CPU load, take the first N. Both
+// halves are wrong on a real cluster. Reported load and advertised cores say
+// nothing about a cap the peer's daemon is under - the local test cluster's
+// workers all advertise 16 cores while held to 8, 2 and 1, a 13x spread that
+// no advertisement reveals. And in synchronous training every rank waits for
+// the slowest, so a node a fraction of the ring's speed does not add capacity,
+// it sets the pace: including it can leave the run slower than leaving it out.
+//
+// Peers are now measured and admitted only while admitting them helps.
+func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) []registry.NodeRecord {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var all []registry.NodeRecord
+	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
+		return nil
+	}
+
+	byID := map[string]registry.NodeRecord{}
+	var cands []ddpplace.Candidate
+	for _, n := range all {
+		if n.State != "healthy" {
+			continue
+		}
+		// GPU remains a hard requirement rather than something to trade off:
+		// an all-reduce must not silently mix devices, and the probe measures
+		// CPU throughput, so it cannot rank a GPU against a CPU anyway.
+		if o.RequireGPU && !ddpHasGPU(n) {
+			continue
+		}
+		byID[n.NodeID] = n
+		cands = append(cands, ddpplace.Candidate{
+			NodeID:   n.NodeID,
+			Host:     ddpExtractHost(n.SSHEndpoint),
+			Port:     n.DaemonPort,
+			Cores:    n.Load.TotalCPUs,
+			MemBytes: n.Load.AvailableMemBytes,
+			HasGPU:   ddpHasGPU(n),
+		})
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	plan := ddpplace.Select(ctx, cands, ddpplace.Options{
+		Max:         o.Nodes,
+		Token:       authtoken.Current(),
+		ProbeMillis: 250,
+		// No working-set size is threaded through here yet, so a node too
+		// small for the model is still admitted and fails at run time rather
+		// than being declined. ddpplace supports the gate; the estimate lives
+		// in the caller and has not been plumbed down.
+	})
+
+	if !plan.Measured {
+		fmt.Printf("      Note: no peer answered the throughput probe; placement is " +
+			"using advertised core counts, which ignore load and any cap on the peer\n")
+	}
+	for _, r := range plan.Rejected {
+		fmt.Printf("      Not using %s: %s\n", shortID(r.Candidate.NodeID), r.Reason)
+	}
+
+	// GPU peers first among the admitted, for the same reason the gate kept
+	// them: a mixed ring is not something the shim can currently balance.
+	sort.SliceStable(plan.Chosen, func(i, j int) bool {
+		return plan.Chosen[i].Candidate.HasGPU && !plan.Chosen[j].Candidate.HasGPU
+	})
+
+	out := make([]registry.NodeRecord, 0, len(plan.Chosen))
+	for _, c := range plan.Chosen {
+		n := byID[c.Candidate.NodeID]
+		if n.NodeID == "" {
+			continue
+		}
+		if n.DaemonPort == 0 {
+			n.DaemonPort = o.DaemonPort
+		}
+		out = append(out, n)
+	}
+	// The coordinator's pick is kept only if measurement agrees it belongs.
+	if len(out) == 0 && rank0.NodeID != "" {
+		return []registry.NodeRecord{rank0}
+	}
+	return out
 }
