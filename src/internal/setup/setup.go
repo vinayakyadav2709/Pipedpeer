@@ -10,6 +10,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 type prereq struct {
@@ -171,19 +172,11 @@ func getPrereqs() []prereq {
 			attempts := [][]string{
 				{"nix", "profile", "install", "nixpkgs#crun"},
 				{"nix-env", "-iA", "nixpkgs.crun"},
-				{"apt-get", "install", "-y", "crun"},
-				{"dnf", "install", "-y", "crun"},
 			}
 			var lastErr error
 			for _, argv := range attempts {
 				if _, err := exec.LookPath(argv[0]); err != nil {
 					continue
-				}
-				// System package managers need root; nix installs per-user.
-				if argv[0] == "apt-get" || argv[0] == "dnf" {
-					if os.Geteuid() != 0 {
-						argv = append([]string{"sudo"}, argv...)
-					}
 				}
 				cmd := exec.Command(argv[0], argv[1:]...)
 				cmd.Stdout = os.Stdout
@@ -193,10 +186,23 @@ func getPrereqs() []prereq {
 					return nil
 				}
 			}
-			if lastErr == nil {
-				lastErr = fmt.Errorf("no installer available (tried nix, apt, dnf)")
+
+			// The distro package managers used to be tried here, each behind
+			// sudo. They are gone: crun's own release binaries are static and
+			// install into the user's bin directory, so a machine the user
+			// does not administer can still join a cluster. Only reached when
+			// nix is absent or has no crun, which is the common case on a
+			// fresh worker.
+			if err := installCrunRelease(); err != nil {
+				if lastErr != nil {
+					return fmt.Errorf("crun install failed: %w (nix attempt: %v)", err, lastErr)
+				}
+				return fmt.Errorf("crun install failed: %w", err)
 			}
-			return fmt.Errorf("crun install failed: %w", lastErr)
+			if !binaryCheck("crun")() {
+				return fmt.Errorf("crun installed to %s but is not on PATH", userdir.Bin())
+			}
+			return nil
 		}},
 	}
 }

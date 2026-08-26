@@ -56,3 +56,19 @@ func Scratch(prefix string) (string, error) {
 	}
 	return os.MkdirTemp(root, prefix)
 }
+
+// Bin is where pipedpeer puts helper binaries it installs for itself, so that
+// setup never needs root to provide a container runtime. This is the standard
+// per-user bin directory rather than a pipedpeer-private one, because it is
+// already on PATH for login shells on every mainstream distribution; the
+// daemon prepends it regardless, since a daemon does not always inherit one.
+func Bin() string {
+	if dir := os.Getenv("XDG_BIN_HOME"); dir != "" {
+		return dir
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(Data(), "bin")
+	}
+	return filepath.Join(home, ".local", "bin")
+}

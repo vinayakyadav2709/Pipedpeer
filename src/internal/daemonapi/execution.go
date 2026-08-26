@@ -9,6 +9,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/pipedpeer/pipedpeer/internal/userns"
 	"github.com/rs/zerolog/log"
 	"io"
 	"io/fs"
@@ -587,6 +588,14 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		if _, err := exec.LookPath("crun"); err != nil {
 			outCh <- OutputMessage{E: "[pipedpeer] crun not found on this node — running unisolated\n"}
 			cfg.Isolate = false
+		} else if ok, why := userns.Available(); !ok {
+			// crun's own message for this is "unshare: Operation not
+			// permitted", which names neither the cause nor the fix, and the
+			// three possible causes need three different fixes.
+			outCh <- OutputMessage{E: "[pipedpeer] this node cannot create a user namespace, " +
+				"so jobs run unisolated.\n    " + why + "\n"}
+			usernsOnce.Do(func() { log.Warn().Str("reason", why).Msg("no user namespace: jobs run unisolated") })
+			cfg.Isolate = false
 		}
 	}
 
@@ -1027,6 +1036,9 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 
 // noCapOnce keeps the "no memory limit" warning to one line per daemon.
 var noCapOnce sync.Once
+
+// usernsOnce keeps the "no user namespace" warning to one line per daemon.
+var usernsOnce sync.Once
 
 // applyMemLimit puts a cgroup memory cap on the bundle, and reports whether
 // it did. parent comes from cgroups.Prepare, which has already proved that a
