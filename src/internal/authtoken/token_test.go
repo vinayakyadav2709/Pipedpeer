@@ -138,3 +138,42 @@ func TestSetAndClearRoundTrip(t *testing.T) {
 		t.Fatal("clear did not remove the token")
 	}
 }
+
+// TestTestBinaryIgnoresConfiguredToken is the guard that keeps a developer's
+// real secret out of the test suite. Without it, every package whose tests
+// start or call a daemon began failing on a machine where a token was
+// configured — and in the coordinator package that surfaced as a ten-minute
+// timeout rather than an error, which sends you looking at the wrong code.
+func TestTestBinaryIgnoresConfiguredToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	// Write a token the way `pipedpeer auth set` would, then read it back as
+	// a fresh process would.
+	if err := Set("operator-secret"); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	cached, loaded = "", false
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		cached, loaded = "", false
+		mu.Unlock()
+	})
+
+	if !underTest() {
+		t.Fatal("this is a test binary; underTest() should say so")
+	}
+	if got := Current(); got != "" {
+		t.Errorf("test binary picked up the operator's token %q", got)
+	}
+
+	// An explicit Set still works, so tests that mean to exercise auth can.
+	if err := Set("chosen-by-the-test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := Current(); got != "chosen-by-the-test" {
+		t.Errorf("Current()=%q after an explicit Set", got)
+	}
+}

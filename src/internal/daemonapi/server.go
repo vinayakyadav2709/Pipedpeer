@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
@@ -1199,9 +1201,14 @@ func (s *Server) upsertSelf() {
 	capsJSON, _ := json.Marshal(caps)
 	loadJSON, _ := json.Marshal(load)
 
+	// Both fields, not just Host: peers read the endpoint, and publishing a
+	// routable Host beside an unroutable endpoint fixes nothing.
+	host := s.advertisedHost(extractHost(ssh))
+	ssh = rewriteHost(ssh, host)
+
 	_ = s.store.MarkHealthy(nodestore.Node{
 		NodeID:       s.nodeID,
-		Host:         extractHost(ssh),
+		Host:         host,
 		Port:         port,
 		SSHEndpoint:  ssh,
 		Arch:         caps["arch"],
@@ -1589,4 +1596,56 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// advertisedHost is the address this node publishes to its peers.
+//
+// The interface-list guess is only right when a machine has one route to the
+// world. A laptop holding a stale 192.168.x lease published that while its
+// peers were reachable only over an overlay, and nothing complained: the node
+// simply advertised an address no peer could dial. DDP appeared to work
+// because the reachable machine happened to draw rank 0; with the roles
+// reversed the sync endpoint would have been unreachable for the other rank.
+//
+// So ask the kernel which of our addresses it would use to reach the peers we
+// already know about, and publish that.
+func (s *Server) advertisedHost(fallback string) string {
+	if s.store == nil {
+		return fallback
+	}
+	nodes, err := s.store.ListAll()
+	if err != nil {
+		return fallback
+	}
+	var peers []string
+	for _, n := range nodes {
+		if n.NodeID == s.nodeID || n.Host == "" || n.Port == 0 {
+			continue
+		}
+		// Only peers we can currently reach get a vote. Unreachable rows
+		// outlive whatever they described - manual entries never expire at
+		// all - and letting a machine that is long gone decide how we
+		// describe ourselves is how the stale answer survives.
+		if n.State != "healthy" {
+			continue
+		}
+		peers = append(peers, net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
+	}
+	return netaddr.Advertise(peers, fallback)
+}
+
+// rewriteHost swaps the host in a "user@host:port" endpoint, leaving the user
+// and port alone.
+func rewriteHost(endpoint, host string) string {
+	if endpoint == "" || host == "" {
+		return endpoint
+	}
+	user, rest := "", endpoint
+	if i := strings.LastIndex(endpoint, "@"); i >= 0 {
+		user, rest = endpoint[:i+1], endpoint[i+1:]
+	}
+	if _, port, err := net.SplitHostPort(rest); err == nil {
+		return user + net.JoinHostPort(host, port)
+	}
+	return user + host
 }
