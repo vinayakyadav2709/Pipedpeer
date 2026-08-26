@@ -2117,6 +2117,10 @@ def _install_ddp():
     import torch.distributed as _dist
 
     _NATIVE_DDP = []
+    import numpy as _np_ddp
+    # Gradients ship as float16 unless asked otherwise. Averaging is still
+    # done in float64; only the wire is narrowed.
+    _FP16_GRADS = os.environ.get("PIPEDPEER_DDP_FP32") != "1"
     _WORLD = int(os.environ.get("PIPEDPEER_WORLD_SIZE", "1"))
     _RANK = int(os.environ.get("PIPEDPEER_RANK", "0"))
     # daemon (default): every sync is one POST to the lead rank's daemon on
@@ -2173,11 +2177,27 @@ def _install_ddp():
             raise RuntimeError("ddp sync returned %d of %d blobs" % (len(out), _WORLD))
         return out
 
-    def _daemon_allreduce(tensors):
-        """Average tensors across ranks in place, through the daemon channel."""
+    def _daemon_allreduce(tensors, half=None):
+        """Average tensors across ranks in place, through the daemon channel.
+
+        Gradients cross the wire as float16 by default. This is the dominant
+        cost of a step on any link slower than a datacentre LAN - the demo is
+        bounded by sync time, not compute - and halving the bytes halves it.
+        The averaging itself is still done in float64 and written back at the
+        tensor's own dtype, so the loss of precision is confined to transport,
+        which is the same trade PyTorch's own fp16 compression hook makes.
+        PIPEDPEER_DDP_FP32=1 turns it off; weight broadcasts never use it.
+        """
         import pickle
+        if half is None:
+            half = _FP16_GRADS
         arrs = [t.detach().cpu().numpy() for t in tensors]
-        blobs = _daemon_exchange(pickle.dumps(arrs, protocol=pickle.HIGHEST_PROTOCOL))
+        wire = arrs
+        if half:
+            # Only float32; float64 tensors keep their range, and integer
+            # buffers would be corrupted outright.
+            wire = [a.astype("float16") if a.dtype == _np_ddp.float32 else a for a in arrs]
+        blobs = _daemon_exchange(pickle.dumps(wire, protocol=pickle.HIGHEST_PROTOCOL))
         peers = [pickle.loads(b) for b in blobs]
         for i, t in enumerate(tensors):
             acc = peers[0][i].astype("float64", copy=True)
@@ -2187,7 +2207,11 @@ def _install_ddp():
             t.data.copy_(_th.from_numpy(acc.astype(arrs[i].dtype)).to(t.device))
 
     def _daemon_broadcast(tensors):
-        """Overwrite tensors with rank 0's values, through the daemon channel."""
+        """Overwrite tensors with rank 0's values, through the daemon channel.
+
+        Never reduced precision: this is how every rank agrees on the model
+        it is training, and a rounding difference here would compound over
+        the run rather than average out as a gradient's would."""
         import pickle
         arrs = [t.detach().cpu().numpy() for t in tensors]
         blobs = _daemon_exchange(pickle.dumps(arrs, protocol=pickle.HIGHEST_PROTOCOL))
@@ -2258,7 +2282,7 @@ def _install_ddp():
                 params = [p for g in self.param_groups for p in g["params"]]
                 if self not in _STEPPED:
                     _STEPPED.add(self)
-                    _daemon_allreduce([p.data for p in params])
+                    _daemon_allreduce([p.data for p in params], half=False)
                     _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
                          % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
                 if _SYNC_EVERY == 1:

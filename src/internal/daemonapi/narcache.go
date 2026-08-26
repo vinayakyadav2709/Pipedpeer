@@ -187,9 +187,13 @@ func closurePaths(storePath string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := (&exec.Cmd{Path: nixPath, Args: []string{"nix-store", "-qR", storePath}}).Output()
+	var stderr bytes.Buffer
+	cmd := &exec.Cmd{Path: nixPath, Args: []string{"nix-store", "-qR", storePath}, Stderr: &stderr}
+	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		// Carry nix's own words: "exit status 1" on its own sends you
+		// looking in the wrong place.
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.Fields(string(out)), nil
 }
