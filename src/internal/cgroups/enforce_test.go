@@ -8,6 +8,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // hogEnv makes a re-exec of this test binary allocate until it dies, so the
@@ -213,5 +214,53 @@ func TestMemoryCeilingCanBeLifted(t *testing.T) {
 	joined := strings.Join(ceilingProperties(), " ")
 	if !strings.Contains(joined, "MemoryMax=3G") {
 		t.Errorf("explicit ceiling not honoured: %s", joined)
+	}
+}
+
+// TestStaleScopeIsClearedBeforeStarting covers a failure that made the daemon
+// unrestartable. systemd refuses a transient unit whose name it already
+// knows, and --collect does not always reach a scope whose processes were
+// killed rather than exited - so after one hard kill, every subsequent
+// `pipedpeer start` failed with "Unit pipedpeer-daemon-38080.scope was
+// already loaded or has a fragment file" and no daemon came up at all.
+func TestStaleScopeIsClearedBeforeStarting(t *testing.T) {
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("NOT VERIFIED: no systemd on this machine, so no scopes to go stale")
+	}
+	if os.Getenv("XDG_RUNTIME_DIR") == "" {
+		t.Skip("NOT VERIFIED: no session bus, so the user manager is unreachable")
+	}
+	const unit = "pipedpeer-stale-test"
+
+	// Leave a scope behind holding a live process, the way a killed daemon
+	// does.
+	start := exec.Command("systemd-run", "--user", "--quiet", "--unit="+unit,
+		"--scope", "--property=Delegate=yes", "sleep", "60")
+	if err := start.Start(); err != nil {
+		t.Skipf("NOT VERIFIED: could not create a scope to go stale: %v", err)
+	}
+	defer func() {
+		_ = start.Process.Kill()
+		_, _ = start.Process.Wait()
+		clearStaleScope(unit)
+	}()
+	// Give systemd a moment to register it before asking for the same name.
+	for i := 0; i < 50; i++ {
+		if exec.Command("systemctl", "--user", "is-active", unit+".scope").Run() == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Through the launcher path, not the helper directly: the bug was that
+	// nothing on the way to starting a daemon did this.
+	scopeArgv(unit)
+
+	// The name must now be free: creating it again is what a restart does.
+	again := exec.Command("systemd-run", "--user", "--quiet", "--collect",
+		"--unit="+unit, "--scope", "true")
+	if out, err := again.CombinedOutput(); err != nil {
+		t.Errorf("the name is still taken after clearing, so a restart would fail: %v\n%s",
+			err, out)
 	}
 }
