@@ -140,6 +140,14 @@ func Cmd(dir string, argv ...string) (*exec.Cmd, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	// Repair rather than assume. A store seeded by an older build has no
+	// nix.conf, and the only symptom is every build failing with
+	// "experimental Nix feature 'nix-command' is disabled" - which reads as a
+	// problem with the flake, not with the store. Found on gcp1, on a store
+	// seeded before this file existed.
+	if err := ensureConf(); err != nil {
+		return nil, nil, err
+	}
 	crun, err := exec.LookPath("crun")
 	if err != nil {
 		return nil, nil, fmt.Errorf("a private nix store needs crun to bind it at /nix: %w", err)

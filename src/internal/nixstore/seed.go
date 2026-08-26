@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -75,7 +76,7 @@ func Seed(progress func(string, ...any)) error {
 	if _, err := NixBinDir(); err != nil {
 		return fmt.Errorf("nix is not usable after seeding: %w", err)
 	}
-	if err := writeConf(); err != nil {
+	if err := ensureConf(); err != nil {
 		return err
 	}
 	// Force the private path on now that it can work, so the verification
@@ -118,24 +119,79 @@ func download(url, dest string) error {
 	return nil
 }
 
-// writeConf gives the private store its own nix.conf.
-//
-// A system install keeps this at /etc/nix, which here is bound read-only from
-// the host and on a nix-less machine does not exist at all - so without this
-// nix comes up with flakes disabled and the first build fails with
-// "experimental Nix feature 'nix-command' is disabled". The bundle points
-// NIX_CONF_DIR at this file.
-func writeConf() error {
+// requiredConf is what a private store needs in its nix.conf, as key/value
+// pairs so a store written by an older build can be repaired setting by
+// setting rather than only when the file is missing entirely.
+var requiredConf = [][2]string{
+	// Without this the first build fails with "experimental Nix feature
+	// 'nix-command' is disabled", which reads as a problem with the flake.
+	{"experimental-features", "nix-command flakes"},
+	// There is no nixbld group and no way to create one without root; builds
+	// run as the invoking user, as a single-user nix does anyway.
+	{"build-users-group", ""},
+	// The namespace maps exactly one uid, so the kernel denies setgroups in
+	// it. nix tries to drop supplementary groups before building and fails
+	// with "setgroups failed"; it has nothing to drop here. Found on a real
+	// Ubuntu machine - the unprivileged container this was first built in
+	// does not hit it, because there the daemon was already root inside.
+	{"require-drop-supplementary-groups", "false"},
+	// nix's own build sandbox creates a second user namespace inside ours and
+	// writes its uid_map, which a machine restricting unprivileged user
+	// namespaces refuses ("writing file '/proc/N/uid_map': Operation not
+	// permitted"). Turning it off costs build purity, not safety: the job
+	// sandbox is a separate mechanism and is untouched, and nearly every path
+	// arrives substituted from the binary cache rather than built here. Store
+	// paths are computed from a derivation's inputs, so peers still agree on
+	// them either way.
+	{"sandbox", "false"},
+}
+
+// ensureConf makes sure the private store's nix.conf carries every setting
+// the namespace requires, adding any that are missing and leaving anything
+// else in the file alone.
+func ensureConf() error {
 	dir := filepath.Join(Root(), "etc", "nix")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	conf := "experimental-features = nix-command flakes\n" +
-		// There is no nixbld group and no way to create one without root;
-		// builds run as the invoking user, which is what a single-user nix
-		// does anyway.
-		"build-users-group =\n"
-	return os.WriteFile(filepath.Join(dir, "nix.conf"), []byte(conf), 0o644)
+	path := filepath.Join(dir, "nix.conf")
+
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	body := string(existing)
+
+	var add []string
+	for _, kv := range requiredConf {
+		if !hasSetting(body, kv[0]) {
+			add = append(add, kv[0]+" = "+kv[1])
+		}
+	}
+	if len(add) == 0 {
+		return nil
+	}
+	if body != "" && !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	body += strings.Join(add, "\n") + "\n"
+	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+// hasSetting reports whether key is already assigned, ignoring comments so a
+// commented-out line does not count as set.
+func hasSetting(conf, key string) bool {
+	for _, line := range strings.Split(conf, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, _, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(name) == key {
+			return true
+		}
+	}
+	return false
 }
 
 // ConfDir is where the private store keeps nix.conf, as seen inside the
