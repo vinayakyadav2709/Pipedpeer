@@ -2188,6 +2188,90 @@ def _install_ddp():
     # SGD: train locally, average weights every Nth step — the knob for
     # high-latency links where a per-step round trip dominates.
     _SYNC_EVERY = max(1, int(os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "1")))
+    # A receipt for training, for the same reason pool work has one: a run
+    # that distributed nothing and a run that distributed everything look
+    # identical from the outside, and so do a fast ring and one that spent
+    # 95% of its time waiting.
+    _DDP_STATS = {"syncs": 0, "sync_sec": 0.0, "sent_bytes": 0, "recv_bytes": 0}
+    # Server-side averaging. Off with PIPEDPEER_DDP_BLACKBOARD=1, which falls
+    # back to every rank receiving every rank's payload - needed only against
+    # a daemon too old to average.
+    _REDUCE_OK = os.environ.get("PIPEDPEER_DDP_BLACKBOARD", "") != "1"
+
+    # Averaging less often than every step trades accuracy for speed, so it
+    # is off unless asked for: PIPEDPEER_DDP_SYNC_EVERY=auto.
+    #
+    # The temptation to make it the default is strong, and measurement is why
+    # it is resisted. On two machines over a home connection an
+    # 800k-parameter model costs ~0.5s a step to sync against ~50ms to
+    # compute, so 91% of the run is moving gradients and the job takes 54s
+    # against 2.9s on one machine. Auto-tuning to average every ~20 steps cuts
+    # that to 5.4s - and moved the final loss from 0.0603 to 0.0756, because
+    # an 87-step run averaged 7 times is barely distributed training at all.
+    #
+    # A 10x speed-up that quietly makes the model worse is exactly the kind of
+    # result this project exists to stop shipping. So the default stays exact,
+    # the diagnosis is printed either way, and the user decides.
+    _SYNC_BUDGET = float(os.environ.get("PIPEDPEER_DDP_SYNC_BUDGET", "0.25"))
+    _SYNC_EVERY_MAX = int(os.environ.get("PIPEDPEER_DDP_SYNC_EVERY_MAX", "32"))
+    _SYNC_AUTO = os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "").lower() == "auto"
+    _SYNC_TUNED = [None if _SYNC_AUTO else _SYNC_EVERY]
+    _WARNED_SYNC_BOUND = [False]
+    # Compute time is measured as the interval between consecutive optimizer
+    # steps minus whatever was spent syncing in it - not as the duration of
+    # step() itself, which is a rounding error next to the forward and
+    # backward passes it follows and would make N wildly too large.
+    _STEP_SEC = [0.0, 0]  # total compute seconds, count
+    _STEP_MARK = [None, 0.0]  # monotonic at last step, sync_sec at last step
+
+    def _tuned_sync_every():
+        """How often to average, from measured sync and step times.
+
+        Chosen so sync is at most _SYNC_BUDGET of the wall clock:
+            sync/N <= budget * (step + sync/N)  =>  N >= sync*(1-budget)/(step*budget)
+        """
+        if _DDP_STATS["syncs"] < 3 or _STEP_SEC[1] < 3:
+            return _SYNC_TUNED[0] or _SYNC_EVERY
+        sync = _DDP_STATS["sync_sec"] / _DDP_STATS["syncs"]
+        step = _STEP_SEC[0] / _STEP_SEC[1]
+        if step <= 0 or sync <= 0:
+            return _SYNC_TUNED[0] or _SYNC_EVERY
+        want = sync * (1.0 - _SYNC_BUDGET) / (step * _SYNC_BUDGET)
+        n = max(1, min(_SYNC_EVERY_MAX, int(want + 0.5)))
+
+        if not _SYNC_AUTO:
+            # Diagnose regardless. A run that spends nine tenths of itself
+            # moving gradients should say so, once, rather than leave the
+            # user to conclude the system is simply slow.
+            if n > 1 and not _WARNED_SYNC_BOUND[0]:
+                _WARNED_SYNC_BOUND[0] = True
+                _log("ddp: sync-bound — %.0f ms per sync against %.0f ms of compute, "
+                     "so %.0f%% of this run is moving gradients. "
+                     "PIPEDPEER_DDP_SYNC_EVERY=auto would average every %d steps "
+                     "instead of every one, which is faster and trains a slightly "
+                     "different model." % (sync * 1000, step * 1000,
+                                           100.0 * sync / (sync + step), n))
+            return _SYNC_EVERY
+
+        if _SYNC_TUNED[0] is None:
+            _SYNC_TUNED[0] = n
+            if n > 1:
+                _log("ddp: averaging every %d steps — a sync costs %.0f ms against "
+                     "%.0f ms of compute. This is local SGD: faster, and not the "
+                     "same arithmetic as exact DDP." % (n, sync * 1000, step * 1000))
+        return _SYNC_TUNED[0]
+
+    def _ddp_report():
+        if not _DDP_STATS["syncs"]:
+            return
+        _log("ddp: %d sync(s), %.1fs total (%.0f ms each), %.1f MiB sent, %.1f MiB received"
+             % (_DDP_STATS["syncs"], _DDP_STATS["sync_sec"],
+                1000.0 * _DDP_STATS["sync_sec"] / _DDP_STATS["syncs"],
+                _DDP_STATS["sent_bytes"] / 1048576.0,
+                _DDP_STATS["recv_bytes"] / 1048576.0))
+
+    import atexit as _atexit_ddp
+    _atexit_ddp.register(_ddp_report)
     _SEQ = [0]
     _STEPN = {}
     if _BACKEND == "daemon" and not _SYNC_URL:
@@ -2205,7 +2289,9 @@ def _install_ddp():
         """
         import json
         import struct
+        import time as _t
         import urllib.request
+        _t0 = _t.monotonic()
         _SEQ[0] += 1
         header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
                              "world": _WORLD}).encode()
@@ -2229,7 +2315,80 @@ def _install_ddp():
             rest = rest[4 + n:]
         if len(out) != _WORLD:
             raise RuntimeError("ddp sync returned %d of %d blobs" % (len(out), _WORLD))
+        # Timed because a training run that is slower distributed than local
+        # is the failure mode that matters most here, and without a number
+        # for where the step went there is nothing to act on. Measured on two
+        # machines over a WAN-ish link: 87 steps at 0.69s of sync each, on a
+        # model whose whole compute was 33ms a step.
+        _DDP_STATS["syncs"] += 1
+        _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
+        _DDP_STATS["sent_bytes"] += len(body)
+        _DDP_STATS["recv_bytes"] += len(data)
         return out
+
+    def _pack(arrs):
+        """Flatten arrays into one contiguous buffer of a single dtype.
+
+        Raw bytes rather than pickle, because the daemon has to be able to
+        average them: a reply carrying one model instead of one per rank is
+        the difference between distributed training being worth doing on a
+        normal link and being 21x slower than one machine. Dropping pickle
+        also takes Python's serialiser out of every step.
+        """
+        if len(arrs) == 1:
+            return arrs[0].reshape(-1), [arrs[0].shape], [arrs[0].size]
+        flat = _np_ddp.concatenate([a.reshape(-1) for a in arrs])
+        return flat, [a.shape for a in arrs], [a.size for a in arrs]
+
+    def _unpack(flat, shapes, sizes, dtypes):
+        out, off = [], 0
+        for shape, size, dt in zip(shapes, sizes, dtypes):
+            out.append(flat[off:off + size].reshape(shape).astype(dt, copy=False))
+            off += size
+        return out
+
+    def _daemon_reduce(arrs, wire_dtype):
+        """One averaged allreduce through the daemon, in reduce mode."""
+        import json
+        import struct
+        import time as _t
+        import urllib.request
+        flat, shapes, sizes = _pack(arrs)
+        flat = _np_ddp.ascontiguousarray(flat.astype(wire_dtype, copy=False))
+        _t0 = _t.monotonic()
+        _SEQ[0] += 1
+        header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
+                             "world": _WORLD, "dtype": wire_dtype.name,
+                             "count": int(flat.size),
+                             "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
+        payload = flat.tobytes()
+        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
+        req = urllib.request.Request(
+            _SYNC_URL, data=body,
+            headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
+        if _TOKEN:
+            req.add_header("X-Pipedpeer-Token", _TOKEN)
+        with urllib.request.urlopen(req, timeout=240) as resp:
+            data = resp.read()
+        nl = data.find(b"\n")
+        if nl < 0:
+            raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
+        # Adopt the group's agreed interval. Ranks measure their own link and
+        # arrive at different numbers, and averaging at different points in
+        # each rank's step sequence is not local SGD - it is ranks combining
+        # models that have taken different numbers of local steps, which shows
+        # up as a worse final loss and nothing else.
+        agreed = json.loads(data[:nl]).get("sync_every", 0)
+        if agreed and agreed != _SYNC_TUNED[0]:
+            _SYNC_TUNED[0] = int(agreed)
+        rest = data[nl + 1:]
+        n = struct.unpack(">I", rest[:4])[0]
+        mean = _np_ddp.frombuffer(rest[4:4 + n], dtype=wire_dtype)
+        _DDP_STATS["syncs"] += 1
+        _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
+        _DDP_STATS["sent_bytes"] += len(body)
+        _DDP_STATS["recv_bytes"] += len(data)
+        return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
     def _daemon_allreduce(tensors, half=None):
         """Average tensors across ranks in place, through the daemon channel.
@@ -2251,6 +2410,18 @@ def _install_ddp():
             # Only float32; float64 tensors keep their range, and integer
             # buffers would be corrupted outright.
             wire = [a.astype("float16") if a.dtype == _np_ddp.float32 else a for a in arrs]
+        # Reduce mode when the payload is uniform enough for the daemon to
+        # average it, which is the ordinary case: one dtype across every
+        # gradient. Anything mixed falls back to the blackboard, where the
+        # daemon does not need to understand what it is holding.
+        wire_dtypes = {a.dtype for a in wire}
+        if _REDUCE_OK and len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
+                "float16", "float32", "float64"):
+            means = _daemon_reduce(wire, next(iter(wire_dtypes)))
+            for i, t in enumerate(tensors):
+                t.data.copy_(_th.from_numpy(
+                    _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
+            return
         blobs = _daemon_exchange(pickle.dumps(wire, protocol=pickle.HIGHEST_PROTOCOL))
         peers = [pickle.loads(b) for b in blobs]
         for i, t in enumerate(tensors):
@@ -2339,14 +2510,25 @@ def _install_ddp():
                     _daemon_allreduce([p.data for p in params], half=False)
                     _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
                          % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
-                if _SYNC_EVERY == 1:
+                import time as _t_step
+                _now = _t_step.monotonic()
+                if _STEP_MARK[0] is not None:
+                    _elapsed = _now - _STEP_MARK[0]
+                    _synced = _DDP_STATS["sync_sec"] - _STEP_MARK[1]
+                    if _elapsed > _synced >= 0:
+                        _STEP_SEC[0] += _elapsed - _synced
+                        _STEP_SEC[1] += 1
+                _STEP_MARK[0], _STEP_MARK[1] = _now, _DDP_STATS["sync_sec"]
+
+                every = _tuned_sync_every()
+                if every == 1:
                     grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
                              for p in params if p.grad is not None]
                     if grads:
                         _daemon_allreduce(grads)
                     return _orig_step(*sa, **skw)
                 out = _orig_step(*sa, **skw)
-                if (n + 1) % _SYNC_EVERY == 0:
+                if (n + 1) % every == 0:
                     _daemon_allreduce([p.data for p in params])
                 return out
             if not _dist.is_initialized():

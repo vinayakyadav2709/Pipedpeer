@@ -1,0 +1,188 @@
+package daemonapi
+
+import (
+	"encoding/binary"
+	"math"
+	"testing"
+)
+
+func encodeF32(vals []float32) []byte {
+	out := make([]byte, len(vals)*4)
+	for i, v := range vals {
+		binary.LittleEndian.PutUint32(out[i*4:], math.Float32bits(v))
+	}
+	return out
+}
+
+func decodeF32(b []byte) []float32 {
+	out := make([]float32, len(b)/4)
+	for i := range out {
+		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return out
+}
+
+func encodeF16(vals []float32) []byte {
+	out := make([]byte, len(vals)*2)
+	for i, v := range vals {
+		binary.LittleEndian.PutUint16(out[i*2:], float32ToFloat16(v))
+	}
+	return out
+}
+
+func decodeF16(b []byte) []float32 {
+	out := make([]float32, len(b)/2)
+	for i := range out {
+		out[i] = float16ToFloat32(binary.LittleEndian.Uint16(b[i*2:]))
+	}
+	return out
+}
+
+// TestAccumulatorAveragesRanks is the arithmetic the shim used to do. Getting
+// it wrong here is worse than a slow sync: the gradients are silently wrong
+// and training still runs, converging to something else.
+func TestAccumulatorAveragesRanks(t *testing.T) {
+	a := newDDPAccumulator(ddpF32, 4)
+	for _, rank := range [][]float32{
+		{1, 2, 3, 4},
+		{3, 4, 5, 6},
+		{5, 6, 7, 8},
+	} {
+		if err := a.add(encodeF32(rank)); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	}
+	out, err := a.mean()
+	if err != nil {
+		t.Fatalf("mean: %v", err)
+	}
+	got := decodeF32(out)
+	want := []float32{3, 4, 5, 6}
+	for i := range want {
+		if math.Abs(float64(got[i]-want[i])) > 1e-6 {
+			t.Errorf("element %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestAccumulatorSumsInFloat64 checks the width the sum is kept at. Adding
+// many float16 values in float16 loses exactly the precision the averaging is
+// supposed to preserve, and the buffer exists once per group rather than once
+// per rank, so there is no reason to economise on it.
+func TestAccumulatorSumsInFloat64(t *testing.T) {
+	// Each rank contributes a value that float16 can hold, but whose running
+	// sum cannot be represented without losing the small ones.
+	a := newDDPAccumulator(ddpF16, 1)
+	const ranks = 64
+	for i := 0; i < ranks; i++ {
+		if err := a.add(encodeF16([]float32{1.0})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := decodeF16(a.mustMean(t))[0]
+	if math.Abs(float64(got-1.0)) > 1e-3 {
+		t.Errorf("mean of %d ones = %v, want 1", ranks, got)
+	}
+}
+
+func (a *ddpAccumulator) mustMean(t *testing.T) []byte {
+	t.Helper()
+	b, err := a.mean()
+	if err != nil {
+		t.Fatalf("mean: %v", err)
+	}
+	return b
+}
+
+// TestWrongSizedPayloadIsRejected. A rank that disagrees about the model's
+// shape must not be folded in: the sum would be silently wrong for every
+// element after the mismatch.
+func TestWrongSizedPayloadIsRejected(t *testing.T) {
+	a := newDDPAccumulator(ddpF32, 4)
+	if err := a.add(encodeF32([]float32{1, 2, 3})); err == nil {
+		t.Error("a payload of the wrong length was accepted")
+	}
+	if err := a.add(encodeF32([]float32{1, 2, 3, 4, 5})); err == nil {
+		t.Error("an over-long payload was accepted")
+	}
+}
+
+// TestEmptyAccumulatorHasNoMean: dividing by zero ranks should be an error,
+// not a buffer of NaNs that trains a model into nothing.
+func TestEmptyAccumulatorHasNoMean(t *testing.T) {
+	if _, err := newDDPAccumulator(ddpF32, 2).mean(); err == nil {
+		t.Error("mean of no contributors was accepted")
+	}
+}
+
+// TestFloat16RoundTrip covers the codec the gradients travel in. These are
+// written out here rather than taken from a library, so they need to be held
+// to the standard's behaviour rather than to whatever they happen to do.
+func TestFloat16RoundTrip(t *testing.T) {
+	cases := []float32{
+		0, 1, -1, 0.5, -0.5, 2, 65504, -65504, // 65504 is binary16's largest finite
+		1.0 / 3, -1.0 / 3, 1e-4, -1e-4,
+		6.1035156e-05,  // smallest normal
+		5.9604645e-08,  // smallest subnormal
+		-5.9604645e-08, // and its negative
+	}
+	for _, want := range cases {
+		got := float16ToFloat32(float32ToFloat16(want))
+		// binary16 carries about three decimal digits; compare relatively
+		// except around zero.
+		if want == 0 {
+			if got != 0 || math.Signbit(float64(got)) != math.Signbit(float64(want)) {
+				t.Errorf("round trip of %v gave %v", want, got)
+			}
+			continue
+		}
+		rel := math.Abs(float64(got-want) / float64(want))
+		if rel > 1e-3 {
+			t.Errorf("round trip of %v gave %v (relative error %.2e)", want, got, rel)
+		}
+	}
+}
+
+// TestFloat16SaturatesRatherThanWraps. A gradient spike beyond binary16's
+// range must become infinity, which training can detect, and not wrap to a
+// small number, which it cannot.
+func TestFloat16SaturatesRatherThanWraps(t *testing.T) {
+	for _, v := range []float32{1e6, -1e6, float32(math.Inf(1)), float32(math.Inf(-1))} {
+		got := float16ToFloat32(float32ToFloat16(v))
+		if !math.IsInf(float64(got), 0) {
+			t.Errorf("%v encoded to %v; an out-of-range value must saturate to "+
+				"infinity, not wrap to something finite and plausible", v, got)
+		}
+		if math.Signbit(float64(got)) != math.Signbit(float64(v)) {
+			t.Errorf("%v encoded to %v: sign lost", v, got)
+		}
+	}
+}
+
+// TestFloat16KeepsNaN. A NaN that decays into infinity turns a detectable
+// training failure into a silent one.
+func TestFloat16KeepsNaN(t *testing.T) {
+	got := float16ToFloat32(float32ToFloat16(float32(math.NaN())))
+	if !math.IsNaN(float64(got)) {
+		t.Errorf("NaN round-tripped to %v", got)
+	}
+}
+
+// TestFloat16RoundsToNearestEven. Truncating instead of rounding biases every
+// gradient towards zero, which over thousands of steps is a systematic drift
+// rather than noise.
+func TestFloat16RoundsToNearestEven(t *testing.T) {
+	// Exactly representable neighbours near 1: 1, 1+2^-10, 1+2^-9 ...
+	const eps = 1.0 / 1024
+	// Midway between 1 and 1+eps: nearest-even picks 1 (even mantissa).
+	mid := float32(1 + eps/2)
+	if got := float16ToFloat32(float32ToFloat16(mid)); got != 1 {
+		t.Errorf("%v rounded to %v, want 1 (nearest even)", mid, got)
+	}
+	// Midway between 1+eps and 1+2*eps: nearest-even picks 1+2*eps.
+	mid2 := float32(1 + eps + eps/2)
+	want := float32(1 + 2*eps)
+	if got := float16ToFloat32(float32ToFloat16(mid2)); got != want {
+		t.Errorf("%v rounded to %v, want %v (nearest even)", mid2, got, want)
+	}
+}
