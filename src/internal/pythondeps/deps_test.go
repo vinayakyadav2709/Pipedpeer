@@ -98,3 +98,61 @@ func TestStdlibModulesFilteredFromExternalDeps(t *testing.T) {
 		t.Fatalf("stdlib filtering failed\nwant: %#v\n got: %#v", want, got)
 	}
 }
+
+// TestCommaSeparatedImportsAreAllDetected covers a bug that produced a closure
+// missing a package and an error blaming the user's script.
+//
+// The detector matched the first name on an import line, so "import numpy,
+// pandas" put numpy in the closure and left pandas out. The job then failed on
+// the worker with ModuleNotFoundError, which points at the script rather than
+// at the dependency detection that caused it. Found by a benchmark whose
+// fixture happened to use that form.
+func TestCommaSeparatedImportsAreAllDetected(t *testing.T) {
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{"import numpy, pandas", []string{"numpy", "pandas"}},
+		{"import numpy,pandas,scipy", []string{"numpy", "pandas", "scipy"}},
+		{"import numpy as np, pandas as pd", []string{"numpy", "pandas"}},
+		{"import os.path, sys", []string{"os", "sys"}},
+
+		// Unchanged behaviour, asserted so the rewrite did not quietly alter it.
+		{"import numpy", []string{"numpy"}},
+		{"import numpy as np", []string{"numpy"}},
+		{"from pandas import DataFrame", []string{"pandas"}},
+		{"from sklearn.ensemble import RandomForestClassifier", []string{"sklearn"}},
+
+		// A relative import names no top-level module.
+		{"from . import helper", nil},
+		{"from .util import thing", nil},
+
+		// Not imports at all.
+		{"# import numpy, pandas", nil},
+		{"important = 1", nil},
+		{"print('import numpy')", nil},
+		{"", nil},
+	}
+	for _, c := range cases {
+		got := importedModules(c.line)
+		if len(got) != len(c.want) {
+			t.Errorf("%q gave %v, want %v", c.line, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%q gave %v, want %v", c.line, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestTrailingCommentDoesNotHideAnImport. Stripping the comment must not take
+// the import with it.
+func TestTrailingCommentDoesNotHideAnImport(t *testing.T) {
+	got := importedModules("import numpy, pandas  # both needed")
+	if len(got) != 2 || got[0] != "numpy" || got[1] != "pandas" {
+		t.Errorf("got %v, want numpy and pandas", got)
+	}
+}

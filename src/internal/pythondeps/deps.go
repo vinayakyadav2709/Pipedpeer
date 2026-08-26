@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 )
 
@@ -142,6 +141,61 @@ func ExtractImports(scriptPath string) []string {
 	return scan.ExternalDeps
 }
 
+// importedModules returns every top-level module an import line brings in.
+//
+// It used to be one regular expression capturing the first name on the line,
+// which silently drops everything after a comma: "import numpy, pandas" put
+// numpy in the closure and left pandas out, and the job then died on the
+// worker with ModuleNotFoundError - an error pointing at the user's script
+// rather than at the dependency detection that caused it. Found by a benchmark
+// whose fixture happened to use that form.
+//
+// "from x import a, b" is different and already handled: the dependency is x,
+// and what is taken from it does not matter here.
+func importedModules(line string) []string {
+	// A comment can contain anything that looks like an import.
+	if i := strings.Index(line, "#"); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	switch {
+	case strings.HasPrefix(line, "from "):
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "from "))
+		if name := topLevelModule(rest); name != "" {
+			return []string{name}
+		}
+	case strings.HasPrefix(line, "import "):
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "import "))
+		var out []string
+		for _, part := range strings.Split(rest, ",") {
+			if name := topLevelModule(strings.TrimSpace(part)); name != "" {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// topLevelModule reduces "pkg.sub as alias" to "pkg". A relative import
+// ("from . import x") has no top-level name and yields nothing.
+func topLevelModule(s string) string {
+	if s == "" || strings.HasPrefix(s, ".") {
+		return ""
+	}
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		s = s[:i] // drop "as alias" and anything after
+	}
+	if i := strings.Index(s, "."); i >= 0 {
+		s = s[:i]
+	}
+	for _, r := range s {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return ""
+		}
+	}
+	return s
+}
+
 func ExtractImportScan(scriptPath string) ImportScan {
 	file, err := os.Open(scriptPath)
 	if err != nil {
@@ -156,7 +210,6 @@ func ExtractImportScan(scriptPath string) ImportScan {
 	seenDeps := make(map[string]bool)
 	seenLocal := make(map[string]bool)
 	reader := bufio.NewReader(file)
-	re := regexp.MustCompile(`^\s*(?:import|from)\s+([a-zA-Z0-9_]+)`)
 
 	for {
 		line, _, err := reader.ReadLine()
@@ -165,10 +218,7 @@ func ExtractImportScan(scriptPath string) ImportScan {
 		}
 
 		lineStr := strings.TrimSpace(string(line))
-		matches := re.FindStringSubmatch(lineStr)
-		if len(matches) >= 2 {
-			imp := matches[1]
-
+		for _, imp := range importedModules(lineStr) {
 			localFile := filepath.Join(scriptDir, imp+".py")
 			localPackage := filepath.Join(scriptDir, imp, "__init__.py")
 
