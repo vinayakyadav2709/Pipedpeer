@@ -23,7 +23,15 @@ labdir="$HOME/lab-hetero"
 runtime=docker
 command -v docker >/dev/null || runtime=podman
 
+# Containers first: they bind-mount the binary, so replacing it underneath a
+# running one fails with "Text file busy".
+for i in 1 2 3; do
+	$runtime rm -f "pp-hetero-$i" >/dev/null 2>&1 || true
+done
+sleep 1
+
 mkdir -p "$labdir"
+rm -f "$labdir/pipedpeer"
 cp "$bin" "$labdir/pipedpeer"
 chmod +x "$labdir/pipedpeer"
 
@@ -35,13 +43,6 @@ DOCKER
 
 echo "building image..."
 $runtime build -q -t pp-hetero "$labdir" >/dev/null
-
-for i in "${!ports[@]}"; do
-	name="pp-hetero-$((i + 1))"
-	$runtime rm -f "$name" >/dev/null 2>&1 || true
-done
-# Host ports linger for a moment after the containers holding them go away.
-sleep 1
 
 for i in "${!ports[@]}"; do
 	name="pp-hetero-$((i + 1))"
