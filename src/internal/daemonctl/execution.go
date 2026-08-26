@@ -3,11 +3,13 @@ package daemonctl
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"mime/multipart"
@@ -331,18 +333,18 @@ func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
 // ExportNAR exports the full runtime closure of a store path to a NAR file.
 // Uses the nix multicall binary under the nix-store name (argv[0] set).
 func ExportNAR(storePath, destPath string) error {
-	nixPath, err := exec.LookPath("nix")
+	query, qcleanup, err := nixstore.Cmd("", "nix-store", "-qR", storePath)
 	if err != nil {
-		return fmt.Errorf("nix not found in PATH")
+		return err
 	}
-
-	query := &exec.Cmd{
-		Path: nixPath,
-		Args: []string{"nix-store", "-qR", storePath},
-	}
+	defer qcleanup()
+	var qerr bytes.Buffer
+	query.Stderr = &qerr
 	closureOut, err := query.Output()
 	if err != nil {
-		return fmt.Errorf("nix-store -qR: %w", err)
+		// Carry nix's own words: "exit status 1" alone sends you looking in
+		// the wrong place.
+		return fmt.Errorf("nix-store -qR %s: %w: %s", storePath, err, strings.TrimSpace(qerr.String()))
 	}
 
 	paths := strings.Fields(string(closureOut))
@@ -359,12 +361,13 @@ func ExportNAR(storePath, destPath string) error {
 	gz := gzip.NewWriter(f)
 	defer gz.Close()
 
-	export := &exec.Cmd{
-		Path:   nixPath,
-		Args:   append([]string{"nix-store", "--export"}, paths...),
-		Stdout: gz,
-		Stderr: os.Stderr,
+	export, ecleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
+	if err != nil {
+		return err
 	}
+	defer ecleanup()
+	export.Stdout = gz
+	export.Stderr = os.Stderr
 	return export.Run()
 }
 

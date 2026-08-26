@@ -10,6 +10,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -45,6 +46,11 @@ func storeDir() string {
 // install it without ever creating the store, so `nix build` fails on the
 // first real job while setup has already reported nix as fine.
 func nixUsable() bool {
+	// A private store counts: it carries its own nix, and nixstore.Cmd runs
+	// it with the store bound at /nix.
+	if nixstore.Private() {
+		return true
+	}
 	if !binaryCheck("nix")() {
 		return false
 	}
@@ -109,6 +115,11 @@ func multiUserNix() bool {
 // fine and then die at import. The proper fix is signing exports with a node
 // key (part of the identity work); until then setup repairs the config.
 func acceptsUnsignedClosures() bool {
+	// A private store has no nix-daemon in front of it, so there is no
+	// signature policy to repair and nothing to edit as root.
+	if nixstore.Private() {
+		return true
+	}
 	if !multiUserNix() {
 		return true
 	}
@@ -148,22 +159,6 @@ func getPrereqs() []prereq {
 		{name: "tar", check: binaryCheck("tar")},
 		{name: "bash", check: binaryCheck("bash")},
 		{name: "curl", check: binaryCheck("curl")},
-		{name: "nix", check: nixUsable, install: func() error {
-			// A nix that is installed but storeless only needs the store:
-			// running a full installer over a packaged nix would leave two of
-			// them on the machine.
-			if binaryCheck("nix")() {
-				return createNixStore()
-			}
-			fmt.Println("    → Installing Nix (Determinate Systems installer)...")
-			cmd := exec.Command("sh", "-c",
-				`curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm`)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-			return cmd.Run()
-		}},
-		{name: "nix-imports", check: acceptsUnsignedClosures, install: allowUnsignedClosures},
 		{name: "crun", check: binaryCheck("crun"), install: func() error {
 			fmt.Println("    → Installing crun (OCI runtime)...")
 			// Modern Nix (Determinate) often ships without nix-env, and some
@@ -204,6 +199,41 @@ func getPrereqs() []prereq {
 			}
 			return nil
 		}},
+		// crun comes before nix deliberately: a private store is bound at
+		// /nix inside a namespace that crun builds, so seeding one needs
+		// the runtime already in place.
+		{name: "nix", check: nixUsable, install: func() error {
+			// A nix that is installed but storeless only needs the store:
+			// running a full installer over a packaged nix would leave two of
+			// them on the machine.
+			if binaryCheck("nix")() {
+				if err := createNixStore(); err == nil {
+					return nil
+				}
+				// Falls through to the private store: a machine where /nix
+				// cannot be created is exactly the case it exists for.
+			}
+
+			// Try the unprivileged route first. The Determinate installer
+			// needs root, which a user does not have on a machine they do not
+			// administer, and asking for it is the single biggest barrier to
+			// joining a cluster. A private store needs none: it lives in the
+			// user's data directory and is bound at /nix inside a namespace.
+			if err := nixstore.Seed(func(f string, a ...any) { fmt.Printf(f, a...) }); err == nil {
+				return nil
+			} else if os.Geteuid() != 0 {
+				fmt.Printf("    → Private store unavailable (%v); falling back to the system installer\n", err)
+			}
+
+			fmt.Println("    → Installing Nix (Determinate Systems installer)...")
+			cmd := exec.Command("sh", "-c",
+				`curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm`)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Stdin = os.Stdin
+			return cmd.Run()
+		}},
+		{name: "nix-imports", check: acceptsUnsignedClosures, install: allowUnsignedClosures},
 	}
 }
 
