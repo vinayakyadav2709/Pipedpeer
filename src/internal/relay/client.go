@@ -2,14 +2,17 @@ package relay
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/quic-go/quic-go"
 )
 
@@ -33,12 +36,17 @@ type Client struct {
 // this is not optional - but its certificate is self-signed, so a chain check
 // could only ever fail. The caller supplies pinning: the same
 // trust-on-first-use the daemons already use between themselves.
-func Dial(ctx context.Context, addr, cluster, node string,
+func Dial(ctx context.Context, addr, cluster string, key identity.KeyPair,
 	verify func(rawCerts [][]byte, chains [][]*x509.Certificate) error,
 	local func(context.Context) (net.Conn, error)) (*Client, error) {
 
-	if cluster == "" || node == "" {
-		return nil, fmt.Errorf("a relay client needs a cluster and a node name")
+	if cluster == "" {
+		return nil, fmt.Errorf("a relay client needs a cluster")
+	}
+	if len(key.Private) == 0 {
+		return nil, fmt.Errorf("a relay client needs a signing key: the relay " +
+			"registers peers by the fingerprint of the key they sign with, not by a " +
+			"name they choose")
 	}
 	tlsConf := &tls.Config{
 		// The fingerprint answers the question that matters - is this the
@@ -59,13 +67,28 @@ func Dial(ctx context.Context, addr, cluster, node string,
 		conn.CloseWithError(1, "")
 		return nil, err
 	}
-	if err := writeJSON(st, hello{Cluster: cluster, Node: node}); err != nil {
+	// A fresh nonce per connection: a hello captured from the wire must not
+	// be replayable to claim this identity later.
+	var nonceRaw [16]byte
+	if _, err := rand.Read(nonceRaw[:]); err != nil {
+		conn.CloseWithError(1, "")
+		return nil, err
+	}
+	nonce := base64.StdEncoding.EncodeToString(nonceRaw[:])
+	sig := key.Sign(helloContext, []byte(cluster+"|"+nonce))
+
+	if err := writeJSON(st, hello{
+		Cluster: cluster,
+		PubKey:  identity.EncodePublic(key.Public),
+		Nonce:   nonce,
+		Sig:     base64.StdEncoding.EncodeToString(sig),
+	}); err != nil {
 		conn.CloseWithError(1, "")
 		return nil, err
 	}
 	_ = st.Close()
 
-	return &Client{conn: conn, node: node, cluster: cluster, dial: local}, nil
+	return &Client{conn: conn, node: key.Fingerprint(), cluster: cluster, dial: local}, nil
 }
 
 // Serve answers streams the relay forwards to us, splicing each to the local
@@ -154,6 +177,10 @@ func (c *Client) Open(ctx context.Context, peer string) (*Stream, error) {
 	}
 	return &Stream{Stream: st, r: io.MultiReader(rest, st)}, nil
 }
+
+// Node is the address other peers reach this client at: the fingerprint of
+// its key.
+func (c *Client) Node() string { return c.node }
 
 // Close ends the connection.
 func (c *Client) Close() error { return c.conn.CloseWithError(0, "") }

@@ -23,12 +23,14 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/quic-go/quic-go"
 )
 
@@ -41,9 +43,44 @@ const ALPN = "pipedpeer-relay/1"
 const maxHeader = 4096
 
 // hello is the first thing a client says on a fresh connection.
+//
+// The node is not named, it is proved. A relay introduces strangers, and a
+// peer that simply asserts a name asserts whoever's name it likes - so the
+// address a peer is registered under is the fingerprint of the key it signs
+// with, and taking somebody else's requires their private half rather than
+// their spelling.
 type hello struct {
 	Cluster string `json:"cluster"`
-	Node    string `json:"node"`
+	// PubKey is base64 ed25519. The registered address is its fingerprint.
+	PubKey string `json:"pubkey"`
+	// Nonce is fresh per connection and signed, so a hello captured from the
+	// wire cannot be replayed to claim the same identity later.
+	Nonce string `json:"nonce"`
+	Sig   string `json:"sig"`
+}
+
+// helloContext binds a hello's signature to this purpose, so it cannot be
+// replayed as any other signed message.
+const helloContext = "relay-hello"
+
+// verify checks the signature and returns the address this peer is entitled
+// to be registered under.
+func (h hello) verify() (string, error) {
+	if h.Cluster == "" || h.PubKey == "" || h.Nonce == "" || h.Sig == "" {
+		return "", fmt.Errorf("hello must carry a cluster, a public key, a nonce and a signature")
+	}
+	pub, err := identity.DecodePublic(h.PubKey)
+	if err != nil {
+		return "", fmt.Errorf("public key: %w", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(h.Sig)
+	if err != nil {
+		return "", fmt.Errorf("signature: %w", err)
+	}
+	if !identity.Verify(pub, helloContext, []byte(h.Cluster+"|"+h.Nonce), sig) {
+		return "", fmt.Errorf("signature does not match the public key offered")
+	}
+	return identity.Fingerprint(pub), nil
 }
 
 // openReq is the first thing written on a stream that wants to reach a peer.
@@ -151,28 +188,32 @@ func (s *Server) handleConn(ctx context.Context, conn *quic.Conn) {
 		return
 	}
 	var h hello
-	if _, err := readHeader(io.LimitReader(first, maxHeader), &h); err != nil ||
-		h.Cluster == "" || h.Node == "" {
+	if _, err := readHeader(io.LimitReader(first, maxHeader), &h); err != nil {
 		conn.CloseWithError(1, "bad hello")
+		return
+	}
+	addr, err := h.verify()
+	if err != nil {
+		conn.CloseWithError(1, "unauthenticated: "+err.Error())
 		return
 	}
 	_ = first.Close()
 
-	s.conns.put(h.Cluster, h.Node, conn)
-	defer s.conns.drop(h.Cluster, h.Node, conn)
+	s.conns.put(h.Cluster, addr, conn)
+	defer s.conns.drop(h.Cluster, addr, conn)
 
 	for {
 		st, err := conn.AcceptStream(ctx)
 		if err != nil {
 			return
 		}
-		go s.handleStream(ctx, h, st)
+		go s.handleStream(ctx, h.Cluster, addr, st)
 	}
 }
 
 // handleStream splices one peer's stream to a stream on the other's
 // connection, and copies until either end stops.
-func (s *Server) handleStream(ctx context.Context, from hello, st *quic.Stream) {
+func (s *Server) handleStream(ctx context.Context, cluster, from string, st *quic.Stream) {
 	defer st.Close()
 
 	var req openReq
@@ -182,7 +223,7 @@ func (s *Server) handleStream(ctx context.Context, from hello, st *quic.Stream) 
 		return
 	}
 
-	target, ok := s.conns.get(from.Cluster, req.To)
+	target, ok := s.conns.get(cluster, req.To)
 	if !ok {
 		writeJSON(st, openResp{Error: fmt.Sprintf("peer %q is not connected to this relay", req.To)})
 		return
@@ -195,7 +236,7 @@ func (s *Server) handleStream(ctx context.Context, from hello, st *quic.Stream) 
 	}
 	defer out.Close()
 
-	if err := writeJSON(out, openResp{OK: true, From: from.Node}); err != nil {
+	if err := writeJSON(out, openResp{OK: true, From: from}); err != nil {
 		return
 	}
 	if err := writeJSON(st, openResp{OK: true, From: req.To}); err != nil {
