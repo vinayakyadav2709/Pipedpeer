@@ -285,8 +285,11 @@ os.environ["PIPEDPEER_PANDAS"] = "1"
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
 import sitecustomize as shim
-import pandas as pd
-import numpy as np
+# pandas and numpy are imported by the scripts that use them, not here. This
+# preamble is shared by every test that needs a fake daemon, and importing them
+# unconditionally made the cost-model and numpy tests skip for want of pandas
+# they never touch - a skip for the wrong reason, which hides that the machine
+# could have run the test.
 # sitecustomize is imported at interpreter startup, before this preamble runs,
 # so the env vars it read then are stale; point the module at the fake daemon.
 shim._ENABLED = True
@@ -305,19 +308,45 @@ func runShimPython(t *testing.T, name, src string, wantSentinel string) {
 // runShimPythonEnv is runShimPython with extra process env vars, needed when
 // the shim's install-time decisions (joblib backend, numpy patching) must see
 // a cluster before the preamble overrides the module attributes.
+// requiredPython reports which third-party modules a shim test script needs,
+// by looking at what it uses. Deliberately conservative on both sides: a
+// module named here that is not needed causes a skip that could have run, and
+// one missed causes an import error inside the script that reads as a test
+// failure.
+func requiredPython(src string) []string {
+	var deps []string
+	add := func(mod string, markers ...string) {
+		for _, m := range markers {
+			if strings.Contains(src, m) {
+				deps = append(deps, mod)
+				return
+			}
+		}
+	}
+	add("pandas", "import pandas", "pd.")
+	add("numpy", "import numpy", "np.")
+	add("sklearn", "import sklearn", "from sklearn")
+	add("joblib", "import joblib", "joblib.")
+	add("torch", "import torch", "torch.")
+	return deps
+}
+
 func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...string) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
 	}
-	// Only the tests that drive the pandas paths need pandas. Gating every
-	// caller on it made two unrelated tests skip for no reason, and a skip
-	// that nobody notices is how the shim's startup cost regressed.
-	if strings.Contains(src, "import pandas") || strings.Contains(src, "shimFakeDaemon") ||
-		strings.Contains(src, "pd.") {
-		if _, err := exec.Command(python, "-c", "import pandas").CombinedOutput(); err != nil {
-			t.Skipf("pandas not available: %v", err)
+	// Gate on what this particular script actually imports.
+	//
+	// The gate used to fire on the fake daemon being present at all, which
+	// meant the numpy tests and the cost-model test skipped for want of
+	// pandas that they never touch. A skip is coverage that is not running,
+	// and skipping for the wrong reason hides that a machine could have run
+	// it: three of the six skips here needed nothing that was missing.
+	for _, dep := range requiredPython(src) {
+		if _, err := exec.Command(python, "-c", "import "+dep).CombinedOutput(); err != nil {
+			t.Skipf("%s not available, which this script imports: %v", dep, err)
 		}
 	}
 	dir := t.TempDir()
@@ -345,6 +374,8 @@ func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...stri
 // requires exact equality with local pandas.
 func TestShimHashShuffleMatchesLocal(t *testing.T) {
 	runShimPython(t, "t3", shimFakeDaemon+`
+import pandas as pd
+import numpy as np
 n = 4000
 df = pd.DataFrame({"k": np.random.randint(0, 13, n), "a": np.random.randn(n), "b": np.random.randint(0, 100, n)})
 gb = df.groupby("k")
@@ -407,6 +438,8 @@ print("SHUFFLE-OK")
 // plain-DataFrame fallback when the daemon is unreachable.
 func TestShimOutOfCoreIntegrity(t *testing.T) {
 	runShimPython(t, "t5", shimFakeDaemon+`
+import pandas as pd
+import numpy as np
 csv = os.path.join(TMP, "lines.csv")
 with open(csv, "wb") as f:
     f.write(b"k,v\n" + b"".join(b"k%d,%d\n" % (i % 5, i) for i in range(1000)))
