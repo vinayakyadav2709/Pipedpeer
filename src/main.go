@@ -74,9 +74,12 @@ func main() {
 	}
 
 	rootCmd := &cobra.Command{
-		Use:   "pipedpeer",
-		Short: "Decentralized compute orchestrator",
-		Long:  "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
+		// A command that fails at run time should say why, not print its
+		// flags: the flags were fine, the network was not.
+		SilenceUsage: true,
+		Use:          "pipedpeer",
+		Short:        "Decentralized compute orchestrator",
+		Long:         "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
 	}
 
 	viper.SetEnvPrefix("PIPEDPEER")
@@ -98,6 +101,7 @@ func main() {
 		newPingCmd(),
 		newNetCheckCmd(),
 		newNetPunchCmd(),
+		newNetJoinCmd(),
 		newRendezvousCmd(),
 		newTrafficCmd(),
 		newTasksCmd(),
