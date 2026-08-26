@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"crypto/x509"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -13,7 +16,11 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nattype"
+	"net/http"
+
+	"github.com/pipedpeer/pipedpeer/internal/relay"
 	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/spf13/cobra"
 )
 
@@ -250,11 +257,109 @@ func newNetJoinCmd() *cobra.Command {
 // stays fresh.
 const punchRound = 4 * time.Second
 
+// newRelayTestCmd checks that a peer can be reached through the relay, by
+// making an ordinary HTTP request to its daemon and reading the answer.
+//
+// It exists because "the relay is up" and "a request survives it" are
+// different claims, and only the second one matters. The first version of this
+// relay passed every connection test and corrupted the first bytes of every
+// payload.
+func newRelayTestCmd() *cobra.Command {
+	var server, node, peer, token, path string
+	var localPort int
+
+	cmd := &cobra.Command{
+		Use:   "relay-test",
+		Short: "Reach a peer's daemon through the relay and print what it says",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if server == "" {
+				return fmt.Errorf("--relay is required")
+			}
+			if node == "" {
+				id, err := identity.GetOrCreate()
+				if err != nil {
+					return err
+				}
+				node = id.ShortID()
+			}
+			if token == "" {
+				token = authtoken.Current()
+			}
+			cluster := rendezvous.ClusterID(token)
+
+			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
+			defer cancel()
+
+			verify := func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return fmt.Errorf("relay presented no certificate")
+				}
+				return tlsid.CheckOrPin(server, rawCerts[0])
+			}
+
+			client, err := relay.Dial(ctx, server, cluster, node, verify,
+				relay.LocalDialer(fmt.Sprintf("127.0.0.1:%d", localPort)))
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+			go func() { _ = client.Serve(ctx) }()
+
+			if peer == "" {
+				fmt.Printf("connected to the relay as %s in cluster %s; serving this "+
+					"machine's daemon on :%d to peers.\nRun with --peer on the other "+
+					"machine to make a request.\n", node, cluster, localPort)
+				<-ctx.Done()
+				return nil
+			}
+
+			httpc := &http.Client{
+				Transport: &http.Transport{
+					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+						st, err := client.Open(ctx, peer)
+						if err != nil {
+							return nil, err
+						}
+						return relay.NetConn(st), nil
+					},
+					DisableKeepAlives: true,
+				},
+				Timeout: 30 * time.Second,
+			}
+			start := time.Now()
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://relayed"+path, nil)
+			if err != nil {
+				return err
+			}
+			if token != "" {
+				req.Header.Set(authtoken.Header, token)
+			}
+			resp, err := httpc.Do(req)
+			if err != nil {
+				return fmt.Errorf("relayed request to %s: %w", peer, err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			fmt.Printf("relayed %s from %s in %.0f ms: %s\n%s\n",
+				path, peer, float64(time.Since(start).Microseconds())/1000, resp.Status, body)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&server, "relay", "", "relay address, host:port")
+	cmd.Flags().StringVar(&node, "node", "", "this node's name")
+	cmd.Flags().StringVar(&peer, "peer", "", "peer to reach (omit to serve only)")
+	cmd.Flags().StringVar(&token, "token", "", "cluster token")
+	cmd.Flags().StringVar(&path, "path", "/health", "path to request")
+	cmd.Flags().IntVar(&localPort, "daemon-port", 38080, "local daemon port to expose")
+	return cmd
+}
+
 // newRendezvousCmd runs the public half: a reflector that tells whoever asks
 // where their packets appear to come from.
 func newRendezvousCmd() *cobra.Command {
 	var addrs []string
 	var bookAddr string
+	var relayAddr string
 	var ttl time.Duration
 
 	cmd := &cobra.Command{
@@ -270,7 +375,7 @@ func newRendezvousCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			errs := make(chan error, len(addrs)+1)
+			errs := make(chan error, len(addrs)+2)
 			// Bound as a pair so each can answer from the other, which is what
 			// the filtering half of the test needs.
 			var conns []net.PacketConn
@@ -290,6 +395,27 @@ func newRendezvousCmd() *cobra.Command {
 					fmt.Printf("reflector listening on %s\n", pc.LocalAddr())
 					errs <- nattype.ReflectPair(ctx, pc, other)
 				}(pc, other)
+			}
+
+			// The relay, for peers that cannot be reached directly. One of the
+			// two networks measured here is a mobile carrier's, which hands
+			// out a different external port per destination and cannot be
+			// punched at all, so this is required rather than a nicety.
+			if relayAddr != "" {
+				cert, err := tlsid.EnsureCert()
+				if err != nil {
+					return fmt.Errorf("relay certificate: %w", err)
+				}
+				ln, err := relay.Listen(relayAddr, cert)
+				if err != nil {
+					return fmt.Errorf("relay listener: %w", err)
+				}
+				rsrv := relay.NewServer()
+				go func() {
+					fmt.Printf("relay listening on %s (quic; fingerprint %s)\n",
+						relayAddr, tlsid.Fingerprint(cert.Certificate[0])[:16])
+					errs <- rsrv.Serve(ctx, ln)
+				}()
 			}
 
 			// The address book, on its own port. Peers register here and are
@@ -327,5 +453,7 @@ func newRendezvousCmd() *cobra.Command {
 		"address for the peer address book (empty to run reflectors only)")
 	cmd.Flags().DurationVar(&ttl, "ttl", 2*time.Minute,
 		"how long a peer stays listed without checking in")
+	cmd.Flags().StringVar(&relayAddr, "relay", ":38446",
+		"address for the QUIC relay (empty to run without one)")
 	return cmd
 }
