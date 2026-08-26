@@ -1123,9 +1123,35 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_s
         return False
     if _FORCE:
         return True
+
+    # Deciding is not free: the bandwidth probe ships 64 MB. A script doing one
+    # 33 MB matmul spent 2.5 s on a LAN measuring the link, to conclude it
+    # should not use it - and on the phone-tethered link this project also runs
+    # over, 64 MB is half a minute. The probe cost more than the work it was
+    # declining.
+    #
+    # It is also avoidable. Bandwidth only ever appears in est_transfer, and
+    # only as a divisor, so a lower measurement can only make shipping look
+    # worse. Ask first at a bandwidth no real link will beat: if the answer is
+    # still "stay local" there, it is "stay local" at the real speed too, and
+    # there is nothing to measure.
+    if not _offload_wins(nbytes, flops_per_byte, round_trip, split,
+                         flops_per_sec, K, _OPTIMISTIC_BW):
+        return False
     bw = _measure_bandwidth()
     if not bw:
         return False
+    return _offload_wins(nbytes, flops_per_byte, round_trip, split,
+                         flops_per_sec, K, bw)
+
+
+# Faster than any link this runs over: 10 Gbit/s. Used only to rule offloads
+# out without measuring, so being generous costs a probe, never a wrong answer.
+_OPTIMISTIC_BW = 1.25e9
+
+
+def _offload_wins(nbytes, flops_per_byte, round_trip, split, flops_per_sec, K, bw):
+    """Whether offloading beats local at this bandwidth."""
     est_local = nbytes * flops_per_byte / flops_per_sec
     est_transfer = nbytes * round_trip / bw
     if not split:

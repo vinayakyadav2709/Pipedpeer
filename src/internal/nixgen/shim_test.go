@@ -511,6 +511,39 @@ print("COST-OK")
 `, "COST-OK")
 }
 
+// TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer.
+//
+// The bandwidth probe ships 64 MB. A script doing one 33 MB matmul spent 2.5 s
+// on a LAN measuring the link only to conclude it should not use it, and over
+// the phone-tethered link this also runs on, 64 MB is half a minute - the
+// probe costing far more than the work it was declining.
+//
+// Bandwidth only ever divides est_transfer, so measuring can only make
+// shipping look worse. If an offload loses at a speed no real link reaches, it
+// loses at the real speed, and there is nothing to find out.
+func TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer(t *testing.T) {
+	runShimPython(t, "t6b", shimFakeDaemon+`
+import numpy as np
+A = np.zeros((2048, 2048))
+
+assert PROBES[0] == 0, "something probed before the test started"
+
+# matmul at real BLAS speed: local wins by a wide margin at any bandwidth.
+assert not shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
+assert PROBES[0] == 0, (
+    "the link was measured to answer a question the measurement could not "
+    "change: %d probe(s), 64 MB each" % PROBES[0])
+
+# svd at LAPACK speed is the other way round - shipping plausibly wins, so the
+# real bandwidth genuinely decides and the probe is worth its cost.
+shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
+assert PROBES[0] == 1, (
+    "expected the probe when the answer actually depends on it, got %d"
+    % PROBES[0])
+print("NOPROBE-OK")
+`, "NOPROBE-OK")
+}
+
 // TestShimJoblibBackendDistributes (T7) runs an UNMODIFIED sklearn
 // RandomForestClassifier(n_jobs=-1).fit() plus a plain joblib.Parallel call
 // and requires the batches to reach the cluster (no multiprocessing.Pool
