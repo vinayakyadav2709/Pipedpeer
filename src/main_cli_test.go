@@ -351,17 +351,61 @@ func TestRegistryCLIStartsAndAcceptsConnections(t *testing.T) {
 	}
 }
 
+// TestNodesCLIShowsSelf checks what its name says.
+//
+// It used to accept "NODE_ID" or "No nodes found", which between them cover
+// every output the command can produce - it passed whether the daemon listed
+// this machine, listed nothing, or was not running at all. A test that cannot
+// fail is worse than no test: it occupies the place where a real one would go.
 func TestNodesCLIShowsSelf(t *testing.T) {
 	stateDir := t.TempDir()
 	xdg := t.TempDir()
+	port := freePort(t)
 
-	// Stop any leftover daemon first
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
+	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
+	t.Cleanup(func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") })
 
-	out := runCLIWithEnv(t, stateDir, xdg, "nodes")
-	if !strings.Contains(out, "NODE_ID") && !strings.Contains(out, "No nodes found") {
-		t.Fatalf("expected nodes table or empty output, got: %s", out)
+	// The daemon registers itself on its first health poll, which is not
+	// instant.
+	var out string
+	for i := 0; i < 30; i++ {
+		out = runCLIWithEnv(t, stateDir, xdg, "nodes", "--port", fmt.Sprintf("%d", port))
+		if strings.Contains(out, "self") {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
+
+	if !strings.Contains(out, "NODE_ID") {
+		t.Fatalf("no nodes table at all:\n%s", out)
+	}
+	if !strings.Contains(out, "self") {
+		t.Fatalf("the running daemon does not list this machine, which is the one "+
+			"thing this command must always be able to show:\n%s", out)
+	}
+
+	// And the id shown has to be this daemon's, not any id at all.
+	status := runCLIWithEnv(t, stateDir, xdg, "status")
+	if id := nodeIDFromStatus(status); len(id) >= 8 {
+		// The table shows the short form, which is what an operator matches
+		// against; comparing the full uuid would fail on formatting alone.
+		if short := id[:8]; !strings.Contains(out, short) {
+			t.Errorf("nodes lists a self row, but not this daemon's id %q:\n%s", short, out)
+		}
+	}
+}
+
+// nodeIDFromStatus pulls a node id out of `pipedpeer status` output, or
+// returns "" when the format does not carry one.
+func nodeIDFromStatus(status string) string {
+	for _, field := range strings.Fields(status) {
+		trimmed := strings.Trim(field, "(),")
+		if rest, ok := strings.CutPrefix(trimmed, "node-id="); ok {
+			return rest
+		}
+	}
+	return ""
 }
 
 func TestAutoPlacementSelectsSelf(t *testing.T) {
