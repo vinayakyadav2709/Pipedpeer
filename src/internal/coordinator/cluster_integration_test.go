@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -548,7 +549,15 @@ func TestStatsReflectLiveState(t *testing.T) {
 // --- Lease integration tests ---
 
 // PlaceWithRetry places a task on a real daemon and receives a lease
-func TestPlaceWithRetryGetsLease(t *testing.T) {
+// TestLeaseLifecycleAgainstARealDaemon covers request, commit and complete
+// against a daemon rather than a stub.
+//
+// It was called TestPlaceWithRetryGetsLease and never called PlaceWithRetry -
+// it drives requestLease and CommitLease by hand. The name claimed coverage of
+// the placement path that nothing had, which is worse than the gap itself:
+// somebody looking for that coverage would have found it and stopped looking.
+// TestPlaceWithRetryChoosesANodeAndReserves below is the real thing.
+func TestLeaseLifecycleAgainstARealDaemon(t *testing.T) {
 	// Start a real daemon
 	daemon := daemonapi.NewWithConfig("worker-1", 5*time.Second, 2*time.Second, 100*time.Millisecond)
 	daemonSrv := httptest.NewServer(daemon.Handler())
@@ -617,7 +626,13 @@ func TestPlaceWithRetryGetsLease(t *testing.T) {
 }
 
 // Queue behavior: daemon rejects → wait → resources freed → placed
-func TestPlaceWithRetryQueuesAndRetries(t *testing.T) {
+// TestLeaseIsRefusedWhileTheWorkerIsFullAndGrantedAfter drives the admission
+// path by hand: reserve most of a daemon's memory, watch a request be refused,
+// free the blocker and watch the next one succeed.
+//
+// Also formerly named for PlaceWithRetry, which it does not call. The retry
+// loop here is the test's own.
+func TestLeaseIsRefusedWhileTheWorkerIsFullAndGrantedAfter(t *testing.T) {
 	daemon := daemonapi.NewWithConfig("busy-worker", 5*time.Second, 2*time.Second, 100*time.Millisecond)
 	daemonSrv := httptest.NewServer(daemon.Handler())
 	defer daemonSrv.Close()
@@ -920,4 +935,96 @@ func splitHostPort(t *testing.T, addr string) (string, int) {
 	var port int
 	fmt.Sscanf(parts[1], "%d", &port)
 	return parts[0], port
+}
+
+// TestPlaceWithRetryChoosesANodeAndReserves is the coverage that was missing.
+//
+// Two tests carried this function's name and neither called it. PlaceWithRetry
+// is what actually places a job: it picks a candidate, asks it for a lease,
+// commits, and reports which node got it - so nothing about that was exercised
+// while the names suggested it all was.
+func TestPlaceWithRetryChoosesANodeAndReserves(t *testing.T) {
+	daemon := daemonapi.NewWithConfig("worker-1", 5*time.Second, 2*time.Second, 100*time.Millisecond)
+	daemonSrv := httptest.NewServer(daemon.Handler())
+	defer daemonSrv.Close()
+	daemonHost := strings.TrimPrefix(daemonSrv.URL, "http://")
+	host, portStr, ok := strings.Cut(daemonHost, ":")
+	if !ok {
+		t.Fatalf("cannot split %q", daemonHost)
+	}
+	daemonPort, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("port in %q: %v", daemonHost, err)
+	}
+
+	idSelf := identity.NodeIdentity{NodeID: "submitter", Hostname: "submitter", Arch: "x86_64-linux"}
+	cfg := Config{
+		SelfIdentity: idSelf,
+		SelfSSH:      "root@localhost:22",
+		SelfDaemon:   fakeDaemon(t),
+		// Only one candidate, so the choice is unambiguous and the assertion
+		// below is about placement rather than about which node won a race.
+		DiscoverFn: func() []registry.NodeRecord {
+			// A real port, because PlaceWithRetry builds the daemon URL from
+			// these fields. The older tests could leave it zero only because
+			// they called requestLease with a ready-made URL and never
+			// exercised that construction at all.
+			return []registry.NodeRecord{{
+				NodeID:      "worker-1",
+				SSHEndpoint: "root@" + host + ":22",
+				DaemonPort:  daemonPort,
+				Load: registry.LoadInfo{
+					CPUPercent: 5, AvailableMemBytes: 8 * 1024 * 1024 * 1024, TotalCPUs: 8,
+				},
+				HealthScore: 1.0, State: "healthy",
+			}}
+		},
+		RequiredMemBytes: 1024,
+		RetryInterval:    50 * time.Millisecond,
+		NoSelf:           true, // force the remote candidate, not this process
+	}
+	coord := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var statuses []string
+	res, err := coord.PlaceWithRetry(ctx, cfg, func(s string) { statuses = append(statuses, s) })
+	if err != nil {
+		t.Fatalf("PlaceWithRetry: %v (statuses: %v)", err, statuses)
+	}
+	if res == nil {
+		t.Fatal("PlaceWithRetry returned no lease and no error")
+	}
+	if res.LeaseID == "" {
+		t.Error("no lease id: nothing was actually reserved on the worker")
+	}
+	if res.NodeID != "worker-1" {
+		t.Errorf("placed on %q, want worker-1", res.NodeID)
+	}
+
+	// Reserved, not yet committed - which is the contract. PlaceWithRetry
+	// holds a slot; the caller commits once the workspace is uploaded, so a
+	// submitter that dies in between does not leave a worker believing it is
+	// running something.
+	if got := daemon.ActiveLeases(); got != 1 {
+		t.Errorf("worker holds %d lease(s) after placement, want 1", got)
+	}
+	if got := daemon.ActiveJobs(); got != 0 {
+		t.Errorf("worker reports %d running job(s) before the commit, want 0", got)
+	}
+
+	// And the reservation is a real one the caller can carry through.
+	if err := coord.CommitLease(daemonSrv.URL, res.LeaseID); err != nil {
+		t.Fatalf("CommitLease on the placed lease: %v", err)
+	}
+	if got := daemon.ActiveJobs(); got != 1 {
+		t.Errorf("worker reports %d running job(s) after the commit, want 1", got)
+	}
+	if err := coord.CompleteLease(daemonSrv.URL, res.LeaseID, "succeeded"); err != nil {
+		t.Fatalf("CompleteLease: %v", err)
+	}
+	if got := daemon.ActiveJobs(); got != 0 {
+		t.Errorf("worker still reports %d active job(s) after completion", got)
+	}
 }
