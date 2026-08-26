@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // narCache content-addresses imported Nix closures by their store path. A Nix
@@ -176,6 +178,102 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 // a shared /nix/store volume the closure is on disk but never has a local NAR,
 // and a broadcast must not push it again (ponytail: shared-store rig shortcut;
 // a per-node store still works because bin/run is only present after import).
+// closurePaths lists every store path a closure depends on, dependencies
+// first. That ordering matters: nix-store --import refuses a path whose
+// references are not present yet, so a filtered subset stays importable only
+// because the order is preserved.
+func closurePaths(storePath string) ([]string, error) {
+	nixPath, err := exec.LookPath("nix")
+	if err != nil {
+		return nil, err
+	}
+	out, err := (&exec.Cmd{Path: nixPath, Args: []string{"nix-store", "-qR", storePath}}).Output()
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(string(out)), nil
+}
+
+// exportPaths writes a gzipped NAR carrying exactly the given store paths.
+func exportPaths(paths []string, destPath string) error {
+	if len(paths) == 0 {
+		return fmt.Errorf("nothing to export")
+	}
+	nixPath, err := exec.LookPath("nix")
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	defer gz.Close()
+	cmd := &exec.Cmd{
+		Path:   nixPath,
+		Args:   append([]string{"nix-store", "--export"}, paths...),
+		Stdout: gz,
+		Stderr: os.Stderr,
+	}
+	return cmd.Run()
+}
+
+// peerMissingPaths asks a peer which of these store paths it lacks. A peer
+// that does not understand the question (older build, or any error) yields
+// nil and the caller falls back to sending the closure whole.
+func peerMissingPaths(host string, port int, paths []string) ([]string, bool) {
+	body, err := json.Marshal(map[string]any{"paths": paths})
+	if err != nil {
+		return nil, false
+	}
+	url := fmt.Sprintf("http://%s:%d/v1/store/missing", host, port)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var out struct {
+		Missing []string `json:"missing"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return nil, false
+	}
+	return out.Missing, true
+}
+
+// handleStoreMissing answers which of a closure's store paths this node does
+// not already have.
+//
+// Closures are transferred whole today, keyed on the top-level store path, so
+// two environments that differ by one package re-send everything they have in
+// common — python, numpy, the whole interpreter tree — because the top-level
+// hash differs. Nix store paths are already content-addressed, which makes
+// them exactly the units a sender should be allowed to skip: the equivalent
+// of shipping only the layers a registry lacks.
+func (s *Server) handleStoreMissing(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	missing := make([]string, 0, len(req.Paths))
+	for _, p := range req.Paths {
+		// A store path is immutable once it exists, so presence is the whole
+		// question — there is no version of it that could be stale.
+		if !pathExists(p) {
+			missing = append(missing, p)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
+}
+
 func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
 	storePath := r.URL.Query().Get("path")
 	if storePath == "" {
@@ -209,6 +307,38 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer narFile.Close()
+
+	// A partial archive carries only the paths this node was missing, which
+	// makes it useless as a cache entry: cached under the closure's key, it
+	// would later be forwarded to a third node as if it were the whole
+	// thing, and that node would be left with an unimportable fragment. So
+	// import it and cache nothing. If this node ever needs to seed a peer,
+	// ensureLocal re-exports the complete closure from its own store.
+	partial := r.FormValue("partial") == "1"
+	if partial {
+		if err := os.MkdirAll(s.narCache.dir, 0o755); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		tmp, err := os.CreateTemp(s.narCache.dir, "partial-*.nar")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		defer os.Remove(tmp.Name())
+		if _, err := io.Copy(tmp, narFile); err != nil {
+			tmp.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		tmp.Close()
+		if err := s.importNARFile(tmp.Name()); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "import: " + err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "imported": true})
+		return
+	}
 
 	// Cache the NAR and materialise the closure in the local nix store so
 	// /v1/pool/map can actually run it (<storePath>/bin/run must exist).
@@ -245,6 +375,25 @@ func (s *Server) materializeClosure(storePath string) error {
 	out, err := importNAR(nixPath, f)
 	if err != nil {
 		return fmt.Errorf("nix-store --import: %v: %s", err, string(out))
+	}
+	return nil
+}
+
+// importNARFile imports an archive into the local nix store without caching
+// it. Used for partial archives, which describe only what this node was
+// missing and must never be mistaken for the whole closure.
+func (s *Server) importNARFile(path string) error {
+	nixPath, err := exec.LookPath("nix")
+	if err != nil {
+		return fmt.Errorf("nix not found in PATH")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if out, err := importNAR(nixPath, f); err != nil {
+		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
 }

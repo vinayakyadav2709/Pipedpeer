@@ -31,6 +31,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // Default lease configuration
@@ -559,6 +560,20 @@ func (s *Server) broadcastClosure(storePath string) {
 
 // importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
 func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
+	// Send only what this peer lacks. The whole-closure archive is keyed on
+	// the top-level store path, so two environments differing by one package
+	// share none of it and every byte of python, numpy and the interpreter
+	// tree crosses the wire again. Store paths are content-addressed, which
+	// makes them exactly the units it is safe to skip.
+	//
+	// Best-effort throughout: any failure here falls back to the whole
+	// archive, which is correct, just larger.
+	partial := false
+	if diff, ok := diffNARFor(ph, storePath); ok {
+		defer os.RemoveAll(filepath.Dir(diff))
+		narPath, partial = diff, true
+	}
+
 	f, err := os.Open(narPath)
 	if err != nil {
 		return err
@@ -571,6 +586,13 @@ func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 		defer pw.Close()
 		if err := mp.WriteField("store_path", storePath); err != nil {
 			return
+		}
+		if partial {
+			// The receiver must import this without caching it as the
+			// closure, or it would forward a fragment to the next node.
+			if err := mp.WriteField("partial", "1"); err != nil {
+				return
+			}
 		}
 		w, err := mp.CreateFormFile("nar", "closure.nar")
 		if err != nil {
@@ -759,6 +781,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
 	r.Get("/v1/store", s.handleStoreCheck)
+	r.Post("/v1/store/missing", s.handleStoreMissing)
 	r.Post("/v1/store/import", s.handleStoreImport)
 	r.Post("/v1/pool/map", s.handlePoolMap)
 	r.Get("/v1/pool/stats", s.handlePoolStats)
@@ -1648,4 +1671,38 @@ func rewriteHost(endpoint, host string) string {
 		return user + net.JoinHostPort(host, port)
 	}
 	return user + host
+}
+
+// diffNARFor builds an archive holding only the closure paths a peer is
+// missing, and reports whether it is worth using. The caller keeps the whole
+// archive when this declines, so every failure mode here is a slower
+// transfer rather than a broken one.
+func diffNARFor(ph *PeerHealth, storePath string) (string, bool) {
+	paths, err := closurePaths(storePath)
+	if err != nil || len(paths) == 0 {
+		return "", false
+	}
+	missing, ok := peerMissingPaths(ph.Host, ph.Port, paths)
+	if !ok {
+		return "", false // older peer: it does not know the question
+	}
+	if len(missing) == 0 {
+		return "", false // it has everything; the caller's own gate handles that
+	}
+	if len(missing) == len(paths) {
+		return "", false // shares nothing, so a diff saves nothing
+	}
+	dir, err := userdir.Scratch("nardiff-*")
+	if err != nil {
+		return "", false
+	}
+	out := filepath.Join(dir, "diff.nar")
+	if err := exportPaths(missing, out); err != nil {
+		os.RemoveAll(dir)
+		return "", false
+	}
+	log.Info().Int("missing", len(missing)).Int("closure", len(paths)).
+		Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+		Msg("sending only the store paths this peer lacks")
+	return out, true
 }
