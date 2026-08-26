@@ -111,27 +111,12 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 		if pkg == "torch" {
 			hasTorch = true
 		}
-		if pkg == "scikit-learn" && nixSystem == "x86_64-linux" {
-			// nixpkgs-unstable still ships scikit-learn 1.8.x; pin the cp314
-			// manylinux wheel to match the host dev environment (1.9.0) so the
-			// built closure behaves identically on this machine and in docker.
-			// 1.9.0 hard-imports narwhals, so pull nixpkgs' narwhals in too.
-			psPkgs = append(psPkgs, "ps.narwhals")
-			psPkgs = append(psPkgs, `(ps.scikit-learn.overridePythonAttrs (old: {
-  version = "1.9.0";
-  format = "wheel";
-  pyproject = null;
-  dontPatch = true;
-  patches = [];
-  doCheck = false;
-  dontBuild = true;
-  dontCheckRuntimeDeps = true;
-  pythonImportsCheck = [];
-  src = pkgs.fetchurl {
-    url = "https://files.pythonhosted.org/packages/f0/af/4d72d9e475ac83719160c662619e4bf7b95c19507cd582e7d0167a3c3dae/scikit_learn-1.9.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-    sha256 = "1fea2cc5677ab49d6f5bade978c866da44957b712d92e9635e8b4f723013c3cb";
-  };
-}))`)
+		// Packages pinned to a specific wheel, from the table in wheelpin.go.
+		// A pin used to be a hardcoded branch here with its Nix expression,
+		// URL and hash inline; a second one meant copying all of it.
+		if pin, ok := pinFor(pkg, nixSystem); ok {
+			psPkgs = append(psPkgs, pin.Deps...)
+			psPkgs = append(psPkgs, pin.expr())
 			continue
 		}
 		if pkg == "torch" && nixSystem == "x86_64-linux" && gpu {
