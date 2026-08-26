@@ -40,6 +40,8 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/pipedpeer/pipedpeer/internal/userns"
 )
 
 func main() {
@@ -51,8 +53,18 @@ func main() {
 	// TLS first, then the token: the token wrapper delegates to whatever it
 	// wraps, so this order puts the secret inside the encrypted connection
 	// rather than beside it.
+	// Before anything else: a userns probe re-executes this binary, and that
+	// child must do its one syscall and exit rather than parse arguments.
+	userns.Install()
+
 	tlsid.Install()
 	authtoken.Install()
+
+	// crun may have been installed into the user's own bin directory, which
+	// setup does instead of asking for root. That directory is on PATH for a
+	// login shell but not necessarily for a daemon, and a daemon that cannot
+	// find crun falls back to running jobs unsandboxed.
+	ensureUserBinOnPath()
 
 	if len(os.Args) > 1 && os.Args[1] == "__daemon__" {
 		runDaemon(os.Args[2:])
@@ -1786,4 +1798,20 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ensureUserBinOnPath puts the per-user bin directory on PATH if it is
+// missing, so a crun installed there without root is found by every later
+// exec.LookPath.
+func ensureUserBinOnPath() {
+	dir := userdir.Bin()
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p == dir {
+			return
+		}
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return
+	}
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
