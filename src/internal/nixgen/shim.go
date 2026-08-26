@@ -2220,6 +2220,15 @@ def _install_ddp():
     # Said once. The condition holds for every step of the run, and a warning
     # repeated 88 times is a warning nobody reads.
     _WARNED_SAME_WORK = [False]
+
+    # Gradients as signed bytes rather than half floats: half the bytes again
+    # on a link where bytes are the whole cost. What quantisation drops is
+    # carried forward in _ERR and added to the next step's gradient, so the
+    # error is delayed rather than discarded - which is what keeps this from
+    # being a slow bias towards zero. Off by default because it is still a
+    # change to the arithmetic; PIPEDPEER_DDP_INT8=1 turns it on.
+    _INT8_GRADS = os.environ.get("PIPEDPEER_DDP_INT8", "") == "1"
+    _ERR = {}
     # Compute time is measured as the interval between consecutive optimizer
     # steps minus whatever was spent syncing in it - not as the duration of
     # step() itself, which is a rounding error next to the forward and
@@ -2407,6 +2416,75 @@ def _install_ddp():
         _DDP_STATS["recv_bytes"] += len(data)
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
+    def _daemon_reduce_int8(arrs, key):
+        """Average gradients as signed bytes, carrying the rounding error.
+
+        Each rank scales its own values into [-127, 127] and sends the scale
+        in the header; the daemon decodes, sums in float64 and returns the
+        mean the same way. Every rank gets identical bytes back, so quantising
+        the reply adds noise to the update without letting the ranks drift
+        apart - they still hold exactly the same model, which is the property
+        that matters.
+
+        What rounding drops is kept in _ERR and added to the next step's
+        gradient. Without that, small gradients round to zero every step and
+        never move the model at all; with it they accumulate until they are
+        large enough to survive a round, which is the standard error-feedback
+        trick and the reason this is usable rather than merely smaller.
+        """
+        import json
+        import struct
+        import time as _t
+        import urllib.request
+
+        flat, shapes, sizes = _pack(arrs)
+        flat = flat.astype("float32", copy=True)
+        prev = _ERR.get(key)
+        if prev is not None and prev.shape == flat.shape:
+            flat += prev
+        peak = float(_np_ddp.abs(flat).max()) if flat.size else 0.0
+        scale = peak / 127.0 if peak > 0 else 1.0
+        q = _np_ddp.clip(_np_ddp.round(flat / scale), -127, 127).astype("int8")
+        # Whatever quantisation lost, minus nothing: carried to the next step.
+        _ERR[key] = flat - q.astype("float32") * scale
+
+        _t0 = _t.monotonic()
+        _SEQ[0] += 1
+        header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
+                             "world": _WORLD, "dtype": "int8", "kind": "grads",
+                             "count": int(q.size), "scale": scale,
+                             "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
+        payload = q.tobytes()
+        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
+        req = urllib.request.Request(
+            _SYNC_URL, data=body,
+            headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
+        if _TOKEN:
+            req.add_header("X-Pipedpeer-Token", _TOKEN)
+        with urllib.request.urlopen(req, timeout=240) as resp:
+            data = resp.read()
+        nl = data.find(b"\n")
+        if nl < 0:
+            raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
+        reply = json.loads(data[:nl])
+        agreed = reply.get("sync_every", 0)
+        if agreed and agreed != _SYNC_TUNED[0]:
+            _SYNC_TUNED[0] = int(agreed)
+        if reply.get("same_work") and not _WARNED_SAME_WORK[0]:
+            _WARNED_SAME_WORK[0] = True
+            _log("ddp: every rank produced the SAME gradients — every rank is "
+                 "training on the same data, so this run is correct and pure "
+                 "overhead. Shard it: X, y = X[rank::world], y[rank::world]")
+        rest = data[nl + 1:]
+        n = struct.unpack(">I", rest[:4])[0]
+        out_scale = float(reply.get("scale", 1.0)) or 1.0
+        mean = _np_ddp.frombuffer(rest[4:4 + n], dtype="int8").astype("float32") * out_scale
+        _DDP_STATS["syncs"] += 1
+        _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
+        _DDP_STATS["sent_bytes"] += len(body)
+        _DDP_STATS["recv_bytes"] += len(data)
+        return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
+
     def _daemon_allreduce(tensors, half=None, kind="grads"):
         """Average tensors across ranks in place, through the daemon channel.
 
@@ -2432,6 +2510,12 @@ def _install_ddp():
         # gradient. Anything mixed falls back to the blackboard, where the
         # daemon does not need to understand what it is holding.
         wire_dtypes = {a.dtype for a in wire}
+        if _REDUCE_OK and _INT8_GRADS and kind == "grads" and len(wire_dtypes) == 1:
+            means = _daemon_reduce_int8(arrs, key=id(tensors[0]))
+            for i, t in enumerate(tensors):
+                t.data.copy_(_th.from_numpy(
+                    _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
+            return
         if _REDUCE_OK and len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
                 "float16", "float32", "float64"):
             means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind)
