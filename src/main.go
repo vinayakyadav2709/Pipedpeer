@@ -704,6 +704,7 @@ func runDDP(o ddpRunOptions) error {
 		PythonVersion: o.PythonVersion,
 		Pkgs:          o.Pkgs,
 		Intercept:     true, // DDP transparency lives in the sitecustomize shim
+		GPU:           o.RequireGPU || o.PreferGPU,
 	}, func(step int, title string) {
 		if step == 1 {
 			fmt.Printf("[%d/7] %s\n", step, title)

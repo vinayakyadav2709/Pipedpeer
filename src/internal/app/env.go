@@ -44,6 +44,10 @@ type EnvOptions struct {
 	// Intercept embeds the sitecustomize shim into the workspace so parallel
 	// primitives route through the cluster (see nixgen/shim.go).
 	Intercept bool
+	// GPU selects the CUDA build of torch. Off, the closure is several
+	// gigabytes smaller and comes from the binary cache instead of a
+	// fixed-output wheel fetch.
+	GPU bool
 }
 
 // StageFn reports build progress. Callers own the numbering so a single run
@@ -89,7 +93,7 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	env := &Environment{ProjectRoot: projectRoot, tmpDir: tmpDir}
 
 	stage(3, "Generating flake.nix...")
-	env.FlakeContent = nixgen.GenerateFlake(nixPkgs, opts.PythonVersion)
+	env.FlakeContent = nixgen.GenerateFlake(nixPkgs, opts.PythonVersion, opts.GPU)
 	flakePath := filepath.Join(tmpDir, "flake.nix")
 	if err := os.WriteFile(flakePath, []byte(env.FlakeContent), 0644); err != nil {
 		env.Close()
