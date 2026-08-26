@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -40,6 +41,42 @@ func Root() string {
 // is the ordinary store/ and var/ of any nix installation.
 func NixDir() string { return Root() }
 
+// systemNixDirs are where an installed nix lives when it is not on PATH.
+//
+// Every nix installer puts its profile on PATH from a login shell profile
+// script, and nothing else. A daemon started by systemd, by cron, by
+// `ssh host command`, or inside `docker exec` gets none of that, so a machine
+// with a perfectly good nix reported "nix not found in PATH". Worse, the same
+// lookup decides Private(): a node that had always used the system store
+// would silently switch to a private one and re-download every closure it
+// already held.
+//
+// Order matters only in that all of these are correct answers; the first that
+// exists is used.
+var systemNixDirs = []string{
+	"/nix/var/nix/profiles/default/bin", // multi-user, and the Determinate installer
+	"/run/current-system/sw/bin",        // NixOS
+}
+
+// SystemNix returns the path of an installed nix outside the private store.
+func SystemNix() (string, error) {
+	if p, err := exec.LookPath("nix"); err == nil {
+		return p, nil
+	}
+	dirs := systemNixDirs
+	if home, err := os.UserHomeDir(); err == nil {
+		// The single-user installer, which puts it under the user's home.
+		dirs = append(append([]string{}, dirs...), filepath.Join(home, ".nix-profile", "bin"))
+	}
+	for _, dir := range dirs {
+		p := filepath.Join(dir, "nix")
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("nix not found on PATH or in %s", strings.Join(dirs, ", "))
+}
+
 var privateOnce struct {
 	sync.Once
 	private bool
@@ -58,7 +95,7 @@ func Private() bool {
 			return
 		}
 		if _, err := os.Stat("/nix/store"); err == nil {
-			if _, err := exec.LookPath("nix"); err == nil {
+			if _, err := SystemNix(); err == nil {
 				return // system store and a nix to drive it: nothing to do
 			}
 		}
@@ -129,9 +166,9 @@ func Cmd(dir string, argv ...string) (*exec.Cmd, func(), error) {
 		return nil, nil, fmt.Errorf("no command given")
 	}
 	if !Private() {
-		nixPath, err := exec.LookPath("nix")
+		nixPath, err := SystemNix()
 		if err != nil {
-			return nil, nil, fmt.Errorf("nix not found in PATH")
+			return nil, nil, err
 		}
 		return &exec.Cmd{Path: nixPath, Args: argv, Dir: dir}, func() {}, nil
 	}

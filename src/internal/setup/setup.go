@@ -123,7 +123,11 @@ func acceptsUnsignedClosures() bool {
 	if !multiUserNix() {
 		return true
 	}
-	out, err := exec.Command("nix", "config", "show", "require-sigs").Output()
+	nixPath, err := nixstore.SystemNix()
+	if err != nil {
+		return false
+	}
+	out, err := exec.Command(nixPath, "config", "show", "require-sigs").Output()
 	return err == nil && strings.TrimSpace(string(out)) == "false"
 }
 
