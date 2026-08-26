@@ -216,3 +216,17 @@ type relayAddr struct{}
 
 func (relayAddr) Network() string { return "quic" }
 func (relayAddr) String() string  { return "relayed" }
+
+// Closed reports whether the connection to the relay has gone.
+//
+// A dead connection takes its streams with it, so a caller that keeps using it
+// opens streams into nothing and every peer behind the relay silently stops
+// answering. Checking beats waiting for the failures.
+func (c *Client) Closed() bool {
+	select {
+	case <-c.conn.Context().Done():
+		return true
+	default:
+		return false
+	}
+}

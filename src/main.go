@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,12 +34,14 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/discovery"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/internet"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/ping"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
@@ -181,6 +184,13 @@ func newStartCmd() *cobra.Command {
 				fmt.Printf("daemon already running\n")
 				return nil
 			}
+			// Passed through the environment rather than as another argument:
+			// the daemon reads PIPEDPEER_RENDEZVOUS, and a machine that always
+			// joins the same cluster sets it once instead of typing it on
+			// every start.
+			if rv, _ := cmd.Flags().GetString("rendezvous"); rv != "" {
+				os.Setenv("PIPEDPEER_RENDEZVOUS", rv)
+			}
 			if err := daemonctl.Start(nodeID.NodeID, port, maxConcurrent); err != nil {
 				return err
 			}
@@ -194,6 +204,9 @@ func newStartCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Int("port", 38080, "Local daemon port")
+	cmd.Flags().String("rendezvous", "",
+		"join a cluster over the internet through this address book, host:port "+
+			"(also PIPEDPEER_RENDEZVOUS). Peers are discovered and connected automatically.")
 	cmd.Flags().Int("max-concurrent", 0,
 		"Maximum tasks this node accepts at once (0 = unlimited; also settable via PIPEDPEER_MAX_CONCURRENT)")
 	return cmd
@@ -1579,7 +1592,7 @@ func runDaemon(args []string) {
 
 	var port int
 	var maxConcurrent = -1
-	var registryURL, sshEndpoint, natsURL string
+	var registryURL, sshEndpoint, natsURL, rendezvousAddr string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
@@ -1602,6 +1615,11 @@ func runDaemon(args []string) {
 				sshEndpoint = args[i+1]
 				i++
 			}
+		case "--rendezvous":
+			if i+1 < len(args) {
+				rendezvousAddr = args[i+1]
+				i++
+			}
 		case "--nats-url":
 			if i+1 < len(args) {
 				natsURL = args[i+1]
@@ -1617,6 +1635,9 @@ func runDaemon(args []string) {
 	}
 	if natsURL == "" {
 		natsURL = os.Getenv("PIPEDPEER_NATS_URL")
+	}
+	if rendezvousAddr == "" {
+		rendezvousAddr = os.Getenv("PIPEDPEER_RENDEZVOUS")
 	}
 	if maxConcurrent < 0 {
 		maxConcurrent = 0 // unlimited unless configured
@@ -1722,10 +1743,70 @@ func runDaemon(args []string) {
 	// node adds capacity but never slows a run down.
 	server.EnablePoolSpill()
 
+	// Internet mode: one address instead of four steps. The daemon registers
+	// with a rendezvous, learns who else is in the cluster, opens a path to
+	// each of them and registers that path as an ordinary node - so nothing
+	// downstream has to know a peer is remote.
+	//
+	// Entirely optional and never fatal: a machine with no internet, or a
+	// rendezvous that is down, still runs local jobs and still uses its LAN
+	// peers.
+	internetCtx, stopInternet := context.WithCancel(context.Background())
+	defer stopInternet()
+	if rendezvousAddr != "" {
+		key, kerr := identity.Key()
+		if kerr != nil {
+			log.Warn().Err(kerr).Msg("no signing key: internet mode disabled")
+		} else {
+			mgr := internet.New(internet.Config{
+				Rendezvous: rendezvousAddr,
+				Cluster:    rendezvous.ClusterID(authtoken.Current()),
+				Key:        key,
+				DaemonPort: port,
+				VerifyRelay: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+					if len(rawCerts) == 0 {
+						return fmt.Errorf("relay presented no certificate")
+					}
+					return tlsid.CheckOrPin(rendezvousAddr, rawCerts[0])
+				},
+				OnPeer: func(node, addr string) {
+					host, portStr, err := net.SplitHostPort(addr)
+					if err != nil {
+						return
+					}
+					p, err := strconv.Atoi(portStr)
+					if err != nil {
+						return
+					}
+					if err := server.AddPeer(host, p); err != nil {
+						log.Warn().Err(err).Str("peer", node).Msg("could not register relayed peer")
+						return
+					}
+					log.Info().Str("peer", node).Str("at", addr).Msg("peer joined over the internet")
+				},
+				OnPeerGone: func(node, addr string) {
+					host, portStr, err := net.SplitHostPort(addr)
+					if err != nil {
+						return
+					}
+					p, _ := strconv.Atoi(portStr)
+					_ = server.RemovePeer(host, p)
+					log.Info().Str("peer", node).Msg("peer left")
+				},
+				Log: func(format string, args ...any) {
+					log.Info().Msgf("internet: "+format, args...)
+				},
+			})
+			go mgr.Run(internetCtx)
+			log.Info().Str("rendezvous", rendezvousAddr).Msg("internet mode enabled")
+		}
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sig
+		stopInternet()
 		server.StopWarmWorkers()
 		if hbClient != nil {
 			hbClient.Stop()

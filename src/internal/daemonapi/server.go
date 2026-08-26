@@ -1005,6 +1005,30 @@ func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
 }
 
+// AddPeer registers a peer at host:port and polls it immediately, the same way
+// `pipedpeer nodes add` does. Exported so internet mode can register the local
+// ports it puts in front of remote peers, without going back out through HTTP
+// to reach its own daemon.
+func (s *Server) AddPeer(host string, port int) error {
+	if s.store == nil {
+		return fmt.Errorf("node store unavailable")
+	}
+	if err := s.store.AddManual(host, port); err != nil {
+		return err
+	}
+	go s.pollAllNodes()
+	return nil
+}
+
+// RemovePeer forgets a peer, for when internet mode's local port goes away.
+func (s *Server) RemovePeer(host string, port int) error {
+	if s.store == nil {
+		return fmt.Errorf("node store unavailable")
+	}
+	_, err := s.store.RemoveManual(host)
+	return err
+}
+
 func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) {
 	host := chi.URLParam(r, "host")
 	if host == "_all" {
