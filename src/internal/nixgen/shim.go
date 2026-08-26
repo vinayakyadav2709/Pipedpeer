@@ -2107,22 +2107,42 @@ def _install_ddp():
         _BACKEND = "gloo"  # no sync endpoint handed down; old transport
 
     def _daemon_exchange(payload):
-        import base64
+        """One allreduce round trip through the lead rank's daemon.
+
+        Payloads travel as a length-prefixed frame rather than base64 in
+        JSON. A gradient is the largest thing this system sends per step and
+        it is sent every step; base64 inflated it by a third both on the wire
+        and in the daemon's memory, where a full model per rank is already
+        held until the slowest rank arrives. The daemon never looks inside
+        the payload, so the encoding bought nothing.
+        """
         import json
+        import struct
         import urllib.request
         _SEQ[0] += 1
-        body = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
-                           "world": _WORLD,
-                           "data": base64.b64encode(payload).decode()}).encode()
-        req = urllib.request.Request(_SYNC_URL, data=body,
-                                     headers={"Content-Type": "application/json"})
+        header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
+                             "world": _WORLD}).encode()
+        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
+        req = urllib.request.Request(
+            _SYNC_URL, data=body,
+            headers={"Content-Type": "application/vnd.pipedpeer.ddp"})
         if _TOKEN:
             req.add_header("X-Pipedpeer-Token", _TOKEN)
         with urllib.request.urlopen(req, timeout=240) as resp:
-            out = json.loads(resp.read())
-        if "blobs" not in out:
-            raise RuntimeError("ddp sync failed: %s" % out)
-        return [base64.b64decode(b) for b in out["blobs"]]
+            data = resp.read()
+        nl = data.find(b"\n")
+        if nl < 0:
+            raise RuntimeError("ddp sync returned no header: %r" % data[:200])
+        count = json.loads(data[:nl]).get("blob_frames", 0)
+        rest = data[nl + 1:]
+        out = []
+        for _ in range(count):
+            n = struct.unpack(">I", rest[:4])[0]
+            out.append(rest[4:4 + n])
+            rest = rest[4 + n:]
+        if len(out) != _WORLD:
+            raise RuntimeError("ddp sync returned %d of %d blobs" % (len(out), _WORLD))
+        return out
 
     def _daemon_allreduce(tensors):
         """Average tensors across ranks in place, through the daemon channel."""

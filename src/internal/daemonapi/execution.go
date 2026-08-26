@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"io/fs"
 	"net/http"
@@ -144,7 +145,7 @@ func defaultJobDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "jobs")
+		return filepath.Join(userdir.Data(), "jobs")
 	}
 	return filepath.Join(home, ".local", "share", "pipedpeer", "jobs")
 }

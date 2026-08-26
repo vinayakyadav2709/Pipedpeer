@@ -3,6 +3,9 @@ package daemonapi
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -117,5 +120,91 @@ func TestDDPSyncSweepDropsStaleEntries(t *testing.T) {
 	}
 	if _, ok := b.entries["new/1"]; !ok {
 		t.Fatal("fresh entry was swept")
+	}
+}
+
+// TestDDPSyncBinaryFramesRoundTrip covers the wire format gradients actually
+// use. A gradient is the largest thing this system sends per step, and it is
+// sent every step; base64 inflated it by a third both on the wire and in this
+// daemon's memory, where a full model per rank is already held until the
+// slowest rank arrives. The daemon never reads the payload, so the encoding
+// bought nothing — and binary payloads must survive bytes that are not valid
+// UTF-8, which a JSON string cannot carry.
+func TestDDPSyncBinaryFramesRoundTrip(t *testing.T) {
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	const world = 2
+	// Deliberately not text: real payloads are pickled float arrays.
+	payloads := [][]byte{
+		{0x00, 0xff, 0x80, 0x01, 0xfe},
+		{0xde, 0xad, 0xbe, 0xef, 0x00},
+	}
+
+	post := func(rank int) ([][]byte, error) {
+		hdr, _ := json.Marshal(map[string]any{
+			"group": "bin", "seq": 1, "rank": rank, "world": world,
+		})
+		body := append(hdr, '\n')
+		body = putFrame(body, payloads[rank])
+		resp, err := http.Post(ts.URL+"/v1/ddp/sync", DDPFramesContentType, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("status %d", resp.StatusCode)
+		}
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
+		}
+		nl := bytes.IndexByte(raw, '\n')
+		if nl < 0 {
+			return nil, fmt.Errorf("no header line")
+		}
+		var head struct {
+			Frames int `json:"blob_frames"`
+		}
+		if err := json.Unmarshal(raw[:nl], &head); err != nil {
+			return nil, err
+		}
+		rest := raw[nl+1:]
+		var out [][]byte
+		for i := 0; i < head.Frames; i++ {
+			var f []byte
+			if f, rest, err = readFrame(rest); err != nil {
+				return nil, err
+			}
+			out = append(out, f)
+		}
+		return out, nil
+	}
+
+	results := make([][][]byte, world)
+	errs := make([]error, world)
+	var wg sync.WaitGroup
+	for r := 0; r < world; r++ {
+		wg.Add(1)
+		go func(rank int) {
+			defer wg.Done()
+			results[rank], errs[rank] = post(rank)
+		}(r)
+	}
+	wg.Wait()
+
+	for rank := range results {
+		if errs[rank] != nil {
+			t.Fatalf("rank %d: %v", rank, errs[rank])
+		}
+		if len(results[rank]) != world {
+			t.Fatalf("rank %d got %d blobs, want %d", rank, len(results[rank]), world)
+		}
+		for i, got := range results[rank] {
+			if !bytes.Equal(got, payloads[i]) {
+				t.Errorf("rank %d blob %d = %x, want %x", rank, i, got, payloads[i])
+			}
+		}
 	}
 }

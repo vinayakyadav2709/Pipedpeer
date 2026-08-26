@@ -3,6 +3,7 @@ package jobhistory
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,7 +69,7 @@ func BaseDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "jobs")
+		return filepath.Join(userdir.Data(), "jobs")
 	}
 	return filepath.Join(home, ".local", "share", "pipedpeer", "jobs")
 }

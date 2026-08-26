@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,7 +87,9 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 		fmt.Printf("      Using Nix package: %s\n", pkg)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "pipedpeer-*")
+	// On disk, not in RAM: the exported closure is written here and a torch
+	// closure is several gigabytes.
+	tmpDir, err := userdir.Scratch("build-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %v", err)
 	}

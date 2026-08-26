@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"log"
 	"net"
@@ -130,7 +131,9 @@ func isLoopback(remoteAddr string) bool {
 
 func chunkDirFor(storePath string) string {
 	sum := sha256.Sum256([]byte(storePath))
-	return filepath.Join(os.TempDir(), "pipedpeer", "chunkcache", hex.EncodeToString(sum[:8]))
+	// Parsed chunks are worth keeping across a warm-worker respawn and can be
+	// large; a tmpfs charges RAM for them and drops them on reboot.
+	return filepath.Join(userdir.Cache(), "chunkcache", hex.EncodeToString(sum[:8]))
 }
 
 // chunkFanOut is shared by both worker scripts: it spreads one chunk's items
@@ -1383,7 +1386,7 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 // spawn starts a warm worker for a store path. bin/run warm_worker.py reads
 // JSON-lines from stdin and writes results to stdout.
 func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
-	dir, err := os.MkdirTemp("", "pipedpeer-warm-*")
+	dir, err := userdir.Scratch("warm-*")
 	if err != nil {
 		return nil, err
 	}
@@ -1433,7 +1436,9 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	defer w.mu.Unlock()
 	w.id++
 
-	dir, err := os.MkdirTemp("", "pipedpeer-warm-task-*")
+	// Holds the chunk payload: hundreds of megabytes is normal, and a
+	// tmpfs would charge the job's own memory for it.
+	dir, err := userdir.Scratch("warm-task-*")
 	if err != nil {
 		return nil, err
 	}
@@ -1564,7 +1569,7 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 			return nil, err
 		}
 	}
-	dir, err := os.MkdirTemp("", "pipedpeer-pool-*")
+	dir, err := userdir.Scratch("pool-*")
 	if err != nil {
 		return nil, err
 	}
