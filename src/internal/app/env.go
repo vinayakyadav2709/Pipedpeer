@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 )
 
@@ -106,8 +106,13 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 
 	stage(4, "Building locally...")
 	nixSystem := nixgen.NixArch()
-	cmd := exec.Command("nix", "build", ".#packages."+nixSystem+".default", "--option", "build-users-group", "")
-	cmd.Dir = tmpDir
+	cmd, cleanup, err := nixstore.Cmd(tmpDir, "nix", "build", ".#packages."+nixSystem+".default",
+		"--option", "build-users-group", "")
+	if err != nil {
+		env.Close()
+		return nil, err
+	}
+	defer cleanup()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {

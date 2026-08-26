@@ -10,11 +10,12 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
 
 // narCache content-addresses imported Nix closures by their store path. A Nix
@@ -121,11 +122,12 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 	if _, err := os.Stat(filepath.Join(storePath, "bin", "run")); err != nil {
 		return "", false // not materialised here; nothing to export
 	}
-	nixPath, err := exec.LookPath("nix")
+	qcmd, qcleanup, err := nixstore.Cmd("", "nix-store", "-qR", storePath)
 	if err != nil {
 		return "", false
 	}
-	out, err := (&exec.Cmd{Path: nixPath, Args: []string{"nix-store", "-qR", storePath}}).Output()
+	out, err := qcmd.Output()
+	qcleanup()
 	if err != nil {
 		return "", false
 	}
@@ -142,12 +144,14 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 	}
 	defer os.Remove(tmp.Name())
 	gz := gzip.NewWriter(tmp)
-	export := &exec.Cmd{
-		Path:   nixPath,
-		Args:   append([]string{"nix-store", "--export"}, paths...),
-		Stdout: gz,
-		Stderr: os.Stderr,
+	export, ecleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
+	if err != nil {
+		tmp.Close()
+		return "", false
 	}
+	defer ecleanup()
+	export.Stdout = gz
+	export.Stderr = os.Stderr
 	if err := export.Run(); err != nil {
 		tmp.Close()
 		return "", false
@@ -183,12 +187,13 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 // references are not present yet, so a filtered subset stays importable only
 // because the order is preserved.
 func closurePaths(storePath string) ([]string, error) {
-	nixPath, err := exec.LookPath("nix")
+	cmd, cleanup, err := nixstore.Cmd("", "nix-store", "-qR", storePath)
 	if err != nil {
 		return nil, err
 	}
+	defer cleanup()
 	var stderr bytes.Buffer
-	cmd := &exec.Cmd{Path: nixPath, Args: []string{"nix-store", "-qR", storePath}, Stderr: &stderr}
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		// Carry nix's own words: "exit status 1" on its own sends you
@@ -203,10 +208,11 @@ func exportPaths(paths []string, destPath string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("nothing to export")
 	}
-	nixPath, err := exec.LookPath("nix")
+	cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	f, err := os.Create(destPath)
 	if err != nil {
 		return err
@@ -214,12 +220,8 @@ func exportPaths(paths []string, destPath string) error {
 	defer f.Close()
 	gz := gzip.NewWriter(f)
 	defer gz.Close()
-	cmd := &exec.Cmd{
-		Path:   nixPath,
-		Args:   append([]string{"nix-store", "--export"}, paths...),
-		Stdout: gz,
-		Stderr: os.Stderr,
-	}
+	cmd.Stdout = gz
+	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
@@ -367,16 +369,12 @@ func (s *Server) materializeClosure(storePath string) error {
 	if !ok {
 		return fmt.Errorf("no cached nar for %s", storePath)
 	}
-	nixPath, err := exec.LookPath("nix")
-	if err != nil {
-		return fmt.Errorf("nix not found in PATH")
-	}
 	f, err := os.Open(narPath)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	out, err := importNAR(nixPath, f)
+	out, err := importNAR(f)
 	if err != nil {
 		return fmt.Errorf("nix-store --import: %v: %s", err, string(out))
 	}
@@ -387,16 +385,12 @@ func (s *Server) materializeClosure(storePath string) error {
 // it. Used for partial archives, which describe only what this node was
 // missing and must never be mistaken for the whole closure.
 func (s *Server) importNARFile(path string) error {
-	nixPath, err := exec.LookPath("nix")
-	if err != nil {
-		return fmt.Errorf("nix not found in PATH")
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if out, err := importNAR(nixPath, f); err != nil {
+	if out, err := importNAR(f); err != nil {
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil

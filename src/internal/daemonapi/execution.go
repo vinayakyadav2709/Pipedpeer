@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"github.com/pipedpeer/pipedpeer/internal/userns"
 	"github.com/rs/zerolog/log"
@@ -52,7 +53,7 @@ type ociConfig struct {
 	OciVersion string     `json:"ociVersion"`
 	Process    ociProcess `json:"process"`
 	Root       ociRoot    `json:"root"`
-	Hostname   string     `json:"hostname"`
+	Hostname   string     `json:"hostname,omitempty"`
 	Mounts     []ociMount `json:"mounts"`
 	Linux      *ociLinux  `json:"linux,omitempty"`
 }
@@ -498,16 +499,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 		// Import NAR into local Nix store — uses nix multicall binary
 		// invoked as nix-store via argv[0].
-		nixPath, err := exec.LookPath("nix")
-		if err != nil {
-			writeWS(OutputMessage{Error: "nix not found"})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
-			return
-		}
-
-		out, err := importNAR(nixPath, narFile)
+		out, err := importNAR(narFile)
 		if err != nil {
 			writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
 			s.jobsMu.Lock()
@@ -584,8 +576,24 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// Isolation needs crun. If setup never managed to install it, degrade to
 	// unisolated execution with a loud warning instead of failing the job —
 	// the sandbox is a hardening layer, not a functional requirement.
+	// With a private nix store the sandbox is not a hardening layer, it is
+	// what puts the store at /nix: the closure's binaries all name
+	// /nix/store/... paths that do not exist on this machine outside the
+	// mount namespace. Degrading to unisolated there does not produce a less
+	// safe run, it produces a run that cannot start, so say so instead.
+	sandboxRequired := nixstore.Private()
+
 	if cfg.Isolate {
 		if _, err := exec.LookPath("crun"); err != nil {
+			if sandboxRequired {
+				writeWS(OutputMessage{Error: "this node keeps its nix store in the user's " +
+					"data directory, which only the sandbox can mount at /nix — but crun is " +
+					"not installed, so nothing can run. Install it with `pipedpeer setup`."})
+				s.jobsMu.Lock()
+				job.Status = "failed"
+				s.jobsMu.Unlock()
+				return
+			}
 			outCh <- OutputMessage{E: "[pipedpeer] crun not found on this node — running unisolated\n"}
 			cfg.Isolate = false
 		} else if ok, why := userns.Available(); !ok {
@@ -595,6 +603,15 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			outCh <- OutputMessage{E: "[pipedpeer] this node cannot create a user namespace, " +
 				"so jobs run unisolated.\n    " + why + "\n"}
 			usernsOnce.Do(func() { log.Warn().Str("reason", why).Msg("no user namespace: jobs run unisolated") })
+			if sandboxRequired {
+				writeWS(OutputMessage{Error: "this node keeps its nix store in the user's " +
+					"data directory, which only the sandbox can mount at /nix — but this " +
+					"machine refuses user namespaces, so nothing can run.\n" + why})
+				s.jobsMu.Lock()
+				job.Status = "failed"
+				s.jobsMu.Unlock()
+				return
+			}
 			cfg.Isolate = false
 		}
 	}
@@ -686,6 +703,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		homeDir := filepath.Join(filepath.Dir(job.WorkDir), "home")
 		os.MkdirAll(homeDir, 0755)
 
+		q := sandboxQuirks()
 		ociCfg := ociConfig{
 			OciVersion: "1.0.2",
 			Process: ociProcess{
@@ -695,11 +713,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				Env:      env,
 				Cwd:      "/work",
 			},
-			Root:     ociRoot{Path: "rootfs", Readonly: true},
-			Hostname: "pipedpeer",
+			Root: ociRoot{Path: "rootfs", Readonly: true},
+			// Hostname only when the machine allows sethostname; inside an
+			// unprivileged container it does not, and crun fails the job.
+			Hostname: hostnameFor(q),
 			Mounts: []ociMount{
-				{Destination: "/nix", Type: "bind", Source: "/nix", Options: []string{"rbind", "ro"}},
-				{Destination: "/proc", Type: "proc", Source: "proc"},
+				// Source, not destination: with a private store the files
+				// live in the user's data directory, but the paths baked into
+				// every binary still say /nix, so that is where they must
+				// appear inside the sandbox.
+				{Destination: "/nix", Type: "bind", Source: nixstore.HostNixDir(), Options: []string{"rbind", "ro"}},
+				procMountFor(q),
 				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "mode=755"}},
 				// Python multiprocessing creates its SemLock in /dev/shm and
 				// mmaps it (POSIX shm), which needs a writable, executable tmpfs
@@ -711,9 +735,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				{Destination: "/home/root", Type: "bind", Source: homeDir, Options: []string{"rbind", "rw"}},
 			},
 			Linux: &ociLinux{
-				Namespaces: []ociNamespace{
-					{Type: "pid"}, {Type: "ipc"}, {Type: "uts"}, {Type: "mount"},
-				},
+				Namespaces: namespacesFor(q),
 			},
 		}
 
@@ -996,7 +1018,7 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 // classic `nix-store --import` only learned that flag in some versions and
 // errors out on others. Rather than pin one Nix version, try with the flag and
 // fall back when it is not recognised.
-func importNAR(nixPath string, nar *os.File) ([]byte, error) {
+func importNAR(nar *os.File) ([]byte, error) {
 	run := func(args ...string) ([]byte, error) {
 		if _, err := nar.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("rewind nar: %w", err)
@@ -1016,11 +1038,12 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 		} else {
 			src = br
 		}
-		cmd := &exec.Cmd{
-			Path:  nixPath,
-			Args:  append([]string{"nix-store"}, args...),
-			Stdin: src,
+		cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store"}, args...)...)
+		if err != nil {
+			return nil, err
 		}
+		defer cleanup()
+		cmd.Stdin = src
 		return cmd.CombinedOutput()
 	}
 
