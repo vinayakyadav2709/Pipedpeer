@@ -140,3 +140,78 @@ func oomKilled(events string) bool {
 	}
 	return false
 }
+
+// TestScopePrefixCarriesAMemoryCeiling covers the gap that let a pool
+// benchmark take down a developer machine.
+//
+// The per-job cgroup limit only ever bounded sandboxed jobs. The daemon's warm
+// pool workers are ordinary child processes in the daemon's own cgroup, and
+// nothing bounded those, so a wide enough pool drove the machine into a global
+// OOM - at which point the kernel picked a victim by score and killed an
+// unrelated dev server rather than the worker that had asked for the memory.
+func TestScopePrefixCarriesAMemoryCeiling(t *testing.T) {
+	joined := strings.Join(scopeArgv("pipedpeer-ceiling-test"), " ")
+	for _, want := range []string{"MemoryMax=", "MemorySwapMax=0"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("scope is started without %s; the daemon and its pool workers "+
+				"would be unbounded:\n  %s", want, joined)
+		}
+	}
+}
+
+// TestNoMemoryHighThrottle keeps a plausible-looking setting out.
+//
+// MemoryHigh reads as strictly better than a hard cap alone - reclaim and
+// throttle rather than kill. With swap refused and a compute workload's
+// memory almost entirely anonymous there is nothing to reclaim, and it
+// throttles forever instead: measured at 7381 throttle events, zero kills and
+// 88% pressure, stalled indefinitely just under the cap.
+func TestNoMemoryHighThrottle(t *testing.T) {
+	joined := strings.Join(ceilingProperties(), " ")
+	if strings.Contains(joined, "MemoryHigh") {
+		t.Errorf("MemoryHigh is set; with MemorySwapMax=0 this stalls rather than "+
+			"fails: %s", joined)
+	}
+}
+
+// TestMemoryCeilingLeavesTheMachineRoom: a ceiling that is the whole machine
+// is not a ceiling. The point is that something else can survive us.
+func TestMemoryCeilingLeavesTheMachineRoom(t *testing.T) {
+	total := totalMemBytes()
+	if total <= 0 {
+		t.Skip("NOT VERIFIED: cannot read MemTotal on this machine")
+	}
+	var max int64
+	for _, p := range ceilingProperties() {
+		if v, ok := strings.CutPrefix(p, "MemoryMax="); ok {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				t.Fatalf("MemoryMax=%q is not a byte count", v)
+			}
+			max = n
+		}
+	}
+	if max == 0 {
+		t.Fatal("no MemoryMax in the default properties")
+	}
+	if max >= total {
+		t.Errorf("ceiling %d >= machine total %d; nothing is reserved for anything else", max, total)
+	}
+	if max < total/8 {
+		t.Errorf("ceiling %d is under an eighth of %d; real jobs would not fit", max, total)
+	}
+}
+
+// TestMemoryCeilingCanBeLifted keeps the escape hatch working for a machine
+// that is doing nothing else.
+func TestMemoryCeilingCanBeLifted(t *testing.T) {
+	t.Setenv(MemoryMaxEnv, "max")
+	if got := ceilingProperties(); len(got) != 0 {
+		t.Errorf("PIPEDPEER_MEMORY_MAX=max still constrains the scope: %v", got)
+	}
+	t.Setenv(MemoryMaxEnv, "3G")
+	joined := strings.Join(ceilingProperties(), " ")
+	if !strings.Contains(joined, "MemoryMax=3G") {
+		t.Errorf("explicit ceiling not honoured: %s", joined)
+	}
+}

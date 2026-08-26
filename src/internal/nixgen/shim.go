@@ -459,6 +459,49 @@ class _ClusterPool:
         self.close()
 
 
+def _cgroup_headroom():
+    """What this process's cgroup still allows, or None if it is uncapped.
+
+    The daemon runs under a memory ceiling so that a runaway pool cannot take
+    the whole machine down with it. Without reading that ceiling here, the
+    pool sizes itself against the machine's free memory, overshoots the cap,
+    and the kernel kills a worker - a job failure caused by the very
+    protection meant to prevent one. Reading it turns "killed" into "used
+    fewer workers".
+    """
+    try:
+        with open("/proc/self/cgroup") as f:
+            for line in f:
+                if line.startswith("0::"):
+                    own = line[3:].strip()
+                    break
+            else:
+                return None
+    except OSError:
+        return None
+
+    # The limit can be set on any ancestor, and the binding one is the
+    # smallest remaining headroom along the whole chain.
+    best = None
+    path = "/sys/fs/cgroup" + own
+    while True:
+        try:
+            with open(path + "/memory.max") as f:
+                raw = f.read().strip()
+            if raw != "max":
+                with open(path + "/memory.current") as f:
+                    used = int(f.read().strip())
+                room = int(raw) - used
+                if best is None or room < best:
+                    best = room
+        except (OSError, ValueError):
+            pass
+        if path == "/sys/fs/cgroup" or "/" not in path[len("/sys/fs/cgroup"):]:
+            break
+        path = path.rsplit("/", 1)[0]
+    return best
+
+
 def _avail_bytes():
     """Memory this machine could actually give a new process.
 
@@ -467,18 +510,29 @@ def _avail_bytes():
     cache it reads several times too low - measured 2GB free against 21GB
     available here - and every limit derived from it collapses. MemAvailable
     is the kernel's own answer to this question.
+
+    Bounded by the cgroup's remaining headroom where there is one, because the
+    machine having memory free does not mean this process is allowed to use
+    it.
     """
+    avail = 0
     try:
         with open("/proc/meminfo") as f:
             for line in f:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+                    avail = int(line.split()[1]) * 1024
+                    break
     except (OSError, ValueError, IndexError):
         pass
-    try:
-        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-    except (ValueError, OSError):
-        return 0
+    if not avail:
+        try:
+            avail = os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError):
+            return 0
+    room = _cgroup_headroom()
+    if room is not None and room < avail:
+        return max(0, room)
+    return avail
 
 
 def _imap_batch(procs):
