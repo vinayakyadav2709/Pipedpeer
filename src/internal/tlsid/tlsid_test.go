@@ -2,12 +2,15 @@ package tlsid
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func isolate(t *testing.T) {
@@ -145,8 +148,10 @@ func TestClientConfigRejectsASwappedCertificate(t *testing.T) {
 	}
 	stop()
 
-	// Same logical peer, different identity: a fresh cert in a fresh dir.
-	isolateKeepPins(t)
+	// Same logical peer, different identity. The certificate is regenerated in
+	// place rather than by moving the state directory: the pin file lives
+	// there too, and the pin has to survive for this to be testing anything.
+	freshCert(t)
 	addr2, stop2 := serve()
 	defer stop2()
 	client2 := &http.Client{Transport: &http.Transport{TLSClientConfig: ClientConfig("pinned-peer")}}
@@ -155,9 +160,76 @@ func TestClientConfigRejectsASwappedCertificate(t *testing.T) {
 	}
 }
 
-// isolateKeepPins swaps the cert directory but keeps the in-memory pins, so a
-// test can present a genuinely different certificate for the same peer name.
-func isolateKeepPins(t *testing.T) {
+// freshCert makes the next EnsureCert mint a new identity, leaving the pin
+// store alone.
+func freshCert(t *testing.T) {
 	t.Helper()
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	for _, name := range []string{"daemon.crt", "daemon.key"} {
+		if err := os.Remove(filepath.Join(dirForTest(), name)); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("removing %s: %v", name, err)
+		}
+	}
+}
+
+// dirForTest exposes the package's state directory to tests without widening
+// the API.
+func dirForTest() string { return dir() }
+
+// TestForgetTakesEffectWithoutARestart covers advice that did not work.
+//
+// When a peer's certificate changes, the daemon logs "run `pipedpeer auth
+// forget <peer>` if it was reinstalled". That command rewrites the pin file -
+// but the daemon had loaded the file once and never looked again, so it went
+// on refusing the peer from a copy in memory. The operator followed the
+// instruction, nothing changed, and nothing said why.
+func TestForgetTakesEffectWithoutARestart(t *testing.T) {
+	isolate(t)
+
+	const peer = "192.0.2.10:38080"
+	first := []byte("certificate-one")
+	if err := CheckOrPin(peer, first); err != nil {
+		t.Fatalf("first contact should pin: %v", err)
+	}
+	// A different certificate for a known peer is refused, as it should be.
+	if err := CheckOrPin(peer, []byte("certificate-two")); err == nil {
+		t.Fatal("a changed certificate was accepted")
+	}
+
+	// Another process - the CLI - drops the pin. Simulated by writing the
+	// file the way `auth forget` does, then clearing this process's memory of
+	// having read it is exactly what must NOT be needed.
+	forgetFromAnotherProcess(t, peer)
+
+	if err := CheckOrPin(peer, []byte("certificate-two")); err != nil {
+		t.Errorf("still refusing the peer after the pin was dropped on disk: %v\n"+
+			"the daemon is answering from a copy in memory, so the fix it "+
+			"recommends does nothing until it is restarted", err)
+	}
+}
+
+// forgetFromAnotherProcess rewrites the pin file without going through this
+// process's in-memory store, which is what a separate `pipedpeer auth forget`
+// invocation does.
+func forgetFromAnotherProcess(t *testing.T, peer string) {
+	t.Helper()
+	path := filepath.Join(dirForTest(), "known_peers.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the pin file: %v", err)
+	}
+	var onDisk map[string]string
+	if err := json.Unmarshal(b, &onDisk); err != nil {
+		t.Fatalf("parsing the pin file: %v", err)
+	}
+	if _, ok := onDisk[peer]; !ok {
+		t.Fatalf("%s was never written to the pin file; the test is not testing anything", peer)
+	}
+	delete(onDisk, peer)
+	out, _ := json.Marshal(onDisk)
+	// Written a moment later so the modification time genuinely differs even
+	// on a filesystem with coarse timestamps.
+	time.Sleep(10 * time.Millisecond)
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatalf("writing the pin file: %v", err)
+	}
 }

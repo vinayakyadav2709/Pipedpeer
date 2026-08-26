@@ -135,23 +135,47 @@ func localIPs() []net.IP {
 type pinStore struct {
 	mu   sync.Mutex
 	pins map[string]string // "host:port" -> fingerprint
+	// mod and size are the state of the file as last read, so a change made
+	// by another process is noticed.
+	mod  time.Time
+	size int64
+	read bool
 }
 
 var pins = &pinStore{pins: map[string]string{}}
 
 func pinPath() string { return filepath.Join(dir(), "known_peers.json") }
 
+// load reads the pin file, and re-reads it whenever it has changed on disk.
+//
+// It used to load once and never again, which made the advice in its own
+// error message wrong: a peer whose certificate changed tells the operator to
+// run `pipedpeer auth forget <peer>`, that command rewrites this file, and the
+// running daemon went on refusing the peer from a copy in memory until it was
+// restarted. Nothing said so.
 func (p *pinStore) load() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.pins) > 0 {
+	st, err := os.Stat(pinPath())
+	if err != nil {
+		// No file: nothing pinned yet, or the store was removed wholesale.
+		if p.read && len(p.pins) > 0 {
+			p.pins = map[string]string{}
+		}
+		return
+	}
+	if p.read && st.ModTime().Equal(p.mod) && st.Size() == p.size {
 		return
 	}
 	b, err := os.ReadFile(pinPath())
 	if err != nil {
 		return
 	}
-	_ = json.Unmarshal(b, &p.pins)
+	fresh := map[string]string{}
+	if json.Unmarshal(b, &fresh) != nil {
+		return // keep what we have rather than trusting a half-written file
+	}
+	p.pins, p.mod, p.size, p.read = fresh, st.ModTime(), st.Size(), true
 }
 
 func (p *pinStore) save() {
@@ -161,6 +185,9 @@ func (p *pinStore) save() {
 	}
 	_ = os.MkdirAll(dir(), 0o700)
 	_ = os.WriteFile(pinPath(), b, 0o600)
+	if st, err := os.Stat(pinPath()); err == nil {
+		p.mod, p.size, p.read = st.ModTime(), st.Size(), true
+	}
 }
 
 // CheckOrPin accepts a peer's certificate on first contact and requires the
