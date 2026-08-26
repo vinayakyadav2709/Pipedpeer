@@ -2217,6 +2217,9 @@ def _install_ddp():
     _SYNC_AUTO = os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "").lower() == "auto"
     _SYNC_TUNED = [None if _SYNC_AUTO else _SYNC_EVERY]
     _WARNED_SYNC_BOUND = [False]
+    # Said once. The condition holds for every step of the run, and a warning
+    # repeated 88 times is a warning nobody reads.
+    _WARNED_SAME_WORK = [False]
     # Compute time is measured as the interval between consecutive optimizer
     # steps minus whatever was spent syncing in it - not as the duration of
     # step() itself, which is a rounding error next to the forward and
@@ -2347,7 +2350,7 @@ def _install_ddp():
             off += size
         return out
 
-    def _daemon_reduce(arrs, wire_dtype):
+    def _daemon_reduce(arrs, wire_dtype, kind="grads"):
         """One averaged allreduce through the daemon, in reduce mode."""
         import json
         import struct
@@ -2359,7 +2362,7 @@ def _install_ddp():
         _SEQ[0] += 1
         header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
                              "world": _WORLD, "dtype": wire_dtype.name,
-                             "count": int(flat.size),
+                             "count": int(flat.size), "kind": kind,
                              "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
         payload = flat.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
@@ -2378,9 +2381,23 @@ def _install_ddp():
         # each rank's step sequence is not local SGD - it is ranks combining
         # models that have taken different numbers of local steps, which shows
         # up as a worse final loss and nothing else.
-        agreed = json.loads(data[:nl]).get("sync_every", 0)
+        _reply = json.loads(data[:nl])
+        agreed = _reply.get("sync_every", 0)
         if agreed and agreed != _SYNC_TUNED[0]:
             _SYNC_TUNED[0] = int(agreed)
+        if _reply.get("same_work") and not _WARNED_SAME_WORK[0]:
+            _WARNED_SAME_WORK[0] = True
+            _log("ddp: every rank produced the SAME gradients, so every rank is "
+                 "training on the same data. Averaging identical gradients gives "
+                 "exactly the single-process result, so this run is correct and "
+                 "pure overhead - the extra machines are doing the same work "
+                 "twice.\n"
+                 "    Sharding is automatic for a DataLoader. A script that slices "
+                 "its tensors by hand has to do it itself, e.g.\n"
+                 "      import os\n"
+                 "      r = int(os.environ.get('PIPEDPEER_RANK', 0))\n"
+                 "      w = int(os.environ.get('PIPEDPEER_WORLD_SIZE', 1))\n"
+                 "      X, y = X[r::w], y[r::w]")
         rest = data[nl + 1:]
         n = struct.unpack(">I", rest[:4])[0]
         mean = _np_ddp.frombuffer(rest[4:4 + n], dtype=wire_dtype)
@@ -2390,7 +2407,7 @@ def _install_ddp():
         _DDP_STATS["recv_bytes"] += len(data)
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
-    def _daemon_allreduce(tensors, half=None):
+    def _daemon_allreduce(tensors, half=None, kind="grads"):
         """Average tensors across ranks in place, through the daemon channel.
 
         Gradients cross the wire as float16 by default. This is the dominant
@@ -2417,7 +2434,7 @@ def _install_ddp():
         wire_dtypes = {a.dtype for a in wire}
         if _REDUCE_OK and len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
                 "float16", "float32", "float64"):
-            means = _daemon_reduce(wire, next(iter(wire_dtypes)))
+            means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind)
             for i, t in enumerate(tensors):
                 t.data.copy_(_th.from_numpy(
                     _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
@@ -2507,7 +2524,10 @@ def _install_ddp():
                 params = [p for g in self.param_groups for p in g["params"]]
                 if self not in _STEPPED:
                     _STEPPED.add(self)
-                    _daemon_allreduce([p.data for p in params], half=False)
+                    # The opening weight broadcast, not a gradient: every rank
+                    # starts from the same seed, so these are identical by
+                    # construction and must not be read as duplicated work.
+                    _daemon_allreduce([p.data for p in params], half=False, kind="weights")
                     _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
                          % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
                 import time as _t_step
@@ -2529,7 +2549,7 @@ def _install_ddp():
                     return _orig_step(*sa, **skw)
                 out = _orig_step(*sa, **skw)
                 if (n + 1) % every == 0:
-                    _daemon_allreduce([p.data for p in params])
+                    _daemon_allreduce([p.data for p in params], kind="weights")
                 return out
             if not _dist.is_initialized():
                 _init_group()

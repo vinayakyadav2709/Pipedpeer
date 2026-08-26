@@ -48,11 +48,11 @@ func TestAccumulatorAveragesRanks(t *testing.T) {
 		{3, 4, 5, 6},
 		{5, 6, 7, 8},
 	} {
-		if err := a.add(encodeF32(rank)); err != nil {
+		if err := a.add(encodeF32(rank), 0); err != nil {
 			t.Fatalf("add: %v", err)
 		}
 	}
-	out, err := a.mean()
+	out, _, err := a.mean()
 	if err != nil {
 		t.Fatalf("mean: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAccumulatorSumsInFloat64(t *testing.T) {
 	a := newDDPAccumulator(ddpF16, 1)
 	const ranks = 64
 	for i := 0; i < ranks; i++ {
-		if err := a.add(encodeF16([]float32{1.0})); err != nil {
+		if err := a.add(encodeF16([]float32{1.0}), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -87,7 +87,7 @@ func TestAccumulatorSumsInFloat64(t *testing.T) {
 
 func (a *ddpAccumulator) mustMean(t *testing.T) []byte {
 	t.Helper()
-	b, err := a.mean()
+	b, _, err := a.mean()
 	if err != nil {
 		t.Fatalf("mean: %v", err)
 	}
@@ -99,10 +99,10 @@ func (a *ddpAccumulator) mustMean(t *testing.T) []byte {
 // element after the mismatch.
 func TestWrongSizedPayloadIsRejected(t *testing.T) {
 	a := newDDPAccumulator(ddpF32, 4)
-	if err := a.add(encodeF32([]float32{1, 2, 3})); err == nil {
+	if err := a.add(encodeF32([]float32{1, 2, 3}), 0); err == nil {
 		t.Error("a payload of the wrong length was accepted")
 	}
-	if err := a.add(encodeF32([]float32{1, 2, 3, 4, 5})); err == nil {
+	if err := a.add(encodeF32([]float32{1, 2, 3, 4, 5}), 0); err == nil {
 		t.Error("an over-long payload was accepted")
 	}
 }
@@ -110,7 +110,7 @@ func TestWrongSizedPayloadIsRejected(t *testing.T) {
 // TestEmptyAccumulatorHasNoMean: dividing by zero ranks should be an error,
 // not a buffer of NaNs that trains a model into nothing.
 func TestEmptyAccumulatorHasNoMean(t *testing.T) {
-	if _, err := newDDPAccumulator(ddpF32, 2).mean(); err == nil {
+	if _, _, err := newDDPAccumulator(ddpF32, 2).mean(); err == nil {
 		t.Error("mean of no contributors was accepted")
 	}
 }

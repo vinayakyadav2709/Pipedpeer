@@ -442,3 +442,132 @@ func ddpReduceSyncEvery(t *testing.T, ts *httptest.Server, group string, seq int
 	}
 	return out.SyncEvery
 }
+
+// TestDDPDetectsRanksDoingIdenticalWork is the diagnostic for the failure this
+// project keeps rediscovering: correct results, no speed-up, and nothing said.
+//
+// Sharding is automatic only for DataLoader-based code. A script that slices
+// its tensors by hand - which both bundled training demos do - leaves every
+// rank computing the same batch, so the averaged gradient equals the
+// single-process gradient exactly. Measured on two machines: the loss agreed
+// to six digits with the single-node run and the job took 97.7s against 55.0s.
+// The daemon is the only place holding every rank's contribution, so it is the
+// only place that can notice.
+func TestDDPDetectsRanksDoingIdenticalWork(t *testing.T) {
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	same := func(rank int) bool {
+		return ddpReduceSameWork(t, ts, "same", 1, rank, 2, []float32{1, 2, 3, 4})
+	}
+	flags := make([]bool, 2)
+	var wg sync.WaitGroup
+	for r := 0; r < 2; r++ {
+		wg.Add(1)
+		go func(rank int) { defer wg.Done(); flags[rank] = same(rank) }(r)
+	}
+	wg.Wait()
+	for rank, flagged := range flags {
+		if !flagged {
+			t.Errorf("rank %d was not told its gradients were identical to its "+
+				"peer's; the run is pure overhead and says nothing", rank)
+		}
+	}
+}
+
+// TestDDPDoesNotCryWolfOnDifferentGradients. A false positive here would tell
+// a correctly sharded run that it is wasting its time.
+func TestDDPDoesNotCryWolfOnDifferentGradients(t *testing.T) {
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	payloads := [][]float32{{1, 2, 3, 4}, {1, 2, 3, 5}}
+	flags := make([]bool, 2)
+	var wg sync.WaitGroup
+	for r := 0; r < 2; r++ {
+		wg.Add(1)
+		go func(rank int) {
+			defer wg.Done()
+			flags[rank] = ddpReduceSameWork(t, ts, "diff", 1, rank, 2, payloads[rank])
+		}(r)
+	}
+	wg.Wait()
+	for rank, flagged := range flags {
+		if flagged {
+			t.Errorf("rank %d was told it duplicates work though the gradients "+
+				"differ by one element", rank)
+		}
+	}
+}
+
+// ddpReduceSameWork posts a contribution and reports the daemon's same_work
+// verdict.
+func ddpReduceSameWork(t *testing.T, ts *httptest.Server, group string, seq int64, rank, world int, vals []float32) bool {
+	t.Helper()
+	return ddpReduceKind(t, ts, group, seq, rank, world, vals, "grads")
+}
+
+func ddpReduceKind(t *testing.T, ts *httptest.Server, group string, seq int64, rank, world int, vals []float32, kind string) bool {
+	t.Helper()
+	hdr, _ := json.Marshal(map[string]any{
+		"group": group, "seq": seq, "rank": rank, "world": world,
+		"dtype": "float32", "count": len(vals), "kind": kind,
+	})
+	body := append(hdr, '\n')
+	body = putFrame(body, encodeF32(vals))
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/ddp/sync", bytes.NewReader(body))
+	req.Header.Set("Content-Type", DDPReduceContentType)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("rank %d: %v", rank, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	nl := bytes.IndexByte(raw, '\n')
+	if nl < 0 {
+		t.Fatalf("rank %d: no header in reply", rank)
+	}
+	var out struct {
+		SameWork bool `json:"same_work"`
+	}
+	if err := json.Unmarshal(raw[:nl], &out); err != nil {
+		t.Fatalf("rank %d: %v", rank, err)
+	}
+	return out.SameWork
+}
+
+// TestDDPWeightSyncIsNotDuplicatedWork covers a false positive that reported a
+// correctly sharded run as pure overhead.
+//
+// A run opens by broadcasting the initial weights, and those are identical
+// across ranks by construction whenever the script seeds its generator - which
+// every training script does. Fingerprinting that sync told a run that had
+// just sharded its data perfectly well that its machines were duplicating
+// work. A warning that cries wolf is worse than no warning.
+func TestDDPWeightSyncIsNotDuplicatedWork(t *testing.T) {
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	flags := make([]bool, 2)
+	var wg sync.WaitGroup
+	for r := 0; r < 2; r++ {
+		wg.Add(1)
+		go func(rank int) {
+			defer wg.Done()
+			// Identical payloads, as the opening weight broadcast always is.
+			flags[rank] = ddpReduceKind(t, ts, "w", 1, rank, 2,
+				[]float32{1, 2, 3, 4}, "weights")
+		}(r)
+	}
+	wg.Wait()
+	for rank, flagged := range flags {
+		if flagged {
+			t.Errorf("rank %d was told it duplicates work, but this was the opening "+
+				"weight broadcast, which is identical across ranks by design", rank)
+		}
+	}
+}
