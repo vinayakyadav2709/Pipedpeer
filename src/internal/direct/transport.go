@@ -6,10 +6,12 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -449,6 +451,14 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 	rst, err := conn.AcceptStream(ctx)
 	if err != nil {
 		conn.CloseWithError(1, "")
+		// A peer that closes with "already connected" is not failing to
+		// identify itself - it has a working link to us and is declining a
+		// second one, which happens whenever both ends race at once and both
+		// win. Reporting that as an identity failure sends a reader looking
+		// for an impostor.
+		if isAlreadyConnected(err) {
+			return nil, errAlreadyConnected
+		}
 		return nil, fmt.Errorf("%s at %s never identified itself: %w", short(node), at, err)
 	}
 	if err := readJSON(rst, &theirs); err != nil {
@@ -481,6 +491,19 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 		e.mu.Unlock()
 	}()
 	return conn, nil
+}
+
+// errAlreadyConnected says the peer already has a link to us and declined a
+// second. Not a failure: both ends racing and both winning is the ordinary
+// case, and one of the two connections has to lose.
+var errAlreadyConnected = errors.New("the peer already has a link to us")
+
+// IsAlreadyConnected reports whether a dial failed only because a link
+// already exists.
+func IsAlreadyConnected(err error) bool { return errors.Is(err, errAlreadyConnected) }
+
+func isAlreadyConnected(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "already connected")
 }
 
 // Close shuts the endpoint down.

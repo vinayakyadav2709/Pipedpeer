@@ -373,6 +373,11 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 
 	conn, err := m.endpoint.Dial(ctx, node, at)
 	if err != nil {
+		if direct.IsAlreadyConnected(err) {
+			// Both ends raced and both won. One connection has to lose, and
+			// losing is not a failure to reach the peer.
+			return nil
+		}
 		return err
 	}
 
@@ -447,7 +452,14 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 	hits := make(chan found, 2)
 
 	go func() {
-		at, err := m.endpoint.Prober().SprayToward(cctx, ip, known, 10*time.Second)
+		aim := known
+		if os.Getenv("PIPEDPEER_FORCE_BIRTHDAY") == "1" {
+			// Skip the address we already know, or the very first probe
+			// answers and the port space is never touched - which would make
+			// this look verified while testing nothing.
+			aim = netip.AddrPort{}
+		}
+		at, err := m.endpoint.Prober().SprayToward(cctx, ip, aim, 10*time.Second)
 		if err == nil {
 			hits <- found{at: at}
 		}
