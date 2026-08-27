@@ -116,3 +116,38 @@ func resetPrivate() {
 	privateOnce.Once = onceReset()
 	privateOnce.private = false
 }
+
+// TestNixBuildCarriesTheExperimentalFlags. `nix build` is gated behind
+// experimental features that a machine's nix.conf may not enable — the stock
+// nixos/nix image does not — and the resulting error names the flake, not the
+// configuration. Passing the flag per invocation keeps a system store, which
+// belongs to the user, unedited.
+func TestNixBuildCarriesTheExperimentalFlags(t *testing.T) {
+	got := withExperimentalFeatures([]string{"nix", "build", ".#default"})
+	want := []string{"nix", "--extra-experimental-features", "nix-command flakes", "build", ".#default"}
+	if len(got) != len(want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+}
+
+// The stable commands need nothing, and adding an unknown flag to them would
+// break every closure transfer.
+func TestNixStoreIsLeftAlone(t *testing.T) {
+	in := []string{"nix-store", "-qR", "/nix/store/x"}
+	if got := withExperimentalFeatures(in); len(got) != len(in) {
+		t.Errorf("nix-store invocation was rewritten: %q", got)
+	}
+}
+
+// A caller that sets the features itself means it; this is a default.
+func TestAnExplicitSettingWins(t *testing.T) {
+	in := []string{"nix", "--extra-experimental-features", "nix-command", "build"}
+	if got := withExperimentalFeatures(in); len(got) != len(in) {
+		t.Errorf("an explicit setting was overridden: %q", got)
+	}
+}

@@ -161,10 +161,39 @@ func HostNixDir() string {
 //
 // The returned cleanup must be called once the command has finished; it
 // removes the generated bundle.
+// withExperimentalFeatures enables the new CLI for the commands that need it.
+//
+// `nix build` is behind experimental flags that nix only enables when the
+// machine's nix.conf says so, and a machine whose nix.conf does not is not a
+// broken machine - the stock nixos/nix image is one. The failure is
+// "experimental Nix feature 'nix-command' is disabled", which reads as a
+// problem with the generated flake and sends the reader to the wrong file.
+//
+// A private store gets this written into its own nix.conf by ensureConf; a
+// system store belongs to the user and is not ours to edit, so the flag is
+// passed per invocation instead. The stable commands - every nix-store call -
+// need nothing and are left alone.
+func withExperimentalFeatures(argv []string) []string {
+	if filepath.Base(argv[0]) != "nix" {
+		return argv
+	}
+	for _, a := range argv {
+		// An explicit setting from the caller wins; this is a default, not an
+		// override.
+		if strings.HasSuffix(a, "experimental-features") {
+			return argv
+		}
+	}
+	out := make([]string, 0, len(argv)+2)
+	out = append(out, argv[0], "--extra-experimental-features", "nix-command flakes")
+	return append(out, argv[1:]...)
+}
+
 func Cmd(dir string, argv ...string) (*exec.Cmd, func(), error) {
 	if len(argv) == 0 {
 		return nil, nil, fmt.Errorf("no command given")
 	}
+	argv = withExperimentalFeatures(argv)
 	if !Private() {
 		nixPath, err := SystemNix()
 		if err != nil {
