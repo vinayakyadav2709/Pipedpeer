@@ -92,3 +92,60 @@ func TestTheUnenforcedShareMatchesTheEnforcedOne(t *testing.T) {
 func writeTestFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o600)
 }
+
+// TestPageCacheIsNotSpentBudget.
+//
+// memory.current counts page cache, and reading a multi-GB closure fills it.
+// Measured on a container capped at 3 GiB: 1.99 GiB "used", of which 13 MB
+// was anonymous and the rest was the nix store it had just read. The daemon
+// advertised 1 GiB free and placement declined a 2.3 GiB job it had room for.
+func TestPageCacheIsNotSpentBudget(t *testing.T) {
+	dir := t.TempDir()
+	// The figures above, verbatim.
+	if err := writeTestFile(dir+"/memory.current", "1994993664\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(dir+"/memory.stat", `anon 13549568
+file 1874497536
+inactive_file 1605939200
+active_file 268562432
+slab_reclaimable 103170176
+`); err != nil {
+		t.Fatal(err)
+	}
+	got := usageOf(dir)
+	// 1994993664 - (1605939200 + 103170176) = 285884288
+	if got != 285884288 {
+		t.Errorf("usage read as %d bytes; want 285884288 with reclaimable cache "+
+			"excluded. 1994993664 would mean the closure this node had just read "+
+			"counted against the job it was about to run", got)
+	}
+}
+
+// TestAllCacheReadsAsNothingSpent, and never as a negative — which as an
+// int64 subtraction would come back as an enormous allowance.
+func TestAllCacheReadsAsNothingSpent(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeTestFile(dir+"/memory.current", "1000000\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(dir+"/memory.stat", "inactive_file 900000\nslab_reclaimable 500000\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := usageOf(dir); got != 0 {
+		t.Errorf("usage read as %d, want 0", got)
+	}
+}
+
+// TestMissingStatFallsBackToTheRawFigure. An unreadable memory.stat must not
+// make the budget look larger than it is; without the breakdown, the cautious
+// answer is that all of it is spent.
+func TestMissingStatFallsBackToTheRawFigure(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeTestFile(dir+"/memory.current", "4096\n"); err != nil {
+		t.Fatal(err)
+	}
+	if got := usageOf(dir); got != 4096 {
+		t.Errorf("usage read as %d with no memory.stat, want the raw 4096", got)
+	}
+}

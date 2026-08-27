@@ -1106,6 +1106,115 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None):
     return out
 
 
+def _weighted_batches(weights, base_batch, world):
+    """Each rank's per-step batch, together adding up to the ring's.
+
+    The ring processes base_batch*world samples per step however the shares
+    fall; only the split between ranks changes. Rounding is absorbed by the
+    largest rank so the total is exact - let it drift and the step counts
+    drift with it.
+    """
+    total = max(world, int(base_batch) * world)
+    b = [max(1, int(round(w * total))) for w in weights]
+    drift = total - sum(b)
+    if drift:
+        k = b.index(max(b))
+        b[k] = max(1, b[k] + drift)
+    return b
+
+
+class _WeightedShardSampler:
+    """A rank's share of the dataset, sized by what placement measured.
+
+    Two invariants, both of which fail quietly if they are only approximated:
+
+    Every rank must run the SAME NUMBER of steps. Each step ends at a barrier,
+    so a rank with fewer steps leaves the others averaging without it - the
+    daemon tolerates that, which is why the failure does not hang but simply
+    makes the last step of every epoch short a rank. Sizing shard and batch
+    independently and rounding each does not give equal counts: measured
+    62/31/7 shares produced 40, 40 and 39 steps. So the step count is chosen
+    first, from the whole dataset, and each rank takes exactly steps*batch
+    samples.
+
+    Contiguous, not strided. Striding by rank only produces disjoint,
+    exhaustive shards when every rank takes the same stride, which is exactly
+    what stops being true here. Cumulative offsets do, for any shares.
+
+    The remainder below one global batch is dropped, as drop_last does in any
+    DDP setup, and shuffling makes it a different remainder each epoch.
+
+    Shuffling is seeded from the epoch alone, so every rank permutes the same
+    way and their slices stay disjoint - the same contract DistributedSampler
+    keeps, and the reason set_epoch exists.
+    """
+
+    def __init__(self, n, weights, rank, shuffle, base_batch, world):
+        if n <= 0:
+            raise ValueError("empty dataset")
+        self.n = n
+        self.rank = rank
+        self.shuffle = shuffle
+        self.epoch = 0
+        self.batches = _weighted_batches(weights, base_batch, world)
+        self.batch = self.batches[rank]
+        self.steps = n // sum(self.batches)
+        if self.steps < 1:
+            raise ValueError(
+                "%d samples do not make one step of %d across the ring"
+                % (n, sum(self.batches)))
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def _bounds(self):
+        start = sum(self.steps * b for b in self.batches[:self.rank])
+        return start, start + self.steps * self.batch
+
+    def __len__(self):
+        return self.steps * self.batch
+
+    def __iter__(self):
+        # torch is imported per-function everywhere in this file, never as a
+        # module global - importing it at class scope would cost every script
+        # the import whether or not it trains.
+        import torch as _th_local
+        order = list(range(self.n))
+        if self.shuffle:
+            g = _th_local.Generator()
+            g.manual_seed(self.epoch)
+            order = [order[i] for i in _th_local.randperm(self.n, generator=g).tolist()]
+        start, end = self._bounds()
+        return iter(order[start:end])
+
+
+def _parse_weights(raw, world):
+    """Each rank's share of a step, or None when the shares are equal.
+
+    Equal shares are what every ring did before weights existed, and treating
+    them as a special case keeps that path byte-for-byte unchanged rather than
+    routing it through arithmetic that happens to reduce to it.
+    """
+    if not raw or world < 2:
+        return None
+    try:
+        w = [float(x) for x in raw.split(",")]
+    except ValueError:
+        return None
+    if len(w) != world or any(x <= 0 for x in w):
+        return None
+    total = sum(w)
+    if total <= 0:
+        return None
+    w = [x / total for x in w]
+    # Within a couple of percent of even is even. Placement measures live
+    # machines, so identical hardware still returns slightly different
+    # numbers, and resharding for that is churn.
+    if max(w) - min(w) < 0.02:
+        return None
+    return w
+
+
 def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_sec):
     """BLAS-realistic cost model for numpy offloads, calibrated to real BLAS
     throughput (matmul ~200 GFLOP/s, svd ~1.5 GFLOP/s on this cluster's numpy).
@@ -2203,6 +2312,21 @@ def _install_ddp():
     _FP16_GRADS = os.environ.get("PIPEDPEER_DDP_FP32") != "1"
     _WORLD = int(os.environ.get("PIPEDPEER_WORLD_SIZE", "1"))
     _RANK = int(os.environ.get("PIPEDPEER_RANK", "0"))
+    # Each rank's share of a step, measured by placement. Equal shares are the
+    # same thing as no shares, and are treated as such.
+    _WEIGHTS = _parse_weights(os.environ.get("PIPEDPEER_DDP_WEIGHTS", ""), _WORLD)
+    # The number of samples behind the gradient being sent, read from the
+    # batch the model was last given. It decides how the daemon weighs this
+    # rank's contribution, and it has to be the real figure rather than the
+    # configured one: a final short batch is smaller than the rest, and a
+    # rank whose loader ran dry contributes nothing at all.
+    _BATCH_N = [0]
+    # Whether the measured shares were actually used. The run announces them
+    # before the script starts, and a script that indexes its own tensors
+    # ("X[rank::world]") never reaches the sampler that would apply them - so
+    # without this the run claims a split it did not perform.
+    _WEIGHTS_APPLIED = [False]
+    _WARNED_WEIGHTS_UNUSED = [False]
     # daemon (default): every sync is one POST to the lead rank's daemon on
     # the same port every other byte of pipedpeer traffic uses — no sockets
     # of our own, no MASTER_PORT, nothing new to firewall. gloo/nccl remain
@@ -2460,7 +2584,8 @@ def _install_ddp():
                              "world": _WORLD, "dtype": wire_dtype.name,
                              "count": int(flat.size), "kind": kind,
                              "sync_every": int(_SYNC_TUNED[0] or 0),
-                             "step_ms": _mean_step_ms()}).encode()
+                             "step_ms": _mean_step_ms(),
+                             "samples": int(_BATCH_N[0])}).encode()
         payload = flat.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -2489,6 +2614,15 @@ def _install_ddp():
                  "in time. The run continues on the ranks that did; a smaller average "
                  "is a smaller step in the same direction, and every rank applies the "
                  "identical result, so nothing drifts." % (_ranks, _WORLD))
+        if (_WEIGHTS is not None and not _WEIGHTS_APPLIED[0]
+                and not _WARNED_WEIGHTS_UNUSED[0]):
+            _WARNED_WEIGHTS_UNUSED[0] = True
+            _log("ddp: this run measured unequal shares (%s) but the script "
+                 "splits its own data, so they were not applied - every rank "
+                 "took an equal slice and the ring runs at the slowest rank's "
+                 "pace. To use them: give each rank weights[rank] of the data "
+                 "instead of X[rank::world]."
+                 % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
         if _reply.get("same_work") and not _WARNED_SAME_WORK[0]:
             _WARNED_SAME_WORK[0] = True
             _log("ddp: every rank produced the SAME gradients, so every rank is "
@@ -2568,7 +2702,8 @@ def _install_ddp():
                              "count": int(q.size), "scale": scales[0],
                              "scales": scales, "counts": [int(n) for n in sizes],
                              "sync_every": int(_SYNC_TUNED[0] or 0),
-                             "step_ms": _mean_step_ms()}).encode()
+                             "step_ms": _mean_step_ms(),
+                             "samples": int(_BATCH_N[0])}).encode()
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -2585,6 +2720,15 @@ def _install_ddp():
         agreed = reply.get("sync_every", 0)
         if agreed and agreed != _SYNC_TUNED[0]:
             _SYNC_TUNED[0] = int(agreed)
+        if (_WEIGHTS is not None and not _WEIGHTS_APPLIED[0]
+                and not _WARNED_WEIGHTS_UNUSED[0]):
+            _WARNED_WEIGHTS_UNUSED[0] = True
+            _log("ddp: this run measured unequal shares (%s) but the script "
+                 "splits its own data, so they were not applied - every rank "
+                 "took an equal slice and the ring runs at the slowest rank's "
+                 "pace. To use them: give each rank weights[rank] of the data "
+                 "instead of X[rank::world]."
+                 % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
         if reply.get("same_work") and not _WARNED_SAME_WORK[0]:
             _WARNED_SAME_WORK[0] = True
             _log("ddp: every rank produced the SAME gradients — every rank is "
@@ -2779,6 +2923,19 @@ def _install_ddp():
         self.step = _step
 
     def _forward(self, *args, **kw):
+        # The leading dimension of the first tensor argument is how many
+        # samples this step's gradient was computed over. Reading it here
+        # rather than from the configured batch size is what makes the
+        # weighting honest: the last batch of an epoch is short, and a rank
+        # that ran dry sends a gradient over nothing.
+        if _WORLD > 1:
+            for a in args:
+                if hasattr(a, "shape") and getattr(a, "ndim", 0) >= 1:
+                    try:
+                        _BATCH_N[0] = int(a.shape[0])
+                    except Exception:
+                        pass
+                    break
         if _WORLD > 1 and not _NATIVE_DDP and self not in _FWD:
             if _BACKEND == "daemon":
                 # Only sync once training is underway (mirrors the gloo
@@ -2818,14 +2975,53 @@ def _install_ddp():
             return None
         shuffle = isinstance(getattr(self, "sampler", None),
                              _th.utils.data.RandomSampler)
+        bs = getattr(self, "batch_sampler", None)
+        can_rebatch = (bs is not None and hasattr(bs, "sampler")
+                       and isinstance(getattr(bs, "batch_size", None), int)
+                       and bs.batch_size > 0)
+
+        # Unequal shares need the batch to grow with the shard, not just the
+        # shard. Every rank must take the same NUMBER of steps or the ring
+        # deadlocks: each step ends at a barrier, so a rank with three times
+        # the data and the same batch size runs three times as many steps and
+        # the others are left waiting at a sync that never completes. Scaling
+        # both keeps shard/batch - the step count - identical for everyone.
+        #
+        # So weights are only honoured where the batch size can be changed
+        # too. Where it cannot, equal shards are the safe answer and the
+        # reason is said out loud rather than discovered as a hang.
+        if _WEIGHTS is not None:
+            if not can_rebatch:
+                _log("ddp: this loader's batch size cannot be changed, so the "
+                     "measured shares (%s) cannot be used - every rank would "
+                     "run a different number of steps and the ring would hang "
+                     "at the first sync. Falling back to equal shards."
+                     % ", ".join("%.2f" % w for w in _WEIGHTS))
+            else:
+                try:
+                    sampler = _WeightedShardSampler(
+                        len(ds), _WEIGHTS, _RANK, shuffle, bs.batch_size, _WORLD)
+                except Exception as e:
+                    _log("ddp: cannot shard this dataset by measured share (%s); "
+                         "falling back to equal shards" % e)
+                else:
+                    bs.sampler = sampler
+                    bs.batch_size = sampler.batch
+                    _WEIGHTS_APPLIED[0] = True
+                    _log("ddp: rank %d takes %d of %d samples (share %.0f%%), "
+                         "batch %d, %d steps an epoch - the step count is the "
+                         "same on every rank, so none waits on another"
+                         % (_RANK, len(sampler), len(ds), 100 * _WEIGHTS[_RANK],
+                            sampler.batch, sampler.steps))
+                    return sampler
+
         try:
             sampler = _th.utils.data.distributed.DistributedSampler(
                 ds, num_replicas=_WORLD, rank=_RANK, shuffle=shuffle)
         except Exception as e:
             _log("ddp: cannot shard this dataset (%s); every rank reads all of it" % e)
             return None
-        bs = getattr(self, "batch_sampler", None)
-        if bs is not None and hasattr(bs, "sampler"):
+        if can_rebatch or (bs is not None and hasattr(bs, "sampler")):
             bs.sampler = sampler
             _log("ddp: sharding %d samples across %d ranks" % (len(ds), _WORLD))
             return sampler

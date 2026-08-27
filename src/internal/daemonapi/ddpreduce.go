@@ -79,6 +79,16 @@ type ddpAccumulator struct {
 	// preserve, and this buffer exists once per group, not once per rank.
 	sum   []float64
 	count int
+	// weight is the total sample count folded in, and the divisor the mean
+	// uses. With equal batches every rank weighs 1 and this is the rank
+	// count, exactly as before.
+	//
+	// Unequal batches make the plain average wrong rather than merely
+	// imprecise: a rank training on twice the data has computed a gradient
+	// over twice the samples, and averaging the two per-rank means as equals
+	// gives the small shard twice the influence per sample it deserves. The
+	// combined gradient is sum(n_i * g_i) / sum(n_i).
+	weight float64
 }
 
 func newDDPAccumulator(dtype ddpDType, n int) *ddpAccumulator {
@@ -106,12 +116,19 @@ func (a *ddpAccumulator) withSegments(counts []int) error {
 // add folds one rank's payload into the running sum. scale is meaningful only
 // for int8, where each rank picks its own from its own values.
 func (a *ddpAccumulator) add(payload []byte, scale float64) error {
-	return a.addSegmented(payload, []float64{scale})
+	return a.addSegmented(payload, []float64{scale}, 1)
 }
 
 // addSegmented folds one rank's payload in, decoding each tensor with its own
-// scale.
-func (a *ddpAccumulator) addSegmented(payload []byte, scales []float64) error {
+// scale, and weighting it by the number of samples that produced it.
+//
+// weight <= 0 is read as 1: a rank that does not say how many samples it
+// trained on is one running the equal-batch code, and equal weights reproduce
+// the plain average exactly.
+func (a *ddpAccumulator) addSegmented(payload []byte, scales []float64, weight float64) error {
+	if weight <= 0 {
+		weight = 1
+	}
 	if a.dtype == ddpI8 && len(a.segments) > 1 {
 		if len(scales) != len(a.segments) {
 			return fmt.Errorf("%d scale(s) for %d segment(s)", len(scales), len(a.segments))
@@ -127,17 +144,21 @@ func (a *ddpAccumulator) addSegmented(payload []byte, scales []float64) error {
 				return fmt.Errorf("segment %d has a non-positive scale", i)
 			}
 			for j := 0; j < n; j++ {
-				a.sum[off+j] += float64(int8(payload[off+j])) * sc
+				a.sum[off+j] += float64(int8(payload[off+j])) * sc * weight
 			}
 			off += n
 		}
 		a.count++
+		a.weight += weight
 		return nil
 	}
-	return a.addFlat(payload, scales[0])
+	return a.addFlat(payload, scales[0], weight)
 }
 
-func (a *ddpAccumulator) addFlat(payload []byte, scale float64) error {
+func (a *ddpAccumulator) addFlat(payload []byte, scale float64, weight float64) error {
+	if weight <= 0 {
+		weight = 1
+	}
 	want := len(a.sum) * a.dtype.size()
 	if len(payload) != want {
 		return fmt.Errorf("payload is %d bytes, want %d for %d %s values",
@@ -146,27 +167,28 @@ func (a *ddpAccumulator) addFlat(payload []byte, scale float64) error {
 	switch a.dtype {
 	case ddpF16:
 		for i := range a.sum {
-			a.sum[i] += float64(float16ToFloat32(binary.LittleEndian.Uint16(payload[i*2:])))
+			a.sum[i] += float64(float16ToFloat32(binary.LittleEndian.Uint16(payload[i*2:]))) * weight
 		}
 	case ddpF32:
 		for i := range a.sum {
-			a.sum[i] += float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[i*4:])))
+			a.sum[i] += float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[i*4:]))) * weight
 		}
 	case ddpF64:
 		for i := range a.sum {
-			a.sum[i] += math.Float64frombits(binary.LittleEndian.Uint64(payload[i*8:]))
+			a.sum[i] += math.Float64frombits(binary.LittleEndian.Uint64(payload[i*8:])) * weight
 		}
 	case ddpI8:
 		if scale <= 0 {
 			return fmt.Errorf("int8 payload needs a positive scale")
 		}
 		for i := range a.sum {
-			a.sum[i] += float64(int8(payload[i])) * scale
+			a.sum[i] += float64(int8(payload[i])) * scale * weight
 		}
 	default:
 		return fmt.Errorf("unsupported dtype %q", a.dtype)
 	}
 	a.count++
+	a.weight += weight
 	return nil
 }
 
@@ -179,7 +201,7 @@ func (a *ddpAccumulator) meanSegmented() ([]byte, []float64, error) {
 	if a.count == 0 {
 		return nil, nil, fmt.Errorf("no ranks contributed")
 	}
-	inv := 1 / float64(a.count)
+	inv := 1 / a.weight
 	out := make([]byte, len(a.sum))
 	scales := make([]float64, len(a.segments))
 
@@ -220,7 +242,7 @@ func (a *ddpAccumulator) mean() ([]byte, float64, error) {
 	if a.count == 0 {
 		return nil, 0, fmt.Errorf("no ranks contributed")
 	}
-	inv := 1 / float64(a.count)
+	inv := 1 / a.weight
 	out := make([]byte, len(a.sum)*a.dtype.size())
 	switch a.dtype {
 	case ddpF16:

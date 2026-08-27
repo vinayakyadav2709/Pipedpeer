@@ -294,7 +294,7 @@ func TestPerTensorScalesPreservePrecision(t *testing.T) {
 	}
 	bigScale, smallScale := 0.30/127, 0.010/127
 	payload := append(encodeI8(big, bigScale), encodeI8(small, smallScale)...)
-	if err := seg.addSegmented(payload, []float64{bigScale, smallScale}); err != nil {
+	if err := seg.addSegmented(payload, []float64{bigScale, smallScale}, 1); err != nil {
 		t.Fatal(err)
 	}
 	out, scales, err := seg.meanSegmented()

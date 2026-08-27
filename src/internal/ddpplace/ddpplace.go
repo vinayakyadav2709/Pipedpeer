@@ -191,10 +191,7 @@ func Select(ctx context.Context, cands []Candidate, opts Options) Plan {
 	// takes a proportionally smaller batch and always helps a little, which is
 	// what `sized` already models. The two are kept apart deliberately rather
 	// than one being made to stand in for the other.
-	plan := sized
-	if !opts.ProportionalBatches {
-		plan = equalBatchAdmission(sized, opts)
-	}
+	plan := admit(sized, opts)
 
 	out := Plan{Measured: measured}
 	var chosen []Choice
@@ -253,9 +250,28 @@ func Select(ctx context.Context, cands []Candidate, opts Options) Plan {
 	return out
 }
 
-// equalBatchAdmission keeps only the prefix of fastest devices that maximises
-// k*rate_k, and returns the remainder as rejections.
-func equalBatchAdmission(p schedule.Plan, opts Options) schedule.Plan {
+// admit keeps only the prefix of fastest devices that maximises k*rate_k, and
+// divides a step between them.
+//
+// The rule is the same whether or not batches are proportional, and that is
+// deliberate. k*rate_k asks what the ring is worth if every rank computes the
+// same batch and waits for the slowest - the worst case for an uneven ring -
+// so a set it admits is worth having however the step is divided. Sizing
+// batches by share can only improve such a set: nobody waits on a rank that
+// was given less to do.
+//
+// Admitting MORE ranks because shares make them survivable is the tempting
+// next step and is not done here, because nothing at placement time knows
+// what a rank costs to keep in sync. Measured: letting the proportional model
+// admit every device it could use built a three-rank ring that spent 47-59%
+// of itself moving gradients and finished in 36.4s, against 6.9s for the one
+// machine this rule would have picked. The share model prices compute and
+// nothing else, and for a small model on a fast machine sync is most of the
+// bill. What that needs is the per-rank cost measured from the run itself.
+//
+// So: this decides who is in, and ProportionalBatches decides how much each
+// of them takes.
+func admit(p schedule.Plan, opts Options) schedule.Plan {
 	shares := make([]schedule.Share, 0, len(p.Shares))
 	shares = append(shares, p.Shares...)
 	sort.Slice(shares, func(i, j int) bool { return shares[i].Device.Rate > shares[j].Device.Rate })
@@ -268,11 +284,23 @@ func equalBatchAdmission(p schedule.Plan, opts Options) schedule.Plan {
 		}
 	}
 
+	// Shares by rate, for the admitted set only.
+	var admittedRate float64
+	for i := 0; i < best; i++ {
+		admittedRate += shares[i].Device.Rate
+	}
+
 	out := schedule.Plan{Makespan: p.Makespan, Alone: p.Alone, Rejected: p.Rejected}
 	for i, s := range shares {
 		if i < best {
-			// Equal batches: every admitted rank gets the same share.
-			s.Items = nominalStep / best
+			if opts.ProportionalBatches && admittedRate > 0 {
+				// Each rank takes what it can do, so a step costs what the
+				// ring can do rather than what its slowest member can.
+				s.Items = int(float64(nominalStep) * s.Device.Rate / admittedRate)
+			} else {
+				// Equal batches: every admitted rank gets the same share.
+				s.Items = nominalStep / best
+			}
 			out.Shares = append(out.Shares, s)
 			continue
 		}
