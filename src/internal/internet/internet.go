@@ -552,14 +552,29 @@ func (m *Manager) Paths() map[string]string {
 
 // expired names the peers that should lose their local port.
 //
-// A grace period rather than dropping on the first miss. A single lost
-// registration is not a machine going away - the address book is UDP, and a
-// dropped packet looks exactly like a departure - and tearing the node out of
-// the store makes every job in flight against it fail.
+// A live connection is never expired, whatever the introducer says. That is
+// the whole point of not relaying: once two daemons are talking directly the
+// introducer is not part of the path, and a link that survives it going away
+// is the property this was built for.
+//
+// It was measured failing. With the introducer stopped, two machines with a
+// working punched connection tore it down sixty seconds later - "peer
+// stopped checking in" - because the address book had stopped listing them.
+// The connection was fine; nothing had stopped except the introducer, which
+// is exactly what is supposed to be survivable. A QUIC connection knows
+// perfectly well whether it is alive, and its keepalive says so every twenty
+// seconds.
+//
+// For a peer without a live connection the grace period still applies: a
+// single lost registration is not a machine going away - the address book is
+// UDP, and a dropped packet looks exactly like a departure.
 func expired(peers map[string]*peerLink, live map[string]bool, now time.Time, poll time.Duration) []string {
 	var gone []string
 	for node, link := range peers {
 		if live[node] {
+			continue
+		}
+		if link.alive() {
 			continue
 		}
 		if now.Sub(link.lastSeen) > 3*poll {
@@ -567,6 +582,19 @@ func expired(peers map[string]*peerLink, live map[string]bool, now time.Time, po
 		}
 	}
 	return gone
+}
+
+// alive reports whether this link's connection is still up.
+func (l *peerLink) alive() bool {
+	if l == nil || l.conn == nil {
+		return false
+	}
+	select {
+	case <-l.conn.Context().Done():
+		return false
+	default:
+		return true
+	}
 }
 
 func short(node string) string {

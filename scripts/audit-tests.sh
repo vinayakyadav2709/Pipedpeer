@@ -311,6 +311,10 @@ case_ "both ends of a direct link can originate" src/internal/direct/transport.g
 	's = s.replace("\tgo func() {\n\t\te.serveStreams(context.WithoutCancel(ctx), conn)", "\tgo func() {\n\t\tif false {\n\t\t\te.serveStreams(context.WithoutCancel(ctx), conn)\n\t\t}", 1)' \
 	./internal/direct/ "TestBothEndsCanOpenStreams"
 
+case_ "a live link outlives the introducer" src/internal/internet/internet.go \
+	's = s.replace("\t\tif link.alive() {\n\t\t\tcontinue\n\t\t}\n", "", 1)' \
+	./internal/internet/ "TestALiveLinkSurvivesTheIntroducerGoingAway"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

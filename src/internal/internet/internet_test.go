@@ -126,3 +126,64 @@ func TestAMappingThatIsNotOursIsNotPublished(t *testing.T) {
 		})
 	}
 }
+
+// TestALiveLinkSurvivesTheIntroducerGoingAway.
+//
+// The property the whole batch exists for, and it was measured failing: with
+// the introducer stopped, two machines holding a working punched connection
+// tore it down sixty seconds later - "peer stopped checking in" - because the
+// address book had stopped listing them. Nothing had stopped except the
+// introducer, which is precisely what is meant to be survivable.
+//
+// A connection knows whether it is alive. The address book is how peers are
+// found, not how they are kept.
+func TestALiveLinkSurvivesTheIntroducerGoingAway(t *testing.T) {
+	now := time.Now()
+	poll := 20 * time.Second
+	// Long past the grace period, and the introducer lists nobody.
+	stale := now.Add(-10 * time.Minute)
+
+	live := &peerLink{addr: "127.0.0.1:1", lastSeen: stale, conn: liveConn(t)}
+	dead := &peerLink{addr: "127.0.0.1:2", lastSeen: stale}
+
+	gone := expired(map[string]*peerLink{"live": live, "dead": dead},
+		map[string]bool{}, now, poll)
+
+	for _, n := range gone {
+		if n == "live" {
+			t.Error("a working direct connection was dropped because the " +
+				"introducer stopped listing it; surviving that is the point")
+		}
+	}
+	found := false
+	for _, n := range gone {
+		if n == "dead" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("a peer with no connection and no listing was kept forever")
+	}
+}
+
+// A link whose connection has closed is not alive, however recently the
+// introducer mentioned it.
+func TestAClosedConnectionIsNotAlive(t *testing.T) {
+	conn := liveConn(t)
+	l := &peerLink{conn: conn}
+	if !l.alive() {
+		t.Fatal("a fresh connection reports itself dead")
+	}
+	conn.CloseWithError(0, "")
+	// The context closes asynchronously; give it a moment.
+	for i := 0; i < 50 && l.alive(); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if l.alive() {
+		t.Error("a closed connection still reports itself alive, so a dead peer " +
+			"is kept and offered work forever")
+	}
+	if (&peerLink{}).alive() {
+		t.Error("a link with no connection reports itself alive")
+	}
+}
