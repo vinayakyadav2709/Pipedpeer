@@ -201,6 +201,16 @@ func (s *Store) AddManual(host string, port int) error {
 			state = "healthy"
 		}
 	}
+	// One address, one daemon. Nodes are keyed by identity, so a worker that
+	// comes back with a new one - a container recreated, a machine
+	// reinstalled - lands beside its old entry rather than replacing it, and
+	// the old one is manual so PruneStale keeps it forever. Eleven rows for a
+	// four-node cluster, every stale one health-checked on every cycle, and
+	// `pipedpeer nodes` unreadable. Whoever answers at this address now is the
+	// node at this address.
+	if err := s.forgetOthersAt(host, port, nodeID); err != nil {
+		return err
+	}
 	return s.UpsertNode(Node{
 		NodeID:      nodeID,
 		Host:        host,
@@ -210,6 +220,18 @@ func (s *Store) AddManual(host string, port int) error {
 		IsManual:    true,
 		State:       state,
 	})
+}
+
+// forgetOthersAt drops manual entries that claim this address under a
+// different identity.
+//
+// Manual only: a discovered node is re-found on its own and carries no such
+// residue, and deleting discovered rows here would race the discovery loop.
+func (s *Store) forgetOthersAt(host string, port int, keep string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM nodes WHERE is_manual = 1 AND host = ? AND port = ? AND node_id != ?`,
+		host, port, keep)
+	return err
 }
 
 // RemoveManual deletes manual entries for a host and reports how many went.
