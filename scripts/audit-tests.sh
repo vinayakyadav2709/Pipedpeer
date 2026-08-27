@@ -303,6 +303,10 @@ case_ "a mapping that is not ours is not published" src/internal/internet/intern
 	's = s.replace("\tif !reflex.IsValid() {\n\t\treturn true\n\t}\n\treturn reflex.Addr() == mapped.Addr()", "\treturn true", 1)' \
 	./internal/internet/ "TestAMappingThatIsNotOursIsNotPublished"
 
+case_ "an inbound connection becomes a usable peer" src/internal/direct/transport.go \
+	's = s.replace("\tif e.onInbound != nil {\n\t\te.onInbound(node, conn)\n\t}\n", "", 1)' \
+	./internal/direct/ "TestAnInboundConnectionIsHandedUp"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
