@@ -862,6 +862,42 @@ func ddpPickMasterPort(host string, base, span int) int {
 	return base
 }
 
+// ddpOneDeviceKind keeps the ring to a single kind of device.
+//
+// --gpu force already excluded CPU nodes, but --gpu prefer filtered nothing:
+// every node went into admission ranked by a probe that measures CPU
+// throughput, so a GPU box with a modest CPU was rejected as "too slow to
+// contribute" while a CPU box with a fast one was admitted, and the ring came
+// out mixed - which the code two lines below says the shim cannot balance.
+// The preference was applied afterwards, as a sort of the survivors, which
+// cannot put back a node admission had already dropped.
+//
+// Mixed is the wrong answer anyway at the sizes measured here: the same model
+// and batch takes 1.5s on this GPU and 56.2s on this CPU, and with equal
+// batches every rank waits for the slowest. So the choice is which kind, not
+// how to blend them - GPUs when there are any, CPUs when there are not.
+//
+// This is what makes the ring "only the good GPUs, then only the good CPUs":
+// the kind is decided here, and which of that kind are worth having is decided
+// by the marginal-gain rule in ddpplace.
+func ddpOneDeviceKind(cands []ddpplace.Candidate, preferGPU bool) []ddpplace.Candidate {
+	if !preferGPU {
+		return cands
+	}
+	var gpu []ddpplace.Candidate
+	for _, c := range cands {
+		if c.HasGPU {
+			gpu = append(gpu, c)
+		}
+	}
+	if len(gpu) > 0 {
+		return gpu
+	}
+	// No accelerator anywhere. CPU is what is left, and a CPU ring beats no
+	// ring - "prefer" is not "require".
+	return cands
+}
+
 // ddpSharesNode reports whether ring member i is on a machine that is also
 // hosting another rank.
 func ddpSharesNode(ring []registry.NodeRecord, i int) bool {
@@ -2015,6 +2051,7 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 			Slots:    ddpSlots(n),
 		})
 	}
+	cands = ddpOneDeviceKind(cands, o.RequireGPU || o.PreferGPU)
 	if len(cands) == 0 {
 		return nil, nil
 	}
