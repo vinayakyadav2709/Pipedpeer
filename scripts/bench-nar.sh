@@ -27,12 +27,21 @@ pp_curl() {
 	if [[ -n "$tok" ]]; then curl -H "X-Pipedpeer-Token: $tok" "$@"; else curl "$@"; fi
 }
 
-peers="$(pp_curl -sf --max-time 5 "http://127.0.0.1:$port/v1/nodes" 2>/dev/null |
-	python3 -c 'import json,sys
-try: nodes = json.load(sys.stdin)
-except Exception: nodes = []
-print(sum(1 for n in nodes if n.get("state") == "healthy" and n.get("source") != "self"))' 2>/dev/null || echo 0)"
-if [[ "${peers:-0}" -lt 1 ]]; then
+# "How many peers" and "could I ask" are different questions, and answering
+# the second with 0 is how this benchmark once ran with no peer at all: the
+# API call failed, the count came back empty, and the arithmetic test that was
+# meant to stop the run produced a syntax error and let it through.
+nodes_json="$(pp_curl -sf --max-time 5 "http://127.0.0.1:$port/v1/nodes" 2>/dev/null || true)"
+if [[ -z "$nodes_json" ]]; then
+	echo "FAIL: no answer from the daemon API on :$port. Not the same as having"
+	echo "      no peers, and the difference decides whether these numbers mean"
+	echo "      anything."
+	exit 1
+fi
+peers="$(printf '%s' "$nodes_json" | python3 -c 'import json,sys
+nodes = json.load(sys.stdin)
+print(sum(1 for n in nodes if n.get("state") == "healthy" and n.get("source") != "self"))')"
+if [[ "$peers" -lt 1 ]]; then
 	echo "FAIL: no healthy peer. This measures what crosses to a peer, so with none"
 	echo "      it would measure nothing and report success - which is how the diff"
 	echo "      stopped firing unnoticed in the first place."

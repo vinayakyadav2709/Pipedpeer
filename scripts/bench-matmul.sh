@@ -28,12 +28,21 @@ pp_curl() {
 	if [[ -n "$tok" ]]; then curl -H "X-Pipedpeer-Token: $tok" "$@"; else curl "$@"; fi
 }
 
-peers="$(pp_curl -sf --max-time 5 "http://127.0.0.1:$port/v1/nodes" 2>/dev/null |
-	python3 -c 'import json,sys
-try: nodes = json.load(sys.stdin)
-except Exception: nodes = []
-print(sum(1 for n in nodes if n.get("state") == "healthy" and n.get("source") != "self"))' 2>/dev/null || echo 0)"
-if [[ "${peers:-0}" -lt 1 ]]; then
+# "How many peers" and "could I ask" are different questions, and answering
+# the second with 0 is how this benchmark once ran with no peer at all: the
+# API call failed, the count came back empty, and the arithmetic test that was
+# meant to stop the run produced a syntax error and let it through.
+nodes_json="$(pp_curl -sf --max-time 5 "http://127.0.0.1:$port/v1/nodes" 2>/dev/null || true)"
+if [[ -z "$nodes_json" ]]; then
+	echo "FAIL: no answer from the daemon API on :$port. Not the same as having"
+	echo "      no peers, and the difference decides whether these numbers mean"
+	echo "      anything."
+	exit 1
+fi
+peers="$(printf '%s' "$nodes_json" | python3 -c 'import json,sys
+nodes = json.load(sys.stdin)
+print(sum(1 for n in nodes if n.get("state") == "healthy" and n.get("source") != "self"))')"
+if [[ "$peers" -lt 1 ]]; then
 	echo "FAIL: no healthy peer. With none the model refuses everything and the"
 	echo "      benchmark would score a decision that was never made."
 	exit 1
@@ -58,20 +67,53 @@ cp "$driver" "$work/mm.py"
 #   wide        A is small, B and C are large. Replicating B to every worker
 #               is the whole cost, and it is not proportional to A at all.
 #
-# Sizes are bounded by what the sending machine holds at once - A, B and C,
-# plus a pickled copy of B for every worker it replicates to. The wide case is
-# the one that grows fastest, so it is kept to a 512 MB B rather than the
-# multi-GB one that would show the effect most clearly and risk taking the
-# machine down with it.
-shapes="${BENCH_SHAPES_ALL:-"2048 2048 2048|8192 8192 8192|65536 1024 1024|1024 8192 8192"}"
+# Sizes are bounded by what the machine can survive, not by what would show
+# the effect best. Forcing an 8192-cube spill on a 14 GB box drove it to
+# 194 MB free and the kernel killed the desktop: the submitting daemon and the
+# worker are separate processes that each read the host's free memory and each
+# concluded it had 11 GB to play with. On separate machines that reading is
+# right; on one machine they oversubscribe it between them.
+shapes="${BENCH_SHAPES_ALL:-"2048 2048 2048|4096 4096 4096|16384 1024 1024|1024 4096 4096"}"
 [[ -n "${BENCH_SHAPES:-}" ]] && shapes="$BENCH_SHAPES"
 
 # One shape per run: the decision is made once per call, and a merged log makes
 # it guesswork which line belonged to which shape.
+# The estimator sizes a job from its imports, which is a guess about a script
+# it has not run. These shapes are known: A, B and C are held at once, the
+# cluster path holds pickled copies of what it ships, and being killed at an
+# 855 MB default is not a result about the cost model. So the size is stated.
+mem_for() {
+	# shellcheck disable=SC2086
+	set -- $1
+	python3 -c "
+m, k, n = $1, $2, $3
+arrays = (m * k + k * n + m * n) * 8
+print('%dM' % max(1024, int(arrays * 2.5 / 1e6)))"
+}
+
+# fits reports whether forcing this shape is safe here. The forced path holds
+# the three arrays plus the pickled payload, a compression attempt on it, and
+# the returned blocks; measured at roughly eight times the arrays. Refusing to
+# measure a shape is a worse benchmark than measuring it, and a far better one
+# than an OOM that takes the machine's desktop with it.
+fits() {
+	# shellcheck disable=SC2086
+	set -- $1
+	local avail_mb
+	avail_mb="$(free -m | awk '/^Mem:/{print $7}')"
+	python3 -c "
+m, k, n = $1, $2, $3
+arrays = (m * k + k * n + m * n) * 8
+factor = float('${BENCH_MEM_FACTOR:-8}')
+need_mb = arrays * factor / 1e6
+avail_mb = $avail_mb * 0.6
+print('yes' if need_mb <= avail_mb else 'no %d %d' % (need_mb, avail_mb))"
+}
+
 one() {
 	local shape="$1" mode="$2" log="$3"
 	# shellcheck disable=SC2086
-	(cd "$work" && "$cli" run --distribute "$mode" mm.py -- $shape) > "$log" 2>&1 ||
+	(cd "$work" && "$cli" run --mem "$(mem_for "$shape")" --distribute "$mode" mm.py -- $shape) > "$log" 2>&1 ||
 		{ echo "FAIL running $shape ($mode)"; tail -20 "$log"; exit 1; }
 }
 
@@ -89,6 +131,15 @@ for shape in "${shape_list[@]}"; do
 
 	auto_log="$work/$label.auto.log"
 	force_log="$work/$label.force.log"
+
+	verdict="$(fits "$shape")"
+	if [[ "$verdict" != "yes" ]]; then
+		read -r _ need avail <<< "$verdict"
+		printf '%-22s %9s %8s %9s %9s %8s   not measured: needs ~%s MB, %s MB safely free\n' \
+			"$label" "-" "-" "-" "-" "-" "$need" "$avail"
+		continue
+	fi
+
 	one "$shape" auto "$auto_log"
 	one "$shape" force "$force_log"
 
