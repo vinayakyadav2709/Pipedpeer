@@ -2,7 +2,6 @@ package daemonctl
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -10,6 +9,7 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"mime/multipart"
@@ -281,20 +281,16 @@ func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
 		return nil, err
 	}
 
-	// Sniff, so a daemon on an older build that answers uncompressed still
-	// works: a cluster is rarely upgraded all at once. Go's http client
-	// already unwraps gzip when it negotiated the encoding itself, but this
-	// response declares it outright, so handle it here.
-	br := bufio.NewReader(body)
-	var rd io.Reader = br
-	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
-		gz, err := gzip.NewReader(br)
-		if err != nil {
-			return nil, err
-		}
-		defer gz.Close()
-		rd = gz
+	// Sniff, so a daemon on an older build that answers gzip or plain still
+	// works: a cluster is rarely upgraded all at once, and it is upgraded in
+	// both directions. Go's http client already unwraps gzip when it
+	// negotiated the encoding itself, but this response declares it outright,
+	// so handle it here.
+	rd, closeRd, err := tarcodec.Reader(body)
+	if err != nil {
+		return nil, err
 	}
+	defer closeRd()
 	tr := tar.NewReader(rd)
 	for {
 		hdr, err := tr.Next()
@@ -430,43 +426,10 @@ func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 	}
 
 	// Compressed last, not at creation: the shim is added with `tar --append`,
-	// which cannot open a gzipped archive. A workspace is mostly source and
-	// crosses the wire on every run, so a second pass over a file already on
-	// disk is worth it.
-	return gzipInPlace(destPath)
-}
-
-// gzipInPlace rewrites a file as gzip. The reader sniffs the magic bytes, so
-// an older daemon still accepts an uncompressed archive and this can land on
-// either side of a cluster first.
-func gzipInPlace(path string) error {
-	src, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	tmp := path + ".gz"
-	dst, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	gz := gzip.NewWriter(dst)
-	if _, err := io.Copy(gz, src); err != nil {
-		gz.Close()
-		dst.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := gz.Close(); err != nil {
-		dst.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := dst.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	// which cannot open a compressed archive. A workspace is mostly source
+	// and crosses the wire on every run, so a second pass over a file already
+	// on disk is worth it.
+	return tarcodec.CompressFile(destPath, tarcodec.CompressFloor)
 }
 
 // appendShim adds .pipedpeer/shim/sitecustomize.py as a member of an existing
