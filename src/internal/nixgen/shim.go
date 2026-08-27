@@ -867,10 +867,39 @@ def _install_numpy():
         # math local by leaving it unpatched, and refuses to ship when the
         # probe or peer count says no. Round-trip factor 3: A in, the replicated
         # operand B in, and the product C back.
-        return (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
+        if not (a.ndim == 2 and b.ndim == 2 and a.shape[1] == b.shape[0]
                 and a.shape[0] >= 8 and _URL and _ENABLED
-                and not os.environ.get("PIPEDPEER_NUMPY_NESTED")
-                and _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 8), 5, True, 200e9))
+                and not os.environ.get("PIPEDPEER_NUMPY_NESTED")):
+            return False
+        # What the product needs here: both operands, the result, and the
+        # copies made while dispatching. Measured at roughly eight times the
+        # arrays for the forced path, which is what took a 14 GB machine to
+        # 194 MB free.
+        working = int((a.nbytes + b.nbytes + a.shape[0] * b.shape[1] * a.itemsize) * 8)
+        return _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 8), 5, True,
+                                     200e9, working)
+
+    def _mm_no_fallback(a, b, err):
+        """Refuse rather than fall back, when falling back means the OOM killer.
+
+        Every other failure here ends in a local run, which is right: a
+        cluster that cannot take the work is not a reason to fail. But when
+        the operands do not fit in this machine's memory, the local run is not
+        a slower answer - it is the thing the offload existed to avoid, and it
+        takes the machine down with it. Better to say so, with the numbers and
+        the flag that changes them.
+        """
+        working = int((a.nbytes + b.nbytes
+                       + a.shape[0] * b.shape[1] * a.itemsize) * 8)
+        if _fits_locally(working):
+            return
+        raise MemoryError(
+            "this %s x %s product needs about %.1f GB and this machine has "
+            "%.1f GB available, so it cannot run here - and the cluster could "
+            "not take it either (%s). Give a peer more memory, or run it on "
+            "fewer rows at a time."
+            % (a.shape, b.shape, working / 1e9,
+               _local_free_bytes() / 1e9, err))
 
     def _mm_dispatch(a, b):
         import numpy as _np
@@ -886,6 +915,7 @@ def _install_numpy():
             try:
                 return _mm_dispatch(a, b)
             except Exception as e:
+                _mm_no_fallback(a, b, e)
                 _log("numpy matmul fallback (%s)" % e)
         return _orig_matmul(a, b, *args, **kw)
 
@@ -1215,7 +1245,96 @@ def _parse_weights(raw, world):
     return w
 
 
-def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_sec):
+def _local_free_bytes():
+    """What this machine could give a new allocation.
+
+    MemAvailable, not free pages: the kernel reclaims page cache on demand,
+    so a box with a warm cache reads several times too low and every limit
+    built on it collapses. PIPEDPEER_TEST_FREE_MEM overrides it, which is how
+    the out-of-memory branch is tested without actually running a machine out
+    of memory.
+    """
+    override = os.environ.get("PIPEDPEER_TEST_FREE_MEM")
+    if override:
+        try:
+            return int(float(override))
+        except ValueError:
+            pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def _fits_locally(working_set):
+    """Whether an operation's working set has room on this machine.
+
+    Nine tenths of what is available, because an allocation that exactly fills
+    memory leaves the machine thrashing rather than working, and because the
+    estimate is an estimate.
+    """
+    if working_set <= 0:
+        return True
+    free = _local_free_bytes()
+    if free <= 0:
+        return True          # cannot tell; do not invent a refusal
+    return working_set <= free * 0.9
+
+
+_GPU_PEERS = {"t": 0.0, "any": None}
+
+
+def _cluster_has_gpu():
+    """Whether any peer offers an accelerator, cached like the bandwidth probe.
+
+    The cost model prices remote compute at this cluster's CPU BLAS. A peer
+    with a GPU is not that: measured on this hardware, the same model and
+    batch took 1.5s on the GPU against 56.2s on the CPU. Charging CPU rates
+    for a GPU peer refuses offloads that would have paid for themselves many
+    times over.
+    """
+    now = time.monotonic()
+    if now - _GPU_PEERS["t"] < _BW_TTL:
+        return _GPU_PEERS["any"]
+    _GPU_PEERS["t"] = now
+    _GPU_PEERS["any"] = False
+    if not _URL:
+        return False
+    try:
+        import json as _json
+        import urllib.request
+        req = urllib.request.Request(_URL.rstrip("/") + "/v1/nodes")
+        if _TOKEN:
+            req.add_header("X-Pipedpeer-Token", _TOKEN)
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            nodes = _json.loads(resp.read())
+        for n in nodes:
+            if n.get("state") != "healthy" or n.get("source") == "self":
+                continue
+            load = n.get("load") or {}
+            caps = n.get("capabilities") or {}
+            if load.get("gpus") or load.get("gpu_model") or caps.get("gpu"):
+                _GPU_PEERS["any"] = True
+                break
+    except Exception:
+        pass
+    return _GPU_PEERS["any"]
+
+
+# How much faster a remote GPU is than this cluster's CPU BLAS for the shapes
+# that reach the cost model. Measured on the RTX 3060 here: 37x at a
+# saturating batch, 6x at a toy one. The smaller figure is used, because
+# claiming the larger one for a shape that will not saturate the device is how
+# a cost model talks itself into a transfer that does not pay.
+_GPU_SPEEDUP = 6.0
+
+
+def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split,
+                          flops_per_sec, working_set=0):
     """BLAS-realistic cost model for numpy offloads, calibrated to real BLAS
     throughput (matmul ~200 GFLOP/s, svd ~1.5 GFLOP/s on this cluster's numpy).
     est_transfer counts the full round trip (in + out, plus the replicated
@@ -1233,6 +1352,17 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_s
     if _FORCE:
         return True
 
+    # Does it fit here at all? Everything below compares how long local takes
+    # against how long remote takes, which quietly assumes local is possible.
+    # When the working set does not fit, local is not slower - it is the OOM
+    # killer, or hours of swap. Shipping is then the only answer that runs,
+    # whatever the arithmetic says about speed.
+    if not _fits_locally(working_set):
+        _log("%.0f MB working set against %.0f MB free: this does not fit here, "
+             "so it goes to the cluster whatever the transfer costs"
+             % (working_set / 1e6, _local_free_bytes() / 1e6))
+        return True
+
     # Deciding is not free: the bandwidth probe ships 64 MB. A script doing one
     # 33 MB matmul spent 2.5 s on a LAN measuring the link, to conclude it
     # should not use it - and on the phone-tethered link this project also runs
@@ -1244,14 +1374,20 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_s
     # worse. Ask first at a bandwidth no real link will beat: if the answer is
     # still "stay local" there, it is "stay local" at the real speed too, and
     # there is nothing to measure.
+    # A peer with an accelerator is not this cluster's CPU BLAS, and pricing
+    # it as though it were refuses offloads that would pay for themselves.
+    remote_flops = flops_per_sec
+    if _cluster_has_gpu():
+        remote_flops = flops_per_sec * _GPU_SPEEDUP
+
     if not _offload_wins(nbytes, flops_per_byte, round_trip, split,
-                         flops_per_sec, K, _OPTIMISTIC_BW):
+                         flops_per_sec, K, _OPTIMISTIC_BW, remote_flops):
         return False
     bw = _measure_bandwidth()
     if not bw:
         return False
     return _offload_wins(nbytes, flops_per_byte, round_trip, split,
-                         flops_per_sec, K, bw)
+                         flops_per_sec, K, bw, remote_flops)
 
 
 # Faster than any link this runs over: 10 Gbit/s. Used only to rule offloads
@@ -1259,13 +1395,27 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split, flops_per_s
 _OPTIMISTIC_BW = 1.25e9
 
 
-def _offload_wins(nbytes, flops_per_byte, round_trip, split, flops_per_sec, K, bw):
-    """Whether offloading beats local at this bandwidth."""
+def _offload_wins(nbytes, flops_per_byte, round_trip, split, flops_per_sec, K, bw,
+                  remote_flops_per_sec=None):
+    """Whether offloading beats local at this bandwidth.
+
+    Local and remote are priced separately: the same work runs at this
+    machine's rate here and at the peer's rate there, and on a cluster with an
+    accelerator those are not the same number.
+    """
+    if remote_flops_per_sec is None or remote_flops_per_sec <= 0:
+        remote_flops_per_sec = flops_per_sec
     est_local = nbytes * flops_per_byte / flops_per_sec
     est_transfer = nbytes * round_trip / bw
     if not split:
+        # Single-worker offload (svd, eig) is not a race against local: it
+        # relocates the work so a weak orchestrator is freed entirely, and is
+        # worth it when shipping the matrix costs far less than computing it
+        # here. Charging the remote compute against it as well made this
+        # condition unsatisfiable - est_remote equals est_local on a cluster
+        # of like machines, so it read "transfer + local < half of local".
         return est_transfer < est_local * 0.5
-    est_remote = est_local / K * 1.3
+    est_remote = (nbytes * flops_per_byte / remote_flops_per_sec) / K * 1.3
     return est_local > est_transfer + est_remote
 
 
