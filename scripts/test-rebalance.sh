@@ -21,14 +21,21 @@ lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cli.sh"
 source "$lib"
 pp_resolve_cli "$repo_root" || exit 2
 cli="$PP_CLI"
-victim="${VICTIM:-pp-w8}"
+# The name lab-hetero gives its widest worker. This defaulted to pp-w8, which
+# nothing has been called for a long time, so the script this one names in its
+# own header brought up a lab it then refused to touch: "no container named
+# pp-w8 to throttle", on a machine with the lab running.
+victim="${VICTIM:-pp-hetero-1}"
 throttle_to="${THROTTLE_TO:-1}"
 epochs="${EPOCHS:-8}"
 
 command -v docker >/dev/null || { echo "docker is needed to throttle a worker" >&2; exit 2; }
 docker inspect "$victim" >/dev/null 2>&1 || {
-	echo "FAIL: no container named $victim to throttle. This needs the uneven"
-	echo "      lab: two workers with different CPU quotas." >&2
+	echo "FAIL: no container named $victim to throttle. This needs the uneven" >&2
+	echo "      lab: two workers with different CPU quotas. Bring it up with" >&2
+	echo "      scripts/lab-hetero.sh, or name the one to throttle in VICTIM." >&2
+	echo "      Running now:" >&2
+	docker ps --format '        {{.Names}}' >&2 || true
 	exit 1
 }
 
