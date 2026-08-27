@@ -881,7 +881,8 @@ func (s *Server) ReservedMem() int64 {
 //
 // Peers on other machines are not subtracted: their memory is their own.
 func (s *Server) AvailableForJob() int64 {
-	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	reserved := s.ReservedMem()
+	load := heartbeat.CollectLoad(s.ActiveJobs(), reserved)
 	avail := load.AvailableMemBytes - s.reservedOnThisMachine()
 	if avail < 0 {
 		avail = 0
@@ -900,7 +901,18 @@ func (s *Server) AvailableForJob() int64 {
 	// budget at admission makes the unpoliced node behave like the policed
 	// one.
 	if b := cgroups.SelfBudget(); b.Total > 0 {
-		if r := b.Remaining(); r < avail {
+		// Reservations are promises against this budget too. The free-memory
+		// reading above already has them subtracted; leaving them in here
+		// mixed two accounting systems, so a daemon whose budget was the
+		// tighter bound reported the same headroom however much it had
+		// already promised - and admitted work twice over. Caught by a
+		// stacked-reservation test that passed on one machine and failed on
+		// the other, which is the difference between the two bounds binding.
+		r := b.Remaining() - reserved
+		if r < 0 {
+			r = 0
+		}
+		if r < avail {
 			avail = r
 		}
 	}
@@ -1574,6 +1586,11 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	// Memory is read with zero reservations so the reserved total can be
 	// recomputed from the lease table inside the critical section.
 	hostLoad := heartbeat.CollectLoad(0, 0)
+	// Read outside the lock for the same reason as hostLoad: one asks the
+	// kernel about this daemon's cgroup, the other asks a roommate over the
+	// loopback, and neither should happen while admission is held.
+	roommates := s.reservedOnThisMachine()
+	budget := cgroups.SelfBudget()
 	devices := gpu.PerDevice()
 	gpuPresent := gpu.Detect().Vendor != gpu.VendorNone
 
@@ -1607,7 +1624,22 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		for _, l := range s.leases {
 			reserved += l.MemBytes
 		}
-		available := hostLoad.AvailableMemBytes - reserved
+		// The same figure AvailableForJob reports, computed here because the
+		// reserved total has to come from the lease table inside this lock.
+		//
+		// This path had its own arithmetic and used neither bound - so a
+		// daemon admitted leases past its own share of the machine and past
+		// what a roommate had already promised, which is every gap the budget
+		// work closed, still open on the path every job is actually admitted
+		// through. A stacked-reservation test caught it by failing on the
+		// machine where the budget binds and passing on the one where free
+		// memory does.
+		available := hostLoad.AvailableMemBytes - reserved - roommates
+		if budget.Total > 0 {
+			if r := budget.Remaining() - reserved; r < available {
+				available = r
+			}
+		}
 		if available < 0 {
 			available = 0
 		}

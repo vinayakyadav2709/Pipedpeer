@@ -1,8 +1,6 @@
 package nixgen
 
 import (
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -20,11 +18,13 @@ import (
 // nothing reads X is exactly the drift this catches, so the check runs over
 // code with comments stripped.
 func TestEveryEnvVarTheShimNamesIsRead(t *testing.T) {
-	src, err := os.ReadFile(shimSourcePath(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	code := stripPyComments(string(src))
+	// The constant, not the file. Reading shim.go from disk made this test
+	// depend on the source tree being present, which it is not when the
+	// binaries are built here and run on the machine that has the Python
+	// dependencies - it failed there with "cannot find shim.go" while passing
+	// locally, which is the exact shape of problem test-on-host.sh exists to
+	// surface.
+	code := stripPyComments(ShimSitecustomize)
 
 	named := regexp.MustCompile(`"(PIPEDPEER_[A-Z0-9_]+)"`)
 	read := regexp.MustCompile(`(?:environ\.get|getenv|environ\[)\s*\(?\s*"(PIPEDPEER_[A-Z0-9_]+)"`)
@@ -50,18 +50,6 @@ func TestEveryEnvVarTheShimNamesIsRead(t *testing.T) {
 		t.Errorf("%s is named in the shim but never read; a knob that does "+
 			"nothing is worse than no knob", name)
 	}
-}
-
-// shimSourcePath finds the Go file the shim's Python lives in.
-func shimSourcePath(t *testing.T) string {
-	t.Helper()
-	for _, p := range []string{"shim.go", filepath.Join("internal", "nixgen", "shim.go")} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	t.Fatal("cannot find shim.go")
-	return ""
 }
 
 // stripPyComments removes whole-line and trailing # comments, leaving string
