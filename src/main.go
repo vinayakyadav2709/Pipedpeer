@@ -705,7 +705,16 @@ func runDDP(o ddpRunOptions) error {
 
 	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
 	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
-		masterAddr = detectLocalIP()
+		// Rank 0 is this machine, and every other rank has to reach it. Which
+		// of our addresses that is depends on where they are: asking the
+		// route to a peer beats picking one address for everybody, which on a
+		// machine that is on both a LAN and a Tailscale network picks the LAN
+		// one and hangs the run.
+		peerHost := ""
+		if len(peers) > 0 {
+			peerHost = ddpExtractHost(peers[0].SSHEndpoint)
+		}
+		masterAddr = localIPFor(peerHost)
 	}
 	masterPort := o.MasterPort
 	if masterPort == 0 {
@@ -789,7 +798,11 @@ func runDDP(o ddpRunOptions) error {
 				fmt.Sprintf("WORLD_SIZE=%d", o.Nodes),
 				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
 				fmt.Sprintf("MASTER_PORT=%d", masterPort),
-				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s", net.JoinHostPort(detectLocalIP(), strconv.Itoa(o.DaemonPort))),
+				// The address THIS rank would reach us at, which is not
+				// necessarily the one another rank would use.
+				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s",
+					net.JoinHostPort(localIPFor(ddpExtractHost(n.SSHEndpoint)),
+						strconv.Itoa(o.DaemonPort))),
 				// Sync rides the lead rank's daemon on the one port that
 				// already works between every pair of nodes; ranks never
 				// open sockets of their own (MASTER_* stays only for the
@@ -2011,6 +2024,58 @@ func runDaemon(args []string) {
 // Preference order is by how widely routable an address is: a LAN address
 // beats a VPN one, because peers that can reach both should take the direct
 // path.
+// localIPFor is the address a given peer would see us at.
+//
+// detectLocalIP picks one address for everybody, preferring a private one -
+// and a machine on both a home LAN and a Tailscale network has two, of which
+// only one reaches the peer. Measured: a node advertised its stale LAN
+// address, 192.168.0.201, to a peer that could only be reached over Tailscale.
+// DDP worked anyway because the lead rank happened to be the reachable node;
+// with the roles reversed the sync URL is an address the other rank cannot
+// open, and the run hangs at the first barrier.
+//
+// The kernel already knows the answer. Connecting a UDP socket sends nothing
+// - it only fixes the route - and the local address it picks is the source
+// address a packet to that peer would carry.
+//
+// Falls back to detectLocalIP when there is no peer in question (plain
+// self-advertisement) or the route cannot be resolved.
+func localIPFor(target string) string {
+	if target == "" {
+		return detectLocalIP()
+	}
+	host := target
+	if h, _, err := net.SplitHostPort(target); err == nil {
+		host = h
+	}
+	if host == "" {
+		return detectLocalIP()
+	}
+	// The port is immaterial: no packet is sent, and the route is chosen by
+	// the destination address alone.
+	//
+	// Bounded, because a hostname that does not resolve blocks in DNS for
+	// several seconds and this runs while a job is being placed. Falling back
+	// to the old answer quickly beats holding up the run to be exact.
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.Dial("udp", net.JoinHostPort(host, "9"))
+	if err != nil {
+		return detectLocalIP()
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil || addr.IP.IsUnspecified() {
+		return detectLocalIP()
+	}
+	// Reaching a peer over loopback says nothing about how anybody else
+	// reaches us, and advertising 127.0.0.1 to a second machine is the one
+	// answer guaranteed to be wrong.
+	if addr.IP.IsLoopback() {
+		return detectLocalIP()
+	}
+	return addr.IP.String()
+}
+
 func detectLocalIP() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
