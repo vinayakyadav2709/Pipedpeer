@@ -2327,6 +2327,14 @@ def _install_ddp():
     # without this the run claims a split it did not perform.
     _WEIGHTS_APPLIED = [False]
     _WARNED_WEIGHTS_UNUSED = [False]
+    # Shares the daemon has refitted from what the ring actually did, waiting
+    # for an epoch boundary. Resharding mid-epoch would have ranks re-slice
+    # data they are part-way through, so samples would be trained on twice or
+    # skipped; the boundary is where the sampler already re-slices.
+    _PENDING_WEIGHTS = [None]
+    # Set when the daemon has told this rank the ring is better off without
+    # it.
+    _DROPPED = [False]
     # daemon (default): every sync is one POST to the lead rank's daemon on
     # the same port every other byte of pipedpeer traffic uses — no sockets
     # of our own, no MASTER_PORT, nothing new to firewall. gloo/nccl remain
@@ -2388,6 +2396,41 @@ def _install_ddp():
     # backward passes it follows and would make N wildly too large.
     _STEP_SEC = [0.0, 0]  # total compute seconds, count
     _STEP_MARK = [None, 0.0]  # monotonic at last step, sync_sec at last step
+
+    def _apply_rebalance(reply):
+        """Take the daemon's verdict on this ring.
+
+        Neither answer is acted on here. New shares wait for an epoch
+        boundary, where the sampler re-slices anyway; a drop waits for the
+        same place, because leaving mid-epoch would strand the other ranks at
+        a barrier expecting a gradient that is no longer coming.
+        """
+        w = reply.get("weights")
+        if w and len(w) == _WORLD:
+            try:
+                w = [float(x) for x in w]
+            except (TypeError, ValueError):
+                w = None
+            if w and abs(sum(w) - 1.0) < 1e-6 and all(x > 0 for x in w):
+                _PENDING_WEIGHTS[0] = w
+        if reply.get("drop") == _RANK and not _DROPPED[0]:
+            _DROPPED[0] = True
+            _log("ddp: leaving the ring — %s. This rank finishes its own work "
+                 "locally; the others carry on without waiting for it."
+                 % reply.get("why", "the ring is faster without this rank"))
+
+    def _mean_sync_ms():
+        """What one sync has cost this rank on average, in milliseconds.
+
+        The daemon needs it to decide whether a rank pays for itself: every
+        rank in the ring costs a gradient exchange per step, and a rank whose
+        compute contribution is smaller than the sync it adds is making the
+        run slower. Placement cannot know this - it runs before a single byte
+        of the model has moved.
+        """
+        if _DDP_STATS["syncs"] <= 0:
+            return 0.0
+        return 1000.0 * _DDP_STATS["sync_sec"] / _DDP_STATS["syncs"]
 
     def _mean_step_ms():
         """This rank's mean compute time for a step, in milliseconds.
@@ -2585,6 +2628,7 @@ def _install_ddp():
                              "count": int(flat.size), "kind": kind,
                              "sync_every": int(_SYNC_TUNED[0] or 0),
                              "step_ms": _mean_step_ms(),
+                             "sync_ms": _mean_sync_ms(),
                              "samples": int(_BATCH_N[0])}).encode()
         payload = flat.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
@@ -2623,6 +2667,7 @@ def _install_ddp():
                  "pace. To use them: give each rank weights[rank] of the data "
                  "instead of X[rank::world]."
                  % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
+        _apply_rebalance(_reply)
         if _reply.get("same_work") and not _WARNED_SAME_WORK[0]:
             _WARNED_SAME_WORK[0] = True
             _log("ddp: every rank produced the SAME gradients, so every rank is "
@@ -2703,6 +2748,7 @@ def _install_ddp():
                              "scales": scales, "counts": [int(n) for n in sizes],
                              "sync_every": int(_SYNC_TUNED[0] or 0),
                              "step_ms": _mean_step_ms(),
+                             "sync_ms": _mean_sync_ms(),
                              "samples": int(_BATCH_N[0])}).encode()
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
@@ -2729,6 +2775,7 @@ def _install_ddp():
                  "pace. To use them: give each rank weights[rank] of the data "
                  "instead of X[rank::world]."
                  % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
+        _apply_rebalance(reply)
         if reply.get("same_work") and not _WARNED_SAME_WORK[0]:
             _WARNED_SAME_WORK[0] = True
             _log("ddp: every rank produced the SAME gradients — every rank is "
@@ -2764,6 +2811,13 @@ def _install_ddp():
         PIPEDPEER_DDP_FP32=1 turns it off; weight broadcasts never use it.
         """
         import pickle
+        if _DROPPED[0]:
+            # Told to leave. Posting anyway would have the others average a
+            # rank the daemon has stopped expecting; not posting is what lets
+            # them complete without waiting. This rank keeps training on its
+            # own shard, which is harmless - its gradients simply stop
+            # reaching anybody.
+            return
         if half is None:
             half = _FP16_GRADS
         arrs = [t.detach().cpu().numpy() for t in tensors]
@@ -3043,7 +3097,32 @@ def _install_ddp():
                     _EPOCHS[self] = epoch + 1
                     return itertools.islice(_ORIG_ITER(self), _RANK, None, _WORLD)
                 sampler = shard
-            if isinstance(sampler, _th.utils.data.distributed.DistributedSampler):
+            # An epoch boundary is the one place shares can change safely:
+            # the sampler re-slices here anyway, so no rank is part-way
+            # through a shard when the boundaries move.
+            if _PENDING_WEIGHTS[0] is not None and isinstance(
+                    sampler, _WeightedShardSampler):
+                new = _PENDING_WEIGHTS[0]
+                _PENDING_WEIGHTS[0] = None
+                bs = getattr(self, "batch_sampler", None)
+                try:
+                    reshared = _WeightedShardSampler(
+                        sampler.n, new, _RANK, sampler.shuffle,
+                        sum(sampler.batches) // _WORLD, _WORLD)
+                except Exception as e:
+                    _log("ddp: cannot take the refitted shares (%s); keeping "
+                         "the ones in use" % e)
+                else:
+                    if bs is not None:
+                        bs.sampler = reshared
+                        bs.batch_size = reshared.batch
+                    _SHARDED[id(self)] = reshared
+                    sampler = reshared
+                    _log("ddp: rank %d reshared to %d samples, batch %d - the "
+                         "daemon refitted the ring from what it measured"
+                         % (_RANK, len(reshared), reshared.batch))
+
+            if hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(_EPOCHS.get(self, 0))
                 _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
         return _ORIG_ITER(self)
