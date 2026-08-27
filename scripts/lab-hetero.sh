@@ -21,9 +21,14 @@ bin="${1:-$HOME/bin/pipedpeer}"
 labdir="$HOME/lab-hetero"
 
 # No compose here, only plain containers, so a runtime without a compose
-# implementation is still perfectly usable.
+# implementation is still perfectly usable - but this one builds an image, and
+# docker is preferred for it. On the test machine podman answers `info` and
+# then refuses the build: "short-name resolution enforced but cannot prompt
+# without a TTY". The image below is fully qualified now, which is the real
+# fix, and the order stays docker-first because that is what this script has
+# always been exercised with.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime.sh"
-PP_NEED_COMPOSE=0 pp_pick_runtime || exit 1
+PP_NEED_COMPOSE=0 PP_RUNTIME_ORDER="docker podman" pp_pick_runtime || exit 1
 runtime="$PP_RUNTIME"
 
 # Containers first: they bind-mount the binary, so replacing it underneath a
@@ -44,7 +49,7 @@ cp "$bin" "$labdir/pipedpeer"
 chmod +x "$labdir/pipedpeer"
 
 cat > "$labdir/Dockerfile" <<'DOCKER'
-FROM nixos/nix:2.31.3
+FROM docker.io/nixos/nix:2.31.3
 RUN nix-env -iA nixpkgs.crun
 CMD ["sh", "-c", "sleep infinity"]
 DOCKER
