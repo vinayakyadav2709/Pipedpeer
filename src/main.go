@@ -683,7 +683,7 @@ func runDDP(o ddpRunOptions) error {
 	// availability rather than speed, and on an uneven cluster that put the
 	// slowest machine in the ring's most important seat: every rank waits for
 	// it, and it also serves as the rendezvous master.
-	ring, ringSlots := ddpChooseRing(o, rank0)
+	ring, ringSlots, ringWeights := ddpChooseRing(o, rank0)
 	if len(ring) < 2 {
 		// Measurement says one machine beats any ring available. That is an
 		// answer, not a failure: erroring out here left the user with nothing
@@ -701,6 +701,7 @@ func runDDP(o ddpRunOptions) error {
 	}
 	rank0, peers := ring[0], ring[1:o.Nodes]
 	ringSlots = ringSlots[:o.Nodes]
+	ringWeights = ddpNormaliseWeights(ringWeights[:o.Nodes])
 
 	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
 	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
@@ -731,6 +732,10 @@ func runDDP(o ddpRunOptions) error {
 		}
 		fmt.Printf("rank %d: %s (%s:%d)%s\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
 			ddpExtractHost(n.SSHEndpoint), n.DaemonPort, where)
+	}
+	if uneven := ddpUneven(ringWeights); uneven {
+		fmt.Printf("shares: %s — measured, so a slower rank takes less rather "+
+			"than setting the pace for everyone\n", ddpSharePercents(ringWeights))
 	}
 	if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 		fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=%s\n\n", masterAddr, masterPort, os.Getenv("PIPEDPEER_DDP_BACKEND"))
@@ -793,6 +798,14 @@ func runDDP(o ddpRunOptions) error {
 					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
 				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
 			)
+			// Every rank gets the whole set of shares, not just its own: a
+			// contiguous shard needs the offsets of everything before it, and
+			// a rank that knew only its own size could not tell where its
+			// slice began.
+			if len(ringWeights) == len(ranks) {
+				rankEnvs = append(rankEnvs,
+					"PIPEDPEER_DDP_WEIGHTS="+ddpWeightList(ringWeights))
+			}
 			// Every rank posts its gradients to the lead rank's daemon, so
 			// every rank needs the credential that daemon requires. Without
 			// this the sync is refused with 401 - and because the refusal
@@ -896,6 +909,74 @@ func ddpOneDeviceKind(cands []ddpplace.Candidate, preferGPU bool) []ddpplace.Can
 	// No accelerator anywhere. CPU is what is left, and a CPU ring beats no
 	// ring - "prefer" is not "require".
 	return cands
+}
+
+// ddpUneven reports whether the shares differ enough to be worth mentioning.
+// Placement measures live machines, so identical hardware still returns
+// slightly different numbers; the shim uses the same threshold before it
+// reshards, and the two must agree or the run says one thing and does
+// another.
+func ddpUneven(w []float64) bool {
+	if len(w) < 2 {
+		return false
+	}
+	lo, hi := w[0], w[0]
+	for _, x := range w {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return hi-lo >= ddpEvenTolerance
+}
+
+// ddpEvenTolerance is the spread below which shares count as equal. Shared
+// with the shim through PIPEDPEER_DDP_WEIGHTS: change one and change both.
+const ddpEvenTolerance = 0.02
+
+// ddpSharePercents renders shares for a person.
+func ddpSharePercents(w []float64) string {
+	parts := make([]string, len(w))
+	for i, x := range w {
+		parts[i] = fmt.Sprintf("rank %d %.0f%%", i, 100*x)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ddpWeightList renders the ring's shares for the shim.
+func ddpWeightList(w []float64) string {
+	parts := make([]string, len(w))
+	for i, x := range w {
+		parts[i] = strconv.FormatFloat(x, 'f', 6, 64)
+	}
+	return strings.Join(parts, ",")
+}
+
+// ddpNormaliseWeights makes the ring's shares sum to one.
+//
+// Placement normalises over everything it admitted, but the ring is then
+// truncated to --ddp N, and shares that sum to less than one would hand out
+// less than the whole dataset - every epoch would silently train on a
+// fraction of it. Anything unusable falls back to equal shares, which is what
+// the ring did before shares existed.
+func ddpNormaliseWeights(w []float64) []float64 {
+	var total float64
+	for _, x := range w {
+		if x <= 0 {
+			return nil
+		}
+		total += x
+	}
+	if total <= 0 {
+		return nil
+	}
+	out := make([]float64, len(w))
+	for i, x := range w {
+		out[i] = x / total
+	}
+	return out
 }
 
 // ddpSharesNode reports whether ring member i is on a machine that is also
@@ -2016,16 +2097,18 @@ var errRingNotWorthIt = errors.New("a single node is faster than any ring availa
 //
 // Peers are now measured and admitted only while admitting them helps.
 // The second return is each ring member's accelerator index on its node, so a
-// machine hosting two ranks pins a different device for each.
-func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeRecord, []int) {
+// machine hosting two ranks pins a different device for each. The third is
+// each member's measured share of a step, which the shim turns into a shard
+// and a batch size.
+func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeRecord, []int, []float64) {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
 	if err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	defer resp.Body.Close()
 	var all []registry.NodeRecord
 	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	byID := map[string]registry.NodeRecord{}
@@ -2053,15 +2136,27 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 	}
 	cands = ddpOneDeviceKind(cands, o.RequireGPU || o.PreferGPU)
 	if len(cands) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	// PIPEDPEER_DDP_EQUAL_BATCHES=1 gives every rank the same batch whatever
+	// placement measured. It exists so the two can be compared on one rig -
+	// "shares made this faster" is a claim that needs the other run to stand
+	// against - and as an escape hatch if weighting ever misbehaves.
+	proportional := os.Getenv("PIPEDPEER_DDP_EQUAL_BATCHES") != "1"
+
 	plan := ddpplace.Select(ctx, cands, ddpplace.Options{
 		Max:         o.Nodes,
 		Token:       authtoken.Current(),
 		ProbeMillis: 250,
+		// The shim sizes each rank's shard and batch by its share, so a
+		// slower device takes proportionally less and the ring stops running
+		// at the slowest rank's pace. Without it the admission rule has to
+		// exclude anything materially slower, because with equal batches it
+		// would set the pace for everyone.
+		ProportionalBatches: proportional,
 		// No working-set size is threaded through here yet, so a node too
 		// small for the model is still admitted and fails at run time rather
 		// than being declined. ddpplace supports the gate; the estimate lives
@@ -2084,6 +2179,7 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 
 	out := make([]registry.NodeRecord, 0, len(plan.Chosen))
 	slots := make([]int, 0, len(plan.Chosen))
+	weights := make([]float64, 0, len(plan.Chosen))
 	for _, c := range plan.Chosen {
 		n := byID[c.Candidate.NodeID]
 		if n.NodeID == "" {
@@ -2094,10 +2190,13 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 		}
 		out = append(out, n)
 		slots = append(slots, c.Slot)
+		if proportional {
+			weights = append(weights, c.Weight)
+		}
 	}
 	// The coordinator's pick is kept only if measurement agrees it belongs.
 	if len(out) == 0 && rank0.NodeID != "" {
-		return []registry.NodeRecord{rank0}, []int{0}
+		return []registry.NodeRecord{rank0}, []int{0}, []float64{1}
 	}
-	return out, slots
+	return out, slots, weights
 }

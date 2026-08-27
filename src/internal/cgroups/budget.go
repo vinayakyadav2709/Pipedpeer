@@ -93,9 +93,49 @@ func readBytes(path string) (int64, bool) {
 	return n, true
 }
 
+// usageOf is how much of a cgroup's allowance is genuinely spent.
+//
+// memory.current counts page cache, and reading a multi-GB closure fills it:
+// a container capped at 3 GiB reported 1.99 GiB used with 13 MB of that
+// anonymous - the rest was the nix store it had just read. The daemon then
+// advertised 1 GiB free, and placement declined a 2.3 GiB job it had ample
+// room for.
+//
+// Cache is not spent memory. The kernel reclaims it before it ever kills
+// anything, so a job that needs the space simply causes reclaim. Subtracting
+// the inactive file pages and reclaimable slab is the same accounting
+// /proc/meminfo's MemAvailable does; active file pages stay counted, which
+// keeps the estimate on the cautious side.
 func usageOf(dir string) int64 {
-	if n, ok := readBytes(filepath.Join(dir, "memory.current")); ok {
-		return n
+	cur, ok := readBytes(filepath.Join(dir, "memory.current"))
+	if !ok {
+		return 0
 	}
-	return 0
+	stat := readMemoryStat(filepath.Join(dir, "memory.stat"))
+	reclaimable := stat["inactive_file"] + stat["slab_reclaimable"]
+	if reclaimable >= cur {
+		// Nothing but cache. Reporting zero is right, and guards against a
+		// negative that would read as an enormous allowance.
+		return 0
+	}
+	return cur - reclaimable
+}
+
+// readMemoryStat parses the "key value" lines of a cgroup memory.stat.
+func readMemoryStat(path string) map[string]int64 {
+	out := map[string]int64{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		if n, err := strconv.ParseInt(f[1], 10, 64); err == nil {
+			out[f[0]] = n
+		}
+	}
+	return out
 }

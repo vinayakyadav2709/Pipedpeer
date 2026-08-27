@@ -65,6 +65,10 @@ loss_fn = nn.MSELoss()
 
 BATCH, EPOCHS = 2048, 3
 steps_per_epoch = n // BATCH
+if steps_per_epoch < 1:
+    raise SystemExit(
+        f"rank {rank} has {n} samples, fewer than one batch of {BATCH} — "
+        f"there is nothing for it to train on. Use fewer ranks.")
 print("training ...")
 t0 = time.monotonic()
 for epoch in range(EPOCHS):
@@ -75,7 +79,10 @@ for epoch in range(EPOCHS):
         loss = loss_fn(model(xb), yb)
         loss.backward()
         opt.step()
-        if step % (steps_per_epoch // 10) == 0:
+        # max(1, ...): with enough ranks a shard is under ten steps, and
+        # "every tenth step" then divides by zero. Reported at three ranks,
+        # where 20000 samples make nine steps.
+        if step % max(1, steps_per_epoch // 10) == 0:
             print(f"epoch {epoch} step {step:4d} loss {loss.item():.4f}")
 print(f"training done in {time.monotonic() - t0:.1f}s")
 print("final loss:", loss_fn(model(X[:1000]), y[:1000]).item())

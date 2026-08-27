@@ -175,6 +175,19 @@ type ddpSyncRequest struct {
 	// on whatever hardware the rank actually has - comparable by
 	// construction, and free, because the work is being done anyway.
 	StepMillis float64 `json:"step_ms,omitempty"`
+	// Samples is how many samples produced this gradient.
+	//
+	// With equal batches it is the same on every rank and changes nothing.
+	// With proportional batches it is the whole correctness argument: a rank
+	// training on twice the data computed its mean gradient over twice the
+	// samples, and averaging the per-rank means as equals would give the
+	// smaller shard twice the influence per sample it earned. The combined
+	// gradient is sum(n_i * g_i) / sum(n_i).
+	//
+	// Absent (0) from a rank running the equal-batch code, which the
+	// accumulator reads as a weight of 1 - reproducing the plain average
+	// exactly, so a mixed-version ring is wrong in no new way.
+	Samples int `json:"samples,omitempty"`
 }
 
 // ddpMode is how a request wants its payload handled.
@@ -318,7 +331,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			if len(scales) == 0 {
 				scales = []float64{req.Scale}
 			}
-			if addErr := e.acc.addSegmented(blob, scales); addErr != nil {
+			if addErr := e.acc.addSegmented(blob, scales, float64(req.Samples)); addErr != nil {
 				// Recorded rather than returned to this rank alone: the
 				// others are blocked on a result that is now never coming,
 				// and a timeout three minutes later would name nothing.

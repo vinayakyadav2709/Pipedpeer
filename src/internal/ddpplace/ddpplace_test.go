@@ -3,6 +3,7 @@ package ddpplace
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -303,11 +304,21 @@ func TestEqualBatchesRejectTheStragglers(t *testing.T) {
 	}
 }
 
-// TestProportionalBatchesKeepSlowNodes records the other half of the rule.
-// Once each rank's batch is sized by its speed, a slow rank takes a smaller
-// batch and does help - so the equal-batch rejection must not outlive the
-// constraint that justified it.
-func TestProportionalBatchesKeepSlowNodes(t *testing.T) {
+// TestProportionalBatchesChangeSharesNotMembership.
+//
+// This used to assert the opposite - that per-rank batch sizes let every node
+// into the ring, since a slow rank takes a smaller batch and "does help". The
+// arithmetic behind that is sound and the claim is still wrong, because it
+// prices compute and nothing else.
+//
+// Measured on a 16/8/2-core ring: letting the share model admit all three
+// built a ring that spent 47-59% of itself moving gradients and finished in
+// 36.4s, against 6.9s for the single machine the k*rate_k rule picks. Every
+// extra rank costs a gradient exchange per step, and placement runs before
+// the script does, so it cannot know what that costs.
+//
+// So shares decide how much each admitted rank takes, not who is admitted.
+func TestProportionalBatchesChangeSharesNotMembership(t *testing.T) {
 	scores := []float64{14.9e9, 7.8e9, 2.0e9, 1.2e9}
 	names := []string{"host16", "cpu8", "cpu2", "cpu1"}
 	var cands []Candidate
@@ -317,24 +328,41 @@ func TestProportionalBatchesKeepSlowNodes(t *testing.T) {
 		cands = append(cands, Candidate{NodeID: names[i], Host: h, Port: p, Cores: 16, MemBytes: 1 << 40})
 	}
 
-	plan := Select(context.Background(), cands, Options{ProbeMillis: 50, ProportionalBatches: true})
-	if len(plan.Chosen) != 4 {
-		t.Errorf("chose %d of 4 ranks; with per-rank batch sizes every node earns its "+
-			"share and none of them sets the pace: %v", len(plan.Chosen), chosenIDs(plan))
+	equal := Select(context.Background(), cands, Options{ProbeMillis: 50})
+	prop := Select(context.Background(), cands, Options{ProbeMillis: 50, ProportionalBatches: true})
+
+	if len(prop.Chosen) != len(equal.Chosen) {
+		t.Errorf("shares changed the ring from %v to %v; they are meant to change "+
+			"how much each admitted rank takes, not who is admitted - admitting "+
+			"more needs the per-rank sync cost, which placement cannot measure",
+			chosenIDs(equal), chosenIDs(prop))
 	}
+
 	// And the shares must reflect the measurements, or "proportional" is a
 	// word rather than a behaviour.
-	var fast, slow float64
-	for _, c := range plan.Chosen {
-		switch c.Candidate.NodeID {
-		case "host16":
-			fast = c.Weight
-		case "cpu1":
-			slow = c.Weight
+	var fastest, slowest float64
+	for _, c := range prop.Chosen {
+		if fastest == 0 || c.Weight > fastest {
+			fastest = c.Weight
+		}
+		if slowest == 0 || c.Weight < slowest {
+			slowest = c.Weight
 		}
 	}
-	if fast <= slow*4 {
-		t.Errorf("fastest weight %.4f is not far above the slowest %.4f, though they "+
-			"measure 12x apart", fast, slow)
+	if len(prop.Chosen) > 1 && fastest <= slowest*1.5 {
+		t.Errorf("fastest share %.4f is not meaningfully above the slowest %.4f, "+
+			"though the admitted nodes measure far apart", fastest, slowest)
+	}
+
+	// Equal batches must still divide a step evenly, or the control this is
+	// compared against is not a control.
+	if len(equal.Chosen) > 1 {
+		first := equal.Chosen[0].Weight
+		for _, c := range equal.Chosen[1:] {
+			if math.Abs(c.Weight-first) > 1e-9 {
+				t.Errorf("equal batches gave unequal shares %.4f and %.4f",
+					first, c.Weight)
+			}
+		}
 	}
 }
