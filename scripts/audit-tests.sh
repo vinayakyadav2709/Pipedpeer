@@ -209,6 +209,23 @@ case_ "dead env vars are refused" src/internal/nixgen/shim.go \
 	's = s.replace("_BW_TTL = 300.0", "_BW_TTL = 300.0\n_DEAD = \"PIPEDPEER_NEVER_READ_BY_ANYTHING\"", 1)' \
 	./internal/nixgen/ "TestEveryEnvVarTheShimNamesIsRead"
 
+# ---- found by the acceptance audit, 2026-08-28 -------------------------------
+# All three were checks that read the machine they ran on rather than the
+# situation they described, and all three had tests that skipped rather than
+# failed. A skip is not a pass, and these make sure it stays that way.
+
+case_ "setup finds nix off PATH" src/internal/setup/setup.go \
+	's = s.replace("func nixInstalled() bool {\n\t_, err := nixstore.SystemNix()\n\treturn err == nil\n}", "func nixInstalled() bool {\n\treturn binaryCheck(\"nix\")()\n}", 1)' \
+	./internal/setup/ "TestSetupFindsNixOffPath"
+
+case_ "the userns diagnosis names a fix" src/internal/userns/userns.go \
+	's = s.replace("func diagnose() string {", "func diagnose() string {\n\tif true {\n\t\treturn \"the kernel said no\"\n\t}", 1)' \
+	./internal/userns/ "TestDiagnosisNamesAFix"
+
+case_ "the missing-nix error names where it looked" src/internal/nixstore/nixstore.go \
+	's = s.replace("\treturn \"\", fmt.Errorf(\"nix not found on PATH or in %s\", strings.Join(dirs, \", \"))", "\t_ = dirs\n\treturn \"\", fmt.Errorf(\"nix not found\")", 1)' \
+	./internal/nixstore/ "TestMissingNixSaysWhereItLooked"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

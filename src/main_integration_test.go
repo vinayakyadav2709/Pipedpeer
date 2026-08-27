@@ -388,15 +388,31 @@ echo "hidden" > secret.txt
 `
 	dockerExec(t, ctx, labDir, setupScript)
 
-	// Read the daemon's auto-generated node ID
-	nodeIDOut := strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
+	// Read the daemon's auto-generated node ID.
+	//
+	// From wherever the daemon actually put it, not from a path spelled out
+	// here. This read was hardcoded to /root/.local/share/pipedpeer, and the
+	// lab image sets XDG_DATA_HOME=/var/lib/pipedpeer, so it found nothing and
+	// the test failed at "failed to read node identity from worker1" - which
+	// nobody saw, because the test is gated on PIPEDPEER_INTEGRATION and had
+	// not been run.
+	readNodeID := func() string {
+		return strings.TrimSpace(dockerExec(t, ctx, labDir,
+			"cat \"${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/node_identity.json\" 2>/dev/null "+
+				"| grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
+	}
+	nodeIDOut := readNodeID()
 	if nodeIDOut == "" {
 		// Daemon hasn't created identity yet — start it explicitly first
 		dockerExec(t, ctx, labDir, "/pipedpeer start --port 38080 && sleep 2")
-		nodeIDOut = strings.TrimSpace(dockerExec(t, ctx, labDir, "cat /root/.local/share/pipedpeer/node_identity.json 2>/dev/null | grep node_id | head -1 | tr -d ' \",' | cut -d: -f2"))
+		nodeIDOut = readNodeID()
 	}
 	if nodeIDOut == "" {
-		t.Fatalf("failed to read node identity from worker1")
+		where := strings.TrimSpace(dockerExec(t, ctx, labDir,
+			"echo \"XDG_DATA_HOME=${XDG_DATA_HOME:-unset} HOME=$HOME\"; "+
+				"find / -name node_identity.json -maxdepth 6 2>/dev/null | head -3"))
+		t.Fatalf("failed to read node identity from worker1; the daemon stores it "+
+			"under XDG_DATA_HOME, and in this container that is:\n%s", where)
 	}
 
 	// Run the compiled binary from inside worker1 — no --host means self
