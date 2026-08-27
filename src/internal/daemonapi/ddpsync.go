@@ -7,7 +7,9 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +81,9 @@ type ddpEntry struct {
 	// most is the one setting the pace for everybody.
 	syncEvery int
 
+	// expected is how many contributions this round waits for: the world size
+	// less any rank the ring has been told to continue without.
+	expected int
 	// partial is how many ranks actually contributed when a round completed
 	// short-handed; zero when everybody arrived.
 	partial int
@@ -104,13 +109,65 @@ type ddpBoard struct {
 	// thousands of identical lines. Measured 41 for a 90-step run before this
 	// was keyed properly.
 	measured map[string]time.Time // key: group -> when it was reported
+	// runs holds what belongs to a training run rather than to one sync
+	// round. An entry is one round, so anything kept there is forgotten
+	// between steps - which is how the ring's measurement came to be logged
+	// 41 times for a 90-step run.
+	runs map[string]*ddpRun // key: group
+}
+
+// expectedCount is how many ranks this round waits for. Falls back to the
+// world size for entries created before any drop was known.
+func (e *ddpEntry) expectedCount() int {
+	if e.expected > 0 && e.expected <= e.world {
+		return e.expected
+	}
+	return e.world
+}
+
+// dropCount is how many ranks a run has been told to continue without.
+// Caller holds the board lock.
+func (b *ddpBoard) dropCount(group string) int {
+	r := b.runs[group]
+	if r == nil {
+		return 0
+	}
+	return len(r.dropped)
+}
+
+// ddpRun is a training run's state across its sync rounds.
+type ddpRun struct {
+	// reports is what each rank last said about its own throughput, which is
+	// what the shares are refitted from.
+	reports map[int]rankReport
+	// weights is the share set currently in force.
+	weights []float64
+	// round counts syncs, so the refit happens on a cadence rather than on
+	// every step.
+	round int
+	// dropped names ranks the ring has been told to continue without.
+	dropped map[int]bool
+	// seen is when this run last synced, so it can be forgotten.
+	seen time.Time
 }
 
 func newDDPBoard() *ddpBoard {
 	return &ddpBoard{
 		entries:  make(map[string]*ddpEntry),
 		measured: make(map[string]time.Time),
+		runs:     make(map[string]*ddpRun),
 	}
+}
+
+// observe records what a rank reported. Caller holds the board lock.
+func (b *ddpBoard) observe(group string, rank int, rep rankReport) {
+	r := b.runs[group]
+	if r == nil {
+		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}}
+		b.runs[group] = r
+	}
+	r.reports[rank] = rep
+	r.seen = time.Now()
 }
 
 // sweep drops entries older than maxAge: a rank that died mid-run must not
@@ -129,6 +186,11 @@ func (b *ddpBoard) sweep(maxAge time.Duration) {
 	for group, when := range b.measured {
 		if time.Since(when) > maxAge {
 			delete(b.measured, group)
+		}
+	}
+	for group, r := range b.runs {
+		if time.Since(r.seen) > maxAge {
+			delete(b.runs, group)
 		}
 	}
 }
@@ -188,6 +250,11 @@ type ddpSyncRequest struct {
 	// accumulator reads as a weight of 1 - reproducing the plain average
 	// exactly, so a mixed-version ring is wrong in no new way.
 	Samples int `json:"samples,omitempty"`
+	// SyncMillis is what one gradient exchange has cost this rank on average.
+	// The daemon needs it to decide whether a rank pays for itself: every
+	// rank costs an exchange per step, and one contributing less compute than
+	// it adds in sync is making the run slower.
+	SyncMillis float64 `json:"sync_ms,omitempty"`
 }
 
 // ddpMode is how a request wants its payload handled.
@@ -283,6 +350,15 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "world size mismatch within group"})
 		return
 	}
+	// A rank the ring has been told to continue without is not a rank that is
+	// merely late. Counting it as expected would have every remaining step
+	// wait out the full partial timeout - 45 seconds each - for a gradient
+	// that is never coming, which would make dropping a freeloader far worse
+	// than keeping it.
+	e.expected = e.world - s.ddp.dropCount(req.Group)
+	if e.expected < 1 {
+		e.expected = 1
+	}
 	if req.SyncEvery > e.syncEvery {
 		e.syncEvery = req.SyncEvery
 	}
@@ -291,6 +367,11 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			e.stepMillis = map[int]float64{}
 		}
 		e.stepMillis[req.Rank] = req.StepMillis
+		s.ddp.observe(req.Group, req.Rank, rankReport{
+			StepMillis: req.StepMillis,
+			SyncMillis: req.SyncMillis,
+			Samples:    req.Samples,
+		})
 		if _, said := s.ddp.measured[req.Group]; !said && len(e.stepMillis) >= e.world {
 			s.ddp.measured[req.Group] = time.Now()
 			// Said once, whatever the verdict. What each device is worth for
@@ -340,7 +421,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				e.seen[req.Rank] = true
 			}
 		}
-		complete = e.err != nil || len(e.seen) == e.world
+		complete = e.err != nil || len(e.seen) >= e.expectedCount()
 		if complete && e.err == nil && e.result == nil {
 			e.result, e.resultScales, e.err = e.acc.meanSegmented()
 			if len(e.resultScales) > 0 {
@@ -350,7 +431,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		e.blobs[req.Rank] = blob
-		complete = len(e.blobs) == e.world
+		complete = len(e.blobs) >= e.expectedCount()
 	}
 	if complete {
 		select {
@@ -400,7 +481,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			ranks = e.partial
 		}
 		e.fetched[req.Rank] = true
-		if len(e.fetched) == e.world || rerr != nil {
+		rebalanceJSON := s.ddp.rebalanceFor(req.Group, e.world)
+		if len(e.fetched) >= e.expectedCount() || rerr != nil {
 			delete(s.ddp.entries, key)
 		}
 		s.ddp.mu.Unlock()
@@ -410,8 +492,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		body := []byte(fmt.Sprintf(
 			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"scales\": %s, "+
-				"\"same_work\": %t, \"ranks\": %d}\n",
-			agreedEvery, rscale, rscales, sameWork, ranks))
+				"\"same_work\": %t, \"ranks\": %d%s}\n",
+			agreedEvery, rscale, rscales, sameWork, ranks, rebalanceJSON))
 		body = putFrame(body, result)
 		w.Header().Set("Content-Type", DDPReduceContentType)
 		w.WriteHeader(http.StatusOK)
@@ -423,7 +505,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		ordered[rank] = b
 	}
 	e.fetched[req.Rank] = true
-	if len(e.fetched) == e.world {
+	if len(e.fetched) >= e.expectedCount() {
 		delete(s.ddp.entries, key)
 	}
 	s.ddp.mu.Unlock()
@@ -570,4 +652,56 @@ func rankTimes(steps map[int]float64) string {
 		parts = append(parts, fmt.Sprintf("rank %d %.0f ms", r, steps[r]))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// rebalanceEvery is how many syncs pass between refits.
+//
+// Often enough that a machine which slows down mid-run is noticed within
+// seconds, rare enough that the ranks are not re-slicing their data
+// constantly - a reshare costs an epoch boundary, which is the only place it
+// can safely happen.
+var rebalanceEvery = envInt("PIPEDPEER_DDP_REBALANCE_EVERY", 20)
+
+// rebalanceFor decides whether to tell the ring something, and returns the
+// JSON fragment to append to the reply (empty when there is nothing to say).
+//
+// Caller holds the board lock.
+func (b *ddpBoard) rebalanceFor(group string, world int) string {
+	r := b.runs[group]
+	if r == nil {
+		return ""
+	}
+	r.round++
+	if rebalanceEvery <= 0 || r.round%rebalanceEvery != 0 {
+		return ""
+	}
+
+	plan := planRebalance(r.reports, r.weights, world)
+	if plan.Drop >= 0 && !r.dropped[plan.Drop] {
+		r.dropped[plan.Drop] = true
+		log.Warn().Str("group", group).Int("rank", plan.Drop).Msg(plan.Why)
+		return fmt.Sprintf(`, "drop": %d, "why": %q`, plan.Drop, plan.Why)
+	}
+	if plan.Weights == nil {
+		return ""
+	}
+	r.weights = plan.Weights
+	log.Info().Str("group", group).Str("shares", sharePercents(plan.Weights)).
+		Msg("ring reshared from measured throughput")
+	parts := make([]string, len(plan.Weights))
+	for i, w := range plan.Weights {
+		parts[i] = strconv.FormatFloat(w, 'f', 6, 64)
+	}
+	return fmt.Sprintf(`, "weights": [%s], "why": %q`,
+		strings.Join(parts, ","), plan.Why)
+}
+
+// envInt reads a positive integer from the environment, or returns def.
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
 }
