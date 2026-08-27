@@ -259,6 +259,22 @@ case_ "a node speaks only for itself" src/internal/rendezvous/rendezvous.go \
 	's = s.replace("\t\tCandidates: mine.candidates,", "\t\tCandidates: append(mine.candidates, req.Candidates...),", 1)' \
 	./internal/rendezvous/ "TestConnectUsesRegisteredCandidatesNotClaimedOnes"
 
+case_ "a reply must answer this attempt" src/internal/direct/direct.go \
+	's = s.replace("\t\tch := p.waiting[pr.nonce]", "\t\tvar ch chan netip.AddrPort\n\t\tfor _, c := range p.waiting {\n\t\t\tch = c\n\t\t}", 1)' \
+	./internal/direct/ "TestSomebodyElsesReplyIsIgnored"
+
+case_ "candidates are tried best first" src/internal/direct/direct.go \
+	's = s.replace("func sortByRank(cs []Candidate) {", "func sortByRank(cs []Candidate) {\n\tif true {\n\t\treturn\n\t}", 1)' \
+	./internal/direct/ "TestCandidatesAreTriedBestFirst"
+
+case_ "the symmetric side hands back the socket that was hit" src/internal/direct/birthday.go \
+	's = s.replace("\t\t\t\tcase found <- hit{conn: c, from: from}:", "\t\t\t\tcase found <- hit{conn: nil, from: from}:", 1)' \
+	./internal/direct/ "TestTheBirthdayPunchConnectsThroughASymmetricNAT"
+
+case_ "a probe is told apart from QUIC" src/internal/direct/direct.go \
+	's = s.replace("\tif len(b) < 21 || [4]byte(b[0:4]) != probeMagic {", "\tif len(b) < 21 {", 1)' \
+	./internal/direct/ "TestAProbeIsNotMistakenForQUIC"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
