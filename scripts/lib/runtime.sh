@@ -29,9 +29,11 @@ pp_runtime_works() {
 	[[ "$1" != podman ]] || pp_podman_compose_works
 }
 
+# PP_RUNTIME_ORDER overrides the preference, for callers that know one
+# runtime handles their case better than the other.
 pp_pick_runtime() {
 	local candidate
-	for candidate in podman docker; do
+	for candidate in ${PP_RUNTIME_ORDER:-podman docker}; do
 		command -v "$candidate" >/dev/null 2>&1 || continue
 		if pp_runtime_works "$candidate"; then
 			PP_RUNTIME="$candidate"
@@ -41,7 +43,7 @@ pp_pick_runtime() {
 	# Nothing usable. Name what was tried: "no container runtime found" on a
 	# machine with both installed sends you looking in the wrong place.
 	local installed=()
-	for candidate in podman docker; do
+	for candidate in ${PP_RUNTIME_ORDER:-podman docker}; do
 		command -v "$candidate" >/dev/null 2>&1 && installed+=("$candidate")
 	done
 	if ((${#installed[@]})); then
