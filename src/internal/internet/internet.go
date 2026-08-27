@@ -39,6 +39,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -365,9 +366,9 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 	_ = rendezvous.RequestPunch(m.endpoint.Conn(), m.cfg.Rendezvous,
 		m.cfg.Cluster, m.node(), node, hex.EncodeToString(nonce))
 
-	at, err := m.endpoint.Prober().Race(ctx, cands, 250*time.Millisecond)
+	at, err := m.raceOrCollide(ctx, node, cands)
 	if err != nil {
-		return &direct.Unreachable{Peer: node, Reason: direct.ReasonTimeout, Tried: len(cands)}
+		return err
 	}
 
 	conn, err := m.endpoint.Dial(ctx, node, at)
@@ -383,6 +384,108 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 		}
 	}
 	return m.linkUp(ctx, node, conn, kind)
+}
+
+// raceOrCollide finds an address that answers, by the ordinary punch or, when
+// that fails, by collision.
+//
+// The ordinary punch handles every pair where at least one router keeps a
+// predictable external port. The collision is for the pair where neither
+// does, or where one side allocates a fresh port per destination and the
+// other accepts packets only from an address it has already written to -
+// which is this project's own two machines, and where a plain punch moved 400
+// packets each way and received nothing.
+//
+// PIPEDPEER_FORCE_BIRTHDAY=1 skips the ordinary punch. That exists to
+// exercise the collision on hardware where the plain punch happens to
+// succeed: otherwise the path can only ever be tested against a simulation,
+// and a mechanism that has never run in the field is one nobody should rely
+// on.
+func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct.Candidate) (netip.AddrPort, error) {
+	if os.Getenv("PIPEDPEER_FORCE_BIRTHDAY") != "1" {
+		at, err := m.endpoint.Prober().Race(ctx, cands, 250*time.Millisecond)
+		if err == nil {
+			return at, nil
+		}
+	} else {
+		m.cfg.Log("PIPEDPEER_FORCE_BIRTHDAY=1: skipping the ordinary punch to %s", short(node))
+	}
+
+	// Nothing answered where it was expected. If the peer has a routable
+	// address at all, its router may simply be allocating unpredictably - so
+	// stop aiming and collide instead.
+	var ip netip.Addr
+	var known netip.AddrPort
+	for _, c := range cands {
+		if c.Addr.Addr().IsPrivate() || c.Addr.Addr().IsLoopback() {
+			continue
+		}
+		ip = c.Addr.Addr()
+		known = c.Addr
+		break
+	}
+	if !ip.IsValid() {
+		return netip.AddrPort{}, &direct.Unreachable{
+			Peer: node, Reason: direct.ReasonTimeout, Tried: len(cands),
+		}
+	}
+
+	m.cfg.Log("no answer from %s where expected; colliding across its port space", short(node))
+
+	// Both halves at once, so neither side has to know which kind of NAT it
+	// is behind. The side that cannot be aimed at needs many mappings open
+	// for the other's probes to hit; the side that can be aimed at needs to
+	// spray. Running both means whichever role this machine turns out to
+	// have, it is already playing it.
+	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+
+	type found struct {
+		at   netip.AddrPort
+		conn *net.UDPConn // set when OUR socket was hit
+	}
+	hits := make(chan found, 2)
+
+	go func() {
+		at, err := m.endpoint.Prober().SprayToward(cctx, ip, known, 10*time.Second)
+		if err == nil {
+			hits <- found{at: at}
+		}
+	}()
+	go func() {
+		if !known.IsValid() {
+			return
+		}
+		conn, from, err := direct.OpenMany(cctx, known, m.node(), 10*time.Second)
+		if err == nil {
+			hits <- found{at: from, conn: conn}
+		}
+	}()
+
+	select {
+	case h := <-hits:
+		if h.conn != nil {
+			// Their probe landed on one of our sockets. That socket's
+			// mapping is the reachable one, so it has to carry the
+			// connection - and they will dial it, not the shared port.
+			if err := m.endpoint.Adopt(ctx, h.conn); err != nil {
+				_ = h.conn.Close()
+				return netip.AddrPort{}, err
+			}
+			m.cfg.Log("collision: %s reached us on a second socket; listening there too", short(node))
+			// Their dial is what completes this; nothing to connect to from
+			// here, so report it as not-yet rather than as failure.
+			return netip.AddrPort{}, &direct.Unreachable{
+				Peer: node, Reason: direct.ReasonTimeout, Tried: len(cands),
+			}
+		}
+		m.cfg.Log("collision found %s at %s", short(node), h.at)
+		return h.at, nil
+	case <-cctx.Done():
+		return netip.AddrPort{}, &direct.Unreachable{
+			Peer: node, Reason: direct.ReasonBothSymmetric, Tried: len(cands),
+		}
+	}
 }
 
 // linkUp gives a connected peer a local port and tells the daemon about it.
@@ -539,13 +642,19 @@ func (m *Manager) Peers() map[string]string {
 	return out
 }
 
-// Paths reports how each peer is reached, for `pipedpeer nodes`.
+// Paths reports how each peer is reached, keyed by the local address it is
+// reachable at.
+//
+// Keyed by address rather than by node, because the two halves of the system
+// name a peer differently: this manager knows it by the fingerprint of its
+// key, and the node store knows it by the UUID its daemon reports. The
+// forwarder address is the one thing both have, so it is what joins them.
 func (m *Manager) Paths() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make(map[string]string, len(m.peers))
-	for node, link := range m.peers {
-		out[node] = link.path
+	for _, link := range m.peers {
+		out[link.addr] = link.path
 	}
 	return out
 }

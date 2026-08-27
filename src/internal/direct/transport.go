@@ -117,7 +117,9 @@ type Endpoint struct {
 	local func(context.Context) (net.Conn, error)
 	log   func(string, ...any)
 
-	other chan otherPacket
+	other   chan otherPacket
+	tlsConf *tls.Config
+	adopted []*quic.Transport
 
 	mu    sync.Mutex
 	peers map[string]*quic.Conn
@@ -195,6 +197,7 @@ func Listen(cfg Config) (*Endpoint, error) {
 		// A peer's certificate proves nothing here; the signed hello does.
 		ClientAuth: tls.NoClientCert,
 	}
+	e.tlsConf = tlsConf
 	ln, err := e.transport.Listen(tlsConf, quicConfig())
 	if err != nil {
 		conn.Close()
@@ -226,6 +229,42 @@ func LocalDialer(addr string) func(context.Context) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, "tcp", addr)
 	}
+}
+
+// Adopt makes a socket found by collision carry connections too.
+//
+// The collision leaves the working mapping on one of the many sockets opened
+// to create it, not on the shared one - that is the whole mechanism, since a
+// single socket has a single mapping and one port in sixty thousand is not
+// worth spraying at. The peer that found us will dial the address belonging
+// to THAT socket, so unless something is listening there the collision
+// achieves nothing.
+//
+// The prober is shared, so probes arriving on an adopted socket are answered
+// exactly as on the main one.
+func (e *Endpoint) Adopt(ctx context.Context, conn *net.UDPConn) error {
+	tr := &quic.Transport{Conn: &sharedConn{conn: conn, prober: e.prober, other: e.other}}
+	ln, err := tr.Listen(e.tlsConf, quicConfig())
+	if err != nil {
+		_ = tr.Close()
+		return fmt.Errorf("listening on the socket the collision found: %w", err)
+	}
+	e.mu.Lock()
+	e.adopted = append(e.adopted, tr)
+	e.mu.Unlock()
+
+	go func() {
+		defer tr.Close()
+		defer ln.Close()
+		for {
+			c, err := ln.Accept(ctx)
+			if err != nil {
+				return
+			}
+			go e.accept(ctx, c)
+		}
+	}()
+	return nil
 }
 
 // Prober exposes the punching machinery to the manager that drives it.
@@ -451,6 +490,13 @@ func (e *Endpoint) Close() error {
 	}
 	if e.transport != nil {
 		_ = e.transport.Close()
+	}
+	e.mu.Lock()
+	adopted := e.adopted
+	e.adopted = nil
+	e.mu.Unlock()
+	for _, tr := range adopted {
+		_ = tr.Close()
 	}
 	return e.conn.Close()
 }
