@@ -149,3 +149,122 @@ else:
 print("WTINY-OK")
 `, "WTINY-OK")
 }
+
+// TestTheBatchSizeIsActuallyObserved.
+//
+// The sample count behind each gradient was captured by patching
+// nn.Module.forward, which intercepts nothing: every real model defines its
+// own forward, and Python resolves the subclass's first. Measured — a patched
+// Module.forward saw not one call for an ordinary model.
+//
+// The consequence was quiet. Samples arrived as zero, so the daemon's
+// weighted average fell back to treating every rank as equal, which is wrong
+// as soon as batches are proportional, and the mid-run refit had no rates to
+// work with and never fired. Nothing failed; the loss just came out of a
+// slightly different arithmetic than the one intended.
+//
+// A global forward pre-hook fires for every module, subclass or not.
+func TestTheBatchSizeIsActuallyObserved(t *testing.T) {
+	runShimPython(t, "batchhook", `
+import torch
+import torch.nn as nn
+
+seen = []
+
+def pre(module, args):
+    for a in args:
+        if hasattr(a, "shape") and getattr(a, "ndim", 0) >= 1:
+            seen.append(int(a.shape[0]))
+            return
+
+torch.nn.modules.module.register_module_forward_pre_hook(pre)
+
+class MLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(4, 4), nn.ReLU(), nn.Linear(4, 1))
+    def forward(self, x):
+        return self.net(x)
+
+MLP()(torch.randn(7, 4))
+assert seen, (
+    "the global pre-hook saw no forward call for a model that defines its own "
+    "forward - which is every real model")
+assert seen[0] == 7, "the batch was recorded as %r, want 7" % (seen[0],)
+
+# And the mechanism it replaced does not work, which is why this exists.
+orig = nn.Module.forward
+patched_saw = []
+def patched(self, *a, **k):
+    patched_saw.append(1)
+    return orig(self, *a, **k)
+nn.Module.forward = patched
+MLP()(torch.randn(3, 4))
+nn.Module.forward = orig
+assert not patched_saw, (
+    "patching Module.forward now intercepts subclasses; if that is true the "
+    "pre-hook is no longer the only way, but the comment explaining it is wrong")
+print("BATCHHOOK-OK")
+`, "BATCHHOOK-OK")
+}
+
+// TestTheReportedStepTimeTracksRecentSteps.
+//
+// The figure the daemon refits shares from was a cumulative mean over the
+// whole run. A cumulative mean moves toward a new value at (N-k)/N, so a rank
+// throttled at step 200 of 400 still reports half its old speed — and one
+// that RECOVERS waits just as long to be given work back, which defeats the
+// point of refitting at all. The pool's rate model has used a sliding window
+// since it was written.
+func TestTheReportedStepTimeTracksRecentSteps(t *testing.T) {
+	runShimPython(t, "recentstep", `
+import sitecustomize as shim
+
+WINDOW = 20
+recent = []
+total, count = 0.0, 0
+
+def step(seconds):
+    global total, count
+    total += seconds
+    count += 1
+    shim._push_window(recent, seconds, WINDOW)
+
+for _ in range(200):
+    step(0.010)                      # 10 ms a step
+assert abs(shim._recent_mean_ms(recent, total, count) - 10) < 0.5
+
+for _ in range(WINDOW):
+    step(0.100)                      # throttled: ten times slower
+
+reported = shim._recent_mean_ms(recent, total, count)
+cumulative = 1000.0 * total / count
+
+assert abs(reported - 100) < 1, (
+    "after a full window of slow steps the reported time is %.1f ms, not the "
+    "100 ms this rank is actually taking" % reported)
+assert cumulative < 30, (
+    "the cumulative mean should still be dominated by the fast steps (%.1f)"
+    % cumulative)
+assert reported > cumulative * 3, (
+    "reported %.1f ms against a cumulative %.1f ms - if these are close, the "
+    "figure is not tracking recent steps and a throttled machine keeps its "
+    "share" % (reported, cumulative))
+
+# And it recovers just as fast, which is the half a cumulative mean never does.
+for _ in range(WINDOW):
+    step(0.010)
+assert abs(shim._recent_mean_ms(recent, total, count) - 10) < 1, (
+    "a machine that recovered still reports %.1f ms"
+    % shim._recent_mean_ms(recent, total, count))
+
+# The window is bounded, or a long run keeps every step it ever took.
+assert len(recent) == WINDOW, len(recent)
+
+# With nothing recent, the cumulative figure is used rather than zero, which
+# would read as an infinitely fast rank.
+assert abs(shim._recent_mean_ms([], 2.0, 100) - 20) < 1e-9
+assert shim._recent_mean_ms([], 0.0, 0) == 0.0
+print("RECENTSTEP-OK")
+`, "RECENTSTEP-OK")
+}

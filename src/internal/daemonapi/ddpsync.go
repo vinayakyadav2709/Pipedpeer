@@ -379,6 +379,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			// printing it only when something is wrong would leave a balanced
 			// ring looking like one nobody measured.
 			log.Info().Str("group", req.Group).Str("ranks", rankTimes(e.stepMillis)).
+				Str("samples", rankSamples(s.ddp.runs[req.Group])).
 				Msg("ring measured: time for one step, on each rank's own hardware")
 			if msg, ok := pacedBy(e.stepMillis, e.world); ok {
 				log.Warn().Str("group", req.Group).Msg(msg)
@@ -639,6 +640,28 @@ func pacedBy(steps map[int]float64, world int) (string, bool) {
 // Ranks on identical hardware vary by a few percent from load alone; a factor
 // of two is a different device, or a machine doing something else.
 const pacedRatio = 2.0
+
+// rankSamples renders how many samples each rank's step covered.
+//
+// Reported because its absence hid a real fault: the sample count arrived as
+// zero for every rank, which made the weighted average fall back to treating
+// them as equals and left the refit with no rates. Nothing failed - the
+// number was simply never looked at.
+func rankSamples(r *ddpRun) string {
+	if r == nil || len(r.reports) == 0 {
+		return "none reported"
+	}
+	ranks := make([]int, 0, len(r.reports))
+	for rank := range r.reports {
+		ranks = append(ranks, rank)
+	}
+	sort.Ints(ranks)
+	parts := make([]string, 0, len(ranks))
+	for _, rank := range ranks {
+		parts = append(parts, fmt.Sprintf("rank %d %d", rank, r.reports[rank].Samples))
+	}
+	return strings.Join(parts, ", ")
+}
 
 // rankTimes renders the ring's measured step times in rank order.
 func rankTimes(steps map[int]float64) string {
