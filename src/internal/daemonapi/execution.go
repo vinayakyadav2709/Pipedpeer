@@ -9,6 +9,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"github.com/pipedpeer/pipedpeer/internal/userns"
 	"github.com/rs/zerolog/log"
@@ -393,19 +394,15 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 // entries that escape it, and records a stamp per extracted file so results
 // can later be limited to what the job actually changed.
 func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]FileStamp) error {
-	// Sniff rather than require: workspaces are gzipped now, but a submitter
-	// on an older build sends them plain, and a cluster is rarely upgraded
-	// all at once. Peeking two bytes lets either land on either side.
-	br := bufio.NewReader(src)
-	var in io.Reader = br
-	if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
-		gz, err := gzip.NewReader(br)
-		if err != nil {
-			return err
-		}
-		defer gz.Close()
-		in = gz
+	// Sniff rather than require: workspaces are zstd now, were gzip before,
+	// and a submitter on an older build still sends them plain. A cluster is
+	// rarely upgraded all at once and never in one direction, so reading all
+	// three removes the flag day.
+	in, closeIn, err := tarcodec.Reader(src)
+	if err != nil {
+		return err
 	}
+	defer closeIn()
 	tr := tar.NewReader(in)
 	for {
 		hdr, err := tr.Next()
@@ -920,10 +917,20 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 
 	// Results carry whatever the job produced - model checkpoints, CSVs,
 	// logs - and travel back over the same link the closure came in on.
-	w.Header().Set("Content-Encoding", "gzip")
-	gzw := gzip.NewWriter(w)
-	defer gzw.Close()
-	if err := writeResultsTar(gzw, job); err != nil {
+	//
+	// zstd rather than gzip: several times faster to write at a better ratio,
+	// which matters here because the machine doing the compressing is the one
+	// the user is waiting on. Content-Encoding says zstd, and the client
+	// sniffs anyway, so an older client reading this sees an encoding it does
+	// not know and falls through to the magic bytes.
+	w.Header().Set("Content-Encoding", "zstd")
+	zw, err := tarcodec.Writer(w)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "results tar for %s: %v\n", jobID, err)
+		return
+	}
+	defer zw.Close()
+	if err := writeResultsTar(zw, job); err != nil {
 		// Headers are already out, so the client sees a truncated archive and
 		// reports the read error. Log for the node operator.
 		fmt.Fprintf(os.Stderr, "results tar for %s failed: %v\n", jobID, err)
