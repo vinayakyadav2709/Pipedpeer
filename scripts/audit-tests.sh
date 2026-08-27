@@ -275,6 +275,18 @@ case_ "a probe is told apart from QUIC" src/internal/direct/direct.go \
 	's = s.replace("\tif len(b) < 21 || [4]byte(b[0:4]) != probeMagic {", "\tif len(b) < 21 {", 1)' \
 	./internal/direct/ "TestAProbeIsNotMistakenForQUIC"
 
+case_ "the wrong machine cannot win the race" src/internal/direct/transport.go \
+	's = s.replace("\tif got != node || theirs.Cluster != e.cluster {", "\tif false {", 1)' \
+	./internal/direct/ "TestTheWrongMachineCannotWinTheRace|TestAPeerFromAnotherClusterIsRefused"
+
+case_ "the splice waits for the response" src/internal/direct/transport.go \
+	's = s.replace("\t<-done\n\t<-done\n}", "\t<-done\n}", 1)' \
+	./internal/direct/ "TestOneSocketCarriesBothProbesAndQUIC"
+
+case_ "one socket carries probes and QUIC" src/internal/direct/sharedconn.go \
+	's = s.replace("\t\tif s.prober != nil && s.prober.Deliver(b[:n], addr) {\n\t\t\tcontinue\n\t\t}\n", "", 1)' \
+	./internal/direct/ "TestOneSocketCarriesBothProbesAndQUIC"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
