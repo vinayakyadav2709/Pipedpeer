@@ -862,16 +862,6 @@ func ddpPickMasterPort(host string, base, span int) int {
 	return base
 }
 
-// ddpSlots is how many ranks a node can host at once.
-//
-// One per accelerator: a two-GPU machine given one rank trains on one GPU and
-// leaves the other idle for the whole run. On a CPU node it stays at one -
-// two ranks there would divide the same cores between them and pay the
-// gradient sync on top, which is slower than one rank using all of them.
-//
-// PIPEDPEER_DDP_RANKS_PER_NODE overrides it. That exists to exercise the
-// mechanism on hardware with a single GPU, where the multi-accelerator case
-// cannot otherwise be run at all; it is not a tuning knob.
 // ddpSharesNode reports whether ring member i is on a machine that is also
 // hosting another rank.
 func ddpSharesNode(ring []registry.NodeRecord, i int) bool {
@@ -883,6 +873,16 @@ func ddpSharesNode(ring []registry.NodeRecord, i int) bool {
 	return false
 }
 
+// ddpSlots is how many ranks a node can host at once.
+//
+// One per accelerator: a two-GPU machine given one rank trains on one GPU and
+// leaves the other idle for the whole run. On a CPU node it stays at one -
+// two ranks there would divide the same cores between them and pay the
+// gradient sync on top, which is slower than one rank using all of them.
+//
+// PIPEDPEER_DDP_RANKS_PER_NODE overrides it. That exists to exercise the
+// mechanism on hardware with a single GPU, where the multi-accelerator case
+// cannot otherwise be run at all; it is not a tuning knob.
 func ddpSlots(n registry.NodeRecord) int {
 	if v := os.Getenv("PIPEDPEER_DDP_RANKS_PER_NODE"); v != "" {
 		if k, err := strconv.Atoi(v); err == nil && k > 0 {
@@ -905,10 +905,15 @@ func ddpHasGPU(n registry.NodeRecord) bool {
 	return n.Load.GPUModel != "" || len(n.Load.GPUs) > 0
 }
 
-// ddpEligibleCount returns how many healthy nodes could host a DDP rank.
+// ddpEligibleCount returns how many DDP ranks this cluster could host.
 // GPU nodes count when they fit the VRAM requirement; CPU nodes count as a
 // fallback when they fit the job's memory (plan C1: GPU preferred, CPU only
 // when it fits). requireGPU (--gpu force) hard-excludes CPU nodes.
+//
+// Ranks, not nodes. This gate runs before placement and gives up on the whole
+// idea when it sees fewer than two, so counting nodes made a single machine
+// with two accelerators ineligible for the ring it is perfectly able to host -
+// and the multi-rank placement below it could never be reached.
 func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64) int {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
 	if err != nil {
@@ -929,7 +934,7 @@ func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredM
 		cpuOK := !requireGPU &&
 			(requiredMem <= 0 || n.Load.AvailableMemBytes >= requiredMem)
 		if gpuOK || cpuOK {
-			count++
+			count += ddpSlots(n)
 		}
 	}
 	return count
