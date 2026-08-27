@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -124,8 +125,15 @@ func diagnose() string {
 		"container/seccomp policy."
 }
 
+// sysctlRoot is "/" except under test. The diagnosis is the whole reason this
+// package exists, and it is produced only on a machine that refuses namespaces
+// - so on every machine we develop on, the test for it skipped. A test that
+// cannot run is not a test, and the AppArmor branch is the one that matters
+// most and is hardest to reach: it needs Ubuntu 24.04+.
+var sysctlRoot = "/"
+
 func sysctl(path string) string {
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(filepath.Join(sysctlRoot, path))
 	if err != nil {
 		return ""
 	}
