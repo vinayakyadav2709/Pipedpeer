@@ -60,16 +60,40 @@ func testKey(t *testing.T) identity.KeyPair {
 }
 
 // startRelay brings up a relay on a loopback port.
-func startRelay(t *testing.T) (addr string, stop func()) {
+func startRelay(t *testing.T) (addr string, srv *Server, stop func()) {
 	t.Helper()
 	ln, err := Listen("127.0.0.1:0", testCert(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := NewServer()
+	srv = NewServer()
 	go func() { _ = srv.Serve(ctx, ln) }()
-	return ln.Addr().String(), func() { cancel(); ln.Close() }
+	return ln.Addr().String(), srv, func() { cancel(); ln.Close() }
+}
+
+// awaitPeer waits until the relay has a peer registered under fp.
+//
+// Dial returning is not the same as being addressable: the relay registers a
+// peer only after it has accepted that peer's first stream and read the hello
+// off it, which happens on the server's own goroutine. Opening a stream to a
+// peer that has just dialled is therefore a race, and under a loaded machine
+// it loses - "peer %q is not connected to this relay", from a peer that was
+// connecting perfectly well. Callers in the daemon retry on a poll; a test
+// has to wait for the state it is about to depend on.
+func awaitPeer(t *testing.T, srv *Server, cluster, fp string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, p := range srv.Peers(cluster) {
+			if p == fp {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("relay never registered peer %s in cluster %s; it knows %v",
+		fp, cluster, srv.Peers(cluster))
 }
 
 // TestHTTPSurvivesTheRelayUnchanged is the property that makes this worth
@@ -77,7 +101,7 @@ func startRelay(t *testing.T) (addr string, stop func()) {
 // sync, results - is HTTP, and none of it should have to know it is being
 // relayed.
 func TestHTTPSurvivesTheRelayUnchanged(t *testing.T) {
-	addr, stop := startRelay(t)
+	addr, relaySrv, stop := startRelay(t)
 	defer stop()
 
 	// The service the far peer is fronting.
@@ -115,6 +139,8 @@ func TestHTTPSurvivesTheRelayUnchanged(t *testing.T) {
 	}
 	defer client.Close()
 
+	awaitPeer(t, relaySrv, "c1", workerKey.Fingerprint())
+
 	// An ordinary HTTP client, over a stream the relay carries.
 	httpc := &http.Client{
 		Transport: &http.Transport{
@@ -146,7 +172,7 @@ func TestHTTPSurvivesTheRelayUnchanged(t *testing.T) {
 // connected should be told so, not left waiting for a stream that will never
 // carry anything.
 func TestUnknownPeerIsRefusedNotHung(t *testing.T) {
-	addr, stop := startRelay(t)
+	addr, _, stop := startRelay(t)
 	defer stop()
 
 	submitterKey := testKey(t)
@@ -182,7 +208,7 @@ func TestUnknownPeerIsRefusedNotHung(t *testing.T) {
 // token, so crossing it would let one user's submitter address another user's
 // machines through a relay they happen to share.
 func TestClustersCannotReachEachOther(t *testing.T) {
-	addr, stop := startRelay(t)
+	addr, relaySrv, stop := startRelay(t)
 	defer stop()
 
 	workerKey, submitterKey := testKey(t), testKey(t)
@@ -202,6 +228,11 @@ func TestClustersCannotReachEachOther(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer attacker.Close()
+
+	// The victim has to be registered before the attempt, or a refusal proves
+	// only that it had not finished connecting - which is the wrong reason to
+	// pass a cluster-isolation test.
+	awaitPeer(t, relaySrv, "theirs", workerKey.Fingerprint())
 
 	if _, err := attacker.Open(ctx, workerKey.Fingerprint()); err == nil {
 		t.Error("a peer in one cluster opened a stream to a peer in another")
@@ -240,7 +271,7 @@ func TestReconnectDoesNotUnregisterTheLiveConnection(t *testing.T) {
 // corrupts the request line and surfaces as "malformed HTTP response", which
 // points nowhere near the cause.
 func TestRawBytesSurviveTheRelay(t *testing.T) {
-	addr, stop := startRelay(t)
+	addr, relaySrv, stop := startRelay(t)
 	defer stop()
 
 	bl, err := net.Listen("tcp", "127.0.0.1:0")
@@ -276,6 +307,8 @@ func TestRawBytesSurviveTheRelay(t *testing.T) {
 	}
 	defer sub.Close()
 
+	awaitPeer(t, relaySrv, "c1", workerKey.Fingerprint())
+
 	st, err := sub.Open(ctx, workerKey.Fingerprint())
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -303,7 +336,7 @@ func TestRawBytesSurviveTheRelay(t *testing.T) {
 // impostor. The address is therefore the fingerprint of the key the peer signs
 // with, so taking it requires the private half.
 func TestIdentityCannotBeClaimedWithoutTheKey(t *testing.T) {
-	addr, stop := startRelay(t)
+	addr, relaySrv, stop := startRelay(t)
 	defer stop()
 
 	victimKey := testKey(t)
@@ -331,6 +364,11 @@ func TestIdentityCannotBeClaimedWithoutTheKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sub.Close()
+
+	// The impostor has to be connected for the claim to have been possible;
+	// otherwise the relay refuses because nobody is there, and the test would
+	// pass on an empty relay.
+	awaitPeer(t, relaySrv, "c1", impostorKey.Fingerprint())
 
 	if _, err := sub.Open(ctx, victimKey.Fingerprint()); err == nil {
 		t.Error("a stream to the victim's address was opened while only an impostor " +
