@@ -17,16 +17,18 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cli="${PIPEDPEER:-$repo_root/bin/pipedpeer}"
 port="${PIPEDPEER_PORT:-38080}"
 
-[[ -x "$cli" ]] || { echo "no binary at $cli" >&2; exit 2; }
-
-tok="$("$cli" auth show 2>/dev/null | head -1)"
-case "$tok" in *"no token set"*) tok="" ;; esac
-pp_curl() {
-	if [[ -n "$tok" ]]; then curl -H "X-Pipedpeer-Token: $tok" "$@"; else curl "$@"; fi
-}
+# Best-effort: an absent token is a normal answer. Reading it inline used to
+# be a pipeline under `set -o pipefail`, so a binary that did not know the
+# `auth` command killed the script here - exit 1, zero bytes of output, before
+# the first echo.
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cli.sh"
+[[ -f "$lib" ]] || { echo "missing $lib - copy scripts/ whole, not this file alone" >&2; exit 2; }
+source "$lib"
+pp_resolve_cli "$repo_root" || exit 2
+cli="$PP_CLI"
+pp_read_token
 
 # "How many peers" and "could I ask" are different questions, and answering
 # the second with 0 is how this benchmark once ran with no peer at all: the

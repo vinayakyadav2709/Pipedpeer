@@ -16,12 +16,15 @@ set -uo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cli="${PIPEDPEER:-$repo_root/bin/pipedpeer}"
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cli.sh"
+[[ -f "$lib" ]] || { echo "missing $lib - copy scripts/ whole, not this file alone" >&2; exit 2; }
+source "$lib"
+pp_resolve_cli "$repo_root" || exit 2
+cli="$PP_CLI"
 victim="${VICTIM:-pp-w8}"
 throttle_to="${THROTTLE_TO:-1}"
 epochs="${EPOCHS:-8}"
 
-[[ -x "$cli" ]] || { echo "no binary at $cli" >&2; exit 2; }
 command -v docker >/dev/null || { echo "docker is needed to throttle a worker" >&2; exit 2; }
 docker inspect "$victim" >/dev/null 2>&1 || {
 	echo "FAIL: no container named $victim to throttle. This needs the uneven"

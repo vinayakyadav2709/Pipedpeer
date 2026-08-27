@@ -16,7 +16,13 @@
 # origin is held to a single worker, so the cluster's share is the critical
 # path and the policy that divides it is what decides the wall time.
 set -euo pipefail
-cli="$HOME/bin/pipedpeer"
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cli.sh"
+[[ -f "$lib" ]] || { echo "missing $lib - copy scripts/ whole, not this file alone" >&2; exit 2; }
+source "$lib"
+pp_resolve_cli "$repo_root" || exit 2
+cli="$PP_CLI"
 items="${ITEMS:-48}"
 spin="${SPIN:-1500000}"
 W="$HOME/.local/state/pipedpeer/splitbench"

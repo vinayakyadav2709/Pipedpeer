@@ -17,11 +17,6 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# PIPEDPEER first: the harnesses are copied to a test machine and run beside a
-# binary, with no checkout to build from. Assuming a repo is what stopped this
-# one running where the cluster actually is - it died on
-# "/home/scripts/build.sh: No such file or directory".
-cli="${PIPEDPEER:-$repo_root/bin/pipedpeer}"
 ports=(38081 38082 38083)
 
 # This harness builds the cluster it then breaks, so it needs its siblings -
@@ -37,16 +32,9 @@ for sibling in lab-up.sh lab-down.sh; do
 	}
 done
 
-if [[ ! -x "$cli" ]]; then
-	if [[ -x "$repo_root/scripts/build.sh" ]]; then
-		echo "building binary..."
-		"$repo_root/scripts/build.sh"
-	else
-		echo "no binary at $cli, and no checkout here to build one from." >&2
-		echo "Set PIPEDPEER to a built binary." >&2
-		exit 2
-	fi
-fi
+source "$repo_root/scripts/lib/cli.sh"
+pp_resolve_cli "$repo_root" || exit 2
+cli="$PP_CLI"
 
 source "$repo_root/scripts/lib/runtime.sh"
 pp_pick_runtime || exit 1
@@ -56,17 +44,7 @@ runtime="$PP_RUNTIME"
 # reports that as a plain failure - which reads as "the daemon is down" when
 # it is answering perfectly well. Anything talking to this host's daemon has
 # to carry the token; the lab workers are fresh containers with none.
-pp_token="$("$cli" auth show 2>/dev/null | head -1)"
-case "$pp_token" in
-	*"no token set"*) pp_token="" ;;
-esac
-pp_curl() {
-	if [[ -n "$pp_token" ]]; then
-		curl -H "X-Pipedpeer-Token: $pp_token" "$@"
-	else
-		curl "$@"
-	fi
-}
+pp_read_token
 
 # Each worker reports its own tally of pool work. Asking the daemon beats
 # grepping its log: the log lives inside the container at a path that depends

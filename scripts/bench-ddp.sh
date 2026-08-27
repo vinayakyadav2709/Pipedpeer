@@ -19,15 +19,14 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cli="${PIPEDPEER:-$repo_root/bin/pipedpeer}"
+lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/cli.sh"
+[[ -f "$lib" ]] || { echo "missing $lib - copy scripts/ whole, not this file alone" >&2; exit 2; }
+source "$lib"
+pp_resolve_cli "$repo_root" || exit 2
+cli="$PP_CLI"
 ranks="${RANKS:-2}"
 gpu="off"
 [[ "${1:-}" == "--gpu" ]] && gpu="force"
-
-if [[ ! -x "$cli" ]]; then
-	echo "no binary at $cli; build it first or set PIPEDPEER=" >&2
-	exit 2
-fi
 
 # Not $TMPDIR: /tmp is a tmpfs of limited size on these machines, and the
 # workspace travels with the job.
