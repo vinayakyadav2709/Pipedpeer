@@ -408,7 +408,15 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 // on.
 func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct.Candidate) (netip.AddrPort, error) {
 	if os.Getenv("PIPEDPEER_FORCE_BIRTHDAY") != "1" {
-		at, err := m.endpoint.Prober().Race(ctx, cands, 250*time.Millisecond)
+		// A bounded window of its own, not the caller's whole budget. The
+		// race used to run until the connect context expired, so by the time
+		// it gave up there was nothing left: the collision inherited a
+		// context that was already done and failed instantly, every time,
+		// while logging that it had tried. Six seconds is far longer than a
+		// punch that is going to work needs.
+		raceCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		at, err := m.endpoint.Prober().Race(raceCtx, cands, 250*time.Millisecond)
+		cancel()
 		if err == nil {
 			return at, nil
 		}
@@ -442,7 +450,10 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 	// for the other's probes to hit; the side that can be aimed at needs to
 	// spray. Running both means whichever role this machine turns out to
 	// have, it is already playing it.
-	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	// Detached from the caller's deadline for the same reason: the collision
+	// needs a window of its own, and the two sides have to be spraying at the
+	// same moment for it to mean anything.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 12*time.Second)
 	defer cancel()
 
 	type found struct {
