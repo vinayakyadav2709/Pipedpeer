@@ -29,6 +29,15 @@ func detectContainerRuntime() string {
 // composeArgs returns the arguments for a compose operation based on the runtime.
 // For podman-compose: returns ["up", "-d", ...] (no "compose" subcommand)
 // For docker: returns ["compose", "up", "-d", ...] (includes "compose" subcommand)
+// worker1Port is the port lab/docker-compose.yml starts worker1's daemon on.
+//
+// It has to be said, because the lab runs with network_mode: host - so inside
+// the container 127.0.0.1:38080 is not this worker's daemon, it is whatever
+// the host machine is running. Defaulting to 38080 made the CLI submit to the
+// developer's own daemon, which answered 401, which surfaced as "remote daemon
+// rejected job".
+const worker1Port = 38081
+
 func composeArgs(runtime string, args ...string) []string {
 	if runtime == "podman-compose" {
 		return args
@@ -53,6 +62,17 @@ func TestConcurrentJobsAndSharedNumpyCache(t *testing.T) {
 	labDir := filepath.Join(repoRoot, "lab")
 
 	ctx := context.Background()
+
+	// The compose file bind-mounts lab/pipedpeer as the daemon binary, so
+	// whatever is sitting there becomes the node under test. Building it here
+	// keeps the daemon and the CLI copied in below on the same code; without
+	// this the test happily verified a binary from whenever the lab was last
+	// brought up by hand.
+	labBin := filepath.Join(labDir, "pipedpeer")
+	if out, err := runCmdE(ctx, filepath.Join(repoRoot, "src"), "sh", "-c",
+		fmt.Sprintf("CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o %s .", labBin)); err != nil {
+		t.Fatalf("failed to build the lab daemon binary: %v\noutput: %s", err, out)
+	}
 
 	args := composeArgs(runtime, "up", "-d", "--build", "worker1")
 	runCmd(t, ctx, labDir, runtime, args...)
@@ -340,6 +360,17 @@ func TestIntegrationFullSyncAndExecute(t *testing.T) {
 
 	ctx := context.Background()
 
+	// The compose file bind-mounts lab/pipedpeer as the daemon binary, so
+	// whatever is sitting there becomes the node under test. Building it here
+	// keeps the daemon and the CLI copied in below on the same code; without
+	// this the test happily verified a binary from whenever the lab was last
+	// brought up by hand.
+	labBin := filepath.Join(labDir, "pipedpeer")
+	if out, err := runCmdE(ctx, filepath.Join(repoRoot, "src"), "sh", "-c",
+		fmt.Sprintf("CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -o %s .", labBin)); err != nil {
+		t.Fatalf("failed to build the lab daemon binary: %v\noutput: %s", err, out)
+	}
+
 	args := composeArgs(runtime, "up", "-d", "--build", "worker1")
 	runCmd(t, ctx, labDir, runtime, args...)
 	t.Cleanup(func() {
@@ -404,7 +435,7 @@ echo "hidden" > secret.txt
 	nodeIDOut := readNodeID()
 	if nodeIDOut == "" {
 		// Daemon hasn't created identity yet — start it explicitly first
-		dockerExec(t, ctx, labDir, "/pipedpeer start --port 38080 && sleep 2")
+		dockerExec(t, ctx, labDir, fmt.Sprintf("/pipedpeer start --port %d && sleep 2", worker1Port))
 		nodeIDOut = readNodeID()
 	}
 	if nodeIDOut == "" {
@@ -415,8 +446,25 @@ echo "hidden" > secret.txt
 			"under XDG_DATA_HOME, and in this container that is:\n%s", where)
 	}
 
+	// The daemon answering on worker1Port must be this container's, not
+	// something else that got there first. The lab is host-networked, so any
+	// other daemon on the machine holding that port answers instead - a
+	// hetero-lab container left running from an earlier measurement did
+	// exactly that, and the run failed four steps later with "target_id does
+	// not match this node", which names the symptom and not the cause.
+	answering := strings.TrimSpace(dockerExec(t, ctx, labDir, fmt.Sprintf(
+		"/pipedpeer nodes --port %d 2>/dev/null | grep ' self$' | cut -d' ' -f1", worker1Port)))
+	if answering == "" || !strings.HasPrefix(nodeIDOut, answering) {
+		t.Fatalf("the daemon on port %d reports node %q, but worker1's identity is %q.\n"+
+			"Something else on this machine is holding that port - the lab runs with\n"+
+			"network_mode: host, so another daemon (a lab left up from an earlier run)\n"+
+			"answers in worker1's place. Free it first: docker ps, then stop it.",
+			worker1Port, answering, nodeIDOut)
+	}
+
 	// Run the compiled binary from inside worker1 — no --host means self
-	out, err := dockerExecE(ctx, labDir, "cd /tmp/sync-test && /pipedpeer run script.py -e MY_VAR=testvar")
+	out, err := dockerExecE(ctx, labDir, fmt.Sprintf(
+		"cd /tmp/sync-test && /pipedpeer run script.py --port %d -e MY_VAR=testvar", worker1Port))
 	if err != nil {
 		t.Fatalf("cli run failed: %v\noutput: %s", err, out)
 	}
@@ -438,16 +486,23 @@ echo "hidden" > secret.txt
 	}
 
 	// Verify job history artifacts were created
-	jobHistoryDir := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls -d /root/.local/share/pipedpeer/jobs/*/ | head -1"))
+	jobHistoryDir := strings.TrimSpace(dockerExec(t, ctx, labDir,
+		"ls -d \"${XDG_DATA_HOME:-$HOME/.local/share}\"/pipedpeer/jobs/*/ | head -1"))
 	if jobHistoryDir == "" {
 		t.Fatalf("no job history directory found")
 	}
 
-	// Must-exist artifacts
-	for _, f := range []string{"metadata.json", "script.py", "flake.nix", "run_command.sh", "stdout.log"} {
+	// Must-exist artifacts. run_command.sh was on this list and has not been
+	// written by anything for a long time; the test is gated on
+	// PIPEDPEER_INTEGRATION, so nobody saw it ask for a file that no longer
+	// exists. When one is missing now, say what is actually there - "expected
+	// X to exist" on its own does not distinguish a renamed artifact from a
+	// job that wrote none of them.
+	for _, f := range []string{"metadata.json", "script.py", "flake.nix", "stdout.log", "stderr.log"} {
 		exists := strings.TrimSpace(dockerExec(t, ctx, labDir, fmt.Sprintf("test -f %s%s && echo yes || echo no", jobHistoryDir, f)))
 		if exists != "yes" {
-			t.Fatalf("expected job history artifact %s to exist", f)
+			have := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls -1 "+jobHistoryDir))
+			t.Fatalf("expected job history artifact %s in %s; what is there:\n%s", f, jobHistoryDir, have)
 		}
 	}
 
