@@ -234,6 +234,19 @@ case_ "the ring counts machines, not ranks" src/main.go \
 	's = s.replace("func ddpDistinctMachines(ring []registry.NodeRecord) int {", "func ddpDistinctMachines(ring []registry.NodeRecord) int {\n\tif true {\n\t\treturn len(ring)\n\t}", 1)' \
 	. "TestTheRingCountsMachinesNotRanks"
 
+# ---- direct connections batch (plan-nat.md) ----------------------------------
+case_ "a double-NAT mapping is not published" src/internal/portmap/portmap.go \
+	's = s.replace("\tif a.Is4() {\n\t\tb := a.As4()\n\t\tif b[0] == 100 && b[1] >= 64 && b[1] <= 127 {\n\t\t\treturn false\n\t\t}\n\t}\n", "", 1)' \
+	./internal/portmap/ "TestADoubleNATMappingIsNotAdvertised"
+
+case_ "the granted lease is what gets renewed" src/internal/portmap/portmap.go \
+	's = s.replace("\tif granted <= 0 {\n\t\tgranted = asked\n\t}", "\tgranted = asked", 1)' \
+	./internal/portmap/ "TestTheGrantedLeaseIsWhatGetsRenewed|TestAZeroGrantFallsBackToWhatWasAsked"
+
+case_ "a PCP reply must carry our nonce" src/internal/portmap/natpmp.go \
+	's = s.replace("\tfor i := range nonce {\n\t\tif resp[24+i] != nonce[i] {\n\t\t\treturn netip.AddrPort{}, 0, fmt.Errorf(\"PCP reply carries a different nonce\")\n\t\t}\n\t}\n", "", 1)' \
+	./internal/portmap/ "TestAWrongNonceIsRefused"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
