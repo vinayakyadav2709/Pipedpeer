@@ -310,6 +310,18 @@ func (e *Endpoint) accept(ctx context.Context, conn *quic.Conn) {
 		e.mu.Unlock()
 	}()
 
+	e.serveStreams(ctx, conn)
+}
+
+// serveStreams splices everything a peer opens to the local service.
+//
+// Run for connections in BOTH directions, which is the point. A QUIC
+// connection is symmetric once established - either end may open a stream -
+// and only the accepting side ran this, so a peer we had dialled could never
+// send us anything. Measured: the forwarder took the request, the stream went
+// out, and nothing ever accepted it at the far end; curl sat until it timed
+// out with zero bytes.
+func (e *Endpoint) serveStreams(ctx context.Context, conn *quic.Conn) {
 	for {
 		st, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -419,6 +431,16 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 	e.mu.Lock()
 	e.peers[node] = conn
 	e.mu.Unlock()
+
+	// A connection we dialled still has to serve what the peer opens on it.
+	go func() {
+		e.serveStreams(context.WithoutCancel(ctx), conn)
+		e.mu.Lock()
+		if e.peers[node] == conn {
+			delete(e.peers, node)
+		}
+		e.mu.Unlock()
+	}()
 	return conn, nil
 }
 
