@@ -48,19 +48,33 @@ func TestALivePeerIsNeverDropped(t *testing.T) {
 	}
 }
 
-// TestRelayDefaultsToTheRendezvousHost. They are normally the same machine, and
-// making the user give both addresses when one is derivable is exactly the
-// setup this is meant to remove.
-func TestRelayDefaultsToTheRendezvousHost(t *testing.T) {
+// TestThePollKeepsTheMappingAlive.
+//
+// The registration is not only how peers are found: it is the packet that
+// keeps this node's own mapping alive on its router. NATs commonly forget an
+// idle UDP mapping after thirty seconds, so a poll at or above that loses the
+// mapping between polls and the address published to peers stops working
+// while the introducer still lists it.
+func TestThePollKeepsTheMappingAlive(t *testing.T) {
 	m := New(Config{Rendezvous: "203.0.113.9:38445"})
 	if m.cfg.Poll <= 0 {
-		t.Error("no default poll interval; the manager would spin")
+		t.Fatal("no default poll interval; the manager would spin")
 	}
-	// The derivation itself lives in Run; assert the port constant it uses is
-	// the one `pipedpeer rendezvous` actually serves, since a mismatch would
-	// mean a cluster that never connects and nothing saying why.
-	if DefaultRelayPort != "38446" {
-		t.Errorf("DefaultRelayPort is %s; `pipedpeer rendezvous` serves 38446",
-			DefaultRelayPort)
+	if m.cfg.Poll >= 30*time.Second {
+		t.Errorf("poll is %s, which is not under a NAT's usual 30s idle timeout; "+
+			"the mapping lapses between polls", m.cfg.Poll)
+	}
+}
+
+// TestTheDirectPortIsFixedByDefault. A mapping the router granted and an
+// address a peer cached are both worth keeping across a restart, and neither
+// survives a port that changes every time the daemon starts.
+func TestTheDirectPortIsFixedByDefault(t *testing.T) {
+	m := New(Config{Rendezvous: "203.0.113.9:38445"})
+	if m.cfg.DirectPort != DefaultPort {
+		t.Errorf("DirectPort = %d, want the fixed default %d", m.cfg.DirectPort, DefaultPort)
+	}
+	if DefaultPort == 0 {
+		t.Error("the default port is ephemeral, so no mapping survives a restart")
 	}
 }

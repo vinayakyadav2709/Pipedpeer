@@ -116,6 +116,8 @@ type Endpoint struct {
 	local func(context.Context) (net.Conn, error)
 	log   func(string, ...any)
 
+	other chan otherPacket
+
 	mu    sync.Mutex
 	peers map[string]*quic.Conn
 }
@@ -170,8 +172,9 @@ func Listen(cfg Config) (*Endpoint, error) {
 	// out of the read stream first. One socket is not tidiness: a router's
 	// mapping belongs to a socket, so the punch and the connection that uses
 	// it have to come from the same one.
+	e.other = make(chan otherPacket, 64)
 	e.transport = &quic.Transport{
-		Conn: &sharedConn{conn: conn, prober: e.prober},
+		Conn: &sharedConn{conn: conn, prober: e.prober, other: e.other},
 	}
 
 	tlsConf := &tls.Config{
@@ -188,6 +191,30 @@ func Listen(cfg Config) (*Endpoint, error) {
 	}
 	e.listener = ln
 	return e, nil
+}
+
+// NextOther returns the next datagram that was neither QUIC nor a probe.
+//
+// The introducer's replies and its forwarded punch requests. They arrive on
+// this socket because they have to: the registration that carries them is
+// also what keeps this node's mapping alive on its own router, and sending it
+// from anywhere else would refresh the wrong mapping.
+func (e *Endpoint) NextOther(ctx context.Context) ([]byte, netip.AddrPort, error) {
+	select {
+	case p := <-e.other:
+		return p.payload, p.from, nil
+	case <-ctx.Done():
+		return nil, netip.AddrPort{}, ctx.Err()
+	}
+}
+
+// LocalDialer connects to a local service, for splicing a peer's streams to
+// this daemon.
+func LocalDialer(addr string) func(context.Context) (net.Conn, error) {
+	return func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", addr)
+	}
 }
 
 // Prober exposes the punching machinery to the manager that drives it.
