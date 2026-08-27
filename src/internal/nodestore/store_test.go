@@ -2,7 +2,15 @@ package nodestore
 
 import (
 	"database/sql"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -290,4 +298,72 @@ func TestMigrationIsIdempotent(t *testing.T) {
 		}
 		s.Close()
 	}
+}
+
+// TestReaddingAnAddressReplacesTheOldIdentity. A worker that comes back with a
+// new node ID - a container recreated, a machine reinstalled - used to land
+// beside its old entry rather than replacing it, and manual entries are exempt
+// from PruneStale, so they accumulated forever. Eleven rows for a four-node
+// cluster, each dead one health-checked on every cycle.
+//
+// Goes through AddManual rather than the helper it calls: an earlier version
+// of this test called the helper directly and stayed green when the call site
+// was deleted, which is the failure this whole audit exists to catch.
+func TestReaddingAnAddressReplacesTheOldIdentity(t *testing.T) {
+	s := newTestStore(t)
+
+	// One address, answering with a different identity each time - a container
+	// recreated between the two adds.
+	var nodeID atomic.Value
+	nodeID.Store("gen1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"node_id":%q}`, nodeID.Load().(string))
+	}))
+	defer srv.Close()
+	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portStr)
+
+	// A manual neighbour at another port, and a discovered row at this one:
+	// neither is ours to remove.
+	_ = s.UpsertNode(Node{NodeID: "other", Host: host, Port: port + 1, Source: "manual", IsManual: true})
+	_ = s.UpsertNode(Node{NodeID: "found", Host: host, Port: port, Source: "discovery"})
+
+	if err := s.AddManual(host, port); err != nil {
+		t.Fatal(err)
+	}
+	nodeID.Store("gen2")
+	if err := s.AddManual(host, port); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes, _ := s.ListAll()
+	got := map[string]bool{}
+	for _, n := range nodes {
+		got[n.NodeID] = true
+	}
+	if got["gen1"] {
+		t.Errorf("the superseded identity at %s:%d survived: %v", host, port, keysOf(got))
+	}
+	if !got["gen2"] {
+		t.Errorf("the node currently at %s:%d is missing: %v", host, port, keysOf(got))
+	}
+	if !got["other"] {
+		t.Errorf("a manual node at a different port was removed: %v", keysOf(got))
+	}
+	if !got["found"] {
+		t.Errorf("a discovered node was removed; only manual residue is ours to " +
+			"clear, and deleting discovered rows here races the discovery loop")
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

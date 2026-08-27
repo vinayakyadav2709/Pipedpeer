@@ -226,6 +226,10 @@ case_ "the missing-nix error names where it looked" src/internal/nixstore/nixsto
 	's = s.replace("\treturn \"\", fmt.Errorf(\"nix not found on PATH or in %s\", strings.Join(dirs, \", \"))", "\t_ = dirs\n\treturn \"\", fmt.Errorf(\"nix not found\")", 1)' \
 	./internal/nixstore/ "TestMissingNixSaysWhereItLooked"
 
+case_ "one address holds one node" src/internal/nodestore/store.go \
+	's = s.replace("\tif err := s.forgetOthersAt(host, port, nodeID); err != nil {\n\t\treturn err\n\t}\n", "", 1)' \
+	./internal/nodestore/ "TestReaddingAnAddressReplacesTheOldIdentity"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
