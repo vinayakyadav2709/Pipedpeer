@@ -109,8 +109,9 @@ type Endpoint struct {
 	listener  *quic.Listener
 	prober    *Prober
 
-	key     identity.KeyPair
-	cluster string
+	key       identity.KeyPair
+	cluster   string
+	onInbound func(string, *quic.Conn)
 	// local dials the service a peer's stream should be spliced to, which
 	// keeps everything above this ignorant of how the bytes arrived.
 	local func(context.Context) (net.Conn, error)
@@ -136,6 +137,15 @@ type Config struct {
 	Cert *tls.Certificate
 	// Local dials the service inbound streams are spliced to.
 	Local func(context.Context) (net.Conn, error)
+	// OnInbound is called once a peer that dialled US has proved who it is.
+	//
+	// Needed because reachability is not symmetric. A machine whose router
+	// allocates a fresh port per destination can dial out perfectly well and
+	// cannot be dialled, so for that pair every connection is inbound at one
+	// end - and without this the receiving side authenticates the peer,
+	// files the connection away and never gives it a local port, while the
+	// far side reconnects forever.
+	OnInbound func(node string, conn *quic.Conn)
 	// Log receives progress.
 	Log func(string, ...any)
 }
@@ -159,12 +169,13 @@ func Listen(cfg Config) (*Endpoint, error) {
 	}
 
 	e := &Endpoint{
-		conn:    conn,
-		key:     cfg.Key,
-		cluster: cfg.Cluster,
-		local:   cfg.Local,
-		log:     cfg.Log,
-		peers:   map[string]*quic.Conn{},
+		conn:      conn,
+		key:       cfg.Key,
+		cluster:   cfg.Cluster,
+		local:     cfg.Local,
+		onInbound: cfg.OnInbound,
+		log:       cfg.Log,
+		peers:     map[string]*quic.Conn{},
 	}
 	e.prober = NewProber(conn, cfg.Key.Fingerprint())
 
@@ -287,6 +298,9 @@ func (e *Endpoint) accept(ctx context.Context, conn *quic.Conn) {
 	e.peers[node] = conn
 	e.mu.Unlock()
 	e.log("direct: %s connected from %s", short(node), conn.RemoteAddr())
+	if e.onInbound != nil {
+		e.onInbound(node, conn)
+	}
 
 	defer func() {
 		e.mu.Lock()

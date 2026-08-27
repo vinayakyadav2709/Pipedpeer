@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/quic-go/quic-go"
 )
 
 func testCert(t *testing.T) tls.Certificate {
@@ -210,5 +211,95 @@ func TestTheDirectALPNIsNotTheRelayALPN(t *testing.T) {
 	// replayed at the other.
 	if helloContext == "relay-hello" {
 		t.Error("a direct hello is signed with the relay's context and could be replayed there")
+	}
+}
+
+// TestAnInboundConnectionIsHandedUp.
+//
+// Reachability is not symmetric. A machine whose router allocates a fresh
+// external port per destination dials out perfectly well and cannot be
+// dialled, so for that pair every connection is inbound at one end - and the
+// receiving end has to make a usable link out of it.
+//
+// Seen against the two real machines before this existed: the peer dialled
+// in, was authenticated, filed away and never given a local port, and it
+// reconnected every few seconds forever while the daemon logged each arrival.
+func TestAnInboundConnectionIsHandedUp(t *testing.T) {
+	type inbound struct {
+		node string
+		conn *quic.Conn
+	}
+	got := make(chan inbound, 4)
+
+	serverKey := testKey(t)
+	cert := testCert(t)
+	server, err := Listen(Config{
+		Port: 0, Key: serverKey, Cluster: "c1", Cert: &cert,
+		Local: echoService(t),
+		OnInbound: func(node string, conn *quic.Conn) {
+			got <- inbound{node, conn}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = server.Serve(ctx) }()
+
+	clientKey := testKey(t)
+	client := endpoint(t, clientKey, "c1", nil)
+
+	at := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), server.Port())
+	if _, err := client.Dial(ctx, serverKey.Fingerprint(), at); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case in := <-got:
+		if in.node != clientKey.Fingerprint() {
+			t.Errorf("handed up node %s, want the dialling peer %s",
+				in.node[:8], clientKey.Fingerprint()[:8])
+		}
+		if in.conn == nil {
+			t.Error("no connection handed up, so no local port can be made for it")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an authenticated inbound connection was never handed up; the " +
+			"peer would reconnect forever while this side ignored it")
+	}
+}
+
+// And a connection that fails to prove itself must NOT be handed up: the
+// callback is what turns a connection into a usable peer, so an unverified
+// one reaching it would make the identity check pointless.
+func TestAnUnverifiedInboundConnectionIsNotHandedUp(t *testing.T) {
+	got := make(chan string, 4)
+
+	serverKey := testKey(t)
+	cert := testCert(t)
+	server, err := Listen(Config{
+		Port: 0, Key: serverKey, Cluster: "theirs", Cert: &cert,
+		Local:     echoService(t),
+		OnInbound: func(node string, _ *quic.Conn) { got <- node },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = server.Serve(ctx) }()
+
+	// A peer from a different cluster.
+	client := endpoint(t, testKey(t), "mine", nil)
+	at := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), server.Port())
+	_, _ = client.Dial(ctx, serverKey.Fingerprint(), at)
+
+	select {
+	case node := <-got:
+		t.Errorf("a peer from another cluster was handed up as usable: %s", node[:8])
+	case <-time.After(1500 * time.Millisecond):
 	}
 }

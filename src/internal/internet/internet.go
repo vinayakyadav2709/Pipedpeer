@@ -154,6 +154,16 @@ func (m *Manager) Run(ctx context.Context) {
 		Cert:    m.cfg.Cert,
 		Local:   direct.LocalDialer(fmt.Sprintf("127.0.0.1:%d", m.cfg.DaemonPort)),
 		Log:     m.cfg.Log,
+		// A peer that dialled us is just as reachable as one we dialled, and
+		// for a pair where one side cannot be dialled at all it is the only
+		// way a link is ever made. Without this the connection was
+		// authenticated and then left unused while the far side reconnected
+		// every few seconds - seen against the two real machines.
+		OnInbound: func(node string, conn *quic.Conn) {
+			if err := m.linkUp(ctx, node, conn, "punched-in"); err != nil {
+				m.cfg.Log("could not use the connection from %s: %v", short(node), err)
+			}
+		},
 	})
 	if err != nil {
 		m.cfg.Log("cannot listen for direct connections: %v", err)
