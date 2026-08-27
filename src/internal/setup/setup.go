@@ -379,6 +379,11 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 		fmt.Printf("  Daemon already running on :%d\n", daemonPort)
 	}
 
+	// After the daemon is up, because the report asks the router for the
+	// port the daemon will use and it should be told the truth about a
+	// machine in its finished state.
+	networkReport(DirectPort(), autoYes)
+
 	fmt.Println()
 	fmt.Println("  Setup complete.")
 	return daemonPort, nil

@@ -291,6 +291,14 @@ case_ "a forwarded peer cannot lead a ring" src/main.go \
 	's = s.replace("\tkey := n.Capabilities[heartbeat.MachineCapability]\n\treturn key == \"\" || key != selfMachine", "\treturn false", 1)' \
 	. "TestAForwardedPeerCannotLeadTheRing|TestTheRingPutsAReachableLeadFirst|TestARingWithNoReachableLeadIsRefused"
 
+case_ "a stopped firewall is not an active one" src/internal/setup/network.go \
+	's = s.replace("if err == nil && strings.TrimSpace(out) == \"running\" {", "if err == nil && strings.Contains(out, \"running\") {", 1)' \
+	./internal/setup/ "TestAnInactiveFirewallIsNotTouched"
+
+case_ "the firewall is not touched without consent" src/internal/setup/network.go \
+	's = s.replace("\tif !apply {\n\t\treturn st\n\t}\n\t// --permanent then --reload", "\t// --permanent then --reload", 1)' \
+	./internal/setup/ "TestNothingIsChangedWithoutConsent"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
