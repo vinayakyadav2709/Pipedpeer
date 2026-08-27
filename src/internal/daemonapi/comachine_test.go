@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 )
@@ -41,6 +42,7 @@ func TestAPeerSharingThisMachineIsSubtracted(t *testing.T) {
 		Status: "healthy", Machine: me, ReservedMem: 4 << 30,
 	}
 	s.peersMu.Unlock()
+	forgetRoommates(s)
 
 	after := s.AvailableForJob()
 	if after >= before {
@@ -67,6 +69,7 @@ func TestAPeerOnAnotherMachineIsNotSubtracted(t *testing.T) {
 		Status: "healthy", Machine: "a-different-boot-id", ReservedMem: 8 << 30,
 	}
 	s.peersMu.Unlock()
+	forgetRoommates(s)
 
 	after := s.AvailableForJob()
 	// Free memory moves under a running test, so compare with a tolerance
@@ -95,6 +98,7 @@ func TestUnknownMachineIsNotAssumedToBeThisOne(t *testing.T) {
 	}
 	s.peersMu.Unlock()
 
+	forgetRoommates(s)
 	if diff := before - s.AvailableForJob(); diff > 1<<30 {
 		t.Errorf("a peer that said nothing about its machine cost this one %d "+
 			"bytes; silence is not agreement", diff)
@@ -124,6 +128,7 @@ func TestAnUnreachablePeerIsNotHoldingMemory(t *testing.T) {
 	}
 	s.peersMu.Unlock()
 
+	forgetRoommates(s)
 	if diff := before - s.AvailableForJob(); diff > 1<<30 {
 		t.Errorf("a peer that stopped answering still held %d bytes", diff)
 	}
@@ -179,6 +184,7 @@ func TestTheLiveFigureBeatsTheCachedOne(t *testing.T) {
 	}
 	s.peersMu.Unlock()
 
+	forgetRoommates(s)
 	if got := s.reservedOnThisMachine(); got != 6<<30 {
 		t.Errorf("read %d bytes reserved on this machine, want the live 6 GiB "+
 			"rather than the poller's stale 0", got)
@@ -204,8 +210,17 @@ func TestARoommateThatStopsAnsweringKeepsItsLastFigure(t *testing.T) {
 	}
 	s.peersMu.Unlock()
 
+	forgetRoommates(s)
 	if got := s.reservedOnThisMachine(); got != 3<<30 {
 		t.Errorf("read %d bytes; a roommate that did not answer should keep "+
 			"its last known 3 GiB, not drop to nothing", got)
 	}
+}
+
+// forgetRoommates drops the short-lived answer cache, standing in for the
+// poller cycle that would separate two of these checks in a running daemon.
+func forgetRoommates(s *Server) {
+	s.coResMu.Lock()
+	s.coResAt = time.Time{}
+	s.coResMu.Unlock()
 }

@@ -54,10 +54,16 @@ for i in "${!ports[@]}"; do
 	port="${ports[$i]}"
 	quota="${cpus[$i]}"
 	echo "starting $name: ${quota} cpu(s) on :$port"
+	# A memory limit as well as a CPU one. Without it the container's daemon
+	# has no systemd to place it in a scope and no limit from docker either,
+	# so it runs completely unbounded beside a host daemon that is correctly
+	# capped - and the kernel, finding the machine out of memory, picks a
+	# victim outside both. Measured: it killed the desktop shell.
 	$runtime run -d --name "$name" \
 		--privileged \
 		--network host \
 		--cpus="$quota" \
+		--memory="${LAB_MEM:-2g}" \
 		-v "$labdir/pipedpeer:/usr/local/bin/pipedpeer:ro" \
 		-e XDG_DATA_HOME=/var/lib/pipedpeer \
 		pp-hetero \

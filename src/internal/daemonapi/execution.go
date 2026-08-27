@@ -746,10 +746,11 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		// now nothing did, so one job's runaway allocation was every other
 		// job on the node's problem too.
 		parent, canCap, why := cgroups.Prepare()
-		if applyMemLimit(&ociCfg, cfg.MemLimitBytes, parent, canCap, jobID) {
-			log.Info().Int64("bytes", cfg.MemLimitBytes).Str("job", jobID).
+		limit := s.grantableMemory(cfg.MemLimitBytes, jobID)
+		if applyMemLimit(&ociCfg, limit, parent, canCap, jobID) {
+			log.Info().Int64("bytes", limit).Str("job", jobID).
 				Str("cgroup", parent).Msg("job memory capped by cgroup")
-			capBytes, capParent = cfg.MemLimitBytes, parent
+			capBytes, capParent = limit, parent
 			// memory.events is hierarchical, so the parent's counter covers
 			// every job cgroup beneath it. Snapshotting it here turns "some
 			// job was OOM-killed at some point" into "a kill happened while
@@ -1071,6 +1072,47 @@ var usernsOnce sync.Once
 // Swap is pinned to the same value deliberately. Left alone, a job that hits
 // its cap starts swapping instead of failing, and thrashing takes every other
 // job on the node down with it rather than just itself.
+// grantableMemory bounds a job's ceiling by what the machine can actually
+// spare, and reports when it had to.
+//
+// The ceiling arrives from the submitter as twice the estimate - deliberately
+// generous, because killing a job that would have finished is a worse failure
+// than the runaway it prevents. What was missing is that generosity has to
+// stop somewhere, and "twice the estimate" knows nothing about the machine it
+// lands on. A job admitted for 4 GB was then permitted 7.5 GB by the kernel,
+// and with a second daemon on the same host doing likewise, the two ceilings
+// added up to more memory than existed: the machine went out of memory and
+// the kernel picked a victim outside either cgroup.
+//
+// So the ceiling is clamped to what is free right now, counting what daemons
+// sharing this machine have promised. Never below the estimate that was
+// admitted, though - admission already decided that much would fit, and a
+// ceiling under it would kill the job on arrival for a shortage that appeared
+// after it was let in.
+func (s *Server) grantableMemory(requested int64, jobID string) int64 {
+	if requested <= 0 {
+		return requested
+	}
+	// The submitter doubles the estimate, so half of what it asked for is the
+	// figure admission approved.
+	admitted := requested / 2
+	spare := s.AvailableForJob()
+	if spare >= requested {
+		return requested
+	}
+	granted := spare
+	if granted < admitted {
+		granted = admitted
+	}
+	if granted >= requested {
+		return requested
+	}
+	log.Info().Int64("requested", requested).Int64("granted", granted).
+		Int64("machine_spare", spare).Str("job", jobID).
+		Msg("job ceiling lowered to what this machine can spare")
+	return granted
+}
+
 func applyMemLimit(cfg *ociConfig, limit int64, parent string, canCap bool, jobID string) bool {
 	if limit <= 0 || !canCap || cfg.Linux == nil {
 		return false
