@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -236,19 +237,53 @@ func CheckRemoteAcceptance(host string, port int, targetID, jobName, submitterNo
 	}
 	defer resp.Body.Close()
 
+	// The status code, before the body. Every refusal this daemon makes
+	// carries a reason, so a refusal without one did not come from admission
+	// at all - it is a 401 from the token middleware, a 404 from a daemon too
+	// old to have this route, or a proxy in between. All three decode cleanly
+	// into an AcceptResponse full of zero values, and the caller printed
+	// "remote daemon rejected job" for each of them. That sentence sent a
+	// reader looking at scheduling for an hour when the answer was a missing
+	// header.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if readErr != nil {
+		return nil, fmt.Errorf("remote daemon at %s: reading the answer failed: %w", url, readErr)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("remote daemon at %s refused the request: HTTP %d. "+
+			"This node's token does not match that daemon's; set the same one on "+
+			"both with `pipedpeer auth set`", url, resp.StatusCode)
+	}
+
 	var out AcceptResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("remote daemon returned invalid response: %w", err)
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("remote daemon at %s returned HTTP %d and a body that is "+
+			"not an accept response: %w: %s", url, resp.StatusCode, err, snippet(body))
 	}
 
 	if !out.Accepted {
-		reason := out.Reason
-		if reason == "" {
-			reason = "remote daemon rejected job"
+		if out.Reason != "" {
+			return nil, fmt.Errorf("job rejected by remote daemon: %s", out.Reason)
 		}
-		return nil, fmt.Errorf("job rejected by remote daemon: %s", reason)
+		// No reason and no recognised status: say what actually came back
+		// rather than inventing a scheduling decision that was never made.
+		return nil, fmt.Errorf("remote daemon at %s did not accept the job and gave no "+
+			"reason: HTTP %d %s", url, resp.StatusCode, snippet(body))
 	}
 	return &out, nil
+}
+
+// snippet keeps a response body short enough to print and long enough to
+// identify.
+func snippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "(empty body)"
+	}
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
 }
 
 // CommitLease commits a lease, transitioning it from reserved to running.
