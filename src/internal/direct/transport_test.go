@@ -303,3 +303,72 @@ func TestAnUnverifiedInboundConnectionIsNotHandedUp(t *testing.T) {
 	case <-time.After(1500 * time.Millisecond):
 	}
 }
+
+// TestBothEndsCanOpenStreams.
+//
+// A QUIC connection is symmetric once established: either end may open a
+// stream. Only the accepting side served them, so a peer we had dialled could
+// never send us anything - and for a pair where one side can only dial, that
+// is every request in one direction.
+//
+// Measured before this was fixed: the forwarder took the request, the stream
+// went out, and nothing accepted it at the far end. curl waited twenty
+// seconds and got zero bytes.
+func TestBothEndsCanOpenStreams(t *testing.T) {
+	// Both ends run a service, so a stream opened either way has somewhere
+	// to land.
+	serverKey, clientKey := testKey(t), testKey(t)
+	server := endpoint(t, serverKey, "c1", echoService(t))
+	client := endpoint(t, clientKey, "c1", echoService(t))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	at := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), server.Port())
+	outbound, err := client.Dial(ctx, serverKey.Fingerprint(), at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer outbound.CloseWithError(0, "")
+
+	// The dialler opening a stream: the ordinary direction, and the one that
+	// already worked.
+	if got := roundTrip(t, ctx, outbound, "from the dialler"); got != "from the dialler" {
+		t.Errorf("dialler -> accepter carried %q", got)
+	}
+
+	// And the accepter opening one back over the same connection, which is
+	// what a peer that can only be dialled has to be able to do.
+	server.mu.Lock()
+	back := server.peers[clientKey.Fingerprint()]
+	server.mu.Unlock()
+	if back == nil {
+		t.Fatal("the accepting end kept no handle on the connection, so it can " +
+			"never originate anything to that peer")
+	}
+	if got := roundTrip(t, ctx, back, "from the accepter"); got != "from the accepter" {
+		t.Errorf("accepter -> dialler carried %q; a peer we dialled cannot be "+
+			"sent anything, which is every request in one direction for a pair "+
+			"where only one side can dial", got)
+	}
+}
+
+func roundTrip(t *testing.T, ctx context.Context, conn *quic.Conn, msg string) string {
+	t.Helper()
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("opening a stream: %v", err)
+	}
+	if _, err := st.Write([]byte(msg)); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+	_ = st.Close()
+	// A deadline, so a link that carries nothing FAILS rather than hangs.
+	// Without it the mutation that stops the dialler serving streams makes
+	// this block until the whole suite is killed, and a test that hangs
+	// reports nothing at all.
+	_ = st.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, len(msg))
+	n, _ := io.ReadFull(st, buf)
+	return string(buf[:n])
+}

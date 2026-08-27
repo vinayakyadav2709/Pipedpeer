@@ -307,6 +307,10 @@ case_ "an inbound connection becomes a usable peer" src/internal/direct/transpor
 	's = s.replace("\tif e.onInbound != nil {\n\t\te.onInbound(node, conn)\n\t}\n", "", 1)' \
 	./internal/direct/ "TestAnInboundConnectionIsHandedUp"
 
+case_ "both ends of a direct link can originate" src/internal/direct/transport.go \
+	's = s.replace("\tgo func() {\n\t\te.serveStreams(context.WithoutCancel(ctx), conn)", "\tgo func() {\n\t\tif false {\n\t\t\te.serveStreams(context.WithoutCancel(ctx), conn)\n\t\t}", 1)' \
+	./internal/direct/ "TestBothEndsCanOpenStreams"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
