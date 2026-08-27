@@ -25,6 +25,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
@@ -806,7 +807,25 @@ func (s *Server) AvailableForJob() int64 {
 	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
 	avail := load.AvailableMemBytes - s.reservedOnThisMachine()
 	if avail < 0 {
-		return 0
+		avail = 0
+	}
+
+	// Never promise more than this daemon's own share of the machine, even
+	// when more happens to be free. Free memory is what the machine has;
+	// the budget is what this daemon may take of it, and the difference is
+	// the room left for everything that is not pipedpeer.
+	//
+	// This matters most where the kernel is not enforcing anything. A daemon
+	// in a container has no systemd to place it in a scope, and no memory
+	// limit at all unless docker was given one - so it ran unbounded beside a
+	// host daemon that was correctly capped at half the machine, and the
+	// kernel went looking for a victim outside either cgroup. Honouring the
+	// budget at admission makes the unpoliced node behave like the policed
+	// one.
+	if b := cgroups.SelfBudget(); b.Total > 0 {
+		if r := b.Remaining(); r < avail {
+			avail = r
+		}
 	}
 	return avail
 }
@@ -872,7 +891,7 @@ const coResidentTTL = 300 * time.Millisecond
 // peerReservedNow asks a co-located daemon what it currently has reserved.
 func peerReservedNow(ph PeerHealth) (int64, bool) {
 	req, err := http.NewRequest("GET",
-		fmt.Sprintf("http://%s/health", net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))), nil)
+		fmt.Sprintf("http://%s/v1/reserved", net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))), nil)
 	if err != nil {
 		return 0, false
 	}
@@ -890,7 +909,7 @@ func peerReservedNow(ph PeerHealth) (int64, bool) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, false
 	}
-	var h healthResponse
+	var h reservedResponse
 	if json.NewDecoder(resp.Body).Decode(&h) != nil {
 		return 0, false
 	}
@@ -930,6 +949,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
+	r.Get("/v1/reserved", s.handleReserved)
 	r.Get("/v1/store", s.handleStoreCheck)
 	r.Post("/v1/store/missing", s.handleStoreMissing)
 	r.Post("/v1/store/import", s.handleStoreImport)
@@ -941,6 +961,24 @@ func (s *Server) buildRouter() {
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 
 	s.router = r
+}
+
+// handleReserved answers what this daemon has promised, and nothing else.
+//
+// Separate from /health deliberately. A daemon computing what it can grant
+// asks its roommates what they have promised; if that question were answered
+// by /health, and /health reported grantable memory, two daemons on one
+// machine would each be waiting on the other to answer the same question.
+func (s *Server) handleReserved(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, reservedResponse{
+		ReservedMem: s.ReservedMem(),
+		Machine:     heartbeat.Machine(),
+	})
+}
+
+type reservedResponse struct {
+	ReservedMem int64  `json:"reserved_mem"`
+	Machine     string `json:"machine"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -959,13 +997,19 @@ func (s *Server) healthSnapshot() healthResponse {
 	}
 
 	load := heartbeat.CollectLoad(activeJobs, reserved)
+	// What a peer may actually be given, not what the machine happens to have
+	// free. A container worker capped at 2 GiB advertising the host's 10.7 GiB
+	// is inviting work it will be killed for accepting, and every scheduler
+	// that reads this - ring placement, pool peer choice - believes it.
+	grantable := s.AvailableForJob()
+	load.AvailableMemBytes = grantable
 	return healthResponse{
 		Status:        "ok",
 		NodeID:        s.nodeID,
 		ActiveJobs:    activeJobs,
 		ActiveLeases:  s.ActiveLeases(),
 		ReservedMem:   reserved,
-		AvailableMem:  load.AvailableMemBytes,
+		AvailableMem:  grantable,
 		MaxConcurrent: s.MaxConcurrentJobs(),
 		Capabilities:  caps,
 		Load:          load,
