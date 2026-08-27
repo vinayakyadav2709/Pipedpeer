@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -699,6 +698,20 @@ func runDDP(o ddpRunOptions) error {
 			len(ring), o.Nodes)
 		o.Nodes = len(ring)
 	}
+	// The lead has to be a node every other rank can reach, and a peer
+	// reached over the internet is registered at 127.0.0.1 on a port only
+	// this daemon forwards. Reordering rather than dropping: such a node is
+	// still a good rank, it just cannot be the one everybody syncs to.
+	if reordered, ok := ddpLeadFirst(ring, ddpSelfMachine(o.DaemonPort)); ok {
+		ring = reordered
+	} else {
+		return fmt.Errorf("no rank in this ring can lead it: every candidate is " +
+			"reached through a local forwarder, so the address they would all " +
+			"sync to points at themselves. A ring needs at least one node with " +
+			"an address the others can use - this machine, or a peer on a " +
+			"network they share")
+	}
+
 	rank0, peers := ring[0], ring[1:o.Nodes]
 	ringSlots = ringSlots[:o.Nodes]
 	ringWeights = ddpNormaliseWeights(ringWeights[:o.Nodes])
@@ -1012,6 +1025,77 @@ func ddpNormaliseWeights(w []float64) []float64 {
 // a ring learns nothing new here - it just stops ignoring what the daemon
 // knew. Nodes that do not report one are counted separately: an unknown
 // machine is not evidence of sharing.
+// ddpSelfMachine is this machine's key, as the daemon reports it.
+//
+// Empty when the daemon cannot be asked, which makes ddpForwardedLead treat
+// every loopback node as forwarded. That is the safe direction: it refuses a
+// ring rather than building one whose ranks all sync to themselves.
+func ddpSelfMachine(daemonPort int) string {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", daemonPort))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Capabilities map[string]string `json:"capabilities"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&h) != nil {
+		return ""
+	}
+	return h.Capabilities[heartbeat.MachineCapability]
+}
+
+// ddpForwardedLead reports whether a node is only reachable through a local
+// forwarder, and so cannot be the rank everybody else syncs to.
+//
+// A peer reached over the internet is registered at 127.0.0.1 on a port this
+// daemon forwards, which is what keeps health polling, closure upload and
+// gradient sync from having to know how the bytes travel. It also means its
+// recorded address is meaningless anywhere else: 127.0.0.1 on another rank is
+// that rank.
+//
+// The star sync has every rank post gradients to the lead's daemon, so the
+// lead's address has to mean the same thing to all of them. A loopback
+// address qualifies only when it really is this machine, which is decided by
+// the machine key the roommate accounting already collects - by host alone
+// the two cases are identical, and reading a forwarded peer as "this machine"
+// hands every rank an address pointing at itself.
+func ddpForwardedLead(n registry.NodeRecord, selfMachine string) bool {
+	host := ddpExtractHost(n.SSHEndpoint)
+	if host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return false
+	}
+	// Loopback. Safe only if this is the machine we are running on. A node
+	// too old to report a key counts as forwarded: assuming otherwise is the
+	// failure this exists to prevent.
+	key := n.Capabilities[heartbeat.MachineCapability]
+	return key == "" || key != selfMachine
+}
+
+// ddpLeadFirst reorders a ring so its lead is a node every rank can reach.
+//
+// Reordered rather than filtered: a node that cannot lead is still a
+// perfectly good rank, and dropping it would shrink a ring for no reason.
+// Returns false when nothing in the ring can lead, which has to be said
+// rather than papered over - picking one anyway hangs every rank at the
+// first barrier with no indication why.
+func ddpLeadFirst(ring []registry.NodeRecord, selfMachine string) ([]registry.NodeRecord, bool) {
+	for i, n := range ring {
+		if ddpForwardedLead(n, selfMachine) {
+			continue
+		}
+		if i == 0 {
+			return ring, true
+		}
+		out := make([]registry.NodeRecord, 0, len(ring))
+		out = append(out, ring[i])
+		out = append(out, ring[:i]...)
+		out = append(out, ring[i+1:]...)
+		return out, true
+	}
+	return ring, false
+}
+
 func ddpDistinctMachines(ring []registry.NodeRecord) int {
 	seen := map[string]bool{}
 	unknown := 0
@@ -1980,17 +2064,16 @@ func runDaemon(args []string) {
 		if kerr != nil {
 			log.Warn().Err(kerr).Msg("no signing key: internet mode disabled")
 		} else {
+			cert, certErr := tlsid.EnsureCert()
+			if certErr != nil {
+				log.Warn().Err(certErr).Msg("internet mode needs a certificate for direct connections")
+			}
 			mgr := internet.New(internet.Config{
 				Rendezvous: rendezvousAddr,
 				Cluster:    rendezvous.ClusterID(authtoken.Current()),
 				Key:        key,
+				Cert:       &cert,
 				DaemonPort: port,
-				VerifyRelay: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-					if len(rawCerts) == 0 {
-						return fmt.Errorf("relay presented no certificate")
-					}
-					return tlsid.CheckOrPin(rendezvousAddr, rawCerts[0])
-				},
 				OnPeer: func(node, addr string) {
 					host, portStr, err := net.SplitHostPort(addr)
 					if err != nil {
@@ -2005,6 +2088,14 @@ func runDaemon(args []string) {
 						return
 					}
 					log.Info().Str("peer", node).Str("at", addr).Msg("peer joined over the internet")
+				},
+				OnUnreachable: func(node, reason string) {
+					// Recorded rather than relayed around. A peer with no
+					// direct path is not offered work - the scheduler routes
+					// around it - and the reason travels so a machine that
+					// quietly stopped serving is visible instead of missing.
+					log.Info().Str("peer", node).Str("reason", reason).
+						Msg("peer has no direct path; not offering it work")
 				},
 				OnPeerGone: func(node, addr string) {
 					host, portStr, err := net.SplitHostPort(addr)

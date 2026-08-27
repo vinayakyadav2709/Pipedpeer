@@ -287,6 +287,10 @@ case_ "one socket carries probes and QUIC" src/internal/direct/sharedconn.go \
 	's = s.replace("\t\tif s.prober != nil && s.prober.Deliver(b[:n], addr) {\n\t\t\tcontinue\n\t\t}\n", "", 1)' \
 	./internal/direct/ "TestOneSocketCarriesBothProbesAndQUIC"
 
+case_ "a forwarded peer cannot lead a ring" src/main.go \
+	's = s.replace("\tkey := n.Capabilities[heartbeat.MachineCapability]\n\treturn key == \"\" || key != selfMachine", "\treturn false", 1)' \
+	. "TestAForwardedPeerCannotLeadTheRing|TestTheRingPutsAReachableLeadFirst|TestARingWithNoReachableLeadIsRefused"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

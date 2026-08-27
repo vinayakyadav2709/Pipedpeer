@@ -2,6 +2,7 @@ package direct
 
 import (
 	"net"
+	"net/netip"
 	"time"
 )
 
@@ -27,6 +28,16 @@ import (
 type sharedConn struct {
 	conn   *net.UDPConn
 	prober *Prober
+	// other receives datagrams that are neither probes nor QUIC - the
+	// introducer's replies and its forwarded punch requests, which arrive on
+	// this socket because they must: the packet that carries a registration
+	// is also the one that keeps this node's NAT mapping alive.
+	other chan otherPacket
+}
+
+type otherPacket struct {
+	payload []byte
+	from    netip.AddrPort
 }
 
 // ReadFrom returns the next datagram that is not one of ours.
@@ -39,6 +50,18 @@ func (s *sharedConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		// Consumed here and never passed on: QUIC would otherwise see a
 		// stray datagram on a connection it has no record of.
 		if s.prober != nil && s.prober.Deliver(b[:n], addr) {
+			continue
+		}
+		// Introducer traffic is JSON and QUIC is not, so the two are told
+		// apart by looking. Handing a registration reply to quic-go would
+		// have it dropped as a packet for a connection that does not exist.
+		if s.other != nil && len(b) > 0 && b[0] == '{' {
+			cp := make([]byte, n)
+			copy(cp, b[:n])
+			select {
+			case s.other <- otherPacket{payload: cp, from: addr}:
+			default: // nobody reading; better dropped than blocking the socket
+			}
 			continue
 		}
 		return n, net.UDPAddrFromAddrPort(addr), nil
