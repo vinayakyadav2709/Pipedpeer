@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"log"
@@ -736,11 +737,26 @@ func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 // ceiling is here for everything that is not the shim behaving.
 const maxPoolBody = 2 << 30 // 2 GiB
 
+// poolBodyLimit is the ceiling for this daemon, which is not the same number
+// on every node. A fixed 2 GiB is most of a small worker's entire allowance -
+// the container beside its host in the lab is capped at exactly that - so one
+// request sized to the constant would consume everything the daemon is
+// allowed before a single item had been looked at. Half the budget, so there
+// is room left to do something with what arrives.
+func (s *Server) poolBodyLimit() int64 {
+	limit := int64(maxPoolBody)
+	if b := cgroups.SelfBudget(); b.Total > 0 && b.Total/2 < limit {
+		limit = b.Total / 2
+	}
+	return limit
+}
+
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
-	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxPoolBody))
+	limit := s.poolBodyLimit()
+	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-			"error": fmt.Sprintf("pool request body exceeds %d bytes", maxPoolBody),
+			"error": fmt.Sprintf("pool request body exceeds %d bytes", limit),
 		})
 		return
 	}

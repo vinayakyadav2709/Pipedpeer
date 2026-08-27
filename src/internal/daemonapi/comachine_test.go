@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 )
 
@@ -223,4 +224,26 @@ func forgetRoommates(s *Server) {
 	s.coResMu.Lock()
 	s.coResAt = time.Time{}
 	s.coResMu.Unlock()
+}
+
+// TestPoolBodyLimitFitsTheDaemonsBudget.
+//
+// A fixed 2 GiB ceiling is most of a small worker's entire allowance - the
+// lab's container beside its host is capped at exactly 2 GiB - so one request
+// sized to the constant would consume everything the daemon is allowed before
+// a single item had been looked at.
+func TestPoolBodyLimitFitsTheDaemonsBudget(t *testing.T) {
+	s := New("self")
+	limit := s.poolBodyLimit()
+
+	if limit > maxPoolBody {
+		t.Errorf("limit %d exceeds the absolute ceiling %d", limit, maxPoolBody)
+	}
+	if limit <= 0 {
+		t.Fatalf("limit is %d, which accepts nothing at all", limit)
+	}
+	if b := cgroups.SelfBudget(); b.Total > 0 && limit >= b.Total {
+		t.Errorf("one request may fill %d bytes of a %d byte budget, leaving "+
+			"nothing to process it with", limit, b.Total)
+	}
 }
