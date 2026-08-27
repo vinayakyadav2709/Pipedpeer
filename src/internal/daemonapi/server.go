@@ -680,10 +680,42 @@ func (s *Server) EnablePersistence() {
 
 // persist snapshots the current leases and jobs to disk. Call after any
 // mutation so a crash or restart starts from the latest state.
+// persist writes the daemon's leases and jobs to disk.
+//
+// The maps are copied under the locks that guard them before being handed to
+// save, which marshals them. Passing the live maps meant JSON iterating one
+// while another request wrote to it, and Go does not treat that as a race to
+// be detected later - it kills the process on the spot with "concurrent map
+// iteration and map write".
+//
+// It took two uploads arriving at one daemon at the same moment, which never
+// happened while each node hosted a single rank. Giving a node one rank per
+// accelerator made it ordinary, and the daemon died mid-run.
 func (s *Server) persist() {
-	if s.state != nil {
-		s.state.save(s.leases, s.jobs)
+	if s.state == nil {
+		return
 	}
+	s.mu.Lock()
+	leases := make(map[string]*Lease, len(s.leases))
+	for k, v := range s.leases {
+		if v != nil {
+			copy := *v
+			leases[k] = &copy
+		}
+	}
+	s.mu.Unlock()
+
+	s.jobsMu.Lock()
+	jobs := make(map[string]*JobRecord, len(s.jobs))
+	for k, v := range s.jobs {
+		if v != nil {
+			copy := *v
+			jobs[k] = &copy
+		}
+	}
+	s.jobsMu.Unlock()
+
+	s.state.save(leases, jobs)
 }
 
 // sweepExpired removes leases in "reserved" state past expiry + grace.
@@ -696,7 +728,6 @@ func (s *Server) persist() {
 func (s *Server) sweepExpired() {
 	now := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for id, lease := range s.leases {
 		switch lease.State {
 		case LeaseReserved:
@@ -713,6 +744,10 @@ func (s *Server) sweepExpired() {
 			}
 		}
 	}
+	// Released before persisting: persist takes this lock to copy the maps
+	// before marshalling them, and holding it here would deadlock against
+	// itself.
+	s.mu.Unlock()
 	s.persist()
 }
 

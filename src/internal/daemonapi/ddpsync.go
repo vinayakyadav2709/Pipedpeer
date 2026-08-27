@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // DDP sync over the daemon's own channel. Ranks never open ports of their
@@ -51,6 +56,12 @@ type ddpEntry struct {
 	// seen tracks which ranks have contributed, since acc keeps only a count
 	// and a rank that retried must not be folded in twice.
 	seen map[int]bool
+	// stepMillis is each rank's mean compute time for a step, as reported by
+	// the rank. The spread across ranks is what says whether the ring is
+	// balanced - and with equal batches the slowest of them is the step time
+	// for everybody.
+	stepMillis map[int]float64
+
 	// err is set when a contribution could not be folded in - a rank that
 	// disagrees about the model's shape, say. Held rather than returned to
 	// that one rank, because the others are blocked waiting for a result that
@@ -87,10 +98,19 @@ type ddpEntry struct {
 type ddpBoard struct {
 	mu      sync.Mutex
 	entries map[string]*ddpEntry // key: group + "/" + seq
+	// measured records which groups have already had their ring reported.
+	// Keyed by group rather than by entry: an entry is one sync round, and a
+	// flag there says it once per step, which at one sync per step is
+	// thousands of identical lines. Measured 41 for a 90-step run before this
+	// was keyed properly.
+	measured map[string]time.Time // key: group -> when it was reported
 }
 
 func newDDPBoard() *ddpBoard {
-	return &ddpBoard{entries: make(map[string]*ddpEntry)}
+	return &ddpBoard{
+		entries:  make(map[string]*ddpEntry),
+		measured: make(map[string]time.Time),
+	}
 }
 
 // sweep drops entries older than maxAge: a rank that died mid-run must not
@@ -101,6 +121,14 @@ func (b *ddpBoard) sweep(maxAge time.Duration) {
 	for k, e := range b.entries {
 		if time.Since(e.created) > maxAge {
 			delete(b.entries, k)
+		}
+	}
+	// One key per training run, kept only to say the ring's measurement once.
+	// A daemon that has served a thousand runs should not still be holding a
+	// thousand group names.
+	for group, when := range b.measured {
+		if time.Since(when) > maxAge {
+			delete(b.measured, group)
 		}
 	}
 }
@@ -135,6 +163,18 @@ type ddpSyncRequest struct {
 	// sequence is not local SGD, it is nonsense, and it showed up as a
 	// measurably worse final loss. The daemon hands everyone one answer.
 	SyncEvery int `json:"sync_every,omitempty"`
+	// StepMillis is this rank's mean compute time for one step, which every
+	// rank already measures for its own sync tuning and which nothing has
+	// ever collected.
+	//
+	// Gathered here it becomes the one measurement the scheduler has never
+	// had: what a device is worth for this job, in units that compare across
+	// devices. The throughput probe used for placement is an integer loop on
+	// the CPU, so a GPU node's score is its CPU's score and a GPU cannot be
+	// ranked against a CPU at all. This is the same model, the same batch,
+	// on whatever hardware the rank actually has - comparable by
+	// construction, and free, because the work is being done anyway.
+	StepMillis float64 `json:"step_ms,omitempty"`
 }
 
 // ddpMode is how a request wants its payload handled.
@@ -232,6 +272,24 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.SyncEvery > e.syncEvery {
 		e.syncEvery = req.SyncEvery
+	}
+	if req.StepMillis > 0 {
+		if e.stepMillis == nil {
+			e.stepMillis = map[int]float64{}
+		}
+		e.stepMillis[req.Rank] = req.StepMillis
+		if _, said := s.ddp.measured[req.Group]; !said && len(e.stepMillis) >= e.world {
+			s.ddp.measured[req.Group] = time.Now()
+			// Said once, whatever the verdict. What each device is worth for
+			// this job is the measurement the scheduler has never had, and
+			// printing it only when something is wrong would leave a balanced
+			// ring looking like one nobody measured.
+			log.Info().Str("group", req.Group).Str("ranks", rankTimes(e.stepMillis)).
+				Msg("ring measured: time for one step, on each rank's own hardware")
+			if msg, ok := pacedBy(e.stepMillis, e.world); ok {
+				log.Warn().Str("group", req.Group).Msg(msg)
+			}
+		}
 	}
 	var complete bool
 	if e.result != nil || e.err != nil {
@@ -438,4 +496,65 @@ func (s *Server) completePartial(key string) bool {
 		close(e.done)
 	}
 	return e.err == nil
+}
+
+// pacedBy reports whether one rank is setting the pace for the whole ring, in
+// the words the user needs to hear.
+//
+// With equal batches - which is what runs today - a step costs what the
+// slowest rank costs, so a rank several times slower than the rest is not
+// contributing a share of the work, it is deciding how long every step takes.
+// Nothing said so before: the loss came out right and the run was simply
+// slow, which is the failure mode this whole project exists to make visible.
+//
+// Silent until every rank has reported, because the fastest rank arriving
+// first would otherwise look like a ring of one.
+func pacedBy(steps map[int]float64, world int) (string, bool) {
+	if world < 2 || len(steps) < world {
+		return "", false
+	}
+	slowRank, slow := -1, 0.0
+	fast := math.MaxFloat64
+	var total float64
+	for rank, ms := range steps {
+		if ms > slow {
+			slowRank, slow = rank, ms
+		}
+		if ms < fast {
+			fast = ms
+		}
+		total += ms
+	}
+	if slow <= 0 || fast <= 0 || slow/fast < pacedRatio {
+		return "", false
+	}
+	// What the ring costs per step now, against what it would cost without
+	// the straggler. Equal batches: the step is the slowest rank, and dropping
+	// it leaves the next slowest - approximated here by the mean of the rest,
+	// which is enough to say whether the difference is worth acting on.
+	rest := (total - slow) / float64(len(steps)-1)
+	return fmt.Sprintf(
+		"rank %d takes %.0f ms a step against %.0f ms for the fastest, and with "+
+			"equal batches every rank waits for the slowest - so this one rank is "+
+			"setting the pace for the whole ring. Without it a step would cost "+
+			"about %.0f ms.", slowRank, slow, fast, rest), true
+}
+
+// pacedRatio is how much slower one rank must be before it is worth saying so.
+// Ranks on identical hardware vary by a few percent from load alone; a factor
+// of two is a different device, or a machine doing something else.
+const pacedRatio = 2.0
+
+// rankTimes renders the ring's measured step times in rank order.
+func rankTimes(steps map[int]float64) string {
+	ranks := make([]int, 0, len(steps))
+	for r := range steps {
+		ranks = append(ranks, r)
+	}
+	sort.Ints(ranks)
+	parts := make([]string, 0, len(ranks))
+	for _, r := range ranks {
+		parts = append(parts, fmt.Sprintf("rank %d %.0f ms", r, steps[r]))
+	}
+	return strings.Join(parts, ", ")
 }
