@@ -192,3 +192,195 @@ func TestRegisterRoundTripsOverUDP(t *testing.T) {
 		t.Errorf("got peers %+v, want bob", peers)
 	}
 }
+
+func registerWith(t *testing.T, s *Server, cluster, node, from string, cands []string) response {
+	t.Helper()
+	body, _ := json.Marshal(request{Op: "register", Cluster: cluster, Node: node, Candidates: cands})
+	raw := s.Handle(body, fakeAddr(from))
+	if raw == nil {
+		t.Fatalf("registration from %s was ignored", node)
+	}
+	var resp response
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("reply is not json: %v", err)
+	}
+	return resp
+}
+
+// TestCandidatesReachTheOtherPeer. The reflexive address the rendezvous sees
+// is the one least likely to work: two machines on one network reach each
+// other's LAN address without troubling a router, and a mapped port survives
+// a NAT that no reflexive address gets through. A peer that is only ever told
+// the reflexive address cannot try either.
+func TestCandidatesReachTheOtherPeer(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000",
+		[]string{"lan:192.168.0.10:38447", "mapped:203.0.113.1:38447"})
+	resp := registerWith(t, s, "c1", "bob", "198.51.100.2:6000", []string{"lan:10.0.0.5:38447"})
+
+	if len(resp.Peers) != 1 {
+		t.Fatalf("bob sees %d peers, want 1", len(resp.Peers))
+	}
+	got := resp.Peers[0]
+	if got.Node != "alice" {
+		t.Fatalf("peer is %s, want alice", got.Node)
+	}
+	if len(got.Candidates) != 2 {
+		t.Fatalf("alice's candidates = %v, want both of them", got.Candidates)
+	}
+	if got.Candidates[0] != "lan:192.168.0.10:38447" || got.Candidates[1] != "mapped:203.0.113.1:38447" {
+		t.Errorf("candidates = %v, want the LAN and mapped addresses alice registered", got.Candidates)
+	}
+	// The reflexive address must still travel: it is what the punch aims at.
+	if got.Addr != "203.0.113.1:5000" {
+		t.Errorf("Addr = %s, want the address the server saw", got.Addr)
+	}
+}
+
+// TestConnectForwardsToThePeerAndNobodyElse. This is the one operation that
+// makes the server send a packet somewhere the sender chose, so where it goes
+// is worth pinning down.
+func TestConnectForwardsToThePeerAndNobodyElse(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", []string{"lan:192.168.0.10:38447"})
+	registerWith(t, s, "c1", "bob", "198.51.100.2:6000", nil)
+
+	body, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "alice", Peer: "bob", Nonce: "n1"})
+	reply, fwd := s.handle(body, fakeAddr("203.0.113.1:5000"))
+
+	if reply != nil {
+		t.Errorf("connect answered the caller (%s); it should only forward", reply)
+	}
+	if fwd == nil {
+		t.Fatal("connect forwarded nothing, so bob never learns to punch back")
+	}
+	if fwd.To != "198.51.100.2:6000" {
+		t.Errorf("forwarded to %s, want bob's registered address", fwd.To)
+	}
+	p, ok := ParsePunch(fwd.Body)
+	if !ok {
+		t.Fatalf("the forwarded datagram is not a punch: %s", fwd.Body)
+	}
+	if p.From != "alice" || p.Nonce != "n1" {
+		t.Errorf("punch says from=%s nonce=%s, want alice/n1", p.From, p.Nonce)
+	}
+	// Alice's candidates must ride along, or bob has nothing to aim at.
+	if len(p.Candidates) != 1 || p.Candidates[0] != "lan:192.168.0.10:38447" {
+		t.Errorf("punch candidates = %v, want alice's registration", p.Candidates)
+	}
+	// And bob learns its own address free, saving a round trip.
+	if p.You != "198.51.100.2:6000" {
+		t.Errorf("punch You = %s, want bob's address", p.You)
+	}
+}
+
+// TestConnectUsesRegisteredCandidatesNotClaimedOnes. A node speaks for itself,
+// and only through a registration the server watched arrive from its own
+// address. Letting connect carry arbitrary candidates would make the server
+// repeat one machine's claims about another.
+func TestConnectUsesRegisteredCandidatesNotClaimedOnes(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", []string{"lan:192.168.0.10:38447"})
+	registerWith(t, s, "c1", "bob", "198.51.100.2:6000", nil)
+
+	body, _ := json.Marshal(request{
+		Op: "connect", Cluster: "c1", Node: "alice", Peer: "bob", Nonce: "n1",
+		Candidates: []string{"lan:10.6.6.6:1"},
+	})
+	_, fwd := s.handle(body, fakeAddr("203.0.113.1:5000"))
+	if fwd == nil {
+		t.Fatal("nothing forwarded")
+	}
+	p, _ := ParsePunch(fwd.Body)
+	for _, c := range p.Candidates {
+		if strings.Contains(c, "10.6.6.6") {
+			t.Errorf("a candidate named in the connect was forwarded: %v", p.Candidates)
+		}
+	}
+}
+
+// TestConnectCannotCrossClusters. Members of different clusters must never
+// see each other, and the forward is a way of reaching an address directly.
+func TestConnectCannotCrossClusters(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "mine", "alice", "203.0.113.1:5000", nil)
+	registerWith(t, s, "theirs", "victim", "198.51.100.2:6000", nil)
+
+	body, _ := json.Marshal(request{Op: "connect", Cluster: "mine", Node: "alice", Peer: "victim"})
+	if _, fwd := s.handle(body, fakeAddr("203.0.113.1:5000")); fwd != nil {
+		t.Errorf("forwarded across clusters, to %s", fwd.To)
+	}
+}
+
+// TestConnectIsRateLimited. Unbounded, this is a way of pointing the
+// server's traffic at any address that has ever registered.
+func TestConnectIsRateLimited(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", nil)
+	registerWith(t, s, "c1", "bob", "198.51.100.2:6000", nil)
+
+	body, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "alice", Peer: "bob"})
+	forwarded := 0
+	for i := 0; i < 50; i++ {
+		if _, fwd := s.handle(body, fakeAddr("203.0.113.1:5000")); fwd != nil {
+			forwarded++
+		}
+	}
+	if forwarded > int(connectBurst)+1 {
+		t.Errorf("forwarded %d of 50 back-to-back requests; the burst is %.0f", forwarded, connectBurst)
+	}
+	if forwarded == 0 {
+		t.Error("forwarded none at all, so an ordinary first connect would be dropped")
+	}
+
+	// A different source has its own allowance: one noisy peer must not stop
+	// everyone else connecting.
+	registerWith(t, s, "c1", "carol", "192.0.2.7:7000", nil)
+	other, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "carol", Peer: "bob"})
+	if _, fwd := s.handle(other, fakeAddr("192.0.2.7:7000")); fwd == nil {
+		t.Error("a second source was refused because the first exhausted its allowance")
+	}
+}
+
+// TestConnectToAnAbsentPeerIsSilent. Answering would turn the server into a
+// way of testing which nodes exist.
+func TestConnectToAnAbsentPeerIsSilent(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", nil)
+
+	body, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "alice", Peer: "ghost"})
+	if reply, fwd := s.handle(body, fakeAddr("203.0.113.1:5000")); reply != nil || fwd != nil {
+		t.Errorf("answered for a peer that is not there: reply=%s fwd=%v", reply, fwd)
+	}
+}
+
+// TestAPunchIsNotMistakenForARegistration. Both arrive on one socket by
+// design; a caller that confuses them either drops connections or treats a
+// peer's punch as its own address.
+func TestAPunchIsNotMistakenForARegistration(t *testing.T) {
+	s := NewServer(time.Minute)
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", nil)
+	registerWith(t, s, "c1", "bob", "198.51.100.2:6000", nil)
+
+	regBody, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "alice", Peer: "bob"})
+	_, fwd := s.handle(regBody, fakeAddr("203.0.113.1:5000"))
+	if fwd == nil {
+		t.Fatal("nothing forwarded")
+	}
+	if _, _, ok := ParseRegister(fwd.Body); ok {
+		t.Error("a punch parsed as a registration reply")
+	}
+
+	reply := s.Handle(mustJSON(request{Op: "register", Cluster: "c1", Node: "bob"}), fakeAddr("198.51.100.2:6000"))
+	if _, ok := ParsePunch(reply); ok {
+		t.Error("a registration reply parsed as a punch")
+	}
+	if _, _, ok := ParseRegister(reply); !ok {
+		t.Error("a registration reply did not parse as one")
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
