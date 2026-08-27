@@ -1,6 +1,7 @@
 package internet
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -76,5 +77,52 @@ func TestTheDirectPortIsFixedByDefault(t *testing.T) {
 	}
 	if DefaultPort == 0 {
 		t.Error("the default port is ephemeral, so no mapping survives a restart")
+	}
+}
+
+// TestAMappingThatIsNotOursIsNotPublished.
+//
+// Measured on this project's laptop: on a phone tether, UPnP granted a
+// mapping on 172.168.3.211 while a public server saw the machine as
+// 103.57.97.77. The range check for double NAT does not catch that - 172.168
+// is outside RFC1918, which stops at 172.31 - so the address looked
+// publishable and belongs to somebody else entirely. Publishing it sends
+// every peer to probe an uninvolved host.
+func TestAMappingThatIsNotOursIsNotPublished(t *testing.T) {
+	cases := []struct {
+		name    string
+		mapped  string
+		reflex  string
+		publish bool
+		why     string
+	}{
+		{
+			name: "the router and the world agree", mapped: "203.0.113.9:38447",
+			reflex: "203.0.113.9:41000", publish: true,
+			why: "the mapping is genuinely this machine's",
+		},
+		{
+			name: "the phone tether case", mapped: "172.168.3.211:38447",
+			reflex: "103.57.97.77:44069", publish: false,
+			why: "the router is behind another NAT and named a stranger",
+		},
+		{
+			name: "no reflexive address yet", mapped: "203.0.113.9:38447",
+			reflex: "", publish: true,
+			why: "on the first poll the mapping is the better of two guesses",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var reflex netip.AddrPort
+			if tc.reflex != "" {
+				reflex = netip.MustParseAddrPort(tc.reflex)
+			}
+			got := mappingIsOurs(netip.MustParseAddrPort(tc.mapped), reflex)
+			if got != tc.publish {
+				t.Errorf("publish = %v, want %v — %s", got, tc.publish, tc.why)
+			}
+		})
 	}
 }

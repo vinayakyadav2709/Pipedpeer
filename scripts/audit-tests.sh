@@ -299,6 +299,10 @@ case_ "the firewall is not touched without consent" src/internal/setup/network.g
 	's = s.replace("\tif !apply {\n\t\treturn st\n\t}\n\t// --permanent then --reload", "\t// --permanent then --reload", 1)' \
 	./internal/setup/ "TestNothingIsChangedWithoutConsent"
 
+case_ "a mapping that is not ours is not published" src/internal/internet/internet.go \
+	's = s.replace("\tif !reflex.IsValid() {\n\t\treturn true\n\t}\n\treturn reflex.Addr() == mapped.Addr()", "\treturn true", 1)' \
+	./internal/internet/ "TestAMappingThatIsNotOursIsNotPublished"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

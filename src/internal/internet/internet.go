@@ -307,7 +307,23 @@ func (m *Manager) sync(ctx context.Context) {
 
 	var mapped netip.AddrPort
 	if mp := m.keeper.Current(); mp.Kind != portmap.KindNone && mp.Public {
-		mapped = mp.External
+		// The router's word, checked against what a public server actually
+		// sees. A range check catches the obvious double-NAT cases, and not
+		// this one: a phone tether here granted a UPnP mapping on
+		// 172.168.3.211 while the world saw this machine as 103.57.97.77.
+		// That address is outside every private range, so it looked
+		// publishable, and it belongs to somebody else entirely - publishing
+		// it would have peers send unsolicited probes to an uninvolved host.
+		//
+		// Only skipped when the reflexive address is not known yet, on the
+		// first poll, where the mapping is the better guess of the two.
+		if mappingIsOurs(mp.External, reflex) {
+			mapped = mp.External
+		} else {
+			m.cfg.Log("router claims %s but the introducer sees %s; not publishing "+
+				"the mapping - there is another NAT above this router",
+				mp.External.Addr(), reflex.Addr())
+		}
 	}
 	cands := direct.Gather(m.endpoint.Port(), mapped, reflex)
 
@@ -556,4 +572,23 @@ func trimKind(s string) string {
 		return addr
 	}
 	return s
+}
+
+// mappingIsOurs reports whether a router's claimed external address is really
+// this machine's.
+//
+// A range check catches the obvious double-NAT cases and misses this one: a
+// phone tether granted a UPnP mapping on 172.168.3.211 while a public server
+// saw the machine as 103.57.97.77. That is outside every private range, so it
+// looks publishable, and it is somebody else's address. Comparing it against
+// what the introducer actually sees settles it.
+//
+// True when there is no reflexive address yet, on the first poll: the mapping
+// is then the better of two guesses, and one wasted probe costs less than
+// publishing nothing at all.
+func mappingIsOurs(mapped, reflex netip.AddrPort) bool {
+	if !reflex.IsValid() {
+		return true
+	}
+	return reflex.Addr() == mapped.Addr()
 }
