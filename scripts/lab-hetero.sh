@@ -20,8 +20,11 @@ ports=(38081 38082 38083)
 bin="${1:-$HOME/bin/pipedpeer}"
 labdir="$HOME/lab-hetero"
 
-runtime=docker
-command -v docker >/dev/null || runtime=podman
+# No compose here, only plain containers, so a runtime without a compose
+# implementation is still perfectly usable.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/runtime.sh"
+PP_NEED_COMPOSE=0 pp_pick_runtime || exit 1
+runtime="$PP_RUNTIME"
 
 # Containers first: they bind-mount the binary, so replacing it underneath a
 # running one fails with "Text file busy".

@@ -18,12 +18,24 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 repo_root="$(pwd)"
-cli="$repo_root/bin/pipedpeer"
+# PIPEDPEER first: the benchmarks are copied to a test machine and run beside
+# a binary, with no checkout to build from. Assuming a repo made this the only
+# harness that could not run where the cluster is - it died on
+# "/home/scripts/build.sh: No such file or directory".
+cli="${PIPEDPEER:-$repo_root/bin/pipedpeer}"
 items="${BENCH_ITEMS:-48}"
 spin="${BENCH_SPIN:-120000}"
 
 command -v python3 >/dev/null || { echo "python3 required"; exit 1; }
-[[ -x "$cli" ]] || "$repo_root/scripts/build.sh"
+if [[ ! -x "$cli" ]]; then
+	if [[ -x "$repo_root/scripts/build.sh" ]]; then
+		"$repo_root/scripts/build.sh"
+	else
+		echo "no binary at $cli, and no checkout here to build one from." >&2
+		echo "Set PIPEDPEER to a built binary." >&2
+		exit 2
+	fi
+fi
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
 mkdir -p "$state_dir"
