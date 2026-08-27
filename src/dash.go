@@ -175,7 +175,12 @@ func (m dashModel) View() string {
 
 		srcDisplay := p.Source
 		if srcDisplay == "discovery" {
-			srcDisplay = "mDNS"
+			// UDP broadcast, not mDNS. The label said mDNS since before the
+			// mechanism was chosen, and an operator debugging why a peer is
+			// not found goes looking at Avahi rather than at whether their
+			// access point drops broadcast - which is the thing that actually
+			// breaks it.
+			srcDisplay = "broadcast"
 		}
 
 		peerRows = append(peerRows, []string{

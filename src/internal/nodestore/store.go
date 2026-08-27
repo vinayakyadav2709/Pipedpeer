@@ -1,5 +1,5 @@
 // Package nodestore is the daemon's record of every node it knows about:
-// itself, peers found on the LAN via mDNS, and peers added by hand.
+// itself, peers found on the LAN by UDP broadcast, and peers added by hand.
 //
 // The daemon is the single source of truth for cluster membership — the CLI,
 // the dashboard and the orchestrator all read it through the daemon's
@@ -185,7 +185,7 @@ func (s *Store) UpsertNode(n Node) error {
 
 func (s *Store) AddManual(host string, port int) error {
 	// Try to resolve the real node UUID immediately via the health endpoint, so
-	// the entry merges with the same node when mDNS finds it later.
+	// the entry merges with the same node when discovery finds it later.
 	healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(healthURL)
