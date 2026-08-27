@@ -230,6 +230,10 @@ case_ "one address holds one node" src/internal/nodestore/store.go \
 	's = s.replace("\tif err := s.forgetOthersAt(host, port, nodeID); err != nil {\n\t\treturn err\n\t}\n", "", 1)' \
 	./internal/nodestore/ "TestReaddingAnAddressReplacesTheOldIdentity"
 
+case_ "the ring counts machines, not ranks" src/main.go \
+	's = s.replace("func ddpDistinctMachines(ring []registry.NodeRecord) int {", "func ddpDistinctMachines(ring []registry.NodeRecord) int {\n\tif true {\n\t\treturn len(ring)\n\t}", 1)' \
+	. "TestTheRingCountsMachinesNotRanks"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

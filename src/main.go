@@ -810,6 +810,11 @@ func runDDP(o ddpRunOptions) error {
 				fmt.Sprintf("PIPEDPEER_DDP_SYNC=http://%s/v1/ddp/sync",
 					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
 				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
+				// How many machines, not how many ranks. The ring's
+				// worth-it verdict compares against "this machine doing
+				// every shard", and ranks that share a machine do not
+				// multiply what it can do.
+				fmt.Sprintf("PIPEDPEER_DDP_MACHINES=%d", ddpDistinctMachines(ranks)),
 			)
 			// Every rank gets the whole set of shares, not just its own: a
 			// contiguous shard needs the offsets of everything before it, and
@@ -994,6 +999,37 @@ func ddpNormaliseWeights(w []float64) []float64 {
 
 // ddpSharesNode reports whether ring member i is on a machine that is also
 // hosting another rank.
+// ddpDistinctMachines counts the physical machines a ring spans.
+//
+// Not the same as the number of ranks. Two daemons on one laptop are two
+// nodes with two identities and one set of cores, and the ring's own verdict
+// on whether it was worth forming divides the work by the number of ranks -
+// which on a co-located ring says the machine is twice as fast as itself.
+// Measured: a two-rank ring on one machine reported "the ring paid for
+// itself" on a run that took 191s against 92.8s for the same machine alone.
+//
+// The machine key is the one the roommate memory accounting already uses, so
+// a ring learns nothing new here - it just stops ignoring what the daemon
+// knew. Nodes that do not report one are counted separately: an unknown
+// machine is not evidence of sharing.
+func ddpDistinctMachines(ring []registry.NodeRecord) int {
+	seen := map[string]bool{}
+	unknown := 0
+	for _, n := range ring {
+		key := n.Capabilities[heartbeat.MachineCapability]
+		if key == "" {
+			unknown++
+			continue
+		}
+		seen[key] = true
+	}
+	n := len(seen) + unknown
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 func ddpSharesNode(ring []registry.NodeRecord, i int) bool {
 	for j, n := range ring {
 		if j != i && n.NodeID == ring[i].NodeID {
