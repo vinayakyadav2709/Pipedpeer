@@ -32,6 +32,18 @@ func binaryCheck(name string) func() bool {
 	}
 }
 
+// nixInstalled is binaryCheck("nix") plus the installer locations, because
+// PATH is not where nix is - it is where the installer's profile script puts
+// it, and nothing that is not a login shell runs that script. A systemd unit,
+// a cron job, `ssh host command` and `docker exec` all see a machine with a
+// perfectly good /nix/var/nix/profiles/default/bin/nix and an empty PATH.
+// Reporting "nix missing" there sends the user to install a second nix over
+// the one they have.
+func nixInstalled() bool {
+	_, err := nixstore.SystemNix()
+	return err == nil
+}
+
 // storeDir is where nix keeps the store. NIX_STORE_DIR overrides it for the
 // unusual setups that relocate it.
 func storeDir() string {
@@ -51,7 +63,7 @@ func nixUsable() bool {
 	if nixstore.Private() {
 		return true
 	}
-	if !binaryCheck("nix")() {
+	if !nixInstalled() {
 		return false
 	}
 	info, err := os.Stat(storeDir())
@@ -210,7 +222,7 @@ func getPrereqs() []prereq {
 			// A nix that is installed but storeless only needs the store:
 			// running a full installer over a packaged nix would leave two of
 			// them on the machine.
-			if binaryCheck("nix")() {
+			if nixInstalled() {
 				if err := createNixStore(); err == nil {
 					return nil
 				}
