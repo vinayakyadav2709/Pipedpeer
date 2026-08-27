@@ -123,7 +123,14 @@ type Server struct {
 	// Peer health cache (populated by background poller)
 	peersMu     sync.RWMutex
 	peerHealths map[string]*PeerHealth // key: "host:port"
-	stopPoller  chan struct{}
+
+	// What daemons sharing this machine have reserved, and when that was
+	// last asked. Guarded separately from peerHealths because it is read on
+	// the admission path and refreshed by an HTTP call.
+	coResMu    sync.Mutex
+	coResBytes int64
+	coResAt    time.Time
+	stopPoller chan struct{}
 
 	// Discovery function for mDNS scanning (set before StartPeerPoller)
 	discoverFn func() []NodeDiscovered
@@ -171,6 +178,13 @@ type PeerHealth struct {
 	// TotalCPUs is the peer's core count, used only as the prior for how much
 	// pool work to give it before anything has actually been measured there.
 	TotalCPUs int `json:"total_cpus"`
+	// ReservedMem is what the peer has already promised to jobs of its own.
+	// Only meaningful alongside Machine: it is what this daemon must also
+	// subtract when the peer turns out to be sharing this machine's RAM.
+	ReservedMem int64 `json:"reserved_mem"`
+	// Machine identifies the physical machine the peer runs on, so a peer
+	// that shares this one can be recognised.
+	Machine string `json:"machine"`
 }
 
 // --- Request/Response types ---
@@ -776,9 +790,111 @@ func (s *Server) ReservedMem() int64 {
 }
 
 // AvailableForJob returns real OS available memory minus pipedpeer reservations.
+// AvailableForJob is how much memory this daemon may promise to a new job.
+//
+// Free memory is a property of the machine, not of the daemon, so anything
+// else on this machine that has already promised memory has to be subtracted
+// too. Two daemons on one host each reading the host's free memory and each
+// subtracting only their own reservations both conclude they have all of it,
+// and both admit work that between them it cannot hold - measured: a forced
+// spill drove a 14 GB machine to 194 MB free and the kernel killed its
+// desktop shell. A container worker beside its host's daemon is an ordinary
+// arrangement, and the lab scripts here build exactly it.
+//
+// Peers on other machines are not subtracted: their memory is their own.
 func (s *Server) AvailableForJob() int64 {
 	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
-	return load.AvailableMemBytes
+	avail := load.AvailableMemBytes - s.reservedOnThisMachine()
+	if avail < 0 {
+		return 0
+	}
+	return avail
+}
+
+// reservedOnThisMachine sums what daemons sharing this machine have promised.
+//
+// Asked directly rather than read from the health poller's cache. The poller
+// runs every ten seconds or so, and a chunk that arrives inside that window is
+// admitted against a figure from before the reservation it needs to see - the
+// two daemons then admit in the same window and the machine goes over anyway.
+// Measured with the cached figure: a forced spill still drove the host out of
+// memory, though the kernel took a pipedpeer worker rather than the desktop.
+// A daemon sharing this machine is reachable over the loopback, so asking is
+// cheap; the answer is held briefly so a burst of admissions is one question.
+func (s *Server) reservedOnThisMachine() int64 {
+	me := heartbeat.Machine()
+	if me == "" {
+		// Cannot tell which machine this is, so cannot tell who shares it.
+		// Claiming co-location on a guess would shrink every node's usable
+		// memory for no reason.
+		return 0
+	}
+
+	s.coResMu.Lock()
+	if time.Since(s.coResAt) < coResidentTTL {
+		total := s.coResBytes
+		s.coResMu.Unlock()
+		return total
+	}
+	s.coResMu.Unlock()
+
+	s.peersMu.RLock()
+	var roommates []PeerHealth
+	for _, ph := range s.peerHealths {
+		if ph.Status == "healthy" && heartbeat.SameMachine(ph.Machine, me) {
+			roommates = append(roommates, *ph)
+		}
+	}
+	s.peersMu.RUnlock()
+
+	var total int64
+	for _, ph := range roommates {
+		if live, ok := peerReservedNow(ph); ok {
+			total += live
+			continue
+		}
+		// Unreachable right now: the last known figure is a better guess than
+		// zero, which would read as "it has promised nothing".
+		total += ph.ReservedMem
+	}
+
+	s.coResMu.Lock()
+	s.coResBytes, s.coResAt = total, time.Now()
+	s.coResMu.Unlock()
+	return total
+}
+
+// coResidentTTL bounds how often a daemon asks its roommates what they have
+// promised. Short enough that a reservation made moments ago is seen, long
+// enough that a burst of admissions asks once.
+const coResidentTTL = 300 * time.Millisecond
+
+// peerReservedNow asks a co-located daemon what it currently has reserved.
+func peerReservedNow(ph PeerHealth) (int64, bool) {
+	req, err := http.NewRequest("GET",
+		fmt.Sprintf("http://%s/health", net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))), nil)
+	if err != nil {
+		return 0, false
+	}
+	if tok := authtoken.Current(); tok != "" {
+		req.Header.Set("X-Pipedpeer-Token", tok)
+	}
+	// Loopback, and on the admission path: a daemon that has stopped
+	// answering must not hold up work here.
+	client := &http.Client{Timeout: 400 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var h healthResponse
+	if json.NewDecoder(resp.Body).Decode(&h) != nil {
+		return 0, false
+	}
+	return h.ReservedMem, true
 }
 
 // GetLease returns a copy of a lease by ID.
@@ -1246,6 +1362,8 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.ActiveJobs = h.ActiveJobs
 	ph.AvailableMem = h.AvailableMem
 	ph.TotalCPUs = h.Load.TotalCPUs
+	ph.ReservedMem = h.ReservedMem
+	ph.Machine = h.Capabilities[heartbeat.MachineCapability]
 
 	capsJSON, _ := json.Marshal(h.Capabilities)
 	loadJSON, _ := json.Marshal(h.Load)

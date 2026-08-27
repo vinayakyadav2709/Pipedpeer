@@ -137,6 +137,11 @@ func Capabilities(id identity.NodeIdentity) map[string]string {
 		"arch":     id.Arch,
 		"hostname": id.Hostname,
 	}
+	// Which physical machine this is, so a daemon sharing one with a peer can
+	// tell. Hostname will not do: containers get their own.
+	if m := Machine(); m != "" {
+		caps[MachineCapability] = m
+	}
 
 	// CPU: core count, model and clock. Cached — cpu.Info() shells into
 	// /proc/cpuinfo and is called on every heartbeat.
