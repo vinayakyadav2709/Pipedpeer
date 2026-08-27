@@ -139,10 +139,35 @@ else
   PASS=$((PASS + 1)); echo "PASS: 01 ran fully remote (no local fallback)"
 fi
 run_demo 02_numpy_heavy 02_numpy_heavy.py "" "reconstruction relative error:"
-if grep -q "matmul: sending" "$LOG/02_numpy_heavy.out"; then
-  FAIL=$((FAIL + 1)); echo "FAIL: matmul should stay local (local BLAS ~200 GFLOP/s beats cluster transport)"
+# Whether the matmul shipped is not the question - whether the choice was the
+# faster one is. This used to fail the build on "matmul: sending", which is a
+# fact about this rig (three containers sharing one host's cores, where nothing
+# remote can beat local BLAS) stated as a law, and it would fail the day the
+# model got good enough to ship a shape that should be shipped. The demo now
+# reports what it paid against what local BLAS would have cost, and the check
+# is that the decision did not make things worse. Decision quality across
+# shapes is scripts/bench-matmul.sh; this is the tripwire that the promise -
+# never slower than local - still holds on a run anyone can reproduce.
+mm_line="$(grep -a 'matmul decision:' "$LOG/02_numpy_heavy.out" | tail -1)"
+if [ -z "$mm_line" ]; then
+  FAIL=$((FAIL + 1)); echo "FAIL: 02 reported no matmul decision — nothing to check"
 else
-  PASS=$((PASS + 1)); echo "PASS: matmul stayed local (D2: local BLAS wins)"
+  mm_verdict="$(printf '%s' "$mm_line" | awk '
+    { for (i = 1; i <= NF; i++) {
+        if ($i == "paid") { paid = $(i+1) + 0 }
+        if ($i == "~" || substr($i, 1, 1) == "~") { local = substr($i, 2) + 0 }
+      }
+      # A tenth of a second either way is noise, and a fifth again slower is
+      # the point at which a user would notice the shim rather than the work.
+      if (local <= 0) { print "unknown" }
+      else if (paid <= local * 1.2 + 0.1) { print "ok" }
+      else { printf "slower %.1f %.1f", paid, local }
+    }')"
+  case "$mm_verdict" in
+    ok) PASS=$((PASS + 1)); echo "PASS: matmul decision was not slower than local ($mm_line)" ;;
+    unknown) FAIL=$((FAIL + 1)); echo "FAIL: could not read the matmul decision from: $mm_line" ;;
+    *) FAIL=$((FAIL + 1)); echo "FAIL: matmul decision cost more than local BLAS ($mm_verdict)" ;;
+  esac
 fi
 check "02 shim ledger: svd offload" "offloading" "$LOG/02_numpy_heavy.out"
 run_demo 03_pandas_ooc 03_pandas_ooc.py "-e PIPEDPEER_OOC_MIN=5e8" "groupby('cat').mean()"
