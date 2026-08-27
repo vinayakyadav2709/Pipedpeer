@@ -1218,6 +1218,31 @@ class _WeightedShardSampler:
         return iter(order[start:end])
 
 
+def _push_window(values, v, cap):
+    """Append v, keeping at most cap entries. The oldest goes first."""
+    values.append(v)
+    while len(values) > cap:
+        del values[0]
+
+
+def _recent_mean_ms(recent, total_sec, count):
+    """What a step is costing now, in milliseconds.
+
+    Recent rather than cumulative. A cumulative mean moves toward a new value
+    at (N-k)/N, so a rank throttled at step 200 of 400 still reports half its
+    old speed - and one that RECOVERS waits just as long to be given work
+    back, which defeats the point of refitting shares at all. The pool's rate
+    model has used a sliding window since it was written, for this reason.
+
+    Falls back to the cumulative figure until the window has anything in it.
+    """
+    if recent:
+        return 1000.0 * sum(recent) / len(recent)
+    if count <= 0:
+        return 0.0
+    return 1000.0 * total_sec / count
+
+
 def _parse_weights(raw, world):
     """Each rank's share of a step, or None when the shares are equal.
 
@@ -2545,6 +2570,16 @@ def _install_ddp():
     # step() itself, which is a rounding error next to the forward and
     # backward passes it follows and would make N wildly too large.
     _STEP_SEC = [0.0, 0]  # total compute seconds, count
+    # The last few steps, for the daemon's refit. Separate from the cumulative
+    # figure above, which is right for tuning how often to sync - a stable
+    # long-run average - and wrong for noticing that this machine slowed down
+    # a moment ago. A cumulative mean over a whole run moves toward a new
+    # value at (N-k)/N, so a rank that was throttled at step 200 of 400 still
+    # reports half its old speed, and one that RECOVERS waits just as long to
+    # be given work back. The pool's rate model has used a sliding window
+    # since it was written, for the same reason.
+    _STEP_RECENT = []
+    _STEP_WINDOW = 20
     _STEP_MARK = [None, 0.0]  # monotonic at last step, sync_sec at last step
 
     def _apply_rebalance(reply):
@@ -2583,17 +2618,18 @@ def _install_ddp():
         return 1000.0 * _DDP_STATS["sync_sec"] / _DDP_STATS["syncs"]
 
     def _mean_step_ms():
-        """This rank's mean compute time for a step, in milliseconds.
+        """What a step is costing this rank now, in milliseconds.
 
-        Already measured for sync tuning; reported so the lead daemon can
-        compare ranks. Same model, same batch, whatever hardware this rank
-        has - which makes it the one number that compares a GPU against a
-        CPU, and the placement probe cannot: that one is an integer loop on
-        the CPU, so a GPU node scores its CPU's score.
+        Reported so the lead daemon can compare ranks: same model, same batch,
+        whatever hardware this rank has - which makes it the one number that
+        compares a GPU against a CPU, and the placement probe cannot, being an
+        integer loop on the CPU.
+
+        Recent rather than cumulative, because the daemon uses it to notice a
+        machine that has changed. Falls back to the cumulative figure until
+        the window has anything in it.
         """
-        if _STEP_SEC[1] <= 0:
-            return 0.0
-        return 1000.0 * _STEP_SEC[0] / _STEP_SEC[1]
+        return _recent_mean_ms(_STEP_RECENT, _STEP_SEC[0], _STEP_SEC[1])
 
     def _tuned_sync_every():
         """How often to average, from measured sync and step times.
@@ -3093,19 +3129,27 @@ def _install_ddp():
                     if _elapsed > _synced >= 0:
                         _STEP_SEC[0] += _elapsed - _synced
                         _STEP_SEC[1] += 1
+                        _push_window(_STEP_RECENT, _elapsed - _synced, _STEP_WINDOW)
                 _STEP_MARK[0], _STEP_MARK[1] = _now, _DDP_STATS["sync_sec"]
 
                 every = _tuned_sync_every()
-                if every == 1:
-                    grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
-                             for p in params if p.grad is not None]
-                    if grads:
-                        _daemon_allreduce(grads)
-                    return _orig_step(*sa, **skw)
-                out = _orig_step(*sa, **skw)
-                if (n + 1) % every == 0:
-                    _daemon_allreduce([p.data for p in params], kind="weights")
-                return out
+                try:
+                    if every == 1:
+                        grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
+                                 for p in params if p.grad is not None]
+                        if grads:
+                            _daemon_allreduce(grads)
+                        return _orig_step(*sa, **skw)
+                    out = _orig_step(*sa, **skw)
+                    if (n + 1) % every == 0:
+                        _daemon_allreduce([p.data for p in params], kind="weights")
+                    return out
+                finally:
+                    # This step's gradient has been sent with the batch behind
+                    # it; the next forward pass records its own. Left set, the
+                    # first batch of the run would be reported for every step
+                    # and a short final batch never seen.
+                    _BATCH_N[0] = 0
             if not _dist.is_initialized():
                 _init_group()
             if self not in _STEPPED:
@@ -3127,19 +3171,6 @@ def _install_ddp():
         self.step = _step
 
     def _forward(self, *args, **kw):
-        # The leading dimension of the first tensor argument is how many
-        # samples this step's gradient was computed over. Reading it here
-        # rather than from the configured batch size is what makes the
-        # weighting honest: the last batch of an epoch is short, and a rank
-        # that ran dry sends a gradient over nothing.
-        if _WORLD > 1:
-            for a in args:
-                if hasattr(a, "shape") and getattr(a, "ndim", 0) >= 1:
-                    try:
-                        _BATCH_N[0] = int(a.shape[0])
-                    except Exception:
-                        pass
-                    break
         if _WORLD > 1 and not _NATIVE_DDP and self not in _FWD:
             if _BACKEND == "daemon":
                 # Only sync once training is underway (mirrors the gloo
@@ -3281,6 +3312,37 @@ def _install_ddp():
         _NATIVE_DDP.append(True)
         _log("native DistributedDataParallel detected; shim sync disabled")
         return _ORIG_DDP(self, *a, **kw)
+
+    def _batch_pre_hook(module, args):
+        """Record how many samples this step's forward pass is over.
+
+        A global pre-hook, not a patch of Module.forward. Assigning to
+        nn.Module.forward intercepts nothing: every real module defines its
+        own forward, and Python resolves the subclass's first - measured, a
+        patched Module.forward saw not one call for an ordinary model. So the
+        sample count was always zero on the wire, which made the weighted
+        gradient average fall back to equal weights (wrong once batches are
+        proportional) and left the mid-run refit with no rates to work with.
+
+        Only the first module of a step is recorded. The hook fires for every
+        layer too, and an inner layer's leading dimension is not the batch
+        once a model reshapes.
+        """
+        if _WORLD <= 1 or _BATCH_N[0]:
+            return
+        for a in args:
+            if hasattr(a, "shape") and getattr(a, "ndim", 0) >= 1:
+                try:
+                    _BATCH_N[0] = int(a.shape[0])
+                except Exception:
+                    pass
+                return
+
+    try:
+        _th.nn.modules.module.register_module_forward_pre_hook(_batch_pre_hook)
+    except Exception as e:
+        _log("ddp: cannot observe batch sizes (%s); gradients will be averaged "
+             "as equals, which is only right when the batches are" % e)
 
     _ORIG_DDP = _th.nn.parallel.DistributedDataParallel.__init__
     _th.nn.parallel.DistributedDataParallel.__init__ = _ddp_init

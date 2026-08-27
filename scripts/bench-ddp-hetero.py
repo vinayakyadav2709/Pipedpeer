@@ -48,7 +48,10 @@ model = MLP().to(device)
 opt = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
 loss_fn = nn.MSELoss()
 
-EPOCHS = 2
+# Long enough for the daemon's refit cadence to fire more than once, so a
+# machine that slows down mid-run has time to be noticed and the ring time to
+# recover. PIPEDPEER_BENCH_EPOCHS raises it for the rebalance test.
+EPOCHS = int(os.environ.get("PIPEDPEER_BENCH_EPOCHS", "2"))
 seen = 0
 steps = 0
 t0 = time.monotonic()
