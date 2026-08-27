@@ -247,6 +247,18 @@ case_ "a PCP reply must carry our nonce" src/internal/portmap/natpmp.go \
 	's = s.replace("\tfor i := range nonce {\n\t\tif resp[24+i] != nonce[i] {\n\t\t\treturn netip.AddrPort{}, 0, fmt.Errorf(\"PCP reply carries a different nonce\")\n\t\t}\n\t}\n", "", 1)' \
 	./internal/portmap/ "TestAWrongNonceIsRefused"
 
+case_ "the introducer only forwards within a cluster" src/internal/rendezvous/rendezvous.go \
+	's = s.replace("\ttarget, ok := c[req.Peer]", "\tvar target entry\n\tvar ok bool\n\tfor _, cc := range s.clusters {\n\t\tif e, found := cc[req.Peer]; found {\n\t\t\ttarget, ok = e, true\n\t\t}\n\t}", 1)' \
+	./internal/rendezvous/ "TestConnectCannotCrossClusters"
+
+case_ "connect is rate limited" src/internal/rendezvous/rendezvous.go \
+	's = s.replace("\tif !s.allow(from.String()) {\n\t\treturn nil, nil\n\t}\n", "", 1)' \
+	./internal/rendezvous/ "TestConnectIsRateLimited"
+
+case_ "a node speaks only for itself" src/internal/rendezvous/rendezvous.go \
+	's = s.replace("\t\tCandidates: mine.candidates,", "\t\tCandidates: append(mine.candidates, req.Candidates...),", 1)' \
+	./internal/rendezvous/ "TestConnectUsesRegisteredCandidatesNotClaimedOnes"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
