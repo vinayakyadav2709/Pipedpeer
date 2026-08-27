@@ -6,29 +6,50 @@ import (
 	"testing"
 )
 
-// TestAddressIsChosenPerPeer.
+// TestTheRouteDecidesTheAddress.
 //
-// detectLocalIP picks one address for everybody and prefers a private one. A
-// machine on both a home LAN and a Tailscale network has two, of which only
-// one reaches a given peer: measured, a node advertised its stale LAN address
-// 192.168.0.201 to a peer reachable only over Tailscale. DDP worked anyway
-// because the lead rank happened to be the reachable node; with the roles
-// reversed the sync URL is an address the other rank cannot open and the run
-// hangs at the first barrier.
-func TestAddressIsChosenPerPeer(t *testing.T) {
-	// A route that certainly exists and is not loopback: whatever the kernel
-	// uses to reach a public address.
-	got := localIPFor("1.1.1.1")
-	if got == "" {
-		t.Fatal("no address chosen for a routable peer")
+// This is the whole mechanism: which of our addresses a peer sees depends on
+// which of them reaches that peer. detectLocalIP picks one for everybody and
+// prefers a private one, so a machine on both a home LAN and a Tailscale
+// network advertises the LAN address to a peer only reachable over Tailscale -
+// measured, 192.168.0.201, and the run hangs at the first barrier.
+//
+// Asserted against loopback, which every machine has a distinct route to:
+// reaching 127.0.0.1 must not give the same source address as reaching the
+// outside world. An earlier version asked only whether the result was a
+// non-loopback address, which detectLocalIP also satisfies - so it passed
+// with the whole per-peer mechanism removed, and the audit caught it.
+func TestTheRouteDecidesTheAddress(t *testing.T) {
+	loop, ok := routeSourceIP("127.0.0.1")
+	if !ok {
+		t.Skip("NOT VERIFIED: no route to loopback on this machine")
 	}
-	ip := net.ParseIP(got)
-	if ip == nil {
-		t.Fatalf("chose %q, which is not an address", got)
+	out, ok := routeSourceIP("1.1.1.1")
+	if !ok {
+		t.Skip("NOT VERIFIED: this machine has no route off itself")
 	}
-	if ip.IsLoopback() {
-		t.Errorf("chose the loopback address %s for a remote peer; no other "+
-			"machine can reach us there", got)
+	if loop.Equal(out) {
+		t.Errorf("reaching loopback and reaching the internet both gave %s; "+
+			"the address is not being chosen per peer", loop)
+	}
+	if !loop.IsLoopback() {
+		t.Errorf("the route to 127.0.0.1 gave %s, not a loopback address", loop)
+	}
+	if out.IsLoopback() {
+		t.Errorf("the route to the internet gave the loopback address %s", out)
+	}
+}
+
+// TestLoopbackIsNeverAdvertised. A peer on this machine is reached over lo,
+// and telling a second machine to find us at 127.0.0.1 is the one answer
+// guaranteed to be wrong - so the policy layer overrides the route there.
+func TestLoopbackIsNeverAdvertised(t *testing.T) {
+	if detectLocalIP() == "127.0.0.1" {
+		t.Skip("NOT VERIFIED: this machine has no non-loopback address")
+	}
+	got := localIPFor("127.0.0.1")
+	if ip := net.ParseIP(got); ip != nil && ip.IsLoopback() {
+		t.Errorf("advertised %s for a peer reached over loopback", got)
 	}
 }
 

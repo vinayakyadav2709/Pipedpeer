@@ -7,6 +7,57 @@ import (
 	"testing"
 )
 
+// TestTheInstallerLocationsAreSearched.
+//
+// The home-directory case was the only one covered, and the location that
+// actually bit was /nix/var/nix/profiles/default/bin - the multi-user and
+// Determinate installer path, which is where the test machine had its nix and
+// where every job failed with "nix not found in PATH". Emptying systemNixDirs
+// left the old test green, because the home path is appended separately; the
+// audit caught that.
+func TestTheInstallerLocationsAreSearched(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nix := filepath.Join(bin, "nix")
+	if err := os.WriteFile(nix, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	restore := systemNixDirs
+	systemNixDirs = []string{bin}
+	defer func() { systemNixDirs = restore }()
+
+	// Nothing on PATH, and no nix in the home directory either, so the only
+	// way to find it is the installer location.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", t.TempDir())
+
+	got, err := SystemNix()
+	if err != nil {
+		t.Fatalf("a nix in an installer location was not found: %v", err)
+	}
+	if got != nix {
+		t.Errorf("SystemNix() = %q, want %q", got, nix)
+	}
+}
+
+// TestTheMultiUserPathIsOneOfThem, named explicitly because that is the one
+// the test machine had and the one whose absence produced the failure.
+func TestTheMultiUserPathIsOneOfThem(t *testing.T) {
+	want := "/nix/var/nix/profiles/default/bin"
+	for _, d := range systemNixDirs {
+		if d == want {
+			return
+		}
+	}
+	t.Errorf("%s is not searched; it is where the multi-user and Determinate "+
+		"installers put nix, and where every job failed with \"not found in "+
+		"PATH\" on a machine that had it", want)
+}
+
 // TestSystemNixIsFoundOffPath covers a machine with nix installed and nothing
 // on PATH, which is every non-login context: a systemd unit, cron, `ssh host
 // command`, `docker exec`. The installer's profile script is the only thing

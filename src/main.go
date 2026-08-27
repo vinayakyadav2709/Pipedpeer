@@ -2051,29 +2051,42 @@ func localIPFor(target string) string {
 	if host == "" {
 		return detectLocalIP()
 	}
-	// The port is immaterial: no packet is sent, and the route is chosen by
-	// the destination address alone.
-	//
-	// Bounded, because a hostname that does not resolve blocks in DNS for
-	// several seconds and this runs while a job is being placed. Falling back
-	// to the old answer quickly beats holding up the run to be exact.
-	d := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := d.Dial("udp", net.JoinHostPort(host, "9"))
-	if err != nil {
-		return detectLocalIP()
-	}
-	defer conn.Close()
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok || addr.IP == nil || addr.IP.IsUnspecified() {
+	ip, ok := routeSourceIP(host)
+	if !ok {
 		return detectLocalIP()
 	}
 	// Reaching a peer over loopback says nothing about how anybody else
 	// reaches us, and advertising 127.0.0.1 to a second machine is the one
 	// answer guaranteed to be wrong.
-	if addr.IP.IsLoopback() {
+	if ip.IsLoopback() {
 		return detectLocalIP()
 	}
-	return addr.IP.String()
+	return ip.String()
+}
+
+// routeSourceIP asks the kernel which of our addresses a packet to host would
+// carry. This is the part that is per-peer; localIPFor is the policy around
+// it, and separating them is what lets the mechanism be tested: asserting
+// only that the result is a non-loopback address passes with the whole thing
+// removed, because detectLocalIP returns one too.
+//
+// Bounded, because a hostname that does not resolve blocks in DNS for several
+// seconds and this runs while a job is being placed. Falling back to the old
+// answer quickly beats holding up the run to be exact.
+func routeSourceIP(host string) (net.IP, bool) {
+	// The port is immaterial: no packet is sent, and the route is chosen by
+	// the destination address alone.
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.Dial("udp", net.JoinHostPort(host, "9"))
+	if err != nil {
+		return nil, false
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil || addr.IP.IsUnspecified() {
+		return nil, false
+	}
+	return addr.IP, true
 }
 
 func detectLocalIP() string {
