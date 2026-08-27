@@ -83,6 +83,9 @@ type Server struct {
 
 	mu     sync.Mutex
 	leases map[string]*Lease // lease_id → Lease
+	// pathReporter says how each peer is reached, keyed by local address.
+	// Set by internet mode; nil when nothing is joined over the internet.
+	pathReporter func() map[string]string
 
 	stopSweep chan struct{}
 
@@ -1147,11 +1150,73 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// How each peer is reached, when anything knows. Carried in the
+	// capabilities map rather than as a new field, so an older orchestrator
+	// decoding this into a registry.NodeRecord keeps working and simply
+	// ignores it.
+	paths := s.reportedPaths()
+
 	nodes := make([]nodeResp, 0, len(dbNodes))
 	for _, n := range dbNodes {
-		nodes = append(nodes, toNodeResp(n))
+		resp := toNodeResp(n)
+		if p := pathFor(n, paths); p != "" {
+			if resp.Capabilities == nil {
+				resp.Capabilities = map[string]string{}
+			}
+			resp.Capabilities[PathCapability] = p
+		}
+		nodes = append(nodes, resp)
 	}
 	writeJSON(w, http.StatusOK, nodes)
+}
+
+// PathCapability is where the route to a peer travels.
+const PathCapability = "path"
+
+// SetPathReporter tells the daemon how peers are being reached.
+//
+// Set by internet mode, which is the only thing that knows: a peer there is
+// behind a local forwarder and could be reached by a punched connection, a
+// mapped port, or nothing at all. Without this a machine that has quietly
+// stopped serving looks the same as one that was never there, which is the
+// failure this exists to prevent.
+func (s *Server) SetPathReporter(f func() map[string]string) {
+	s.mu.Lock()
+	s.pathReporter = f
+	s.mu.Unlock()
+}
+
+func (s *Server) reportedPaths() map[string]string {
+	s.mu.Lock()
+	f := s.pathReporter
+	s.mu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f()
+}
+
+// pathFor is how a node is reached, or "" when nothing can say.
+//
+// A peer behind a local forwarder is only knowable from the manager that made
+// it. Anything else with a routable address is reached by talking straight to
+// it, which is a direct path by construction - no relay is involved and never
+// was - so that much can be stated without asking anyone.
+func pathFor(n nodestore.Node, paths map[string]string) string {
+	if n.Source == "self" {
+		return "self"
+	}
+	addr := net.JoinHostPort(n.Host, strconv.Itoa(n.Port))
+	if p, ok := paths[addr]; ok && p != "" {
+		return p
+	}
+	if ip := net.ParseIP(n.Host); ip != nil && ip.IsLoopback() {
+		// A loopback address that no manager claims is a forwarder whose
+		// link has gone, or a second daemon on this machine. Saying "lan"
+		// here would be inventing a route.
+		return ""
+	}
+	return "lan"
 }
 
 // nodeResp is a registry.NodeRecord as served by /v1/nodes. The orchestrator

@@ -1713,8 +1713,8 @@ func printNodes(daemonPort int) error {
 		return nil
 	}
 
-	fmt.Printf("%-10s %-12s %-10s %-6s %-6s %-10s %-14s %s\n",
-		"NODE_ID", "HOST", "STATE", "JOBS", "CORES", "MEM AVAIL", "GPU", "SOURCE")
+	fmt.Printf("%-10s %-12s %-10s %-6s %-6s %-10s %-14s %-10s %s\n",
+		"NODE_ID", "HOST", "STATE", "JOBS", "CORES", "MEM AVAIL", "GPU", "PATH", "SOURCE")
 	for _, n := range nodes {
 		gpuDesc := "-"
 		if name := n.Capabilities["gpu_name"]; name != "" {
@@ -1728,9 +1728,16 @@ func printNodes(daemonPort int) error {
 		if cores == "" {
 			cores = "-"
 		}
-		fmt.Printf("%-10s %-12s %-10s %-6d %-6s %-10s %-14s %s\n",
+		// How this peer is reached. A peer that is being routed around
+		// should be visible as such rather than simply absent, which is the
+		// failure a relay-free design has to avoid.
+		path := n.Capabilities[daemonapi.PathCapability]
+		if path == "" {
+			path = "-"
+		}
+		fmt.Printf("%-10s %-12s %-10s %-6d %-6s %-10s %-14s %-10s %s\n",
 			shortID(n.NodeID), truncate(host, 12), n.State, n.Load.ActiveJobs, cores,
-			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, n.Source)
+			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, path, n.Source)
 	}
 	return nil
 }
@@ -2110,6 +2117,9 @@ func runDaemon(args []string) {
 					log.Info().Msgf("internet: "+format, args...)
 				},
 			})
+			// So `pipedpeer nodes` can show how each peer is reached, and
+			// a machine being routed around is visible rather than absent.
+			server.SetPathReporter(mgr.Paths)
 			go mgr.Run(internetCtx)
 			log.Info().Str("rendezvous", rendezvousAddr).Msg("internet mode enabled")
 		}
