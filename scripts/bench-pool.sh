@@ -120,12 +120,22 @@ fi
 
 echo
 if [[ -f "$workdir/receipt.json" ]]; then
-	python3 - "$workdir/receipt.json" <<'PYEOF'
+	python3 - "$workdir/receipt.json" "$items" <<'PYEOF'
 import json, sys
 r = json.load(open(sys.argv[1]))
+total = int(sys.argv[2])
+remote = r.get("remote_items", 0)
+local = r.get("local_items", 0)
 print("receipt: %d items on the cluster, %d local, %d failure(s), %d declined" % (
-    r.get("remote_items", 0), r.get("local_items", 0),
-    r.get("remote_failures", 0), r.get("unshippable", 0)))
+    remote, local, r.get("remote_failures", 0), r.get("unshippable", 0)))
+# The numbers above account only for work that went through the cluster layer.
+# The rest the local pool kept and never offered, which is the correct thing
+# to do with a short queue and is not visible in either counter - so 17 and 10
+# out of 48 reads as 21 items lost. Say where they went.
+kept = total - remote - local - r.get("unshippable", 0)
+if kept > 0:
+    print("         %d of %d never left the local pool: not dispatched, not lost" % (
+        kept, total))
 PYEOF
 else
 	echo "receipt: none returned"
