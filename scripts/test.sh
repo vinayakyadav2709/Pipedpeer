@@ -78,6 +78,22 @@ else
     test_exit=$?
 fi
 
+# A test that starts a server and does not stop it leaves it holding a port
+# until somebody notices. Measured: 54 registry processes, the oldest running
+# for over a day, from `go run` subprocesses whose wrapper was killed while
+# the binary it spawned carried on. Counting them here is what turns that from
+# something discovered by accident into something the suite reports.
+leaked="$(ps -eo cmd= | grep -c '[p]ipedpeer registry --port' || true)"
+if [[ "${leaked:-0}" -gt 0 ]]; then
+	echo
+	echo "LEAK: $leaked registry process(es) are still running after the suite."
+	echo "      A test started one and did not stop it. Killing the wrapper of a"
+	echo "      \`go run\` does not stop the binary it spawned - build it and run"
+	echo "      that instead, so the process killed is the one serving."
+	ps -eo pid=,etime=,cmd= | grep '[p]ipedpeer registry --port' | head -5
+	test_exit=1
+fi
+
 echo
 echo "==================== Test Summary ===================="
 if [[ $test_exit -eq 0 ]]; then

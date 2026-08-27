@@ -958,7 +958,7 @@ def _install_numpy():
 
 
 # ---- distributed pandas: cost model, hash-shuffle groupby/merge, OOC ----
-# Opt-in via PIPEDPEER_PANDAS=1. Every intercept gates on the latency cost
+# Always on, and safe to be: every intercept gates on the latency cost
 # model (_should_spill): a shuffle only fires when transfer + remote estimate
 # beats the single-node estimate, so interception is never slower than plain
 # pandas (D2). Shuffles bucket rows by hash(key) % K (K = peers+1, bucket 0

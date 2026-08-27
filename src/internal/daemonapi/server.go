@@ -814,6 +814,48 @@ func (s *Server) ActiveLeases() int {
 	return len(s.leases)
 }
 
+// QueueDepth is how many leases are reserved but not yet running: work this
+// node has promised to do and has not started.
+//
+// It has been in the wire format since the registry was written and populated
+// nowhere, so every node reported zero and the number told a reader nothing.
+// A node with three jobs queued behind the one it is running is a worse
+// choice than an idle one with the same core count, and this is what says so.
+func (s *Server) QueueDepth() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, l := range s.leases {
+		if l.State == LeaseReserved {
+			n++
+		}
+	}
+	return n
+}
+
+// RecentFailures is how many jobs have failed here lately.
+//
+// The registry's health score has subtracted 0.1 per recent failure since it
+// was written, against a field nothing ever set - so the term was always
+// zero and a node that failed every job scored the same as one that failed
+// none. Counted over a window, because a node that failed an hour ago and has
+// been fine since is not a node to avoid.
+func (s *Server) RecentFailures() int {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	cutoff := time.Now().Add(-recentFailureWindow)
+	n := 0
+	for _, j := range s.jobs {
+		if j != nil && j.Status == "failed" && j.CreatedAt.After(cutoff) {
+			n++
+		}
+	}
+	return n
+}
+
+// recentFailureWindow is how far back a failure still counts against a node.
+const recentFailureWindow = 10 * time.Minute
+
 // ReservedMem returns the total memory reserved by all active leases.
 func (s *Server) ReservedMem() int64 {
 	s.mu.Lock()
@@ -1032,6 +1074,8 @@ func (s *Server) healthSnapshot() healthResponse {
 	}
 
 	load := heartbeat.CollectLoad(activeJobs, reserved)
+	load.QueueDepth = s.QueueDepth()
+	load.RecentFailures = s.RecentFailures()
 	// What a peer may actually be given, not what the machine happens to have
 	// free. A container worker capped at 2 GiB advertising the host's 10.7 GiB
 	// is inviting work it will be killed for accepting, and every scheduler
@@ -1487,6 +1531,8 @@ func (s *Server) upsertSelf() {
 	}
 
 	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	load.QueueDepth = s.QueueDepth()
+	load.RecentFailures = s.RecentFailures()
 	capsJSON, _ := json.Marshal(caps)
 	loadJSON, _ := json.Marshal(load)
 

@@ -121,7 +121,6 @@ func Finalize(dir string, r Record, runErr error) error {
 	if err == nil {
 		r.DurationMs = finished.Sub(start).Milliseconds()
 	}
-	prevStatus := r.Status
 	if runErr != nil {
 		r.Status = StateFailed
 		r.Error = runErr.Error()
@@ -132,7 +131,6 @@ func Finalize(dir string, r Record, runErr error) error {
 	if existing, err := ReadRecordAt(dir); err == nil && existing.Stage != "" {
 		r.Stage = existing.Stage
 	}
-	PublishEvent(r.ID, r.Status, prevStatus, r.Error)
 	return SaveRecord(dir, r)
 }
 

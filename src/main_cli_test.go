@@ -297,7 +297,18 @@ func TestRegistryCLIStartsAndAcceptsConnections(t *testing.T) {
 	// Start registry as a subprocess, then query it with HTTP
 	port := freePort(t)
 
-	cmd := exec.Command("go", "run", ".", "registry", "--port", fmt.Sprintf("%d", port))
+	// Built, not `go run`. Killing a `go run` kills the wrapper and leaves the
+	// binary it spawned running: the suite left a registry behind on every
+	// invocation, holding its port until somebody noticed and killed it by
+	// hand. Killing a process we started ourselves actually stops it.
+	binPath := filepath.Join(t.TempDir(), "pipedpeer")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(binPath, "registry", "--port", fmt.Sprintf("%d", port))
 	cmd.Dir = "."
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {

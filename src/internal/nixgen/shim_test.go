@@ -155,7 +155,6 @@ print("torch-ok")
 	cmd.Env = append(os.Environ(),
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
-		"PIPEDPEER_TORCH=1",
 		"PIPEDPEER_DAEMON_URL=",
 		"PIPEDPEER_NUM_SHARDS=0",
 	)
@@ -281,7 +280,6 @@ os.environ["PIPEDPEER_SHIM"] = "1"
 os.environ["PIPEDPEER_DAEMON_URL"] = "http://127.0.0.1:%d" % PORT
 os.environ["PIPEDPEER_NUM_SHARDS"] = "3"
 os.environ["PIPEDPEER_STORE_PATH"] = ""
-os.environ["PIPEDPEER_PANDAS"] = "1"
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
 import sitecustomize as shim
@@ -761,7 +759,6 @@ print("RANK-%d-OK" % rank)
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=",
 		"PIPEDPEER_NUM_SHARDS=0",
-		"PIPEDPEER_TORCH=0",
 	}
 	runOnce := func(env ...string) {
 		cmd := exec.Command(python, rankScript)
