@@ -683,7 +683,7 @@ func runDDP(o ddpRunOptions) error {
 	// availability rather than speed, and on an uneven cluster that put the
 	// slowest machine in the ring's most important seat: every rank waits for
 	// it, and it also serves as the rendezvous master.
-	ring := ddpChooseRing(o, rank0)
+	ring, ringSlots := ddpChooseRing(o, rank0)
 	if len(ring) < 2 {
 		// Measurement says one machine beats any ring available. That is an
 		// answer, not a failure: erroring out here left the user with nothing
@@ -700,6 +700,7 @@ func runDDP(o ddpRunOptions) error {
 		o.Nodes = len(ring)
 	}
 	rank0, peers := ring[0], ring[1:o.Nodes]
+	ringSlots = ringSlots[:o.Nodes]
 
 	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
 	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
@@ -722,8 +723,14 @@ func runDDP(o ddpRunOptions) error {
 	fmt.Printf("=== Distributed training: %d ranks ===\n", o.Nodes)
 	fmt.Printf("rank 0: %s (%s:%d)\n", rank0.NodeID[:min(8, len(rank0.NodeID))], masterAddr, rank0.DaemonPort)
 	for i, n := range peers {
-		fmt.Printf("rank %d: %s (%s:%d)\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
-			ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
+		where := ""
+		if ddpSharesNode(ring[:o.Nodes], i+1) {
+			// Two ranks on one machine is unusual enough that not saying so
+			// would read as a mistake in the node list.
+			where = fmt.Sprintf(" device %d", ringSlots[i+1])
+		}
+		fmt.Printf("rank %d: %s (%s:%d)%s\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
+			ddpExtractHost(n.SSHEndpoint), n.DaemonPort, where)
 	}
 	if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 		fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=%s\n\n", masterAddr, masterPort, os.Getenv("PIPEDPEER_DDP_BACKEND"))
@@ -760,6 +767,14 @@ func runDDP(o ddpRunOptions) error {
 	errs := make(chan error, o.Nodes)
 	for i, n := range ranks {
 		go func(i int, n registry.NodeRecord) {
+			// Ranks sharing a machine must not share its accelerator: both
+			// taking device 0 is not two ranks of work, it is two ranks
+			// queueing on one GPU. An explicit --gpu-id is the user overriding
+			// that on purpose and is left alone.
+			rankGPUDevices := o.GPUDevices
+			if rankGPUDevices == "" && ddpSharesNode(ranks, i) {
+				rankGPUDevices = strconv.Itoa(ringSlots[i])
+			}
 			rankEnvs := append([]string(nil), o.Envs...)
 			rankEnvs = append(rankEnvs,
 				"PIPEDPEER_DDP=1",
@@ -799,7 +814,7 @@ func runDDP(o ddpRunOptions) error {
 				Intercept:         true,
 				SkipBroadcast:     true,
 				GPU:               o.PreferGPU || o.RequireGPU,
-				GPUDevices:        o.GPUDevices,
+				GPUDevices:        rankGPUDevices,
 				Mode:              "script",
 				PythonVersion:     o.PythonVersion,
 				Envs:              rankEnvs,
@@ -845,6 +860,42 @@ func ddpPickMasterPort(host string, base, span int) int {
 		c.Close()
 	}
 	return base
+}
+
+// ddpSlots is how many ranks a node can host at once.
+//
+// One per accelerator: a two-GPU machine given one rank trains on one GPU and
+// leaves the other idle for the whole run. On a CPU node it stays at one -
+// two ranks there would divide the same cores between them and pay the
+// gradient sync on top, which is slower than one rank using all of them.
+//
+// PIPEDPEER_DDP_RANKS_PER_NODE overrides it. That exists to exercise the
+// mechanism on hardware with a single GPU, where the multi-accelerator case
+// cannot otherwise be run at all; it is not a tuning knob.
+// ddpSharesNode reports whether ring member i is on a machine that is also
+// hosting another rank.
+func ddpSharesNode(ring []registry.NodeRecord, i int) bool {
+	for j, n := range ring {
+		if j != i && n.NodeID == ring[i].NodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func ddpSlots(n registry.NodeRecord) int {
+	if v := os.Getenv("PIPEDPEER_DDP_RANKS_PER_NODE"); v != "" {
+		if k, err := strconv.Atoi(v); err == nil && k > 0 {
+			return k
+		}
+	}
+	if len(n.Load.GPUs) > 1 {
+		return len(n.Load.GPUs)
+	}
+	if c, err := strconv.Atoi(n.Capabilities["gpu_count"]); err == nil && c > 1 {
+		return c
+	}
+	return 1
 }
 
 func ddpHasGPU(n registry.NodeRecord) bool {
@@ -1923,15 +1974,17 @@ var errRingNotWorthIt = errors.New("a single node is faster than any ring availa
 // it sets the pace: including it can leave the run slower than leaving it out.
 //
 // Peers are now measured and admitted only while admitting them helps.
-func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) []registry.NodeRecord {
+// The second return is each ring member's accelerator index on its node, so a
+// machine hosting two ranks pins a different device for each.
+func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeRecord, []int) {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	defer resp.Body.Close()
 	var all []registry.NodeRecord
 	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
-		return nil
+		return nil, nil
 	}
 
 	byID := map[string]registry.NodeRecord{}
@@ -1954,10 +2007,11 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) []registry.NodeRe
 			Cores:    n.Load.TotalCPUs,
 			MemBytes: n.Load.AvailableMemBytes,
 			HasGPU:   ddpHasGPU(n),
+			Slots:    ddpSlots(n),
 		})
 	}
 	if len(cands) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -1987,6 +2041,7 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) []registry.NodeRe
 	})
 
 	out := make([]registry.NodeRecord, 0, len(plan.Chosen))
+	slots := make([]int, 0, len(plan.Chosen))
 	for _, c := range plan.Chosen {
 		n := byID[c.Candidate.NodeID]
 		if n.NodeID == "" {
@@ -1996,10 +2051,11 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) []registry.NodeRe
 			n.DaemonPort = o.DaemonPort
 		}
 		out = append(out, n)
+		slots = append(slots, c.Slot)
 	}
 	// The coordinator's pick is kept only if measurement agrees it belongs.
 	if len(out) == 0 && rank0.NodeID != "" {
-		return []registry.NodeRecord{rank0}
+		return []registry.NodeRecord{rank0}, []int{0}
 	}
-	return out
+	return out, slots
 }
