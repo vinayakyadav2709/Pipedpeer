@@ -35,7 +35,14 @@ work="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/bench-ddp"
 rm -rf "$work"
 mkdir -p "$work"
 : > "$work/.pipedpeerignore"
-cp "$repo_root/scripts/bench-train.py" "$work/train.py"
+# Beside this script when copied to a test machine; under scripts/ in a
+# checkout. Assuming the checkout is what stopped the other harnesses running
+# where the cluster actually is.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+driver="$here/bench-train.py"
+[[ -f "$driver" ]] || driver="$repo_root/scripts/bench-train.py"
+[[ -f "$driver" ]] || { echo "cannot find bench-train.py beside $here" >&2; exit 2; }
+cp "$driver" "$work/train.py"
 
 # Returns "seconds loss" from a run, or "- -" when it did not finish.
 run_one() {

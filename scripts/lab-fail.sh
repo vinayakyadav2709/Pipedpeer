@@ -17,22 +17,40 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cli="$repo_root/bin/pipedpeer"
+# PIPEDPEER first: the harnesses are copied to a test machine and run beside a
+# binary, with no checkout to build from. Assuming a repo is what stopped this
+# one running where the cluster actually is - it died on
+# "/home/scripts/build.sh: No such file or directory".
+cli="${PIPEDPEER:-$repo_root/bin/pipedpeer}"
 ports=(38081 38082 38083)
 
+# This harness builds the cluster it then breaks, so it needs its siblings -
+# unlike the benchmarks, which only need a binary and a running cluster. Said
+# up front rather than discovered three steps in as "No such file or
+# directory".
+for sibling in lab-up.sh lab-down.sh; do
+	[[ -f "$repo_root/scripts/$sibling" ]] || {
+		echo "lab-fail needs $sibling beside it: it brings up the cluster it" >&2
+		echo "then breaks, rather than using one that is already running." >&2
+		echo "Copy the whole scripts/ directory, not this file alone." >&2
+		exit 2
+	}
+done
+
 if [[ ! -x "$cli" ]]; then
-	echo "building binary..."
-	"$repo_root/scripts/build.sh"
+	if [[ -x "$repo_root/scripts/build.sh" ]]; then
+		echo "building binary..."
+		"$repo_root/scripts/build.sh"
+	else
+		echo "no binary at $cli, and no checkout here to build one from." >&2
+		echo "Set PIPEDPEER to a built binary." >&2
+		exit 2
+	fi
 fi
 
-if command -v podman &>/dev/null; then
-	runtime=podman
-elif command -v docker &>/dev/null; then
-	runtime=docker
-else
-	echo "FAIL: no container runtime (podman/docker)"
-	exit 1
-fi
+source "$repo_root/scripts/lib/runtime.sh"
+pp_pick_runtime || exit 1
+runtime="$PP_RUNTIME"
 
 # Once a token is configured, an unauthenticated probe gets 401 and `curl -sf`
 # reports that as a plain failure - which reads as "the daemon is down" when
