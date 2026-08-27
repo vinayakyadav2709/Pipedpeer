@@ -80,7 +80,12 @@ echo
 # The run says this itself now; repeat the best line here so the table is
 # self-contained.
 for label in "ranks${ranks}_fp16" "ranks${ranks}_int8"; do
-	verdict="$(grep -oE 'the ring (paid for itself|did NOT pay for itself)[^\n]*' "$work/$label.log" | head -1 || true)"
+	# Not [^\n]*: inside a bracket expression that is "any character except
+	# backslash and n", and grep is line-oriented anyway - so the verdict was
+	# cut at its first letter n, every time. It printed "the ring did NOT pay
+	# for itself - 2 ra" and had been doing something like it for as long as
+	# the line has existed.
+	verdict="$(grep -o 'the ring .*' "$work/$label.log" | head -1 || true)"
 	[[ -n "$verdict" ]] && echo "  $label: $verdict"
 done
 
