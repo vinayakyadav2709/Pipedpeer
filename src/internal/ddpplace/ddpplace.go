@@ -39,6 +39,18 @@ type Candidate struct {
 	MemBytes int64
 	// HasGPU marks a node whose accelerator would be used.
 	HasGPU bool
+	// Slots is how many ranks this node can host at once. One unless the node
+	// has several accelerators: a machine with two GPUs running one rank
+	// leaves one of them idle for the whole run, which is the single biggest
+	// waste a heterogeneous cluster can produce.
+	//
+	// More than one slot on a CPU-only node is not a win and should not be
+	// asked for - the ranks would divide the same cores between them and pay
+	// the sync on top - so callers leave this at one there.
+	//
+	// Zero is read as one, so a caller that does not know stays on today's
+	// behaviour.
+	Slots int
 }
 
 // Choice is the outcome for one candidate.
@@ -51,6 +63,10 @@ type Choice struct {
 	// Equal weights mean equal batches; unequal ones need the shim to size
 	// batches per rank.
 	Weight float64
+	// Slot distinguishes ranks sharing a node, and is the accelerator index
+	// the rank should pin. Two ranks on one box both taking device 0 is not
+	// two ranks of work, it is two ranks fighting over one GPU.
+	Slot int
 }
 
 // Rejection records a candidate that was not used, and why.
@@ -91,6 +107,22 @@ type Options struct {
 	ProportionalBatches bool
 }
 
+// slotRef remembers which node and accelerator a scheduled device came from.
+type slotRef struct {
+	cand  Candidate
+	slot  int
+	score float64
+}
+
+// slotID names a node's accelerator. The scheduler keys on device identity, so
+// two ranks on one node need two names.
+func slotID(nodeID string, slot int) string {
+	if slot == 0 {
+		return nodeID
+	}
+	return fmt.Sprintf("%s#%d", nodeID, slot)
+}
+
 // Select measures the candidates and returns those worth including.
 //
 // Nodes that cannot be measured are not discarded - a node that fails to
@@ -102,20 +134,38 @@ func Select(ctx context.Context, cands []Candidate, opts Options) Plan {
 	}
 	scores, measured := probeAll(ctx, cands, opts.Token, opts.ProbeMillis)
 
+	// One device per slot, not per node. A node's slots are separate
+	// accelerators, so each is its own thing to schedule - and whether the
+	// second one is worth using is then decided by the same rule as any other
+	// device, rather than assumed either way.
 	devices := make([]schedule.Device, 0, len(cands))
+	slotOf := map[string]slotRef{}
 	for i, c := range cands {
-		devices = append(devices, schedule.Device{
-			ID:   c.NodeID,
-			Node: c.Host,
-			Kind: kindOf(c),
-			Rate: scores[i],
-			// Every rank pays roughly the same startup: process launch,
-			// closure materialisation, and joining the group. Charging a
-			// uniform cost keeps this from silently becoming a proxy for
-			// "nodes I have talked to recently".
-			SetupSec: 0,
-			MemBytes: c.MemBytes,
-		})
+		slots := c.Slots
+		if slots < 1 {
+			slots = 1
+		}
+		for slot := 0; slot < slots; slot++ {
+			id := slotID(c.NodeID, slot)
+			slotOf[id] = slotRef{cand: c, slot: slot, score: scores[i]}
+			devices = append(devices, schedule.Device{
+				ID:   id,
+				Node: c.Host,
+				Kind: kindOf(c),
+				Rate: scores[i],
+				// Every rank pays roughly the same startup: process launch,
+				// closure materialisation, and joining the group. Charging a
+				// uniform cost keeps this from silently becoming a proxy for
+				// "nodes I have talked to recently".
+				SetupSec: 0,
+				// Ranks sharing a node share its free memory, so the
+				// working-set gate has to see a share of it. Giving each slot
+				// the whole node's figure would admit two ranks that between
+				// them cannot fit, and the failure would arrive at run time
+				// as an OOM rather than here as a refusal.
+				MemBytes: c.MemBytes / int64(slots),
+			})
+		}
 	}
 
 	// Memory is a hard gate wherever it applies; the scheduler applies it.
@@ -146,35 +196,38 @@ func Select(ctx context.Context, cands []Candidate, opts Options) Plan {
 		plan = equalBatchAdmission(sized, opts)
 	}
 
-	byID := map[string]Candidate{}
-	scoreByID := map[string]float64{}
-	for i, c := range cands {
-		byID[c.NodeID] = c
-		scoreByID[c.NodeID] = scores[i]
-	}
-
 	out := Plan{Measured: measured}
 	var chosen []Choice
 	for _, s := range plan.Shares {
+		ref := slotOf[s.Device.ID]
 		if s.Items <= 0 {
 			out.Rejected = append(out.Rejected, Rejection{
-				Candidate: byID[s.Device.ID],
+				Candidate: ref.cand,
 				Reason:    "too slow to contribute a share of a step",
 			})
 			continue
 		}
 		chosen = append(chosen, Choice{
-			Candidate: byID[s.Device.ID],
-			Score:     scoreByID[s.Device.ID],
+			Candidate: ref.cand,
+			Score:     ref.score,
 			Weight:    float64(s.Items) / float64(nominalStep),
+			Slot:      ref.slot,
 		})
 	}
 	for _, r := range plan.Rejected {
-		out.Rejected = append(out.Rejected, Rejection{Candidate: byID[r.Device.ID], Reason: r.Reason})
+		out.Rejected = append(out.Rejected, Rejection{Candidate: slotOf[r.Device.ID].cand, Reason: r.Reason})
 	}
 
 	// Fastest first, so a caller taking a prefix takes the best of them.
-	sort.Slice(chosen, func(i, j int) bool { return chosen[i].Score > chosen[j].Score })
+	// Ties break on slot so a node's first accelerator is preferred over its
+	// second: a ring capped below what is available should leave a machine's
+	// spare device idle rather than its primary one.
+	sort.Slice(chosen, func(i, j int) bool {
+		if chosen[i].Score != chosen[j].Score {
+			return chosen[i].Score > chosen[j].Score
+		}
+		return chosen[i].Slot < chosen[j].Slot
+	})
 	if opts.Max > 0 && len(chosen) > opts.Max {
 		for _, c := range chosen[opts.Max:] {
 			out.Rejected = append(out.Rejected, Rejection{
