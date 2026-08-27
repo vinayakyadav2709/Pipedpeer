@@ -79,6 +79,15 @@ func TestSystemNixIsFoundOffPath(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", t.TempDir()) // nothing on PATH
 
+	// And no system install either, which is the case being described. Left
+	// unset, this passed on a machine with no multi-user nix and failed on one
+	// that had it - the test was reading the developer's own /nix rather than
+	// the situation it names. TestTheMultiUserPathIsOneOfThem covers the
+	// system locations; this one covers the home install alone.
+	restore := systemNixDirs
+	systemNixDirs = []string{filepath.Join(t.TempDir(), "absent")}
+	defer func() { systemNixDirs = restore }()
+
 	got, err := SystemNix()
 	if err != nil {
 		t.Fatalf("an installed nix was not found: %v", err)
@@ -114,18 +123,34 @@ func TestMissingNixSaysWhereItLooked(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 
-	if _, err := os.Stat("/nix/var/nix/profiles/default/bin/nix"); err == nil {
-		t.Skip("NOT VERIFIED: this machine has a system nix, so there is no " +
-			"missing-nix case to observe here")
+	// This used to skip on any machine that had a system nix - which is both
+	// machines it is ever run on, so the assertion never executed. The
+	// searched list is what has to appear in the message, so pointing it at
+	// directories that do not exist reproduces the missing-nix case anywhere.
+	// That the real list contains the multi-user path is
+	// TestTheMultiUserPathIsOneOfThem's job, not this one's.
+	absent := t.TempDir()
+	restore := systemNixDirs
+	systemNixDirs = []string{
+		filepath.Join(absent, "nix/var/nix/profiles/default/bin"),
+		filepath.Join(absent, "usr/local/bin"),
 	}
+	defer func() { systemNixDirs = restore }()
+
 	_, err := SystemNix()
 	if err == nil {
 		t.Fatal("no nix anywhere, but SystemNix() succeeded")
 	}
-	if !strings.Contains(err.Error(), ".nix-profile") ||
-		!strings.Contains(err.Error(), "/nix/var/nix/profiles") {
-		t.Errorf("error %q does not name the directories that were searched, "+
-			"so a reader cannot tell where to install or what to symlink", err)
+	if !strings.Contains(err.Error(), ".nix-profile") {
+		t.Errorf("error %q does not name the home install, so a reader with "+
+			"a single-user nix cannot tell it was looked for", err)
+	}
+	for _, dir := range systemNixDirs {
+		if !strings.Contains(err.Error(), dir) {
+			t.Errorf("error %q does not name %s, one of the directories that "+
+				"were searched, so a reader cannot tell where to install or "+
+				"what to symlink", err, dir)
+		}
 	}
 }
 
