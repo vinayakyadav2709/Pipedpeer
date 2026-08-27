@@ -2697,7 +2697,19 @@ def _install_ddp():
         if _WORLD < 2 or _STEP_SEC[1] < 2:
             return
         compute = _STEP_SEC[0]
-        alone = compute * _WORLD          # one machine would do every shard
+        # Machines, not ranks. Two ranks on one laptop are two identities and
+        # one set of cores, and multiplying by the rank count there says the
+        # machine is twice as fast as itself: measured, a two-rank ring on one
+        # machine called itself worth forming on a run that took 191s against
+        # 92.8s for that machine alone. A daemon too old to send the count
+        # cannot tell us, so the old assumption stands in that case and is the
+        # only place it still applies.
+        try:
+            _machines = int(os.environ.get("PIPEDPEER_DDP_MACHINES", "") or _WORLD)
+        except ValueError:
+            _machines = _WORLD
+        _machines = max(1, min(_machines, _WORLD))
+        alone = compute * _machines       # every machine's share, done by one
         together = compute + sync_total
         if together <= 0:
             return
@@ -2710,10 +2722,18 @@ def _install_ddp():
         # a run that beat a single fast machine by 1.02x.
         if speedup >= 1.05:
             _log("ddp: the ring paid for itself — %.1fs of compute and %.1fs of "
-                 "sync across %d ranks, against about %.1fs for THIS machine to "
-                 "have done the whole dataset (%.2fx). A faster machine on its own "
-                 "may still beat that."
-                 % (compute, sync_total, _WORLD, alone, speedup))
+                 "sync across %d ranks on %d machine(s), against about %.1fs for "
+                 "THIS machine to have done the whole dataset (%.2fx). A faster "
+                 "machine on its own may still beat that."
+                 % (compute, sync_total, _WORLD, _machines, alone, speedup))
+        elif _machines < _WORLD:
+            _log("ddp: the ring did NOT pay for itself — %d ranks on %d "
+                 "machine(s), so the extra ranks brought no extra hardware: "
+                 "%.1fs of compute and %.1fs of sync against about %.1fs for "
+                 "this machine alone. Co-located ranks divide one machine and "
+                 "pay the sync on top; they are for a second accelerator, not "
+                 "a second machine."
+                 % (_WORLD, _machines, compute, sync_total, alone))
         else:
             _log("ddp: the ring did NOT pay for itself — %.1fs of compute and "
                  "%.1fs of sync across %d ranks, against about %.1fs for THIS "
