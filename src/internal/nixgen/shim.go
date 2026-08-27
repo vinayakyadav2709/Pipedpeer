@@ -2265,6 +2265,19 @@ def _install_ddp():
     _STEP_SEC = [0.0, 0]  # total compute seconds, count
     _STEP_MARK = [None, 0.0]  # monotonic at last step, sync_sec at last step
 
+    def _mean_step_ms():
+        """This rank's mean compute time for a step, in milliseconds.
+
+        Already measured for sync tuning; reported so the lead daemon can
+        compare ranks. Same model, same batch, whatever hardware this rank
+        has - which makes it the one number that compares a GPU against a
+        CPU, and the placement probe cannot: that one is an integer loop on
+        the CPU, so a GPU node scores its CPU's score.
+        """
+        if _STEP_SEC[1] <= 0:
+            return 0.0
+        return 1000.0 * _STEP_SEC[0] / _STEP_SEC[1]
+
     def _tuned_sync_every():
         """How often to average, from measured sync and step times.
 
@@ -2446,7 +2459,8 @@ def _install_ddp():
         header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
                              "world": _WORLD, "dtype": wire_dtype.name,
                              "count": int(flat.size), "kind": kind,
-                             "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
+                             "sync_every": int(_SYNC_TUNED[0] or 0),
+                             "step_ms": _mean_step_ms()}).encode()
         payload = flat.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -2553,7 +2567,8 @@ def _install_ddp():
                              "world": _WORLD, "dtype": "int8", "kind": "grads",
                              "count": int(q.size), "scale": scales[0],
                              "scales": scales, "counts": [int(n) for n in sizes],
-                             "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
+                             "sync_every": int(_SYNC_TUNED[0] or 0),
+                             "step_ms": _mean_step_ms()}).encode()
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
