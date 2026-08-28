@@ -611,6 +611,14 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 		<-conn.Context().Done()
 		m.dropLink(node)
 	}()
+	// When the forwarder stops accepting, this link cannot carry anything
+	// more, and the manager has to be told. Returning quietly left the link
+	// in m.peers: Paths() went on reporting a route, the node table went on
+	// showing "punched", every poll went on failing, and nothing ever tried
+	// to reconnect - a cluster that had silently stopped distributing while
+	// claiming a direct path. Observed after a large closure transfer, and it
+	// did not recover in ten minutes; only a restart brought it back.
+	defer m.dropLink(node)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
