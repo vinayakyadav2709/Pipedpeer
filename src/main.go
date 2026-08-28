@@ -1970,6 +1970,10 @@ func runDaemon(args []string) {
 
 	server := daemonapi.New(nodeID.NodeID)
 	server.EnablePersistence()
+	// Both closure caches are bounded here rather than only when something is
+	// transferred, so a node that has gone quiet still gives the disk back
+	// and a lowered cap takes effect without waiting for the next job.
+	server.BoundCaches()
 	server.SetMaxConcurrentJobs(maxConcurrent)
 	if v := os.Getenv("PIPEDPEER_SERIAL_CLOSURE_IMPORTS"); v == "1" {
 		server.SetSerialClosureImports(true)

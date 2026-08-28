@@ -36,6 +36,35 @@ import (
 // was consulted at all.
 var buildSignedClosure = (*Server).signedClosureFor
 
+// BoundCaches brings both closure caches under their cap.
+//
+// Called by the daemon at startup rather than from a constructor, which the
+// tests build freely and which must not delete anything on the machine
+// running them - the same reason EnablePersistence is opt-in.
+//
+// Pruning only when a closure is sent or received means a cache shrinks only
+// while the node is still busy: a machine that has stopped doing either keeps
+// whatever it had forever, and lowering the cap does nothing until the next
+// transfer. That is backwards - the disk matters most on the machine nobody
+// is using - and it is also what makes a new cap take effect at all.
+func (s *Server) BoundCaches() {
+	max := narpack.MaxBytes()
+	if dir, err := closureCacheDir(); err == nil {
+		if freed, err := narpack.Prune(dir, max); err != nil {
+			log.Info().Err(err).Msg("could not bound the closure cache at startup")
+		} else if freed > 0 {
+			log.Info().Str("freed", narpack.Human(freed)).Str("cap", narpack.Human(max)).
+				Msg("closure cache was over its cap at startup")
+		}
+	}
+	if s.narCache != nil {
+		if freed := s.narCache.prune(max); freed > 0 {
+			log.Info().Str("freed", narpack.Human(freed)).Str("cap", narpack.Human(max)).
+				Msg("closure archive cache was over its cap at startup")
+		}
+	}
+}
+
 // closureCacheDir is where this daemon keeps the cache it publishes from.
 //
 // One directory for the whole daemon rather than one per transfer: nix skips
