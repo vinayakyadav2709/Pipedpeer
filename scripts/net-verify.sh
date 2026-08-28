@@ -25,8 +25,18 @@ cli="$PP_CLI"
 pp_read_token
 
 port="${PIPEDPEER_PORT:-38080}"
-log="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/daemon.log"
+rawlog="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/daemon.log"
 want_peer="${1:-}"
+
+# The daemon logs with ANSI colour, and the first run of this script proved
+# what that does to naive greps: the rendezvous host came out as
+# "\e[0m35.234..." - which ssh cannot dial - and the route pattern missed
+# "punched-in" entirely (a hyphen, absent from [a-z]*), so the script picked
+# a STALE forwarder port from before the last restart and reported a working
+# cluster as broken. Strip the colour once, up front, and work from that.
+log="$(mktemp "${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/net-verify.XXXXXX")"
+trap 'rm -f "$log"' EXIT
+sed 's/\x1b\[[0-9;]*m//g' "$rawlog" > "$log"
 
 fail=0
 say() { printf '%s\n' "$*"; }
@@ -50,7 +60,7 @@ say "introducer: ${rendezvous:-unknown}"
 #    when a link comes up; anything else is guesswork.
 say
 say "peers and how they are reached:"
-routes="$(grep -ao 'peer [0-9a-f]* reachable at [^ ]* ([a-z]*)' "$log" | tail -20)"
+routes="$(grep -ao 'peer [0-9a-f]* reachable at [^ ]* ([a-z-]*)' "$log" | tail -20)"
 if [[ -z "$routes" ]]; then
 	bad "no peer has been reached directly."
 	reasons="$(grep -ao 'no direct path to [0-9a-f]*: [^(]*' "$log" | tail -5)"
@@ -81,7 +91,10 @@ say "moving bytes to $peer_addr"
 #    rather than as a promise.
 say
 say "stopping the introducer for the duration of the transfer..."
-rv_host="${rendezvous%%:*}"
+# NET_VERIFY_SSH names the ssh destination for the introducer's machine when
+# the raw IP is not one (a config alias carrying the right user, usually).
+# Without it this half of the check degrades gracefully and says so.
+rv_host="${NET_VERIFY_SSH:-${rendezvous%%:*}}"
 killed=0
 if [[ -n "$rv_host" ]] && command -v ssh >/dev/null; then
 	if timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 -o RemoteCommand=none \
@@ -120,7 +133,7 @@ fi
 
 say
 if (( fail )); then
-	say "one or more checks failed; the log is $log"
+	say "one or more checks failed; the log is $rawlog"
 	exit 1
 fi
 say "PASS: peers are reached directly, and the introducer is not in the path."

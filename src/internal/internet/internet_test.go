@@ -1,9 +1,12 @@
 package internet
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/direct"
 )
 
 // TestOneMissedRegistrationDoesNotDropAPeer. The address book is UDP, so a
@@ -185,5 +188,56 @@ func TestAClosedConnectionIsNotAlive(t *testing.T) {
 	}
 	if (&peerLink{}).alive() {
 		t.Error("a link with no connection reports itself alive")
+	}
+}
+
+// TestAPeerWithNoPathIsNeverHandedToTheDaemon.
+//
+// The routing-around contract: a peer that cannot be reached is reported
+// with its reason and NOT registered as a node, so the scheduler never
+// offers it work. If OnPeer fired for it, every job placed there would time
+// out against a forwarder to nowhere - which is worse than the relay this
+// design removed, not better.
+func TestAPeerWithNoPathIsNeverHandedToTheDaemon(t *testing.T) {
+	joined := make(chan string, 4)
+	var unreachable []string
+	m := New(Config{
+		Rendezvous: "203.0.113.9:38445",
+		OnPeer:     func(node, addr string) { joined <- node },
+		OnUnreachable: func(node, reason string) {
+			unreachable = append(unreachable, node+": "+reason)
+		},
+	})
+
+	// A peer that published nowhere to try - the simplest unreachable case,
+	// and the one an old daemon with no candidates produces.
+	err := m.connect(context.Background(), "beefbeefbeefbeef", nil)
+	u, ok := direct.IsUnreachable(err)
+	if !ok {
+		t.Fatalf("connect returned %v, not an Unreachable with a reason", err)
+	}
+	if u.Reason != direct.ReasonNoCandidates {
+		t.Errorf("reason = %q, want no-candidates", u.Reason)
+	}
+
+	m.noPath("beefbeefbeefbeef", err)
+	select {
+	case n := <-joined:
+		t.Fatalf("OnPeer fired for unreachable peer %s; the scheduler would "+
+			"place work on a forwarder to nowhere", n)
+	default:
+	}
+	if len(unreachable) != 1 {
+		t.Fatalf("OnUnreachable calls = %d, want 1: the reason is how a machine "+
+			"that stopped serving stays visible", len(unreachable))
+	}
+
+	// And the failure sets a backoff, so the next poll does not punch-burst
+	// at a peer that will not answer.
+	m.mu.Lock()
+	next, ok2 := m.backoff["beefbeefbeefbeef"]
+	m.mu.Unlock()
+	if !ok2 || !next.After(time.Now()) {
+		t.Error("no backoff recorded; every poll would retry a dead peer forever")
 	}
 }
