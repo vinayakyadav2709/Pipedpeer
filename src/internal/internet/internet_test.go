@@ -220,7 +220,7 @@ func TestAPeerWithNoPathIsNeverHandedToTheDaemon(t *testing.T) {
 		t.Errorf("reason = %q, want no-candidates", u.Reason)
 	}
 
-	m.noPath("beefbeefbeefbeef", err)
+	m.noPath("beefbeefbeefbeef", err, candKey(nil))
 	select {
 	case n := <-joined:
 		t.Fatalf("OnPeer fired for unreachable peer %s; the scheduler would "+
@@ -237,7 +237,59 @@ func TestAPeerWithNoPathIsNeverHandedToTheDaemon(t *testing.T) {
 	m.mu.Lock()
 	next, ok2 := m.backoff["beefbeefbeefbeef"]
 	m.mu.Unlock()
-	if !ok2 || !next.After(time.Now()) {
+	if !ok2 || !next.until.After(time.Now()) {
 		t.Error("no backoff recorded; every poll would retry a dead peer forever")
+	}
+}
+
+// TestARestartedPeerDoesNotServeTheOldPenalty.
+//
+// A peer that restarts gets a new socket, a new mapping and a different set
+// of candidates. Making it wait out a backoff earned by addresses that no
+// longer exist is how a restarted machine sat unreachable for minutes while
+// both ends were perfectly able to connect - which is the restart-recovery
+// window this exists to close.
+//
+// The penalty belongs to a situation, not to a peer.
+func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
+	m := New(Config{Rendezvous: "203.0.113.9:38445"})
+	old := []string{"reflex:203.0.113.1:41000", "lan:192.168.0.5:38447"}
+
+	m.noPath("beef", &direct.Unreachable{Peer: "beef", Reason: direct.ReasonTimeout}, candKey(old))
+
+	m.mu.Lock()
+	entry := m.backoff["beef"]
+	m.mu.Unlock()
+	if !entry.until.After(time.Now()) {
+		t.Fatal("no penalty recorded")
+	}
+
+	// Same addresses: the penalty still applies, or a peer that cannot be
+	// reached is punched at on every poll forever.
+	if entry.tried != candKey(old) {
+		t.Errorf("penalty recorded against %q, want the addresses that failed", entry.tried)
+	}
+	if candKey([]string{"lan:192.168.0.5:38447", "reflex:203.0.113.1:41000"}) != candKey(old) {
+		t.Error("the same addresses in a different order read as a different situation")
+	}
+
+	now := time.Now()
+
+	// Same addresses, penalty unexpired: wait, or a peer that cannot be
+	// reached is punched at on every poll forever.
+	if shouldTry(entry, old, now) {
+		t.Error("retried the same addresses that just failed, before the penalty expired")
+	}
+
+	// Restarted: a new reflexive port, so a new situation and no wait.
+	fresh := []string{"reflex:203.0.113.1:52111", "lan:192.168.0.5:38447"}
+	if !shouldTry(entry, fresh, now) {
+		t.Error("a restarted peer offering a new address was made to serve out a " +
+			"penalty earned by an address that no longer exists")
+	}
+
+	// And once the penalty expires, the same addresses are fair game again.
+	if !shouldTry(entry, old, entry.until.Add(time.Second)) {
+		t.Error("the penalty never expires")
 	}
 }
