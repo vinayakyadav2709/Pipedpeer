@@ -377,6 +377,31 @@ case_ "every environment carries cloudpickle" src/internal/nixgen/flake.go \
 	's = s.replace("\tpsPkgs = append(psPkgs, \"ps.cloudpickle\")", "", 1)' \
 	./internal/nixgen/ "TestEveryFlakeCarriesCloudpickle|TestGenerateFlakeWithoutPackages"
 
+# ---- transfers that keep their signatures -----------------------------------
+case_ "the receiver checks signatures" src/internal/narpack/narpack.go \
+	's = s.replace("argv := append([]string{\"nix\", \"copy\", \"--from\", cacheURI(cacheDir)}, importSeam...)", "argv := append([]string{\"nix\", \"copy\", \"--no-check-sigs\", \"--from\", cacheURI(cacheDir)}, importSeam...)", 1)' \
+	./internal/narpack/ "TestAClosureFromAnUntrustedSenderIsRefused"
+
+case_ "only the archives a peer lacks travel" src/internal/narpack/narpack.go \
+	"s = s.replace('\t\tif !send[p] {\n\t\t\tcontinue\n\t\t}\n', '', 1)" \
+	./internal/narpack/ "TestOnlyTheArchivesThePeerLacksTravel"
+
+case_ "a peer that cannot answer is sent everything" src/internal/narpack/narpack.go \
+	"s = s.replace('\tif want == nil {', '\tif false {', 1)" \
+	./internal/narpack/ "TestAPeerThatCannotAnswerIsSentEverything"
+
+case_ "an archive cannot write outside its directory" src/internal/narpack/narpack.go \
+	"s = s.replace('\tif path.IsAbs(clean) || clean == \"..\" || strings.HasPrefix(clean, \"../\") {', '\tif false {', 1)" \
+	./internal/narpack/ "TestAnArchiveCannotWriteOutsideItsDirectory"
+
+case_ "a narinfo is read past a huge References line" src/internal/narpack/narpack.go \
+	"s = s.replace('\tsc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)', '', 1)" \
+	./internal/narpack/ "TestNarinfoWithAHugeReferencesLineStillParses"
+
+case_ "an unknown archive format is refused" src/internal/narpack/narpack.go \
+	"s = s.replace('\tif m.Format != Format {', '\tif false {', 1)" \
+	./internal/narpack/ "TestAnArchiveFromAFutureFormatIsRejected"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
