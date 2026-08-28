@@ -2,6 +2,7 @@ package internet
 
 import (
 	"context"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -291,5 +292,66 @@ func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
 	// And once the penalty expires, the same addresses are fair game again.
 	if !shouldTry(entry, old, entry.until.Add(time.Second)) {
 		t.Error("the penalty never expires")
+	}
+}
+
+// TestAForwarderThatStopsAcceptingReleasesItsPeer.
+//
+// The forwarder is the only way HTTP crosses a direct link. When its accept
+// loop ended, serveLink returned quietly and left the link in place: Paths()
+// went on reporting a route, the node table went on printing "punched", every
+// health poll failed, and no poll ever tried to reconnect - a cluster that
+// had silently stopped distributing while claiming a direct path to the peer
+// it was not using. Observed after a large closure transfer; it did not
+// recover on its own in ten minutes, and only a restart brought it back.
+//
+// Dropping the peer is what makes the next poll reconnect. This asserts the
+// release happens, via the callback the daemon uses to forget the address.
+func TestAForwarderThatStopsAcceptingReleasesItsPeer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone := make(chan string, 1)
+	m := &Manager{
+		peers: map[string]*peerLink{},
+		cfg: Config{
+			Log:        func(string, ...any) {},
+			OnPeerGone: func(node, addr string) { gone <- node },
+		},
+	}
+	m.peers["peer-1"] = &peerLink{
+		addr:     ln.Addr().String(),
+		listener: ln,
+		stop:     func() {},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		m.serveLink(ctx, "peer-1", nil, ln)
+		close(done)
+	}()
+
+	// The forwarder stops accepting, without the manager being told.
+	ln.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveLink did not return after its listener closed")
+	}
+	select {
+	case node := <-gone:
+		if node != "peer-1" {
+			t.Fatalf("released %q, want peer-1", node)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the forwarder stopped accepting and the peer was never " +
+			"released, so nothing will ever reconnect to it")
+	}
+	if _, ok := m.peers["peer-1"]; ok {
+		t.Error("the peer is still listed as having a direct path")
 	}
 }

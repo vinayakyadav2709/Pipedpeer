@@ -442,6 +442,10 @@ case_ "apply works without keyword arguments" src/internal/nixgen/shim.go \
 	"s = s.replace('kwds=kwds or {})', 'kwds=kwds)', 1)" \
 	./internal/nixgen/ "TestApplyWorksWithoutKeywordArguments"
 
+case_ "a dead forwarder releases its peer" src/internal/internet/internet.go \
+	"s = s.replace('\tdefer m.dropLink(node)\n\tfor {', '\tfor {', 1)" \
+	./internal/internet/ "TestAForwarderThatStopsAcceptingReleasesItsPeer"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
