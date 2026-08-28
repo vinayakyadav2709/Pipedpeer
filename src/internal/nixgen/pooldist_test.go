@@ -39,7 +39,7 @@ const poolFakeDaemon = `
 import base64, json, os, pickle, struct, sys, threading, traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-STATE = {"requests": 0, "errors": 0, "items": 0, "last_error": "", "by_src": 0, "by_ref": 0}
+STATE = {"requests": 0, "errors": 0, "items": 0, "last_error": "", "by_src": 0, "by_ref": 0, "both": 0}
 LOCK = threading.Lock()
 
 class Handler(BaseHTTPRequestHandler):
@@ -109,6 +109,12 @@ class Handler(BaseHTTPRequestHandler):
             ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
         ns["_CACHE"] = {}
         ns["_CHUNK_DIR"] = ""
+        if req.get("func_src") and req.get("func"):
+            # Both forms in one header. The runner prefers func_src, so a
+            # by-value callable sent beside source would be silently ignored
+            # and the test would pass while exercising the other path.
+            with LOCK:
+                STATE["both"] += 1
         if req.get("func_src"):
             with LOCK:
                 STATE["by_src"] += 1
@@ -156,6 +162,7 @@ type fakeDaemonStats struct {
 	LastError string `json:"last_error"`
 	BySrc     int    `json:"by_src"`
 	ByRef     int    `json:"by_ref"`
+	Both      int    `json:"both"`
 }
 
 // startPoolFakeDaemon runs poolFakeDaemon in its own process, from its own
@@ -228,6 +235,7 @@ type shimReceipt struct {
 	DispatchedItems int `json:"dispatched_items"`
 	RemoteFailures  int `json:"remote_failures"`
 	Unshippable     int `json:"unshippable"`
+	ShippedPickled  int `json:"shipped_pickled"`
 	Parts           []struct {
 		Kind         string `json:"kind"`
 		Items        int    `json:"items"`
@@ -248,6 +256,13 @@ func runPoolScript(t *testing.T, files map[string]string, main string) poolRunRe
 	if err != nil {
 		t.Skip("python3 not available")
 	}
+	return runPoolScriptWith(t, python, files, main)
+}
+
+// runPoolScriptWith is runPoolScript against a chosen interpreter, for the
+// cases that need one with cloudpickle in it.
+func runPoolScriptWith(t *testing.T, python string, files map[string]string, main string) poolRunResult {
+	t.Helper()
 	url, stats := startPoolFakeDaemon(t, python)
 
 	dir := t.TempDir()

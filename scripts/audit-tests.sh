@@ -340,6 +340,39 @@ case_ "the signing key is not world readable" src/internal/nixsign/nixsign.go \
 	's = s.replace("\tif err := f.Chmod(0o600); err != nil {", "\tif err := f.Chmod(0o644); err != nil {", 1)' \
 	./internal/nixsign/ "TestTheSecretKeyIsNotWorldReadable"
 
+# ---- shipping a kernel that has no source -----------------------------------
+case_ "a kernel with no source ships by value" src/internal/nixgen/shim.go \
+	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_payload(func)', 1)" \
+	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
+
+case_ "source is tried before by-value" src/internal/nixgen/shim.go \
+	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_pickle(func) or _func_payload(func)', 1)" \
+	./internal/nixgen/ "TestNamedFunctionStillShipsAsSource"
+
+case_ "a lambda has no name a worker can resolve" src/internal/nixgen/shim.go \
+	"s = s.replace('    if not func.__name__.isidentifier():', '    if False:', 1)" \
+	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
+
+case_ "one kernel form per header, never both" src/internal/nixgen/shim.go \
+	's = s.replace("            else:\n                header[\"func_src\"]", "            if True:\n                header[\"func_src\"]", 1)' \
+	./internal/nixgen/ "TestHeaderCarriesOneKernelFormNotBoth"
+
+case_ "an unpicklable kernel runs on local threads" src/internal/nixgen/shim.go \
+	"s = s.replace('        if _process_safe(func):\n            return self._ctx', '        if True:\n            return self._ctx', 1)" \
+	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
+
+case_ "work that cannot travel is counted, not claimed" src/internal/nixgen/shim.go \
+	's = s.replace("        if payload is not None and payload.get(\"pickled\"):", "        if payload is None or True:", 1)' \
+	./internal/nixgen/ "TestKernelThatCannotTravelAtAllStaysLocal"
+
+case_ "a by-value kernel carries the workspace it reads" src/internal/nixgen/shim.go \
+	"s = s.replace('            if mod is not None and not _is_library_module(mod):', '            if False:', 1)" \
+	./internal/nixgen/ "TestByValueKernelCarriesTheWorkspaceItReads"
+
+case_ "every environment carries cloudpickle" src/internal/nixgen/flake.go \
+	's = s.replace("\tpsPkgs = append(psPkgs, \"ps.cloudpickle\")", "", 1)' \
+	./internal/nixgen/ "TestEveryFlakeCarriesCloudpickle|TestGenerateFlakeWithoutPackages"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

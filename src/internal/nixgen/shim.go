@@ -89,8 +89,14 @@ def _log(msg):
 # calling that distributed work would be the same comfortable half-truth this
 # receipt exists to prevent. When the two differ, the gap is work that went
 # out to a socket and came straight back.
+# shipped_pickled counts items whose kernel could only travel by value -
+# a lambda, a closure, a method. Those used to be the whole of
+# "unshippable", so without a counter of its own the fix would show up only
+# as that number falling, which is indistinguishable from the workload
+# changing shape. It is a subset of dispatched_items, not a peer of it.
 _STATS = {"remote_items": 0, "local_items": 0, "dispatched_items": 0,
-          "remote_failures": 0, "unshippable": 0, "parts": []}
+          "remote_failures": 0, "unshippable": 0, "shipped_pickled": 0,
+          "parts": []}
 _STATS_LOCK = threading.Lock()
 # The pid that actually intercepted something, claimed on the first record.
 # Pool workers and multiprocessing's own helper processes (the forkserver, on
@@ -192,6 +198,7 @@ class _ClusterPool:
         self._pending = 0
         self._measure_items = 4
         self._spilled = False
+        self._threads = None
         atexit.register(self.close)
 
     def _resize(self):
@@ -213,6 +220,12 @@ class _ClusterPool:
         except Exception:
             return                        # keep the working pool
         old, self._ctx, self._procs = self._ctx, new, want
+        if self._threads is not None:
+            try:
+                self._threads.terminate()
+            except Exception:
+                pass
+            self._threads = None          # rebuilt at the new width on demand
         _log("local pool resized to %d workers" % want)
         try:
             old.terminate()
@@ -281,11 +294,17 @@ class _ClusterPool:
         if cost <= 0:
             return head_results + self._local(func, tail, starmap)
 
-        payload = _func_payload(func)
+        payload = _func_payload(func) or _func_pickle(func)
+        if payload is not None and payload.get("pickled"):
+            with _STATS_LOCK:
+                _claim_receipt()
+                _STATS["shipped_pickled"] += len(tail)
+            _log("kernel %r has no source to send; shipping it by value"
+                 % getattr(func, "__name__", "?"))
         if payload is None:
             _record("pool", len(tail), False, "unshippable")
-            _log("kernel %r cannot ship as source (lambda, closure, method or "
-                 "decorated); staying local" % getattr(func, "__name__", "?"))
+            _log("kernel %r cannot ship at all, by source or by value; "
+                 "staying local" % getattr(func, "__name__", "?"))
             return head_results + self._local(func, tail, starmap)
         if not _FORCE and len(tail) * cost < _POOL_MIN_WORK:
             _log("tail is %.2fs of work, below the %.2fs dispatch floor; staying local"
@@ -293,12 +312,40 @@ class _ClusterPool:
             return head_results + self._local(func, tail, starmap)
         return head_results + self._race(func, tail, starmap, cost, payload)
 
+    def _local_ctx(self, func):
+        """The pool that can actually run func on this machine.
+
+        A lambda, or a function closing over a local, does not merely fail to
+        reach a peer - it fails to reach this machine's own worker
+        PROCESSES, because multiprocessing pickles a callable by reference
+        and there is no name for a worker to resolve. Stock
+        multiprocessing.Pool raises PicklingError for exactly these, so the
+        measurement head died before anything could be dispatched and the
+        by-value work below was unreachable.
+
+        Threads share the interpreter, so nothing has to be pickled to reach
+        them. The trade is worth naming plainly: for CPU-bound work the GIL
+        makes these threads take turns, so the LOCAL half stops being
+        parallel. The remote half is unaffected and is where the win is; the
+        alternative is the call raising, which is what it did before.
+        """
+        if _process_safe(func):
+            return self._ctx
+        if self._threads is None:
+            import multiprocessing.dummy as _dummy
+            self._threads = _dummy.Pool(self._procs)
+            _log("kernel %r cannot cross a process boundary, so local work "
+                 "runs on threads; the cluster still runs it in parallel"
+                 % getattr(func, "__name__", "?"))
+        return self._threads
+
     def _local(self, func, items, starmap):
         _log("local %d items" % len(items))
         _record_local(len(items))
+        ctx = self._local_ctx(func)
         if starmap:
-            return self._ctx.starmap(func, items)
-        return self._ctx.map(func, items)
+            return ctx.starmap(func, items)
+        return ctx.map(func, items)
 
     def _race(self, func, items, starmap, per_item_cost, payload):
         # D2: local and remote each pull ~half the tail concurrently; when local
@@ -333,10 +380,13 @@ class _ClusterPool:
             """Run user func over (idx, item) pairs and first-wins into slots."""
             idxs = [p[0] for p in pairs]
             vals = [p[1] for p in pairs]
+            ctx = self._local_ctx(func)
             if starmap:
-                res = self._ctx.starmap(_apply, [(func, v) for v in vals])
+                # _apply carries func as an argument, so a process pool would
+                # have to pickle it as data; route by the same test either way.
+                res = ctx.starmap(_apply, [(func, v) for v in vals])
             else:
-                res = self._ctx.map(func, vals)
+                res = ctx.map(func, vals)
             with lock:
                 for i, v in zip(idxs, res):
                     if slots[i] is None:
@@ -398,25 +448,37 @@ class _ClusterPool:
         the dispatch thread and printed a traceback, which is the one thing
         interception promises never to do."""
         import pickle
-        src, name, gvars = payload
         idxs = [p[0] for p in chunk]
         vals = [p[1] for p in chunk]
         if starmap:
             vals = [v if isinstance(v, (list, tuple)) else (v,) for v in vals]
         t0 = time.monotonic()
         try:
-            globals_pickle = pickle.dumps(gvars)
+            globals_pickle = pickle.dumps(payload.get("gvars") or {})
             items = [pickle.dumps(v) for v in vals]
             header = {
-                "func_src": src,
-                "func_name": name,
                 "items_frames": len(items),
                 "globals": True,
                 "starmap": starmap,
-                # Admission control: the daemon 503s rather than OOM when it
-                # cannot spare this, and micro-chunks when it is over budget.
-                "required_mem": _pool_required(globals_pickle, items),
             }
+            # Exactly one of the two, never both: the runner prefers func_src
+            # and would silently ignore a callable sent beside it, so a
+            # header carrying both would test the wrong path while looking
+            # like it tested this one.
+            if payload.get("pickled"):
+                header["func"] = payload["pickled"]
+            else:
+                header["func_src"] = payload["src"]
+                header["func_name"] = payload["name"]
+            # Admission control: the daemon 503s rather than OOM when it
+            # cannot spare this, and micro-chunks when it is over budget.
+            #
+            # The callable counts towards it. A lambda closing over a large
+            # array carries that array inside its own payload rather than in
+            # the globals frame, so sizing globals+items alone would report a
+            # few kilobytes for a request holding hundreds of megabytes.
+            header["required_mem"] = _pool_required(
+                globals_pickle, items, header.get("func", ""))
             if _FORCE:
                 header["force"] = True
             info = {}
@@ -445,6 +507,13 @@ class _ClusterPool:
             self._ctx.terminate()
         except Exception:
             pass
+        if self._threads is not None:
+            try:
+                self._threads.close()
+                self._threads.terminate()
+            except Exception:
+                pass
+            self._threads = None
 
     def terminate(self):
         self.close()
@@ -607,7 +676,7 @@ def _code_names(code):
 
 
 def _func_payload(func):
-    """Rebuild instructions for func as (source, name, globals), or None.
+    """Rebuild instructions for func as {"src", "name", "gvars"}, or None.
 
     A worker runs the closure's python with neither the shim nor the job's
     workspace on its path, so a by-reference pickle — __main__.work, or a
@@ -620,8 +689,9 @@ def _func_payload(func):
 
     Returns None when the callable cannot be rebuilt this way — lambdas,
     closures, nested defs, methods, decorated functions, partials, anything
-    written in C. Those stay local, which is correct but slow, and the
-    receipt counts them so "slow" is visible rather than mysterious.
+    written in C. Those go to _func_pickle instead, which ships them by
+    value; only what neither can carry stays local, and the receipt counts
+    that so "slow" is visible rather than mysterious.
     """
     import inspect
     import pickle
@@ -634,6 +704,14 @@ def _func_payload(func):
         return None
     if "." in getattr(func, "__qualname__", func.__name__):
         return None                       # method or nested def
+    if not func.__name__.isidentifier():
+        # A lambda bound to a module-level name reaches here: no closure, no
+        # dot in its qualname. Its source is the assignment that creates it,
+        # which compiles happily, and the worker then looks up "<lambda>" in
+        # the namespace that exec produced and dies with a KeyError - once
+        # per chunk, on the far side, where the traceback is hardest to see.
+        # By value is the only way one of these travels.
+        return None
 
     imports, sources, gvars = [], [], {}
     seen = set()
@@ -678,7 +756,87 @@ def _func_payload(func):
         pickle.dumps(gvars)
     except Exception:
         return None
-    return src, func.__name__, gvars
+    return {"src": src, "name": func.__name__, "gvars": gvars}
+
+
+def _process_safe(func):
+    """True when the standard library can send func to a worker process.
+
+    multiprocessing pickles a callable by reference: it stores the module and
+    qualified name and expects the worker to look them up. That works for a
+    module-level function, a bound method of a module-level class, or a
+    partial over one - and not for a lambda or a closure, which have no name
+    to resolve.
+
+    Asked by trying it rather than by inspecting the callable's shape,
+    because the shapes that fail are not a list anyone can keep correct.
+    """
+    import pickle
+    try:
+        pickle.dumps(func)
+        return True
+    except Exception:
+        return False
+
+
+def _func_pickle(func):
+    """Ship func by value with cloudpickle, as {"pickled": b64}, or None.
+
+    The second tier, tried only where source shipping has already given up.
+    Source is preferred because it is the smaller and older path: it sends a
+    few hundred bytes of text and depends on nothing but the interpreter.
+    cloudpickle sends the callable itself - which is what makes it work for a
+    lambda, a closure, a bound method or a decorated function, where there is
+    no name a worker could resolve and often no source to read.
+
+    Only the sender needs cloudpickle to build this; the worker loads it with
+    plain pickle, which reaches into cloudpickle for the reconstruction
+    helpers. Both ends run the same shipped store path, so they are running
+    the same cloudpickle and there is no version to negotiate.
+
+    Returns None when the callable genuinely cannot travel - an open file
+    handle, a live socket, a running generator, a lock - and the caller then
+    keeps the work local, as before.
+    """
+    import base64
+
+    try:
+        import cloudpickle
+    except ImportError:
+        # An environment built before cloudpickle was added to every flake.
+        # Nothing is wrong with the callable, so say which it is: the fix is
+        # to rebuild the environment, not to rewrite the kernel.
+        _log("cloudpickle is not in this environment, so %r cannot ship by "
+             "value; rebuild the environment to enable it"
+             % getattr(func, "__name__", "?"))
+        return None
+
+    # A function defined in the job's own files is not importable on a
+    # worker: the workspace does not travel with the closure. cloudpickle
+    # pickles a module-level function BY REFERENCE by default, which would
+    # produce a payload naming a module the worker has never heard of, and
+    # every chunk would fail there rather than here. Registering those
+    # modules by value makes it send the code instead.
+    #
+    # Library modules are deliberately left by reference: they exist on both
+    # sides, and sending numpy by value would be absurd.
+    try:
+        for mod in list(sys.modules.values()):
+            if mod is not None and not _is_library_module(mod):
+                try:
+                    cloudpickle.register_pickle_by_value(mod)
+                except Exception:
+                    pass    # not every module can be registered; skip it
+    except Exception:
+        pass
+
+    try:
+        blob = cloudpickle.dumps(func)
+    except Exception as e:
+        _log("kernel %r cannot ship by value either (%s)"
+             % (getattr(func, "__name__", "?"), e))
+        return None
+    return {"pickled": base64.b64encode(blob).decode()}
 
 
 def _apply(func, item):
@@ -1778,14 +1936,19 @@ def _ooc_eligible(path):
         return False
 
 
-def _pool_required(globals_pickle, items):
+def _pool_required(globals_pickle, items, func_payload=""):
     """Honest per-node working-set estimate for a noSplit/fanned-out chunk:
     one node holds the globals plus the single largest item (parts are spread
     across peers, so the request total overstates any one node). 2x covers
     parse/output expansion. Keeps the daemon's admission control meaningful
-    instead of 503-ing large-but-spread reads."""
+    instead of 503-ing large-but-spread reads.
+
+    func_payload is the serialised callable, when it is one that carries data
+    rather than pointing at it. A named function ships as source and weighs
+    nothing; a lambda closing over an array ships that array inside itself,
+    and every node receiving a part holds a copy of it."""
     if items:
-        return 2 * (len(globals_pickle) + max(len(i) for i in items))
+        return 2 * (len(globals_pickle) + len(func_payload) + max(len(i) for i in items))
     return 0
 
 
