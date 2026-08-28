@@ -3,6 +3,7 @@ package daemonctl
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
 
@@ -102,6 +104,9 @@ func exportPathsLocal(paths []string, destPath string) error {
 	gz := gzip.NewWriter(f)
 	defer gz.Close()
 
+	// Signed before it leaves, so the far side can require a signature
+	// instead of being configured to stop asking for one.
+	_ = nixsign.EnsureSigned(context.Background(), paths)
 	cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
 	if err != nil {
 		return err
