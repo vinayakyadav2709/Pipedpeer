@@ -355,3 +355,57 @@ func TestAForwarderThatStopsAcceptingReleasesItsPeer(t *testing.T) {
 		t.Error("the peer is still listed as having a direct path")
 	}
 }
+
+// TestTheForwarderOutlivesTheAttemptThatMadeIt.
+//
+// An outbound link is established inside the connect budget - the candidate
+// race plus the collision window - and the forwarder's context was derived
+// from that call's, so it inherited the deadline. Seconds after a successful
+// punch the listener closed while the QUIC connection stayed healthy, and
+// every request to that peer failed with the manager still reporting a
+// direct path.
+//
+// The symptom named it: a peer showing "punched" was broken and one showing
+// "punched-in" worked, because the inbound path is handed the manager's own
+// context and the outbound path was handed the dialler's.
+func TestTheForwarderOutlivesTheAttemptThatMadeIt(t *testing.T) {
+	m := &Manager{
+		peers:   map[string]*peerLink{},
+		backoff: map[string]backoffEntry{},
+		cfg:     Config{Log: func(string, ...any) {}},
+	}
+
+	// Exactly what connect() has in hand: a context that ends when the punch
+	// budget does.
+	attempt, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	if err := m.linkUp(attempt, "peer-1", liveConn(t), "punched"); err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	link := m.peers["peer-1"]
+	m.mu.Unlock()
+	if link == nil {
+		t.Fatal("linkUp did not record the peer")
+	}
+
+	// Outlive the attempt by a wide margin.
+	<-attempt.Done()
+	time.Sleep(250 * time.Millisecond)
+
+	c, err := net.DialTimeout("tcp", link.addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("the forwarder died with the attempt that created it, so "+
+			"every request to this peer fails while it still reports a "+
+			"direct path: %v", err)
+	}
+	c.Close()
+
+	m.mu.Lock()
+	_, still := m.peers["peer-1"]
+	m.mu.Unlock()
+	if !still {
+		t.Error("the peer was released although its connection is healthy")
+	}
+}
