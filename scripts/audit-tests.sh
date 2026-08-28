@@ -362,7 +362,7 @@ case_ "an unpicklable kernel runs on local threads" src/internal/nixgen/shim.go 
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
 case_ "work that cannot travel is counted, not claimed" src/internal/nixgen/shim.go \
-	's = s.replace("        if payload is not None and payload.get(\"pickled\"):", "        if payload is None or True:", 1)' \
+	"s = s.replace('            _record(\"pool\", len(tail), False, \"unshippable\")', '            _record(\"pool\", len(tail), True, \"\")', 1)" \
 	./internal/nixgen/ "TestKernelThatCannotTravelAtAllStaysLocal"
 
 case_ "by-value items counted as sent, not as offered" src/internal/nixgen/shim.go \
@@ -401,6 +401,30 @@ case_ "a narinfo is read past a huge References line" src/internal/narpack/narpa
 case_ "an unknown archive format is refused" src/internal/narpack/narpack.go \
 	"s = s.replace('\tif m.Format != Format {', '\tif false {', 1)" \
 	./internal/narpack/ "TestAnArchiveFromAFutureFormatIsRejected"
+
+case_ "the signed format is only sent to a peer that asked" src/internal/daemonapi/server.go \
+	"s = s.replace('\tif ph.TakesSignedClosures() {', '\tif true {', 1)" \
+	./internal/daemonapi/ "TestTheSendPathHonoursWhatThePeerSaidItTakes"
+
+case_ "a peer name that merely contains the format is not it" src/internal/daemonapi/server.go \
+	"s = s.replace('\t\tif strings.TrimSpace(f) == narpack.FormatName {', '\t\tif strings.Contains(f, narpack.FormatName) {', 1)" \
+	./internal/daemonapi/ "TestOnlyAPeerThatSaysSoIsSentTheSignedFormat"
+
+case_ "a foreign tar is not a closure archive" src/internal/narpack/narpack.go \
+	"s = s.replace('\treturn name == ManifestName', '\treturn true', 1)" \
+	./internal/daemonapi/ "TestTheFormatIsDecidedByTheBytesNotTheClaim"
+
+case_ "sniffing does not consume the archive" src/internal/narpack/narpack.go \
+	"s = s.replace('\thead, err := br.Peek(tarMagicOffset + len(tarMagic))', '\thead := make([]byte, tarMagicOffset+len(tarMagic))\n\t_, err := io.ReadFull(br, head)', 1)" \
+	./internal/daemonapi/ "TestTheFormatIsDecidedByTheBytesNotTheClaim"
+
+case_ "a signed archive is never cached as the closure" src/internal/daemonapi/narcache.go \
+	"s = s.replace('\t\twriteJSON(w, http.StatusOK, map[string]any{\"cached\": false, \"imported\": true, \"signed\": true})', '\t\ts.narCache.store(storePath, bytes.NewReader([]byte(\"x\")))\n\t\twriteJSON(w, http.StatusOK, map[string]any{\"cached\": false, \"imported\": true, \"signed\": true})', 1)" \
+	./internal/daemonapi/ "TestASignedClosureIsNeverCachedAsTheClosure"
+
+case_ "a sender cannot materialise something else" src/internal/daemonapi/narcache.go \
+	"s = s.replace('\troots := []string{storePath}', '\troots := m.Roots', 1)" \
+	./internal/daemonapi/ "TestASenderCannotMaterialiseSomethingElse"
 
 echo
 echo "======================================================"
