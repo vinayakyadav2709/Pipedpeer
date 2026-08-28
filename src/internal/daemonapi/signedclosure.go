@@ -121,5 +121,22 @@ func (s *Server) signedClosureFor(ph *PeerHealth, storePath string) (path string
 		cleanup()
 		return "", nil, false
 	}
+
+	// Marked as used before anything is evicted, so the environment this node
+	// ships constantly is not the one thrown away for being old.
+	narpack.Touch(cacheDir, paths)
+
+	// Bounded after the archive is written, never before: the archive is
+	// already on disk by now, so nothing being evicted can be something this
+	// transfer still needs. The cache is derived data - whatever goes is
+	// republished from this node's own store next time - so the cost of a
+	// wrong eviction is compressing it again.
+	if freed, err := narpack.Prune(cacheDir, narpack.MaxBytes()); err != nil {
+		log.Info().Err(err).Msg("could not bound the closure cache")
+	} else if freed > 0 {
+		log.Info().Str("freed", narpack.Human(freed)).
+			Str("cap", narpack.Human(narpack.MaxBytes())).
+			Msg("evicted least-recently-sent closures to stay under the cache cap")
+	}
 	return out, cleanup, true
 }

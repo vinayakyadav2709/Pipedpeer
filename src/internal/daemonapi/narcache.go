@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -76,7 +77,76 @@ func (c *narCache) narFileFor(storePath string) (string, bool) {
 		delete(c.byID, storePath)
 		return "", false
 	}
+	// Marked as used, so eviction removes what this node has stopped
+	// sending rather than what it happened to cache first.
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
 	return path, true
+}
+
+// prune drops least-recently-used archives until the cache is under max.
+//
+// This cache had no bound at all: every closure this node ever exported or
+// received stayed on disk forever, a compressed second copy of the store
+// beside the real one. Removing an entry is safe - ensureLocal re-exports
+// from this node's own store when a peer needs one again - so the cost of a
+// wrong eviction is doing the export twice.
+//
+// Returns the bytes freed.
+func (c *narCache) prune(max int64) int64 {
+	if max <= 0 {
+		return 0
+	}
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return 0
+	}
+	type item struct {
+		path string
+		size int64
+		used time.Time
+	}
+	var items []item
+	var total int64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".nar") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		items = append(items, item{filepath.Join(c.dir, e.Name()), info.Size(), info.ModTime()})
+		total += info.Size()
+	}
+	if total <= max {
+		return 0
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].used.Before(items[j].used) })
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	byPath := map[string]string{}
+	for store, p := range c.byID {
+		byPath[p] = store
+	}
+	var freed int64
+	for _, it := range items {
+		if total-freed <= max {
+			break
+		}
+		if err := os.Remove(it.path); err != nil {
+			continue
+		}
+		// The index has to lose it too, or narFileFor hands out a path that
+		// is not there and the caller reports a cache hit for nothing.
+		if store, ok := byPath[it.path]; ok {
+			delete(c.byID, store)
+		}
+		freed += it.size
+	}
+	c.save()
+	return freed
 }
 
 // store caches the NAR body for a store path and returns the cached path.
@@ -106,6 +176,13 @@ func (c *narCache) store(storePath string, src io.Reader) (string, error) {
 	c.byID[storePath] = dst
 	c.save()
 	c.mu.Unlock()
+
+	// Bounded after the new entry is in place, so a cache already at its cap
+	// makes room rather than refusing to take what it was just handed.
+	if freed := c.prune(narpack.MaxBytes()); freed > 0 {
+		log.Info().Str("freed", narpack.Human(freed)).
+			Msg("evicted least-recently-used closure archives to stay under the cache cap")
+	}
 	return dst, nil
 }
 

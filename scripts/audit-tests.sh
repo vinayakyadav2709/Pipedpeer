@@ -450,6 +450,31 @@ case_ "the forwarder outlives the attempt that made it" src/internal/internet/in
 	"s = s.replace('\tlinkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))', '\tlinkCtx, cancel := context.WithCancel(ctx)', 1)" \
 	./internal/internet/ "TestTheForwarderOutlivesTheAttemptThatMadeIt"
 
+# ---- bounded closure caches -------------------------------------------------
+case_ "the closure cache evicts least-recently-used" src/internal/narpack/prune.go \
+	"s = s.replace('\t\treturn entries[i].used.Before(entries[j].used)', '\t\treturn entries[i].used.After(entries[j].used)', 1)" \
+	./internal/narpack/ "TestPruneEvictsTheLeastRecentlyUsedFirst|TestTouchSavesWhatIsStillBeingSent"
+
+case_ "evicting removes the archive too" src/internal/narpack/prune.go \
+	"s = s.replace('\t\tif e.nar != \"\" {\n\t\t\t_ = os.Remove(e.nar)\n\t\t}', '', 1)" \
+	./internal/narpack/ "TestPruneRemovesTheArchiveNotJustTheMetadata"
+
+case_ "eviction stops once the cache is under its cap" src/internal/narpack/prune.go \
+	"s = s.replace('\t\tif total-freed <= max {\n\t\t\tbreak\n\t\t}\n', '', 1).replace('\tif total <= max {\n\t\treturn 0, nil\n\t}', '', 1)" \
+	./internal/narpack/ "TestPruneLeavesACacheUnderTheCapAlone|TestPruneEvictsTheLeastRecentlyUsedFirst"
+
+case_ "sending a closure records it as used" src/internal/narpack/prune.go \
+	"s = s.replace('\t\t_ = os.Chtimes(filepath.Join(cacheDir, ni.Name), now, now)', '', 1)" \
+	./internal/narpack/ "TestTouchSavesWhatIsStillBeingSent"
+
+case_ "an evicted archive is not still claimed as cached" src/internal/daemonapi/narcache.go \
+	"s = s.replace('\t\tif store, ok := byPath[it.path]; ok {\n\t\t\tdelete(c.byID, store)\n\t\t}', '', 1)" \
+	./internal/daemonapi/ "TestAnEvictedArchiveIsNotStillClaimedAsCached"
+
+case_ "the nar cache evicts least-recently-used" src/internal/daemonapi/narcache.go \
+	"s = s.replace('\tsort.SliceStable(items, func(i, j int) bool { return items[i].used.Before(items[j].used) })', '\tsort.SliceStable(items, func(i, j int) bool { return items[i].used.After(items[j].used) })', 1)" \
+	./internal/daemonapi/ "TestTheNarCacheStaysUnderItsCap"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
