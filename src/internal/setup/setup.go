@@ -121,13 +121,14 @@ func multiUserNix() bool {
 	return err == nil && strings.TrimSpace(string(out)) == "active"
 }
 
-// acceptsUnsignedClosures reports whether this node can import a peer's
-// closure. Peer closures are unsigned NAR exports; a multi-user nix-daemon
-// refuses them ("lacks a signature by a trusted key") until require-sigs is
-// off, which means a stock worker cannot receive work at all — jobs upload
-// fine and then die at import. The proper fix is signing exports with a node
-// key (part of the identity work); until then setup repairs the config.
-func acceptsUnsignedClosures() bool {
+// acceptsPeerClosures reports whether this node can import a peer's closure.
+//
+// A multi-user nix-daemon refuses a store path no trusted key signed - "lacks
+// a signature by a trusted key" - so a stock worker could not receive work at
+// all: jobs uploaded fine and died at import. Closures are signed now, and
+// travel in a form that keeps the signature, so what a machine needs is to
+// trust this cluster's keys.
+func acceptsPeerClosures() bool {
 	// A private store has no nix-daemon in front of it, so there is no
 	// signature policy to repair and nothing to edit as root.
 	if nixstore.Private() {
@@ -143,10 +144,13 @@ func acceptsUnsignedClosures() bool {
 	// Either answer is acceptable, and they mean different things.
 	//
 	// require-sigs off: an older machine still carrying the blanket
-	// workaround. It works, and setup no longer creates that state.
+	// workaround. It works, and setup no longer creates that state - it is
+	// left alone rather than "repaired", because turning the check back on
+	// is a decision about the whole machine and belongs to whoever owns it.
 	//
 	// require-sigs on AND this cluster's keys trusted: the machine checks
-	// every signature and accepts ours. That is the state worth having.
+	// every signature and accepts ours. That is the state worth having, and
+	// the one setup now produces.
 	out, err := exec.Command(nixPath, "config", "show", "require-sigs").Output()
 	if err == nil && strings.TrimSpace(string(out)) == "false" {
 		return true
@@ -177,42 +181,38 @@ func clusterKeysAreTrusted(nixPath string) bool {
 	return true
 }
 
-func allowUnsignedClosures() error {
-	// Trust this cluster's keys rather than switching the check off.
+func trustClusterKeys() error {
+	// Trust this cluster's keys. Do not switch the check off.
 	//
 	// The old repair appended `require-sigs = false`, which stops nix
 	// verifying signatures for EVERYTHING on the machine - every channel,
-	// every substituter, every user - so that pipedpeer could import an
+	// every substituter, every user - so that pipedpeer could import one
 	// unsigned peer closure. That is a system-wide reduction bought for one
 	// program's convenience, and it outlives the program.
 	//
-	// Exports are signed now, with a key derived from the node identity, so
-	// what the machine needs is the far narrower statement: these specific
-	// keys are trusted and everything else is still refused. Both settings
-	// need root once; only one leaves the machine as strict as it was for
-	// everything outside this cluster.
-	// Both settings, and the second is still needed - which was measured, not
-	// assumed. `nix-store --export` does not serialise signatures: a path
-	// correctly signed on the sender arrives at a receiver that trusts the
-	// key and is still refused. Verified on two machines with every path in
-	// the closure signed by a trusted key.
+	// It was necessary for a while, and the reason is worth remembering:
+	// `nix-store --export`, which every transfer used, does not serialise
+	// signatures, so a correctly signed closure was refused anyway. Closures
+	// now travel as a small binary cache, where the signature is part of each
+	// path's metadata and survives the journey - measured between two
+	// machines, with the receiving one importing under require-sigs = true
+	// and refusing the same closure when the sending node's key was taken out
+	// of its trust list.
 	//
-	// So the keys are trusted here because that is right and costs nothing,
-	// and require-sigs is still relaxed because otherwise the machine cannot
-	// receive work at all. The remaining piece is a transfer that preserves
-	// signatures - `nix copy` rather than `nix-store --export` - after which
-	// the second line can go.
+	// So this writes one line: these specific keys are trusted, and
+	// everything else is refused exactly as strictly as before.
 	fmt.Println("    → Trusting this cluster's signing keys...")
 
-	keys, kerr := os.ReadFile(nixsign.TrustedKeysFile())
-	trustLine := ""
-	if kerr == nil && len(strings.TrimSpace(string(keys))) > 0 {
-		trustLine = fmt.Sprintf("echo 'extra-trusted-public-keys = %s' >> %%s && ",
-			strings.TrimSpace(string(keys)))
+	keys, err := os.ReadFile(nixsign.TrustedKeysFile())
+	trusted := strings.TrimSpace(string(keys))
+	if err != nil || trusted == "" {
+		// Nothing to trust yet: the daemon writes this file once it knows
+		// its peers. Saying so is better than editing the machine's nix
+		// configuration to no effect.
+		return fmt.Errorf("no cluster keys known yet (%s is empty); "+
+			"start the daemon so it learns its peers, then re-run setup",
+			nixsign.TrustedKeysFile())
 	}
-	fmt.Println("    → Allowing peer closures (require-sigs = false)...")
-	fmt.Println("      The export format nix uses for transfers carries no")
-	fmt.Println("      signatures, so a signed closure is refused all the same.")
 
 	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
 	// nix.custom.conf for local changes; plain multi-user installs edit
@@ -222,12 +222,10 @@ func allowUnsignedClosures() error {
 		target = "/etc/nix/nix.custom.conf"
 	}
 
-	script := fmt.Sprintf(trustLine+
-		"echo 'require-sigs = false' >> %s && systemctl restart nix-daemon", target)
-	if trustLine != "" {
-		script = fmt.Sprintf(trustLine, target) +
-			fmt.Sprintf("echo 'require-sigs = false' >> %s && systemctl restart nix-daemon", target)
-	}
+	fmt.Printf("      Adding extra-trusted-public-keys to %s.\n", target)
+	fmt.Println("      Signature checking stays ON for everything else.")
+
+	script := nixConfigRepair(trusted, target)
 	argv := []string{"sh", "-c", script}
 	if os.Geteuid() != 0 {
 		argv = append([]string{"sudo"}, argv...)
@@ -240,6 +238,18 @@ func allowUnsignedClosures() error {
 		return fmt.Errorf("could not update %s: %w", target, err)
 	}
 	return nil
+}
+
+// nixConfigRepair is the edit setup makes to a machine's nix configuration.
+//
+// Separated from running it so what gets written to a user's system file as
+// root can be asserted without editing anything. What must never reappear
+// here is `require-sigs = false`: it would be one line in a diff, it would
+// work, and it would silently stop the machine checking signatures on
+// everything it ever installs.
+func nixConfigRepair(trustedKeys, target string) string {
+	return fmt.Sprintf("echo 'extra-trusted-public-keys = %s' >> %s && systemctl restart nix-daemon",
+		trustedKeys, target)
 }
 
 func getPrereqs() []prereq {
@@ -321,7 +331,7 @@ func getPrereqs() []prereq {
 			cmd.Stdin = os.Stdin
 			return cmd.Run()
 		}},
-		{name: "nix-imports", check: acceptsUnsignedClosures, install: allowUnsignedClosures},
+		{name: "nix-imports", check: acceptsPeerClosures, install: trustClusterKeys},
 	}
 }
 
