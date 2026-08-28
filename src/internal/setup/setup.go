@@ -191,15 +191,28 @@ func allowUnsignedClosures() error {
 	// keys are trusted and everything else is still refused. Both settings
 	// need root once; only one leaves the machine as strict as it was for
 	// everything outside this cluster.
-	fmt.Println("    → Trusting this cluster's signing keys (require-sigs stays on)...")
+	// Both settings, and the second is still needed - which was measured, not
+	// assumed. `nix-store --export` does not serialise signatures: a path
+	// correctly signed on the sender arrives at a receiver that trusts the
+	// key and is still refused. Verified on two machines with every path in
+	// the closure signed by a trusted key.
+	//
+	// So the keys are trusted here because that is right and costs nothing,
+	// and require-sigs is still relaxed because otherwise the machine cannot
+	// receive work at all. The remaining piece is a transfer that preserves
+	// signatures - `nix copy` rather than `nix-store --export` - after which
+	// the second line can go.
+	fmt.Println("    → Trusting this cluster's signing keys...")
 
 	keys, kerr := os.ReadFile(nixsign.TrustedKeysFile())
-	if kerr != nil || len(strings.TrimSpace(string(keys))) == 0 {
-		return fmt.Errorf("no cluster keys to trust yet at %s: start the daemon and "+
-			"let it meet a peer, then run setup again. Until then this machine "+
-			"cannot import peer closures, which is a correct refusal rather than "+
-			"a reason to stop checking signatures", nixsign.TrustedKeysFile())
+	trustLine := ""
+	if kerr == nil && len(strings.TrimSpace(string(keys))) > 0 {
+		trustLine = fmt.Sprintf("echo 'extra-trusted-public-keys = %s' >> %%s && ",
+			strings.TrimSpace(string(keys)))
 	}
+	fmt.Println("    → Allowing peer closures (require-sigs = false)...")
+	fmt.Println("      The export format nix uses for transfers carries no")
+	fmt.Println("      signatures, so a signed closure is refused all the same.")
 
 	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
 	// nix.custom.conf for local changes; plain multi-user installs edit
@@ -209,9 +222,12 @@ func allowUnsignedClosures() error {
 		target = "/etc/nix/nix.custom.conf"
 	}
 
-	script := fmt.Sprintf(
-		"echo 'extra-trusted-public-keys = %s' >> %s && systemctl restart nix-daemon",
-		strings.TrimSpace(string(keys)), target)
+	script := fmt.Sprintf(trustLine+
+		"echo 'require-sigs = false' >> %s && systemctl restart nix-daemon", target)
+	if trustLine != "" {
+		script = fmt.Sprintf(trustLine, target) +
+			fmt.Sprintf("echo 'require-sigs = false' >> %s && systemctl restart nix-daemon", target)
+	}
 	argv := []string{"sh", "-c", script}
 	if os.Geteuid() != 0 {
 		argv = append([]string{"sudo"}, argv...)

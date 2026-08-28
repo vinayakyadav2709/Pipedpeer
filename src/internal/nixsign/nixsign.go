@@ -9,10 +9,32 @@
 // that machine, not only for pipedpeer. One project's convenience became a
 // system-wide reduction in what the package manager will refuse.
 //
-// The proper answer is the one nix is built for: sign what we export, and
-// tell each machine which keys its cluster uses. "Accept anything unsigned"
-// becomes "accept what a known cluster member signed", which is a different
-// statement about the machine.
+// The intended answer was the one nix is built for: sign what we export and
+// tell each machine which keys its cluster uses, so "accept anything
+// unsigned" becomes "accept what a known cluster member signed".
+//
+// # Why that is not sufficient on its own, measured
+//
+// `nix-store --export` does not carry signatures. Signatures live in the
+// store's own metadata, and the classic export format - which is what every
+// transfer here uses - does not serialise them. So a path can be correctly
+// signed on the sender, arrive at a receiver that trusts the signing key,
+// and still be refused: verified on the two machines here, with all 26 paths
+// in a closure signed by a trusted key and the import still failing with
+// "lacks a signature by a trusted key".
+//
+// What this package therefore provides today is the key material and its
+// distribution - each node's key, published, proved against the fingerprint
+// the connection was authenticated under, and kept current as peers come and
+// go. Those are the parts that are hard to get right and they are done. What
+// remains is a transfer that preserves signatures: `nix copy` against a
+// store URI rather than `nix-store --export`, which is a change to how
+// closures move rather than to how they are signed.
+//
+// Until then a machine that requires signatures cannot import peer closures,
+// and `require-sigs = false` remains the working configuration. Signing is
+// still performed, so the moment the transfer carries signatures there is
+// nothing else to switch on.
 //
 // # Where the key comes from
 //
