@@ -315,6 +315,10 @@ case_ "a live link outlives the introducer" src/internal/internet/internet.go \
 	's = s.replace("\t\tif link.alive() {\n\t\t\tcontinue\n\t\t}\n", "", 1)' \
 	./internal/internet/ "TestALiveLinkSurvivesTheIntroducerGoingAway"
 
+case_ "an unreachable peer is reported, not offered" src/internal/internet/internet.go \
+	's = s.replace("\tif m.cfg.OnUnreachable != nil {", "\tif false {", 1)' \
+	./internal/internet/ "TestAPeerWithNoPathIsNeverHandedToTheDaemon"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
