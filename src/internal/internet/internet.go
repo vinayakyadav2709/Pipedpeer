@@ -543,7 +543,20 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 		conn.CloseWithError(1, "")
 		return fmt.Errorf("no local port for peer %s: %w", short(node), err)
 	}
-	linkCtx, cancel := context.WithCancel(ctx)
+	// Detached from the caller's deadline, and this is load-bearing.
+	//
+	// An outbound link is established inside the connect budget - the
+	// candidate race plus the collision window - so a context derived from
+	// the caller's carried that deadline. The forwarder then closed seconds
+	// after the link came up, while the QUIC connection stayed perfectly
+	// healthy, and every HTTP request to that peer failed with the manager
+	// still reporting a direct path. It matched the symptom exactly: a peer
+	// showing "punched" was broken and one showing "punched-in" worked,
+	// because the inbound path is handed the manager's own context and the
+	// outbound path was not.
+	//
+	// Shutdown still closes it: closeAll calls stop and closes the listener.
+	linkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	link := &peerLink{
 		listener: ln, addr: ln.Addr().String(), conn: conn,
 		stop: cancel, lastSeen: time.Now(), path: path,
@@ -607,10 +620,12 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 	}()
 	// A connection that dies takes its streams with it; drop the link so the
 	// next poll reconnects rather than forwarding into nothing.
-	go func() {
-		<-conn.Context().Done()
-		m.dropLink(node)
-	}()
+	if conn != nil {
+		go func() {
+			<-conn.Context().Done()
+			m.dropLink(node)
+		}()
+	}
 	// When the forwarder stops accepting, this link cannot carry anything
 	// more, and the manager has to be told. Returning quietly left the link
 	// in m.peers: Paths() went on reporting a route, the node table went on

@@ -446,6 +446,10 @@ case_ "a dead forwarder releases its peer" src/internal/internet/internet.go \
 	"s = s.replace('\tdefer m.dropLink(node)\n\tfor {', '\tfor {', 1)" \
 	./internal/internet/ "TestAForwarderThatStopsAcceptingReleasesItsPeer"
 
+case_ "the forwarder outlives the attempt that made it" src/internal/internet/internet.go \
+	"s = s.replace('\tlinkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))', '\tlinkCtx, cancel := context.WithCancel(ctx)', 1)" \
+	./internal/internet/ "TestTheForwarderOutlivesTheAttemptThatMadeIt"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
