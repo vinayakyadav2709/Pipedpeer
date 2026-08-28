@@ -40,6 +40,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -101,11 +102,26 @@ type Manager struct {
 	peers map[string]*peerLink
 	// reflex is this node's address as the introducer last saw it.
 	reflex netip.AddrPort
-	// backoff is when to next try a peer that had no path.
-	backoff map[string]time.Time
+	// backoff is when to next try a peer that had no path, and which
+	// addresses earned the penalty.
+	backoff map[string]backoffEntry
 	// waiting are peers that asked us to punch, so an incoming request is
 	// answered by racing rather than ignored.
 	invited map[string][]string
+}
+
+// backoffEntry records a failed attempt.
+//
+// tried is what was tried, because a penalty belongs to a SITUATION rather
+// than to a peer. When a daemon restarts its socket gets a new mapping and it
+// republishes different candidates: that is a new situation, and making it
+// serve out a penalty earned by addresses that no longer exist is how a
+// restarted peer sat unreachable for minutes while both machines were
+// perfectly able to connect. Retrying on change costs nothing extra - the
+// addresses changed, so the previous failure says nothing about these ones.
+type backoffEntry struct {
+	until time.Time
+	tried string
 }
 
 type peerLink struct {
@@ -134,7 +150,7 @@ func New(cfg Config) *Manager {
 	return &Manager{
 		cfg:     cfg,
 		peers:   map[string]*peerLink{},
-		backoff: map[string]time.Time{},
+		backoff: map[string]backoffEntry{},
 		invited: map[string][]string{},
 	}
 }
@@ -275,9 +291,9 @@ func (m *Manager) onRegistered(ctx context.Context, you string, peers []rendezvo
 		if connected {
 			link.lastSeen = time.Now()
 		}
-		next := m.backoff[p.Node]
+		back := m.backoff[p.Node]
 		m.mu.Unlock()
-		if connected || time.Now().Before(next) {
+		if connected {
 			continue
 		}
 
@@ -287,11 +303,15 @@ func (m *Manager) onRegistered(ctx context.Context, you string, peers []rendezvo
 		if p.Addr != "" {
 			cands = append(append([]string{}, cands...), string(direct.KindReflex)+":"+p.Addr)
 		}
+
+		if !shouldTry(back, cands, time.Now()) {
+			continue
+		}
 		go func(node string, cands []string) {
 			cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
 			if err := m.connect(cctx, node, cands); err != nil {
-				m.noPath(node, err)
+				m.noPath(node, err, candKey(cands))
 			}
 		}(p.Node, cands)
 	}
@@ -552,7 +572,7 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 }
 
 // noPath records that a peer cannot be reached, and why.
-func (m *Manager) noPath(node string, err error) {
+func (m *Manager) noPath(node string, err error, tried string) {
 	reason := err.Error()
 	if u, ok := direct.IsUnreachable(err); ok {
 		reason = string(u.Reason)
@@ -564,14 +584,14 @@ func (m *Manager) noPath(node string, err error) {
 	m.mu.Lock()
 	wait := 30 * time.Second
 	if prev, ok := m.backoff[node]; ok {
-		if d := time.Until(prev); d > 0 {
+		if d := time.Until(prev.until); d > 0 {
 			wait = d * 2
 		}
 	}
 	if wait > 5*time.Minute {
 		wait = 5 * time.Minute
 	}
-	m.backoff[node] = time.Now().Add(wait)
+	m.backoff[node] = backoffEntry{until: time.Now().Add(wait), tried: tried}
 	m.mu.Unlock()
 
 	m.cfg.Log("no direct path to %s: %s (retrying in %s)", short(node), reason, wait)
@@ -763,4 +783,30 @@ func mappingIsOurs(mapped, reflex netip.AddrPort) bool {
 		return true
 	}
 	return reflex.Addr() == mapped.Addr()
+}
+
+// shouldTry decides whether a peer under penalty is worth trying again.
+//
+// Yes once the penalty has run out, and yes immediately when the peer is
+// offering different addresses than the ones that earned it: a daemon that
+// restarts gets a new mapping and republishes, and that is a new situation
+// about which the previous failure says nothing. Making it serve out the old
+// penalty is how a restarted peer sat unreachable for minutes while both ends
+// were perfectly able to connect.
+func shouldTry(back backoffEntry, cands []string, now time.Time) bool {
+	if !now.Before(back.until) {
+		return true
+	}
+	return back.tried != candKey(cands)
+}
+
+// candKey identifies a set of candidate addresses.
+//
+// Order-independent, because two registrations listing the same addresses in
+// a different order describe the same situation and should not read as a new
+// one.
+func candKey(cands []string) string {
+	sorted := append([]string(nil), cands...)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "|")
 }

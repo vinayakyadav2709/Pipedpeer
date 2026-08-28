@@ -319,6 +319,10 @@ case_ "an unreachable peer is reported, not offered" src/internal/internet/inter
 	's = s.replace("\tif m.cfg.OnUnreachable != nil {", "\tif false {", 1)' \
 	./internal/internet/ "TestAPeerWithNoPathIsNeverHandedToTheDaemon"
 
+case_ "a penalty belongs to a situation, not a peer" src/internal/internet/internet.go \
+	's = s.replace("\treturn back.tried != candKey(cands)", "\treturn false", 1)' \
+	./internal/internet/ "TestARestartedPeerDoesNotServeTheOldPenalty"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
