@@ -426,6 +426,14 @@ case_ "a sender cannot materialise something else" src/internal/daemonapi/narcac
 	"s = s.replace('\troots := []string{storePath}', '\troots := m.Roots', 1)" \
 	./internal/daemonapi/ "TestASenderCannotMaterialiseSomethingElse"
 
+case_ "setup never disables signature checking" src/internal/setup/setup.go \
+	"s = s.replace('\treturn fmt.Sprintf(\"echo \\'extra-trusted-public-keys = %s\\' >> %s && systemctl restart nix-daemon\",\n\t\ttrustedKeys, target)', '\treturn fmt.Sprintf(\"echo \\'extra-trusted-public-keys = %s\\' >> %s && echo \\'require-sigs = false\\' >> %s && systemctl restart nix-daemon\",\n\t\ttrustedKeys, target, target)', 1)" \
+	./internal/setup/ "TestSetupNeverDisablesSignatureCheckingSystemWide"
+
+case_ "setup with no keys edits nothing" src/internal/setup/setup.go \
+	"s = s.replace('\tif err != nil || trusted == \"\" {', '\tif false {', 1)" \
+	./internal/setup/ "TestSetupWithNoKeysYetChangesNothing"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

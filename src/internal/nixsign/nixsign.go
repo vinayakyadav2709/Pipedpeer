@@ -13,28 +13,26 @@
 // tell each machine which keys its cluster uses, so "accept anything
 // unsigned" becomes "accept what a known cluster member signed".
 //
-// # Why that is not sufficient on its own, measured
+// # Signing alone was not enough, and why
 //
-// `nix-store --export` does not carry signatures. Signatures live in the
-// store's own metadata, and the classic export format - which is what every
-// transfer here uses - does not serialise them. So a path can be correctly
-// signed on the sender, arrive at a receiver that trusts the signing key,
-// and still be refused: verified on the two machines here, with all 26 paths
-// in a closure signed by a trusted key and the import still failing with
-// "lacks a signature by a trusted key".
+// `nix-store --export` does not carry signatures. They live in the store's
+// own metadata, and the classic export format does not serialise them. So a
+// path could be correctly signed on the sender, arrive at a receiver that
+// trusted the signing key, and still be refused - measured on the two
+// machines here, with all 26 paths in a closure signed by a trusted key and
+// the import failing anyway with "lacks a signature by a trusted key".
 //
-// What this package therefore provides today is the key material and its
-// distribution - each node's key, published, proved against the fingerprint
-// the connection was authenticated under, and kept current as peers come and
-// go. Those are the parts that are hard to get right and they are done. What
-// remains is a transfer that preserves signatures: `nix copy` against a
-// store URI rather than `nix-store --export`, which is a change to how
-// closures move rather than to how they are signed.
+// That is fixed elsewhere, in internal/narpack: closures now travel as a
+// small binary cache, where the signature is a field in each path's metadata
+// and survives the journey. This package is the other half - the key
+// material and its distribution: each node's key, published, proved against
+// the fingerprint the connection was authenticated under, and kept current
+// as peers come and go.
 //
-// Until then a machine that requires signatures cannot import peer closures,
-// and `require-sigs = false` remains the working configuration. Signing is
-// still performed, so the moment the transfer carries signatures there is
-// nothing else to switch on.
+// Together they work. Verified between two machines with the receiver on
+// `require-sigs = true`: a closure signed by a trusted peer imports and its
+// work runs, and the same closure is refused when the sending node's key is
+// taken out of the receiver's trust list.
 //
 // # Where the key comes from
 //

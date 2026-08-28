@@ -3,6 +3,7 @@ package setup
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
@@ -114,5 +115,45 @@ func TestSetupFindsNixOffPath(t *testing.T) {
 		t.Error("an installed nix with an existing store is usable; reporting " +
 			"otherwise sends the user to install a second nix over the one " +
 			"they already have")
+	}
+}
+
+// TestSetupNeverDisablesSignatureCheckingSystemWide.
+//
+// The old repair appended `require-sigs = false` to the machine's nix
+// configuration so pipedpeer could import an unsigned peer closure. That
+// stops nix verifying signatures for everything on the machine - every
+// channel, every substituter, every user - and it outlives pipedpeer.
+//
+// Closures now carry their signatures, so the narrow statement is enough.
+// This guards the line reappearing: it would be one line in a diff, it would
+// work, and nothing else in the system would notice.
+func TestSetupNeverDisablesSignatureCheckingSystemWide(t *testing.T) {
+	script := nixConfigRepair("pipedpeer-abc:AAAA= pipedpeer-def:BBBB=", "/etc/nix/nix.custom.conf")
+
+	if strings.Contains(script, "require-sigs") {
+		t.Fatalf("setup writes a require-sigs setting into the machine's nix config:\n%s", script)
+	}
+	if !strings.Contains(script, "extra-trusted-public-keys = pipedpeer-abc:AAAA= pipedpeer-def:BBBB=") {
+		t.Errorf("setup does not trust the cluster's keys:\n%s", script)
+	}
+	if !strings.Contains(script, "/etc/nix/nix.custom.conf") {
+		t.Errorf("setup edits the wrong file:\n%s", script)
+	}
+}
+
+// TestSetupWithNoKeysYetChangesNothing.
+//
+// Appending "extra-trusted-public-keys = " with nothing after it would edit a
+// system file as root to no effect, and leave a line that reads as if the
+// cluster were trusted. Saying what is missing is the useful answer.
+func TestSetupWithNoKeysYetChangesNothing(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	err := trustClusterKeys()
+	if err == nil {
+		t.Fatal("setup edited the nix config with no cluster keys to trust")
+	}
+	if !strings.Contains(err.Error(), "start the daemon") {
+		t.Errorf("the error does not say what to do about it: %v", err)
 	}
 }
