@@ -193,6 +193,16 @@ KERNEL = functools.partial(_add, 10)`, "x + 10"},
 			if res.receipt.Unshippable > 0 {
 				t.Errorf("receipt still counts %d items unshippable", res.receipt.Unshippable)
 			}
+			// By-value items are a subset of what was dispatched, so the
+			// count cannot exceed it. Counting the tail where the tier is
+			// chosen rather than what was sent made it larger - the race
+			// keeps half the tail local - and a subset exceeding its
+			// superset is the kind of flattering number the receipt exists
+			// to prevent.
+			if res.receipt.ShippedPickled > res.receipt.DispatchedItems {
+				t.Errorf("receipt claims %d items shipped by value but only %d dispatched",
+					res.receipt.ShippedPickled, res.receipt.DispatchedItems)
+			}
 		})
 	}
 }
