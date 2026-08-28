@@ -3,6 +3,7 @@ package daemonapi
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
 
@@ -144,6 +146,9 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 	}
 	defer os.Remove(tmp.Name())
 	gz := gzip.NewWriter(tmp)
+	// Signed before it leaves, so the far side can require a signature
+	// instead of being configured to stop asking for one.
+	_ = nixsign.EnsureSigned(context.Background(), paths)
 	export, ecleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
 	if err != nil {
 		tmp.Close()
@@ -208,6 +213,7 @@ func exportPaths(paths []string, destPath string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("nothing to export")
 	}
+	_ = nixsign.EnsureSigned(context.Background(), paths)
 	cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
 	if err != nil {
 		return err

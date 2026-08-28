@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -384,6 +385,9 @@ func ExportNAR(storePath, destPath string) error {
 	gz := gzip.NewWriter(f)
 	defer gz.Close()
 
+	// Signed before it leaves, so the far side can require a signature
+	// instead of being configured to stop asking for one.
+	_ = nixsign.EnsureSigned(context.Background(), paths)
 	export, ecleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
 	if err != nil {
 		return err

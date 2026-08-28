@@ -28,8 +28,10 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
@@ -1518,6 +1520,60 @@ func (s *Server) pollAllNodes() {
 	// 4. Forget auto-discovered nodes that have been gone a while. Manual
 	//    entries survive — see nodestore.PruneStale.
 	s.store.PruneStale(staleNodeTTL)
+
+	// 5. Keep the list of signing keys this cluster uses current, so nix can
+	//    require a signature and still accept peer closures.
+	s.refreshTrustedKeys()
+}
+
+// refreshTrustedKeys records which keys this cluster signs store paths with.
+//
+// Written after every poll rather than once at startup, because membership
+// changes: a peer that joins must have its closures accepted, and one that
+// leaves must stop being trusted. The file is rewritten whole, so leaving is
+// as effective as joining.
+//
+// A key is only recorded if it proves it belongs to the node publishing it -
+// the material has to hash to that node's fingerprint. Anything else is
+// logged and dropped, because a key trusted under the wrong name would let
+// its holder sign as somebody else.
+func (s *Server) refreshTrustedKeys() {
+	self, err := identity.Key()
+	if err != nil {
+		return
+	}
+	nodes, err := s.store.ListAll()
+	if err != nil {
+		return
+	}
+
+	offered := map[string]string{}
+	for _, n := range nodes {
+		caps := map[string]string{}
+		if n.CapsJSON != "" {
+			_ = json.Unmarshal([]byte(n.CapsJSON), &caps)
+		}
+		key := caps[heartbeat.NixKeyCapability]
+		if key == "" {
+			continue
+		}
+		// Keyed by the fingerprint the key claims, which Collect then checks
+		// against the key material itself. The node's UUID is a different
+		// namespace and cannot be compared with it.
+		fp, ok := nixsign.FingerprintOf(key)
+		if !ok {
+			continue
+		}
+		offered[fp] = key
+	}
+
+	trusted, rejected := nixsign.Collect(self, offered)
+	for _, r := range rejected {
+		log.Warn().Str("peer", r).Msg("ignoring a signing key that does not belong to the node offering it")
+	}
+	if err := nixsign.WriteTrustedKeys(trusted); err != nil {
+		log.Warn().Err(err).Msg("could not record the cluster's signing keys")
+	}
 }
 
 // staleNodeTTL is how long a discovered node may go unseen before it is

@@ -323,6 +323,23 @@ case_ "a penalty belongs to a situation, not a peer" src/internal/internet/inter
 	's = s.replace("\treturn back.tried != candKey(cands)", "\treturn false", 1)' \
 	./internal/internet/ "TestARestartedPeerDoesNotServeTheOldPenalty"
 
+# ---- signed closures --------------------------------------------------------
+case_ "a signing key must belong to the node offering it" src/internal/nixsign/nixsign.go \
+	's = s.replace("\tif got != fingerprint {\n\t\treturn fmt.Errorf(\"nix public key belongs to %s, not to %s\", got[:8], fingerprint[:8])\n\t}\n", "", 1)' \
+	./internal/nixsign/ "TestAKeyCannotBeOfferedForSomebodyElse|TestOnlyKeysThatProveThemselvesAreTrusted"
+
+case_ "a key label cannot disagree with its bytes" src/internal/nixsign/nixsign.go \
+	's = s.replace("\tif want := \"pipedpeer-\" + fingerprint[:16]; name != want {\n\t\treturn fmt.Errorf(\"nix public key is labelled %q but its bytes belong to %q\", name, want)\n\t}\n", "", 1)' \
+	./internal/nixsign/ "TestAKeyCannotBeOfferedForSomebodyElse"
+
+case_ "a peer that leaves stops being trusted" src/internal/nixsign/nixsign.go \
+	's = s.replace("\ttmp := TrustedKeysFile() + \".tmp\"\n\tif err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {\n\t\treturn err\n\t}\n\treturn os.Rename(tmp, TrustedKeysFile())", "\tf, err := os.OpenFile(TrustedKeysFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer f.Close()\n\t_, err = f.WriteString(body)\n\treturn err", 1)' \
+	./internal/nixsign/ "TestTrustedKeysAreRewrittenNotAppended"
+
+case_ "the signing key is not world readable" src/internal/nixsign/nixsign.go \
+	's = s.replace("\tif err := f.Chmod(0o600); err != nil {", "\tif err := f.Chmod(0o644); err != nil {", 1)' \
+	./internal/nixsign/ "TestTheSecretKeyIsNotWorldReadable"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"

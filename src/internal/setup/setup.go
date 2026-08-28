@@ -10,6 +10,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -139,12 +140,66 @@ func acceptsUnsignedClosures() bool {
 	if err != nil {
 		return false
 	}
+	// Either answer is acceptable, and they mean different things.
+	//
+	// require-sigs off: an older machine still carrying the blanket
+	// workaround. It works, and setup no longer creates that state.
+	//
+	// require-sigs on AND this cluster's keys trusted: the machine checks
+	// every signature and accepts ours. That is the state worth having.
 	out, err := exec.Command(nixPath, "config", "show", "require-sigs").Output()
-	return err == nil && strings.TrimSpace(string(out)) == "false"
+	if err == nil && strings.TrimSpace(string(out)) == "false" {
+		return true
+	}
+	return clusterKeysAreTrusted(nixPath)
+}
+
+// clusterKeysAreTrusted reports whether nix already accepts what this
+// cluster signs with.
+func clusterKeysAreTrusted(nixPath string) bool {
+	want, err := os.ReadFile(nixsign.TrustedKeysFile())
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(want))
+	if len(fields) == 0 {
+		return false
+	}
+	out, err := exec.Command(nixPath, "config", "show", "trusted-public-keys").Output()
+	if err != nil {
+		return false
+	}
+	for _, k := range fields {
+		if !strings.Contains(string(out), k) {
+			return false
+		}
+	}
+	return true
 }
 
 func allowUnsignedClosures() error {
-	fmt.Println("    → Allowing unsigned peer closures (require-sigs = false)...")
+	// Trust this cluster's keys rather than switching the check off.
+	//
+	// The old repair appended `require-sigs = false`, which stops nix
+	// verifying signatures for EVERYTHING on the machine - every channel,
+	// every substituter, every user - so that pipedpeer could import an
+	// unsigned peer closure. That is a system-wide reduction bought for one
+	// program's convenience, and it outlives the program.
+	//
+	// Exports are signed now, with a key derived from the node identity, so
+	// what the machine needs is the far narrower statement: these specific
+	// keys are trusted and everything else is still refused. Both settings
+	// need root once; only one leaves the machine as strict as it was for
+	// everything outside this cluster.
+	fmt.Println("    → Trusting this cluster's signing keys (require-sigs stays on)...")
+
+	keys, kerr := os.ReadFile(nixsign.TrustedKeysFile())
+	if kerr != nil || len(strings.TrimSpace(string(keys))) == 0 {
+		return fmt.Errorf("no cluster keys to trust yet at %s: start the daemon and "+
+			"let it meet a peer, then run setup again. Until then this machine "+
+			"cannot import peer closures, which is a correct refusal rather than "+
+			"a reason to stop checking signatures", nixsign.TrustedKeysFile())
+	}
 
 	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
 	// nix.custom.conf for local changes; plain multi-user installs edit
@@ -155,7 +210,8 @@ func allowUnsignedClosures() error {
 	}
 
 	script := fmt.Sprintf(
-		"echo 'require-sigs = false' >> %s && systemctl restart nix-daemon", target)
+		"echo 'extra-trusted-public-keys = %s' >> %s && systemctl restart nix-daemon",
+		strings.TrimSpace(string(keys)), target)
 	argv := []string{"sh", "-c", script}
 	if os.Geteuid() != 0 {
 		argv = append([]string{"sudo"}, argv...)
