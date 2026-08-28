@@ -463,14 +463,12 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 	hits := make(chan found, 2)
 
 	go func() {
-		aim := known
-		if os.Getenv("PIPEDPEER_FORCE_BIRTHDAY") == "1" {
-			// Skip the address we already know, or the very first probe
-			// answers and the port space is never touched - which would make
-			// this look verified while testing nothing.
-			aim = netip.AddrPort{}
-		}
-		at, err := m.endpoint.Prober().SprayToward(cctx, ip, aim, 10*time.Second)
+		// The known address goes in even under the forcing flag. It is half
+		// the mechanism rather than a shortcut past it: the spray opens the
+		// far side's filter for our mapping, and this is the packet that
+		// arrives through it. Suppressing it made the forced run test
+		// something that could never work.
+		at, err := m.endpoint.Prober().SprayToward(cctx, ip, known, 10*time.Second)
 		if err == nil {
 			hits <- found{at: at}
 		}

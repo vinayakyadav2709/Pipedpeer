@@ -75,12 +75,29 @@ func (p *Prober) SprayToward(ctx context.Context, ip netip.Addr, known netip.Add
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
-	// The address the peer registered is still worth trying: it costs one
-	// packet and it is the answer whenever the mapping happened to be
-	// stable after all.
-	if known.IsValid() {
-		_, _ = p.conn.WriteToUDPAddrPort(msg, known)
+	// The known address is not a one-off attempt, it is half the mechanism.
+	//
+	// Consider the pair this exists for: one router allocates a fresh port
+	// per destination, the other accepts inbound only from an address it has
+	// already written to. The unpredictable side sends from some mapping M
+	// that nobody can guess; the restricted side drops it, because it has
+	// never written to M. What opens that filter is the restricted side's own
+	// spray: every random-port probe it sends is an OUTBOUND packet, so when
+	// one lands on M, its router has now written to M and will accept what
+	// comes back from there.
+	//
+	// Which only helps if something is still arriving from M at that moment.
+	// So the known address is re-sent throughout, not probed once: the spray
+	// opens the door and this is what walks through it. Sending it once at
+	// the start - which is what this did - meant the door opened onto an
+	// empty corridor, and the collision failed on real hardware every time
+	// while both sides were spraying correctly.
+	sendKnown := func() {
+		if known.IsValid() {
+			_, _ = p.conn.WriteToUDPAddrPort(msg, known)
+		}
 	}
+	sendKnown()
 
 	tick := time.NewTicker(birthdayTick)
 	defer tick.Stop()
@@ -97,6 +114,12 @@ func (p *Prober) SprayToward(ctx context.Context, ip netip.Addr, known netip.Add
 		port := uint16(birthdayPortLow + rand.IntN(birthdayPortHigh-birthdayPortLow))
 		_, _ = p.conn.WriteToUDPAddrPort(msg, netip.AddrPortFrom(ip, port))
 		sent++
+		// Every so often, back to the address we know. Cheap, and it is the
+		// packet that gets through the moment the far side's spray opens its
+		// filter for our mapping.
+		if sent%10 == 0 {
+			sendKnown()
+		}
 	}
 
 	// Everything is out; wait out the remaining budget for a straggler.
