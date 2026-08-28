@@ -296,9 +296,6 @@ class _ClusterPool:
 
         payload = _func_payload(func) or _func_pickle(func)
         if payload is not None and payload.get("pickled"):
-            with _STATS_LOCK:
-                _claim_receipt()
-                _STATS["shipped_pickled"] += len(tail)
             _log("kernel %r has no source to send; shipping it by value"
                  % getattr(func, "__name__", "?"))
         if payload is None:
@@ -493,6 +490,15 @@ class _ClusterPool:
         ms = (time.monotonic() - t0) * 1000
         receipt = info.get("receipt")
         _record("pool", len(out), True, "", ms, receipt)
+        if payload.get("pickled"):
+            # Counted here rather than where the tier is chosen, so it counts
+            # items that were actually SENT by value. Counting the tail at
+            # decision time made it larger than dispatched_items - the race
+            # keeps half the tail local - and a receipt whose subset exceeds
+            # its superset is exactly the kind of number this file exists to
+            # not produce.
+            with _STATS_LOCK:
+                _STATS["shipped_pickled"] += len(out)
         where = ""
         if receipt:
             peers = sorted({p.get("where", "")[5:] for p in receipt.get("parts", [])

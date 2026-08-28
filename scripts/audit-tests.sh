@@ -365,6 +365,10 @@ case_ "work that cannot travel is counted, not claimed" src/internal/nixgen/shim
 	's = s.replace("        if payload is not None and payload.get(\"pickled\"):", "        if payload is None or True:", 1)' \
 	./internal/nixgen/ "TestKernelThatCannotTravelAtAllStaysLocal"
 
+case_ "by-value items counted as sent, not as offered" src/internal/nixgen/shim.go \
+	"s = s.replace('                _STATS[\"shipped_pickled\"] += len(out)', '                _STATS[\"shipped_pickled\"] += len(out) * 3', 1)" \
+	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
+
 case_ "a by-value kernel carries the workspace it reads" src/internal/nixgen/shim.go \
 	"s = s.replace('            if mod is not None and not _is_library_module(mod):', '            if False:', 1)" \
 	./internal/nixgen/ "TestByValueKernelCarriesTheWorkspaceItReads"
