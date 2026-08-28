@@ -233,11 +233,24 @@ class _ClusterPool:
             pass
 
     # ---- the four Pool workhorses ----
+    #
+    # apply and apply_async are single calls: there is no tail to spill, so
+    # they run locally. They still have to ask which local pool can take the
+    # callable - a lambda cannot be sent to a worker process, and handing one
+    # to the process pool raises PicklingError. map and imap reach the same
+    # routing through _run; these two are the paths that bypassed it.
     def apply(self, func, args=(), kwds=None):
-        return self._ctx.apply(func, args=args, kwds=kwds)
+        # kwds defaults to None here and to {} in multiprocessing, and it is
+        # passed straight through to func(*args, **kwds). So pool.apply(f, (x,))
+        # - the ordinary call, with no keyword arguments - raised "argument
+        # after ** must be a mapping, not NoneType" from inside the worker,
+        # which reads as a bug in the user's function.
+        return self._local_ctx(func).apply(func, args=args, kwds=kwds or {})
 
     def apply_async(self, func, args=(), kwds=None, callback=None, error_callback=None):
-        return self._ctx.apply_async(func, args=args, kwds=kwds, callback=callback, error_callback=error_callback)
+        return self._local_ctx(func).apply_async(
+            func, args=args, kwds=kwds or {},
+            callback=callback, error_callback=error_callback)
 
     def map(self, func, iterable, chunksize=None):
         return self._run(func, list(iterable))

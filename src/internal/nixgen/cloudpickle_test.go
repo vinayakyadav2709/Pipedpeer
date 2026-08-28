@@ -345,3 +345,62 @@ if __name__ == "__main__":
 		t.Errorf("receipt does not record by-value shipping: %+v", res.receipt)
 	}
 }
+
+// TestEveryPoolEntryPointTakesAKernelWithoutSource.
+//
+// map and imap reach the local-pool routing through _run; apply and
+// apply_async did not, so a lambda through those raised PicklingError from
+// inside multiprocessing while the same lambda through map worked. A drop-in
+// replacement that works for three of five entry points is a trap: the
+// failure appears only when someone changes which one they call.
+func TestEveryPoolEntryPointTakesAKernelWithoutSource(t *testing.T) {
+	python := pythonWithCloudpickle(t)
+	job := `
+import multiprocessing
+
+KERNEL = lambda x: x * 3
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(4) as pool:
+        assert pool.apply(KERNEL, (5,)) == 15, "apply"
+        assert pool.apply_async(KERNEL, (6,)).get(30) == 18, "apply_async"
+        assert pool.map(KERNEL, [1, 2]) == [3, 6], "map"
+        assert list(pool.imap(KERNEL, [1, 2])) == [3, 6], "imap"
+        assert sorted(pool.imap_unordered(KERNEL, [1, 2])) == [3, 6], "imap_unordered"
+        assert pool.starmap(lambda a, b: a + b, [(1, 2)]) == [3], "starmap"
+    print("ENTRYPOINTS-OK")
+`
+	res := runPoolScriptWith(t, python, map[string]string{"job.py": job}, "job.py")
+	if !strings.Contains(res.stdout, "ENTRYPOINTS-OK") {
+		t.Fatalf("a Pool entry point rejected a lambda:\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+	}
+}
+
+// TestApplyWorksWithoutKeywordArguments.
+//
+// multiprocessing.Pool.apply defaults kwds to {}; the shim defaulted it to
+// None and passed it through to func(*args, **kwds). So the ordinary call -
+// pool.apply(f, (x,)), no keyword arguments - raised "argument after ** must
+// be a mapping, not NoneType" from inside a worker, which reads as a fault in
+// the user's own function rather than in the drop-in replacement.
+func TestApplyWorksWithoutKeywordArguments(t *testing.T) {
+	python := pythonWithCloudpickle(t)
+	job := `
+import multiprocessing
+
+def kernel(x, bonus=0):
+    return x * 2 + bonus
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(4) as pool:
+        assert pool.apply(kernel, (5,)) == 10, "apply without kwds"
+        assert pool.apply(kernel, (5,), {"bonus": 1}) == 11, "apply with kwds"
+        assert pool.apply_async(kernel, (5,)).get(30) == 10, "apply_async without kwds"
+        assert pool.apply_async(kernel, (5,), {"bonus": 1}).get(30) == 11, "apply_async with kwds"
+    print("APPLY-OK")
+`
+	res := runPoolScriptWith(t, python, map[string]string{"job.py": job}, "job.py")
+	if !strings.Contains(res.stdout, "APPLY-OK") {
+		t.Fatalf("apply mishandled its arguments:\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+	}
+}

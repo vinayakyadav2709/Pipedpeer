@@ -434,6 +434,14 @@ case_ "setup with no keys edits nothing" src/internal/setup/setup.go \
 	"s = s.replace('\tif err != nil || trusted == \"\" {', '\tif false {', 1)" \
 	./internal/setup/ "TestSetupWithNoKeysYetChangesNothing"
 
+case_ "every Pool entry point takes a kernel with no source" src/internal/nixgen/shim.go \
+	"s = s.replace('        return self._local_ctx(func).apply(func, args=args, kwds=kwds or {})', '        return self._ctx.apply(func, args=args, kwds=kwds or {})', 1)" \
+	./internal/nixgen/ "TestEveryPoolEntryPointTakesAKernelWithoutSource"
+
+case_ "apply works without keyword arguments" src/internal/nixgen/shim.go \
+	"s = s.replace('kwds=kwds or {})', 'kwds=kwds)', 1)" \
+	./internal/nixgen/ "TestApplyWorksWithoutKeywordArguments"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
