@@ -408,13 +408,17 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 // on.
 func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct.Candidate) (netip.AddrPort, error) {
 	if os.Getenv("PIPEDPEER_FORCE_BIRTHDAY") != "1" {
-		// A bounded window of its own, not the caller's whole budget. The
-		// race used to run until the connect context expired, so by the time
-		// it gave up there was nothing left: the collision inherited a
-		// context that was already done and failed instantly, every time,
-		// while logging that it had tried. Six seconds is far longer than a
-		// punch that is going to work needs.
-		raceCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		// A bounded window of its own, not the caller's whole budget: the
+		// race used to run until the connect context expired, so the
+		// collision inherited a context that was already done and failed
+		// instantly while logging that it had tried.
+		//
+		// Fifteen seconds, not six. A punch between these two networks has
+		// been observed taking well over six - both sides have to keep
+		// sending until each router has seen the other - and cutting the
+		// window to six stopped a pair connecting that had been connecting
+		// reliably. The collision gets its own window after this one.
+		raceCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		at, err := m.endpoint.Prober().Race(raceCtx, cands, 250*time.Millisecond)
 		cancel()
 		if err == nil {
