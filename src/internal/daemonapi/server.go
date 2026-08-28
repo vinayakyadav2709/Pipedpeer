@@ -29,6 +29,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
@@ -191,6 +192,21 @@ type PeerHealth struct {
 	// Machine identifies the physical machine the peer runs on, so a peer
 	// that shares this one can be recognised.
 	Machine string `json:"machine"`
+	// ClosureFormats is what this peer can receive a closure as. Empty for a
+	// peer old enough to predate the question, which is exactly the peer
+	// that must keep being sent the old format.
+	ClosureFormats string `json:"closure_formats"`
+}
+
+// TakesSignedClosures reports whether this peer can receive a closure in the
+// form that keeps its signatures.
+func (ph *PeerHealth) TakesSignedClosures() bool {
+	for _, f := range strings.Split(ph.ClosureFormats, ",") {
+		if strings.TrimSpace(f) == narpack.FormatName {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Request/Response types ---
@@ -623,9 +639,22 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) 
 	// Best-effort throughout: any failure here falls back to the whole
 	// archive, which is correct, just larger.
 	partial := false
-	if diff, ok := srv.diffNARFor(ph, storePath); ok {
-		defer os.RemoveAll(filepath.Dir(diff))
-		narPath, partial = diff, true
+	signed := false
+	if ph.TakesSignedClosures() {
+		// The form that keeps signatures, so the peer can require them
+		// instead of being configured to stop asking. It carries its own
+		// per-path metadata, so there is no "partial" flag to set: the
+		// archive says what it contains.
+		if pack, cleanup, ok := buildSignedClosure(srv, ph, storePath); ok {
+			defer cleanup()
+			narPath, signed = pack, true
+		}
+	}
+	if !signed {
+		if diff, ok := srv.diffNARFor(ph, storePath); ok {
+			defer os.RemoveAll(filepath.Dir(diff))
+			narPath, partial = diff, true
+		}
 	}
 
 	f, err := os.Open(narPath)
@@ -645,6 +674,15 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) 
 			// The receiver must import this without caching it as the
 			// closure, or it would forward a fragment to the next node.
 			if err := mp.WriteField("partial", "1"); err != nil {
+				return
+			}
+		}
+		if signed {
+			// Said as well as sniffed. The receiver decides by looking at
+			// the bytes, because that is what stays right when the two ends
+			// are different versions; this field is what makes a mismatch
+			// legible in a log rather than mysterious.
+			if err := mp.WriteField("format", narpack.FormatName); err != nil {
 				return
 			}
 		}
@@ -1620,6 +1658,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.TotalCPUs = h.Load.TotalCPUs
 	ph.ReservedMem = h.ReservedMem
 	ph.Machine = h.Capabilities[heartbeat.MachineCapability]
+	ph.ClosureFormats = h.Capabilities[heartbeat.ClosureFormatCapability]
 
 	capsJSON, _ := json.Marshal(h.Capabilities)
 	loadJSON, _ := json.Marshal(h.Load)

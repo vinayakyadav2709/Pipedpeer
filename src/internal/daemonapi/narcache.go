@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -16,8 +17,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog/log"
+
+	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // narCache content-addresses imported Nix closures by their store path. A Nix
@@ -320,6 +325,20 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 	}
 	defer narFile.Close()
 
+	// Which format arrived is decided by the bytes, not by the form field.
+	// The two ends are never upgraded in the same instant, and a stream read
+	// as the wrong format fails somewhere deep inside nix with an error
+	// about the archive rather than about the version.
+	br := bufio.NewReaderSize(narFile, 1024)
+	if narpack.IsArchive(br) {
+		if err := s.importSignedClosure(br, storePath); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "imported": true, "signed": true})
+		return
+	}
+
 	// A partial archive carries only the paths this node was missing, which
 	// makes it useless as a cache entry: cached under the closure's key, it
 	// would later be forwarded to a third node as if it were the whole
@@ -338,7 +357,7 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer os.Remove(tmp.Name())
-		if _, err := io.Copy(tmp, narFile); err != nil {
+		if _, err := io.Copy(tmp, br); err != nil {
 			tmp.Close()
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
@@ -354,7 +373,7 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 
 	// Cache the NAR and materialise the closure in the local nix store so
 	// /v1/pool/map can actually run it (<storePath>/bin/run must exist).
-	if _, err := s.narCache.store(storePath, narFile); err != nil {
+	if _, err := s.narCache.store(storePath, br); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cache nar: " + err.Error()})
 		return
 	}
@@ -363,6 +382,53 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cached": true})
+}
+
+// signedImport is narpack.Import, as a variable so a test can reach what
+// happens AFTER a successful import.
+//
+// Everything interesting here is on that side - that nothing is cached, that
+// the requested root is what gets imported - and a test cannot get there
+// without a real store holding a real closure, which would make the test
+// depend on this machine having built one.
+var signedImport = narpack.Import
+
+// importSignedClosure takes a closure whose signatures survived the journey
+// and lets nix decide whether to accept it.
+//
+// Nothing is cached here, and that is deliberate. The archive holds only the
+// paths this node was missing, so it is not the closure and must never be
+// forwarded to a third node as if it were. When this node later has to seed a
+// peer, it publishes from its own store, which is complete.
+//
+// No signature check is performed HERE either. The import is an ordinary
+// substitution, so the machine's own nix configuration decides - which is the
+// only place its owner can see and change the decision. If it says the
+// closure lacks a trusted signature, that error is what the submitter sees.
+func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
+	dir, err := userdir.Scratch("signedimport-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+
+	m, err := narpack.Unpack(r, dir)
+	if err != nil {
+		return fmt.Errorf("unpacking the closure: %w", err)
+	}
+	// The sender says what the roots are, but this node asked about
+	// storePath; importing what the archive names rather than what was
+	// requested would let a peer materialise something else entirely.
+	roots := []string{storePath}
+	if storePath == "" && len(m.Roots) > 0 {
+		roots = m.Roots
+	}
+	if err := signedImport(context.Background(), dir, roots); err != nil {
+		return err
+	}
+	log.Info().Str("store", storePath).Int("roots", len(m.Roots)).
+		Msg("imported a closure whose signatures this machine checked")
+	return nil
 }
 
 // materializeClosure imports a cached NAR into the local nix store, skipping

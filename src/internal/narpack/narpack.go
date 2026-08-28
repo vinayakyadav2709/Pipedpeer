@@ -367,3 +367,37 @@ func Import(ctx context.Context, cacheDir string, roots []string) error {
 	}
 	return nil
 }
+
+// FormatName is what a sender calls this archive on the wire, and what a
+// receiver advertises it understands.
+const FormatName = "narpack1"
+
+// tarMagicOffset and tarMagic are where a tar header identifies itself.
+const (
+	tarMagicOffset = 257
+	tarMagic       = "ustar"
+)
+
+// IsArchive reports whether what follows is one of these archives, without
+// consuming it.
+//
+// Sniffed rather than trusted from a form field, because the two formats must
+// be told apart correctly even when a peer is a version ahead or behind: a
+// legacy export stream is gzip, which starts 0x1f 0x8b, and this is a tar
+// whose first entry is the manifest. Reading a stream in the wrong format
+// produces a confusing failure deep inside nix, so the question is settled
+// before anything acts on it.
+func IsArchive(br *bufio.Reader) bool {
+	head, err := br.Peek(tarMagicOffset + len(tarMagic))
+	if err != nil {
+		return false
+	}
+	if string(head[tarMagicOffset:tarMagicOffset+len(tarMagic)]) != tarMagic {
+		return false
+	}
+	// The name field is the first 100 bytes of the header. A tar that is not
+	// ours - a workspace archive that reached the wrong endpoint - must not
+	// be unpacked into a store cache.
+	name := strings.TrimRight(string(head[:len(ManifestName)]), "\x00")
+	return name == ManifestName
+}

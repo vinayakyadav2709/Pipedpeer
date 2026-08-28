@@ -176,15 +176,23 @@ func TestAnArchiveCannotWriteOutsideItsDirectory(t *testing.T) {
 	tw.WriteHeader(&tar.Header{Name: ManifestName, Mode: 0o644, Size: int64(len(body))})
 	tw.Write(body)
 	evil := []byte("pwned")
-	tw.WriteHeader(&tar.Header{Name: "../../escaped.txt", Mode: 0o644, Size: int64(len(evil))})
+	tw.WriteHeader(&tar.Header{Name: "../escaped.txt", Mode: 0o644, Size: int64(len(evil))})
 	tw.Write(evil)
 	tw.Close()
 
-	dir := t.TempDir()
+	// The escape lands one level up, inside a directory this test owns. It
+	// used to reach for the shared temp root, which meant a run that broke
+	// safeName on purpose left a file there and every later run of this test
+	// failed on the debris rather than on the code.
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "cache")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Unpack(bytes.NewReader(buf.Bytes()), dir); err == nil {
 		t.Fatal("an entry escaping the directory was accepted")
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Dir(dir)), "escaped.txt")); err == nil {
+	if _, err := os.Stat(filepath.Join(parent, "escaped.txt")); err == nil {
 		t.Fatal("the escaping entry was written before it was refused")
 	}
 }
