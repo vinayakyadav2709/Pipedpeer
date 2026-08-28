@@ -8,10 +8,44 @@ import (
 func TestGenerateFlakeWithoutPackages(t *testing.T) {
 	flake := GenerateFlake(nil, "", true)
 	if !strings.Contains(flake, "pkgs.python3") {
-		t.Fatalf("expected plain python runtime in flake")
+		t.Fatalf("expected a python3 runtime in flake")
 	}
-	if strings.Contains(flake, "withPackages") {
-		t.Fatalf("did not expect withPackages when nix package list is empty")
+	// A script that imports nothing used to get a bare interpreter. It now
+	// gets an environment, because cloudpickle has to be importable on the
+	// worker for a lambda to run there, and a dependency-free script is
+	// exactly the kind that is written with lambdas.
+	if !strings.Contains(flake, "withPackages") {
+		t.Fatalf("expected an environment even with no packages asked for:\n%s", flake)
+	}
+}
+
+// Every environment carries cloudpickle, whatever else it carries.
+//
+// The shim ships a named function as source and falls back to cloudpickle
+// for a lambda, closure or method. That fallback runs on the WORKER, inside
+// the shipped closure, so an environment built without cloudpickle silently
+// takes every such kernel back to running locally - with nothing failing to
+// say so.
+func TestEveryFlakeCarriesCloudpickle(t *testing.T) {
+	tests := []struct {
+		name string
+		pkgs []string
+		arch string
+	}{
+		{"no packages at all", nil, "x86_64-linux"},
+		{"one package", []string{"numpy"}, "x86_64-linux"},
+		{"a pinned package", []string{"scikit-learn"}, "x86_64-linux"},
+		{"the torch cuda branch", []string{"torch"}, "x86_64-linux"},
+		{"another arch", []string{"numpy"}, "aarch64-linux"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flake := GenerateFlakeForArch(tt.pkgs, "python3", tt.arch, true)
+			if strings.Count(flake, "ps.cloudpickle") != 1 {
+				t.Fatalf("cloudpickle listed %d times, want exactly 1:\n%s",
+					strings.Count(flake, "ps.cloudpickle"), flake)
+			}
+		})
 	}
 }
 
