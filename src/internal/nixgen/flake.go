@@ -87,23 +87,6 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 	if pythonVersion == "" {
 		pythonVersion = "python3"
 	}
-	if len(nixPkgs) == 0 {
-		return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "`+nixpkgsRef+`";
-
-  outputs = { self, nixpkgs }: {
-    packages.%s.default =
-      let
-        pkgs = nixpkgs.legacyPackages.%s;
-      in
-      pkgs.writeShellScriptBin "run" ''
-        exec ${pkgs.%s}/bin/python3 "$@"
-      '';
-  };
-}
-`, nixSystem, nixSystem, pythonVersion)
-	}
-
 	var psPkgs []string
 	torchCUDA := false
 	hasTorch := false
@@ -164,6 +147,23 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 			psPkgs = append(psPkgs, "ps.numpy")
 		}
 	}
+
+	// cloudpickle in every environment, including one that asked for no
+	// packages at all.
+	//
+	// It is how a lambda, a closure or a method reaches a worker. The shim
+	// ships a kernel as source where it can, but source only exists for a
+	// plain named function; everything else used to be counted
+	// "unshippable" and run locally forever. cloudpickle serialises those
+	// by value, and the worker needs it importable to load one - so it has
+	// to be in the environment that TRAVELS, not merely in the submitter's.
+	//
+	// Unconditional because the callable's shape is not knowable when the
+	// environment is built: the same env runs whatever the script does
+	// next. It is pure Python and small, and the transfer diffs per store
+	// path, so an existing peer receives cloudpickle and the rebuilt
+	// wrapper rather than the whole environment again.
+	psPkgs = append(psPkgs, "ps.cloudpickle")
 
 	pkgsList := strings.Join(psPkgs, "\n          ")
 	if torchCUDA {
