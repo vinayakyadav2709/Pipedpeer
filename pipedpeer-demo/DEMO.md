@@ -26,6 +26,13 @@ The three boxes need Linux to *run* jobs (namespaces and a `crun` sandbox). They
 do **not** need to reach each other by hostname, be on a VPN, or have any port
 open. They punch a hole out to each other through their own routers.
 
+**These instructions assume the three boxes start with nothing installed** — no
+pipedpeer, no Nix, no identity, no caches. `pipedpeer setup` installs what it
+needs. If a machine has been used for a previous run, reset it first
+(see [Resetting a machine](#resetting-a-machine-to-a-clean-state) at the end),
+or the first job will be much faster than a real cold start and the demo will
+overstate itself.
+
 > The introducer is only an address book. It tells two machines where to find
 > each other and then stops being involved — the data path is machine to
 > machine. If it goes down after everyone has met, running jobs carry on.
@@ -284,16 +291,58 @@ that landed elsewhere.
 
 ---
 
-## Resetting between runs
+## Between two runs of the demo
 
-To make a second run look like the first (closures already cached make it much
-faster, which is realistic but less dramatic):
+Nothing needs re-joining — the cluster address is remembered, so a restart is
+enough:
 
 ```bash
 pipedpeer stop && pipedpeer start     # on each machine
 ```
 
-Nothing needs re-joining; the cluster address is remembered.
+The second run will be **much faster than the first**, because the environments
+are built and the closures are already on every machine. That is honest and it
+is what a real user experiences from their second job onward — but it is not a
+cold start, so do not present it as one.
+
+## Resetting a machine to a clean state
+
+To rehearse the whole thing from scratch, including the install and the
+environment builds. Everything below is derived data or was installed by
+pipedpeer; none of it is your work.
+
+```bash
+pipedpeer stop 2>/dev/null
+
+# pipedpeer itself: binary, identity, cluster secret, node database, caches
+rm -f  ~/.local/bin/pipedpeer
+chmod -R u+w ~/.local/share/pipedpeer ~/.local/state/pipedpeer ~/.cache/pipedpeer 2>/dev/null
+rm -rf ~/.local/share/pipedpeer ~/.local/state/pipedpeer ~/.cache/pipedpeer
+```
+
+That alone leaves Nix and its store in place, so the next run reinstalls
+pipedpeer but reuses every environment it has built before. For a **true** cold
+start, remove Nix as well:
+
+```bash
+# Determinate installer (what `pipedpeer setup` uses)
+sudo /nix/nix-installer uninstall --no-confirm
+sudo rm -rf /etc/nix          # removes the cluster's trusted keys with it
+```
+
+`chmod -R u+w` first is not optional: Nix store paths are read-only by design,
+and `rm -rf` stops on the first one.
+
+**Leave `crun`, `tar`, `bash` and `curl` alone.** Those are ordinary system
+tools; pipedpeer checks for `crun` and installs it only if it is missing, and
+never touches the other three.
+
+**Check your firewall before "cleaning" it.** On both machines here the high
+ports were already open for unrelated reasons, so `pipedpeer setup` added no
+rule at all — removing 38447/udp would have punched a hole in a range somebody
+else opened, leaving pipedpeer's port specifically blocked while everything
+around it stayed open. Look at `firewall-cmd --list-ports` before changing
+anything.
 
 ---
 
