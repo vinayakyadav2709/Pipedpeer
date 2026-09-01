@@ -45,6 +45,30 @@ local_out="$(mktemp)"
 python3 "$script" 2>&1 | tee "$local_out"
 local_t="$(took < "$local_out")"
 
+# The baseline is what somebody would run today, so it needs the packages
+# installed today. Naming the missing one beats a traceback, and the gap is
+# itself worth noticing: the cluster run below needs none of them installed,
+# because it builds the environment from the script's imports.
+missing="$(grep -Eo "No module named '[^']+'" "$local_out" | head -1 | cut -d"'" -f2)"
+if [[ -n "$missing" ]]; then
+	echo
+	echo "  ^ this machine has no '$missing' installed, so there is no local"
+	echo "    baseline for this script. Either install it:"
+	echo
+	# The import name and the package name are not always the same, and
+	# `pip install sklearn` installs a stub that tells you off.
+	case "$missing" in
+	sklearn) pkg=scikit-learn ;;
+	cv2) pkg=opencv-python ;;
+	PIL) pkg=pillow ;;
+	yaml) pkg=pyyaml ;;
+	*) pkg="$missing" ;;
+	esac
+	echo "        pip install $pkg"
+	echo
+	echo "    or just watch the cluster run below - it needs nothing installed."
+fi
+
 # Said before the run, not after, so a disappointing number is explained
 # rather than explained away. One machine plus a sandbox is legitimately a
 # little slower than one machine; the cluster is the whole point.
@@ -78,7 +102,11 @@ fi
 
 echo
 echo "============================================================"
-printf ' %-28s %s\n' "this machine only:" "${local_t:-did not finish}"
+if [[ -n "$missing" ]]; then
+	printf ' %-28s %s\n' "this machine only:" "cannot run - no '$missing' installed"
+else
+	printf ' %-28s %s\n' "this machine only:" "${local_t:-did not finish}"
+fi
 printf ' %-28s %s\n' "across the cluster:" "${cluster_t:-did not finish}"
 if [[ -n "${local_t:-}" && -n "${cluster_t:-}" ]]; then
 	python3 - "$local_t" "$cluster_t" <<'PY'
