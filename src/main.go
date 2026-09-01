@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/ddpplace"
 	"io"
 	"net"
@@ -103,6 +104,7 @@ func main() {
 		newPingCmd(),
 		newNetCheckCmd(),
 		newNetPunchCmd(),
+		newJoinCmd(),
 		newNetJoinCmd(),
 		newRelayTestCmd(),
 		newRelayConnectCmd(),
@@ -183,12 +185,28 @@ func newStartCmd() *cobra.Command {
 				fmt.Printf("daemon already running\n")
 				return nil
 			}
-			// Passed through the environment rather than as another argument:
-			// the daemon reads PIPEDPEER_RENDEZVOUS, and a machine that always
-			// joins the same cluster sets it once instead of typing it on
-			// every start.
-			if rv, _ := cmd.Flags().GetString("rendezvous"); rv != "" {
-				os.Setenv("PIPEDPEER_RENDEZVOUS", rv)
+			// Passed through the environment rather than as another argument,
+			// because that is how the daemon reads it - and remembered, so a
+			// machine that has joined a cluster is still in it after a
+			// restart. Before this, a daemon restarted by anything that did
+			// not know to repeat the flag came back alone and quietly stopped
+			// taking work.
+			flagRV, _ := cmd.Flags().GetString("rendezvous")
+			if flagRV != "" {
+				norm, err := clustercfg.Normalize(flagRV)
+				if err != nil {
+					return fmt.Errorf("--rendezvous %s: %w", flagRV, err)
+				}
+				flagRV = norm
+				if err := clustercfg.SetRendezvous(norm); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not remember the cluster address: %v\n", err)
+				}
+			}
+			if addr, source := clustercfg.Effective(flagRV); addr != "" {
+				os.Setenv(clustercfg.EnvVar, addr)
+				if source == "saved" {
+					fmt.Printf("joining cluster through %s\n", addr)
+				}
 			}
 			if err := daemonctl.Start(nodeID.NodeID, port, maxConcurrent); err != nil {
 				return err
@@ -204,11 +222,107 @@ func newStartCmd() *cobra.Command {
 	}
 	cmd.Flags().Int("port", 38080, "Local daemon port")
 	cmd.Flags().String("rendezvous", "",
-		"join a cluster over the internet through this address book, host:port "+
-			"(also PIPEDPEER_RENDEZVOUS). Peers are discovered and connected automatically.")
+		"join a cluster over the internet through this address book, host[:port] "+
+			"(also PIPEDPEER_RENDEZVOUS). Remembered, so later starts need no flag. "+
+			"Peers are discovered and connected automatically.")
 	cmd.Flags().Int("max-concurrent", 0,
 		"Maximum tasks this node accepts at once (0 = unlimited; also settable via PIPEDPEER_MAX_CONCURRENT)")
 	return cmd
+}
+
+// newJoinCmd is the one command a machine runs to become part of a cluster.
+//
+// Everything it does could be typed by hand - remember the address, start the
+// daemon, wait, look at the node table - and every demo and every set of
+// instructions did exactly that, in four steps, with a flag that had to be
+// repeated on every later start. Machines were left half-joined often enough
+// that it is worth being one command with no flags.
+//
+// It also waits for a peer before returning, because "did it work" is the
+// only question anybody has at this point, and a daemon that has started is
+// not yet an answer to it.
+func newJoinCmd() *cobra.Command {
+	var wait time.Duration
+	cmd := &cobra.Command{
+		Use:   "join <address>",
+		Short: "Join a cluster through an introducer, and wait until peers appear",
+		Long: "Join the cluster whose introducer is at <address> (host, or host:port; " +
+			"the port defaults to " + strconv.Itoa(clustercfg.DefaultPort) + ").\n\n" +
+			"The address is remembered, so afterwards `pipedpeer start` rejoins the " +
+			"same cluster with no arguments. Peers on other networks are connected " +
+			"to directly; the introducer only makes the introduction.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			addr, err := clustercfg.Normalize(args[0])
+			if err != nil {
+				return err
+			}
+			if err := clustercfg.SetRendezvous(addr); err != nil {
+				return fmt.Errorf("could not remember the cluster address: %w", err)
+			}
+			nodeID, err := identity.GetOrCreate()
+			if err != nil {
+				return err
+			}
+
+			// A daemon that is already up was started without this address,
+			// or with a different one, so it is in the wrong cluster or in
+			// none. Restarting is what makes the join take effect, and doing
+			// it here is better than printing an instruction to do it.
+			if daemonctl.Status().Running {
+				fmt.Println("restarting the daemon to join through " + addr)
+				if err := daemonctl.Stop(); err != nil {
+					return err
+				}
+			} else {
+				fmt.Println("joining through " + addr)
+			}
+			os.Setenv(clustercfg.EnvVar, addr)
+			if err := daemonctl.Start(nodeID.NodeID, 38080, 0); err != nil {
+				return err
+			}
+			fmt.Printf("this node is %s\n", nodeID.ShortID())
+
+			fmt.Printf("waiting up to %s for peers", wait)
+			deadline := time.Now().Add(wait)
+			for time.Now().Before(deadline) {
+				if n := healthyPeerCount(); n > 0 {
+					fmt.Printf("\n\nconnected to %d peer(s):\n\n", n)
+					return printNodes(38080)
+				}
+				fmt.Print(".")
+				time.Sleep(2 * time.Second)
+			}
+
+			// Not an error. A first machine has nobody to meet yet, and
+			// saying so is more useful than a non-zero exit that reads like
+			// the join failed.
+			fmt.Printf("\n\nno peers yet. This is normal for the first machine in a\n" +
+				"cluster - run the same command on the others and they will find\n" +
+				"each other. Check with: pipedpeer nodes\n")
+			return nil
+		},
+	}
+	cmd.Flags().DurationVar(&wait, "wait", 90*time.Second, "how long to wait for peers before returning")
+	return cmd
+}
+
+// healthyPeerCount counts peers other than this node that are usable now.
+func healthyPeerCount() int {
+	nodes, err := fetchClusterNodes(38080)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, nd := range nodes {
+		// "self" is this machine, which is never the answer to "did anyone
+		// else turn up".
+		if nd.Source == "self" || nd.State != "healthy" {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func newStopCmd() *cobra.Command {

@@ -475,6 +475,19 @@ case_ "the nar cache evicts least-recently-used" src/internal/daemonapi/narcache
 	"s = s.replace('\tsort.SliceStable(items, func(i, j int) bool { return items[i].used.Before(items[j].used) })', '\tsort.SliceStable(items, func(i, j int) bool { return items[i].used.After(items[j].used) })', 1)" \
 	./internal/daemonapi/ "TestTheNarCacheStaysUnderItsCap"
 
+# ---- joining a cluster once -------------------------------------------------
+case_ "a joined cluster survives a restart" src/internal/clustercfg/clustercfg.go \
+	"s = s.replace('\tif s := Rendezvous(); s != \"\" {\n\t\treturn s, \"saved\"\n\t}\n', '', 1)" \
+	./internal/clustercfg/ "TestAJoinedClusterSurvivesARestart"
+
+case_ "what was typed beats what was remembered" src/internal/clustercfg/clustercfg.go \
+	"s = s.replace('\tif s := strings.TrimSpace(flag); s != \"\" {\n\t\treturn s, \"flag\"\n\t}\n', '', 1)" \
+	./internal/clustercfg/ "TestWhatWasTypedBeatsWhatWasRemembered"
+
+case_ "a bare host gets the default port" src/internal/clustercfg/clustercfg.go \
+	"s = s.replace('\tif !found {\n\t\treturn addr + \":\" + strconv.Itoa(DefaultPort), nil\n\t}', '\tif !found {\n\t\treturn addr, nil\n\t}', 1)" \
+	./internal/clustercfg/ "TestABareHostGetsTheDefaultPort"
+
 echo
 echo "======================================================"
 printf 'caught by their tests: %d\n' "$pass"
