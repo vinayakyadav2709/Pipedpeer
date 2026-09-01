@@ -20,6 +20,8 @@ import time
 import torch
 import torch.nn as nn
 
+_T0 = time.monotonic()
+
 torch.manual_seed(11)
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -86,3 +88,5 @@ for epoch in range(EPOCHS):
             print(f"epoch {epoch} step {step:4d} loss {loss.item():.4f}")
 print(f"training done in {time.monotonic() - t0:.1f}s")
 print("final loss:", loss_fn(model(X[:1000]), y[:1000]).item())
+
+print(f"TOTAL {time.monotonic() - _T0:.1f}s")
