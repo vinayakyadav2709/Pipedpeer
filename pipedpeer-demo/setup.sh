@@ -47,7 +47,7 @@ cd ..
 
 # --- cluster sanity ---------------------------------------------------------
 echo
-echo "=== cluster nodes (expect yourself + the dGPU worker, both healthy) ==="
+echo "=== cluster nodes (expect all three, healthy, GPU shown on two) ==="
 "$PIPE" nodes
 
 # --- rehearsal pass ---------------------------------------------------------
@@ -56,15 +56,25 @@ echo "=== cluster nodes (expect yourself + the dGPU worker, both healthy) ==="
 # the live demo starts instantly AND pool fan-out can reach every worker.
 echo
 echo "=== rehearsal pass (builds closures + warms stores on all workers) ==="
-run() { echo; echo "--- rehearsal: $1"; "$PIPE" run "$1" \
-      --remote --isolate=false "${@:2}" 2>&1 | tail -8; }
+# Exactly the command the demo uses, so the rehearsal warms the same path.
+run() { echo; echo "--- rehearsal: $1"; "$PIPE" run "$@" 2>&1 | tail -8; }
 
+run 00_pool.py
+run 06_pool_lambda.py
 run 01_sklearn_rf.py
 run 02_numpy_heavy.py
 run 03_pandas_ooc/03_pandas_ooc.py
-run 04_torch_ddp.py --ddp 2 --gpu off
-run 04_torch_ddp.py --gpu force
+run 05_file_sync.py
+# Only if there are GPU machines in the cluster. Skipped rather than failed,
+# because a CPU-only rehearsal is a valid rehearsal for everything else.
+if "$PIPE" nodes | awk 'NR>1 && $7 != "-" {found=1} END {exit !found}'; then
+	run 04_torch_ddp.py --ddp 2
+else
+	echo
+	echo "--- skipping 04_torch_ddp.py: no GPU machine in the cluster yet"
+fi
 
 echo
 echo "=== DEMO READY ==="
-echo "Workers warmed. Open pipedpeer dashboard and run the 4 scripts (see DEMO.md)."
+echo "Every script has been built and shipped once, so the live run is fast."
+echo "Open 'pipedpeer dashboard' and follow DEMO.md Part 4."

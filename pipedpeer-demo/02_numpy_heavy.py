@@ -17,6 +17,8 @@ import time
 
 import numpy as np
 
+_T0 = time.monotonic()
+
 rng = np.random.RandomState(3)
 n = 4096
 
@@ -54,3 +56,5 @@ print("verifying reconstruction A ~= U @ diag(S) @ Vh ...")
 t0 = time.monotonic()
 err = np.linalg.norm(A - (U * S) @ Vh) / np.linalg.norm(A)
 print(f"reconstruction relative error: {err:.2e}  (checked in {time.monotonic() - t0:.1f}s)")
+
+print(f"TOTAL {time.monotonic() - _T0:.1f}s")
