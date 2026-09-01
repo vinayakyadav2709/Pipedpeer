@@ -177,6 +177,13 @@ Afterwards, `pipedpeer traffic` on box-b and box-c shows the batches they ran.
 **What the audience should take away:** the file was not edited between the two
 runs.
 
+> `00_pool.py` imports only the standard library, which is why it is the one to
+> lead with: the local baseline runs anywhere, with nothing installed. The
+> library demos below (sklearn, pandas, torch) need those packages installed on
+> box-a for the *local* half to run at all — `compare.sh` says so and names the
+> package if they are missing. The cluster half never needs them: it builds the
+> environment from the script's imports. That gap is worth pointing at.
+
 ### 4.2 The one stock Python refuses
 
 ```bash

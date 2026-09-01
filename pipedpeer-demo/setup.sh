@@ -67,7 +67,13 @@ run 03_pandas_ooc/03_pandas_ooc.py
 run 05_file_sync.py
 # Only if there are GPU machines in the cluster. Skipped rather than failed,
 # because a CPU-only rehearsal is a valid rehearsal for everything else.
-if "$PIPE" nodes | awk 'NR>1 && $7 != "-" {found=1} END {exit !found}'; then
+#
+# Matched on the vendor name rather than a column number: "MEM AVAIL" prints
+# as "14 GiB", two whitespace-separated fields, so counting columns puts the
+# GPU check on the word "GiB" and every machine looks like it has one. Only
+# NVIDIA cards are advertised as CUDA targets, so the name is the reliable
+# thing to look for.
+if "$PIPE" nodes | tail -n +2 | grep -qi nvidia; then
 	run 04_torch_ddp.py --ddp 2
 else
 	echo
