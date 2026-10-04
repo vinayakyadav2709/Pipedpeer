@@ -516,10 +516,16 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
+		// Keep draining after the client goes away: the output readers block
+		// on outCh, and the job cannot finish until they do.
+		var lost bool
 		for m := range outCh {
+			if lost {
+				continue
+			}
 			data, _ := json.Marshal(m)
 			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				return
+				lost = true
 			}
 		}
 	}()
@@ -634,25 +640,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		go func() {
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				outCh <- OutputMessage{O: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stdout scanner: " + err.Error()}
-			}
-		}()
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				outCh <- OutputMessage{E: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stderr scanner: " + err.Error()}
-			}
-		}()
+		readers := streamOutput(stdout, stderr, outCh)
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
+		readers.Wait()
 		cmd.Wait()
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
@@ -852,25 +842,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		go func() {
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				outCh <- OutputMessage{O: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stdout scanner: " + err.Error()}
-			}
-		}()
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				outCh <- OutputMessage{E: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stderr scanner: " + err.Error()}
-			}
-		}()
+		readers := streamOutput(stdout, stderr, outCh)
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
+		readers.Wait()
 		cmd.Wait()
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
@@ -1153,4 +1127,27 @@ func oomKills(parent string) int64 {
 		}
 	}
 	return 0
+}
+
+// streamOutput forwards a job's stdout and stderr to outCh line by line. The
+// caller must wait on the returned group before cmd.Wait: Wait closes the
+// pipes as soon as the process exits, and a reader still draining the last
+// lines then fails with "file already closed" — which the submitter reads as
+// a failed job and reschedules, even though the script exited 0.
+func streamOutput(stdout, stderr io.Reader, outCh chan<- OutputMessage) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	forward := func(r io.Reader, name string, msg func(string) OutputMessage) {
+		defer wg.Done()
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			outCh <- msg(scanner.Text() + "\n")
+		}
+		if err := scanner.Err(); err != nil {
+			outCh <- OutputMessage{Error: name + " scanner: " + err.Error()}
+		}
+	}
+	wg.Add(2)
+	go forward(stdout, "stdout", func(l string) OutputMessage { return OutputMessage{O: l} })
+	go forward(stderr, "stderr", func(l string) OutputMessage { return OutputMessage{E: l} })
+	return &wg
 }
