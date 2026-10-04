@@ -100,6 +100,7 @@ type chunk struct {
 	frames                                   bool
 	starmap                                  bool
 	itemsB64                                 bool
+	itemsZlib                                bool
 	noSplit                                  bool
 	noFanout                                 bool
 	force                                    bool
@@ -496,6 +497,11 @@ type poolRequest struct {
 	// ItemsB64 marks Items as base64-pickled objects (numpy arrays etc.) rather
 	// than plain JSON scalars, so block-partitioned numeric work can ship.
 	ItemsB64 bool `json:"items_b64,omitempty"`
+	// ItemsZlib marks frame items as zlib-compressed by the shim. The worker
+	// decompresses them, so every header the daemon rebuilds for a part has
+	// to carry it on; dropped, the worker unpickles compressed bytes and
+	// fails with "invalid load key, 'x'".
+	ItemsZlib bool `json:"items_zlib,omitempty"`
 	// CacheKeys resolves items from the worker's persistent chunk cache (warm
 	// worker only) instead of the payload: item i is the content hash under
 	// which the chunk was previously stored. A miss fails the request; the
@@ -854,7 +860,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 			ch := &chunk{
 				pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 				extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
-				starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
+				starmap: req.Starmap, itemsB64: req.ItemsB64, itemsZlib: req.ItemsZlib, noSplit: req.NoSplit,
 				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
@@ -868,7 +874,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	ch := &chunk{
 		pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 		extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
-		starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
+		starmap: req.Starmap, itemsB64: req.ItemsB64, itemsZlib: req.ItemsZlib, noSplit: req.NoSplit,
 		noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 		chunkDir:    chunkDirFor(storePath),
@@ -1383,6 +1389,7 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "no_fanout": true,
 			"cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys, "chunk_dir": ch.chunkDir,
+			"items_zlib": ch.itemsZlib,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
@@ -1533,7 +1540,7 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 			"id": w.id, "func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName,
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys,
-			"chunk_dir": ch.chunkDir,
+			"chunk_dir": ch.chunkDir, "items_zlib": ch.itemsZlib,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
@@ -1669,7 +1676,7 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 			"func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName,
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys,
-			"chunk_dir": ch.chunkDir,
+			"chunk_dir": ch.chunkDir, "items_zlib": ch.itemsZlib,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
