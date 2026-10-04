@@ -547,6 +547,19 @@ class _ClusterPool:
         self.close()
 
 
+def _cgroup_stat(path, key):
+    """One counter from a cgroup's memory.stat, or 0 if it cannot be read."""
+    try:
+        with open(path + "/memory.stat") as f:
+            for line in f:
+                name, _, value = line.partition(" ")
+                if name == key:
+                    return int(value)
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
 def _cgroup_headroom():
     """What this process's cgroup still allows, or None if it is uncapped.
 
@@ -579,7 +592,15 @@ def _cgroup_headroom():
             if raw != "max":
                 with open(path + "/memory.current") as f:
                     used = int(f.read().strip())
-                room = int(raw) - used
+                # memory.current counts page cache, which the kernel reclaims
+                # before it kills anything. Left in, every file a job reads
+                # shrinks the next job's pool: measured 2.0GB of a worker's
+                # 2.15GB "used" was inactive cache, against 33MB of real
+                # memory, and the pool fell from 5 workers to 1 over five warm
+                # runs. inactive_file is the part reclaimed first; current
+                # minus it is the "working set" container runtimes report.
+                used -= _cgroup_stat(path, "inactive_file")
+                room = int(raw) - max(0, used)
                 if best is None or room < best:
                     best = room
         except (OSError, ValueError):
