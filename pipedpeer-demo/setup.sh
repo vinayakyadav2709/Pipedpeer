@@ -19,15 +19,22 @@ echo "using pipedpeer: $PIPE"
 # 03 has its own workspace dir (with its own .pipedpeerignore): the CSV must
 # ship with 03, but nothing else should drag ~1 GB into its upload.
 cd 03_pandas_ooc
+# DEMO_CSV_ROWS sizes it: 10M rows is ~1.1 GB, 3M is ~330 MB. Over home
+# internet links every chunk crosses the network, so rehearse with the size
+# you will actually present.
+ROWS="${DEMO_CSV_ROWS:-10000000}"
 if [ ! -f data.csv ]; then
-  echo "generating data.csv (~1.7 GB) with plain python3 + pandas ..."
-  python3 - <<'PYEOF'
+  echo "generating data.csv ($ROWS rows, ~$((ROWS * 110 / 1000000)) MB) with plain python3 + pandas ..."
+  # Written under a temporary name: a half-written data.csv left by Ctrl+C
+  # would otherwise pass the -f test above on the next run.
+  DEMO_CSV_ROWS="$ROWS" python3 - <<'PYEOF'
+import os
 import numpy as np
 import pandas as pd
 
 rng = np.random.RandomState(42)
-n = 10_000_000
-cats = np.random.choice(["alpha", "beta", "gamma", "delta"], size=n)
+n = int(os.environ["DEMO_CSV_ROWS"])
+cats = rng.choice(["alpha", "beta", "gamma", "delta"], size=n)
 df = pd.DataFrame({
     "id": np.arange(n, dtype=np.int64),
     "cat": cats,
@@ -37,9 +44,10 @@ df = pd.DataFrame({
     "g4": rng.rand(n),
     "out": rng.rand(n),
 })
-df.to_csv("data.csv", index=False)
+df.to_csv("data.csv.tmp", index=False)
 print(f"wrote data.csv ({n:,} rows)")
 PYEOF
+  mv data.csv.tmp data.csv
 else
   echo "data.csv already present: $(du -h data.csv | cut -f1)"
 fi
@@ -63,7 +71,11 @@ run 00_pool.py
 run 06_pool_lambda.py
 run 01_sklearn_rf.py
 run 02_numpy_heavy.py
-run 03_pandas_ooc/03_pandas_ooc.py
+# From inside its own directory: the script opens data.csv relative to where
+# it runs. PIPEDPEER_OOC_MIN forces the out-of-core path, which a machine
+# with more than ~2x the file in free RAM would otherwise skip - and then the
+# rehearsal would warm a path the demo never takes.
+(cd 03_pandas_ooc && run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8)
 run 05_file_sync.py
 # Only if there are GPU machines in the cluster. Skipped rather than failed,
 # because a CPU-only rehearsal is a valid rehearsal for everything else.

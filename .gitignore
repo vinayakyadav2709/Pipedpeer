@@ -17,6 +17,7 @@ pipedpeer-demo/**/data.csv
 pipedpeer-demo/sync_note.txt
 pipedpeer-demo/created_by_job.txt
 pipedpeer-demo/delete_me.txt
+pipedpeer-demo/demo/rehearsal-results.txt
 
 # local-only notes
 future.md
