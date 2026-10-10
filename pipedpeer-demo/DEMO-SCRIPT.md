@@ -6,6 +6,7 @@ what to do when something goes wrong. Every command on stage is one file in
 
 [DEMO.md](DEMO.md) is the reference behind this — how each piece works and the
 full troubleshooting list. This page is the order of events.
+[demo/DEMO-PREP.md](demo/DEMO-PREP.md) is the short version: the commands only.
 
 **Length:** about 20 minutes of demo, then questions.
 **Machines:** three real machines on three different networks, plus the introducer.
