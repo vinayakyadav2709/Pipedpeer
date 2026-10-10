@@ -1,4 +1,4 @@
-// Figure 4.8 - Hash shuffle for grouping and joining: no combiners needed.
+// Figure 4.9 - Hash shuffle for grouping and joining: no combiners needed.
 digraph Shuffle {
   rankdir=TB; bgcolor="white"; nodesep=0.45; ranksep=0.52;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",

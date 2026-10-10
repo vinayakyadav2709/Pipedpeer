@@ -1,7 +1,7 @@
-// Figure 4.4 - Closure transfer: the store path is the cluster-wide cache key.
-// Two columns rather than one, so the figure is not a full page tall.
+// Figure 4.6 - Closure transfer: the store path is the cache key, and the
+// store path is also the unit of transfer.
 digraph ClosureCache {
-  rankdir=TB; bgcolor="white"; nodesep=0.40; ranksep=0.48;
+  rankdir=TB; bgcolor="white"; nodesep=0.40; ranksep=0.42;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
   edge [fontname="Helvetica", fontsize=14, color="#555555"];
@@ -9,19 +9,21 @@ digraph ClosureCache {
   pin  [label="Pinned package set\nthe same inputs give the same store path\non every machine, on any day",
         fillcolor="#fdf6e3", color="#8a6d1f"];
   bld  [label="Build the closure locally"];
-  ask  [label="Does the target already have it?", shape=diamond,
+  ask  [label="Can the target\nrun it already?", shape=diamond,
         fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
   skip [label="Ship nothing but the workspace"];
-  exp  [label="Export and compress the closure"];
-  imp  [label="Import it on the worker\nand cache it by store path"];
-  bcast[label="Push it to peers that lack it\nso they can receive spilled work"];
+  diff [label="Ask which store paths it lacks\nsend only those, or everything\nif it shares none"];
+  imp  [label="Import on the worker\n(a partial import is never\ncached as the closure)"];
+  bcast[label="Push to peers that cannot run it\nsigned with the node key\nso they can receive spilled work"];
+  prune[label="Prune caches least-recently-used\n8 GiB each by default", style="rounded,filled,dashed"];
   run  [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
   pin -> bld -> ask;
   ask -> skip [label="  yes  "];
-  ask -> exp  [label="  no  "];
-  exp -> imp -> bcast;
+  ask -> diff [label="  no  "];
+  diff -> imp -> bcast;
+  bcast -> prune [style=dashed];
   skip -> run;
   bcast -> run;
-  { rank=same; skip; exp; }
+  { rank=same; skip; diff; }
 }

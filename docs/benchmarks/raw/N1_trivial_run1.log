@@ -1,0 +1,42 @@
+[coordinator] Resource estimate: 512 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node ea8a95c6 (lease=f6e5fe5c)
+[coordinator] Lease committed — executing on ea8a95c6
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/trivial/trivial.py
+Daemon: 192.168.0.107:38083
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-920963065/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/trivial
+      Script: trivial.py
+      Sending the whole closure (the node shares none of it)
+      Uploaded job 7f47d3b9-2563-4143-949d-d28555e81d0e
+
+[7/7] Executing on remote...
+TRIVIAL-OK
+      Synced 1 file(s) to /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/trivial (0 new, 1 updated, 0 deleted)
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790954992309233944
+[coordinator] Task completed successfully on node ea8a95c6
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-920963065/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets

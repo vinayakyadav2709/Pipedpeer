@@ -1,0 +1,70 @@
+[coordinator] Resource estimate: 300 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node ea8a95c6 (lease=4ff9c0a3)
+[coordinator] Lease committed — executing on ea8a95c6
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/numpy_ops/numpy_ops.py
+Daemon: 192.168.0.107:38083
+
+[1/7] Detecting imports...
+      Found external imports: numpy
+
+[2/7] Parsing dependencies...
+      Using Nix package: numpy
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-3059260821/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/hnd3la370j150nyhgsfkcw0dl938jzr3-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/numpy_ops
+      Script: numpy_ops.py
+      Sent 15 of 39 store paths (the node had the rest)
+      Uploaded job f5ae1649-e0d1-4ef5-ba1a-36deb9dd747b
+
+[7/7] Executing on remote...
+NUMPY-OK matmul=0.1551 svd=7.3187 checksum=146.225314
+      Synced 1 file(s) to /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/numpy_ops (1 new, 0 updated, 0 deleted)
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790955046924189915
+[coordinator] Task completed successfully on node ea8a95c6
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-3059260821/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+these 2 derivations will be built:
+  /nix/store/r21hwjp332smqiyl8ckaym8d1a6jybky-python3-3.14.7-env.drv
+  /nix/store/yfc5kcdpiw3q0arjm1sj4f76gjkqwwkw-run.drv
+these 9 paths will be fetched (55.2 MiB download, 231.5 MiB unpacked):
+  /nix/store/bw1pyf3q5xagajh247fla11gv80ggarr-blas-3
+  /nix/store/wblrf5v1j1wdrlsdnd48wzp0rj69gckx-blas-3-dev
+  /nix/store/2r9xdg5b7y4jh8q27fqsywl25dsjbiz7-check-phase-thread-limit-hook
+  /nix/store/rwzl43cdan02cp1rqb4fcll394b5vp76-gfortran-15.3.0-lib
+  /nix/store/r7gq0sjzbbkxyqy1f6axvp84a8dyr2kv-gfortran-15.3.0-libgcc
+  /nix/store/dmbqhh8gqa2lxr2s4i0fqw6dz0yg7sr7-lapack-3
+  /nix/store/4f96vzcjgjldf70q1gqv637cq061pd5y-lapack-3-dev
+  /nix/store/fjv6n7mj98zqwy3w82m41mp24vnsicd3-openblas-0.3.33
+  /nix/store/dqlkbzknp8j79084x37a5ac6qfbyqjqs-python3.14-numpy-2.5.1
+copying path '/nix/store/2r9xdg5b7y4jh8q27fqsywl25dsjbiz7-check-phase-thread-limit-hook' from 'https://cache.nixos.org'...
+copying path '/nix/store/r7gq0sjzbbkxyqy1f6axvp84a8dyr2kv-gfortran-15.3.0-libgcc' from 'https://cache.nixos.org'...
+copying path '/nix/store/rwzl43cdan02cp1rqb4fcll394b5vp76-gfortran-15.3.0-lib' from 'https://cache.nixos.org'...
+copying path '/nix/store/fjv6n7mj98zqwy3w82m41mp24vnsicd3-openblas-0.3.33' from 'https://cache.nixos.org'...
+copying path '/nix/store/bw1pyf3q5xagajh247fla11gv80ggarr-blas-3' from 'https://cache.nixos.org'...
+copying path '/nix/store/dmbqhh8gqa2lxr2s4i0fqw6dz0yg7sr7-lapack-3' from 'https://cache.nixos.org'...
+copying path '/nix/store/wblrf5v1j1wdrlsdnd48wzp0rj69gckx-blas-3-dev' from 'https://cache.nixos.org'...
+copying path '/nix/store/4f96vzcjgjldf70q1gqv637cq061pd5y-lapack-3-dev' from 'https://cache.nixos.org'...
+copying path '/nix/store/dqlkbzknp8j79084x37a5ac6qfbyqjqs-python3.14-numpy-2.5.1' from 'https://cache.nixos.org'...
+building '/nix/store/r21hwjp332smqiyl8ckaym8d1a6jybky-python3-3.14.7-env.drv'...
+building '/nix/store/yfc5kcdpiw3q0arjm1sj4f76gjkqwwkw-run.drv'...
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] svd: offloading 34 MB matrix to one worker

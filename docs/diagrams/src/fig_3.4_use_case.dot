@@ -11,6 +11,7 @@ digraph UseCase {
   user  [label="User"];
   admin [label="Node\noperator"];
   peer  [label="Peer\ndaemon"];
+  intro [label="Introducer"];
 
   subgraph cluster_sys {
     label="PipedPeer"; labelloc=b; labeljust=l; fontsize=18; fontname="Helvetica";
@@ -23,13 +24,16 @@ digraph UseCase {
     u3 [label="Train with data parallelism"];
     u4 [label="Inspect jobs and nodes"];
     u5 [label="Accept and lease work"];
-    u6 [label="Serve a closure to peers"];
+    u6 [label="Serve a signed closure to peers"];
     u7 [label="Execute parallel chunks"];
     u8 [label="Install prerequisites"];
-    u9 [label="Manage the daemon"];
+    u9 [label="Set the cluster secret"];
+    u10 [label="Join a cluster across networks"];
+    u11 [label="Register nodes, forward punches"];
   }
 
   user -> u1; user -> u2; user -> u3; user -> u4;
-  admin -> u8; admin -> u9;
+  admin -> u8; admin -> u9; admin -> u10;
   peer -> u5; peer -> u6; peer -> u7;
+  intro -> u11;
 }

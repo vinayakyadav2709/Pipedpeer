@@ -1,4 +1,4 @@
-// Figure 4.3 - Lease state machine on the worker.
+// Figure 4.5 - Lease state machine on the worker.
 // Laid out over two rows: a single row gives a 6:1 strip whose labels are
 // unreadable once scaled to the text width.
 digraph LeaseFSM {

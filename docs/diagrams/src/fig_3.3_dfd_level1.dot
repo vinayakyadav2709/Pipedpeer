@@ -9,25 +9,29 @@ digraph DFD1 {
 
   user  [label="User", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
   peers [label="Peer nodes", shape=box3d, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
+  intro [label="Introducer", shape=box, style="filled,dashed", fillcolor="#f5f5f5", color="#888888", penwidth=1.5];
 
   p1 [label="1  Resolve\nenvironment"];
-  p2 [label="2  Discover\npeers"];
+  p2 [label="2  Find and\nlink peers"];
   p3 [label="3  Place task\nfilter, score, lease"];
-  p4 [label="4  Transfer\nclosure and workspace"];
-  p5 [label="5  Execute\nsandboxed"];
+  p4 [label="4  Transfer\nmissing paths, workspace"];
+  p5 [label="5  Execute\nsandboxed, capped"];
   p6 [label="6  Distribute\nparallel work", fillcolor="#fbe9e9", color="#a33333"];
   p7 [label="7  Return\nresults"];
 
   d1 [label="D1   Node store", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
   d2 [label="D2   Closure cache", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
   d3 [label="D3   Job history", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
+  d4 [label="D4   Identity and trust\nnode key, pins, trusted keys", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
 
   user -> p1 [label="  script  "];
   p1 -> p3 [label="  store path  "];
   p2 -> d1 [label="  upsert  "];
+  d4 -> p2 [label="  sign hello  ", style=dashed];
   d1 -> p3 [label="  healthy peers  "];
   p3 -> p4 [label="  lease  "];
   p4 -> d2 [label="  import  "];
+  d4 -> p4 [label="  verify  ", style=dashed];
   p4 -> p5;
   p5 -> p6 [label="  intercepted calls  ", style=dashed];
   p6 -> p7 [style=invis];
@@ -36,8 +40,9 @@ digraph DFD1 {
   p7 -> d3 [label="  record  ", style=dashed];
 
   // Everything that talks to a peer leaves from the right-hand column.
-  p2 -> peers [label="  probe  ", style=dashed];
-  d2 -> peers [label="  broadcast  ", style=dashed];
+  p2 -> intro [label="  register  ", style=dashed];
+  p2 -> peers [label="  probe, punch  ", style=dashed];
+  d2 -> peers [label="  signed closure  ", style=dashed];
   p6 -> peers [label="  chunks  ", style=dashed];
 
   { rank=same; p6; p7; }

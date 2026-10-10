@@ -1,0 +1,46 @@
+[coordinator] Resource estimate: 434 MiB (tier=historical)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node aaaac1c7 (lease=478d4032)
+[coordinator] Lease committed — executing on aaaac1c7
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/numpy_ops/numpy_ops.py
+Daemon: 192.168.0.107:38082
+
+[1/7] Detecting imports...
+      Found external imports: numpy
+
+[2/7] Parsing dependencies...
+      Using Nix package: numpy
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-575060925/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/hnd3la370j150nyhgsfkcw0dl938jzr3-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/numpy_ops
+      Script: numpy_ops.py
+      Sent 15 of 39 store paths (the node had the rest)
+      Uploaded job 9685e1f8-666b-4484-9674-739b2f1e22bf
+
+[7/7] Executing on remote...
+NUMPY-OK matmul=0.1602 svd=8.8365 checksum=146.225314
+      Synced 1 file(s) to /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/numpy_ops (0 new, 1 updated, 0 deleted)
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790955074068545343
+[coordinator] Task completed successfully on node aaaac1c7
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-575060925/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
+[pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+[pipedpeer] svd: offloading 34 MB matrix to one worker
