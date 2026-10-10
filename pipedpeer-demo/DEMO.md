@@ -8,6 +8,9 @@ Two of the machines have an NVIDIA GPU; one does not. That is deliberate — the
 scheduler treats the GPU as a hard filter, so you can watch a training job land
 only on the machines that can run it while CPU work uses all three.
 
+**Presenting?** [DEMO-SCRIPT.md](DEMO-SCRIPT.md) is the run sheet: prep, order,
+what to say, and one script per step in [`demo/`](demo/). This page is the reference.
+
 Everything below is copy-pasteable. Commands take no flags unless the flag *is*
 the point.
 
@@ -234,19 +237,24 @@ choice is never slower than doing it here".
 ### 4.5 pandas, bigger than memory
 
 ```bash
+./setup.sh                 # makes 03_pandas_ooc/data.csv (10M rows, ~1.1 GB) once, among other things
 cd 03_pandas_ooc
-python3 -c "
-import numpy as np, pandas as pd
-n = 20_000_000
-pd.DataFrame({'cat': np.random.randint(0, 50, n), 'a': np.random.rand(n), 'b': np.random.rand(n)}).to_csv('data.csv', index=False)
-"          # ~1 GB, once
+pipedpeer run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8
 cd ..
-pipedpeer run 03_pandas_ooc/03_pandas_ooc.py
 ```
 
-`read_csv` in chunks across the cluster, then `groupby().mean()` as a hash
-shuffle: each machine reduces its own share of the keys and the partials are
-combined exactly at the end.
+Run it from inside `03_pandas_ooc/`: the script opens `data.csv` relative to
+where it runs. `DEMO_CSV_ROWS=3000000 ./setup.sh` makes a ~330 MB file instead,
+which is kinder to slow links.
+
+`read_csv` streams the file in 64 MB chunks across the cluster, then
+`groupby().mean()` combines each machine's per-group partials exactly at the
+end — the output says `combining N chunk partials from the cluster`. A line
+saying `ooc csv fallback` instead means it read the whole file on one machine.
+
+The out-of-core path normally starts only when the file is bigger than half of
+this machine's free memory. `PIPEDPEER_OOC_MIN` (bytes) lowers that threshold so
+a laptop with plenty of RAM still shows it.
 
 The first run uploads the CSV; do it once before the audience arrives.
 
