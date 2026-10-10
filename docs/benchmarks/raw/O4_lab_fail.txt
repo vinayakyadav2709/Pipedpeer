@@ -1,0 +1,98 @@
+# scripts/lab-fail.sh  -- FAILED at this commit on this host (see RESULTS.md R5)
+# commit 4c91ef3, run 2026-10-02, Fedora 43 / Linux 6.19.13, i5-13420H 12 threads. XDG_CACHE_HOME=/var/tmp/pipedpeer-docs-cache.
+# The job was placed on the submitting host, which already held the closure ('nothing to send'); the shim ran all 80 items locally
+# (receipt: remote_items 0, local_items 80, dispatched_items 0), so no worker held chunks and the harness failed by its own rule.
+building binary from /home/rs/Projects/Pipedpeer/src...
+Built: /home/rs/Projects/Pipedpeer/bin/pipedpeer
+Building pipedpeer binary...
+Stopping host daemon if running...
+stopped daemon
+stopped daemon
+ 206772 206820 206878Using container runtime: podman
+pipedpeer-lab-3
+pipedpeer-lab-2
+pipedpeer-lab-1
+pipedpeer-lab-3
+pipedpeer-lab-2
+pipedpeer-lab-1
+af295bb26d4964617410b0a86054175a3419b524ea7aa59dacfc61e7137f206e
+STEP 1/3: FROM nixos/nix:2.31.3
+STEP 1/3: FROM nixos/nix:2.31.3
+STEP 1/3: FROM nixos/nix:2.31.3
+STEP 2/3: RUN nix-env -iA nixpkgs.crun
+STEP 2/3: RUN nix-env -iA nixpkgs.crun
+STEP 2/3: RUN nix-env -iA nixpkgs.crun
+--> Using cache 4e58a7decb7f9432dce824db9b89f2e66c90f230c9b2dd15b11a21fe78256e38
+--> 4e58a7decb7f
+--> Using cache 4e58a7decb7f9432dce824db9b89f2e66c90f230c9b2dd15b11a21fe78256e38
+--> 4e58a7decb7f
+--> Using cache 4e58a7decb7f9432dce824db9b89f2e66c90f230c9b2dd15b11a21fe78256e38
+--> 4e58a7decb7f
+STEP 3/3: CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+STEP 3/3: CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+--> Using cache 08b2656a2ffc2c3082c7a8d7699cf5e7a3aaad0a90ceb55408712a08f4dc0e62
+COMMIT lab_worker2
+--> Using cache 08b2656a2ffc2c3082c7a8d7699cf5e7a3aaad0a90ceb55408712a08f4dc0e62
+COMMIT lab_worker3
+STEP 3/3: CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+--> Using cache 08b2656a2ffc2c3082c7a8d7699cf5e7a3aaad0a90ceb55408712a08f4dc0e62
+COMMIT lab_worker1
+--> 08b2656a2ffc
+Successfully tagged localhost/lab_worker2:latest
+Successfully tagged localhost/lab_worker3:latest
+08b2656a2ffc2c3082c7a8d7699cf5e7a3aaad0a90ceb55408712a08f4dc0e62
+--> 08b2656a2ffc
+Successfully tagged localhost/lab_worker3:latest
+Successfully tagged localhost/lab_worker2:latest
+08b2656a2ffc2c3082c7a8d7699cf5e7a3aaad0a90ceb55408712a08f4dc0e62
+--> 08b2656a2ffc
+Successfully tagged localhost/lab_worker1:latest
+Successfully tagged localhost/lab_worker3:latest
+Successfully tagged localhost/lab_worker2:latest
+08b2656a2ffc2c3082c7a8d7699cf5e7a3aaad0a90ceb55408712a08f4dc0e62
+0cd33d4d9dde303a50a168992efe275ea452b7e975bc9b5c968fd0020a56f114
+bd7012ff6a9ba65cc70bd3262bd8b71224873a01f1552b905ad789e15098b1c0
+11c447df25a6d8380a3c32efb6cc41379c0ee2c0e99efb1feb891f606f0a4d98
+023b6c5fededdea0d7d8ad049e743879d1a2afc2fa5a218014c69b4dce081c87
+pipedpeer-lab-1
+pipedpeer-lab-2
+pipedpeer-lab-3
+waiting for lab workers...
+lab is up
+started daemon (node-id=94bd5f98, port=38080)
+daemon sees all 3 lab workers
+launching intercept run...
+FAIL: no worker ever received a pool chunk, so there was nothing to lose.
+      The run was never distributed; a dead-worker demo on top of that is meaningless.
+
+[4/7] Building locally...
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-1222560515/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/.local/state/pipedpeer/lab-fail.suMLT9
+      Script: task.py
+      Closure already on the node; nothing to send
+      Uploaded job 29ee7061-c933-4d5c-abfa-fa7c11ca61df
+
+[7/7] Executing on remote...
+[pipedpeer] using 12 workers, not the 8 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 8 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 80 items
+POOL-OK sum=167480
+      Synced 2 file(s) to /home/rs/.local/state/pipedpeer/lab-fail.suMLT9 (2 new, 0 updated, 0 deleted)
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790955244747470053
+Using container runtime: podman
+time="2026-10-02T21:07:19+05:30" level=warning msg="StopSignal SIGTERM failed to stop container pipedpeer-lab-1 in 10 seconds, resorting to SIGKILL"
+pipedpeer-lab-1
+time="2026-10-02T21:07:29+05:30" level=warning msg="StopSignal SIGTERM failed to stop container pipedpeer-lab-3 in 10 seconds, resorting to SIGKILL"
+pipedpeer-lab-3

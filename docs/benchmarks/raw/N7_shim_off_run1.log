@@ -1,0 +1,79 @@
+[coordinator] Resource estimate: 512 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node b143fb22 (lease=6a2f7571)
+[coordinator] Lease committed — executing on b143fb22
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map/pool_map.py
+Daemon: 192.168.0.107:38081
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2602063074/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map
+      Script: pool_map.py
+      Sending the whole closure (the node shares none of it)
+      Uploaded job 0b8727e0-7f19-44e2-9a10-862628f66ca1
+
+[7/7] Executing on remote...
+POOLMAP-OK items=48 seconds=0.1366 checksum=470568233.455799
+[coordinator] Execution failed on b143fb22: execution failed: remote: stdout scanner: read |0: file already closed — retrying in 2s
+[coordinator] Rescheduling (attempt 2)...
+[coordinator] Placed on node b143fb22 (lease=5c188501)
+[coordinator] Lease committed — executing on b143fb22
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map/pool_map.py
+Daemon: 192.168.0.107:38081
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-1196419637/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map
+      Script: pool_map.py
+      Closure already on the node; nothing to send
+      Uploaded job 6b63dad9-6c72-4833-8991-3536ef28807c
+
+[7/7] Executing on remote...
+POOLMAP-OK items=48 seconds=0.1211 checksum=470568233.455799
+      No files changed on the remote
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790955017891920469
+[coordinator] Task completed successfully on node b143fb22
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2602063074/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-1196419637/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets

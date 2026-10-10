@@ -1,0 +1,10 @@
+# scripts/check-skips.sh
+# commit 4c91ef3, 2026-10-02T20:47:47+05:30, Linux 6.19.13-200.fc43.x86_64, 12 threads (i5-13420H), Python 3.14.4 + torch 2.14.1+cpu venv
+skipped this run (2 test(s)):
+    main_integration_test.go:349: set PIPEDPEER_INTEGRATION=1 to run integration tests
+    main_integration_test.go:51: set PIPEDPEER_INTEGRATION=1 to run integration tests
+  TestConcurrentJobsAndSharedNumpyCache
+  TestIntegrationFullSyncAndExecute
+
+  scripts/test-on-host.sh <host> runs these where their dependencies are.
+all 15 distribution tests ran

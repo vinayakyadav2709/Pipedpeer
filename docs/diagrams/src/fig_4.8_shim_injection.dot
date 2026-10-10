@@ -1,4 +1,4 @@
-// Figure 4.6 - How the interception shim reaches the interpreter.
+// Figure 4.8 - How the interception shim reaches the interpreter.
 digraph ShimInject {
   rankdir=TB; bgcolor="white"; nodesep=0.24; ranksep=0.42;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",

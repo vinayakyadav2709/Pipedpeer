@@ -21,13 +21,27 @@ R = json.loads((BENCH / "results.json").read_text())
 M = R["measurements"]
 
 
+def _shipped(label, i):
+    """What the run log says was sent: 'whole', 'nothing' or 'diff'."""
+    log = (BENCH / "raw" / f"{label}_run{i}.log").read_text()
+    if "nothing to send" in log:
+        return "nothing"
+    if "Sending the whole closure" in log:
+        return "whole"
+    return "diff"
+
+
 def fig_closure_cache():
-    """5.1 - Cold versus warm submission of the same environment."""
+    """5.1 - Cold versus warm submission of the same environment. A run counts
+    as warm only if its own log says nothing was sent; a later run that landed
+    on a worker without the closure is shown as what it was."""
     s = [x["seconds"] for x in M["n1_trivial_latency"]["samples"]]
-    cold, warm = s[0], s[1:]
+    kinds = [_shipped("N1_trivial", i) for i in range(len(s))]
+    cold = s[0]
+    warm = [v for v, k in zip(s, kinds) if k == "nothing"]
     fig, (ax, ax2) = plt.subplots(1, 2, figsize=(10.4, 3.9),
                                   gridspec_kw={"width_ratios": [1.15, 1], "wspace": 0.38})
-    ax.bar(["first run\n(closure shipped)", "later runs\n(already cached)"],
+    ax.bar(["first run\n(closure shipped)", "closure present\n(median)"],
            [cold, float(np.median(warm))], color=[RED, GREEN], width=0.55)
     ax.set_ylabel("seconds, end to end")
     for i, v in enumerate([cold, float(np.median(warm))]):
@@ -38,7 +52,13 @@ def fig_closure_cache():
     ax.set_title(f"{cold/np.median(warm):.0f}x cheaper once cached",
                  fontsize=15, loc="left")
 
-    ax2.plot(range(1, len(s) + 1), s, marker="o", color=BLUE, linewidth=1.8)
+    ax2.plot(range(1, len(s) + 1), s, color=BLUE, linewidth=1.4, zorder=1)
+    for i, (v, k) in enumerate(zip(s, kinds)):
+        ax2.plot(i + 1, v, "o", markersize=8, zorder=2,
+                 color=GREEN if k == "nothing" else RED)
+    ax2.text(len(s), max(s) * 0.92, "red: whole closure sent\ngreen: nothing sent",
+             ha="right", va="top", fontsize=12,
+             bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax2.set_xlabel("submission"); ax2.set_ylabel("seconds")
     ax2.set_xticks(range(1, len(s) + 1))
     ax2.set_title("Each run in turn", fontsize=15, loc="left")
@@ -48,24 +68,40 @@ def fig_closure_cache():
 
 def fig_shim_overhead():
     """5.2 - Cost of leaving interception on when it decides not to distribute."""
-    on = M["n7_shim_declines"]["median_s"]
-    off = M["n7_shim_off"]["median_s"]
+    # Runs whose log records an execution failure and a reschedule are not
+    # timings of the job; they are excluded and reported as a defect instead.
+    def clean(label, key):
+        out = []
+        for i, x in enumerate(M[key]["samples"]):
+            log = (BENCH / "raw" / f"{label}_run{i}.log").read_text()
+            if "Execution failed" not in log:
+                out.append(x["seconds"])
+        return out
+    offs, ons = clean("N7_shim_off", "n7_shim_off"), clean("N7_shim_on", "n7_shim_declines")
+    on, off = float(np.median(ons)), float(np.median(offs))
+    rng = [(min(offs), max(offs)), (min(ons), max(ons))]
+    b3 = (BENCH / "raw" / "B3_shim_overhead.txt").read_text()
+    before = float(re.search(r"ratio: ([0-9.]+)x", b3).group(1))
+    d2 = (BENCH / "raw" / "O2_shim_startup.txt").read_text()
+    after = float(re.search(r"ratio: ([0-9.]+)x", d2).group(1))
     fig, (ax, ax2) = plt.subplots(1, 2, figsize=(10.4, 3.9), gridspec_kw={"wspace": 0.34})
 
     ax.bar(["interception off", "interception on"], [off, on],
            color=["#9bb8dd", BLUE], width=0.5)
+    for i, (lo, hi) in enumerate(rng):
+        ax.plot([i, i], [lo, hi], color="#333333", linewidth=1.2)
     for i, v in enumerate([off, on]):
-        ax.text(i, v + off * 0.03, f"{v:.2f} s", ha="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+        ax.text(i, v * 0.5, f"{v:.2f} s", ha="center", va="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.set_ylabel("seconds, end to end"); ax.set_ylim(0, max(on, off) * 1.25)
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
-    ax.set_title(f"Whole job: {(on/off - 1) * 100:+.0f}% with interception on",
+    ax.set_title(f"48-item map, one host; the shim distributed\n(clean runs: {len(offs)} off, {len(ons)} on; line: min-max)",
                  fontsize=15, loc="left")
 
-    # Startup tax before and after the lazy-patching fix (bench-shim-d2.sh).
-    ax2.bar(["before fix", "after fix"], [21.6, 1.20], color=[RED, GREEN], width=0.5)
+    # Startup tax before the lazy-patching fix (August, raw/B3) and now (O2).
+    ax2.bar(["eager patching\n(Aug 2026)", "deferred\n(Oct 2026)"], [before, after], color=[RED, GREEN], width=0.5)
     ax2.axhline(3.0, color=GOLD, linestyle="--", linewidth=1.5)
     ax2.text(0.5, 5.6, "3x budget", color=GOLD, fontsize=13, ha="center", va="bottom", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
-    for i, v in enumerate([21.6, 1.20]):
+    for i, v in enumerate([before, after]):
         ax2.text(i, v + 0.9, f"{v:.2f}x", ha="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax2.set_ylabel("slowdown vs no shim"); ax2.set_ylim(0, 25)
     ax2.grid(axis="y", alpha=0.25); ax2.set_axisbelow(True)
@@ -100,7 +136,7 @@ def fig_sandbox():
     ax.set_ylim(0, max(cr) * 1.25)
     ax.legend(frameon=True, framealpha=1.0, edgecolor="none",
               fontsize=13, loc="upper left")
-    ax.set_title("Sandbox start cost, median of 20 runs",
+    ax.set_title("Sandbox start cost, median of 20 runs (Aug 2026)",
                  fontsize=15, loc="left")
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
     fig.savefig(OUT / "fig_5.3_sandbox_overhead.png"); plt.close(fig)
@@ -120,14 +156,14 @@ def fig_comparison():
         ("No cluster to configure",           [2, 0, 0, 0, 0, 1]),
         ("No head or master node",            [2, 0, 0, 0, 0, 2]),
         ("Reproduces the environment",        [2, 1, 1, 1, 1, 0]),
-        ("Sandboxes each job",                [2, 0, 0, 0, 1, 0]),
+        ("Joins machines behind NAT, no relay", [2, 0, 0, 0, 0, 0]),
         ("Survives losing a node",            [2, 2, 2, 2, 2, 0]),
-        ("Authenticated and encrypted",       [0, 2, 1, 1, 2, 2]),
-        ("Works beyond one LAN",              [1, 2, 2, 2, 2, 2]),
+        ("Authenticated and encrypted",       [1, 2, 1, 1, 2, 2]),
+        ("Sandboxes each job",                [1, 0, 0, 0, 1, 0]),
         ("Runtimes other than Python",        [0, 2, 1, 0, 2, 2]),
         ("Proven in production use",          [0, 2, 2, 2, 2, 2]),
     ]
-    SPLIT = 6            # rows below this are where PipedPeer is behind
+    SPLIT = 6            # rows below this are where PipedPeer is behind or partial
     labels = [r[0] for r in rows]
     M_ = np.array([r[1] for r in rows])
 
@@ -162,7 +198,7 @@ def fig_comparison():
     ax.text(len(systems) - 0.5 + 0.42, (SPLIT - 1) / 2, "what it does\ndifferently",
             rotation=270, ha="center", va="center", fontsize=12, color="#333333")
     ax.text(len(systems) - 0.5 + 0.42, SPLIT + (len(rows) - SPLIT - 1) / 2,
-            "where it is\nbehind", rotation=270, ha="center", va="center",
+            "partial, or\nbehind", rotation=270, ha="center", va="center",
             fontsize=12, color=RED)
     fig.savefig(OUT / "fig_5.4_comparison.png"); plt.close(fig)
 

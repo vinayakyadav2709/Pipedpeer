@@ -31,17 +31,19 @@ def fig_sequence():
         (1, 2, "accept (capacity check)", False),
         (2, 1, "lease granted", True),
         (1, 2, "commit lease", False),
-        (1, 2, "upload workspace, closure if needed", False),
-        (2, 3, "broadcast closure to peers", False),
+        (1, 2, "which store paths are missing?", False),
+        (2, 1, "the paths it lacks", True),
+        (1, 2, "upload workspace and missing paths", False),
+        (2, 3, "push signed closure to peers", False),
         (1, 2, "open execution stream", False),
-        (2, 2, "run in sandbox", None),
-        (2, 3, "distribute parallel work", False),
+        (2, 2, "run in sandbox, memory capped", None),
+        (2, 3, "parallel work, by measured speed", False),
         (3, 2, "partial results", True),
         (2, 1, "stdout and stderr, line by line", True),
         (2, 1, "changed files, deletion manifest", True),
         (1, 0, "results in the working directory", True),
     ]
-    fig, ax = plt.subplots(figsize=(9.2, 9.6))
+    fig, ax = plt.subplots(figsize=(9.2, 10.8))
     top, dy = 0.0, -0.74
     for i, a in enumerate(actors):
         ax.add_patch(FancyBboxPatch((x[i] - 1.32, top + 0.02), 2.64, 0.80,
@@ -118,7 +120,7 @@ def fig_scoring():
     axr.set_ylabel("running score"); axr.set_ylim(0, 1.45)
     axr.set_title("Two nodes scored", fontsize=17, loc="left")
     axr.grid(axis="y", alpha=0.25)
-    fig.savefig(OUT / "fig_4.2_scoring_weights.png"); plt.close(fig)
+    fig.savefig(OUT / "fig_4.4_scoring_weights.png"); plt.close(fig)
 
 
 def fig_race():
@@ -157,11 +159,13 @@ def fig_race():
     ax.set_title("Alternate chunks are owned by each side; the local side is "
                  "always able to finish alone", fontsize=16, loc="left")
     ax.spines["left"].set_visible(False); ax.spines["bottom"].set_visible(False)
-    fig.savefig(OUT / "fig_4.7_race_timeline.png"); plt.close(fig)
+    fig.savefig(OUT / "fig_4.12_race_timeline.png"); plt.close(fig)
 
 
 def fig_cost_model():
-    """4.9 - Decision regions of the cost model. Source: shim _should_spill."""
+    """4.11 - Decision regions of the pandas-path cost model (1 GFLOP/s).
+    Source: shim _should_spill. The numpy path uses _offload_wins with its own
+    throughputs and is not drawn here."""
     K, BW = 3, 500e6          # 3 nodes, 500 MB/s link
     MIN_BYTES = 32 * 1024**2  # hard floor
     LOW_F, LOW_CAP = 8, 512 * 1024**2   # low-intensity carve-out
@@ -192,11 +196,9 @@ def fig_cost_model():
     ax.annotate("under 8 flop/byte and up to 512 MB:\ntoo little work per byte moved",
                 xy=(4.6, 0.60), fontsize=13, color=RED, va="bottom", ha="left", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
-    for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 5.5, 900),
-                          ("dense matmul", 200, 300), ("SVD", 1.5, 300)):
+    for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 4, 300)):
         ax.plot(mbv, fv, "o", color="#1e50a0", markersize=7, zorder=5)
-        off = {"pandas join": (12, -5), "pandas groupby": (12, -5),
-               "dense matmul": (12, -5), "SVD": (12, -5)}[name]
+        off = {"pandas join": (12, -5), "pandas groupby": (12, -5)}[name]
         ax.annotate(name, (mbv, fv), textcoords="offset points", xytext=off,
                     ha="left", fontsize=13, color="#1e50a0", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
@@ -205,9 +207,9 @@ def fig_cost_model():
     ax.set_ylabel("arithmetic intensity (flop per byte, log scale)")
     ax.set_xlim(4, 9000); ax.set_ylim(0.5, 2000)
     ax.grid(alpha=0.2, which="both")
-    ax.set_title("Decision regions at three nodes on a 500 MB/s link",
+    ax.set_title("pandas-path model: three nodes, 500 MB/s link, 1 GFLOP/s",
                  fontsize=17, loc="left")
-    fig.savefig(OUT / "fig_4.9_cost_model.png"); plt.close(fig)
+    fig.savefig(OUT / "fig_4.11_cost_model.png"); plt.close(fig)
 
 
 if __name__ == "__main__":

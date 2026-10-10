@@ -1,4 +1,4 @@
-// Figure 4.1 - Placement pipeline: gather, filter, score, lease, retry.
+// Figure 4.3 - Placement pipeline: gather, filter, score, lease, retry.
 // The three reject branches feed one collector so no edge has to cross the
 // figure, and the queue path leaves from the bottom rather than looping back
 // over the decision spine.

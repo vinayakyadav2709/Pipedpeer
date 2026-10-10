@@ -1,0 +1,201 @@
+{
+  "host": {
+    "platform": "Linux-7.1.8-200.fc44.x86_64-x86_64-with-glibc2.43",
+    "python": "3.14.6",
+    "cpu_count": 20
+  },
+  "cluster": {
+    "lab_ports": [
+      38081,
+      38082,
+      38083
+    ],
+    "worker_count": 3
+  },
+  "note": "All workers are containers on a single host, so these figures measure overhead, cache behaviour and correctness. They do not measure multi-machine speedup: every worker shares this host's CPU and memory.",
+  "measurements": {
+    "n1_trivial_latency": {
+      "runs": 5,
+      "ok": 5,
+      "median_s": 0.6644,
+      "min_s": 0.6357,
+      "max_s": 11.998,
+      "samples": [
+        {
+          "iteration": 0,
+          "seconds": 11.998,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 1,
+          "seconds": 0.6826,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 2,
+          "seconds": 0.6373,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 3,
+          "seconds": 0.6357,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 4,
+          "seconds": 0.6644,
+          "ok": true,
+          "returncode": 0
+        }
+      ]
+    },
+    "n7_shim_declines": {
+      "runs": 5,
+      "ok": 5,
+      "median_s": 0.9259,
+      "min_s": 0.8426,
+      "max_s": 1.1442,
+      "samples": [
+        {
+          "iteration": 0,
+          "seconds": 0.8426,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 1,
+          "seconds": 0.8902,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 2,
+          "seconds": 0.9259,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 3,
+          "seconds": 0.9476,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 4,
+          "seconds": 1.1442,
+          "ok": true,
+          "returncode": 0
+        }
+      ]
+    },
+    "n7_shim_off": {
+      "runs": 5,
+      "ok": 5,
+      "median_s": 0.8529,
+      "min_s": 0.7908,
+      "max_s": 0.9201,
+      "samples": [
+        {
+          "iteration": 0,
+          "seconds": 0.9201,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 1,
+          "seconds": 0.839,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 2,
+          "seconds": 0.7908,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 3,
+          "seconds": 0.8529,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 4,
+          "seconds": 0.8967,
+          "ok": true,
+          "returncode": 0
+        }
+      ]
+    },
+    "n3_forced_distribute": {
+      "runs": 5,
+      "ok": 5,
+      "median_s": 0.8873,
+      "min_s": 0.8329,
+      "max_s": 0.8924,
+      "samples": [
+        {
+          "iteration": 0,
+          "seconds": 0.8924,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 1,
+          "seconds": 0.8918,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 2,
+          "seconds": 0.8678,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 3,
+          "seconds": 0.8873,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 4,
+          "seconds": 0.8329,
+          "ok": true,
+          "returncode": 0
+        }
+      ],
+      "pool_map_receipts_per_worker": {
+        "pipedpeer-lab-1": 3,
+        "pipedpeer-lab-2": 3,
+        "pipedpeer-lab-3": 4
+      },
+      "interpretation": "Every worker received pool/map requests, so the chunks genuinely crossed node boundaries. Wall-clock speedup is NOT claimed: all three workers are containers sharing this one host's CPU, so distributing CPU-bound work cannot beat running it locally here."
+    },
+    "n5_numpy": {
+      "runs": 2,
+      "ok": 2,
+      "median_s": 19.4692,
+      "min_s": 8.4763,
+      "max_s": 30.4622,
+      "samples": [
+        {
+          "iteration": 0,
+          "seconds": 30.4622,
+          "ok": true,
+          "returncode": 0
+        },
+        {
+          "iteration": 1,
+          "seconds": 8.4763,
+          "ok": true,
+          "returncode": 0
+        }
+      ]
+    }
+  }
+}

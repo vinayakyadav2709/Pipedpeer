@@ -1,0 +1,43 @@
+[coordinator] Resource estimate: 512 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node aaaac1c7 (lease=9c8dc5b2)
+[coordinator] Lease committed — executing on aaaac1c7
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/trivial/trivial.py
+Daemon: 192.168.0.107:38082
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-108859583/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/trivial
+      Script: trivial.py
+      Sending the whole closure (the node shares none of it)
+      Uploaded job f209c0ae-c821-4cb0-bcee-d5176bd2f027
+
+[7/7] Executing on remote...
+TRIVIAL-OK
+      Synced 1 file(s) to /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/trivial (1 new, 0 updated, 0 deleted)
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790954983966955877
+[coordinator] Task completed successfully on node aaaac1c7
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+unpacking 'github:NixOS/nixpkgs/56c02bc00adcf003215cc4bd996d6efaf4cff188' into the Git cache...
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-108859583/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
