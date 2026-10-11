@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 )
 
 func memAvailBytes(t *testing.T) int64 {
@@ -28,7 +30,13 @@ func memAvailBytes(t *testing.T) int64 {
 			if err != nil {
 				t.Fatal(err)
 			}
-			return kb * 1024
+			avail := kb * 1024
+			// Admission also honours the daemon's cgroup budget; inside a
+			// memory scope that is the tighter bound.
+			if b := cgroups.SelfBudget(); b.Total > 0 && b.Remaining() < avail {
+				avail = b.Remaining()
+			}
+			return avail
 		}
 	}
 	t.Fatal("MemAvailable not found in /proc/meminfo")
