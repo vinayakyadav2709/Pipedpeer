@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -40,5 +42,17 @@ func TestFetchUnreachableOldDaemon404(t *testing.T) {
 	got, err := fetchUnreachable(portOf(t, srv))
 	if err != nil || got != nil {
 		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+func TestPrintUnreachableShowsPeerAndReason(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[{"peer":"abcdef0123456789","reason":"punch timed out"}]`))
+	}))
+	defer srv.Close()
+	var buf bytes.Buffer
+	printUnreachable(&buf, portOf(t, srv))
+	if !strings.Contains(buf.String(), "punch timed out") || !strings.Contains(buf.String(), "no direct path") {
+		t.Fatalf("got %q", buf.String())
 	}
 }
