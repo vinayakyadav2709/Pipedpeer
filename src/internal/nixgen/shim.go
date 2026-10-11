@@ -1376,7 +1376,8 @@ def _weighted_batches(weights, base_batch, world):
     drift with it.
     """
     total = max(world, int(base_batch) * world)
-    b = [max(1, int(round(w * total))) for w in weights]
+    # A zero share is a rank that has left the ring: no batch at all.
+    b = [max(1, int(round(w * total))) if w > 0 else 0 for w in weights]
     drift = total - sum(b)
     if drift:
         k = b.index(max(b))
@@ -1398,16 +1399,19 @@ class _WeightedShardSampler:
     first, from the whole dataset, and each rank takes exactly steps*batch
     samples.
 
-    Contiguous, not strided. Striding by rank only produces disjoint,
-    exhaustive shards when every rank takes the same stride, which is exactly
-    what stops being true here. Cumulative offsets do, for any shares.
+    Samples are owned by consistent hashing, so when a rank leaves (its
+    share drops to zero) only ITS samples move, to the ranks left; nobody
+    else's shard is reshuffled. Each sample ranks the live ranks by weighted
+    rendezvous hash and goes to the first one that still has room: hashing
+    alone gives shards of only roughly the right size, and the step count
+    needs them exact.
 
     The remainder below one global batch is dropped, as drop_last does in any
     DDP setup, and shuffling makes it a different remainder each epoch.
 
-    Shuffling is seeded from the epoch alone, so every rank permutes the same
-    way and their slices stay disjoint - the same contract DistributedSampler
-    keeps, and the reason set_epoch exists.
+    Shuffling is seeded from the epoch alone, so every rank computes the same
+    owners and their shards stay disjoint - the same contract
+    DistributedSampler keeps, and the reason set_epoch exists.
     """
 
     def __init__(self, n, weights, rank, shuffle, base_batch, world):
@@ -1417,6 +1421,8 @@ class _WeightedShardSampler:
         self.rank = rank
         self.shuffle = shuffle
         self.epoch = 0
+        self.weights = list(weights)
+        self._owned = None  # (epoch, indices) cache
         self.batches = _weighted_batches(weights, base_batch, world)
         self.batch = self.batches[rank]
         self.steps = n // sum(self.batches)
@@ -1428,10 +1434,6 @@ class _WeightedShardSampler:
     def set_epoch(self, epoch):
         self.epoch = epoch
 
-    def _bounds(self):
-        start = sum(self.steps * b for b in self.batches[:self.rank])
-        return start, start + self.steps * self.batch
-
     def __len__(self):
         return self.steps * self.batch
 
@@ -1439,14 +1441,64 @@ class _WeightedShardSampler:
         # torch is imported per-function everywhere in this file, never as a
         # module global - importing it at class scope would cost every script
         # the import whether or not it trains.
-        import torch as _th_local
-        order = list(range(self.n))
-        if self.shuffle:
-            g = _th_local.Generator()
-            g.manual_seed(self.epoch)
-            order = [order[i] for i in _th_local.randperm(self.n, generator=g).tolist()]
-        start, end = self._bounds()
-        return iter(order[start:end])
+        if self._owned is None or self._owned[0] != self.epoch:
+            order = None
+            if self.shuffle:
+                import torch as _th_local
+                g = _th_local.Generator()
+                g.manual_seed(self.epoch)
+                order = _th_local.randperm(self.n, generator=g).tolist()
+            quotas = [self.steps * b for b in self.batches]
+            owners = _hash_owners(self.n, self.weights, quotas, order)
+            self._owned = (self.epoch, owners[self.rank])
+        return iter(self._owned[1])
+
+
+def _hash_owners(n, weights, quotas, order=None):
+    """Split samples 0..n-1 between ranks: exactly quotas[r] each.
+
+    Weighted rendezvous hashing: every (sample, rank) pair gets a fixed
+    pseudo-random score, scaled by the rank's share; a sample prefers ranks
+    in score order and takes the first with room. A rank with share 0 is out.
+    Removing a rank therefore moves only the samples it held (plus the few a
+    full survivor overflows), which is what lets the ring lose a member
+    without re-slicing everyone's data.
+
+    order is the sequence samples claim room in (the epoch's shuffle);
+    samples left when every quota is full are the dropped remainder.
+    Returns one list per rank, in claim order.
+    """
+    import numpy as _np
+    live = [r for r, w in enumerate(weights) if w > 0 and quotas[r] > 0]
+    owners = [[] for _ in weights]
+    if not live:
+        return owners
+    idx = _np.arange(n, dtype=_np.uint64)
+    scores = _np.empty((len(live), n))
+    for j, r in enumerate(live):
+        # splitmix64 of (sample, rank): stable across processes and runs,
+        # unlike Python's salted hash().
+        x = idx * _np.uint64(0x9E3779B97F4A7C15) + _np.uint64((r + 1) * 0x632BE59BD9B4E019 % (1 << 64))
+        x ^= x >> _np.uint64(30)
+        x *= _np.uint64(0xBF58476D1CE4E5B9)
+        x ^= x >> _np.uint64(27)
+        x *= _np.uint64(0x94D049BB133111EB)
+        x ^= x >> _np.uint64(31)
+        u = ((x >> _np.uint64(11)).astype(_np.float64) + 0.5) / float(1 << 53)
+        scores[j] = weights[r] / -_np.log(u)
+    prefs = _np.argsort(-scores, axis=0).T.tolist()  # per sample: live slots, best first
+    room = [quotas[r] for r in live]
+    left = sum(room)
+    for s in (order if order is not None else range(n)):
+        if left == 0:
+            break
+        for j in prefs[s]:
+            if room[j]:
+                room[j] -= 1
+                left -= 1
+                owners[live[j]].append(s)
+                break
+    return owners
 
 
 def _push_window(values, v, cap):
@@ -2832,8 +2884,11 @@ def _install_ddp():
                 w = [float(x) for x in w]
             except (TypeError, ValueError):
                 w = None
-            if w and abs(sum(w) - 1.0) < 1e-6 and all(x > 0 for x in w):
+            # A zero share is a rank that has left the ring.
+            if w and abs(sum(w) - 1.0) < 1e-6 and all(x >= 0 for x in w) and w[_RANK] > 0:
                 _PENDING_WEIGHTS[0] = w
+        if reply.get("down") is not None:
+            _log("ddp: %s" % reply.get("why", "rank %s left the ring" % reply.get("down")))
         if reply.get("drop") == _RANK and not _DROPPED[0]:
             _DROPPED[0] = True
             _log("ddp: leaving the ring — %s. This rank finishes its own work "
@@ -3505,6 +3560,22 @@ def _install_ddp():
                          % (_RANK, len(sampler), len(ds), 100 * _WEIGHTS[_RANK],
                             sampler.batch, sampler.steps))
                     return sampler
+
+        # Equal shares take the same hashed sampler, so a rank that dies
+        # later hands over only its own samples; DistributedSampler's strided
+        # slices would all move.
+        if can_rebatch:
+            try:
+                sampler = _WeightedShardSampler(
+                    len(ds), [1.0 / _WORLD] * _WORLD, _RANK, shuffle, bs.batch_size, _WORLD)
+            except Exception as e:
+                _log("ddp: cannot shard this dataset by hash (%s); using "
+                     "DistributedSampler, so a rank that dies loses its data" % e)
+            else:
+                bs.sampler = sampler
+                bs.batch_size = sampler.batch
+                _log("ddp: sharding %d samples across %d ranks" % (len(ds), _WORLD))
+                return sampler
 
         try:
             sampler = _th.utils.data.distributed.DistributedSampler(

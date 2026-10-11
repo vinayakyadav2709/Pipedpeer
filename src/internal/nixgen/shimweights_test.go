@@ -268,3 +268,28 @@ assert shim._recent_mean_ms([], 0.0, 0) == 0.0
 print("RECENTSTEP-OK")
 `, "RECENTSTEP-OK")
 }
+
+// TestALeavingRankMovesOnlyItsOwnSamples. Shards are owned by consistent
+// hashing, so when a rank dies and its share drops to zero the survivors
+// keep (almost) everything they had and only take on its samples. Strided or
+// contiguous slicing would move most of everyone's data.
+func TestALeavingRankMovesOnlyItsOwnSamples(t *testing.T) {
+	runShimPython(t, "wleave", `
+import sitecustomize as shim
+
+n, base = 6000, 32
+before = [set(shim._WeightedShardSampler(n, [1/3, 1/3, 1/3], r, False, base, 3)) for r in range(3)]
+after = [set(shim._WeightedShardSampler(n, [0.5, 0.0, 0.5], r, False, base, 3)) if r != 1 else set()
+         for r in range(3)]
+s1 = shim._WeightedShardSampler(n, [0.5, 0.0, 0.5], 0, False, base, 3)
+s2 = shim._WeightedShardSampler(n, [0.5, 0.0, 0.5], 2, False, base, 3)
+assert s1.steps == s2.steps, "survivors run different step counts"
+assert not (after[0] & after[2]), "survivor shards overlap"
+for r in (0, 2):
+    kept = len(before[r] & after[r]) / len(before[r])
+    assert kept > 0.95, "rank %d kept only %.0f%% of its samples" % (r, 100 * kept)
+taken = (after[0] | after[2]) & before[1]
+assert len(taken) > 0.9 * len(before[1]), "the dead rank's samples were not taken over"
+print("WLEAVE-OK")
+`, "WLEAVE-OK")
+}
