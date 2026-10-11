@@ -65,8 +65,9 @@ Then **on each machine**, from a checkout or a copy of `pipedpeer-demo/`:
 ./demo/prep-0-install.sh /tmp/pipedpeer        # on box-a: ../bin/pipedpeer
 ```
 
-It installs the binary to `~/.local/bin`, runs `pipedpeer setup -y` (Nix, crun,
-identity, firewall, daemon) and prints a `sha256`. **The three hashes must
+It installs the binary to `~/.local/bin` (no sudo), runs `pipedpeer setup -y`
+(Nix, crun, identity, firewall, daemon, and on a multi-user Nix the key helper:
+the one sudo) and prints a `sha256`. **The three hashes must
 match.** A machine with a different binary is the most likely cause of a step
 misbehaving on the day.
 
@@ -92,21 +93,17 @@ public IP.
 ./join-machine.sh <introducer-ip> <token>         # box-b, then box-c
 ```
 
-Then, once all three have joined, **on each machine**:
+Nothing more per machine. A multi-user Nix (the Determinate installer, or any
+machine running `nix-daemon`) accepts closures only from signing keys listed in
+its `nix.conf`, and a machine learns its peers' keys only after they join.
+Setup installed a root-owned key helper for that, so each daemon adds a new
+peer's key itself, with no prompt, and logs "system nix now trusts these
+cluster keys".
 
-```bash
-pipedpeer trust
-```
-
-A multi-user Nix (the Determinate installer, or any machine running
-`nix-daemon`) accepts closures only from signing keys listed in its
-`nix.conf`, and a machine learns its peers' keys only after they join. So
-box-a, which joined first, does not yet trust b and c, and every job sent to it
-would fail with "lacks a signature by a trusted key". `pipedpeer trust` adds the
-keys the daemon has collected (one sudo, then `nix-daemon` restarts). It says
-"nothing to do" on a single-user or private store, and on a machine that already
-trusts every key. Re-running `pipedpeer setup -y` does the same. The daemon log
-names `pipedpeer trust` whenever it meets a key its Nix does not trust.
+Fallback: if the daemon log instead says "run `pipedpeer trust` on this
+machine" (setup could not install the helper), run `pipedpeer trust` there: one
+sudo, and it installs the helper too. It says "nothing to do" on a single-user
+or private store.
 
 ### 4. Check, then rehearse
 

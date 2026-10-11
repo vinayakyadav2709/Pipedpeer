@@ -74,8 +74,10 @@ curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scri
 pipedpeer setup -y
 ```
 
-`setup` checks for what it needs, installs what is missing (Nix, `crun`), makes
-this machine's identity, opens the one UDP port in the host firewall if there is
+The install script needs no sudo; `setup` asks for it once. It checks for what
+it needs, installs what is missing (Nix, `crun`, and on a multi-user Nix a small
+root-owned key helper so later peers are trusted with no prompt), makes this
+machine's identity, opens the one UDP port in the host firewall if there is
 one, and starts the daemon. It prints what it changed and how to undo it.
 
 The `-y` is "don't ask me before installing". Drop it if you'd rather approve
@@ -115,12 +117,11 @@ after a reboot.
 Run it on box-a first; it will say "no peers yet", which is correct for the
 first machine. As b and c join, they find each other.
 
-Once all three have joined, run `pipedpeer trust` on each. A multi-user Nix
-(`nix-daemon`, as the Determinate installer sets up) accepts closures only from
-signing keys in its `nix.conf`, and box-a met b and c after its own join. It
-adds the collected keys with one sudo, and says "nothing to do" where nothing
-is needed. `join` already does this when it finds peers, so it is box-a, the
-first machine, that needs it.
+A multi-user Nix (`nix-daemon`, as the Determinate installer sets up) accepts
+closures only from signing keys in its `nix.conf`, and box-a meets b and c after
+its own join. Nothing to do about it: the key helper setup installed lets each
+daemon add a new peer's key itself. If setup could not install the helper, the
+daemon log says to run `pipedpeer trust` on that machine (one sudo).
 
 ### Confirm it worked
 
@@ -328,6 +329,7 @@ pipedpeer; none of it is your work.
 
 ```bash
 pipedpeer stop 2>/dev/null
+pipedpeer setup --uninstall   # root-owned key helper, its sudoers rule, the keys it trusted (sudo)
 
 # pipedpeer itself: binary, identity, cluster secret, node database, caches
 rm -f  ~/.local/bin/pipedpeer
@@ -390,8 +392,9 @@ script once before the audience.
 
 **A job fails with "lacks a signature by a trusted key".**
 The receiving machine is enforcing signatures and does not yet trust this
-cluster's keys. Run `pipedpeer trust` there (or re-run `pipedpeer setup -y`) —
-it adds them. A machine that joined before the others always needs this once.
+cluster's keys, which means its daemon could not add them through the key
+helper (its log says why). Run `pipedpeer trust` there: it installs the helper
+if needed (one sudo) and adds them.
 
 **`pipedpeer run` says no eligible node for a GPU script.**
 The GPU machines have not joined, or their driver is not visible. Check the GPU
