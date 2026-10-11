@@ -140,6 +140,11 @@ type peerLink struct {
 	lastSeen time.Time
 	// path says how this peer is reached, for `pipedpeer nodes`.
 	path string
+	// announced is done once OnPeer has returned. OnPeerGone waits for it:
+	// a link that died while OnPeer was still registering it otherwise had
+	// its leave run first, and the join then left a node row at a forwarder
+	// port nobody listens on (FIX-NAT5).
+	announced sync.WaitGroup
 }
 
 func New(cfg Config) *Manager {
@@ -600,6 +605,8 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 		listener: ln, addr: ln.Addr().String(), conn: conn,
 		stop: cancel, lastSeen: time.Now(), path: path,
 	}
+	link.announced.Add(1)
+	defer link.announced.Done()
 
 	m.mu.Lock()
 	if old := m.peers[node]; old != nil {
@@ -723,6 +730,12 @@ func (m *Manager) dropLinkIf(node string, ln net.Listener) {
 		link.conn.CloseWithError(0, "")
 	}
 	m.cfg.Log("peer %s stopped checking in; released %s", short(node), link.addr)
+	m.gone(node, link)
+}
+
+// gone reports a released link, after its join has been reported.
+func (m *Manager) gone(node string, link *peerLink) {
+	link.announced.Wait()
 	if m.cfg.OnPeerGone != nil {
 		m.cfg.OnPeerGone(node, link.addr)
 	}
@@ -733,12 +746,15 @@ func (m *Manager) closeAll() {
 	links := m.peers
 	m.peers = map[string]*peerLink{}
 	m.mu.Unlock()
-	for _, link := range links {
+	for node, link := range links {
 		link.stop()
 		_ = link.listener.Close()
 		if link.conn != nil {
 			link.conn.CloseWithError(0, "")
 		}
+		// The forwarder port dies with this run; its node row must too, or
+		// every restart leaves one more row for a port nobody listens on.
+		m.gone(node, link)
 	}
 }
 

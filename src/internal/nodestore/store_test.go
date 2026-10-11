@@ -383,3 +383,28 @@ func keysOf(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// TestAPollFindingANewIdentityReplacesTheOldRow. AddManual drops a superseded
+// identity, but the health poller is what usually meets the new one: a lab
+// container recreated, or an internet forwarder port reused by another peer.
+// It added a manual row beside the old one on every recreation, and manual
+// rows are never pruned - twenty-odd dead rows for a four-node lab.
+func TestAPollFindingANewIdentityReplacesTheOldRow(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertNode(Node{NodeID: "found", Host: "10.0.0.5", Port: 38081, Source: "discovery"})
+	_ = s.UpsertNode(Node{NodeID: "other", Host: "10.0.0.5", Port: 38082, Source: "manual", IsManual: true})
+	for i := 0; i < 5; i++ {
+		if err := s.MarkHealthy(Node{NodeID: fmt.Sprintf("gen%d", i), Host: "10.0.0.5",
+			Port: 38081, Source: "manual", IsManual: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nodes, _ := s.ListAll()
+	got := map[string]bool{}
+	for _, n := range nodes {
+		got[n.NodeID] = true
+	}
+	if len(got) != 3 || !got["gen4"] || !got["found"] || !got["other"] {
+		t.Errorf("want gen4 (current), found (discovered) and other (another port), got %v", keysOf(got))
+	}
+}
