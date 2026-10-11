@@ -2,11 +2,16 @@ package daemonapi
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/rs/zerolog/log"
 )
 
@@ -18,6 +23,10 @@ const jobOutputFile = "output.jsonl"
 // attachBuffer is how many frames a live attacher may fall behind before it
 // is cut loose to catch up from the file.
 const attachBuffer = 256
+
+// jobOutputCap bounds output.jsonl per job, so a chatty background job can't
+// fill the disk. Past it the file keeps its newer half, behind a note frame.
+var jobOutputCap int64 = 50 << 20
 
 // storedOutput is one line of output.jsonl. Seq lets an attacher that read
 // the file and then follows live frames skip what it already sent; it never
@@ -35,6 +44,7 @@ type jobOutputLog struct {
 	path     string
 	f        *os.File
 	seq      int
+	size     int64
 	done     bool
 	final    *OutputMessage
 	subs     map[chan storedOutput]struct{}
@@ -54,6 +64,9 @@ func (s *Server) jobOutput(jobID string) *jobOutputLog {
 		return l.(*jobOutputLog)
 	}
 	l := &jobOutputLog{jobID: jobID, path: path, subs: map[chan storedOutput]struct{}{}}
+	if info, err := os.Stat(path); err == nil {
+		l.size = info.Size()
+	}
 	for _, m := range readStoredOutput(path, 0) {
 		l.seq = m.Seq
 		if m.Done {
@@ -137,8 +150,10 @@ func (l *jobOutputLog) write(m OutputMessage) {
 	}
 	if l.f != nil {
 		data, _ := json.Marshal(rec)
-		if _, err := l.f.Write(append(data, '\n')); err != nil {
+		if n, err := l.f.Write(append(data, '\n')); err != nil {
 			l.warnOnce(err, "writing job output log; attach will miss this output")
+		} else if l.size += int64(n); l.size > jobOutputCap {
+			l.trim()
 		}
 	}
 	for ch := range l.subs {
@@ -222,4 +237,95 @@ func readStoredOutput(path string, after int) []storedOutput {
 		log.Warn().Err(err).Str("file", path).Msg("reading job output log")
 	}
 	return out
+}
+
+// trim rewrites the file to its newest frames (at most half the cap) behind a
+// note saying how much was dropped; l.mu is held. Halving keeps the rewrite
+// cost linear in the output. The note takes the seq of the last dropped frame,
+// so an attacher that already sent that frame skips the note too.
+func (l *jobOutputLog) trim() {
+	recs := readStoredOutput(l.path, 0)
+	var kept int64
+	cut := len(recs)
+	for cut > 0 {
+		data, _ := json.Marshal(recs[cut-1])
+		if kept+int64(len(data))+1 > jobOutputCap/2 {
+			break
+		}
+		kept += int64(len(data)) + 1
+		cut--
+	}
+	if cut == 0 {
+		return
+	}
+	note := storedOutput{Seq: recs[cut].Seq - 1, OutputMessage: OutputMessage{
+		E: fmt.Sprintf("[pipedpeer] output trimmed: the first %s were dropped to keep this log under %s\n",
+			humanize.IBytes(uint64(l.size-kept)), humanize.IBytes(uint64(jobOutputCap))),
+	}}
+	var buf bytes.Buffer
+	for _, r := range append([]storedOutput{note}, recs[cut:]...) {
+		data, _ := json.Marshal(r)
+		buf.Write(append(data, '\n'))
+	}
+	tmp := l.path + ".tmp"
+	if err := os.WriteFile(tmp, buf.Bytes(), 0o644); err != nil {
+		l.warnOnce(err, "trimming job output log; it keeps growing")
+		return
+	}
+	if err := os.Rename(tmp, l.path); err != nil {
+		l.warnOnce(err, "trimming job output log; it keeps growing")
+		return
+	}
+	if l.f != nil {
+		l.f.Close()
+	}
+	f, err := os.OpenFile(l.path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		l.f = nil
+		l.warnOnce(err, "reopening trimmed job output log; attach will miss later output")
+	} else {
+		l.f = f
+	}
+	log.Warn().Str("job", l.jobID).Int("dropped_frames", cut).Msg("job output log over its cap; kept the newest half")
+	l.size = int64(buf.Len())
+}
+
+// failOrphanedJobs runs once at daemon start, after the saved jobs are
+// loaded. A job recorded as running lost its process (and the pipe its output
+// came through) with the old daemon, so nothing would ever finish it: mark it
+// failed, record a done frame that says why (attach ends with it) and free
+// its lease. A crun container that outlived the daemon is removed, since no
+// one can collect its output.
+func (s *Server) failOrphanedJobs() {
+	var orphans []string
+	s.jobsMu.Lock()
+	for id, job := range s.jobs {
+		if job.Status == "running" || job.Status == "importing" {
+			job.Status = "failed"
+			job.FinishedAt = time.Now()
+			orphans = append(orphans, id)
+		}
+	}
+	s.jobsMu.Unlock()
+	if len(orphans) == 0 {
+		return
+	}
+	_, haveCrun := exec.LookPath("crun")
+	for _, id := range orphans {
+		if haveCrun == nil {
+			ctr := "pp-" + id
+			if exec.Command("crun", "state", ctr).Run() == nil {
+				if out, err := exec.Command("crun", "delete", "-f", ctr).CombinedOutput(); err != nil {
+					log.Warn().Err(err).Str("job", id).Str("output", string(out)).Msg("removing a job container left by the previous daemon")
+				}
+			}
+		}
+		l := s.jobOutput(id)
+		if l.finalFrame() == nil {
+			l.Finish(OutputMessage{ExitCode: -1, Error: "job lost: the daemon restarted while it ran"})
+		}
+		s.releaseJobLease(id, "failed")
+		log.Warn().Str("job", id).Msg("job was running when the daemon stopped; marked failed")
+	}
+	s.persist()
 }
