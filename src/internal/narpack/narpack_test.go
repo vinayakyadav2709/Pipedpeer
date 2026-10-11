@@ -325,3 +325,21 @@ func TestARefusedImportSaysWhyInOneLine(t *testing.T) {
 		t.Fatalf("an empty key list is not named: %s", msg)
 	}
 }
+
+// The signer travels in the manifest so a receiver that has not polled the
+// sender can still check its signature.
+func TestPackSignedCarriesTheSignerToTheReceiver(t *testing.T) {
+	cache := fakeCache(t, map[string]string{"aaaa": "/nix/store/aaaa-root"})
+	var buf bytes.Buffer
+	want := Manifest{Signer: "0123456789abcdef", SignerKey: "pipedpeer-0123456789abcdef:AAAA"}
+	if err := PackSigned(want, cache, []string{"/nix/store/aaaa-root"}, []string{"/nix/store/aaaa-root"}, nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	m, err := Unpack(bytes.NewReader(buf.Bytes()), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Signer != want.Signer || m.SignerKey != want.SignerKey || m.Format != Format {
+		t.Fatalf("manifest = %+v", m)
+	}
+}

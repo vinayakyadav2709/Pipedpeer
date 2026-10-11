@@ -143,7 +143,7 @@ func TestASignedClosureIsNeverCachedAsTheClosure(t *testing.T) {
 	// test would pass without ever reaching the code it is named for.
 	var gotRoots []string
 	old := signedImport
-	signedImport = func(_ context.Context, _ string, roots []string) error {
+	signedImport = func(_ context.Context, _ string, roots []string, _ ...string) error {
 		gotRoots = roots
 		return nil
 	}
@@ -188,7 +188,7 @@ func TestASenderCannotMaterialiseSomethingElse(t *testing.T) {
 
 	var gotRoots []string
 	old := signedImport
-	signedImport = func(_ context.Context, _ string, roots []string) error {
+	signedImport = func(_ context.Context, _ string, roots []string, _ ...string) error {
 		gotRoots = roots
 		return nil
 	}
