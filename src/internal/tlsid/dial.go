@@ -76,7 +76,6 @@ func Note(addr string, speaksTLS bool) { schemes.set(addr, speaksTLS) }
 type transport struct {
 	base   http.RoundTripper
 	secure sync.Map // addr -> *http.Client with the pin for that peer
-	baseMu sync.Mutex
 }
 
 func (t *transport) clientFor(addr string) *http.Client {
