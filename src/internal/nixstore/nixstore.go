@@ -109,6 +109,19 @@ func Private() bool {
 	return privateOnce.private
 }
 
+// HostPath is where a /nix path actually lives on this machine's filesystem.
+//
+// With a private store, /nix exists only inside the namespace nix commands run
+// in; outside it, the daemon's own os.Stat of /nix/store/... sees the host's
+// /nix, which on such a machine is empty or absent. Paths outside /nix, and
+// every path on a machine using the system store, are returned unchanged.
+func HostPath(p string) string {
+	if !strings.HasPrefix(p, "/nix/") || !Private() {
+		return p
+	}
+	return filepath.Join(NixDir(), strings.TrimPrefix(p, "/nix/"))
+}
+
 // NixBinDir finds the bin directory of the nix inside the private store. There is exactly one
 // nix in a freshly seeded store; if a second ever appears, the newest by name
 // is not a safe guess, so this refuses rather than picks.

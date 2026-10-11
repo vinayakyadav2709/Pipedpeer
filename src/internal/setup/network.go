@@ -3,6 +3,7 @@ package setup
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -53,6 +54,20 @@ var firewallCmd = func(ctx context.Context, name string, args ...string) (string
 // lookPath is exec.LookPath, as a variable for the same reason.
 var lookPath = exec.LookPath
 
+// needSudo reports whether changing the firewall needs sudo, as a variable so
+// tests do not depend on who runs them.
+var needSudo = func() bool { return os.Geteuid() != 0 }
+
+// firewallChange runs a command that changes the firewall. Those need root,
+// and setup is normally run as the user: run plainly they failed with a
+// permission error, and the port the punch depends on stayed closed.
+func firewallChange(ctx context.Context, name string, args ...string) (string, error) {
+	if needSudo() {
+		return firewallCmd(ctx, "sudo", append([]string{name}, args...)...)
+	}
+	return firewallCmd(ctx, name, args...)
+}
+
 // openFirewall allows the direct port on whichever host firewall is running.
 //
 // Returns what it found even when it changes nothing, because "no firewall is
@@ -97,11 +112,11 @@ func openFirewalld(ctx context.Context, port int, apply bool) firewallStatus {
 	// --permanent then --reload, so it survives a reboot. A rule that
 	// disappears on restart is worse than none: it works until the machine is
 	// rebooted and then fails in a way nobody connects to the reboot.
-	if out, err := firewallCmd(ctx, "firewall-cmd", "--permanent", "--add-port="+rule); err != nil {
+	if out, err := firewallChange(ctx, "firewall-cmd", "--permanent", "--add-port="+rule); err != nil {
 		st.err = fmt.Errorf("firewall-cmd --add-port: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}
-	if out, err := firewallCmd(ctx, "firewall-cmd", "--reload"); err != nil {
+	if out, err := firewallChange(ctx, "firewall-cmd", "--reload"); err != nil {
 		st.err = fmt.Errorf("firewall-cmd --reload: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}
@@ -121,7 +136,7 @@ func openUFW(ctx context.Context, port int, apply bool) firewallStatus {
 	if !apply {
 		return st
 	}
-	if out, err := firewallCmd(ctx, "ufw", "allow", rule); err != nil {
+	if out, err := firewallChange(ctx, "ufw", "allow", rule); err != nil {
 		st.err = fmt.Errorf("ufw allow: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}

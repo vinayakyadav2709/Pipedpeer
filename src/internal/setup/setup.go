@@ -203,15 +203,9 @@ func trustClusterKeys() error {
 	// everything else is refused exactly as strictly as before.
 	fmt.Println("    → Trusting this cluster's signing keys...")
 
-	keys, err := os.ReadFile(nixsign.TrustedKeysFile())
-	trusted := strings.TrimSpace(string(keys))
-	if err != nil || trusted == "" {
-		// Nothing to trust yet: the daemon writes this file once it knows
-		// its peers. Saying so is better than editing the machine's nix
-		// configuration to no effect.
-		return fmt.Errorf("no cluster keys known yet (%s is empty); "+
-			"start the daemon so it learns its peers, then re-run setup",
-			nixsign.TrustedKeysFile())
+	trusted, err := keysToTrust()
+	if err != nil {
+		return err
 	}
 
 	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
@@ -238,6 +232,31 @@ func trustClusterKeys() error {
 		return fmt.Errorf("could not update %s: %w", target, err)
 	}
 	return nil
+}
+
+// keysToTrust is the space-separated key list to add to nix's trust.
+//
+// The daemon writes the cluster's keys once it has met its peers, but setup
+// runs before the daemon has ever started on a fresh machine. Refusing then
+// aborted the whole setup over a file nothing could have written yet, so it
+// starts from this node's own key - which it always has - and records it, and
+// peers' keys join on a later run.
+func keysToTrust() (string, error) {
+	keys, err := os.ReadFile(nixsign.TrustedKeysFile())
+	if trusted := strings.TrimSpace(string(keys)); err == nil && trusted != "" {
+		return trusted, nil
+	}
+	self, err := identity.Key()
+	if err != nil {
+		return "", fmt.Errorf("no cluster keys known yet, and this node's own key is unreadable: %w", err)
+	}
+	own := nixsign.PublicKey(self)
+	if err := nixsign.WriteTrustedKeys([]string{own}); err != nil {
+		return "", fmt.Errorf("recording this node's key: %w", err)
+	}
+	fmt.Println("      No peers known yet: trusting this node's own key for now.")
+	fmt.Println("      Re-run setup once the daemon has met its peers to trust theirs.")
+	return own, nil
 }
 
 // nixConfigRepair is the edit setup makes to a machine's nix configuration.

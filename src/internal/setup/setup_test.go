@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
 
@@ -142,18 +144,27 @@ func TestSetupNeverDisablesSignatureCheckingSystemWide(t *testing.T) {
 	}
 }
 
-// TestSetupWithNoKeysYetChangesNothing.
+// TestSetupWithNoKeysYetTrustsItsOwnKey.
 //
-// Appending "extra-trusted-public-keys = " with nothing after it would edit a
-// system file as root to no effect, and leave a line that reads as if the
-// cluster were trusted. Saying what is missing is the useful answer.
-func TestSetupWithNoKeysYetChangesNothing(t *testing.T) {
+// On a fresh machine setup runs before the daemon has met anyone, so the
+// cluster's key file does not exist. Aborting there failed the whole setup
+// over a file nothing could have written yet; this node's own key is always
+// known, and it is never an empty line in nix.conf.
+func TestSetupWithNoKeysYetTrustsItsOwnKey(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	err := trustClusterKeys()
-	if err == nil {
-		t.Fatal("setup edited the nix config with no cluster keys to trust")
+	got, err := keysToTrust()
+	if err != nil {
+		t.Fatalf("keysToTrust with no peers known: %v", err)
 	}
-	if !strings.Contains(err.Error(), "start the daemon") {
-		t.Errorf("the error does not say what to do about it: %v", err)
+	self, err := identity.Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := nixsign.PublicKey(self); got != want {
+		t.Fatalf("trusting %q, want this node's own key %q", got, want)
+	}
+	// Recorded, so the prerequisite check sees it next time.
+	if b, _ := os.ReadFile(nixsign.TrustedKeysFile()); !strings.Contains(string(b), got) {
+		t.Errorf("own key not recorded in %s", nixsign.TrustedKeysFile())
 	}
 }

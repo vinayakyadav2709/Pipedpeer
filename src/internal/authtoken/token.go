@@ -17,15 +17,19 @@
 package authtoken
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"flag"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -146,6 +150,11 @@ func Middleware(next http.Handler) http.Handler {
 				got = strings.TrimPrefix(a, "Bearer ")
 			}
 		}
+		if got == "" && r.Method == http.MethodGet && r.URL.Path == "/health" &&
+			VerifyProof(want, r.Host, r.Header.Get(ProofHeader), time.Now()) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -189,3 +198,71 @@ func Install() {
 	}
 	http.DefaultTransport = &transport{base: http.DefaultTransport}
 }
+
+// ProofHeader carries a probe's proof of holding the token, in place of the
+// token itself.
+//
+// LAN discovery asks every address on the local network whether a daemon
+// answers there. Sending the token on those requests handed the cluster's
+// secret to every host on the subnet, so a probe sends this instead: an HMAC,
+// under the token, of the address it is talking to and the time. A host that
+// is not a cluster member learns nothing from it it can use elsewhere, and
+// the daemon accepts it for GET /health only.
+const ProofHeader = "X-Pipedpeer-Proof"
+
+// proofWindow is how far a proof's timestamp may be from the receiver's
+// clock. Wide enough for unsynchronised clocks on a LAN, narrow enough that a
+// captured proof is soon useless even against the host it was made for.
+const proofWindow = 2 * time.Minute
+
+// Proof is the proof for a request to target ("host:port") at time t.
+func Proof(token, target string, t time.Time) string {
+	ts := strconv.FormatInt(t.Unix(), 10)
+	return proofMAC(token, target, ts) + "." + ts
+}
+
+func proofMAC(token, target, ts string) string {
+	m := hmac.New(sha256.New, []byte(token))
+	m.Write([]byte("pipedpeer-probe|" + target + "|" + ts))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// VerifyProof checks a proof made for target, within proofWindow of now.
+func VerifyProof(token, target, proof string, now time.Time) bool {
+	if token == "" || proof == "" {
+		return false
+	}
+	mac, ts, ok := strings.Cut(proof, ".")
+	if !ok {
+		return false
+	}
+	sec, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return false
+	}
+	if d := now.Sub(time.Unix(sec, 0)); d > proofWindow || d < -proofWindow {
+		return false
+	}
+	return hmac.Equal([]byte(mac), []byte(proofMAC(token, target, ts)))
+}
+
+// ProbeClient is an HTTP client for discovery probes: it proves holding the
+// token without sending it, and never carries the token itself.
+func ProbeClient(timeout time.Duration) *http.Client {
+	return &http.Client{Timeout: timeout, Transport: probeTransport{}}
+}
+
+type probeTransport struct{}
+
+func (probeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Del(Header)
+	if tok := Current(); tok != "" {
+		r.Header.Set(ProofHeader, Proof(tok, r.URL.Host, time.Now()))
+	}
+	return bareTransport.RoundTrip(r)
+}
+
+// bareTransport is the standard transport as it was before Install wrapped
+// it, so a probe cannot pick the token up on its way out.
+var bareTransport = http.DefaultTransport
