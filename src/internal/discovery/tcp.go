@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 )
 
 // DiscoverTCP finds daemons by probing the local subnet's /health endpoints
@@ -79,7 +80,9 @@ func DiscoverTCP(daemonPort int, timeout time.Duration) []DiscoveredNode {
 // Returns nil for anything that is not a pipedpeer daemon (connection
 // refused, timeout, foreign HTTP service, malformed body).
 func probeHost(ip string, port int) *DiscoveredNode {
-	client := &http.Client{Timeout: 700 * time.Millisecond}
+	// Every address on the subnet gets this request, so it carries a proof of
+	// the cluster token rather than the token.
+	client := authtoken.ProbeClient(700 * time.Millisecond)
 	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", ip, port))
 	if err != nil {
 		return nil

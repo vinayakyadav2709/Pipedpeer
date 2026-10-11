@@ -26,8 +26,17 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Pool sizing reads `os.cpu_count()` (demo run sheet) | `_usable_cores()` honours CPU affinity and the cgroup `cpu.max` quota |
 | A third-party import missing from the resolver table is silently dropped (report) | The build warns and names the imports, and `--pkg` silences it. The table also covered `import PIL` with a package name nixpkgs lacks (`Pillow`, now `pillow`), and listed pip names (`opencv`) where scripts use import names (`cv2`, `bs4`, `skimage`) |
 | Data races in the `nattype` and `portmap` tests | Fixed in the tests; `go test -race ./...` is clean |
+| Discovery probes carry the shared secret to every host on the subnet (Security) | Probes send an HMAC proof bound to the probed address and the time; it opens `GET /health` only |
+| Firewall commands run without `sudo` (Setup) | Changes go through `sudo` for a non-root user; checks stay unprivileged |
+| `nix-imports` aborts when the keys file is empty (Setup) | Setup trusts this node's own key and records it; peers' keys join on a later run |
+| The punch nonce is identical every time (Internet) | Drawn from `crypto/rand` |
+| `closurediff.go` writes to `$TMPDIR` (Temp files) | Writes to the on-disk scratch directory |
+| `pathExists` checks the host `/nix/store`, not the private store | `/nix` paths are mapped into the private store (`nixstore.HostPath`) |
+| Observed 8: `SECURITY.md` is out of date | Rewritten to describe the secret, pinned TLS, signed closures and what they do not cover |
 
 ## Not bugs, recorded so they are not reported again
+
+- **`TestLeaseExpiryRedirectsTask` can fail under `go test -race ./...`.** It passes alone and as a package, before and after the fixes above. It fails only when every package runs at once under the race detector: heartbeats 30 ms apart are starved against a 400 ms lease. The test already skips when it can see the starvation, but there is a window it cannot see.
 
 - **`imap_unordered` returns results in order.** That is allowed: "unordered" promises no order, and input order is one of them. The cost is that a slow item holds back the rest of its batch.
 - **numpy's `@` operator is not intercepted.** It cannot be: `numpy.ndarray` is an immutable C type, and `ndarray.__matmul__` cannot be replaced (`TypeError: cannot set '__matmul__' attribute of immutable type`). Write `np.matmul(a, b)` or `a.dot(b)` for a product that should be distributed.

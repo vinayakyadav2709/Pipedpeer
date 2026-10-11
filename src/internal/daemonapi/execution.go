@@ -189,6 +189,12 @@ func shellQuote(s string) string {
 // pathExists reports whether a path exists on disk. Used to short-circuit NAR
 // re-imports when a prior task already materialised the closure.
 func pathExists(p string) bool {
+	if host := nixstore.HostPath(p); host != p {
+		// Lstat: links inside the store point at other /nix paths, which
+		// resolve only inside the namespace.
+		_, err := os.Lstat(host)
+		return err == nil
+	}
 	_, err := os.Stat(p)
 	return err == nil
 }

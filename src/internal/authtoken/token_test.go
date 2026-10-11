@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // withToken points the package at a scratch token for one test. The token is
@@ -175,5 +176,75 @@ func TestTestBinaryIgnoresConfiguredToken(t *testing.T) {
 	}
 	if got := Current(); got != "chosen-by-the-test" {
 		t.Errorf("Current()=%q after an explicit Set", got)
+	}
+}
+
+// A discovery probe goes to every address on the subnet. It must prove the
+// token without carrying it, and a cluster daemon must accept that proof for
+// /health, and for nothing else.
+func TestProbeProvesTheTokenWithoutSendingIt(t *testing.T) {
+	withToken(t, "s3cret")
+
+	var gotToken string
+	srv := httptest.NewServer(Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	defer srv.Close()
+	spy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken = r.Header.Get(Header)
+	}))
+	defer spy.Close()
+
+	client := ProbeClient(time.Second)
+	resp, err := client.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("probe with a valid proof got %d", resp.StatusCode)
+	}
+
+	// Even with the token-attaching transport installed, the probe must not
+	// carry the token to a host that is not a member.
+	Install()
+	t.Cleanup(func() { http.DefaultTransport = bareTransport })
+	resp, err = client.Get(spy.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotToken != "" {
+		t.Fatalf("probe sent the token %q to an arbitrary host", gotToken)
+	}
+
+	// The proof opens /health only.
+	resp, err = client.Get(srv.URL + "/v1/jobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a probe proof opened /v1/jobs: %d", resp.StatusCode)
+	}
+}
+
+func TestProofIsBoundToTargetAndTime(t *testing.T) {
+	now := time.Now()
+	p := Proof("s3cret", "10.0.0.5:38080", now)
+	if !VerifyProof("s3cret", "10.0.0.5:38080", p, now) {
+		t.Fatal("a fresh proof for this target was refused")
+	}
+	if VerifyProof("s3cret", "10.0.0.6:38080", p, now) {
+		t.Error("a proof made for another host was accepted")
+	}
+	if VerifyProof("other", "10.0.0.5:38080", p, now) {
+		t.Error("a proof under a different token was accepted")
+	}
+	if VerifyProof("s3cret", "10.0.0.5:38080", p, now.Add(10*time.Minute)) {
+		t.Error("a stale proof was accepted")
+	}
+	if VerifyProof("s3cret", "10.0.0.5:38080", "garbage", now) {
+		t.Error("a malformed proof was accepted")
 	}
 }

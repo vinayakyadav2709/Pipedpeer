@@ -20,7 +20,8 @@ type fakeFirewall struct {
 
 func (f *fakeFirewall) install(t *testing.T) {
 	t.Helper()
-	oldLook, oldCmd := lookPath, firewallCmd
+	oldLook, oldCmd, oldSudo := lookPath, firewallCmd, needSudo
+	needSudo = func() bool { return false }
 	lookPath = func(name string) (string, error) {
 		if f.present[name] {
 			return "/usr/bin/" + name, nil
@@ -38,7 +39,7 @@ func (f *fakeFirewall) install(t *testing.T) {
 		}
 		return "", nil
 	}
-	t.Cleanup(func() { lookPath, firewallCmd = oldLook, oldCmd })
+	t.Cleanup(func() { lookPath, firewallCmd, needSudo = oldLook, oldCmd, oldSudo })
 }
 
 func (f *fakeFirewall) didRun(want string) bool {
@@ -211,5 +212,34 @@ func TestTheReportedPortIsTheOneUsed(t *testing.T) {
 	if DirectPort() != 38447 {
 		t.Errorf("DirectPort() = %d; it must match internet.DefaultPort, or setup "+
 			"opens a port nothing listens on", DirectPort())
+	}
+}
+
+// Setup runs as the user, and firewall changes need root: run plainly they
+// failed with a permission error and the port stayed closed. Checks stay
+// unprivileged; only the changes go through sudo.
+func TestFirewallChangesGoThroughSudoForAUser(t *testing.T) {
+	f := &fakeFirewall{
+		present: map[string]bool{"firewall-cmd": true},
+		replies: map[string]string{
+			"firewall-cmd --state":                "running\n",
+			"firewall-cmd --query-port=38447/udp": "no\n",
+		},
+	}
+	f.install(t)
+	needSudo = func() bool { return true }
+
+	st := openFirewall(context.Background(), 38447, true)
+	if !st.open || !st.changed {
+		t.Fatalf("port not opened: %+v", st)
+	}
+	for _, want := range []string{
+		"sudo firewall-cmd --permanent --add-port=38447/udp",
+		"sudo firewall-cmd --reload",
+		"firewall-cmd --query-port=38447/udp",
+	} {
+		if !f.didRun(want) {
+			t.Errorf("did not run %q; ran %v", want, f.ran)
+		}
 	}
 }

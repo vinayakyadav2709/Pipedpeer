@@ -32,11 +32,11 @@ package internet
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
 	"net/netip"
 	"os"
@@ -381,8 +381,10 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 
 	// Tell the introducer to wake the peer, so both punch at once. Its own
 	// probes are what open its router to us.
+	// Random per request. It was drawn from a generator with a fixed zero
+	// seed, so every punch request carried the same "nonce".
 	nonce := make([]byte, 8)
-	_, _ = rand.NewChaCha8([32]byte{}).Read(nonce)
+	_, _ = rand.Read(nonce)
 	_ = rendezvous.RequestPunch(m.endpoint.Conn(), m.cfg.Rendezvous,
 		m.cfg.Cluster, m.node(), node, hex.EncodeToString(nonce))
 

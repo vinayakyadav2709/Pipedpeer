@@ -10,11 +10,13 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // seedClosure gives a node the store paths it lacks, and reports how many of
@@ -58,13 +60,14 @@ func seedClosure(host string, port int, storePath string) (sent, total int, ok b
 		return 0, len(paths), false
 	}
 
-	nar, err := os.CreateTemp("", "closurediff-*.nar")
+	// On disk, not in $TMPDIR: a partial closure can be gigabytes, and /tmp
+	// is often a tmpfs charged against the RAM the job is about to need.
+	dir, err := userdir.Scratch("closurediff-*")
 	if err != nil {
 		return 0, len(paths), false
 	}
-	narPath := nar.Name()
-	nar.Close()
-	defer os.Remove(narPath)
+	defer os.RemoveAll(dir)
+	narPath := filepath.Join(dir, "partial.nar")
 
 	if err := exportPathsLocal(missing, narPath); err != nil {
 		return 0, len(paths), false
