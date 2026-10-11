@@ -10,7 +10,7 @@ with each entry marked when resolved.
 | 0 | Fix the known issues, demo-breaking ones first | Done | `ad75b4b`, `fad3ce4`, `2c1a49a` |
 | 1 | A per-stage timeline for every run: where the time goes | Done | `b30092d` |
 | 2 | Why a node was chosen, what the shim distributed, and the cluster at a glance | Done | `6d04e97` |
-| 3 | A live web page served by the daemon at `/ui` | Done | see `git log` |
+| 3 | A live web page served by the daemon at `/ui` | Done | `fddf510` |
 | 4 | Benchmarks, a combined capstone script, and the updated demo flow | Planned | |
 
 Every phase below has the same parts:
