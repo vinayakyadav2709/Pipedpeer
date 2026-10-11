@@ -700,7 +700,13 @@ def _is_library_module(mod):
         for marker in ("site-packages", "dist-packages", "/nix/store/"):
             if marker in f:
                 return True
-        return os.path.dirname(f) == os.path.dirname(os.path.realpath(os.__file__))
+        # Anywhere under the stdlib dir, not only directly in it: packages
+        # (collections, re, logging, multiprocessing) and lib-dynload C
+        # extensions live in subdirectories. Missing them registered half
+        # the stdlib for by-value pickling, and cloudpickle then recursed
+        # until it gave up on any kernel that touched a module.
+        stdlib = os.path.dirname(os.path.realpath(os.__file__))
+        return f.startswith(stdlib + os.sep)
     except Exception:
         return False
 
