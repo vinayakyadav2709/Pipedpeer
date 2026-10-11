@@ -1616,7 +1616,7 @@ def _install_numpy():
                 _log("numpy tensordot fallback (%s)" % e)
         return _orig_tensordot(a, b, axes, *args, **kw)
 
-    def _linalg_offload(name, a, args, kw):
+    def _linalg_offload(name, a, args, kw, deadline=1200):
         # Ship np.linalg.<name>(a) as a single noSplit item so it lands on the
         # best peer (part 0 prefers peers[0], falling through to local on
         # failure); a constrained orchestrator never materialises the matrix.
@@ -1640,8 +1640,16 @@ def _install_numpy():
         header["required_mem"] = _pool_required(globals_pickle, items)
         if _FORCE:
             header["force"] = True
-        blobs = _pool_send(header, globals_pickle, items, 1200)
+        blobs = _pool_send_within(header, globals_pickle, items, deadline)
         return pickle.loads(blobs[0])
+
+    def _linalg_deadline(a):
+        # Past the time a peer like this machine needs (ship it, compute it,
+        # ship U/S/Vh back), the offload has already lost; half again as
+        # slack, and never under 30 s.
+        est_local = a.nbytes * max(8, a.shape[0] // 4) / 1.5e9
+        bw = _per_peer_bw(_BW_CACHE["bw"] or _OPTIMISTIC_BW)
+        return max(_LINALG_MIN_DEADLINE, 1.5 * (est_local + a.nbytes * 3 / bw))
 
     def _linalg(name):
         orig = _orig_linalg[name]
@@ -1652,9 +1660,9 @@ def _install_numpy():
                     and _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 4), 3, False, 1.5e9,
                                               op="numpy.linalg." + name)):
                 try:
-                    return _linalg_offload(name, a, args, kw)
+                    return _linalg_offload(name, a, args, kw, _linalg_deadline(a))
                 except Exception as e:
-                    _log("numpy %s fallback (%s)" % (name, e))
+                    _log("numpy %s fallback (%s); running it here" % (name, e))
             return orig(a, *args, **kw)
         return wrapped
 
@@ -1676,6 +1684,8 @@ def _install_numpy():
 # agg spec works.
 _IN_MERGE = False
 _BW_CACHE = {"t": 0.0, "bw": None}
+# Floor of an svd/eig offload's wall-clock limit (tests lower it).
+_LINALG_MIN_DEADLINE = 30.0
 _BW_TTL = 300.0
 
 # The daemon always listens on loopback (http://127.0.0.1:<selfPort>), so its
@@ -1684,7 +1694,7 @@ _BW_TTL = 300.0
 # hijack or refuse loopback traffic and make the shim silently fall back to
 # local). Build a proxy-less opener and reuse it everywhere.
 _DaemonOpener = None
-def _daemon_open(req, timeout):
+def _daemon_open(req, timeout, opener=None):
     """Send req to the loopback daemon, bypassing any environment HTTP proxy.
 
     The shared secret is attached here rather than at each call site: there
@@ -1698,7 +1708,7 @@ def _daemon_open(req, timeout):
     if _DaemonOpener is None:
         _DaemonOpener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        return _DaemonOpener.open(req, timeout=timeout)
+        return (opener or _DaemonOpener).open(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         raise RuntimeError("daemon HTTP %d: %s" % (e.code, e.read())) from e
 
@@ -1797,7 +1807,7 @@ def _maybe_compress(items, header):
     return packed
 
 
-def _pool_send(header, globals_pickle, items, timeout, out_header=None):
+def _pool_send(header, globals_pickle, items, timeout, out_header=None, opener=None):
     """POST a frames pool/map request: small JSON header line + optional
     globals frame + length-prefixed raw pickle item frames. Returns the raw
     pickle blobs of the results (frames response). Bulk data never touches
@@ -1816,7 +1826,7 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None):
                                  headers={"Content-Type": "application/vnd.pipedpeer.frames",
                                           "X-Pipedpeer-Store": _STORE,
                                           "X-Pipedpeer-Submitter": _SUBMITTER})
-    with _daemon_open(req, timeout) as resp:
+    with _daemon_open(req, timeout, opener) as resp:
         data = resp.read()
     nl = data.find(b"\n")
     hdr = json.loads(data[:nl])
@@ -1829,6 +1839,52 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None):
         out.append(rest[4:4 + n])
         rest = rest[4 + n:]
     return out
+
+
+def _pool_send_within(header, globals_pickle, items, deadline):
+    """_pool_send with a wall-clock limit, raising TimeoutError past it.
+
+    urllib's timeout is per socket operation, so a peer that is slow but not
+    silent, or a daemon that tries peer after peer, keeps it waiting for ever:
+    02_numpy_heavy.py's svd sat 15 minutes while the daemon gave four
+    container peers 300 s each. On expiry the connection is shut, which the
+    daemon reads as the requester going away and drops its peer forwards."""
+    import socket
+    import http.client
+    import urllib.request
+    conns = []
+
+    class _Tracked(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            def make(host, **kw):
+                c = http.client.HTTPConnection(host, **kw)
+                conns.append(c)
+                return c
+            return self.do_open(make, req)
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Tracked())
+    box = {}
+
+    def send():
+        try:
+            box["r"] = _pool_send(header, globals_pickle, items, deadline, opener=opener)
+        except BaseException as e:
+            box["e"] = e
+
+    t = threading.Thread(target=send, daemon=True)
+    t.start()
+    t.join(deadline)
+    if t.is_alive():
+        for c in conns:
+            try:
+                if c.sock is not None:
+                    c.sock.shutdown(socket.SHUT_RDWR)
+            except OSError as e:
+                _log("could not close the timed-out cluster request: %s" % e)
+        raise TimeoutError("no answer from the cluster in %.0f s" % deadline)
+    if "e" in box:
+        raise box["e"]
+    return box["r"]
 
 
 def _weighted_batches(weights, base_batch, world):
@@ -2211,8 +2267,20 @@ def _numpy_offload_why(nbytes, flops_per_byte, round_trip, split,
     if not bw:
         _WHY["v"] = "could not measure the link to the cluster"
         return False
+    if not split:
+        bw = _per_peer_bw(bw)
     return _offload_wins(nbytes, flops_per_byte, round_trip, split,
                          flops_per_sec, K, bw, remote_flops)
+
+
+def _per_peer_bw(bw):
+    """What one peer gets of the measured bandwidth.
+
+    The probe's 8 items spread over up to 8 peers in parallel, so it measures
+    the cluster's aggregate; a single-worker offload (svd, eig) uses one link.
+    In the V1 rehearsal 4 peers measured 12.8 MB/s together while one carried
+    0.8, and the svd went out on the aggregate figure."""
+    return bw / max(1, min(8, int(_NUM_SHARDS) - 1))
 
 
 # Faster than any link this runs over: 10 Gbit/s. Used only to rule offloads
@@ -4631,7 +4699,41 @@ def _make_cluster_executor(base):
     return _ClusterExecutor
 
 
+def _quiet_sigterm(signum, frame):
+    """Exit 143 at once, workers first, without a traceback.
+
+    A cancel SIGTERMs the whole sandbox. The script is pid 1 there, and pid 1
+    ignores a signal it has no handler for, while its Pool workers die: for
+    the 2 s before SIGKILL the Pool respawned them and printed ~50 lines of
+    tracebacks under "cancelled". os._exit skips what the default action
+    skips too (finally blocks, atexit)."""
+    import multiprocessing
+    try:
+        for p in multiprocessing.active_children():
+            p.kill()
+    except Exception as e:
+        os.write(2, ("[pipedpeer] SIGTERM: could not stop pool workers: %s\n" % e).encode())
+    for f in (sys.stdout, sys.stderr):
+        try:
+            f.flush()
+        except Exception as e:
+            os.write(2, ("[pipedpeer] SIGTERM: could not flush output: %s\n" % e).encode())
+    os._exit(128 + signum)
+
+
+def _install_sigterm():
+    # Only over the default action: a handler the environment or the script
+    # set is theirs. A forked worker inherits this one and exits as quietly.
+    import signal
+    try:
+        if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
+            signal.signal(signal.SIGTERM, _quiet_sigterm)
+    except ValueError as e:      # not the main thread: nothing to install
+        _log("SIGTERM handler not installed: %s" % e)
+
+
 def _install():
+    _install_sigterm()
     if not _ENABLED:
         return
     sys.meta_path.insert(0, _PatchOnImport())

@@ -288,7 +288,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		// Headroom over the estimate: the estimator is deliberately rough,
 		// and a cap that trips on a job that would have fitted is worse than
 		// no cap. This only has to catch runaway growth.
-		MemLimitBytes: memLimitFor(opts.EstimatedMemBytes),
+		MemLimitBytes: jobMemLimit(opts.EstimatedMemBytes, opts.EstimationTier),
 		LeaseID:       opts.LeaseID,
 	}
 
@@ -433,6 +433,23 @@ func addExecStages(t *jobhistory.Timeline, node string, start time.Time, total t
 	if rest := total - ms(tm.ImportMs+tm.SetupMs+tm.RunMs); rest >= 50*time.Millisecond {
 		t.Add("stream + wrap-up", node, at.Add(ms(tm.RunMs)), rest)
 	}
+}
+
+// jobMemLimit is the cgroup ceiling a job runs under.
+//
+// Only --mem (tier "user") is a statement about what the script needs. The
+// other tiers are guesses: "import" sums library baselines and knows nothing
+// of the data (02_numpy_heavy.py: 300 MiB for numpy, so a 600 MiB cap, while
+// its two 134 MB matrices and their product need over 1 GB), and "historical"
+// can come from a run that was itself killed at the cap. A guess may raise
+// the ceiling but never take it below the no-estimate one; the node still
+// lowers it to what it can spare (daemonapi grantableMemory).
+func jobMemLimit(estimate int64, tier string) int64 {
+	limit := memLimitFor(estimate)
+	if tier != "user" && limit < noEstimateMemLimit {
+		return noEstimateMemLimit
+	}
+	return limit
 }
 
 // memLimitFor turns a memory estimate into a cgroup ceiling.
