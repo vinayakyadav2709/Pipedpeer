@@ -9,3 +9,6 @@ note "Three rows, all healthy. HOST = three different machines."
 note "PATH 'punched' / 'punched-in' = a direct link through both routers - no VPN, no port forwarding."
 note "GPU column: the scheduler knows which machines can take GPU work."
 note "The introducer only introduced them; it carries none of the traffic."
+echo
+note "Second screen: the live page every daemon serves. Open it now and leave it up."
+show "$PIPE" ui --print

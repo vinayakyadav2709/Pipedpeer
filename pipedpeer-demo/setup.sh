@@ -53,6 +53,16 @@ else
 fi
 cd ..
 
+# --- data for script 07 -----------------------------------------------------
+# Its own workspace too, for the same reason. ~200 MB; DEMO_CAPSTONE_ROWS
+# sizes it (2M rows by default).
+if [ ! -f 07_capstone/data.csv ]; then
+  echo "generating 07_capstone/data.csv with plain python3 + pandas ..."
+  (cd 07_capstone && python3 make_data.py)
+else
+  echo "07_capstone/data.csv already present: $(du -h 07_capstone/data.csv | cut -f1)"
+fi
+
 # --- cluster sanity ---------------------------------------------------------
 echo
 echo "=== cluster nodes (expect all three, healthy, GPU shown on two) ==="
@@ -77,6 +87,7 @@ run 02_numpy_heavy.py
 # rehearsal would warm a path the demo never takes.
 (cd 03_pandas_ooc && run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8)
 run 05_file_sync.py
+(cd 07_capstone && run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7)
 # Only if there are GPU machines in the cluster. Skipped rather than failed,
 # because a CPU-only rehearsal is a valid rehearsal for everything else.
 #
