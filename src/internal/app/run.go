@@ -334,6 +334,9 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		return fmt.Errorf("job %s detached: %w", short, err)
 	}
 	if err != nil {
+		if sandboxFailed(err, res.Stderr) {
+			err = &SandboxError{Err: err}
+		}
 		return fmt.Errorf("execution failed: %w", err)
 	}
 

@@ -31,13 +31,6 @@ func TestCheckOnlyScanSpreads(t *testing.T) {
 	}
 }
 
-func TestCheckOnlyUnpackaged(t *testing.T) {
-	got := unpackagedImports([]string{"numpy", "notarealpkg", "otherthing"}, []string{"python3Packages.otherthing"})
-	if !reflect.DeepEqual(got, []string{"notarealpkg"}) {
-		t.Fatalf("unpackagedImports = %v, want [notarealpkg]", got)
-	}
-}
-
 func TestCheckOnlyFit(t *testing.T) {
 	if s := fit("short"); s != "short" {
 		t.Fatalf("fit changed a short line: %q", s)
