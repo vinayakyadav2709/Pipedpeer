@@ -16,8 +16,8 @@ name: pipedpeer-lan
 
 x-pc: &pc
   privileged: true
-  cpus: 3
-  mem_limit: 3g
+  cpus: 2
+  mem_limit: 1200m
   volumes:
     - ../pipedpeer:/usr/local/bin/pipedpeer:ro
 
