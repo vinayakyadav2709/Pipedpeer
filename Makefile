@@ -1,4 +1,4 @@
-.PHONY: build install test test-integration fmt lint lab-up lab-down lab-fail
+.PHONY: build install test test-integration fmt lint lab-up lab-down lab-fail lab-nat
 
 build:
 	./scripts/build.sh
@@ -26,3 +26,6 @@ lab-down:
 
 lab-fail:
 	./scripts/lab-fail.sh
+
+lab-nat:
+	./scripts/lab-nat.sh
