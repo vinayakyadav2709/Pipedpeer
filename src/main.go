@@ -1824,6 +1824,7 @@ func printNodes(daemonPort int) error {
 	}
 	if len(nodes) == 0 {
 		fmt.Println("No nodes found")
+		printUnreachable(os.Stdout, daemonPort)
 		return nil
 	}
 
@@ -1853,16 +1854,24 @@ func printNodes(daemonPort int) error {
 			shortID(n.NodeID), truncate(host, 12), n.State, n.Load.ActiveJobs, cores,
 			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, path, n.Source)
 	}
+	printUnreachable(os.Stdout, daemonPort)
+	return nil
+}
+
+// printUnreachable lists peers with no direct path; a fetch error goes to stderr.
+func printUnreachable(w io.Writer, daemonPort int) {
 	bad, err := fetchUnreachable(daemonPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not list peers with no direct path: %v\n", err)
-	} else if len(bad) > 0 {
-		fmt.Println("\nPeers with no direct path (not offered work):")
-		for _, p := range bad {
-			fmt.Printf("  %-10s %s\n", shortID(p.Peer), p.Reason)
-		}
+		return
 	}
-	return nil
+	if len(bad) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nPeers with no direct path (not offered work):")
+	for _, p := range bad {
+		fmt.Fprintf(w, "  %-10s %s\n", shortID(p.Peer), p.Reason)
+	}
 }
 
 func newTasksCmd() *cobra.Command {
