@@ -14,6 +14,7 @@ if [ -z "$PIPE" ]; then
   fi
 fi
 echo "using pipedpeer: $PIPE"
+export PIPEDPEER_BIN="$PIPE"   # demo/prep-3-gpu.sh uses the same binary
 
 # --- data for script 03 -----------------------------------------------------
 # 03 has its own workspace dir (with its own .pipedpeerignore): the CSV must
@@ -55,7 +56,7 @@ cd ..
 
 # --- cluster sanity ---------------------------------------------------------
 echo
-echo "=== cluster nodes (expect all three, healthy, GPU shown on two) ==="
+echo "=== cluster nodes (expect every joined machine healthy, GPU shown on the two laptops) ==="
 "$PIPE" nodes
 
 # --- rehearsal pass ---------------------------------------------------------
@@ -77,22 +78,17 @@ run 02_numpy_heavy.py
 # rehearsal would warm a path the demo never takes.
 (cd 03_pandas_ooc && run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8)
 run 05_file_sync.py
-# Only if there are GPU machines in the cluster. Skipped rather than failed,
-# because a CPU-only rehearsal is a valid rehearsal for everything else.
-#
-# Matched on the vendor name rather than a column number: "MEM AVAIL" prints
-# as "14 GiB", two whitespace-separated fields, so counting columns puts the
-# GPU check on the word "GiB" and every machine looks like it has one. Only
-# NVIDIA cards are advertised as CUDA targets, so the name is the reliable
-# thing to look for.
-if "$PIPE" nodes | tail -n +2 | grep -qi nvidia; then
-	run 04_torch_ddp.py --ddp 2
-else
-	echo
-	echo "--- skipping 04_torch_ddp.py: no GPU machine in the cluster yet"
+# GPU environment: CUDA torch is several GB, so it is built and
+# shipped once here, by the same script each sender PC runs at the setup
+# visit. A CPU-only rehearsal is still a valid rehearsal for everything else,
+# so a GPU failure is reported, not fatal.
+echo
+echo "=== GPU environment (demo/prep-3-gpu.sh) ==="
+if ! ./demo/prep-3-gpu.sh; then
+	echo "WARNING: GPU prep did not finish - the GPU and everything steps will be slow or fail; see above"
 fi
 
 echo
 echo "=== DEMO READY ==="
 echo "Every script has been built and shipped once, so the live run is fast."
-echo "Open 'pipedpeer dashboard' and follow DEMO.md Part 4."
+echo "Open 'pipedpeer dashboard' and follow DEMO-SCRIPT.md."

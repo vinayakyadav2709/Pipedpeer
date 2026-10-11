@@ -5,3 +5,4 @@ venv/
 # 03 lives in its own workspace (own .pipedpeerignore) so its ~1 GB
 # data.csv ships only when 03 itself runs, not with every other demo.
 03_pandas_ooc/
+demo/finale-logs/

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Step 10 - the receipts: what each machine says it ran for somebody else.
+# Receipts - what each machine says it ran, and for whom (any machine).
 source "$(dirname "$0")/_lib.sh"
 
-banner "Step 10 - where the work actually ran"
-show "$PIPE" jobs 2>/dev/null | head -12
+banner "Where the work actually ran"
+typed pipedpeer jobs
+"$PIPE" jobs 2>/dev/null | head -12
 echo
-note "Run this on box-b and box-c (not here): their own ledger of work received from box-a."
-note "    pipedpeer traffic"
-note "It is the RECEIVING machine's record, so box-a cannot fake it."
+typed pipedpeer events --limit 15
+"$PIPE" events --limit 15
+echo
+note "Now on a PC that took work (PC-2):"
+note "    pipedpeer traffic      # its own ledger of pool work received, per sender"
+note "    pipedpeer events       # who joined, who sent what, how long it took"
+note "It is the RECEIVING machine's record, so the sender cannot fake it."
