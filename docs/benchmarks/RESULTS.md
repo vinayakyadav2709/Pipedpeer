@@ -7,6 +7,7 @@ result says which one it comes from.
 |---|---|---|
 | **[Oct]** | Run for the report on 2026-10-02 at commit `4c91ef3` | `raw/T*`, `raw/O*`, `raw/N*_run*.log`, `results.json` |
 | **[Aug]** | The previous pass, 2026-08-25, on a different host | `raw/B*`, `raw/N3_pool_map_receipts.txt`, `results-2026-08-25.json` |
+| **[Oct-12]** | N7 re-run on 2026-10-12 at commit `08ce1d4`, on a second host (Fedora 44, 16 threads, Python 3.14.8, docker lab) | `raw/N7_*`, the `n7_*` entries of `results.json` (each carries its own `host`) |
 | **[commit]** | Multi-machine measurements recorded in commit messages, 2026-08-26 to 08-29 | `raw/C_commit_measurements.md` (verbatim quotes) |
 
 ## Test bed [Oct]
@@ -66,16 +67,29 @@ result says which one it comes from.
 
 ## R3 Interception cost [Oct]
 
-**Whole job** (N7, a 48-item parallel map, five runs each):
+**Whole job** [Oct-12] (N7, `workloads/pool_idle.py`: a 16-item `Pool.map`
+of ~0.1 ms items, which the cost model must decline; `--remote`, five runs
+each, `python3 docs/benchmarks/bench.py --only n7`):
 
-| | Seconds | Notes |
-|---|---|---|
-| `PIPEDPEER_SHIM=0` | 0.94, 0.66, 0.65 | clean runs. Runs 1 and 4 (9.66 s, 3.25 s) failed with `stdout scanner: read \|0: file already closed` and were rescheduled |
-| shim on | 0.97–1.10, median 0.98 | every run: `remote ok: 18 items … on :38080, :38083` |
+| | Median | Range | Notes |
+|---|---|---|---|
+| `PIPEDPEER_SHIM=0` | 0.678 s | 0.671–0.852 s | |
+| shim on | 0.796 s | 0.747–0.797 s, plus one cold 7.03 s first run | every receipt: `dispatched_items 0`; every log: `tail is 0.01s of work, below the 0.50s dispatch floor; staying local` |
 
-This does **not** measure idle interception. The shim distributed in every
-enabled run, which costs about 0.3 s on one host. The start-up measurement
-below is the direct measure of idle cost.
+This measures idle interception: about **0.12 s** per job, the measurement
+head plus the decision. `bench.py` now runs N7 with `PIPEDPEER_RECEIPT` and
+fails any run whose receipt shows a dispatched item. The earlier [Oct] N7 used
+`pool_map.py`, which the shim distributes (18 of 48 items in every run), so it
+measured distribution, not idle cost. The same workload with
+`--distribute force` did dispatch (4 items), so the cluster was able to take
+work and the decline is the cost model's. The first shim-on run includes a
+cold start on its worker.
+
+Lab note: fresh lab workers refuse the submitter's closure ("lacks a signature
+by a trusted key", `../known-issues.md` Observed #3), so before these runs each
+worker's `/etc/nix/nix.conf` got `extra-trusted-public-keys` from its own
+`trusted-public-keys` file, which is what `pipedpeer setup` writes once a
+daemon knows its peers.
 
 **Start-up** (`scripts/bench-shim-d2.sh`, raw `raw/O2_shim_startup.txt`):
 local-only 0.0944 s against shim-on 0.1168 s, a ratio of **1.24×**. That passes

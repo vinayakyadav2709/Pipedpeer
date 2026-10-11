@@ -1,17 +1,17 @@
 [coordinator] Resource estimate: 512 MiB (tier=import)
 [coordinator] --remote: discovering a node other than this machine...
-[coordinator] Placed on node ea8a95c6 (lease=836bb3ee)
-[coordinator] Lease committed — executing on ea8a95c6
+[coordinator] Placed on node 5792c454 (lease=5a873f56)
+[coordinator] Lease committed — executing on 5792c454
 === Pipedpeer CLI ===
-Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map/pool_map.py
-Daemon: 192.168.0.107:38083
+Script: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle/pool_idle.py
+Daemon: 192.168.0.200:38081
 
 [1/7] Detecting imports...
 
 [2/7] Parsing dependencies...
 
 [3/7] Generating flake.nix...
-      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2396077437/flake.nix
+      Created: /home/yeet/.cache/pipedpeer/scratch/build-3468696462/flake.nix
 
 [4/7] Building locally...
       Built successfully
@@ -20,58 +20,21 @@ Daemon: 192.168.0.107:38083
       Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
 
 [6/7] Uploading to daemon...
-      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map
-      Script: pool_map.py
+      Project root: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle
+      Script: pool_idle.py
       Closure already on the node; nothing to send
-      Uploaded job f1bdb687-8462-45a0-a374-4ca837c0cfa8
+      Uploaded job c096e18c-f87f-4b78-8c15-b27061eb0553
 
 [7/7] Executing on remote...
-POOLMAP-OK items=48 seconds=0.1583 checksum=470568233.455799
-[coordinator] Execution failed on ea8a95c6: execution failed: remote: stdout scanner: read |0: file already closed — retrying in 2s
-[coordinator] Rescheduling (attempt 2)...
-[coordinator] Placed on node ea8a95c6 (lease=df8c3dea)
-[coordinator] Lease committed — executing on ea8a95c6
-=== Pipedpeer CLI ===
-Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map/pool_map.py
-Daemon: 192.168.0.107:38083
-
-[1/7] Detecting imports...
-
-[2/7] Parsing dependencies...
-
-[3/7] Generating flake.nix...
-      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2877767804/flake.nix
-
-[4/7] Building locally...
-      Built successfully
-
-[5/7] Exporting closure...
-      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
-
-[6/7] Uploading to daemon...
-      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map
-      Script: pool_map.py
-      Closure already on the node; nothing to send
-      Uploaded job a14c4254-9abf-484f-af4d-0917fd9e394e
-
-[7/7] Executing on remote...
-POOLMAP-OK items=48 seconds=0.1269 checksum=470568233.455799
+POOLIDLE-OK items=16 seconds=0.1412 checksum=623749.555711
       No files changed on the remote
 
 === Done ===
-History: /home/rs/.local/share/pipedpeer/jobs/1790955022458389182
-[coordinator] Task completed successfully on node ea8a95c6
+History: /home/yeet/.local/share/pipedpeer/jobs/1791747661715222749
+[coordinator] Task completed successfully on node 5792c454
 warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
 warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
-warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2396077437/flake.lock": 
-• Added input 'nixpkgs':
-    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
-warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
-tar: Removing leading `/' from member names
-tar: Removing leading `/' from hard link targets
-warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
-warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
-warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2877767804/flake.lock": 
+warning: creating lock file "/home/yeet/.cache/pipedpeer/scratch/build-3468696462/flake.lock": 
 • Added input 'nixpkgs':
     'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
 warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
