@@ -1,10 +1,16 @@
 package daemonapi
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/narpack"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 )
 
 func fakeSystemTrust(t *testing.T, installed bool, addErr error) (asked, added *[][]string, trusted map[string]bool) {
@@ -95,5 +101,56 @@ func TestAFailingHelperFallsBackToTheWarning(t *testing.T) {
 	}
 	if s.trustNext["peer-b"].Equal(trustSettled) {
 		t.Error("a key the helper failed to add is never retried")
+	}
+}
+
+// TestAMultiUserNodeTrustsTheSignerBeforeImporting: a multi-user nix-daemon
+// ignores the per-import key, so a fresh node refused the first closure until
+// its poll ran the helper. The import now runs that same step first.
+func TestAMultiUserNodeTrustsTheSignerBeforeImporting(t *testing.T) {
+	_, added, trusted := fakeSystemTrust(t, true, nil)
+	sender := newKeyPair(t)
+	key := nixsign.PublicKey(sender)
+
+	var trustedAtImport bool
+	old := signedImport
+	signedImport = func(_ context.Context, _ string, _ []string, _ ...string) error {
+		trustedAtImport = trusted[key]
+		return nil
+	}
+	defer func() { signedImport = old }()
+
+	s := New("test-node")
+	if err := s.importSignedClosure(bytes.NewReader(manifestArchive(t, narpack.Manifest{
+		Signer: sender.Fingerprint(), SignerKey: key,
+	})), "/nix/store/aaaa-root"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(*added, [][]string{{key}}) || !trustedAtImport {
+		t.Fatalf("the signer was not added through the helper before the copy: added=%q trustedAtImport=%v", *added, trustedAtImport)
+	}
+}
+
+// Without the helper nothing can be added, so the import goes ahead and nix's
+// refusal comes back with the `pipedpeer trust` hint (narpack.importError).
+func TestWithoutTheHelperTheImportIsRefusedWithTheHint(t *testing.T) {
+	_, added, _ := fakeSystemTrust(t, false, nil)
+	sender := newKeyPair(t)
+
+	old := signedImport
+	signedImport = func(_ context.Context, _ string, _ []string, _ ...string) error {
+		return errors.New("nix copy from a peer's closure: exit status 1: error: lacks a signature by a trusted key (run `pipedpeer trust` on the receiving machine)")
+	}
+	defer func() { signedImport = old }()
+
+	s := New("test-node")
+	err := s.importSignedClosure(bytes.NewReader(manifestArchive(t, narpack.Manifest{
+		Signer: sender.Fingerprint(), SignerKey: nixsign.PublicKey(sender),
+	})), "/nix/store/aaaa-root")
+	if err == nil || !strings.Contains(err.Error(), "pipedpeer trust") {
+		t.Fatalf("want the refusal with its hint, got %v", err)
+	}
+	if len(*added) != 0 {
+		t.Fatalf("a missing helper was called: %q", *added)
 	}
 }

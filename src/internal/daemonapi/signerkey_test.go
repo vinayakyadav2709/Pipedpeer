@@ -28,15 +28,11 @@ func newKeyPair(t *testing.T) identity.KeyPair {
 	return identity.KeyPair{Public: pub, Private: priv}
 }
 
-// importWithManifest posts a signed archive carrying m and reports the keys
-// the import was told to trust, whether it ran, and the response.
-func importWithManifest(t *testing.T, m narpack.Manifest) ([]string, bool, *httptest.ResponseRecorder) {
+// manifestArchive is a signed archive holding only a manifest with m's
+// signer and the root /nix/store/aaaa-root.
+func manifestArchive(t *testing.T, m narpack.Manifest) []byte {
 	t.Helper()
-	s := New("test-node")
-	s.narCache = &narCache{dir: filepath.Join(t.TempDir(), "nar-cache"), byID: map[string]string{}}
-	root := "/nix/store/aaaa-root"
-	m.Format, m.Roots = narpack.Format, []string{root}
-
+	m.Format, m.Roots = narpack.Format, []string{"/nix/store/aaaa-root"}
 	var archive bytes.Buffer
 	tw := tar.NewWriter(&archive)
 	body, _ := json.Marshal(m)
@@ -45,6 +41,18 @@ func importWithManifest(t *testing.T, m narpack.Manifest) ([]string, bool, *http
 	}
 	tw.Write(body)
 	tw.Close()
+	return archive.Bytes()
+}
+
+// importWithManifest posts a signed archive carrying m and reports the keys
+// the import was told to trust, whether it ran, and the response.
+func importWithManifest(t *testing.T, m narpack.Manifest) ([]string, bool, *httptest.ResponseRecorder) {
+	t.Helper()
+	fakeSystemTrust(t, false, nil) // never ask this machine's nix or sudo
+	s := New("test-node")
+	s.narCache = &narCache{dir: filepath.Join(t.TempDir(), "nar-cache"), byID: map[string]string{}}
+	root := "/nix/store/aaaa-root"
+	archive := bytes.NewBuffer(manifestArchive(t, m))
 
 	var buf bytes.Buffer
 	mp := multipart.NewWriter(&buf)

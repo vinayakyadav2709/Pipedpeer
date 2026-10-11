@@ -501,6 +501,11 @@ func senderKey(m narpack.Manifest) ([]string, error) {
 // token-authenticated, which is the same bar a key learned by polling clears,
 // and the key must prove it belongs to the node it names. It is trusted for
 // this import only; the next poll records it for good.
+//
+// A multi-user nix-daemon ignores keys passed per import, so there the key
+// goes through the same step the poll uses (warnUntrustedKeys): the root-owned
+// key helper adds it to nix.conf before the copy when setup installed one,
+// else the refusal names `pipedpeer trust`.
 func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
 	dir, err := userdir.Scratch("signedimport-*")
 	if err != nil {
@@ -523,6 +528,7 @@ func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
 	if err != nil {
 		return err
 	}
+	s.warnUntrustedKeys(senderKeys)
 	if err := signedImport(context.Background(), dir, roots, senderKeys...); err != nil {
 		return err
 	}
