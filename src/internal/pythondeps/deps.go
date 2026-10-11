@@ -429,8 +429,14 @@ var reqName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
 // warning naming the line.
 func ParseRequirements(content string) []string {
 	var out []string
+	// pip-compile --generate-hashes wraps a requirement over several lines
+	// ending in a backslash; join them, then drop the per-requirement options.
+	content = strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\\\n", " ")
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
+		if i := strings.Index(line, " --hash"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
 		if i := strings.Index(line, " #"); i >= 0 {
 			line = strings.TrimSpace(line[:i])
 		}
