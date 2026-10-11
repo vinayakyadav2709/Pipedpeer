@@ -236,3 +236,57 @@ func TestAttachJobEndedWithoutDoneFrameIsCutShort(t *testing.T) {
 		t.Fatalf("cut-short attach = %+v", got)
 	}
 }
+
+func TestJobOutputLogIsCappedKeepingTheTail(t *testing.T) {
+	s, id, srv := attachFixture(t, "running")
+	old := jobOutputCap
+	jobOutputCap = 8 << 10
+	t.Cleanup(func() { jobOutputCap = old })
+
+	l := s.jobOutput(id)
+	for i := 0; i < 200; i++ {
+		l.Append(OutputMessage{O: fmt.Sprintf("line %03d %s\n", i, strings.Repeat("y", 100))})
+	}
+	l.Finish(OutputMessage{ExitCode: 0})
+
+	info, err := os.Stat(l.path)
+	if err != nil || info.Size() > jobOutputCap {
+		t.Fatalf("output log size %v (err %v), cap %d", info.Size(), err, jobOutputCap)
+	}
+	got := readUntilDone(t, dialAttach(t, srv, id))
+	if !strings.Contains(got[0].E, "output trimmed") {
+		t.Fatalf("first replayed frame is not the trim note: %+v", got[0])
+	}
+	if !strings.HasPrefix(got[len(got)-2].O, "line 199 ") || !got[len(got)-1].Done {
+		t.Fatalf("tail lost: %+v", got[len(got)-2:])
+	}
+}
+
+func TestDaemonStartFailsOrphanedJobs(t *testing.T) {
+	s, id, srv := attachFixture(t, "running")
+	s.jobOutput(id).Append(OutputMessage{O: "half done"})
+	jobLogs.Delete(filepath.Join(s.jobDir, id, jobOutputFile)) // the old daemon is gone
+	s.mu.Lock()
+	s.leases["lease-orphan"] = &Lease{LeaseID: "lease-orphan", JobID: id}
+	s.mu.Unlock()
+
+	s.failOrphanedJobs()
+
+	s.jobsMu.Lock()
+	status, finished := s.jobs[id].Status, s.jobs[id].FinishedAt
+	s.jobsMu.Unlock()
+	if status != "failed" || finished.IsZero() {
+		t.Fatalf("orphan status %q finished %v", status, finished)
+	}
+	s.mu.Lock()
+	_, leaseLeft := s.leases["lease-orphan"]
+	s.mu.Unlock()
+	if leaseLeft {
+		t.Fatal("orphaned job's lease was not released")
+	}
+	got := readUntilDone(t, dialAttach(t, srv, id))
+	last := got[len(got)-1]
+	if outputs(got) != "half done" || last.ExitCode != -1 || !strings.Contains(last.Error, "daemon restarted") {
+		t.Fatalf("attach to orphan = %+v", got)
+	}
+}

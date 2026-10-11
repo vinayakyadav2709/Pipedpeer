@@ -775,6 +775,7 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) 
 func (s *Server) EnablePersistence() {
 	s.state = newState()
 	s.state.load(s.leases, s.jobs)
+	s.failOrphanedJobs()
 }
 
 // persist snapshots the current leases and jobs to disk. Call after any
