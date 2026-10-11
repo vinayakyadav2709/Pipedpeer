@@ -32,7 +32,6 @@ Paths are relative to `src/`. Each entry says how it was established:
 | numpy | The `@` operator is not intercepted (only module functions are patched) | `nixgen/shim.go:1159-1163` |
 | Security | Trusted Nix keys are collected from every node in the node store, and are not bound to an authenticated identity | `daemonapi/server.go:1578-1615` |
 | Security | The legacy closure import uses `--no-check-sigs`, and the submitter's own upload uses that format | `daemonapi/execution.go:1029-1066` |
-| Setup | `nix-imports` aborts when the keys file is empty, which happens before the daemon that writes it has started (fresh multi-user Nix) | `setup/setup.go:206-215, 420-454` |
 | Setup | Keys appended to `nix.conf` are a snapshot; peers added later are not trusted until setup runs again | `setup/setup.go:250-253` |
 | Private store | `pathExists` checks the host `/nix/store`, not the private store | `daemonapi/execution.go:191-194` |
 | Temp files | `closurediff.go` still uses `os.CreateTemp("", …)` | `daemonctl/closurediff.go:61` |
