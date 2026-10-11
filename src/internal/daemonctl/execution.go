@@ -22,7 +22,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/gorilla/websocket"
 )
 
@@ -42,9 +46,14 @@ type ExecConfig struct {
 	// part the kernel enforces, and without it a job that outgrows its
 	// estimate takes the whole machine down rather than itself.
 	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
+	// LeaseID binds the node's lease to this job, so the lease lives exactly
+	// as long as the job does, even when nobody is attached to renew it.
+	LeaseID string `json:"lease_id,omitempty"`
 }
 
 type outputMessage struct {
+	// Cancelled marks the done frame of a job stopped by a cancel frame.
+	Cancelled     bool   `json:"cancelled,omitempty"`
 	O             string `json:"o,omitempty"`
 	E             string `json:"e,omitempty"`
 	Error         string `json:"error,omitempty"`
@@ -57,16 +66,35 @@ type outputMessage struct {
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
 }
 
-type uploadResponse struct {
+// UploadOptions tunes one upload.
+type UploadOptions struct {
+	// SkipBroadcast tells the daemon not to forward the closure to its peers.
+	SkipBroadcast bool
+	// Cold sends the whole closure even when the node already has it, to time
+	// a first run. It does not undo the local build or the node's import.
+	Cold bool
+}
+
+// UploadResponse is the daemon's answer plus what this side measured about
+// the closure transfer, for the run summary.
+type UploadResponse struct {
 	JobID     string   `json:"job_id"`
 	StorePath string   `json:"store_path"`
 	Warnings  []string `json:"warnings,omitempty"`
+
+	// Closure is "on-node" (nothing sent), "partial" (only missing paths)
+	// or "full" (the whole archive).
+	Closure    string        `json:"-"`
+	SentPaths  int           `json:"-"`
+	TotalPaths int           `json:"-"`
+	SentBytes  int64         `json:"-"`
+	SendTime   time.Duration `json:"-"`
 }
 
 // UploadJob sends workspace tarball + NAR closure to the daemon.
 // If the daemon already has the store path cached (a prior task in the fan-out
 // shipped the same closure), the NAR is omitted and only the workspace travels.
-func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptPath string, skipBroadcast bool) (*uploadResponse, error) {
+func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptPath string, o UploadOptions) (*UploadResponse, error) {
 	// Export the NAR only when the target daemon lacks the closure: a gzip
 	// export of a multi-GB store is seconds-to-minutes of wasted work when a
 	// shared store (or a prior fan-out task) already gave every node a copy.
@@ -80,50 +108,81 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 	// tell a run that shipped a whole environment from one that shipped
 	// nothing: both print "Uploading to daemon" and differ only in how long
 	// they take.
-	sendNAR := narPath != "" && !storeCached(host, port, storePath)
-	seeded := false
-	if sendNAR {
+	result := UploadResponse{Closure: "on-node"}
+	var sendNAR bool
+	switch {
+	case narPath == "":
+		// Nothing to ship: the caller relies on a store the node shares.
+	case o.Cold:
+		fmt.Println("      Cold run: sending the whole closure even if the node has it")
+		sendNAR = true
+	case storeCached(host, port, storePath):
+		fmt.Println("      Closure already on the node; nothing to send")
+	default:
+		sendNAR = true
 		// sent > 0, not merely ok: the node reporting no missing paths while
 		// its cache check said the closure was not runnable means it holds a
 		// store path that is there but incomplete. Sending the whole archive
 		// repairs that; sending nothing would leave the job to fail on a
 		// missing bin/run.
-		if sent, total, ok := seedClosure(host, port, storePath); ok && sent > 0 {
+		if sr, ok := seedClosure(host, port, storePath); ok && sr.sent > 0 {
 			// The node now has every path, so the job needs no archive.
-			fmt.Printf("      Sent %d of %d store paths (the node had the rest)\n", sent, total)
-			sendNAR, seeded = false, true
+			fmt.Printf("      Sent %d of %d store paths: %s in %s\n",
+				sr.sent, sr.total, humanize.Bytes(uint64(sr.bytes)), secs(sr.sendTime))
+			sendNAR = false
+			result.Closure, result.SentPaths, result.TotalPaths = "partial", sr.sent, sr.total
+			result.SentBytes, result.SendTime = sr.bytes, sr.sendTime
+		} else {
+			fmt.Println("      Sending the whole closure (the node shares none of it)")
 		}
 	}
+	var narSize int64
 	if sendNAR {
-		fmt.Println("      Sending the whole closure (the node shares none of it)")
+		t0 := time.Now()
 		if err := ExportNAR(storePath, narPath); err != nil {
 			return nil, fmt.Errorf("nix store export failed: %v", err)
 		}
-	} else if narPath != "" && !seeded {
-		fmt.Println("      Closure already on the node; nothing to send")
+		narSize = fileSize(narPath)
+		fmt.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(narSize)), secs(time.Since(t0)))
 	}
 
 	pr, pw := io.Pipe()
 	mp := multipart.NewWriter(pw)
+	var narTime time.Duration
+	written := make(chan struct{})
 
 	go func() {
-		defer pw.Close()
-		defer mp.Close()
-
-		addFile(mp, "workspace", "workspace.tar", workspacePath)
-		mp.WriteField("store_path", storePath)
-		mp.WriteField("script_path", scriptPath)
-		if skipBroadcast {
-			mp.WriteField("skip_broadcast", "1")
-		}
-
-		if sendNAR {
-			addFile(mp, "nar", "closure.nar", narPath)
-		}
+		defer close(written)
+		err := func() error {
+			if err := addFile(mp, "workspace", "workspace.tar", workspacePath, nil); err != nil {
+				return err
+			}
+			mp.WriteField("store_path", storePath)
+			mp.WriteField("script_path", scriptPath)
+			if o.SkipBroadcast {
+				mp.WriteField("skip_broadcast", "1")
+			}
+			if sendNAR {
+				t0 := time.Now()
+				wrap := func(r io.Reader) (io.Reader, func()) {
+					return withProgress(r, narSize, "      Sending closure")
+				}
+				if err := addFile(mp, "nar", "closure.nar", narPath, wrap); err != nil {
+					return err
+				}
+				narTime = time.Since(t0)
+			}
+			return mp.Close()
+		}()
+		pw.CloseWithError(err)
 	}()
 
 	url := fmt.Sprintf("http://%s:%d/v1/jobs/upload", host, port)
 	resp, err := http.Post(url, mp.FormDataContentType(), pr)
+	// Unblock the writer if the daemon answered without reading everything,
+	// then wait so narTime is settled.
+	pr.Close()
+	<-written
 	if err != nil {
 		return nil, fmt.Errorf("upload failed: %w", err)
 	}
@@ -134,9 +193,13 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 		return nil, fmt.Errorf("upload rejected: %s", string(body))
 	}
 
-	var result uploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("invalid upload response: %w", err)
+	}
+	if sendNAR {
+		result.Closure, result.SentBytes, result.SendTime = "full", narSize, narTime
+		fmt.Printf("      Sent closure: %s in %s (%s)\n",
+			humanize.Bytes(uint64(narSize)), secs(narTime), rate(narSize, narTime))
 	}
 	// Peers that refused the environment: without this the run just stays
 	// local and the reason sits in a daemon log on another machine.
@@ -151,23 +214,53 @@ func storeCached(host string, port int, storePath string) bool {
 	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", host, port, url.QueryEscape(storePath))
 	resp, err := http.Get(url)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: closure cache check on %s:%d failed (%v); sending it\n", host, port, err)
 		return false
 	}
 	defer resp.Body.Close()
 	var r struct {
 		Cached bool `json:"cached"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&r) != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: closure cache check on %s:%d unreadable (%v); sending it\n", host, port, err)
 		return false
 	}
 	return r.Cached
 }
 
+// cancelWait is how long a cancelled run waits for the daemon's done frame.
+const cancelWait = 5 * time.Second
+
+// closeDetach is the websocket close code that means "stop watching, keep
+// the job running" (C-BG).
+const closeDetach = 4001
+
 // StreamExecute connects to the daemon WebSocket and streams job output to stdout/stderr.
-// Blocks until the job completes or context is cancelled.
+// Blocks until the job completes.
 // It returns the peak memory the job used (bytes) as reported by the daemon.
-func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (int64, string, string, error) {
-	url := fmt.Sprintf("ws://%s:%d/v1/jobs/%s/exec", host, port, jobID)
+//
+// ctx cancelled: the daemon is told to stop the job ({"cancel":true}) and the
+// returned error wraps context.Canceled. detach closed: the connection closes
+// with code 4001 and no cancel, the job keeps running, and the error wraps
+// ErrDetached. A nil detach never fires.
+func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig, detach <-chan struct{}) (int64, string, string, error) {
+	conn, err := dialJobSocket(ctx, host, port, "/v1/jobs/"+url.PathEscape(jobID)+"/exec")
+	if err != nil {
+		return 0, "", "", err
+	}
+	defer conn.Close()
+
+	// Written before streamJob starts its writer goroutine, so the two
+	// writes never overlap (gorilla allows one writer at a time).
+	if err := conn.WriteJSON(cfg); err != nil {
+		return 0, "", "", fmt.Errorf("send config: %w", err)
+	}
+	return streamJob(ctx, conn, detach)
+}
+
+// dialJobSocket opens an authenticated websocket to a daemon path.
+func dialJobSocket(ctx context.Context, host string, port int, path string) (*websocket.Conn, error) {
+	u := fmt.Sprintf("ws://%s:%d%s", host, port, path)
 
 	// The websocket dialer does not go through http.DefaultTransport, so the
 	// shared secret has to be attached by hand here; without it the upgrade
@@ -177,27 +270,80 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		// Same rule as the transport: the token goes only to a host that has
 		// shown it already holds it.
 		if err := authtoken.Prove(ctx, net.JoinHostPort(host, strconv.Itoa(port))); err != nil {
-			return 0, "", "", err
+			return nil, err
 		}
 		wsHeaders = http.Header{authtoken.Header: []string{tok}}
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, wsHeaders)
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, u, wsHeaders)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("websocket dial: %w", err)
+		if resp != nil {
+			// A refused upgrade carries the reason (unknown job, bad token)
+			// in its body; "bad handshake" alone says nothing.
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+			return nil, fmt.Errorf("websocket dial %s: %w (HTTP %d: %s)", path, err, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return nil, fmt.Errorf("websocket dial: %w", err)
 	}
-	defer conn.Close()
+	return conn, nil
+}
 
-	if err := conn.WriteJSON(cfg); err != nil {
-		return 0, "", "", fmt.Errorf("send config: %w", err)
-	}
+type cancelFrame struct {
+	Cancel bool `json:"cancel"`
+}
+
+// streamJob prints a job's output frames until the done frame, handling
+// cancel (ctx) and detach. Shared by exec and attach.
+func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}) (int64, string, string, error) {
+	var cancelled, detached atomic.Bool
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-stop:
+		case <-ctx.Done():
+			cancelled.Store(true)
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if err := conn.WriteJSON(cancelFrame{Cancel: true}); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not tell the daemon to stop the job: %v\n", err)
+			}
+			// Keep reading for the done frame, but not forever.
+			_ = conn.SetReadDeadline(time.Now().Add(cancelWait))
+		case <-detach:
+			detached.Store(true)
+			msg := websocket.FormatCloseMessage(closeDetach, "detach")
+			if err := conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(2*time.Second)); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: detach close frame not sent (%v); the job keeps running anyway\n", err)
+			}
+			_ = conn.SetReadDeadline(time.Now())
+		}
+	}()
+	defer func() {
+		close(stop)
+		wg.Wait()
+	}()
 
 	var peakBytes int64
 	stdoutBuf := new(strings.Builder)
 	stderrBuf := new(strings.Builder)
+	var rf receiptFilter
+	flushHeld := func() {
+		if s := rf.flush(); s != "" {
+			fmt.Fprint(os.Stderr, s)
+		}
+	}
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+			flushHeld()
+			switch {
+			case detached.Load():
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("job keeps running on the node: %w", ErrDetached)
+			case cancelled.Load():
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+					"cancelled; the daemon did not confirm the job stopped within %s (%v): %w", cancelWait, err, context.Canceled)
+			case websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway):
 				return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
 			}
 			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("connection lost: %w", err)
@@ -205,21 +351,33 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 
 		var out outputMessage
 		if err := json.Unmarshal(msg, &out); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping an unreadable frame from the daemon: %v\n", err)
 			continue
 		}
 
 		if out.Error != "" {
+			flushHeld()
 			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote: %s", out.Error)
 		}
 
+		// Raw chunks, printed as they come: \r redraws stay in place.
 		fmt.Print(out.O)
-		fmt.Fprint(os.Stderr, out.E)
+		if show, _ := rf.filter(out.E); show != "" {
+			fmt.Fprint(os.Stderr, show)
+		}
 		stdoutBuf.WriteString(out.O)
 		stderrBuf.WriteString(out.E)
 
 		if out.Done {
+			flushHeld()
 			if out.PeakMemBytes > 0 {
 				peakBytes = out.PeakMemBytes
+			}
+			// A job that finished cleanly just before the cancel landed did
+			// finish: report it as such.
+			if out.Cancelled || (cancelled.Load() && out.ExitCode != 0) {
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+					"job cancelled (exit code %d): %w", out.ExitCode, context.Canceled)
 			}
 			if out.OOMKilled {
 				// Without this the user sees "exited with code 137" and has
@@ -471,17 +629,28 @@ func appendShim(destPath, content string) error {
 	return cmd.Run()
 }
 
-func addFile(mp *multipart.Writer, fieldName, fileName, filePath string) {
+// addFile copies a file into the form. wrap, if set, wraps the file reader
+// (a progress bar) and returns a func to call once the copy ends.
+func addFile(mp *multipart.Writer, fieldName, fileName, filePath string, wrap func(io.Reader) (io.Reader, func())) error {
 	w, err := mp.CreateFormFile(fieldName, fileName)
 	if err != nil {
-		return
+		return fmt.Errorf("form field %s: %w", fieldName, err)
 	}
 	f, err := os.Open(filePath)
 	if err != nil {
-		return
+		return fmt.Errorf("open %s: %w", fieldName, err)
 	}
 	defer f.Close()
-	io.Copy(w, f)
+	var r io.Reader = f
+	if wrap != nil {
+		var done func()
+		r, done = wrap(f)
+		defer done()
+	}
+	if _, err := io.Copy(w, r); err != nil {
+		return fmt.Errorf("send %s: %w", fieldName, err)
+	}
+	return nil
 }
 
 // humanBytes renders a byte count the way the --mem flag accepts it.
