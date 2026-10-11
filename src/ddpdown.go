@@ -9,10 +9,10 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strconv"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/app"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
@@ -39,7 +39,11 @@ func ddpHostName(n registry.NodeRecord) string {
 // through onDown and the ring carries on without it. The run fails when no
 // rank finishes, on cancel, or when a rank's script itself exited non-zero
 // (a crash at checkpoint save is a failed run, not a lost machine); the ring
-// still carries on so the other ranks do not stall on it.
+// still carries on so the other ranks do not stall on it. A rank added
+// mid-run never fails the run: until it joins it has trained nothing, and a
+// crash while joining (refused, shape mismatch) is the join failing. Once the
+// script has failed, a rank announced on added is stopped at once: the run is
+// lost, and the grower may have picked the very node that failed.
 //
 // A rank still waiting to join when only joiners are left is stopped after
 // ddpJoinGrace: the ring it was joining has finished.
@@ -52,6 +56,7 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 	var firstErr error
 	var died []int
 	var scriptErr error
+	refused := map[int]bool{}
 	ok := 0
 	for running > 0 {
 		if grace == nil && !stopped && len(joiners) > 0 && running == len(joiners) {
@@ -64,6 +69,12 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 			}
 			hosts[a.rank] = a.host
 			running++
+			if scriptErr != nil {
+				fmt.Fprintf(w, "[ddp] rank %d on %s: not joining, the run has already failed\n", a.rank, a.host)
+				refused[a.rank] = true
+				a.cancel()
+				continue
+			}
 			joiners[a.rank] = a.cancel
 			continue
 		case <-grace:
@@ -81,7 +92,7 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 				ok++
 				continue
 			}
-			if joiner && stopped && errors.Is(r.err, context.Canceled) {
+			if (refused[r.rank] || joiner && stopped) && errors.Is(r.err, context.Canceled) {
 				continue
 			}
 			host := "?"
@@ -95,7 +106,7 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 				continue // a cancel stops every rank; nobody died
 			}
 			died = append(died, r.rank)
-			script := ddpScriptFailed(r.err)
+			script := !joiner && app.IsPermanent(r.err)
 			if script && scriptErr == nil {
 				scriptErr = fmt.Errorf("rank %d on %s: the script failed: %w", r.rank, host, r.err)
 			}
@@ -120,26 +131,6 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 		fmt.Fprintf(w, "[ddp] finished on %d of %d ranks (lost: %v)\n", ok, len(hosts), died)
 	}
 	return nil
-}
-
-// ddpExitCode matches the error daemonctl.StreamExecute returns when the job
-// ran to its end and the script exited non-zero.
-var ddpExitCode = regexp.MustCompile(`remote job exited with code (\d+)`)
-
-// ddpScriptFailed says whether a rank's error is its script failing rather
-// than its machine going away. A code above 128 is a signal (the node
-// stopping, the memory watchdog) and counts as a loss, as does anything that
-// is not a reported exit: a dropped connection, an OOM kill.
-//
-// ponytail: matches daemonctl's message; a typed exit error there would be
-// sturdier (outside this cluster).
-func ddpScriptFailed(err error) bool {
-	m := ddpExitCode.FindStringSubmatch(err.Error())
-	if m == nil {
-		return false
-	}
-	code, _ := strconv.Atoi(m[1])
-	return code > 0 && code <= 128
 }
 
 // ddpGroupName names a run's sync group. Unique per run even under a fixed
