@@ -511,12 +511,8 @@ configured still runs. `fig_4.2_trust.png` shows them.
   for its own upload, imports with `--no-check-sigs`
   (`daemonapi/execution.go:1029-1066`).
 - **The registry and LAN discovery are unauthenticated.** The optional
-  standalone registry has no authentication. Discovery accepts any responder.
-- **The QUIC hello is not bound to the session.** Its nonce is chosen by the
-  signer and not tied to the QUIC session. Any key that knows the cluster ID is
-  admitted.
-- `SECURITY.md` in the repository still describes the earlier no-authentication
-  design and needs the same update.
+  standalone registry has no authentication. Discovery accepts any responder, but
+  the token now goes only to hosts that prove they hold it.
 
 ### 4.4 Placement and scoring
 
