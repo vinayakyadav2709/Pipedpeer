@@ -32,11 +32,11 @@ package internet
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net"
 	"net/netip"
 	"os"
@@ -66,6 +66,8 @@ type Config struct {
 	// Cluster is derived from the shared token; peers in different clusters
 	// never see each other.
 	Cluster string
+	// Secret is the cluster token; proves membership in the direct hello.
+	Secret string
 	// Key identifies this node. The address peers reach it at is this key's
 	// fingerprint.
 	Key identity.KeyPair
@@ -108,6 +110,9 @@ type Manager struct {
 	// waiting are peers that asked us to punch, so an incoming request is
 	// answered by racing rather than ignored.
 	invited map[string][]string
+	// listed are the peers in the introducer's latest reply, so a peer that
+	// stopped registering is no longer reported as unreachable.
+	listed map[string]bool
 }
 
 // backoffEntry records a failed attempt.
@@ -122,6 +127,8 @@ type Manager struct {
 type backoffEntry struct {
 	until time.Time
 	tried string
+	// reason is why the last attempt failed, fit to show a user.
+	reason string
 }
 
 type peerLink struct {
@@ -168,6 +175,7 @@ func (m *Manager) Run(ctx context.Context) {
 		Port:    m.cfg.DirectPort,
 		Key:     m.cfg.Key,
 		Cluster: m.cfg.Cluster,
+		Secret:  m.cfg.Secret,
 		Cert:    m.cfg.Cert,
 		Local:   direct.LocalDialer(fmt.Sprintf("127.0.0.1:%d", m.cfg.DaemonPort)),
 		Log:     m.cfg.Log,
@@ -321,6 +329,7 @@ func (m *Manager) onRegistered(ctx context.Context, you string, peers []rendezvo
 	// because a single missed registration is not a machine going away and
 	// tearing the node out makes every job in flight against it fail.
 	m.mu.Lock()
+	m.listed = live
 	now := time.Now()
 	gone := expired(m.peers, live, now, m.cfg.Poll)
 	m.mu.Unlock()
@@ -381,10 +390,14 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 
 	// Tell the introducer to wake the peer, so both punch at once. Its own
 	// probes are what open its router to us.
+	// The nonce is only an attempt id. crypto/rand.Read never returns an
+	// error (Go 1.24+); it crashes the process instead.
 	nonce := make([]byte, 8)
-	_, _ = rand.NewChaCha8([32]byte{}).Read(nonce)
-	_ = rendezvous.RequestPunch(m.endpoint.Conn(), m.cfg.Rendezvous,
-		m.cfg.Cluster, m.node(), node, hex.EncodeToString(nonce))
+	_, _ = rand.Read(nonce)
+	if err := rendezvous.RequestPunch(m.endpoint.Conn(), m.cfg.Rendezvous,
+		m.cfg.Cluster, m.node(), node, hex.EncodeToString(nonce)); err != nil {
+		m.cfg.Log("asking the introducer to wake %s: %v", short(node), err)
+	}
 
 	at, err := m.raceOrCollide(ctx, node, cands)
 	if err != nil {
@@ -604,7 +617,7 @@ func (m *Manager) noPath(node string, err error, tried string) {
 	if wait > 5*time.Minute {
 		wait = 5 * time.Minute
 	}
-	m.backoff[node] = backoffEntry{until: time.Now().Add(wait), tried: tried}
+	m.backoff[node] = backoffEntry{until: time.Now().Add(wait), tried: tried, reason: reason}
 	m.mu.Unlock()
 
 	m.cfg.Log("no direct path to %s: %s (retrying in %s)", short(node), reason, wait)
@@ -727,6 +740,21 @@ func (m *Manager) Paths() map[string]string {
 	return out
 }
 
+// Unreachable reports, by fingerprint, why each peer the introducer still
+// lists has no direct path. A peer drops out once it links or stops being
+// listed.
+func (m *Manager) Unreachable() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string]string{}
+	for node, b := range m.backoff {
+		if m.listed[node] && m.peers[node] == nil {
+			out[node] = b.reason
+		}
+	}
+	return out
+}
+
 // expired names the peers that should lose their local port.
 //
 // A live connection is never expired, whatever the introducer says. That is
@@ -779,14 +807,6 @@ func short(node string) string {
 		return node[:8]
 	}
 	return node
-}
-
-// trimKind strips a candidate's tag, for logging.
-func trimKind(s string) string {
-	if _, addr, ok := strings.Cut(s, ":"); ok {
-		return addr
-	}
-	return s
 }
 
 // mappingIsOurs reports whether a router's claimed external address is really
