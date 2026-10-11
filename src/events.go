@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,9 @@ type clusterEvent struct {
 	Text string
 	// minor events (net, stray warnings) are shown only with --all.
 	minor bool
+	// peer and addr, when set, tie a node fingerprint to the local address its
+	// link answers at; that address is how the node list names it.
+	peer, addr string
 }
 
 func (e clusterEvent) String() string {
@@ -40,10 +44,14 @@ var (
 	ansiRe      = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	stdlibRe    = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) (.*)$`)
 	kvRe        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*=`)
-	reachableRe = regexp.MustCompile(`^internet: peer (\S+) reachable at \S+ \((.*)\)$`)
-	callingRe   = regexp.MustCompile(`^internet: peer (\S+) is trying to reach us; punching back$`)
-	couldNotRe  = regexp.MustCompile(`^internet: could not meet (\S+?):`)
-	idRe        = regexp.MustCompile(`\b[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})?\b`)
+	reachableRe = regexp.MustCompile(`^internet: peer (\S+) reachable at (\S+) \((.*)\)$`)
+	// kvPairRe is one zerolog console field; values with spaces are quoted.
+	kvPairRe   = regexp.MustCompile(`(?:^|\s)([A-Za-z_][A-Za-z0-9_.]*)=("(?:[^"\\]|\\.)*"|\S*)`)
+	consoleRe  = regexp.MustCompile(`^(\S+)\s+(\S+)\s*(.*)$`)
+	poolRecvRe = regexp.MustCompile(`^received pool/map from \S+ items=(\d+)`)
+	callingRe  = regexp.MustCompile(`^internet: peer (\S+) is trying to reach us; punching back$`)
+	couldNotRe = regexp.MustCompile(`^internet: could not meet (\S+?):`)
+	idRe       = regexp.MustCompile(`\b[0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8})?\b`)
 )
 
 // parseEventLine turns one daemon.log line (zerolog console, zerolog JSON or
@@ -85,21 +93,20 @@ func parseEventLine(line string) (clusterEvent, bool) {
 		at, _ = time.ParseInLocation("2006/01/02 15:04:05", m[1], time.Local)
 		msg = m[2]
 	default:
-		toks := strings.Fields(line)
-		if len(toks) < 3 {
+		cm := consoleRe.FindStringSubmatch(line)
+		if cm == nil || cm[3] == "" {
 			return clusterEvent{}, false
 		}
 		now := time.Now()
-		var t time.Time
-		var err error
-		if t, err = time.Parse("15:04:05", toks[0]); err != nil {
-			t, err = time.Parse("3:04PM", toks[0])
+		t, err := time.Parse("15:04:05", cm[1])
+		if err != nil {
+			t, err = time.Parse("3:04PM", cm[1])
 		}
 		if err != nil {
 			return clusterEvent{}, false
 		}
 		at = time.Date(now.Year(), now.Month(), now.Day(), t.Hour(), t.Minute(), t.Second(), 0, time.Local)
-		switch toks[1] {
+		switch cm[2] {
 		case "INF":
 			level = "info"
 		case "WRN":
@@ -111,17 +118,19 @@ func parseEventLine(line string) (clusterEvent, bool) {
 		default:
 			return clusterEvent{}, false
 		}
-		rest := toks[2:]
-		i := 0
-		for i < len(rest) && !kvRe.MatchString(rest[i]) {
-			i++
-		}
-		msg = strings.Join(rest[:i], " ")
-		for _, kv := range rest[i:] {
-			if k, v, found := strings.Cut(kv, "="); found && kvRe.MatchString(kv) {
-				fields[k] = v
+		rest := cm[3]
+		end := len(rest)
+		for i, m := range kvPairRe.FindAllStringSubmatchIndex(rest, -1) {
+			if i == 0 {
+				end = m[0]
 			}
+			v := rest[m[4]:m[5]]
+			if u, err := strconv.Unquote(v); err == nil {
+				v = u
+			}
+			fields[rest[m[2]:m[3]]] = v
 		}
+		msg = strings.Join(strings.Fields(rest[:end]), " ")
 	}
 	return classifyEvent(at, level, msg, fields)
 }
@@ -146,14 +155,18 @@ func classifyEvent(at time.Time, level, msg string, f map[string]string) (cluste
 	case msg == "peer up":
 		return ev("join", who()+" is up"+paren(f["at"]))
 	case msg == "peer joined over the internet":
-		return ev("join", f["peer"]+" joined over the internet"+paren(f["at"]))
+		e, _ := ev("join", f["peer"]+" joined over the internet"+paren(f["at"]))
+		e.peer, e.addr = f["peer"], f["at"]
+		return e, true
 	case msg == "peer down":
 		return ev("leave", who()+" is gone")
 	case msg == "peer left":
 		return ev("leave", f["peer"]+" left")
 	case reachableRe.MatchString(msg):
 		m := reachableRe.FindStringSubmatch(msg)
-		return ev("link", m[1]+" reachable ("+m[2]+")")
+		e, _ := ev("link", m[1]+" reachable ("+m[3]+")")
+		e.peer, e.addr = m[1], m[2]
+		return e, true
 	case callingRe.MatchString(msg):
 		return ev("link", callingRe.FindStringSubmatch(msg)[1]+" is calling; answering")
 	case strings.HasPrefix(msg, "internet: no direct path to"):
@@ -185,7 +198,11 @@ func classifyEvent(at time.Time, level, msg string, f map[string]string) (cluste
 	case strings.Contains(msg, "system nix now trusts"):
 		return ev("trust", msg)
 	case strings.HasPrefix(msg, "[pool] "):
-		return ev("pool", strings.TrimPrefix(msg, "[pool] "))
+		text := strings.TrimPrefix(msg, "[pool] ")
+		if m := poolRecvRe.FindStringSubmatch(text); m != nil {
+			text = "received pool/map: " + m[1] + " items"
+		}
+		return ev("pool", text)
 	case msg == "daemon starting":
 		return ev("start", "daemon starting"+paren("port "+f["port"]))
 	case strings.HasPrefix(msg, "internet: "):
@@ -292,6 +309,13 @@ func nodeNames(daemonPort int) map[string]string {
 	for _, n := range nodes {
 		if h := n.Capabilities["hostname"]; h != "" && len(n.NodeID) >= 8 {
 			names[n.NodeID[:8]] = h
+			// An internet peer's id in the log is a key fingerprint, not the
+			// node id; its row is the local forwarder address.
+			if i := strings.LastIndex(n.SSHEndpoint, "@"); i >= 0 {
+				if host, _, ok := strings.Cut(n.SSHEndpoint[i+1:], ":"); ok {
+					names[fmt.Sprintf("%s:%d", host, n.DaemonPort)] = h
+				}
+			}
 		}
 	}
 	return names
@@ -303,9 +327,31 @@ func (e clusterEvent) withNames(names map[string]string) clusterEvent {
 		if h, ok := names[id[:8]]; ok {
 			return h
 		}
+		if h, ok := names[names["@"+id[:8]]]; ok {
+			return h
+		}
 		return id
 	})
 	return e
+}
+
+// learn remembers which forwarder address a fingerprint answered at, so
+// withNames can name it later (the newest address wins). Keys starting with
+// "@" never collide with an id or an address.
+func (e clusterEvent) learn(names map[string]string) {
+	if e.peer != "" && e.addr != "" && len(e.peer) >= 8 {
+		names["@"+e.peer[:8]] = e.addr
+	}
+}
+
+// keepLearned carries learned aliases over to a freshly fetched name map.
+func keepLearned(fresh, old map[string]string) map[string]string {
+	for k, v := range old {
+		if strings.HasPrefix(k, "@") {
+			fresh[k] = v
+		}
+	}
+	return fresh
 }
 
 func newEventsCmd() *cobra.Command {
@@ -325,6 +371,9 @@ func newEventsCmd() *cobra.Command {
 				return err
 			}
 			for _, e := range evs {
+				e.learn(names)
+			}
+			for _, e := range evs {
 				fmt.Println(e.withNames(names))
 			}
 			if !follow {
@@ -335,8 +384,9 @@ func newEventsCmd() *cobra.Command {
 			refreshed := time.Now()
 			return followEvents(ctx, logFile, all, func(e clusterEvent) {
 				if time.Since(refreshed) > 10*time.Second {
-					names, refreshed = nodeNames(port), time.Now()
+					names, refreshed = keepLearned(nodeNames(port), names), time.Now()
 				}
+				e.learn(names)
 				fmt.Println(e.withNames(names))
 			})
 		},
