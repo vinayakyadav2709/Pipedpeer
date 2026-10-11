@@ -11,7 +11,7 @@ with each entry marked when resolved.
 | 1 | A per-stage timeline for every run: where the time goes | Done | `b30092d` |
 | 2 | Why a node was chosen, what the shim distributed, and the cluster at a glance | Done | `6d04e97` |
 | 3 | A live web page served by the daemon at `/ui` | Done | `fddf510` |
-| 4 | Benchmarks, a combined capstone script, and the updated demo flow | Done | `6c3d41b`, `3ec5100`, DOCSCOMMIT |
+| 4 | Benchmarks, a combined capstone script, and the updated demo flow | Done | `6c3d41b`, `3ec5100`, `9bde7aa` |
 
 Every phase below has the same parts:
 - **What changed**
