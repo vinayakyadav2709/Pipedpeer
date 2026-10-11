@@ -17,17 +17,27 @@
 package authtoken
 
 import (
+	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/rs/zerolog/log"
 )
 
 // Header is where the token travels. Not a cookie and not a query parameter:
@@ -146,6 +156,19 @@ func Middleware(next http.Handler) http.Handler {
 				got = strings.TrimPrefix(a, "Bearer ")
 			}
 		}
+		if got == "" && r.Method == http.MethodGet && r.URL.Path == "/health" {
+			if c := r.Header.Get(ChallengeHeader); validChallenge(c) {
+				p, err := proof(want, c, r.TLS)
+				if err == nil {
+					// Nothing but the proof: an asker without the token learns
+					// only that this host holds the one it challenged with.
+					w.Header().Set(ProofHeader, p)
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				log.Warn().Err(err).Str("remote", r.RemoteAddr).Msg("cannot bind the token proof to this TLS session")
+			}
+		}
 		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -168,16 +191,152 @@ func isDaemonAPI(p string) bool {
 }
 
 func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
-	tok := Current()
-	if tok != "" && isDaemonAPI(r.URL.Path) && r.Header.Get(Header) == "" {
-		r = r.Clone(r.Context())
-		r.Header.Set(Header, tok)
-	}
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	// A challenge is the proof exchange itself; it must leave bare.
+	if r.Header.Get(ChallengeHeader) != "" {
+		return base.RoundTrip(r)
+	}
+	if tok := Current(); tok != "" && isDaemonAPI(r.URL.Path) && r.Header.Get(Header) == "" {
+		r = r.Clone(r.Context())
+		r.Header.Set(Header, tok)
+	}
+	// Whoever set the token, the host gets it only once it has shown it
+	// already holds it. Answering on the daemon port is not enough: the LAN
+	// sweep and a stale address book both reach hosts nobody vetted.
+	if sent := r.Header.Get(Header); sent != "" {
+		if err := prove(r.Context(), base, r.URL.Scheme, r.URL.Host, sent); err != nil {
+			if r.Body != nil {
+				_ = r.Body.Close() // RoundTrip owns the body, even on error
+			}
+			return nil, err
+		}
+	}
 	return base.RoundTrip(r)
+}
+
+// ChallengeHeader and ProofHeader carry the exchange in which a host proves
+// it holds the token before being sent it.
+const (
+	ChallengeHeader = "X-Pipedpeer-Challenge"
+	ProofHeader     = "X-Pipedpeer-Proof"
+	proofLabel      = "EXPORTER-pipedpeer-token-proof"
+)
+
+// proof is the answer to a challenge. Over TLS it is bound to the session's
+// exporter, so a host that merely relays the challenge to a real daemon
+// cannot pass that daemon's answer off as its own. Over plain HTTP there is
+// no session to bind to, and the binding is "".
+func proof(tok, challenge string, cs *tls.ConnectionState) (string, error) {
+	ekm := ""
+	if cs != nil {
+		b, err := cs.ExportKeyingMaterial(proofLabel, nil, 32)
+		if err != nil {
+			return "", err
+		}
+		ekm = hex.EncodeToString(b)
+	}
+	m := hmac.New(sha256.New, []byte(tok))
+	m.Write([]byte("pipedpeer-proof/1|" + challenge + "|" + ekm))
+	return hex.EncodeToString(m.Sum(nil)), nil
+}
+
+func validChallenge(c string) bool {
+	if len(c) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(c)
+	return err == nil
+}
+
+// isLoopback matches the hosts tlsid never upgrades: the job's own daemon.
+func isLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
+}
+
+var (
+	provenMu sync.Mutex
+	proven   = map[string]string{} // "host:port" -> the token it proved it holds
+	refused  = map[string]bool{}   // "host:port" -> refusal already logged
+)
+
+// Prove checks that the daemon at addr ("host:port") holds this process's
+// token, for callers that attach the token outside http.DefaultTransport
+// (the websocket dialer). Success is remembered per addr; failure is not, so
+// a peer that was down is asked again next time.
+func Prove(ctx context.Context, addr string) error {
+	return prove(ctx, http.DefaultTransport, "http", addr, Current())
+}
+
+// ponytail: a proof is remembered for the life of the process. Over TLS the
+// pin keeps it honest; over plain HTTP a host that takes the address over
+// later inherits it. Expire entries if that matters.
+func prove(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) error {
+	if tok == "" || isLoopback(addr) {
+		return nil
+	}
+	provenMu.Lock()
+	ok := proven[addr] == tok
+	provenMu.Unlock()
+	if ok {
+		return nil
+	}
+	err := askProof(ctx, rt, scheme, addr, tok)
+	provenMu.Lock()
+	defer provenMu.Unlock()
+	if err == nil {
+		proven[addr] = tok
+		delete(refused, addr)
+		return nil
+	}
+	err = fmt.Errorf("%s could not prove it holds the cluster token; not sending it: %w", addr, err)
+	if !refused[addr] {
+		refused[addr] = true
+		log.Warn().Err(err).Str("addr", addr).Msg("withholding the cluster token")
+	}
+	return err
+}
+
+func askProof(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) error {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Errorf("making a challenge: %w", err)
+	}
+	challenge := hex.EncodeToString(b)
+	if scheme == "" {
+		scheme = "http"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+addr+"/health", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(ChallengeHeader, challenge)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	got := resp.Header.Get(ProofHeader)
+	if got == "" {
+		return fmt.Errorf("its reply carried no proof (HTTP %d)", resp.StatusCode)
+	}
+	want, err := proof(tok, challenge, resp.TLS)
+	if err != nil {
+		return fmt.Errorf("binding the proof to the TLS session: %w", err)
+	}
+	if !hmac.Equal([]byte(got), []byte(want)) {
+		return errors.New("its proof does not match")
+	}
+	return nil
 }
 
 // Install makes every outbound daemon call carry the token. Wrapping the
