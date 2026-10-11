@@ -402,3 +402,47 @@ func ephemeralRange(t *testing.T) (int, int) {
 	}
 	return lo, hi
 }
+
+// TestTheAdoptedCollisionSocketHasNoReadDeadline: the socket OpenMany hands
+// back is read by QUIC from then on. It kept the probe loop's deadline of one
+// budget, so every read after it timed out and the link died seconds later.
+func TestTheAdoptedCollisionSocketHasNoReadDeadline(t *testing.T) {
+	peer := loopbackConn(t)
+	const budget = time.Second
+
+	type result struct {
+		conn *net.UDPConn
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		c, _, err := OpenMany(context.Background(), addrOf(peer), "beefbeefbeefbeef", budget)
+		done <- result{c, err}
+	}()
+
+	// Answer the first socket that wrote to us, as a spray hit would.
+	_ = peer.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 1500)
+	_, from, err := peer.ReadFromUDPAddrPort(buf)
+	if err != nil {
+		t.Fatalf("no probe from OpenMany's sockets: %v", err)
+	}
+	hit := probe{kind: probeRequest, from: fingerprint8("cafecafecafecafe")}
+	if _, err := peer.WriteToUDPAddrPort(hit.marshal(), from); err != nil {
+		t.Fatal(err)
+	}
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("OpenMany reported no hit: %v", r.err)
+	}
+	defer r.conn.Close()
+
+	// Past the budget, the socket must still read.
+	time.Sleep(budget + 300*time.Millisecond)
+	if _, err := peer.WriteToUDPAddrPort([]byte("quic"), netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), addrOf(r.conn).Port())); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := r.conn.ReadFromUDPAddrPort(buf); err != nil {
+		t.Fatalf("the adopted socket stopped reading after the collision budget: %v", err)
+	}
+}

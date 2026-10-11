@@ -524,3 +524,56 @@ func TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch(t *testing.T) {
 		t.Error("re-registered on an unchanged address; every reply would cause another")
 	}
 }
+
+// TestAMappedRaceAddressKeepsItsCandidateKind: the race answers with an
+// IPv4-mapped address, and comparing it raw to the plain-IPv4 candidates
+// labelled every ordinary punch "punched", hiding that reflex links worked.
+func TestAMappedRaceAddressKeepsItsCandidateKind(t *testing.T) {
+	cands := []direct.Candidate{
+		{Kind: direct.KindLAN, Addr: netip.MustParseAddrPort("10.0.0.2:38447")},
+		{Kind: direct.KindReflex, Addr: netip.MustParseAddrPort("198.51.100.7:40001")},
+	}
+	if got := pathKind(cands, netip.MustParseAddrPort("[::ffff:198.51.100.7]:40001")); got != "reflex" {
+		t.Errorf("mapped reflex address labelled %q, want reflex", got)
+	}
+	if got := pathKind(cands, netip.MustParseAddrPort("198.51.100.7:40999")); got != "punched" {
+		t.Errorf("an address no candidate names labelled %q, want punched", got)
+	}
+}
+
+// TestADeadLinkDoesNotDropItsReplacement: a dead link's watchers (connection
+// closed, forwarder stopped) fire after a reconnect may already have put a
+// new link in its place. Dropping by node alone tore the new one down too.
+func TestADeadLinkDoesNotDropItsReplacement(t *testing.T) {
+	listen := func() net.Listener {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		return ln
+	}
+	old, cur := listen(), listen()
+	var gone []string
+	m := &Manager{
+		peers: map[string]*peerLink{},
+		cfg: Config{
+			Log:        func(string, ...any) {},
+			OnPeerGone: func(node, addr string) { gone = append(gone, addr) },
+		},
+	}
+	m.peers["peer-1"] = &peerLink{addr: cur.Addr().String(), listener: cur, stop: func() {}}
+
+	m.dropLinkIf("peer-1", old)
+	if m.peers["peer-1"] == nil || len(gone) != 0 {
+		t.Fatal("the old link's teardown dropped the replacement link")
+	}
+	m.dropLinkIf("peer-1", cur)
+	if m.peers["peer-1"] != nil || len(gone) != 1 {
+		t.Fatalf("the current link's own teardown did not drop it (gone=%v)", gone)
+	}
+	m.dropLinkIf("peer-1", cur)
+	if len(gone) != 1 {
+		t.Fatalf("a second teardown of the same link reported it gone again (gone=%v)", gone)
+	}
+}

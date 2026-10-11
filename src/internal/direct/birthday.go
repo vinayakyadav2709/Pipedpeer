@@ -2,6 +2,7 @@ package direct
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -211,6 +212,13 @@ func OpenMany(ctx context.Context, peer netip.AddrPort, self string, budget time
 
 	select {
 	case h := <-found:
+		// The probe loop armed a read deadline of one budget. QUIC reads this
+		// socket from now on, and an inherited deadline makes every read after
+		// it time out, so the link dies seconds after it came up.
+		if err := h.conn.SetReadDeadline(time.Time{}); err != nil {
+			_ = h.conn.Close()
+			return nil, netip.AddrPort{}, fmt.Errorf("clearing the collision socket's read deadline: %w", err)
+		}
 		winner = h.conn
 		return h.conn, h.from, nil
 	case <-ctx.Done():
