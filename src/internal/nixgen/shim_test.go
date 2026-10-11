@@ -179,7 +179,7 @@ import struct
 import sys
 import tempfile
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CACHE = {}
 PROBES = [0]
@@ -188,6 +188,7 @@ MAX_CHUNK = [0]
 # a test: it is a running maximum, so a phase that distributed nothing leaves it
 # untouched and the assertion still passes on the earlier phase's work.
 POOL_CALLS = [0]
+COUNT_LOCK = threading.Lock()
 TMP = tempfile.mkdtemp(prefix="pp-shim-")
 
 class Handler(BaseHTTPRequestHandler):
@@ -214,7 +215,8 @@ class Handler(BaseHTTPRequestHandler):
             for _ in range(req["items_frames"]):
                 f, rest = rf(rest)
                 raw.append(f)
-            POOL_CALLS[0] += 1
+            with COUNT_LOCK:
+                POOL_CALLS[0] += 1
             # Sizes are measured on the wire, before decompression: the point
             # of MAX_CHUNK is what actually crossed.
             b = [len(f) for f in raw]
@@ -231,7 +233,8 @@ class Handler(BaseHTTPRequestHandler):
                 import zlib
                 raw = [zlib.decompress(r) for r in raw]
         else:
-            POOL_CALLS[0] += 1
+            with COUNT_LOCK:
+                POOL_CALLS[0] += 1
             g = b""
             if req.get("items_b64"):
                 b = [len(i) for i in req["items"]]
@@ -272,7 +275,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-srv = HTTPServer(("127.0.0.1", 0), Handler)
+# Threaded: one request at a time made a call's
+# requests wait behind the previous call's lost-race chunks, so on a loaded
+# machine they were counted during the next call instead of their own.
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+srv.daemon_threads = True
 PORT = srv.server_address[1]
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
@@ -641,11 +648,15 @@ assert 0 < MAX_CHUNK[0] < big.nbytes // 4, "a task carried the array itself: %d 
 # The fake daemon runs tasks in this process, so the remote runner's nesting
 # marker lands here; on a real peer it lands in that peer's worker.
 os.environ.pop("PIPEDPEER_JB_NESTED", None)
-before = POOL_CALLS[0]
+# Judged by this call's own decisions, not POOL_CALLS: this fake daemon serves
+# one request at a time, so chunks the previous call sent and then lost the
+# race to are still being counted here, seconds later, on a loaded machine.
+before = len(shim._STATS["decisions"])
 res = joblib.Parallel(n_jobs=-1)(joblib.delayed(abs)(-i) for i in range(24))
 assert res == list(range(24)), res
-assert POOL_CALLS[0] == before, "microseconds of work were shipped"
-assert any(d["op"] == "joblib" and not d["shipped"] for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+mine = shim._STATS["decisions"][before:]
+assert mine and all(d["op"] == "joblib" and not d["shipped"] for d in mine), \
+    "microseconds of work were shipped: %r" % mine
 print("JOBLIB-RACE-OK")
 `, "JOBLIB-RACE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }

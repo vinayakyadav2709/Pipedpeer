@@ -310,8 +310,9 @@ class _SubmitBatcher:
     queued; once the queue has been idle for _SUBMIT_IDLE, or someone asks
     for a result, they are grouped by function and each group goes through
     _ClusterPool._run as a starmap, where the usual measurement and cost
-    gate decide what ships. A group that fails is re-run locally call by
-    call, so an exception lands on the one future that raised it.
+    gate decide what ships. A call that raises comes back as a _Raised
+    value, so its exception lands on its own future and no other call runs
+    twice; only a group that fails outside its calls is re-run call by call.
     """
 
     def __init__(self, pool):
@@ -386,7 +387,8 @@ class _SubmitBatcher:
         for group in groups.values():
             fn = group[0][0]
             try:
-                results = self._pool._run(fn, [e[1] for e in group], starmap=True)
+                results = self._pool._run(fn, [e[1] for e in group], starmap=True,
+                                          catch=True)
             except Exception as e:
                 _log("batch of %d %r calls raised (%r); re-running each "
                      "locally so the error lands on its own call"
@@ -394,7 +396,10 @@ class _SubmitBatcher:
                 self._one_by_one(fn, group)
                 continue
             for entry, r in zip(group, results):
-                _settle(entry, r, None)
+                if isinstance(r, _Raised):
+                    _settle(entry, None, r.exc)
+                else:
+                    _settle(entry, r, None)
 
     def _one_by_one(self, fn, group):
         ctx = self._pool._local_ctx(fn)
@@ -553,11 +558,11 @@ class _ClusterPool:
             for r in self._run(func, batch, starmap):
                 yield r
 
-    def _run(self, func, items, starmap=False):
+    def _run(self, func, items, starmap=False, catch=False):
         _add_stat("mapped_items", len(items))
         self._resize()
         if not self._remote or len(items) <= self._measure_items:
-            return self._local(func, items, starmap)
+            return self._local(func, items, starmap, catch)
         # Measure the first few locally, then decide whether to spill the rest.
         # The batch is as wide as the pool: measuring four items on a twenty
         # core machine left sixteen cores idle for the length of one item, a
@@ -565,7 +570,7 @@ class _ClusterPool:
         head_n = max(self._measure_items, min(self._procs, len(items) // 2))
         head, tail = items[:head_n], items[head_n:]
         t0 = time.monotonic()
-        head_results = self._local(func, head, starmap)
+        head_results = self._local(func, head, starmap, catch)
         wall = time.monotonic() - t0
         if not tail:
             return head_results
@@ -575,7 +580,7 @@ class _ClusterPool:
         lanes = max(1, min(len(head), self._procs))
         cost = wall * lanes / max(len(head), 1)
         if cost <= 0:
-            return head_results + self._local(func, tail, starmap)
+            return head_results + self._local(func, tail, starmap, catch)
 
         payload = _func_payload(func) or _func_pickle(func)
         if payload is not None and payload.get("pickled"):
@@ -586,17 +591,17 @@ class _ClusterPool:
             _record("pool", len(tail), False, "unshippable")
             _log("kernel %r cannot ship at all, by source or by value; "
                  "staying local" % getattr(func, "__name__", "?"))
-            return head_results + self._local(func, tail, starmap)
+            return head_results + self._local(func, tail, starmap, catch)
         if not _FORCE and len(tail) * cost < _POOL_MIN_WORK:
             _log("tail is %.2fs of work, below the %.2fs dispatch floor; staying local"
                  % (len(tail) * cost, _POOL_MIN_WORK))
             _decide("pool.map", False, "%d items x %.3fs = %.2fs of work, under the %.2fs worth a round trip"
                     % (len(tail), cost, len(tail) * cost, _POOL_MIN_WORK))
-            return head_results + self._local(func, tail, starmap)
+            return head_results + self._local(func, tail, starmap, catch)
         _decide("pool.map", True, "forced" if _FORCE else
                 "%d items x %.3fs = %.2fs of work, over the %.2fs worth a round trip"
                 % (len(tail), cost, len(tail) * cost, _POOL_MIN_WORK))
-        return head_results + self._race(func, tail, starmap, cost, payload)
+        return head_results + self._race(func, tail, starmap, cost, payload, catch)
 
     def _local_ctx(self, func):
         """The pool that can actually run func on this machine.
@@ -625,19 +630,23 @@ class _ClusterPool:
                  % getattr(func, "__name__", "?"))
         return self._threads
 
-    def _local(self, func, items, starmap):
+    def _local(self, func, items, starmap, catch=False):
         _log("local %d items" % len(items))
         _record_local(len(items))
         ctx = self._local_ctx(func)
+        if catch:
+            return ctx.starmap(_apply_catching, [(func, v) for v in items])
         if starmap:
             return ctx.starmap(func, items)
         return ctx.map(func, items)
 
-    def _race(self, func, items, starmap, per_item_cost, payload):
+    def _race(self, func, items, starmap, per_item_cost, payload, catch=False):
         self._spilled = True
 
         def run_local(vals):
             ctx = self._local_ctx(func)
+            if catch:
+                return ctx.starmap(_apply_catching, [(func, v) for v in vals])
             if starmap:
                 # _apply carries func as an argument, so a process pool would
                 # have to pickle it as data; route by the same test either way.
@@ -703,6 +712,9 @@ class _ClusterPool:
         ms = (time.monotonic() - t0) * 1000
         receipt = info.get("receipt")
         _record(kind, len(out), True, "", ms, receipt)
+        out = _RemotePairs(out)
+        out.elsewhere = sum(int(p.get("items", 0)) for p in (receipt or {}).get("parts", [])
+                            if str(p.get("where", "")).startswith("peer:"))
         if payload.get("pickled"):
             # Counted here rather than where the tier is chosen, so it counts
             # items that were actually SENT by value. Counting the tail at
@@ -747,6 +759,15 @@ class _ClusterPool:
 
     def __exit__(self, *a):
         self.close()
+
+
+class _RemotePairs(list):
+    """A chunk's [(orig_idx, result), ...], and how many ran on another machine.
+
+    A daemon with no free peer runs a chunk itself, on this machine; those
+    results are not the cluster's, and counting them as remote_used made
+    the receipt and /ui claim work that never left. No receipt, no claim."""
+    elsewhere = 0
 
 
 def _race_items(items, per_item_cost, width, run_local, run_remote):
@@ -799,7 +820,10 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
         # local could find the queue empty and the claim not yet listed, and
         # return with that chunk's slots still empty.
         with lock:
-            if not queue:
+            # Once every item has its result the race is over: a peer
+            # thread that comes back for more must not send anything, or
+            # its request lands in the middle of the script's next call.
+            if not queue or done.is_set():
                 return None
             chunk = queue.pop(0)
             if remote:
@@ -848,8 +872,13 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
                         won += 1
             with lock:
                 remote_secs.append(time.monotonic() - t0)
-            if won:
-                _add_stat("remote_used", won)
+            # ponytail: the receipt says how many of a chunk's items ran
+            # elsewhere, not which, so a mixed chunk that won only in part is
+            # counted pro rata; per-item placement on the wire would make it exact.
+            el = min(len(res), getattr(res, "elsewhere", len(res)))
+            used = won if el == len(res) else won * el // max(1, len(res))
+            if used:
+                _add_stat("remote_used", used)
 
     def local_secs(chunk):
         return per_item_cost * len(chunk) / max(1, min(width, len(chunk)))
@@ -877,7 +906,12 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
 
     def remote_run():
         inflight = max(1, min(_REMOTE_INFLIGHT, len(chunks) - 1))
-        threads = [threading.Thread(target=deliver_loop, daemon=False) for _ in range(inflight)]
+        # Daemons, unlike the local side: once the race is done a chunk still
+        # in flight is a loser whose answer is thrown away, and as a non-daemon
+        # it held the interpreter open at exit for as long as a slow peer took
+        # (up to the 600 s request timeout). t_local below is what keeps a
+        # live race - and the receipt of what it kept - alive at exit.
+        threads = [threading.Thread(target=deliver_loop, daemon=True) for _ in range(inflight)]
         for t in threads:
             t.start()
 
@@ -911,15 +945,13 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
                     time.sleep(0.02)
         except BaseException as e:
             failed.append(e)
-            with lock:
-                queue.clear()  # the call is failing: send no more chunks out
         finally:
-            done.set()
+            done.set()  # also stops take() handing peers new chunks
 
     done = threading.Event()
     # Explicitly not daemons: a thread inherits daemon from its creator,
-    # and a batch of submits runs on the daemon batcher thread, so its
-    # in-flight chunks would be killed at exit and never reach the receipt.
+    # and a batch of submits runs on the daemon batcher thread, so a live
+    # race would be killed at exit and its results never reach the caller.
     t_local = threading.Thread(target=local_run, daemon=False)
     t_remote = threading.Thread(target=remote_run, daemon=False)
     t_local.start()
@@ -1308,6 +1340,28 @@ def _func_pickle(func):
 def _apply(func, item):
     """Run func over one starmap item (a tuple of args)."""
     return func(*item) if isinstance(item, tuple) else func(item)
+
+
+class _Raised(object):
+    """A call's exception, returned in place of its result."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+
+def _apply_catching(func, item):
+    """_apply, with the call's exception returned instead of raised.
+
+    For batched submits: one raising call used to fail its whole map, and
+    the batch was then re-run call by call - so every call that had already
+    finished ran a second time, side effects and all. Carried as a value,
+    the error reaches its own future and nothing runs twice. Only local
+    runs need it: a call raising on a peer fails that chunk, and local
+    re-runs the chunk through here."""
+    try:
+        return _apply(func, item)
+    except Exception as e:
+        return _Raised(e)
 
 
 def _adaptive_chunk(per_item_cost):
@@ -3329,6 +3383,9 @@ def _install_ddp():
     # model and optimizer before its first step.
     _JOIN = [os.environ.get("PIPEDPEER_DDP_JOIN") == "1"]
     _JOIN_AT = [None]
+    # The learning rates the ring had when this rank took its model, per
+    # optimizer, put back once the skipped epochs are behind it.
+    _JOIN_LR = [None]
     # Every optimizer the script built, so a model can be handed to a joiner.
     _OPTS = []
     # Set when the daemon has told this rank the ring is better off without
@@ -3418,11 +3475,14 @@ def _install_ddp():
         try:
             world = int(reply.get("world") or _WORLD)
         except (TypeError, ValueError):
+            _log("ddp: ignoring a ring size the daemon sent as %r; keeping %d"
+                 % (reply.get("world"), _WORLD))
             world = _WORLD
         if w and len(w) == world and world >= _WORLD:
             try:
                 w = [float(x) for x in w]
             except (TypeError, ValueError):
+                _log("ddp: ignoring shares the daemon sent as %r" % (w,))
                 w = None
             # A zero share is a rank that has left the ring. The daemon sends
             # six decimals, so thirds sum to 0.999999: renormalised here, the
@@ -3435,6 +3495,13 @@ def _install_ddp():
                 if reply.get("join") is not None:
                     p["join"] = int(reply["join"])
                     p["from"] = int(reply.get("from", 0))
+                else:
+                    # A note states the whole ring, and names a join for as
+                    # long as one is pending. One without it means the join
+                    # ended (the joiner died, or took its model), so an
+                    # earlier note's join must not survive to the boundary.
+                    p.pop("join", None)
+                    p.pop("from", None)
                 _PENDING[0] = p
         if reply.get("down") is not None:
             _log("ddp: %s" % reply.get("why", "rank %s left the ring" % reply.get("down")))
@@ -3973,7 +4040,7 @@ def _install_ddp():
         _OPTS.append(weakref.ref(self))
         _orig_step = self.step
 
-        def _step(*sa, **skw):
+        def _step(_self, *sa, **skw):
             if _BACKEND == "daemon":
                 n = _STEPN.get(id(self), 0)
                 _STEPN[id(self)] = n + 1
@@ -4033,7 +4100,11 @@ def _install_ddp():
                     p.grad.div_(_WORLD)
             return _orig_step(*sa, **skw)
 
-        self.step = _step
+        # A bound method, as the optimizer's own step is: an LR scheduler
+        # wraps opt.step through its __func__, and a plain function made
+        # every script with a scheduler fail at the scheduler's constructor.
+        import types as _types
+        self.step = _types.MethodType(_step, self)
 
     def _forward(self, *args, **kw):
         if _WORLD > 1 and not _NATIVE_DDP and self not in _FWD:
@@ -4164,6 +4235,11 @@ def _install_ddp():
                 return resp.status, resp.read()
         except urllib.error.HTTPError as e:
             return e.code, e.read()
+        except (urllib.error.URLError, OSError) as e:
+            # The lead daemon is gone or unreachable: status 0, so every
+            # caller reports it in its own words instead of a traceback.
+            _log("ddp: %s failed: %s" % (url.split("?")[0], getattr(e, "reason", e)))
+            return 0, str(getattr(e, "reason", e)).encode()
 
     def _live_opts():
         return [o for o in (r() for r in _OPTS) if o is not None]
@@ -4184,20 +4260,42 @@ def _install_ddp():
             "opts": [o.state_dict() for o in opts],
             "stepn": [_STEPN.get(id(o), 0) for o in opts],
         }
-        buf = io.BytesIO()
-        _th.save(state, buf)
-        payload = buf.getvalue()
         header = json.dumps({"group": _GROUP, "rank": _RANK, "join": join,
                              "boundary": boundary, "seq": _SEQ[0], "world": world,
                              "weights": weights,
                              "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
-        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
-        code, reply = _ddp_request(_ddp_base() + "/snapshot", body,
+        # Header, length and model in one buffer, sent as a view of it: the
+        # model used to be copied out of the buffer and then again into the
+        # body, three copies of a multi-GB model at the epoch boundary.
+        buf = io.BytesIO()
+        buf.write(header + b"\n" + b"\0\0\0\0")
+        start = buf.tell()
+        _th.save(state, buf)
+        size = buf.tell() - start
+        buf.seek(start - 4)
+        buf.write(struct.pack(">I", size))
+        code, reply = _ddp_request(_ddp_base() + "/snapshot", buf.getbuffer(),
                                    "application/vnd.pipedpeer.ddp", timeout=240)
         if code != 200:
             raise RuntimeError("HTTP %d: %s" % (code, reply[:300]))
         _log("ddp: handed the model and optimizer to joining rank %d (%.1f MiB)"
-             % (join, len(payload) / 1048576.0))
+             % (join, size / 1048576.0))
+
+    def _drop_joiner(join, world, why):
+        """Tell the lead daemon a joining rank will never get its model.
+
+        The ring grew to count it at this boundary, so without this every
+        sync would wait out the partial window for a rank that never posts,
+        and the refit stays off. Dropped, its share moves back to the ranks
+        the ring had."""
+        import json
+        code, reply = _ddp_request(_ddp_base() + "/down", json.dumps(
+            {"group": _GROUP, "rank": join, "world": world,
+             "why": "the model could not be handed to it: %s" % why}).encode())
+        if code != 200:
+            _log("ddp: could not tell the ring to drop joining rank %d (HTTP %d %s); "
+                 "every sync waits out the partial window until it does"
+                 % (join, code, reply[:200]))
 
     def _ring_switch(call):
         """Take the ring's pending change at this epoch boundary."""
@@ -4212,6 +4310,7 @@ def _install_ddp():
                 except Exception as e:
                     _log("ddp: could not hand the model to joining rank %s (%s); "
                          "the ring carries on and drops it" % (p["join"], e))
+                    _drop_joiner(int(p["join"]), world, str(e)[:200])
             _log("ddp: the ring grows from %d to %d ranks at this epoch"
                  % (_WORLD, world))
         _WORLD = world
@@ -4273,6 +4372,8 @@ def _install_ddp():
                 # nobody else makes.
                 _STEPPED.add(o)
                 _STEPN[id(o)] = int(stepn)
+        _JOIN_LR[0] = [(weakref.ref(o), [g.get("lr") for g in o.param_groups])
+                       for o in opts]
         _SEQ[0] = int(hdr["seq"])
         _WORLD = int(hdr["world"])
         if hdr.get("weights"):
@@ -4284,6 +4385,26 @@ def _install_ddp():
              "skipping the %d epoch(s) the ring already did"
              % (_RANK, _WORLD, hdr.get("rank", 0), int(hdr["boundary"])))
         return int(hdr["boundary"])
+
+    def _restore_join_lr():
+        """Put back the learning rate the ring handed over.
+
+        The script's own per-epoch code still ran over the skipped epochs, so
+        a scheduler stepped once per epoch decayed the loaded rate a second
+        time for every one of them - the ring's rate is already decayed for
+        those epochs. Its step count now matches the ring's, so only the
+        rate is restored."""
+        for ref, lrs in _JOIN_LR[0] or ():
+            o = ref()
+            if o is None:
+                continue
+            for g, lr in zip(o.param_groups, lrs):
+                if lr is not None and g.get("lr") != lr:
+                    _log("ddp: learning rate %g restored to the ring's %g after "
+                         "the skipped epochs stepped this rank's scheduler"
+                         % (g.get("lr"), lr))
+                    g["lr"] = lr
+        _JOIN_LR[0] = None
 
     def _iter(self):
         sampler = getattr(self, "sampler", None)
@@ -4298,6 +4419,7 @@ def _install_ddp():
                     _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
                     return iter(())
                 _JOIN[0] = False
+                _restore_join_lr()
             # An epoch boundary is the one place the ring can change safely:
             # the sampler re-slices here anyway, so no rank is part-way
             # through a shard when the boundaries move.
@@ -4645,7 +4767,11 @@ def _install_joblib():
 
         import pickle
         try:
-            pickle.dumps(tail[0])
+            # The task as it would travel: its large arrays go once per chunk
+            # in the globals frame, so the probe leaves them out. Pickling the
+            # whole first task copied the full training set just to throw it
+            # away. An argument that still cannot travel is caught per chunk.
+            pickle.dumps(_jb_share([(0, tail[0])])[0][0][1])
         except Exception:
             # A lambda or a closure: plain pickle has no name to send it by.
             _decide("joblib", False, "the task cannot be pickled to send")

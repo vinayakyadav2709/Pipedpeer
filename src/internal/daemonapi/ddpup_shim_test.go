@@ -44,6 +44,9 @@ if __name__ == "__main__":
     loader = DataLoader(TensorDataset(torch.arange(240), X, y), batch_size=8, shuffle=True)
     model = torch.nn.Linear(4, 1)
     opt = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    # Stepped once an epoch, the empty ones a joiner skips included: those
+    # steps must not decay the rate the joiner took from the ring a second time.
+    sched = torch.optim.lr_scheduler.ExponentialLR(opt, 0.8)
     for epoch in range(int(sys.argv[1])):
         seen = []
         for idx, xb, yb in loader:
@@ -52,6 +55,7 @@ if __name__ == "__main__":
             opt.step()
             seen.extend(idx.tolist())
             time.sleep(0.1)
+        sched.step()
         print("EPOCH", epoch, len(seen), flush=True)
     print("SEEN", " ".join(str(i) for i in sorted(seen)))
     print("PARAMS", " ".join("%.6f" % v for p in model.parameters() for v in p.detach().flatten().tolist()))
@@ -149,6 +153,10 @@ if __name__ == "__main__":
 	}
 	if field(joiner, "EPOCH 0 ") != "0" {
 		t.Errorf("the joiner trained the ring's first epoch again:\n%s", joiner)
+	}
+
+	if !strings.Contains(joiner, "restored to the ring's") {
+		t.Errorf("the joiner never put back the ring's learning rate:\n%s", joiner)
 	}
 
 	p0 := field(ranks[0].out.String(), "PARAMS ")

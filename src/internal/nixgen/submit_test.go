@@ -66,6 +66,43 @@ if __name__ == "__main__":
 	}
 }
 
+// TestShimSubmitErrorRunsNoCallTwice: a batch with one raising call used to
+// fail as a whole and be re-run call by call, so every call that had already
+// finished ran a second time - its side effects too. Each call must run once.
+func TestShimSubmitErrorRunsNoCallTwice(t *testing.T) {
+	script := `
+import concurrent.futures as cf
+import os
+
+LOG = os.path.abspath("calls.log")
+
+def work(x):
+    fd = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+    os.write(fd, b"%d\n" % x)
+    os.close(fd)
+    if x == 13:
+        raise ValueError("bad item %d" % x)
+    return x * 2
+
+if __name__ == "__main__":
+    with cf.ProcessPoolExecutor(max_workers=4) as ex:
+        futs = [ex.submit(work, i) for i in range(48)]
+        cf.wait(futs, timeout=120)
+    assert isinstance(futs[13].exception(), ValueError), repr(futs[13].exception())
+    assert all(f.result() == i * 2 for i, f in enumerate(futs) if i != 13)
+    with open(LOG) as f:
+        calls = [int(l) for l in f]
+    twice = sorted({x for x in calls if calls.count(x) > 1})
+    assert not twice, "calls run twice: %r" % twice
+    assert sorted(calls) == list(range(48)), sorted(calls)
+    print("SUBMIT-ONCE-OK")
+`
+	res := runPoolScript(t, map[string]string{"job.py": script}, "job.py")
+	if !strings.Contains(res.stdout, "SUBMIT-ONCE-OK") {
+		t.Fatalf("missing sentinel\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+	}
+}
+
 // TestShimPoolApplyAsyncSpreadsWithCallbacks: apply_async in a loop is
 // distributed, callback and error_callback fire once per call before get()
 // returns, and the close/join/get pattern still completes.
