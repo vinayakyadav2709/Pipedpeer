@@ -3,22 +3,24 @@
 
 Plain PyTorch. No distributed.init_process_group, no DistributedDataParallel
 import — `pipedpeer run --ddp 3` makes this transparently a 3-rank DDP run
-(weight sync after every Optimizer.step via the shim hook).
+(gradients averaged after every Optimizer.step via the shim hook).
 
-It does need to say which slice of the data it is training on. Sharding is
-automatic for a DataLoader, whose sampler the shim can swap; a script like
-this one, which indexes its tensors directly, has to do it itself. Without the
-three lines below every rank trains on the whole dataset, the averaged
-gradient equals the single-process gradient exactly, and the run is correct,
-slower than one machine, and silent about it. Measured before they were added:
-97.7s across two machines against 55.0s on one, with the losses agreeing to
-six digits.
+The data comes through a DataLoader, and that is what lets pipedpeer split it:
+the shim swaps the loader's sampler so each rank trains on its own share. It
+is also what lets the ring change shape mid-run — a rank whose machine dies
+hands its share to the others at the next epoch, and a machine that comes
+back joins at the next epoch with the ring's model. A script that slices its
+own tensors gets neither.
+
+Optional argument: the number of epochs (default 3). Use more to have time
+to unplug a machine and plug it back in: `pipedpeer run --ddp 2 04_torch_ddp.py 30`.
 """
-import os
+import sys
 import time
 
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
 _T0 = time.monotonic()
 
@@ -31,17 +33,8 @@ else:
     print("using CPU")
 
 n, d = 60_000, 512
-X = torch.randn(n, d, device=device)
+X = torch.randn(n, d)
 y = (X[:, 0] * 2 + X[:, 1] - X[:, 2] > 0.5).float().unsqueeze(1)
-
-# Each rank takes a disjoint slice. Both variables are 0 and 1 outside a
-# distributed run, so this is a no-op on one machine.
-rank = int(os.environ.get("PIPEDPEER_RANK", 0))
-world = int(os.environ.get("PIPEDPEER_WORLD_SIZE", 1))
-if world > 1:
-    X, y = X[rank::world], y[rank::world]
-    n = X.shape[0]
-    print(f"rank {rank}/{world} training on {n} of {n * world} samples")
 
 
 class MLP(nn.Module):
@@ -65,28 +58,27 @@ model = MLP().to(device)
 opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
 loss_fn = nn.MSELoss()
 
-BATCH, EPOCHS = 2048, 3
-steps_per_epoch = n // BATCH
-if steps_per_epoch < 1:
-    raise SystemExit(
-        f"rank {rank} has {n} samples, fewer than one batch of {BATCH} — "
-        f"there is nothing for it to train on. Use fewer ranks.")
+BATCH = 2048
+EPOCHS = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+loader = DataLoader(TensorDataset(X, y), batch_size=BATCH, shuffle=True)
+
 print("training ...")
 t0 = time.monotonic()
 for epoch in range(EPOCHS):
-    for step in range(steps_per_epoch):
-        xb = X[step * BATCH:(step + 1) * BATCH]
-        yb = y[step * BATCH:(step + 1) * BATCH]
+    steps = 0
+    loss = None
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)
         opt.zero_grad()
         loss = loss_fn(model(xb), yb)
         loss.backward()
         opt.step()
-        # max(1, ...): with enough ranks a shard is under ten steps, and
-        # "every tenth step" then divides by zero. Reported at three ranks,
-        # where 20000 samples make nine steps.
-        if step % max(1, steps_per_epoch // 10) == 0:
-            print(f"epoch {epoch} step {step:4d} loss {loss.item():.4f}")
+        steps += 1
+    # None: an epoch this rank skipped because it joined the ring later.
+    if loss is not None:
+        print(f"epoch {epoch}: {steps} steps, loss {loss.item():.4f}")
 print(f"training done in {time.monotonic() - t0:.1f}s")
-print("final loss:", loss_fn(model(X[:1000]), y[:1000]).item())
+with torch.no_grad():
+    print("final loss:", loss_fn(model(X[:1000].to(device)), y[:1000].to(device)).item())
 
 print(f"TOTAL {time.monotonic() - _T0:.1f}s")

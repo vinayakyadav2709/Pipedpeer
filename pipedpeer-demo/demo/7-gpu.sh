@@ -22,7 +22,7 @@ note "On the GPU laptops' screens now:   watch -n1 nvidia-smi"
 pause
 
 # grep keeps the screen short; the summary lines say where it ran.
-keep='using GPU|using CPU|rank [0-9]|epoch [0-9] step +0 |training done|final loss|TOTAL|ran on|closure|^ *total|cancelled'
+keep='using GPU|using CPU|rank [0-9]|epoch [0-9]+:|training done|final loss|TOTAL|ran on|closure|^ *total|cancelled'
 
 note "One GPU: --remote sends it off this machine, --gpu force allows only GPU machines."
 typed pipedpeer run 04_torch_ddp.py --remote --gpu force

@@ -36,15 +36,15 @@ func TestADeadRankIsDroppedAndItsShareMoves(t *testing.T) {
 		t.Error("the open round completed without a result")
 	}
 
-	if got := b.downNoteFor("g", 0, 7); got != "" {
+	if got := b.noteFor("g", 0, 7); got != "" {
 		t.Errorf("rank 0 told at sync 7, before the agreed sync 8: %s", got)
 	}
 	for _, rank := range []int{0, 2} {
-		note := b.downNoteFor("g", rank, 8)
+		note := b.noteFor("g", rank, 8)
 		if !strings.Contains(note, `"weights": [0.5`) || !strings.Contains(note, ",0.000000,") {
 			t.Errorf("rank %d got %q, want shares 0.5/0/0.5", rank, note)
 		}
-		if again := b.downNoteFor("g", rank, 9); again != "" {
+		if again := b.noteFor("g", rank, 9); again != "" {
 			t.Errorf("rank %d told twice", rank)
 		}
 	}

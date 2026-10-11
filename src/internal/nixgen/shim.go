@@ -2790,11 +2790,29 @@ def _install_ddp():
     # without this the run claims a split it did not perform.
     _WEIGHTS_APPLIED = [False]
     _WARNED_WEIGHTS_UNUSED = [False]
-    # Shares the daemon has refitted from what the ring actually did, waiting
+    # A change to the ring (new shares, a rank gone, a rank joining) waiting
     # for an epoch boundary. Resharding mid-epoch would have ranks re-slice
     # data they are part-way through, so samples would be trained on twice or
-    # skipped; the boundary is where the sampler already re-slices.
-    _PENDING_WEIGHTS = [None]
+    # skipped; the boundary is where the sampler already re-slices. A dict:
+    # weights, world, and join/from while a rank is on its way in.
+    _PENDING = [None]
+    # Bumped at every ring change; a hashed sampler built under an older one
+    # is rebuilt at its loader's next epoch.
+    _RING_GEN = [0]
+    # Every DataLoader epoch this rank has started, across all loaders. A
+    # ring change happens at one of these, and a rank joining mid-run skips
+    # exactly the ones the ring had already done.
+    _ITERS = [0]
+    # Set when a loader is sharded by hash: only such a ring can take a rank
+    # mid-run, and the daemon is told so with every sync.
+    _SHARDED_HASH = [False]
+    # A rank started to join a running ring (pipedpeer saw a machine come
+    # back, or a new one): it skips to the ring's epoch and loads the ring's
+    # model and optimizer before its first step.
+    _JOIN = [os.environ.get("PIPEDPEER_DDP_JOIN") == "1"]
+    _JOIN_AT = [None]
+    # Every optimizer the script built, so a model can be handed to a joiner.
+    _OPTS = []
     # Set when the daemon has told this rank the ring is better off without
     # it.
     _DROPPED = [False]
@@ -2879,16 +2897,31 @@ def _install_ddp():
         a barrier expecting a gradient that is no longer coming.
         """
         w = reply.get("weights")
-        if w and len(w) == _WORLD:
+        try:
+            world = int(reply.get("world") or _WORLD)
+        except (TypeError, ValueError):
+            world = _WORLD
+        if w and len(w) == world and world >= _WORLD:
             try:
                 w = [float(x) for x in w]
             except (TypeError, ValueError):
                 w = None
-            # A zero share is a rank that has left the ring.
-            if w and abs(sum(w) - 1.0) < 1e-6 and all(x >= 0 for x in w) and w[_RANK] > 0:
-                _PENDING_WEIGHTS[0] = w
+            # A zero share is a rank that has left the ring. The daemon sends
+            # six decimals, so thirds sum to 0.999999: renormalised here, the
+            # same way on every rank.
+            if w and abs(sum(w) - 1.0) < 1e-4 and all(x >= 0 for x in w) and w[_RANK] > 0:
+                total = sum(w)
+                p = dict(_PENDING[0] or {})
+                p["weights"] = [x / total for x in w]
+                p["world"] = world
+                if reply.get("join") is not None:
+                    p["join"] = int(reply["join"])
+                    p["from"] = int(reply.get("from", 0))
+                _PENDING[0] = p
         if reply.get("down") is not None:
             _log("ddp: %s" % reply.get("why", "rank %s left the ring" % reply.get("down")))
+        elif reply.get("join") is not None:
+            _log("ddp: %s" % reply.get("why", "rank %s joins the ring" % reply.get("join")))
         if reply.get("drop") == _RANK and not _DROPPED[0]:
             _DROPPED[0] = True
             _log("ddp: leaving the ring — %s. This rank finishes its own work "
@@ -3126,7 +3159,8 @@ def _install_ddp():
                              "sync_every": int(_SYNC_TUNED[0] or 0),
                              "step_ms": _mean_step_ms(),
                              "sync_ms": _mean_sync_ms(),
-                             "samples": int(_BATCH_N[0])}).encode()
+                             "samples": int(_BATCH_N[0]),
+                             "sharded": bool(_SHARDED_HASH[0])}).encode()
         payload = flat.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -3246,7 +3280,8 @@ def _install_ddp():
                              "sync_every": int(_SYNC_TUNED[0] or 0),
                              "step_ms": _mean_step_ms(),
                              "sync_ms": _mean_sync_ms(),
-                             "samples": int(_BATCH_N[0])}).encode()
+                             "samples": int(_BATCH_N[0]),
+                             "sharded": bool(_SHARDED_HASH[0])}).encode()
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -3417,6 +3452,7 @@ def _install_ddp():
         _ORIG_OPT_INIT(self, *args, **kw)
         if _WORLD <= 1 or _NATIVE_DDP:
             return
+        _OPTS.append(weakref.ref(self))
         _orig_step = self.step
 
         def _step(*sa, **skw):
@@ -3553,6 +3589,8 @@ def _install_ddp():
                 else:
                     bs.sampler = sampler
                     bs.batch_size = sampler.batch
+                    sampler.gen = _RING_GEN[0]
+                    _SHARDED_HASH[0] = True
                     _WEIGHTS_APPLIED[0] = True
                     _log("ddp: rank %d takes %d of %d samples (share %.0f%%), "
                          "batch %d, %d steps an epoch - the step count is the "
@@ -3574,6 +3612,8 @@ def _install_ddp():
             else:
                 bs.sampler = sampler
                 bs.batch_size = sampler.batch
+                sampler.gen = _RING_GEN[0]
+                _SHARDED_HASH[0] = True
                 _log("ddp: sharding %d samples across %d ranks" % (len(ds), _WORLD))
                 return sampler
 
@@ -3589,9 +3629,162 @@ def _install_ddp():
             return sampler
         return False        # sharding needed, but only striding is available
 
+    def _ddp_base():
+        return _SYNC_URL.rsplit("/sync", 1)[0]
+
+    def _ddp_request(url, body=None, ctype="application/json", timeout=60):
+        """One call to the lead daemon; on refusal, the daemon's own words."""
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, data=body)
+        if body is not None:
+            req.add_header("Content-Type", ctype)
+        if _TOKEN:
+            req.add_header("X-Pipedpeer-Token", _TOKEN)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read()
+
+    def _live_opts():
+        return [o for o in (r() for r in _OPTS) if o is not None]
+
+    def _send_snapshot(join, boundary, world, weights):
+        """Hand this rank's model and optimizer to a rank joining the ring.
+
+        Taken at the epoch boundary where the ring grows, when every rank
+        holds the same weights and optimizer state, so one copy is the ring's.
+        """
+        import io
+        import json
+        import struct
+        opts = _live_opts()
+        state = {
+            "params": [[p.detach().cpu() for g in o.param_groups for p in g["params"]]
+                       for o in opts],
+            "opts": [o.state_dict() for o in opts],
+            "stepn": [_STEPN.get(id(o), 0) for o in opts],
+        }
+        buf = io.BytesIO()
+        _th.save(state, buf)
+        payload = buf.getvalue()
+        header = json.dumps({"group": _GROUP, "rank": _RANK, "join": join,
+                             "boundary": boundary, "seq": _SEQ[0], "world": world,
+                             "weights": weights,
+                             "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
+        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
+        code, reply = _ddp_request(_ddp_base() + "/snapshot", body,
+                                   "application/vnd.pipedpeer.ddp", timeout=240)
+        if code != 200:
+            raise RuntimeError("HTTP %d: %s" % (code, reply[:300]))
+        _log("ddp: handed the model and optimizer to joining rank %d (%.1f MiB)"
+             % (join, len(payload) / 1048576.0))
+
+    def _ring_switch(call):
+        """Take the ring's pending change at this epoch boundary."""
+        nonlocal _WORLD, _WEIGHTS
+        p, _PENDING[0] = _PENDING[0], None
+        world = int(p.get("world") or _WORLD)
+        w = p.get("weights")
+        if world > _WORLD:
+            if p.get("from") == _RANK and p.get("join") is not None:
+                try:
+                    _send_snapshot(p["join"], call, world, w)
+                except Exception as e:
+                    _log("ddp: could not hand the model to joining rank %s (%s); "
+                         "the ring carries on and drops it" % (p["join"], e))
+            _log("ddp: the ring grows from %d to %d ranks at this epoch"
+                 % (_WORLD, world))
+        _WORLD = world
+        if w is not None:
+            _WEIGHTS = list(w)
+            _WEIGHTS_APPLIED[0] = True
+        _RING_GEN[0] += 1
+
+    def _join_ring():
+        """Wait for the ring's next epoch boundary and take its model.
+
+        Says it is ready, then waits for the rank handing over the model to
+        reach the boundary. Loads the parameters and optimizer state into
+        this rank's own optimizers (built by the same script, so the same
+        shapes in the same order), takes the ring's sync count, size and
+        shares, and returns the epoch it joins at.
+        """
+        nonlocal _WORLD, _WEIGHTS
+        import io
+        import json
+        import struct
+        import urllib.parse
+        code, reply = _ddp_request(_ddp_base() + "/join", json.dumps(
+            {"group": _GROUP, "rank": _RANK, "world": _WORLD}).encode())
+        if code != 200:
+            raise RuntimeError("ddp: the ring would not take rank %d: %s"
+                               % (_RANK, reply[:300].decode("utf-8", "replace")))
+        _log("ddp: rank %d is ready; waiting for the ring's next epoch to join" % _RANK)
+        url = _ddp_base() + "/snapshot?group=%s&rank=%d" % (urllib.parse.quote(_GROUP), _RANK)
+        while True:
+            code, data = _ddp_request(url, timeout=120)
+            if code == 200:
+                break
+            if code != 204:
+                raise RuntimeError("ddp: rank %d could not join: HTTP %d %s"
+                                   % (_RANK, code, data[:300].decode("utf-8", "replace")))
+        nl = data.find(b"\n")
+        hdr = json.loads(data[:nl])
+        rest = data[nl + 1:]
+        n = struct.unpack(">I", rest[:4])[0]
+        state = _th.load(io.BytesIO(rest[4:4 + n]), map_location="cpu")
+        opts = _live_opts()
+        if len(opts) != len(state["opts"]):
+            raise RuntimeError(
+                "ddp: this rank built %d optimizer(s) before its first epoch and the "
+                "ring has %d, so it cannot take the ring's model"
+                % (len(opts), len(state["opts"])))
+        with _th.no_grad():
+            for o, params, sd, stepn in zip(opts, state["params"], state["opts"], state["stepn"]):
+                mine = [p for g in o.param_groups for p in g["params"]]
+                if len(mine) != len(params):
+                    raise RuntimeError("ddp: the ring's model has %d tensors and this "
+                                       "rank's %d" % (len(params), len(mine)))
+                for p, v in zip(mine, params):
+                    p.data.copy_(v.to(p.device))
+                o.load_state_dict(sd)
+                # The ring broadcast its opening weights long ago; this rank
+                # has them now, and a broadcast of its own would be a sync
+                # nobody else makes.
+                _STEPPED.add(o)
+                _STEPN[id(o)] = int(stepn)
+        _SEQ[0] = int(hdr["seq"])
+        _WORLD = int(hdr["world"])
+        if hdr.get("weights"):
+            _WEIGHTS = [float(x) for x in hdr["weights"]]
+            _WEIGHTS_APPLIED[0] = True
+        if _SYNC_AUTO and hdr.get("sync_every"):
+            _SYNC_TUNED[0] = int(hdr["sync_every"])
+        _log("ddp: rank %d joins the ring of %d with rank %s's model and optimizer, "
+             "skipping the %d epoch(s) the ring already did"
+             % (_RANK, _WORLD, hdr.get("rank", 0), int(hdr["boundary"])))
+        return int(hdr["boundary"])
+
     def _iter(self):
         sampler = getattr(self, "sampler", None)
         if _WORLD > 1 and not _NATIVE_DDP:
+            call = _ITERS[0]
+            _ITERS[0] += 1
+            if _JOIN[0]:
+                if _JOIN_AT[0] is None:
+                    _JOIN_AT[0] = _join_ring()
+                if call < _JOIN_AT[0]:
+                    # An epoch the ring finished before this rank arrived.
+                    _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
+                    return iter(())
+                _JOIN[0] = False
+            # An epoch boundary is the one place the ring can change safely:
+            # the sampler re-slices here anyway, so no rank is part-way
+            # through a shard when the boundaries move.
+            if _PENDING[0] is not None:
+                _ring_switch(call)
             if not isinstance(sampler, _th.utils.data.distributed.DistributedSampler):
                 shard = _SHARDED.get(id(self))
                 if shard is None:
@@ -3605,30 +3798,29 @@ def _install_ddp():
                     _EPOCHS[self] = epoch + 1
                     return itertools.islice(_ORIG_ITER(self), _RANK, None, _WORLD)
                 sampler = shard
-            # An epoch boundary is the one place shares can change safely:
-            # the sampler re-slices here anyway, so no rank is part-way
-            # through a shard when the boundaries move.
-            if _PENDING_WEIGHTS[0] is not None and isinstance(
-                    sampler, _WeightedShardSampler):
-                new = _PENDING_WEIGHTS[0]
-                _PENDING_WEIGHTS[0] = None
+            # A loader sharded before the ring last changed is resliced at its
+            # own next epoch, whichever loader took the change.
+            if (isinstance(sampler, _WeightedShardSampler)
+                    and getattr(sampler, "gen", 0) != _RING_GEN[0]):
+                new = _WEIGHTS if _WEIGHTS is not None else [1.0 / _WORLD] * _WORLD
                 bs = getattr(self, "batch_sampler", None)
                 try:
                     reshared = _WeightedShardSampler(
                         sampler.n, new, _RANK, sampler.shuffle,
-                        sum(sampler.batches) // _WORLD, _WORLD)
+                        sum(sampler.batches) // len(sampler.batches), _WORLD)
                 except Exception as e:
-                    _log("ddp: cannot take the refitted shares (%s); keeping "
+                    sampler.gen = _RING_GEN[0]
+                    _log("ddp: cannot take the ring's new shares (%s); keeping "
                          "the ones in use" % e)
                 else:
+                    reshared.gen = _RING_GEN[0]
                     if bs is not None:
                         bs.sampler = reshared
                         bs.batch_size = reshared.batch
                     _SHARDED[id(self)] = reshared
                     sampler = reshared
-                    _log("ddp: rank %d reshared to %d samples, batch %d - the "
-                         "daemon refitted the ring from what it measured"
-                         % (_RANK, len(reshared), reshared.batch))
+                    _log("ddp: rank %d of %d now takes %d samples, batch %d"
+                         % (_RANK, _WORLD, len(reshared), reshared.batch))
 
             if hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(_EPOCHS.get(self, 0))
