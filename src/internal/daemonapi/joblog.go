@@ -4,15 +4,18 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/rs/zerolog/log"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 // jobOutputFile is the daemon's own record of everything a job sent its
@@ -52,8 +55,9 @@ type jobOutputLog struct {
 	cancelFn func()
 }
 
-// jobLogs holds the open logs, keyed by file path (unique per daemon, since
-// every Server has its own jobDir).
+// jobLogs holds the logs of jobs still writing, keyed by file path (unique per
+// daemon, since every Server has its own jobDir). A log leaves it when its job
+// finishes (or its dir is pruned); a finished job's log is read from disk.
 var jobLogs sync.Map
 
 // jobOutput returns the output log of jobID, opening (or creating) its file.
@@ -74,6 +78,10 @@ func (s *Server) jobOutput(jobID string) *jobOutputLog {
 			final := m.OutputMessage
 			l.final = &final
 		}
+	}
+	if l.done {
+		// Finished: nothing will write to it, so it needs no shared entry.
+		return l
 	}
 	actual, _ := jobLogs.LoadOrStore(path, l)
 	return actual.(*jobOutputLog)
@@ -114,6 +122,12 @@ func (l *jobOutputLog) Finish(final OutputMessage) {
 	for ch := range l.subs {
 		close(ch)
 		delete(l.subs, ch)
+	}
+	// Every attacher was just ended, so drop the entry: an attach from now on
+	// replays the file. Unless a write failed — then this log is the only
+	// record of the done frame and stays.
+	if !l.warned {
+		jobLogs.CompareAndDelete(l.path, l)
 	}
 }
 
@@ -294,16 +308,22 @@ func (l *jobOutputLog) trim() {
 // loaded. A job recorded as running lost its process (and the pipe its output
 // came through) with the old daemon, so nothing would ever finish it: mark it
 // failed, record a done frame that says why (attach ends with it) and free
-// its lease. A crun container that outlived the daemon is removed, since no
-// one can collect its output.
+// its lease. A crun container or an unisolated job's process group that
+// outlived the daemon is stopped, since no one can collect its output.
 func (s *Server) failOrphanedJobs() {
 	var orphans []string
+	type group struct {
+		pgid  int
+		start int64
+	}
+	groups := map[string]group{}
 	s.jobsMu.Lock()
 	for id, job := range s.jobs {
 		if job.Status == "running" || job.Status == "importing" {
 			job.Status = "failed"
 			job.FinishedAt = time.Now()
 			orphans = append(orphans, id)
+			groups[id] = group{job.Pgid, job.PgidStart}
 		}
 	}
 	s.jobsMu.Unlock()
@@ -324,8 +344,59 @@ func (s *Server) failOrphanedJobs() {
 		if l.finalFrame() == nil {
 			l.Finish(OutputMessage{ExitCode: -1, Error: "job lost: the daemon restarted while it ran"})
 		}
+		if g := groups[id]; g.pgid > 0 {
+			killOrphanGroup(id, g.pgid, g.start)
+		}
 		s.releaseJobLease(id, "failed")
 		log.Warn().Str("job", id).Msg("job was running when the daemon stopped; marked failed")
 	}
 	s.persist()
+}
+
+// recordJobGroup saves an unisolated job's process group and its leader's
+// start time, so a restarted daemon can stop the job (failOrphanedJobs).
+func (s *Server) recordJobGroup(job *JobRecord, pid int) {
+	start, err := procStartTime(pid)
+	if err != nil {
+		log.Warn().Err(err).Str("job", job.JobID).Int("pid", pid).
+			Msg("cannot read the job's start time; a daemon restart will not stop this job")
+		return
+	}
+	s.jobsMu.Lock()
+	job.Pgid, job.PgidStart = pid, start
+	s.jobsMu.Unlock()
+	s.persist()
+}
+
+// procStartTime is pid's start time in ms since the epoch.
+func procStartTime(pid int) (int64, error) {
+	p, err := process.NewProcess(int32(pid))
+	if err != nil {
+		return 0, err
+	}
+	return p.CreateTime()
+}
+
+// killOrphanGroup SIGKILLs the process group an unisolated job left behind
+// when the daemon stopped, if its leader still runs. The leader's start time
+// must match the recorded one: pids are reused, and a group led by a stranger
+// is not ours to kill.
+// ponytail: checks the leader only; members whose leader already exited keep
+// running (python's own children normally die with it).
+func killOrphanGroup(jobID string, pgid int, start int64) {
+	now, err := procStartTime(pgid)
+	if err != nil {
+		log.Info().Str("job", jobID).Int("pgid", pgid).Msg("orphaned job's process already exited")
+		return
+	}
+	if now != start {
+		log.Warn().Str("job", jobID).Int("pgid", pgid).
+			Msg("orphaned job's process id now belongs to another process; not stopping it")
+		return
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		log.Warn().Err(err).Str("job", jobID).Int("pgid", pgid).Msg("stopping a job left running by the previous daemon")
+		return
+	}
+	log.Warn().Str("job", jobID).Int("pgid", pgid).Msg("stopped a job left running by the previous daemon")
 }

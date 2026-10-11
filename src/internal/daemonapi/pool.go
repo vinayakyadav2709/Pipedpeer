@@ -1507,6 +1507,7 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 		log.Printf("[pool] spawning warm worker for store %s", storePath)
 		w, err := pm.spawn(runPath, storePath)
 		if err != nil {
+			pm.mu.Unlock()
 			log.Printf("[pool] warm worker spawn failed: %v", err)
 			// Cold fallback: one-off spawn keeps the node functional even when
 			// persistent workers are unavailable.
@@ -1521,23 +1522,35 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 	if err != nil && ctx.Err() != nil {
 		// The request was cancelled and submit killed the worker mid-chunk:
 		// forget it (the next request re-warms) and run nothing in its place.
-		pm.mu.Lock()
-		if pm.workers[storePath] == worker {
-			delete(pm.workers, storePath)
-		}
-		pm.mu.Unlock()
+		pm.dropWorker(storePath, worker)
 		return nil, ctx.Err()
 	}
 	if err != nil {
-		// Worker died mid-flight — drop it and fall back to a cold run for
-		// this chunk; the next request will re-warm.
+		// Worker died mid-flight (or could not take the task) — drop it, stop
+		// it if it still runs, and fall back to a cold run for this chunk; the
+		// next request will re-warm.
 		log.Printf("[pool] warm worker submit failed for store %s: %v", storePath, err)
-		pm.mu.Lock()
-		delete(pm.workers, storePath)
-		pm.mu.Unlock()
+		pm.dropWorker(storePath, worker)
+		if worker.killOnce() {
+			go func() {
+				err := worker.cmd.Wait()
+				log.Printf("[pool] warm worker pid %d stopped after a failed submit: %v", worker.cmd.Process.Pid, err)
+			}()
+		}
 		return runPoolChunk(runPath, ch)
 	}
 	return results, nil
+}
+
+// dropWorker forgets a failed warm worker, but only while the map still holds
+// that worker: a concurrent request may already have spawned a fresh one for
+// the store, and dropping it would leak its process past stopAll.
+func (pm *poolManager) dropWorker(storePath string, w *poolWorker) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.workers[storePath] == w {
+		delete(pm.workers, storePath)
+	}
 }
 
 // runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
@@ -1685,13 +1698,18 @@ func (w *poolWorker) dead() bool {
 }
 
 // kill stops the worker and its process group once; later calls do nothing.
-func (w *poolWorker) kill() {
+func (w *poolWorker) kill() { w.killOnce() }
+
+// killOnce is kill reporting whether this call stopped the worker, so exactly
+// one caller reaps it.
+func (w *poolWorker) killOnce() bool {
 	if w.killed.Swap(true) || w.cmd == nil || w.cmd.Process == nil {
-		return
+		return false
 	}
 	if err := killProcessGroup(w.cmd.Process); err != nil {
 		log.Printf("[pool] stopping warm worker pid %d: %v", w.cmd.Process.Pid, err)
 	}
+	return true
 }
 
 // submit sends one task over the pipes and waits for its result file. The
