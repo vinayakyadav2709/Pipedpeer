@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,5 +280,25 @@ func TestAKeyCarriesItsOwnFingerprint(t *testing.T) {
 	}
 	if _, ok := FingerprintOf("nonsense"); ok {
 		t.Error("nonsense yielded a fingerprint")
+	}
+}
+
+func TestConcurrentWritersDoNotRace(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- WriteTrustedKeys([]string{"k1", "k2"})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

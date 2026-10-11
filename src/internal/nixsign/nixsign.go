@@ -219,11 +219,26 @@ func WriteTrustedKeys(keys []string) error {
 	body := strings.Join(out, " ") + "\n"
 	// Written via a temporary file and renamed, so a reader never sees a
 	// half-written list and conclude the cluster trusts nobody.
-	tmp := TrustedKeysFile() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+	// Unique temp name: concurrent pollers must not share one.
+	f, err := os.CreateTemp(dir, "trusted-public-keys-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, TrustedKeysFile())
+	tmp := f.Name()
+	_, werr := f.WriteString(body)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr == nil {
+		werr = os.Chmod(tmp, 0o644)
+	}
+	if werr == nil {
+		werr = os.Rename(tmp, TrustedKeysFile())
+	}
+	if werr != nil {
+		os.Remove(tmp)
+	}
+	return werr
 }
 
 func sortStrings(s []string) {
