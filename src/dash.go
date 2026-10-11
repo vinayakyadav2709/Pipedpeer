@@ -1,9 +1,7 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,26 +9,11 @@ import (
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 )
-
-type peerInfo struct {
-	NodeID      string `json:"node_id"`
-	SSHEndpoint string `json:"ssh_endpoint"`
-	DaemonPort  int    `json:"daemon_port"`
-	State       string `json:"state"`
-	Load        struct {
-		ActiveJobs        int     `json:"active_jobs"`
-		AvailableMemBytes int64   `json:"available_mem_bytes"`
-		CPUPercent        float64 `json:"cpu_percent"`
-	} `json:"load"`
-	Source string `json:"source"`
-}
-
-func (p peerInfo) ActiveJobs() int     { return p.Load.ActiveJobs }
-func (p peerInfo) AvailableMem() int64 { return p.Load.AvailableMemBytes }
 
 type dashModel struct {
 	daemonPort int
@@ -38,11 +21,13 @@ type dashModel struct {
 	interval   time.Duration
 	width      int
 	height     int
-	peers      []peerInfo
+	peers      []clusterNode
+	events     []clusterEvent
 	jobs       []jobhistory.JobSummary
 	live       []clusterTask
 	peerErr    string
 	jobsErr    string
+	eventsErr  string
 	running    bool
 }
 
@@ -90,14 +75,23 @@ func (m dashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *dashModel) refresh() {
 	// Fetch peers from daemon
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", m.daemonPort))
+	peers, err := fetchClusterNodes(m.daemonPort)
 	if err != nil {
 		m.peerErr = "daemon unreachable"
 	} else {
-		defer resp.Body.Close()
 		m.peerErr = ""
-		if err := json.NewDecoder(resp.Body).Decode(&m.peers); err != nil {
-			m.peerErr = err.Error()
+		m.peers = peers
+	}
+
+	// Recent daemon events; a missing log just means nothing to show yet.
+	if evs, err := readEvents(daemonctl.DefaultPaths().LogFile, 5, false); err != nil {
+		m.eventsErr = err.Error()
+	} else {
+		m.eventsErr = ""
+		names := nodeNames(m.daemonPort)
+		m.events = nil
+		for _, e := range evs {
+			m.events = append(m.events, e.withNames(names))
 		}
 	}
 
@@ -139,63 +133,55 @@ func (m dashModel) View() string {
 	// ── Workers table
 	s += sectionStyle.Render("WORKERS") + "\n"
 
+	tw := m.tableWidth()
 	peerRows := [][]string{}
 	for _, p := range m.peers {
-		shortID := p.NodeID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
+		node := p.Capabilities["hostname"]
+		if node == "" {
+			node = shortID(p.NodeID)
 		}
-		if p.NodeID == "" {
-			shortID = "?"
-		}
-
-		host := p.SSHEndpoint
-		if idx := strings.Index(host, "@"); idx != -1 {
-			host = host[idx+1:]
-		}
-		if idx := strings.LastIndex(host, ":"); idx != -1 {
-			host = host[:idx]
+		if p.Source == "self" {
+			node += "*"
 		}
 
-		status := p.State
 		statusCol := greenStyle
-		if status != "healthy" {
+		if p.State != "healthy" {
 			statusCol = redStyle
 		}
 
-		memStr := resourceest.FormatBytes(p.AvailableMem())
-		if p.AvailableMem() == 0 && p.State != "healthy" {
+		memStr := resourceest.FormatBytes(p.Load.AvailableMemBytes)
+		if p.Load.AvailableMemBytes == 0 && p.State != "healthy" {
 			memStr = "-"
 		}
 
-		jobsStr := fmt.Sprintf("%d", p.ActiveJobs())
-		if p.ActiveJobs() > 0 {
+		jobsStr := fmt.Sprintf("%d", p.Load.ActiveJobs)
+		if p.Load.ActiveJobs > 0 {
 			jobsStr = yellowStyle.Render(jobsStr)
 		}
 
 		srcDisplay := p.Source
 		if srcDisplay == "discovery" {
-			// UDP broadcast, not mDNS. The label said mDNS since before the
-			// mechanism was chosen, and an operator debugging why a peer is
-			// not found goes looking at Avahi rather than at whether their
-			// access point drops broadcast - which is the thing that actually
-			// breaks it.
+			// UDP broadcast, not mDNS: an operator debugging why a peer is
+			// not found should look at whether the access point drops
+			// broadcast, not at Avahi.
 			srcDisplay = "broadcast"
 		}
 
 		peerRows = append(peerRows, []string{
-			shortID,
-			fmt.Sprintf("%s:%d", host, p.DaemonPort),
-			statusCol.Render(status),
+			node,
+			statusCol.Render(p.State),
 			jobsStr,
+			fmt.Sprintf("%.0f%%", p.Load.CPUPercent),
 			memStr,
+			dashGPUCell(p),
 			srcDisplay,
 		})
 	}
 	s += renderTable(
-		[]string{"ID", "HOST:PORT", "STATUS", "JOBS", "MEM AVAIL", "SOURCE"},
+		[]string{"NODE", "STATUS", "JOBS", "CPU", "MEM FREE", "GPU", "SOURCE"},
 		peerRows,
-		[]float64{0.12, 0.24, 0.12, 0.07, 0.13, 0.10},
+		[]float64{0.18, 0.11, 0.07, 0.07, 0.12, 0.27, 0.12},
+		tw,
 	)
 
 	healthy, jobs, memAvail := 0, 0, int64(0)
@@ -204,8 +190,8 @@ func (m dashModel) View() string {
 		if p.State == "healthy" {
 			healthy++
 		}
-		jobs += p.ActiveJobs()
-		memAvail += p.AvailableMem()
+		jobs += p.Load.ActiveJobs
+		memAvail += p.Load.AvailableMemBytes
 		cpuSum += p.Load.CPUPercent
 	}
 	avgCPU := 0.0
@@ -296,15 +282,57 @@ func (m dashModel) View() string {
 		[]string{"ID", "SCRIPT/JOB", "NODE", "STAGE", "TIME"},
 		taskRows,
 		[]float64{0.12, 0.28, 0.14, 0.13, 0.10},
+		tw,
 	)
+
+	// ── Events: what the daemon has been doing, newest last.
+	s += "\n" + sectionStyle.Render("EVENTS") + "\n"
+	if m.eventsErr != "" {
+		s += dimStyle.Render("  (no daemon log yet: "+m.eventsErr+")") + "\n"
+	}
+	for _, e := range m.events {
+		s += "  " + e.String() + "\n"
+	}
+	if n := len(m.events); n > 0 {
+		last := m.events[n-1]
+		line := "last: " + last.Text
+		if !last.At.IsZero() {
+			age := time.Since(last.At).Truncate(time.Second)
+			line += fmt.Sprintf(" · %s ago", age)
+			if age < 15*time.Second {
+				line = yellowStyle.Render(line)
+			}
+		}
+		s += "  " + line + "\n"
+	}
 
 	s += "\n" + dimStyle.Render(" q / Ctrl+C to quit") + "\n"
 	return s
 }
 
-func renderTable(headers []string, rows [][]string, widths []float64) string {
-	totalWidth := 78
+func (m dashModel) tableWidth() int {
+	if w := m.width - 2; w > 78 {
+		return w
+	}
+	return 78
+}
 
+// dashGPUCell is "3060 12%" from the node's load, or "-" without a GPU.
+func dashGPUCell(n clusterNode) string {
+	name := n.Load.GPUModel
+	if name == "" {
+		return "-"
+	}
+	for _, w := range strings.Fields(name) {
+		if len(w) >= 3 && w[0] >= '0' && w[0] <= '9' {
+			name = w
+			break
+		}
+	}
+	return fmt.Sprintf("%s %.0f%%", name, n.Load.GPUUtilPercent)
+}
+
+func renderTable(headers []string, rows [][]string, widths []float64, totalWidth int) string {
 	// Header
 	headerCells := make([]string, len(headers))
 	for i, h := range headers {
