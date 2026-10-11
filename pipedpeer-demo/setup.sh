@@ -78,6 +78,13 @@ run 02_numpy_heavy.py
 # rehearsal would warm a path the demo never takes.
 (cd 03_pandas_ooc && run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8)
 run 05_file_sync.py
+# Common packages a teacher's script likely imports, so it starts fast.
+echo
+echo "=== common packages (demo/prep-4-common.sh) ==="
+if ! ./demo/prep-4-common.sh; then
+	echo "WARNING: common packages not built - a new script will build its own (minutes); see above"
+fi
+
 # GPU environment: CUDA torch is several GB, so it is built and
 # shipped once here, by the same script each sender PC runs at the setup
 # visit. A CPU-only rehearsal is still a valid rehearsal for everything else,

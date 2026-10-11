@@ -21,6 +21,11 @@ source "$(dirname "$0")/_lib.sh"
 
 out="$DEMO_DIR/demo/rehearsal-results.txt"
 
+# Before anything else is built: a teacher-style script's check, before and
+# after the common packages (prep-4). Only honest on a fresh machine.
+banner "0/2  Teacher script, before / after the common packages"
+teacher_line=$(./demo/prep-4-common.sh students/grid_search.py | tee >(cat >&2) | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^ *teacher check' | sed 's/^ *//')
+
 banner "1/2  Warm-up: data, environments, closures (setup.sh)"
 ./setup.sh || { echo "${R}setup.sh failed - fix that before anything else${N}"; exit 1; }
 
@@ -93,6 +98,8 @@ if [[ -f 07_everything.py ]]; then
 	printf '%-18s %-8s %-8s %-9s %-9s %s\n' "07_everything.py" "$cold" "$warm" "-" "$(took "$last_log")" "" >>"$out"
 	rm -f "$last_log" "$last_log.t"
 fi
+
+printf '%s\n' "${teacher_line:-teacher check      failed - see prep-4 output above}" >>"$out"
 
 # Finale: everything at once, warm only.
 t0=$SECONDS
