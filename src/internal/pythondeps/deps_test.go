@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -188,5 +189,27 @@ func TestRequirementsBeside(t *testing.T) {
 	}
 	if got := ResolvePackages(nil, []string{p}); len(got) != 1 || got[0] != "rich" {
 		t.Fatalf("requirements not read: %v", got)
+	}
+}
+
+func TestExtractImportScanRecursesIntoLocalModules(t *testing.T) {
+	d := t.TempDir()
+	w := func(name, body string) {
+		p := filepath.Join(d, name)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w("main.py", "import helper\nimport pkg\nimport numpy\n")
+	w("helper.py", "import seaborn\nimport main\nimport helper\n")
+	w("pkg/__init__.py", "")
+	w("pkg/sub.py", "import tqdm\nfrom .. import helper\n")
+	got := ExtractImportScan(filepath.Join(d, "main.py"))
+	want := []string{"numpy", "seaborn", "tqdm"}
+	sort.Strings(got.ExternalDeps)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got.ExternalDeps, want) {
+		t.Fatalf("deps %v want %v", got.ExternalDeps, want)
 	}
 }
