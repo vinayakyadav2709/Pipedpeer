@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 )
@@ -235,6 +236,10 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 
 	stage(7, "Executing on remote...")
 	jobhistory.UpdateStage(historyDir, "executing")
+	if opts.EstimatedMemBytes <= 0 {
+		fmt.Fprintf(os.Stderr, "      Note: no memory estimate for %s; capping the job at %s (raise with --mem)\n",
+			env.ScriptRel, humanize.IBytes(noEstimateMemLimit))
+	}
 	execCfg := daemonctl.ExecConfig{
 		ScriptPath: env.ScriptRel,
 		Args:       opts.ScriptArgs,
@@ -325,6 +330,11 @@ func syncResults(host string, port int, jobID, resultsDir, historyDir string, re
 	return manifest
 }
 
+// noEstimateMemLimit caps a job that came with no memory estimate. Generous
+// on purpose (the estimator's own fallback is 512 MiB): it only has to stop a
+// runaway, and --mem raises it.
+const noEstimateMemLimit = 4 << 30
+
 // memLimitFor turns a memory estimate into a cgroup ceiling.
 //
 // Doubling it is deliberate. The estimate comes from import baselines or the
@@ -332,9 +342,12 @@ func syncResults(host string, port int, jobID, resultsDir, historyDir string, re
 // would have completed is a worse failure than the one it prevents. The point
 // is to stop a runaway allocation taking the machine down with it, not to
 // hold jobs to their forecast.
+//
+// No estimate still gets a cap: an uncapped sandbox is exactly the runaway
+// this exists to stop. The node lowers any cap to what it can spare.
 func memLimitFor(estimate int64) int64 {
 	if estimate <= 0 {
-		return 0 // nothing to go on: leave it uncapped rather than guess
+		return noEstimateMemLimit
 	}
 	const floor = 512 << 20
 	if limit := estimate * 2; limit > floor {

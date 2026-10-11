@@ -66,3 +66,15 @@ func TestUnpackagedHonoursPkgFlag(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestMemLimitAlwaysCaps(t *testing.T) {
+	if got := memLimitFor(0); got != noEstimateMemLimit || got <= 0 {
+		t.Fatalf("no estimate: got %d, want the default cap", got)
+	}
+	if got := memLimitFor(100 << 20); got != 512<<20 {
+		t.Fatalf("small estimate: got %d, want the 512 MiB floor", got)
+	}
+	if got := memLimitFor(1 << 30); got != 2<<30 {
+		t.Fatalf("1 GiB estimate: got %d, want double", got)
+	}
+}
