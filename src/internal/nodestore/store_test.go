@@ -228,6 +228,22 @@ func TestRemoveReportsCountsAndResolvesPrefixes(t *testing.T) {
 	}
 }
 
+// Internet peers all sit behind forwarders on 127.0.0.1. One leaving must
+// take only its own port, not every other peer's forwarder with it.
+func TestRemoveManualAtKeepsOtherForwarders(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertNode(Node{NodeID: "peer-a", Host: "127.0.0.1", Port: 40001, Source: "manual", IsManual: true})
+	_ = s.UpsertNode(Node{NodeID: "peer-b", Host: "127.0.0.1", Port: 40002, Source: "manual", IsManual: true})
+
+	if n, err := s.RemoveManualAt("127.0.0.1", 40001); err != nil || n != 1 {
+		t.Fatalf("RemoveManualAt: n=%d err=%v, want 1", n, err)
+	}
+	nodes, _ := s.ListAll()
+	if len(nodes) != 1 || nodes[0].NodeID != "peer-b" {
+		t.Fatalf("after removing port 40001, want only peer-b, got %+v", nodes)
+	}
+}
+
 // An existing database created before caps_json/load_json existed must migrate
 // in place rather than failing to open.
 func TestMigrationFromPreviousSchema(t *testing.T) {

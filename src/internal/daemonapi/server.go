@@ -89,6 +89,9 @@ type Server struct {
 	// pathReporter says how each peer is reached, keyed by local address.
 	// Set by internet mode; nil when nothing is joined over the internet.
 	pathReporter func() map[string]string
+	// unreachableReporter names the internet peers with no direct path, and
+	// why (fingerprint → reason). Set by internet mode.
+	unreachableReporter func() map[string]string
 
 	stopSweep chan struct{}
 
@@ -1081,6 +1084,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
+	r.Get("/v1/peers/unreachable", s.handleUnreachable)
 	r.Get("/v1/reserved", s.handleReserved)
 	r.Get("/v1/store", s.handleStoreCheck)
 	r.Post("/v1/store/missing", s.handleStoreMissing)
@@ -1236,6 +1240,37 @@ func (s *Server) reportedPaths() map[string]string {
 	return f()
 }
 
+// SetUnreachableReporter tells the daemon which internet peers it cannot
+// reach and why. Such a peer has no forwarder, so it never shows up in
+// /v1/nodes; without this it would vanish without a word.
+func (s *Server) SetUnreachableReporter(f func() map[string]string) {
+	s.mu.Lock()
+	s.unreachableReporter = f
+	s.mu.Unlock()
+}
+
+type unreachablePeer struct {
+	Peer   string `json:"peer"`
+	Reason string `json:"reason"`
+}
+
+// handleUnreachable serves GET /v1/peers/unreachable, sorted by peer. A
+// separate route because /v1/nodes rows decode into registry.NodeRecord
+// across many consumers.
+func (s *Server) handleUnreachable(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	f := s.unreachableReporter
+	s.mu.Unlock()
+	out := []unreachablePeer{}
+	if f != nil {
+		for peer, reason := range f() {
+			out = append(out, unreachablePeer{Peer: peer, Reason: reason})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Peer < out[j].Peer })
+	writeJSON(w, http.StatusOK, out)
+}
+
 // pathFor is how a node is reached, or "" when nothing can say.
 //
 // A peer behind a local forwarder is only knowable from the manager that made
@@ -1381,7 +1416,7 @@ func (s *Server) RemovePeer(host string, port int) error {
 	if s.store == nil {
 		return fmt.Errorf("node store unavailable")
 	}
-	_, err := s.store.RemoveManual(host)
+	_, err := s.store.RemoveManualAt(host, port)
 	return err
 }
 

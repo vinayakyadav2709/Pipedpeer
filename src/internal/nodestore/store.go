@@ -244,6 +244,17 @@ func (s *Store) RemoveManual(host string) (int64, error) {
 	return res.RowsAffected()
 }
 
+// RemoveManualAt deletes the manual entries at one host:port. Internet mode
+// puts every peer's forwarder on 127.0.0.1, so removing by host alone would
+// take every other peer's forwarder with the one that left.
+func (s *Store) RemoveManualAt(host string, port int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM nodes WHERE is_manual = 1 AND host = ? AND port = ?`, host, port)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // DeleteNode removes a single node by ID, regardless of source.
 func (s *Store) DeleteNode(nodeID string) error {
 	_, err := s.db.Exec(`DELETE FROM nodes WHERE node_id = ?`, nodeID)
