@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,14 @@ var (
 	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).Padding(0, 1)
 	sectionStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).MarginTop(1)
 )
+
+// runDashboard runs p until q, Ctrl+C or SIGINT; all three are a normal exit.
+func runDashboard(p *tea.Program) error {
+	if _, err := p.Run(); err != nil && !errors.Is(err, tea.ErrInterrupted) {
+		return err
+	}
+	return nil
+}
 
 func (m dashModel) Init() tea.Cmd {
 	return tea.Tick(m.interval, func(t time.Time) tea.Msg {

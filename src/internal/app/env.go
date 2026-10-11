@@ -105,7 +105,7 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	}
 	nixPkgs, unknown := PlanPackages(absScriptPath, imports, opts.Pkgs, fromLock)
 	if len(unknown) > 0 {
-		found, missing, err := pythondeps.SplitByExistence(unknown, probePythonPackages)
+		found, missing, err := pythondeps.SplitByExistence(unknown, ProbePythonPackages)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
 		}
@@ -302,10 +302,10 @@ func findProjectRoot(scriptDir string) string {
 // of an enclosing git tree (e.g. a git-tracked $HOME).
 func flakeRef(system string) string { return "path:.#packages." + system + ".default" }
 
-// probePythonPackages asks the pinned nixpkgs, in one nix eval, which of names
+// ProbePythonPackages asks the pinned nixpkgs, in one nix eval, which of names
 // exist as python3Packages attributes. Names are import names already vetted
 // as [A-Za-z0-9_] by pythondeps, so they are safe inside the expression.
-func probePythonPackages(names []string) (map[string]bool, error) {
+func ProbePythonPackages(names []string) (map[string]bool, error) {
 	var list strings.Builder
 	for _, n := range names {
 		list.WriteString(`"` + n + `" `)

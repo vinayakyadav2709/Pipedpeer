@@ -39,6 +39,16 @@ func TestSummaryRendering(t *testing.T) {
 		t.Fatalf("got\n%s\nwant\n%s\nunresolved %v", got, want, unresolved)
 	}
 
+	// V1 rehearsal: 96 mapped items, local cores raced 24 of them, so the work
+	// counters sum to 120. The line counts items once and names the race.
+	s = summary{Host: "127.0.0.1", Total: time.Second, Receipt: []byte(`{"remote_items":36,"local_items":84,"mapped_items":96,"remote_used":36,` +
+		`"by_where":{"local":84,"peer:10.88.0.11:38080":9,"peer:10.88.0.12:38080":9,"peer:10.88.0.13:38080":9,"peer:10.88.0.14:38080":9}}`)}
+	names = map[string]string{"10.88.0.11:38080": "pc1", "10.88.0.12:38080": "pc2", "10.88.0.13:38080": "pc3", "10.88.0.14:38080": "pc4"}
+	lines, _ = summaryLines(s, "yeet", names)
+	if got, want := lines[1], "  spread       96 items: 60 on yeet, 36 on 4 others (pc1 9, pc2 9, pc3 9, pc4 9) · 24 computed twice (local cores raced slow chunks)"; got != want {
+		t.Fatalf("raced spread:\ngot  %s\nwant %s", got, want)
+	}
+
 	// Cancelled, nothing ran remotely, a peer with no known name.
 	s = summary{Host: "h", Total: 6200 * time.Millisecond, Err: fmt.Errorf("x: %w", context.Canceled),
 		Receipt: []byte(`{"by_where":{"peer:127.0.0.1:4000":5}}`)}
