@@ -4,7 +4,7 @@
 
 - [Joining across networks](./src/internal/internet/CONTEXT.md): introducer, hole punching, direct QUIC links, forwarders
 - [Nodes and placement](./src/internal/coordinator/CONTEXT.md): discovery, node store, scoring, leases, admission
-- [Execution on a node](./src/internal/daemonapi/CONTEXT.md): upload, sandbox, memory ceilings, results, job dirs
+- [Execution on a node](./src/internal/daemonapi/CONTEXT.md): upload, sandbox, memory ceilings, results, job dirs; `internal/clusterstats` builds the snapshot for `pipedpeer stats`, served with the /ui page by `/v1/stats` (`src/internal/daemonapi/ui.go`)
 - [Interception](./src/internal/nixgen/CONTEXT.md): the Python shim, pool spill, shares, DDP sync
 - [Environments and closures](./src/internal/nixstore/CONTEXT.md): import scan, flakes, stores, closure transfer, signing trust
 - [Membership and trust](./src/internal/authtoken/CONTEXT.md): token, proof, pinned TLS, node keys

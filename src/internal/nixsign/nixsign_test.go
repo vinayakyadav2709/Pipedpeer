@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -135,6 +136,42 @@ func TestTrustedKeysAreRewrittenNotAppended(t *testing.T) {
 	// Space separated on one line, which is the format nix reads.
 	if strings.Count(strings.TrimSpace(got), "\n") != 0 {
 		t.Errorf("trusted keys span several lines; nix expects one setting: %q", got)
+	}
+}
+
+// Concurrent writers must all succeed and leave no temporary files behind.
+// With one shared temporary name, one writer renamed the other's file away
+// and the daemon logged "could not record the cluster's signing keys".
+func TestTrustedKeysSurviveConcurrentWriters(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	a, b := testKey(t), testKey(t)
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- WriteTrustedKeys([]string{PublicKey(a), PublicKey(b)})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent write failed: %v", err)
+		}
+	}
+	left, _ := filepath.Glob(filepath.Join(filepath.Dir(TrustedKeysFile()), "*.tmp"))
+	if len(left) != 0 {
+		t.Errorf("temporary files left behind: %v", left)
+	}
+	info, err := os.Stat(TrustedKeysFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("trusted keys mode %v, want 0644 so nix can read it", info.Mode().Perm())
 	}
 }
 

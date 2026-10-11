@@ -83,6 +83,16 @@ else mode="?"; fi
 printf '%-18s %-8s %-8s %-9s %-9s %s\n' "03_pandas_ooc.py" "$cold" "$warm" "-" "$(took "$last_log")" "$mode" >>"$out"
 rm -f "$last_log" "$last_log.t"
 
+# The capstone has a fair local baseline: the same closure with interception
+# off (-e PIPEDPEER_SHIM=0), on this machine. Its point is that five kinds of
+# work all run from one plain file; whether it is also faster is what this row
+# finds out.
+cap() { (cd 07_capstone && "$PIPE" run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7 "$@") 2>&1 | grep -Eo '^TOTAL [0-9.]+s' | tail -1 | awk '{print $2}'; }
+loc=$(cap -e PIPEDPEER_SHIM=0)
+clu=$(cap)
+spd=$(python3 -c "import sys; l, c = (float(x.rstrip('s') or 0) for x in sys.argv[1:]); print('%.2fx' % (l / c) if l and c else '-')" "${loc:-0}" "${clu:-0}")
+printf '%-18s %-8s %-8s %-9s %-9s %s\n' "07_capstone.py" "-" "-" "${loc:-failed}" "${clu:-failed}" "$spd" >>"$out"
+
 # GPU: as on stage, but from here. Cold resends several GB - expect minutes.
 g=$(gpu_nodes)
 if [[ "$g" -ge 1 ]]; then

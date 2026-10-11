@@ -244,6 +244,11 @@ type shimReceipt struct {
 		RanElsewhere int    `json:"ran_elsewhere"`
 		Via          string `json:"via"`
 	} `json:"parts"`
+	Decisions []struct {
+		Op      string `json:"op"`
+		Shipped bool   `json:"shipped"`
+		Why     string `json:"why"`
+	} `json:"decisions"`
 }
 
 // runPoolScript runs src under the shim against an out-of-process fake daemon.
@@ -284,6 +289,11 @@ func runPoolScriptWith(t *testing.T, python string, files map[string]string, mai
 		"PIPEDPEER_NUM_SHARDS=3",
 		"PIPEDPEER_STORE_PATH=/nix/store/fake",
 		"PIPEDPEER_RECEIPT="+receiptPath,
+		// Each script's own Pool size, not every core here. Local and the
+		// cluster pull from one queue, so a 12-core test machine finishes
+		// 64 x 20ms before the first round trip returns and nothing is left
+		// for the cluster - correct, and useless to a test of dispatching.
+		"PIPEDPEER_RESPECT_POOL_SIZE=1",
 	)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -547,6 +557,10 @@ def work(x):
     time.sleep(0.01)
     return x
 
+# The harness keeps every other test's own pool size; this one is about
+# not keeping it.
+os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
+
 if __name__ == "__main__":
     with multiprocessing.Pool(2) as pool:
         got = pool.map(work, list(range(32)))
@@ -772,5 +786,103 @@ if __name__ == "__main__":
 				t.Errorf("want remote work and no failures: %+v\nstderr:\n%s", res.receipt, res.stderr)
 			}
 		})
+	}
+}
+
+// A pinned job must size its pool to the cores it may run on, not the
+// machine's total: on a 12-core host pinned to one core, a 12-wide pool only
+// time-slices that core twelve ways.
+func TestPoolWidthFollowsCPUPinning(t *testing.T) {
+	runShimPython(t, "pinned", `
+import os
+import sitecustomize as shim
+
+if not hasattr(os, "sched_setaffinity"):
+    print("PINNED-OK")
+    raise SystemExit(0)
+allowed = sorted(os.sched_getaffinity(0))
+assert shim._usable_cores() <= len(allowed), shim._usable_cores()
+os.sched_setaffinity(0, {allowed[0]})
+assert shim._usable_cores() == 1, "pinned to one core, sized for %d" % shim._usable_cores()
+os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
+assert shim._pool_width(None) == 1, shim._pool_width(None)
+print("PINNED-OK")
+`, "PINNED-OK")
+}
+
+// A pool's own workers must not count against it. _resize measures free memory
+// with them running, so on a memory-bound machine every map found less room
+// than the pool was built with and rebuilt it narrower, paying for a second
+// pool start in the middle of the job.
+func TestPoolResizeCountsItsOwnWorkersAsFree(t *testing.T) {
+	runShimPython(t, "reclaim", `
+import os
+import sitecustomize as shim
+
+os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
+shim._usable_cores = lambda: 2
+budget = int(2 * (256 << 20) / 0.4) + 1     # exactly room for two workers
+shim._avail_bytes = lambda: budget
+
+def inc(x):
+    return x + 1
+
+if __name__ == "__main__":
+    pool = shim._ClusterPool()
+    assert pool._procs == 2, pool._procs
+    held = pool._workers_memory()
+    assert held > 0, "a running pool reported no memory held by its workers"
+    # The workers now hold memory the machine no longer reports as free.
+    shim._avail_bytes = lambda: budget - held
+    pool._resize()
+    assert pool._procs == 2, "shrank to %d over its own workers' memory" % pool._procs
+    assert pool.map(inc, range(4)) == [1, 2, 3, 4]
+    pool.close()
+    print("RECLAIM-OK")
+`, "RECLAIM-OK")
+}
+
+// The receipt says what the cost model decided and why, not only what ran
+// where: when a run that should have spread out stays home, the reason is the
+// first thing anyone asks for.
+func TestReceiptRecordsWhyWorkShippedOrStayed(t *testing.T) {
+	res := runPoolScript(t, map[string]string{"job.py": poolScript}, "job.py")
+	assertDistributed(t, res, "POOL-OK")
+	shipped := false
+	for _, d := range res.receipt.Decisions {
+		if d.Op == "pool.map" && d.Shipped && strings.Contains(d.Why, "worth a round trip") {
+			shipped = true
+		}
+	}
+	if !shipped {
+		t.Errorf("a distributed map left no 'shipped' decision with its reason: %+v", res.receipt.Decisions)
+	}
+	// Every item is accounted for exactly once: those that ran remotely and
+	// those whose local result was kept. Items the local cores computed while
+	// racing the cluster were missing, and the total fell short of the map.
+	// The fake daemon runs remote parts on the origin, so "local" includes them.
+	if got := res.receipt.RemoteItems + res.receipt.LocalItems; got < 64 {
+		t.Errorf("receipt accounts for %d items of a 64-item map: %+v", got, res.receipt)
+	}
+
+	tiny := runPoolScript(t, map[string]string{"job.py": `
+import multiprocessing
+
+def inc(x):
+    return x + 1
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(2) as pool:
+        print("TINY-OK", sum(pool.map(inc, range(40))))
+`}, "job.py")
+	kept := false
+	for _, d := range tiny.receipt.Decisions {
+		if d.Op == "pool.map" && !d.Shipped && strings.Contains(d.Why, "under") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Errorf("a map too small to ship left no 'kept local' decision: %+v\nstderr:\n%s",
+			tiny.receipt.Decisions, tiny.stderr)
 	}
 }

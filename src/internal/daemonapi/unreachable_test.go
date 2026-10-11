@@ -52,3 +52,33 @@ func TestUnreachablePeersAreServed(t *testing.T) {
 		t.Fatalf("empty reporter: got %+v, want []", got)
 	}
 }
+
+// The /ui page shows unreachable peers as rows: a known node is marked with
+// the reason, a peer the store never held is appended, the rest are untouched.
+func TestWithUnreachableMarksRows(t *testing.T) {
+	s := New("test-node")
+	nodes := []nodeResp{
+		{NodeID: "known", State: "healthy", Capabilities: map[string]string{"cpu": "4"}},
+		{NodeID: "other", State: "healthy"},
+	}
+	if got := s.withUnreachable(nodes); !reflect.DeepEqual(got, nodes) {
+		t.Fatalf("no reporter: got %+v, want rows unchanged", got)
+	}
+
+	s.SetUnreachableReporter(func() map[string]string {
+		return map[string]string{"known": "punch timed out", "stranger": "both behind symmetric NAT"}
+	})
+	got := s.withUnreachable([]nodeResp{
+		{NodeID: "known", State: "healthy", Capabilities: map[string]string{"cpu": "4"}},
+		{NodeID: "other", State: "healthy"},
+	})
+	want := []nodeResp{
+		{NodeID: "known", State: "unreachable", Capabilities: map[string]string{"cpu": "4", ReasonCapability: "punch timed out"}},
+		{NodeID: "other", State: "healthy"},
+		{NodeID: "stranger", State: "unreachable", Source: "internet",
+			Capabilities: map[string]string{ReasonCapability: "both behind symmetric NAT"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}

@@ -25,7 +25,7 @@ var nixpkgsMapping = map[string]string{
 	"sklearn":        "scikit-learn",
 	"scikit-learn":   "scikit-learn",
 	"matplotlib":     "matplotlib",
-	"pillow":         "Pillow",
+	"pillow":         "pillow",
 	"pyyaml":         "pyyaml",
 	"yaml":           "pyyaml",
 	"pytest":         "pytest",
@@ -36,7 +36,7 @@ var nixpkgsMapping = map[string]string{
 	"opencv":         "opencv-python",
 	"beautifulsoup4": "beautifulsoup4",
 	"lxml":           "lxml",
-	"PIL":            "Pillow",
+	"PIL":            "pillow",
 	"cryptography":   "cryptography",
 	"jwt":            "pyjwt",
 	"sqlalchemy":     "sqlalchemy",
@@ -51,11 +51,25 @@ var nixpkgsMapping = map[string]string{
 	"uvicorn":        "uvicorn",
 	"pydantic":       "pydantic",
 	"click":          "click",
-	"tqdm":           "tqdm",
-	"seaborn":        "seaborn",
-	"sympy":          "sympy",
-	"networkx":       "networkx",
-	"statsmodels":    "statsmodels",
+	// Import names that differ from the package name. The keys above are a
+	// mix; what a script contains is the import name, so it has to be here.
+	"cv2":         "opencv-python",
+	"bs4":         "beautifulsoup4",
+	"skimage":     "scikit-image",
+	"tqdm":        "tqdm",
+	"seaborn":     "seaborn",
+	"statsmodels": "statsmodels",
+	"xgboost":     "xgboost",
+	"lightgbm":    "lightgbm",
+	"polars":      "polars",
+	"pyarrow":     "pyarrow",
+	"numba":       "numba",
+	"sympy":       "sympy",
+	"networkx":    "networkx",
+	"plotly":      "plotly",
+	"h5py":        "h5py",
+	"tabulate":    "tabulate",
+	"rich":        "rich",
 }
 
 // Python standard library modules — these are always available and should
@@ -330,7 +344,9 @@ func ResolveNixPackage(pkg string) string {
 }
 
 // UnresolvedImports returns the imports that have no nix package mapping and
-// are not standard library, in the order given.
+// are not standard library, in the order given. They are left out of the
+// environment, so the script fails on the node with ModuleNotFoundError
+// unless the user names a package for them with --pkg.
 func UnresolvedImports(imports []string) []string {
 	var out []string
 	for _, imp := range imports {

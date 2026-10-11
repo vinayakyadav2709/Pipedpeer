@@ -21,7 +21,7 @@ func attachFixture(t *testing.T, status string) (*Server, string, *httptest.Serv
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	s := New("node-" + strings.Repeat("a", 8))
 	t.Cleanup(s.StopWarmWorkers)
-	id := "job-attach"
+	id := "00000000-0000-4000-8000-0000000000a7" // a UUID, like every daemon job ID
 	if err := os.MkdirAll(filepath.Join(s.jobDir, id, "work"), 0o755); err != nil {
 		t.Fatal(err)
 	}

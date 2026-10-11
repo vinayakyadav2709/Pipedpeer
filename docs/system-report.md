@@ -1016,7 +1016,7 @@ its replacement.
 | `numpy.linalg.svd`, `eig` | Whole matrix to one worker | cost model, unsplit form |
 | pandas `groupby().agg()` and named aggregations, `merge`, `join` | Hash shuffle on the key; bucket 0 local | cost model; above 512 MB unless forced |
 | `pandas.read_csv`, `read_parquet` | Out-of-core, in 64 MB chunks at record boundaries | file larger than half of free memory |
-| `joblib.Parallel`, scikit-learn `n_jobs` | One batch per request | any cluster; no cost model |
+| `joblib.Parallel`, scikit-learn `n_jobs` | Same as `Pool.map`: measure a head on joblib's own backend, then race local against multi-task remote chunks | 0.5 s of work; batches holding a lock stay local |
 | torch `matmul`, `mm` | Row blocks | size only (≥ 32 MB) |
 | torch training (`--ddp`) | Gradients averaged by the lead daemon | opt-in |
 
@@ -1234,9 +1234,9 @@ environment build time, what happened to the closure (already on the node, a
 partial send, or a full or cold send with size and time), the script's time and
 peak memory, how its items spread across machines, the files that came back,
 and the total, or the time at which it was cancelled. The spread comes from a
-receipt the shim prints on stderr at exit, `[pipedpeer] receipt {json}`, with
-items counted by where they ran. The client hides that line from the terminal
-and parses it. Since `5b89f8c` the receipt also counts the items this machine
+receipt the shim writes to a file at exit (`PIPEDPEER_RECEIPT`), with
+items counted by where they ran. The daemon returns it on the done frame and
+the client stores it in the job history. Since `5b89f8c` the receipt also counts the items this machine
 runs itself, including a chunk it re-ran after a peer failed.
 
 ---

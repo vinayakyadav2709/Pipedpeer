@@ -61,17 +61,20 @@ func TestReleaseJobLeaseFreesTheSlot(t *testing.T) {
 func TestPruneDropsADetachedJobADayAfterItFinished(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	s := New("self")
+	// Daemon job dirs are UUIDs; the pruner leaves any other name alone.
+	const detached, plain, recent = "00000000-0000-4000-8000-000000000001",
+		"00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000003"
 	defer s.StopWarmWorkers()
 	finished := time.Now().Add(-DetachedJobRetention - time.Hour)
-	for _, id := range []string{"detached", "plain", "detached-recent"} {
+	for _, id := range []string{detached, plain, recent} {
 		if err := os.MkdirAll(filepath.Join(s.jobDir, id), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	s.jobsMu.Lock()
-	s.jobs["detached"] = &JobRecord{JobID: "detached", Status: "done", Detached: true, FinishedAt: finished}
-	s.jobs["plain"] = &JobRecord{JobID: "plain", Status: "done", FinishedAt: finished}
-	s.jobs["detached-recent"] = &JobRecord{JobID: "detached-recent", Status: "done", Detached: true, FinishedAt: time.Now()}
+	s.jobs[detached] = &JobRecord{JobID: detached, Status: "done", Detached: true, FinishedAt: finished}
+	s.jobs[plain] = &JobRecord{JobID: plain, Status: "done", FinishedAt: finished}
+	s.jobs[recent] = &JobRecord{JobID: recent, Status: "done", Detached: true, FinishedAt: time.Now()}
 	s.jobsMu.Unlock()
 
 	n, err := s.PruneCompletedJobDirs(JobRetention)
@@ -81,10 +84,10 @@ func TestPruneDropsADetachedJobADayAfterItFinished(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("pruned %d dirs, want 1", n)
 	}
-	if _, err := os.Stat(filepath.Join(s.jobDir, "detached")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(s.jobDir, detached)); !os.IsNotExist(err) {
 		t.Fatalf("detached job dir survived a day past its finish: %v", err)
 	}
-	for _, id := range []string{"plain", "detached-recent"} {
+	for _, id := range []string{plain, recent} {
 		if _, err := os.Stat(filepath.Join(s.jobDir, id)); err != nil {
 			t.Fatalf("%s was pruned: %v", id, err)
 		}

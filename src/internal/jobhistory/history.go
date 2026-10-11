@@ -43,6 +43,10 @@ type Record struct {
 	DegradedMode    bool   `json:"degraded_mode,omitempty"`
 	CandidateCount  int    `json:"candidate_count,omitempty"`
 	PlacementReason string `json:"placement_reason,omitempty"`
+	// Strategy and Candidates are the coordinator's whole decision: every
+	// node it considered and what it saw, for `pipedpeer job --explain`.
+	Strategy   string      `json:"strategy,omitempty"`
+	Candidates []Candidate `json:"candidates,omitempty"`
 	// Resource estimation and tracking
 	PeakMemBytes      int64  `json:"peak_mem_bytes,omitempty"`
 	EstimatedMemBytes int64  `json:"estimated_mem_bytes,omitempty"`
@@ -53,6 +57,9 @@ type Record struct {
 	// detached, so attach can find it again.
 	RemoteJobID    string `json:"remote_job_id,omitempty"`
 	DaemonEndpoint string `json:"daemon_endpoint,omitempty"` // host:port
+	// Stages is the run's timeline: every step, where it ran, and how long
+	// it took, the environment build included.
+	Stages []Stage `json:"stages,omitempty"`
 }
 
 type JobSummary struct {
@@ -309,9 +316,19 @@ func QueryPeakMem(scriptPath string, limit int) []int64 {
 	return peaks
 }
 
+// IsRecordDir reports whether dir holds a history record. The history shares
+// its directory with the daemon's own job directories, NAR cache and state
+// file, so a pruner that removed every old directory there deleted whatever
+// the daemon kept beside it.
+func IsRecordDir(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "metadata.json"))
+	return err == nil
+}
+
 // Prune removes history entries whose directory has not been modified within
 // olderThan (dir mtime ≈ when the run finished and its artifacts were
-// written). Returns the number of entries removed.
+// written). Only directories holding a record are considered. Returns the
+// number of entries removed.
 func Prune(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(BaseDir())
 	if err != nil {
@@ -326,12 +343,16 @@ func Prune(olderThan time.Duration) (int, error) {
 		if !e.IsDir() {
 			continue
 		}
+		dir := filepath.Join(BaseDir(), e.Name())
+		if !IsRecordDir(dir) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			if err := os.RemoveAll(filepath.Join(BaseDir(), e.Name())); err != nil {
+			if err := os.RemoveAll(dir); err != nil {
 				return removed, err
 			}
 			removed++

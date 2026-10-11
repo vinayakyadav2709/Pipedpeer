@@ -16,12 +16,12 @@ import (
 var ErrDetached = errors.New("detached")
 
 // AttachStream replays a job's output so far, then follows it live until the
-// done frame. Printing, the receipt filter and cancel-on-ctx are the same as
+// done frame. Printing, the result and cancel-on-ctx are the same as
 // StreamExecute.
-func AttachStream(ctx context.Context, host string, port int, jobID string) (peak int64, stdout, stderr string, err error) {
+func AttachStream(ctx context.Context, host string, port int, jobID string) (ExecResult, error) {
 	conn, err := dialJobSocket(ctx, host, port, "/v1/jobs/"+url.PathEscape(jobID)+"/attach")
 	if err != nil {
-		return 0, "", "", err
+		return ExecResult{}, err
 	}
 	defer conn.Close()
 	return streamJob(ctx, conn, nil)

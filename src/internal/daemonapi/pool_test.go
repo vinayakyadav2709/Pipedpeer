@@ -1393,3 +1393,106 @@ print("fan-ok")
 		t.Fatalf("unexpected probe output: %q", out)
 	}
 }
+
+// A frames request large enough to be split into micro-chunks must still be
+// answered in frames. It was answered in JSON, which the shim could not parse.
+func TestPoolMapMicroChunksAnswerInFrames(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	store := fakeRun(t, t.TempDir())
+
+	s := New("pool-test-microframes")
+	defer s.StopWarmWorkers()
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	emit := `
+import base64, pickle, sys
+sys.stdout.write("\n".join(base64.b64encode(pickle.dumps(v)).decode() for v in (1, 2, 3, 4)))
+`
+	out, err := exec.Command(python, "-c", emit).Output()
+	if err != nil {
+		t.Fatalf("emit pickles: %v", err)
+	}
+	var items []json.RawMessage
+	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		b, _ := base64.StdEncoding.DecodeString(l)
+		items = append(items, b)
+	}
+
+	// 60% of free memory: over the 40% micro-chunk line, under admission.
+	required := memAvailBytes(t) * 6 / 10
+	hdr := []byte(fmt.Sprintf(`{"func_src": "def run(x):\n    return x * 2\n", "func_name": "run", "items_frames": 4, "required_mem": %d}`, required))
+	req, err := http.NewRequest("POST", srv.URL+"/v1/pool/map", bytes.NewReader(buildFrames(hdr, nil, items)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", framesContentType)
+	req.Header.Set("X-Pipedpeer-Store", store)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d: %s", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != framesContentType {
+		t.Fatalf("micro-chunked frames request answered as %q, want frames", ct)
+	}
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		t.Fatal("frames response has no header line")
+	}
+	var outHdr struct {
+		ResultsFrames int `json:"results_frames"`
+		Receipt       struct {
+			Parts []provPart `json:"parts"`
+		} `json:"receipt"`
+	}
+	if err := json.Unmarshal(body[:nl], &outHdr); err != nil {
+		t.Fatalf("bad header %q: %v", body[:nl], err)
+	}
+	if outHdr.ResultsFrames != 4 {
+		t.Fatalf("results_frames = %d, want 4", outHdr.ResultsFrames)
+	}
+	total := 0
+	for _, p := range outHdr.Receipt.Parts {
+		total += p.Items
+	}
+	if total != 4 {
+		t.Fatalf("receipt accounts for %d items, want 4: %+v", total, outHdr.Receipt.Parts)
+	}
+}
+
+// A peer that took a forwarded request reports its share as "local"; passed
+// through unchanged, the submitter read that as work done on the origin.
+func TestRelabelForwardedReceipt(t *testing.T) {
+	body := []byte(`{"results_frames": 2, "receipt": {"node": "peer-node", "parts": [{"where": "local", "items": 1, "ms": 3}, {"where": "peer:10.0.0.3:38080", "items": 1, "ms": 4}]}}` + "\n" + "\x00\x00\x00\x01a")
+	out := relabelForwardedReceipt(body, "10.0.0.2:38080")
+
+	nl := bytes.IndexByte(out, '\n')
+	var hdr struct {
+		ResultsFrames int `json:"results_frames"`
+		Receipt       struct {
+			Parts []provPart `json:"parts"`
+		} `json:"receipt"`
+	}
+	if err := json.Unmarshal(out[:nl], &hdr); err != nil {
+		t.Fatal(err)
+	}
+	if hdr.ResultsFrames != 2 {
+		t.Errorf("results_frames = %d, want 2", hdr.ResultsFrames)
+	}
+	got := []string{hdr.Receipt.Parts[0].Where, hdr.Receipt.Parts[1].Where}
+	want := []string{"peer:10.0.0.2:38080", "peer:10.0.0.3:38080"}
+	if got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("parts = %v, want %v", got, want)
+	}
+	if !bytes.Equal(out[nl:], body[bytes.IndexByte(body, '\n'):]) {
+		t.Error("result frames were altered")
+	}
+}

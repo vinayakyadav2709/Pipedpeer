@@ -126,6 +126,8 @@ func main() {
 		newAuthCmd(),
 		newEventsCmd(),
 		newAttachCmd(),
+		newStatsCmd(),
+		newUICmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE
@@ -159,6 +161,43 @@ func main() {
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
+	}
+}
+
+// placementWait is how long a run waits for a node to become able to take
+// it. PIPEDPEER_REMOTE_WAIT overrides it; 0 takes one look.
+func placementWait() time.Duration {
+	if v, err := time.ParseDuration(os.Getenv("PIPEDPEER_REMOTE_WAIT")); err == nil && v >= 0 {
+		return v
+	}
+	return 15 * time.Second
+}
+
+// acceptWithin asks for admission until it is granted, the refusal is not
+// about memory, or the window runs out.
+//
+// Memory is the one refusal that clears on its own. A run started straight
+// after another one finds the previous job's memory still being handed back,
+// and its admission check fails by a few hundred megabytes: on the bench
+// rig, every second back-to-back run of 02_numpy_heavy was refused in under
+// a tenth of a second while the first one, with the same estimate, ran.
+func acceptWithin(ctx context.Context, window time.Duration, accept func() (*daemonctl.AcceptResponse, error)) (*daemonctl.AcceptResponse, error) {
+	deadline := time.Now().Add(window)
+	told := false
+	for {
+		resp, err := accept()
+		if err == nil || !strings.Contains(err.Error(), "insufficient memory") || time.Now().After(deadline) {
+			return resp, err
+		}
+		if !told {
+			fmt.Printf("[coordinator] %v; waiting up to %s for memory to free...\n", err, window)
+			told = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Second):
+		}
 	}
 }
 
@@ -640,8 +679,15 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				// A remote run must fail loudly when there is no node at all
 				// instead of queuing forever: the user can just drop --remote.
-				decision := coord.FindNode()
+				// PIPEDPEER_REMOTE_WAIT overrides the window; 0 takes one look.
+				wait := placementWait()
+				decision := coord.FindNodeWithin(ctx, wait, time.Second, func() {
+					fmt.Printf("[coordinator] no eligible node yet; waiting up to %s for peers to report in...\n", wait)
+				})
 				if decision.ChosenNode.NodeID == "" {
+					if why := decision.RejectionSummary(); why != "" {
+						fmt.Print("[coordinator] nodes turned down:\n" + why)
+					}
 					return fmt.Errorf("no eligible node found — run without --remote to execute on this machine")
 				}
 
@@ -651,21 +697,29 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				// the user pinned devices explicitly with --gpu-id.
 				var reservedGPU atomic.Int64
 				reservedGPU.Store(-1)
-				// The lease the placement took, so the job keeps it alive.
-				var placedLease atomic.Value
-				placedLease.Store("")
+				queuedAt := time.Now()
+				// The placement behind the current attempt: its lease keeps
+				// the job alive, and its decision goes in the run's record so
+				// `job --explain` can show it.
+				var placed atomic.Pointer[coordinator.LeaseResult]
 
 				detachCh, stopSuspend := watchSuspend(ctx, true)
 				defer stopSuspend()
 
 				executor := func(host string, port int, targetNodeID string) error {
+					var decision coordinator.PlacementDecision
+					var leaseID string
+					if r := placed.Load(); r != nil {
+						decision = r.Decision
+						leaseID = r.LeaseID
+					}
 					devices := gpuID
 					if devices == "" {
 						if idx := reservedGPU.Load(); idx >= 0 {
 							devices = strconv.FormatInt(idx, 10)
 						}
 					}
-					return app.Run(ctx, app.Options{
+					err := app.Run(ctx, app.Options{
 						ScriptPath:        scriptPath,
 						DaemonHost:        host,
 						DaemonPort:        port,
@@ -680,14 +734,24 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						Envs:              envs,
 						Pkgs:              pkgs,
 						ScriptArgs:        scriptArgs,
-						PlacementSource:   "coordinator",
+						PlacementSource:   string(decision.Source),
+						DegradedMode:      decision.DegradedMode,
+						CandidateCount:    len(decision.Candidates),
+						PlacementReason:   decision.Reason,
+						Strategy:          strategy,
+						Candidates:        coordinator.ExplainCandidates(decision),
 						EstimatedMemBytes: estimatedMemBytes,
 						EstimationTier:    estimationTier,
 						Cold:              cold,
 						Detach:            detach,
 						DetachCh:          detachCh,
-						LeaseID:           placedLease.Load().(string),
+						LeaseID:           leaseID,
+						QueuedAt:          queuedAt,
 					})
+					if app.IsPermanent(err) {
+						return coordinator.Permanent(err)
+					}
+					return err
 				}
 
 				statusFn := func(msg string) {
@@ -696,7 +760,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				coord.SetOnPlacement(func(r *coordinator.LeaseResult) {
 					reservedGPU.Store(int64(r.GPUIndex))
-					placedLease.Store(r.LeaseID)
+					placed.Store(r)
 				})
 
 				result, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
@@ -724,7 +788,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				placementSource = "explicit"
 			}
 
-			acceptResp, err := daemonctl.CheckRemoteAcceptance(daemonHost, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
+			acceptResp, err := acceptWithin(ctx, placementWait(), func() (*daemonctl.AcceptResponse, error) {
+				return daemonctl.CheckRemoteAcceptance(daemonHost, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
+			})
 			if err != nil {
 				return err
 			}
@@ -1693,7 +1759,11 @@ func newMapCmd() *cobra.Command {
 					o.DaemonHost = host
 					o.DaemonPort = port
 					o.TargetID = targetNodeID
-					return app.RunTask(ctx, env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					err := app.RunTask(ctx, env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					if app.IsPermanent(err) {
+						return coordinator.Permanent(err)
+					}
+					return err
 				}
 				statusFn := func(msg string) {}
 				res, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
@@ -1929,12 +1999,49 @@ func newJobCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, _ := cmd.Flags().GetString("id")
 			withOutput, _ := cmd.Flags().GetBool("output")
+			timeline, _ := cmd.Flags().GetBool("timeline")
+			explain, _ := cmd.Flags().GetBool("explain")
+			showReceipt, _ := cmd.Flags().GetBool("receipt")
+			if last, _ := cmd.Flags().GetBool("last"); last && id == "" {
+				recent, err := jobhistory.List(1)
+				if err != nil {
+					return err
+				}
+				if len(recent) == 0 {
+					return fmt.Errorf("no jobs recorded yet")
+				}
+				id = recent[0].ID
+			}
 			if id == "" {
-				return fmt.Errorf("--id is required")
+				return fmt.Errorf("--id is required (or --last for the most recent job)")
 			}
 			r, dir, err := jobhistory.Resolve(id)
 			if err != nil {
 				return err
+			}
+			if timeline || explain || showReceipt {
+				fmt.Printf("job %s  %s  %s\n", r.ID, filepath.Base(r.ScriptPath), r.Status)
+				if explain {
+					fmt.Println("\n== Placement ==")
+					jobhistory.WriteExplanation(os.Stdout, r)
+				}
+				if timeline {
+					fmt.Println("\n== Timeline ==")
+					jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
+				}
+				if showReceipt {
+					fmt.Println("\n== Receipt ==")
+					rc, ok, err := jobhistory.ReadReceipt(dir)
+					switch {
+					case err != nil:
+						return err
+					case !ok:
+						fmt.Println("No receipt for this run (interception off, or run before receipts were kept).")
+					default:
+						jobhistory.WriteReceipt(os.Stdout, rc)
+					}
+				}
+				return nil
 			}
 			fmt.Printf("id: %s\n", r.ID)
 			fmt.Printf("status: %s\n", r.Status)
@@ -1959,6 +2066,9 @@ func newJobCmd() *cobra.Command {
 			fmt.Printf("unchanged_files: %d\n", r.UnchangedFiles)
 			fmt.Printf("manifest_path: %s\n", r.ManifestPath)
 			fmt.Printf("history_dir: %s\n", dir)
+			if len(r.Stages) > 0 {
+				fmt.Printf("timeline: %s\n", jobhistory.Summary(r.Stages))
+			}
 			if withOutput {
 				stdout, _ := jobhistory.ReadOptionalText(dir, "stdout.log")
 				stderr, _ := jobhistory.ReadOptionalText(dir, "stderr.log")
@@ -1985,7 +2095,11 @@ func newJobCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("id", "", "Job ID")
+	cmd.Flags().Bool("last", false, "Show the most recent job")
 	cmd.Flags().Bool("output", false, "Print stdout/stderr")
+	cmd.Flags().Bool("timeline", false, "Show where the run's time went, stage by stage")
+	cmd.Flags().Bool("explain", false, "Show every node considered for the run and why the chosen one won")
+	cmd.Flags().Bool("receipt", false, "Show what the shim sent to other machines, kept local, and why")
 	return cmd
 }
 

@@ -986,7 +986,7 @@ func (s *Server) writePoolReply(w http.ResponseWriter, frames bool, results []an
 	// Frames response: small header line + raw pickle result frames. The
 	// receipt rides in the header so the submitter learns where the work
 	// ran, not merely that it was accepted.
-	w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
+	w.Header().Set("Content-Type", framesContentType)
 	w.WriteHeader(http.StatusOK)
 	body := make([]byte, 0, 1024)
 	body = append(body, poolFramesHeader(len(results), s.nodeID, prov.snapshot())...)
@@ -1002,6 +1002,8 @@ func poolFramesHeader(n int, node string, parts []provPart) []byte {
 	return fmt.Appendf(nil, "{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
 		n, node, recJSON)
 }
+
+const framesContentType = "application/vnd.pipedpeer.frames"
 
 // resultPickle extracts the raw pickle bytes a result carries. Results are
 // standardised on raw pickle bytes internally; only the wire edges base64.

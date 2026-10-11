@@ -56,6 +56,8 @@ type Options struct {
 	DegradedMode    bool
 	CandidateCount  int
 	PlacementReason string
+	Strategy        string
+	Candidates      []jobhistory.Candidate
 	// Resource estimation
 	EstimatedMemBytes int64
 	EstimationTier    string
@@ -68,6 +70,9 @@ type Options struct {
 	// LeaseID binds the node's lease to the job, so it lives as long as the
 	// job does even with nobody renewing it.
 	LeaseID string
+	// QueuedAt is when the coordinator started looking for a node, so the
+	// timeline can show placement. Zero when the node was given.
+	QueuedAt time.Time
 }
 
 func Run(ctx context.Context, opts Options) (runErr error) {
@@ -110,7 +115,7 @@ func Run(ctx context.Context, opts Options) (runErr error) {
 		if ctx.Err() != nil {
 			return fmt.Errorf("environment build stopped (%v): %w", err, ctx.Err())
 		}
-		return err
+		return &BuildError{Err: err}
 	}
 	defer env.Close()
 	if ctx.Err() != nil {
@@ -176,15 +181,27 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	historyRecord.DegradedMode = opts.DegradedMode
 	historyRecord.CandidateCount = opts.CandidateCount
 	historyRecord.PlacementReason = opts.PlacementReason
+	historyRecord.Strategy = opts.Strategy
+	historyRecord.Candidates = opts.Candidates
 	historyRecord.EstimatedMemBytes = opts.EstimatedMemBytes
 	historyRecord.EstimationTier = opts.EstimationTier
 	historyRecord.StorePath = env.StorePath
 	_ = jobhistory.SaveRecord(historyDir, historyRecord)
 
+	// The timeline starts with how long the coordinator spent finding a node
+	// (when it did), then the environment build, then this run's own steps.
+	timeline := &jobhistory.Timeline{}
+	if !opts.QueuedAt.IsZero() && len(env.Stages) > 0 {
+		if built, err := time.Parse(time.RFC3339Nano, env.Stages[0].At); err == nil && built.After(opts.QueuedAt) {
+			timeline.Add("placement", "local", opts.QueuedAt, built.Sub(opts.QueuedAt))
+		}
+	}
+	timeline.Stages = append(timeline.Stages, env.Stages...)
 	defer func() {
 		if detached {
 			return // Attach finalizes it
 		}
+		historyRecord.Stages = timeline.Stages
 		if err := jobhistory.Finalize(historyDir, historyRecord, runErr); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not finalize job history %s: %v\n", historyDir, err)
 		}
@@ -192,7 +209,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 			if runErr == nil {
 				fmt.Printf("\n=== Done ===\n")
 			}
-			fmt.Printf("History: %s\n", historyDir)
+			fmt.Printf("History: %s  (pipedpeer job --id %s --timeline)\n", historyDir, jobhistory.ShortID(historyRecord.ID))
 			sum.Total = time.Since(started)
 			sum.Err = runErr
 			printSummary(os.Stdout, sum)
@@ -217,14 +234,30 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	note("      Project root: %s\n", env.ProjectRoot)
 	note("      Script: %s\n", env.ScriptRel)
 
+	node := opts.DaemonHost
+	if opts.TargetID != "" {
+		node = shortNode(opts.TargetID)
+	}
 	uploadStart := time.Now()
 	uploadResp, err := daemonctl.UploadJob(opts.DaemonHost, opts.DaemonPort,
 		env.WorkspaceTar, env.NarPath, env.StorePath, env.ScriptRel,
 		daemonctl.UploadOptions{SkipBroadcast: opts.SkipBroadcast, Cold: opts.Cold})
+	uploadDur := time.Since(uploadStart)
 	if err != nil {
+		timeline.Add("upload", node, uploadStart, uploadDur)
 		return fmt.Errorf("upload failed: %v", err)
 	}
-	sum.Closure = closureLine(uploadResp, time.Since(uploadStart), opts.Cold)
+	sum.Closure = closureLine(uploadResp, uploadDur, opts.Cold)
+	// The node answers the upload only after handing the closure to its own
+	// peers, which on a cold cluster is most of the wait.
+	seed := time.Duration(uploadResp.SeedMs) * time.Millisecond
+	if seed > uploadDur {
+		seed = uploadDur
+	}
+	timeline.Add("upload", node, uploadStart, uploadDur-seed)
+	if seed > 0 {
+		timeline.Add("seed peers", node, uploadStart.Add(uploadDur-seed), seed)
+	}
 	note("      Uploaded job %s\n", uploadResp.JobID)
 	if ctx.Err() != nil {
 		return fmt.Errorf("cancelled before the job started: %w", ctx.Err())
@@ -270,16 +303,24 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	}
 
 	execStart := time.Now()
-	peakBytes, stdoutText, stderrText, err := daemonctl.StreamExecute(ctx, opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg, detach)
-	sum.ScriptRan, sum.ScriptTime, sum.Peak, sum.Stderr = true, time.Since(execStart), peakBytes, stderrText
-	historyRecord.PeakMemBytes = peakBytes
-	_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutText)
-	_ = jobhistory.SaveText(historyDir, "stderr.log", stderrText)
+	res, err := daemonctl.StreamExecute(ctx, opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg, detach)
+	execDur := time.Since(execStart)
+	addExecStages(timeline, node, execStart, execDur, res.Timing)
+	sum.ScriptRan, sum.ScriptTime, sum.Peak, sum.Receipt = true, execDur, res.PeakBytes, res.Receipt
+	historyRecord.PeakMemBytes = res.PeakBytes
+	_ = jobhistory.SaveText(historyDir, "stdout.log", res.Stdout)
+	_ = jobhistory.SaveText(historyDir, "stderr.log", res.Stderr)
+	if len(res.Receipt) > 0 {
+		if err := jobhistory.SaveReceipt(historyDir, res.Receipt); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save the shim receipt in %s: %v\n", historyDir, err)
+		}
+	}
 
 	if errors.Is(err, daemonctl.ErrDetached) {
 		detached = true
 		historyRecord.Detached = true
 		historyRecord.RemoteJobID = uploadResp.JobID
+		historyRecord.Stages = timeline.Stages
 		historyRecord.LocalSyncRoot = resultsDir
 		historyRecord.Stage = "executing"
 		if saveErr := jobhistory.SaveRecord(historyDir, historyRecord); saveErr != nil {
@@ -296,7 +337,9 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		return fmt.Errorf("execution failed: %w", err)
 	}
 
+	endSync := timeline.Begin("sync results", "local")
 	sum.Files = syncResults(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, resultsDir, historyDir, &historyRecord, note)
+	endSync()
 	return nil
 }
 
@@ -334,6 +377,29 @@ func syncResults(host string, port int, jobID, resultsDir, historyDir string, re
 // on purpose (the estimator's own fallback is 512 MiB): it only has to stop a
 // runaway, and --mem raises it.
 const noEstimateMemLimit = 4 << 30
+
+// addExecStages splits the execution into the node's own account of it - the
+// closure import, the sandbox setup, the script itself - and whatever is left
+// over, which is the round trip and output streaming. A node too old to
+// report timing gets a single "execute" stage.
+func addExecStages(t *jobhistory.Timeline, node string, start time.Time, total time.Duration, tm *daemonctl.ExecTiming) {
+	if tm == nil {
+		t.Add("execute", node, start, total)
+		return
+	}
+	ms := func(v int64) time.Duration { return time.Duration(v) * time.Millisecond }
+	at := start
+	if tm.ImportMs > 0 {
+		t.Add("closure import", node, at, ms(tm.ImportMs))
+		at = at.Add(ms(tm.ImportMs))
+	}
+	t.Add("sandbox setup", node, at, ms(tm.SetupMs))
+	at = at.Add(ms(tm.SetupMs))
+	t.Add("script", node, at, ms(tm.RunMs))
+	if rest := total - ms(tm.ImportMs+tm.SetupMs+tm.RunMs); rest >= 50*time.Millisecond {
+		t.Add("stream + wrap-up", node, at.Add(ms(tm.RunMs)), rest)
+	}
+}
 
 // memLimitFor turns a memory estimate into a cgroup ceiling.
 //

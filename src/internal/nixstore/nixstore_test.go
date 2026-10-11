@@ -151,3 +151,21 @@ func TestAnExplicitSettingWins(t *testing.T) {
 		t.Errorf("an explicit setting was overridden: %q", got)
 	}
 }
+
+// With a private store, /nix/store/... exists only inside the namespace. The
+// daemon checking it from outside saw the host's /nix and concluded the
+// closure was missing.
+func TestHostPathMapsIntoThePrivateStore(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PIPEDPEER_NIX_ROOT", root)
+	t.Setenv("PIPEDPEER_FORCE_PRIVATE_NIX", "1")
+	resetPrivate()
+	t.Cleanup(resetPrivate)
+
+	if got, want := HostPath("/nix/store/abc-run/bin/run"), filepath.Join(root, "store/abc-run/bin/run"); got != want {
+		t.Errorf("HostPath = %q, want %q", got, want)
+	}
+	if got := HostPath("/tmp/elsewhere"); got != "/tmp/elsewhere" {
+		t.Errorf("a path outside /nix was rewritten to %q", got)
+	}
+}

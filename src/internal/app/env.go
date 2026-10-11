@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
@@ -28,6 +29,9 @@ type Environment struct {
 	ProjectRoot  string
 	ScriptRel    string
 	FlakeContent string
+	// Stages is how long each build step took. Every run made from this
+	// environment starts its timeline with them.
+	Stages []jobhistory.Stage
 
 	tmpDir string
 }
@@ -61,6 +65,16 @@ type StageFn func(step int, title string)
 func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*Environment, error) {
 	if stage == nil {
 		stage = func(int, string) {}
+	}
+	// Each step runs until the next one begins; the last until the build
+	// returns.
+	var timeline jobhistory.Timeline
+	endStep := func() {}
+	report := stage
+	stage = func(step int, title string) {
+		endStep()
+		endStep = timeline.Begin(buildStageName(step, title), "local")
+		report(step, title)
 	}
 	projectRoot := findProjectRoot(filepath.Dir(absScriptPath))
 
@@ -176,6 +190,8 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 		env.ScriptRel = filepath.Base(absScriptPath)
 	}
 
+	endStep()
+	env.Stages = timeline.Stages
 	return env, nil
 }
 
@@ -196,6 +212,22 @@ func unpackaged(imports, pkgs []string) []string {
 		}
 	}
 	return out
+}
+
+// buildStageNames are the timeline's names for BuildEnvironment's steps.
+var buildStageNames = map[int]string{
+	1: "detect imports",
+	2: "resolve packages",
+	3: "generate flake",
+	4: "nix build",
+	5: "export closure",
+}
+
+func buildStageName(step int, title string) string {
+	if n, ok := buildStageNames[step]; ok {
+		return n
+	}
+	return strings.TrimSuffix(strings.ToLower(title), "...")
 }
 
 func findProjectRoot(scriptDir string) string {

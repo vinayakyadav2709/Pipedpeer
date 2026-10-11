@@ -56,13 +56,18 @@ func Attach(ctx context.Context, id string) (runErr error) {
 		printSummary(os.Stdout, sum)
 	}()
 
-	peak, stdoutText, stderrText, err := daemonctl.AttachStream(ctx, host, port, rec.RemoteJobID)
-	sum.Peak, sum.Stderr = peak, stderrText
-	if peak > 0 {
-		rec.PeakMemBytes = peak
+	res, err := daemonctl.AttachStream(ctx, host, port, rec.RemoteJobID)
+	sum.Peak, sum.Receipt = res.PeakBytes, res.Receipt
+	if res.PeakBytes > 0 {
+		rec.PeakMemBytes = res.PeakBytes
 	}
-	_ = jobhistory.SaveText(dir, "stdout.log", stdoutText)
-	_ = jobhistory.SaveText(dir, "stderr.log", stderrText)
+	_ = jobhistory.SaveText(dir, "stdout.log", res.Stdout)
+	_ = jobhistory.SaveText(dir, "stderr.log", res.Stderr)
+	if len(res.Receipt) > 0 {
+		if err := jobhistory.SaveReceipt(dir, res.Receipt); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save the shim receipt in %s: %v\n", dir, err)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("job %s: %w", short, err)
 	}

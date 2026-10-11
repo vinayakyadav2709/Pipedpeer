@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -97,7 +98,7 @@ type fakeNATPMP struct {
 	extIP    [4]byte
 	extPort  uint16
 	grant    uint32
-	lastLife uint32
+	lastLife atomic.Uint32 // written by serve, read by the test
 }
 
 func startFakeNATPMP(t *testing.T, speakPCP bool, extIP [4]byte, extPort uint16, grant uint32) *fakeNATPMP {
@@ -127,7 +128,7 @@ func (f *fakeNATPMP) serve() {
 		var resp []byte
 		switch {
 		case req[0] == 2 && f.speakPCP && n >= 60:
-			f.lastLife = binary.BigEndian.Uint32(req[4:8])
+			f.lastLife.Store(binary.BigEndian.Uint32(req[4:8]))
 			resp = make([]byte, 0, 60)
 			resp = append(resp, 2, 0x81, 0, 0) // version, response|MAP, reserved, success
 			resp = binary.BigEndian.AppendUint32(resp, f.grant)
@@ -150,7 +151,7 @@ func (f *fakeNATPMP) serve() {
 			resp = binary.BigEndian.AppendUint32(resp, 0)
 			resp = append(resp, f.extIP[:]...)
 		case req[0] == 0 && req[1] == 1:
-			f.lastLife = binary.BigEndian.Uint32(req[8:12])
+			f.lastLife.Store(binary.BigEndian.Uint32(req[8:12]))
 			resp = make([]byte, 0, 16)
 			resp = append(resp, 0, 129, 0, 0)
 			resp = binary.BigEndian.AppendUint32(resp, 0)
@@ -230,14 +231,14 @@ func TestAMappingIsGivenBackOnClose(t *testing.T) {
 	if _, _, err := natpmpMap(ctx, gw, 38447, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if f.lastLife == 0 {
+	if f.lastLife.Load() == 0 {
 		t.Fatal("precondition: the mapping request carried a zero lifetime")
 	}
 	if _, _, err := natpmpMap(ctx, gw, 38447, 0); err != nil {
 		t.Fatal(err)
 	}
-	if f.lastLife != 0 {
-		t.Errorf("delete asked for lifetime %d, want 0 — the mapping was not released", f.lastLife)
+	if life := f.lastLife.Load(); life != 0 {
+		t.Errorf("delete asked for lifetime %d, want 0 — the mapping was not released", life)
 	}
 }
 

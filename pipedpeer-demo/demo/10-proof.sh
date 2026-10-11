@@ -6,6 +6,15 @@ banner "Where the work actually ran"
 typed pipedpeer jobs
 "$PIPE" jobs 2>/dev/null | head -12
 echo
+note "The last run, stage by stage: build, upload, seeding the peers, the script, the sync."
+show "$PIPE" job --last --timeline
+echo
+note "What the shim sent to which machine, what it kept here, and the cost model's reason for each."
+# The per-dispatch table runs to dozens of rows for a forest; the summary,
+# per-peer counts and decisions are what the room can read.
+typed pipedpeer job --last --receipt
+"$PIPE" job --last --receipt | awk '/^Dispatches:/ {skip = 1; next} skip && /^$/ {skip = 0; next} !skip'
+echo
 typed pipedpeer events --limit 15
 "$PIPE" events --limit 15
 echo
