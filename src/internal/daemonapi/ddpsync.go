@@ -135,6 +135,24 @@ func (b *ddpBoard) dropCount(group string) int {
 	return len(r.dropped)
 }
 
+// dropsBelow counts the dropped ranks a round of the given world size would
+// otherwise wait for. A rank that died before it joined has an index past the
+// ring's old size and must not shrink the rounds it was never part of.
+// Caller holds the board lock.
+func (b *ddpBoard) dropsBelow(group string, world int) int {
+	r := b.runs[group]
+	if r == nil {
+		return 0
+	}
+	n := 0
+	for rank := range r.dropped {
+		if rank < world {
+			n++
+		}
+	}
+	return n
+}
+
 // ddpRun is a training run's state across its sync rounds.
 type ddpRun struct {
 	// reports is what each rank last said about its own throughput, which is
@@ -150,21 +168,32 @@ type ddpRun struct {
 	// seen is when this run last synced, so it can be forgotten.
 	seen time.Time
 
-	// A rank that died: every survivor must take the new shares at the SAME
-	// epoch boundary, or two ranks slice the data differently for an epoch
-	// and their step counts part. So the notice rides the reply to one
-	// agreed sync (downSeq), which every live rank fetches.
+	// A change to the ring (a rank died, one is joining, the shares were
+	// refitted): every rank must take it at the SAME epoch boundary, or two
+	// ranks slice the data differently for an epoch and their step counts
+	// part. So the notice rides the reply to one agreed sync (noteSeq), which
+	// every live rank fetches. One note at a time, always carrying the whole
+	// ring (shares and size), so a newer note can replace an older one.
 	lastSeq  int64
-	downNote string       // reply fragment carrying the new shares
-	downSeq  int64        // first sync whose reply carries it
-	downTold map[int]bool // ranks that already have it
+	note     string       // reply fragment carrying the ring as it now is
+	noteSeq  int64        // first sync whose reply carries it
+	noteTold map[int]bool // ranks that already have it
+
+	// world is the ring's size as this daemon knows it; it grows when a
+	// rank joins mid-run (ddpup.go).
+	world int
+	// sharded says a rank reported training from a DataLoader the shim
+	// reshards by hash, which is what lets a rank join mid-run.
+	sharded bool
+	// join is the rank joining now, if any.
+	join *ddpJoin
 }
 
 // run returns a group's run state, creating it. Caller holds the board lock.
 func (b *ddpBoard) run(group string) *ddpRun {
 	r := b.runs[group]
 	if r == nil {
-		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}}
+		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}, noteTold: map[int]bool{}}
 		b.runs[group] = r
 	}
 	return r
@@ -273,6 +302,9 @@ type ddpSyncRequest struct {
 	// rank costs an exchange per step, and one contributing less compute than
 	// it adds in sync is making the run slower.
 	SyncMillis float64 `json:"sync_ms,omitempty"`
+	// Sharded says this rank trains from a DataLoader the shim reshards by
+	// hash. Only such a ring can take a new rank mid-run.
+	Sharded bool `json:"sharded,omitempty"`
 }
 
 // ddpMode is how a request wants its payload handled.
@@ -373,13 +405,30 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	// wait out the full partial timeout - 45 seconds each - for a gradient
 	// that is never coming, which would make dropping a freeloader far worse
 	// than keeping it.
-	e.expected = e.world - s.ddp.dropCount(req.Group)
+	e.expected = e.world - s.ddp.dropsBelow(req.Group, e.world)
 	if e.expected < 1 {
 		e.expected = 1
 	}
-	if run := s.ddp.run(req.Group); req.Seq > run.lastSeq {
-		run.lastSeq = req.Seq
-		run.seen = time.Now()
+	{
+		run := s.ddp.run(req.Group)
+		if req.World > run.world {
+			run.world = req.World
+		}
+		if req.Sharded {
+			run.sharded = true
+		}
+		if req.Seq > run.lastSeq {
+			run.lastSeq = req.Seq
+			run.seen = time.Now()
+			// Decided once per sync and told to every rank at this one: a
+			// refit decided per reply reached only the rank whose reply hit
+			// the cadence, and that rank alone resliced its data.
+			// Not while a rank is joining: a refit note would replace the
+			// join note before every rank had it.
+			if frag := s.ddp.rebalanceFor(req.Group, run.world); frag != "" && run.join == nil {
+				s.ddp.publish(run, req.Seq, frag)
+			}
+		}
 	}
 	if req.SyncEvery > e.syncEvery {
 		e.syncEvery = req.SyncEvery
@@ -504,10 +553,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			ranks = e.partial
 		}
 		e.fetched[req.Rank] = true
-		rebalanceJSON := s.ddp.rebalanceFor(req.Group, e.world)
-		if note := s.ddp.downNoteFor(req.Group, req.Rank, req.Seq); note != "" {
-			rebalanceJSON = note // the planner is silent after a death anyway
-		}
+		rebalanceJSON := s.ddp.noteFor(req.Group, req.Rank, req.Seq)
 		if len(e.fetched) >= e.expectedCount() || rerr != nil {
 			delete(s.ddp.entries, key)
 		}

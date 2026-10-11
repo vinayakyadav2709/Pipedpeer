@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -32,37 +33,69 @@ func ddpHostName(n registry.NodeRecord) string {
 	return shortID(n.NodeID)
 }
 
-// ddpAwaitRanks waits for every rank. A rank that fails while others still
-// run is reported through onDown and the ring carries on without it. The run
-// fails only when no rank finishes, or on cancel; the first rank error is
-// returned then.
-func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResult, hosts []string, onDown func(rank int, err error)) error {
+// ddpAwaitRanks waits for every rank, including ranks started mid-run
+// (announced on added). A rank that fails while others still run is reported
+// through onDown and the ring carries on without it. The run fails only when
+// no rank finishes, or on cancel; the first rank error is returned then.
+//
+// A rank still waiting to join when only joiners are left is stopped after
+// ddpJoinGrace: the ring it was joining has finished.
+func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResult, hosts []string, added <-chan ddpAdded, onDown func(rank int, err error)) error {
+	hosts = append([]string(nil), hosts...)
 	running := len(hosts)
+	joiners := map[int]context.CancelFunc{}
+	var grace <-chan time.Time
+	stopped := false
 	var firstErr error
 	var died []int
 	ok := 0
-	for range hosts {
-		r := <-results
-		running--
-		if r.err == nil {
-			ok++
+	for running > 0 {
+		if grace == nil && !stopped && len(joiners) > 0 && running == len(joiners) {
+			grace = time.After(ddpJoinGrace)
+		}
+		select {
+		case a := <-added:
+			for len(hosts) <= a.rank {
+				hosts = append(hosts, "?")
+			}
+			hosts[a.rank] = a.host
+			running++
+			joiners[a.rank] = a.cancel
 			continue
-		}
-		host := "?"
-		if r.rank >= 0 && r.rank < len(hosts) {
-			host = hosts[r.rank]
-		}
-		if firstErr == nil {
-			firstErr = fmt.Errorf("rank %d on %s failed: %w", r.rank, host, r.err)
-		}
-		if ctx.Err() != nil {
-			continue // a cancel stops every rank; nobody died
-		}
-		died = append(died, r.rank)
-		if running > 0 {
-			fmt.Fprintf(w, "[ddp] rank %d on %s died; continuing on %d\n", r.rank, host, running)
-			fmt.Fprintf(w, "[ddp]   cause: %v\n", r.err)
-			onDown(r.rank, r.err)
+		case <-grace:
+			grace, stopped = nil, true
+			for rank, cancel := range joiners {
+				fmt.Fprintf(w, "[ddp] rank %d on %s: the ring finished before it could join; stopping it\n", rank, hosts[rank])
+				cancel()
+			}
+			continue
+		case r := <-results:
+			running--
+			_, joiner := joiners[r.rank]
+			delete(joiners, r.rank)
+			if r.err == nil {
+				ok++
+				continue
+			}
+			if joiner && stopped && errors.Is(r.err, context.Canceled) {
+				continue
+			}
+			host := "?"
+			if r.rank >= 0 && r.rank < len(hosts) {
+				host = hosts[r.rank]
+			}
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rank %d on %s failed: %w", r.rank, host, r.err)
+			}
+			if ctx.Err() != nil {
+				continue // a cancel stops every rank; nobody died
+			}
+			died = append(died, r.rank)
+			if running > 0 {
+				fmt.Fprintf(w, "[ddp] rank %d on %s died; continuing on %d\n", r.rank, host, running)
+				fmt.Fprintf(w, "[ddp]   cause: %v\n", r.err)
+				onDown(r.rank, r.err)
+			}
 		}
 	}
 	if ctx.Err() != nil || ok == 0 {

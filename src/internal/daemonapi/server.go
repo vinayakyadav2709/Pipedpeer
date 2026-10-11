@@ -1225,6 +1225,9 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/bench", s.handleBench)
 	r.Post("/v1/ddp/sync", s.handleDDPSync)
 	r.Post("/v1/ddp/down", s.handleDDPDown)
+	r.Post("/v1/ddp/join", s.handleDDPJoin)
+	r.Post("/v1/ddp/snapshot", s.handleDDPSnapshotPut)
+	r.Get("/v1/ddp/snapshot", s.handleDDPSnapshotGet)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 

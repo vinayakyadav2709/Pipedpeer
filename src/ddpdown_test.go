@@ -19,7 +19,7 @@ func TestARankDyingMidRunDoesNotFailTheRing(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- ddpAwaitRanks(context.Background(), &out, results,
-			[]string{"laptop-a", "pc-2", "laptop-b"},
+			[]string{"laptop-a", "pc-2", "laptop-b"}, nil,
 			func(rank int, err error) { downs = append(downs, rank) })
 	}()
 
@@ -46,7 +46,7 @@ func TestEveryRankFailingFailsTheRun(t *testing.T) {
 	results <- ddpRankResult{rank: 1, err: errors.New("ImportError")}
 	results <- ddpRankResult{rank: 0, err: errors.New("ImportError")}
 	var out bytes.Buffer
-	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, func(int, error) {})
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, func(int, error) {})
 	if err == nil || !strings.Contains(err.Error(), "rank 1 on b") {
 		t.Fatalf("got %v, want the first failure, rank 1 on b", err)
 	}
@@ -61,7 +61,7 @@ func TestCancelIsNotADeath(t *testing.T) {
 	results <- ddpRankResult{rank: 0, err: context.Canceled}
 	results <- ddpRankResult{rank: 1}
 	called := false
-	err := ddpAwaitRanks(ctx, &bytes.Buffer{}, results, []string{"a", "b"}, func(int, error) { called = true })
+	err := ddpAwaitRanks(ctx, &bytes.Buffer{}, results, []string{"a", "b"}, nil, func(int, error) { called = true })
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want the cancel", err)
 	}

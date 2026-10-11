@@ -586,6 +586,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						NoSelf:         remote,
 						Strategy:       strategy,
 						MemOverride:    memOverride,
+						MaxRanks:       max(ddpNodes, 0),
 					})
 					stopSuspend()
 					// A ring that measures slower than one machine falls
@@ -829,6 +830,9 @@ type ddpRunOptions struct {
 	NoSelf         bool
 	Strategy       string
 	MemOverride    string
+	// MaxRanks caps the ring when ranks join mid-run (--ddp N); 0 lets every
+	// eligible machine that comes back or turns up join.
+	MaxRanks int
 }
 
 // runDDP launches a transparent multi-rank training run: rank 0 is placed by
@@ -1003,25 +1007,38 @@ func runDDP(o ddpRunOptions) error {
 	ranks := make([]registry.NodeRecord, 0, o.Nodes)
 	ranks = append(ranks, rank0)
 	ranks = append(ranks, peers...)
+	nodesAtStart, err := ddpFetchNodes(o.DaemonPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ddp] cannot read the node list (%v); every machine that turns up later counts as new\n", err)
+	}
+	up := newDDPUpState(nodesAtStart)
+	var ranksMu sync.Mutex
 
-	errs := make(chan ddpRankResult, o.Nodes)
-	for i, n := range ranks {
-		go func(i int, n registry.NodeRecord) {
+	errs := make(chan ddpRankResult)
+	// launch starts rank i on n. A joining rank takes the ring's size and
+	// shares from the lead daemon when it gets in, not from here.
+	launch := func(ctx context.Context, i int, n registry.NodeRecord, join bool) {
+		ranksMu.Lock()
+		ring := append([]registry.NodeRecord(nil), ranks...)
+		ranksMu.Unlock()
+		world := len(ring)
+		up.started(n.NodeID)
+		go func() {
 			// Ranks sharing a machine must not share its accelerator: both
 			// taking device 0 is not two ranks of work, it is two ranks
 			// queueing on one GPU. An explicit --gpu-id is the user overriding
 			// that on purpose and is left alone.
 			rankGPUDevices := o.GPUDevices
-			if rankGPUDevices == "" && ddpSharesNode(ranks, i) {
+			if rankGPUDevices == "" && !join && ddpSharesNode(ring, i) {
 				rankGPUDevices = strconv.Itoa(ringSlots[i])
 			}
 			rankEnvs := append([]string(nil), o.Envs...)
 			rankEnvs = append(rankEnvs,
 				"PIPEDPEER_DDP=1",
 				fmt.Sprintf("PIPEDPEER_RANK=%d", i),
-				fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", o.Nodes),
+				fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", world),
 				fmt.Sprintf("RANK=%d", i),
-				fmt.Sprintf("WORLD_SIZE=%d", o.Nodes),
+				fmt.Sprintf("WORLD_SIZE=%d", world),
 				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
 				fmt.Sprintf("MASTER_PORT=%d", masterPort),
 				// The address THIS rank would reach us at, which is not
@@ -1040,13 +1057,15 @@ func runDDP(o ddpRunOptions) error {
 				// worth-it verdict compares against "this machine doing
 				// every shard", and ranks that share a machine do not
 				// multiply what it can do.
-				fmt.Sprintf("PIPEDPEER_DDP_MACHINES=%d", ddpDistinctMachines(ranks)),
+				fmt.Sprintf("PIPEDPEER_DDP_MACHINES=%d", ddpDistinctMachines(ring)),
 			)
-			// Every rank gets the whole set of shares, not just its own: a
-			// contiguous shard needs the offsets of everything before it, and
-			// a rank that knew only its own size could not tell where its
-			// slice began.
-			if len(ringWeights) == len(ranks) {
+			if join {
+				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_JOIN=1")
+			} else if len(ringWeights) == len(ring) {
+				// Every rank gets the whole set of shares, not just its own:
+				// a contiguous shard needs the offsets of everything before
+				// it, and a rank that knew only its own size could not tell
+				// where its slice began.
 				rankEnvs = append(rankEnvs,
 					"PIPEDPEER_DDP_WEIGHTS="+ddpWeightList(ringWeights))
 			}
@@ -1082,8 +1101,13 @@ func runDDP(o ddpRunOptions) error {
 				EstimatedMemBytes: resReq.MemBytes,
 				EstimationTier:    resReq.Tier,
 			}
-			errs <- ddpRankResult{rank: i, err: app.RunTask(o.Ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})}
-		}(i, n)
+			err := app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+			up.ended(n.NodeID, err != nil && ctx.Err() == nil, time.Now())
+			errs <- ddpRankResult{rank: i, err: err}
+		}()
+	}
+	for i, n := range ranks {
+		launch(o.Ctx, i, n, false)
 	}
 
 	hosts := make([]string, len(ranks))
@@ -1091,16 +1115,76 @@ func runDDP(o ddpRunOptions) error {
 		hosts[i] = ddpHostName(n)
 	}
 	leadHost := ddpExtractHost(rank0.SSHEndpoint)
-	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, func(rank int, err error) {
+	backend := os.Getenv("PIPEDPEER_DDP_BACKEND")
+	daemonSync := backend != "gloo" && backend != "nccl"
+
+	// Machines that come back, or turn up, join the ring. Only the daemon
+	// sync can grow: torch's own mesh is fixed at init.
+	added := make(chan ddpAdded)
+	watchCtx, stopWatch := context.WithCancel(o.Ctx)
+	defer stopWatch()
+	if daemonSync {
+		gpuKind := o.RequireGPU || o.PreferGPU
+		gpuRing := gpuKind && ddpHasGPU(rank0)
+		g := &ddpGrower{
+			st:         up,
+			daemonPort: o.DaemonPort,
+			leadHost:   leadHost,
+			leadPort:   rank0.DaemonPort,
+			group:      jobSet,
+			maxRanks:   o.MaxRanks,
+			out:        os.Stdout,
+			fetch:      ddpFetchNodes,
+			check:      ddpJoinCheck,
+			want: func(n registry.NodeRecord) bool {
+				if o.NoSelf && n.NodeID == nodeID.NodeID {
+					return false
+				}
+				// One kind of device per ring, as at the start.
+				return !gpuKind || ddpHasGPU(n) == gpuRing
+			},
+			nextRank: func() int {
+				ranksMu.Lock()
+				defer ranksMu.Unlock()
+				return len(ranks)
+			},
+			start: func(rank int, n registry.NodeRecord) bool {
+				if n.DaemonPort == 0 {
+					n.DaemonPort = o.DaemonPort
+				}
+				ctx, cancel := context.WithCancel(o.Ctx)
+				select {
+				case added <- ddpAdded{rank: rank, host: ddpHostName(n), cancel: cancel}:
+				case <-watchCtx.Done():
+					cancel()
+					return false
+				}
+				ranksMu.Lock()
+				ranks = append(ranks, n)
+				ranksMu.Unlock()
+				fmt.Printf("[ddp] rank %d: starting on %s (%s:%d); it joins at the ring's next epoch\n",
+					rank, ddpHostName(n), ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
+				launch(ctx, rank, n, true)
+				return true
+			},
+		}
+		go g.run(watchCtx)
+	}
+
+	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, added, func(rank int, err error) {
 		// torch's own mesh (gloo/nccl) cannot lose a member; only the
 		// daemon-backed sync can be told to carry on.
-		if b := os.Getenv("PIPEDPEER_DDP_BACKEND"); b == "gloo" || b == "nccl" {
+		if !daemonSync {
 			return
 		}
-		if err := ddpReportDown(leadHost, rank0.DaemonPort, jobSet, rank, len(ranks), err); err != nil {
+		ranksMu.Lock()
+		world := len(ranks)
+		ranksMu.Unlock()
+		if err := ddpReportDown(leadHost, rank0.DaemonPort, jobSet, rank, world, err); err != nil {
 			fmt.Fprintf(os.Stderr, "[ddp] could not tell the lead daemon rank %d is gone (%v); the ring waits 45 s per sync for it instead\n", rank, err)
 		}
 	})
+	stopWatch()
 	if firstErr != nil {
 		if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 			fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n", masterAddr, masterPort)

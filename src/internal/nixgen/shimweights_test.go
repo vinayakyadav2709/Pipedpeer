@@ -293,3 +293,24 @@ assert len(taken) > 0.9 * len(before[1]), "the dead rank's samples were not take
 print("WLEAVE-OK")
 `, "WLEAVE-OK")
 }
+
+// TestARankJoiningMovesOnlyItsShare. A rank that joins a running ring takes
+// about 1/n of everybody's samples and nothing else moves: what each old rank
+// keeps after the ring grows it already had, so its data loading (and any
+// cache of it) carries over.
+func TestARankJoiningMovesOnlyItsShare(t *testing.T) {
+	runShimPython(t, "wjoin", `
+import sitecustomize as shim
+
+n = 6000
+before = [set(shim._WeightedShardSampler(n, [0.5, 0.5], r, False, 50, 2)) for r in range(2)]
+after = [set(shim._WeightedShardSampler(n, [1/3, 1/3, 1/3], r, False, 50, 3)) for r in range(3)]
+assert not (after[0] & after[1]) and not (after[2] & (after[0] | after[1])), "shards overlap"
+for r in range(2):
+    kept = len(after[r] & before[r]) / len(after[r])
+    assert kept > 0.95, "rank %d kept only %.0f%% of its samples" % (r, 100 * kept)
+share = len(after[2]) / sum(len(a) for a in after)
+assert abs(share - 1/3) < 0.01, "the joiner took %.2f of the data" % share
+print("WJOIN-OK")
+`, "WJOIN-OK")
+}

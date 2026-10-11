@@ -47,7 +47,18 @@ func (s *Server) markRankDown(group string, rank, world int, why string) int {
 	defer b.mu.Unlock()
 
 	r := b.run(group)
-	left := world - len(r.dropped)
+	if r.world == 0 {
+		r.world = world
+	}
+	if rank >= r.world {
+		// A rank started to join and died before it said it was ready: the
+		// ring never counted it, so there is nothing to re-spread. Recorded
+		// so a later joiner does not wait on its index.
+		r.dropped[rank] = true
+		return r.world - b.dropsBelow(group, r.world)
+	}
+	world = r.world
+	left := world - b.dropsBelow(group, world)
 	if r.dropped[rank] {
 		return left
 	}
@@ -67,28 +78,33 @@ func (s *Server) markRankDown(group string, rank, world int, why string) int {
 	}
 	r.weights = sharesWithout(weights, r.dropped)
 
+	if j := r.join; j != nil {
+		switch {
+		case j.rank == rank:
+			// The joiner died: the ring still grows at the boundary (its
+			// size was announced), with a zero share for it.
+			b.endJoin(r)
+		case j.from == rank:
+			j.from = lowestLive(r, j.oldWorld)
+		}
+	}
+
 	if why == "" {
 		why = "its job ended"
 	}
 	why = fmt.Sprintf("rank %d stopped (%s); its share of the data moves to the %d rank(s) left at the next epoch", rank, why, left)
-	parts := make([]string, len(r.weights))
-	for i, x := range r.weights {
-		parts[i] = strconv.FormatFloat(x, 'f', 6, 64)
-	}
-	r.downNote = fmt.Sprintf(`, "weights": [%s], "down": %d, "why": %q`, strings.Join(parts, ","), rank, why)
-	r.downSeq = r.lastSeq + 1
-	r.downTold = map[int]bool{}
+	b.publish(r, r.lastSeq+1, ringFragment(r)+fmt.Sprintf(`, "down": %d, "why": %q`, rank, why))
 	log.Warn().Str("group", group).Int("rank", rank).Int("left", left).Str("shares", sharePercents(r.weights)).
 		Msg("ddp rank down")
 
 	// Rounds already open may now have everyone they will ever get. Finish
 	// them instead of leaving their waiters to the 45 s timeout.
-	expected := max(1, world-len(r.dropped))
 	prefix := group + "/"
 	for key, e := range b.entries {
 		if !strings.HasPrefix(key, prefix) || e.result != nil || e.err != nil {
 			continue
 		}
+		expected := max(1, e.world-b.dropsBelow(group, e.world))
 		e.expected = expected
 		switch {
 		case e.acc != nil && e.acc.count > 0 && len(e.seen) >= expected:
@@ -113,15 +129,38 @@ func (s *Server) markRankDown(group string, rank, world int, why string) int {
 	return left
 }
 
-// downNoteFor returns the death notice for this rank's reply, once, from the
+// publish makes frag the ring's note, told once to each rank on its first
+// reply from sync seq on. Caller holds the board lock.
+func (b *ddpBoard) publish(r *ddpRun, seq int64, frag string) {
+	r.note = frag
+	r.noteSeq = seq
+	r.noteTold = map[int]bool{}
+}
+
+// noteFor returns the ring's note for this rank's reply, once, from the
 // agreed sync on. Caller holds the board lock.
-func (b *ddpBoard) downNoteFor(group string, rank int, seq int64) string {
+func (b *ddpBoard) noteFor(group string, rank int, seq int64) string {
 	r := b.runs[group]
-	if r == nil || r.downNote == "" || seq < r.downSeq || r.downTold[rank] {
+	if r == nil || r.note == "" || seq < r.noteSeq || r.noteTold[rank] {
 		return ""
 	}
-	r.downTold[rank] = true
-	return r.downNote
+	r.noteTold[rank] = true
+	return r.note
+}
+
+// ringFragment is the ring as it now is, for a note: every rank's share and
+// the ring's size, plus the joining rank while one is on its way in. Caller
+// holds the board lock.
+func ringFragment(r *ddpRun) string {
+	parts := make([]string, len(r.weights))
+	for i, x := range r.weights {
+		parts[i] = strconv.FormatFloat(x, 'f', 6, 64)
+	}
+	frag := fmt.Sprintf(`, "weights": [%s], "world": %d`, strings.Join(parts, ","), len(r.weights))
+	if j := r.join; j != nil && j.snap == nil {
+		frag += fmt.Sprintf(`, "join": %d, "from": %d`, j.rank, j.from)
+	}
+	return frag
 }
 
 // sharesWithout zeroes the dropped ranks' shares and renormalises the rest.
