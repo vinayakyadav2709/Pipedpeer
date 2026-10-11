@@ -3,6 +3,7 @@ package daemonapi
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -23,6 +24,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -110,6 +112,32 @@ type chunk struct {
 	cacheKeys                                []string
 	itemKeys                                 []string
 	chunkDir                                 string
+	// ctx is the request this chunk serves. It ends when the requester goes
+	// away (its job was killed, or the origin dropped a forward), and that
+	// kills the local workers and drops the peer forwards started for it.
+	ctx context.Context
+}
+
+// context returns the chunk's request context; Background when the chunk was
+// built outside a request (tests, direct calls).
+func (c *chunk) context() context.Context {
+	if c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+// killProcessGroup SIGKILLs the process group a worker leads (it was started
+// with Setpgid), so whatever the user's function forked dies with it. Falls
+// back to the process alone when the group is already gone.
+func killProcessGroup(p *os.Process) error {
+	if p == nil {
+		return nil
+	}
+	if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+		return p.Kill()
+	}
+	return nil
 }
 
 // chunkDirFor returns the on-disk chunk cache dir for a store path. Chunks
@@ -549,6 +577,9 @@ type poolWorker struct {
 	stdin  *bufio.Writer
 	stdout *bufio.Scanner
 	id     int64
+	// killed is set once the worker was stopped (its request was cancelled,
+	// or the server shut down); a killed worker is never reused.
+	killed atomic.Bool
 	// mu serialises submits on this worker: stdin writes and stdout reads must
 	// not interleave when several fan-out goroutines hit the same store.
 	mu sync.Mutex
@@ -651,6 +682,8 @@ type poolStats struct {
 	ItemsExecuted  int64 `json:"items_executed_here"`
 	PartsToPeers   int64 `json:"parts_sent_to_peers"`
 	PartsFailed    int64 `json:"parts_failed"`
+	// ChunksCancelled counts requests whose requester went away mid-work.
+	ChunksCancelled int64 `json:"chunks_cancelled"`
 }
 
 func (p *poolStats) snapshot() map[string]int64 {
@@ -663,6 +696,7 @@ func (p *poolStats) snapshot() map[string]int64 {
 		"items_executed_here":    p.ItemsExecuted,
 		"parts_sent_to_peers":    p.PartsToPeers,
 		"parts_failed":           p.PartsFailed,
+		"chunks_cancelled":       p.ChunksCancelled,
 	}
 }
 
@@ -757,7 +791,22 @@ func (s *Server) poolBodyLimit() int64 {
 	return limit
 }
 
+// poolCancelled reports whether the requester of a pool request went away: the
+// shim's job was killed, or the origin dropped the forward it sent here. The
+// workers and forwards tied to the request have already been stopped through
+// its context by then; this logs it once and counts it.
+func (s *Server) poolCancelled(r *http.Request, items int, started time.Time) bool {
+	if r.Context().Err() == nil {
+		return false
+	}
+	log.Printf("[pool] cancelled: %d items from %s after %.1fs; requester went away, local workers stopped, peer forwards dropped",
+		items, r.RemoteAddr, time.Since(started).Seconds())
+	s.pool.stats.add(func(p *poolStats) { p.ChunksCancelled++ })
+	return true
+}
+
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	limit := s.poolBodyLimit()
 	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 	if err != nil {
@@ -845,7 +894,10 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
 				if peer := s.pool.bestPeer(storePath, submitter); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
-					if s.forwardPoolMap(w, rawBody, peer, storePath) {
+					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath) {
+						return
+					}
+					if s.poolCancelled(r, len(items), started) {
 						return
 					}
 				}
@@ -867,8 +919,17 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				// originLocal stays unset: setting it here would change
 				// placement, which is out of this path's remit.
 				prov: &provenance{},
+				ctx:  r.Context(),
 			}
-			s.runMicroChunks(w, runPath, storePath, ch, safe, submitter)
+			results, err := s.runMicroChunks(runPath, storePath, ch, safe, submitter)
+			if err != nil {
+				if s.poolCancelled(r, len(items), started) {
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			s.writePoolReply(w, ch.frames, results, ch.prov)
 			return
 		}
 	}
@@ -883,6 +944,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		chunkDir:    chunkDirFor(storePath),
 		originLocal: fromLocalShim,
 		prov:        &provenance{},
+		ctx:         r.Context(),
 	}
 	if err := os.MkdirAll(ch.chunkDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -904,6 +966,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
 	}
 	if err != nil {
+		if s.poolCancelled(r, len(items), started) {
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -953,7 +1018,7 @@ func resultPickle(r any) []byte {
 // order. Each sub-batch still fans out to peers; only the orchestrator's own
 // memory share is bounded, and the worker's explicit GC keeps RSS flat across
 // the pipeline.
-func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, ch *chunk, safe int64, submitter string) {
+func (s *Server) runMicroChunks(runPath, storePath string, ch *chunk, safe int64, submitter string) ([]any, error) {
 	n := int((ch.requiredMem + safe - 1) / safe)
 	if n > len(ch.items) {
 		n = len(ch.items)
@@ -965,6 +1030,9 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 		hi := total * int64(i+1) / int64(n)
 		if lo == hi {
 			continue
+		}
+		if err := ch.context().Err(); err != nil {
+			return nil, err
 		}
 		sub := *ch
 		sub.items = ch.items[lo:hi]
@@ -992,12 +1060,11 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		}
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return nil, err
 		}
 		results = append(results, part...)
 	}
-	s.writePoolReply(w, ch.frames, results, ch.prov)
+	return results, nil
 }
 
 // forwardPoolMap relays the raw request to a peer (one hop) so a weak
@@ -1005,8 +1072,11 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 // the peer answered. The status and body are copied, except that a frames
 // receipt is relabelled so the work the peer ran itself reads as "peer:<peer>":
 // to the submitter it ran on another machine, not on this one.
-func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, storePath string) bool {
-	fwd, err := http.NewRequest("POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
+//
+// ctx is the incoming request's: when its requester goes away the forward is
+// dropped, and the peer stops the work through its own request context.
+func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawBody []byte, peer, storePath string) bool {
+	fwd, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
 	if err != nil {
 		log.Printf("[pool] forward to %s: building request: %v", peer, err)
 		return false
@@ -1017,13 +1087,17 @@ func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, sto
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(fwd)
 	if err != nil {
-		log.Printf("[pool] forward to %s failed: %v", peer, err)
+		if ctx.Err() == nil { // a cancel is logged once by the caller
+			log.Printf("[pool] forward to %s failed: %v", peer, err)
+		}
 		return false
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("[pool] forward to %s: reading reply: %v", peer, err)
+		if ctx.Err() == nil {
+			log.Printf("[pool] forward to %s: reading reply: %v", peer, err)
+		}
 		return false
 	}
 	if resp.StatusCode == http.StatusOK {
@@ -1081,6 +1155,10 @@ func relabelForwardedReceipt(body []byte, peer string) []byte {
 // local), so a pre-partitioned payload (hash-shuffle buckets) lands one item
 // per node. Results are still returned in input order.
 func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter string) ([]any, error) {
+	ctx := ch.context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Peel off peers before taking the local worker lock so each local submit
 	// serialises only its own sub-chunk.
 	var peers []string
@@ -1276,6 +1354,9 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
 				for _, peer := range p.peers {
+					if ctx.Err() != nil {
+						break
+					}
 					if pm.peerDead(peer) {
 						continue
 					}
@@ -1288,9 +1369,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 						pm.rates.observe(peer, len(p.c.items), d)
 						break
 					}
+					if ctx.Err() != nil {
+						break // the requester left; the peer did nothing wrong
+					}
 					pm.markPeerDead(peer)
 				}
-				if e != nil {
+				if e != nil && ctx.Err() == nil {
 					// D2/D3 — a remote node adds capacity, never subtracts.
 					r, e = pm.runLocal(runPath, storePath, p.c)
 					if e == nil {
@@ -1300,6 +1384,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 						ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
 					}
 				}
+			}
+			if err := ctx.Err(); err != nil {
+				// Cancelled: no local fallback, no "part failed" noise. The
+				// request logs the cancel once.
+				errs[i] = err
+				return
 			}
 			if e != nil {
 				errs[i] = e
@@ -1402,6 +1492,10 @@ func (pm *poolManager) markPeerDead(peer string) {
 
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
 func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, error) {
+	ctx := ch.context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	pm.stats.add(func(p *poolStats) { p.ItemsExecuted += int64(len(ch.items)) })
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
@@ -1424,6 +1518,16 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 	pm.mu.Unlock()
 
 	results, err := worker.submit(ch)
+	if err != nil && ctx.Err() != nil {
+		// The request was cancelled and submit killed the worker mid-chunk:
+		// forget it (the next request re-warms) and run nothing in its place.
+		pm.mu.Lock()
+		if pm.workers[storePath] == worker {
+			delete(pm.workers, storePath)
+		}
+		pm.mu.Unlock()
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		// Worker died mid-flight — drop it and fall back to a cold run for
 		// this chunk; the next request will re-warm.
@@ -1465,7 +1569,9 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 		body, _ = json.Marshal(payload)
 	}
 	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	// Tied to the request this chunk serves: a cancel closes the connection,
+	// and the peer stops its work when its own request context ends.
+	req, err := http.NewRequestWithContext(ch.context(), "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -1547,6 +1653,8 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 	}
 
 	cmd := exec.Command(runPath, workerScript)
+	// Own process group, so a cancel kills whatever the user's function forked.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		os.RemoveAll(dir)
@@ -1573,7 +1681,17 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 }
 
 func (w *poolWorker) dead() bool {
-	return w == nil || w.cmd == nil || w.cmd.ProcessState != nil
+	return w == nil || w.cmd == nil || w.killed.Load()
+}
+
+// kill stops the worker and its process group once; later calls do nothing.
+func (w *poolWorker) kill() {
+	if w.killed.Swap(true) || w.cmd == nil || w.cmd.Process == nil {
+		return
+	}
+	if err := killProcessGroup(w.cmd.Process); err != nil {
+		log.Printf("[pool] stopping warm worker pid %d: %v", w.cmd.Process.Pid, err)
+	}
 }
 
 // submit sends one task over the pipes and waits for its result file. The
@@ -1584,6 +1702,13 @@ func (w *poolWorker) dead() bool {
 func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	ctx := ch.context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if w.killed.Load() {
+		return nil, fmt.Errorf("warm worker was stopped")
+	}
 	w.id++
 
 	// Holds the chunk payload: hundreds of megabytes is normal, and a
@@ -1621,6 +1746,16 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	if err := os.WriteFile(inPath, body, 0644); err != nil {
 		return nil, err
 	}
+
+	// A cancel while this chunk runs kills the worker; the read below then
+	// fails and the caller sees the cancel. Reap it so it leaves no zombie.
+	stop := context.AfterFunc(ctx, w.kill)
+	defer func() {
+		if !stop() {
+			err := w.cmd.Wait()
+			log.Printf("[pool] warm worker pid %d stopped for a cancelled request: %v", w.cmd.Process.Pid, err)
+		}
+	}()
 
 	msg := map[string]any{"id": w.id, "in_file": inPath, "out_file": outPath}
 	line, _ := json.Marshal(msg)
@@ -1704,8 +1839,8 @@ func (pm *poolManager) stopAll() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	for _, w := range pm.workers {
-		if w != nil && w.cmd != nil && w.cmd.Process != nil {
-			_ = w.cmd.Process.Kill()
+		if w != nil {
+			w.kill()
 		}
 	}
 	pm.workers = map[string]*poolWorker{}
@@ -1755,9 +1890,16 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command(runPath, runnerPath, inPath, outPath)
+	ctx := ch.context()
+	cmd := exec.CommandContext(ctx, runPath, runnerPath, inPath, outPath)
+	// Own process group, killed whole on cancel (see killProcessGroup).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("pool run failed: %v", err)
 	}
 
