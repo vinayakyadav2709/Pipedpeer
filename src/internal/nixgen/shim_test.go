@@ -325,7 +325,7 @@ func requiredPython(src string) []string {
 	add("numpy", "import numpy", "np.")
 	add("sklearn", "import sklearn", "from sklearn")
 	add("joblib", "import joblib", "joblib.")
-	add("torch", "import torch", "torch.")
+	add("torch", "import torch", "torch.", "_WeightedShardSampler", "_weighted_batches")
 	return deps
 }
 
@@ -915,4 +915,16 @@ print("PATCH-OK")
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
 		"PIPEDPEER_NUM_SHARDS=3")
+}
+
+func TestRequiredPythonSeesTheShimsTorchHelpers(t *testing.T) {
+	for _, src := range []string{"shim._WeightedShardSampler(x)", "shim._weighted_batches(x)"} {
+		found := false
+		for _, d := range requiredPython(src) {
+			found = found || d == "torch"
+		}
+		if !found {
+			t.Errorf("requiredPython(%q) misses torch", src)
+		}
+	}
 }
