@@ -56,6 +56,8 @@ type outputMessage struct {
 	// Timing is the node's own split of the execution; absent from a daemon
 	// too old to send it.
 	Timing *ExecTiming `json:"timing,omitempty"`
+	// Receipt is the shim's account of the run, when it wrote one.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
 }
 
 // ExecTiming mirrors the daemon's account of one execution, in milliseconds.
@@ -73,6 +75,8 @@ type ExecResult struct {
 	Stderr    string
 	// Timing is nil when the daemon did not report one.
 	Timing *ExecTiming
+	// Receipt is the shim's raw JSON receipt, nil when there was none.
+	Receipt json.RawMessage
 }
 
 type uploadResponse struct {
@@ -182,6 +186,7 @@ func storeCached(host string, port int, storePath string) bool {
 // Blocks until the job completes or context is cancelled.
 func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (ExecResult, error) {
 	var timing *ExecTiming
+	var receipt json.RawMessage
 	url := fmt.Sprintf("ws://%s:%d/v1/jobs/%s/exec", host, port, jobID)
 
 	// The websocket dialer does not go through http.DefaultTransport, so the
@@ -193,12 +198,12 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, wsHeaders)
 	if err != nil {
-		return ExecResult{PeakBytes: 0, Stdout: "", Stderr: "", Timing: timing}, fmt.Errorf("websocket dial: %w", err)
+		return ExecResult{PeakBytes: 0, Stdout: "", Stderr: "", Timing: timing, Receipt: receipt}, fmt.Errorf("websocket dial: %w", err)
 	}
 	defer conn.Close()
 
 	if err := conn.WriteJSON(cfg); err != nil {
-		return ExecResult{PeakBytes: 0, Stdout: "", Stderr: "", Timing: timing}, fmt.Errorf("send config: %w", err)
+		return ExecResult{PeakBytes: 0, Stdout: "", Stderr: "", Timing: timing, Receipt: receipt}, fmt.Errorf("send config: %w", err)
 	}
 
 	var peakBytes int64
@@ -208,9 +213,9 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, nil
+				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing, Receipt: receipt}, nil
 			}
-			return ExecResult{PeakBytes: 0, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, fmt.Errorf("connection lost: %w", err)
+			return ExecResult{PeakBytes: 0, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing, Receipt: receipt}, fmt.Errorf("connection lost: %w", err)
 		}
 
 		var out outputMessage
@@ -219,7 +224,7 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		}
 
 		if out.Error != "" {
-			return ExecResult{PeakBytes: 0, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, fmt.Errorf("remote: %s", out.Error)
+			return ExecResult{PeakBytes: 0, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing, Receipt: receipt}, fmt.Errorf("remote: %s", out.Error)
 		}
 
 		fmt.Print(out.O)
@@ -232,18 +237,19 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 				peakBytes = out.PeakMemBytes
 			}
 			timing = out.Timing
+			receipt = out.Receipt
 			if out.OOMKilled {
 				// Without this the user sees "exited with code 137" and has
 				// no way to know the node protected itself on purpose.
-				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, fmt.Errorf(
+				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing, Receipt: receipt}, fmt.Errorf(
 					"job ran out of memory: the kernel killed it for exceeding its %s limit. "+
 						"Raise it with --mem, or reduce what the script holds in memory at once",
 					humanBytes(out.MemLimitBytes))
 			}
 			if out.ExitCode != 0 {
-				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, &RemoteExitError{Code: out.ExitCode}
+				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing, Receipt: receipt}, &RemoteExitError{Code: out.ExitCode}
 			}
-			return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, nil
+			return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing, Receipt: receipt}, nil
 		}
 	}
 }

@@ -132,6 +132,9 @@ type OutputMessage struct {
 	// Done frame, so the submitter can tell a slow script from a slow
 	// sandbox or a closure import.
 	Timing *ExecTiming `json:"timing,omitempty"`
+	// Receipt is the shim's account of the run - what it shipped, what it
+	// kept, and why - when the job was intercepted and wrote one.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
 }
 
 // ExecTiming is how a node spent one execution, in milliseconds.
@@ -512,6 +515,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// prior task (or a shared /nix/store volume) already materialised it —
 	// skip the (expensive) NAR open + re-import entirely.
 	execStart := time.Now()
+	var receiptPath string
 	var importDur, runDur time.Duration
 	var runStart time.Time
 	runEntry := filepath.Join(job.StorePath, "bin", "run")
@@ -591,6 +595,13 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
 			"PIPEDPEER_NODE_ID="+s.nodeID,
 		)
+		// The shim writes its receipt here at exit and the Done frame carries
+		// it back, so every run's record says what was distributed and why.
+		if !envsContain(cfg.Envs, "PIPEDPEER_RECEIPT=") {
+			receiptPath = filepath.Join(job.WorkDir, ".pipedpeer", "receipt.json")
+			_ = os.Remove(receiptPath)
+			cfg.Envs = append(cfg.Envs, "PIPEDPEER_RECEIPT="+receiptPath)
+		}
 		// The job talks back to this daemon for every intercepted primitive,
 		// so it needs the token too. Without it interception would 401 and
 		// fall back to local work, which looks like a slow job rather than a
@@ -894,6 +905,11 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			SetupMs:  (runStart.Sub(execStart) - importDur).Milliseconds(),
 			RunMs:    runDur.Milliseconds(),
 		}}
+	if receiptPath != "" {
+		if b, err := os.ReadFile(receiptPath); err == nil && json.Valid(b) {
+			done.Receipt = b
+		}
+	}
 	// 137 is SIGKILL. With a cap in force and a fresh kill recorded under our
 	// cgroup, the cause is the cap; without the counter moving it could just
 	// as well have been an operator's kill -9, so it is not claimed.
@@ -986,6 +1002,11 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		}
 		rel = filepath.ToSlash(rel)
 		present[rel] = true
+		// pipedpeer's own files - the shim, its bytecode, the receipt - are
+		// not the job's output and must not land in the user's project.
+		if strings.HasPrefix(rel, ".pipedpeer/") {
+			return nil
+		}
 
 		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
 			return nil

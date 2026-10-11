@@ -10,7 +10,7 @@ The work is in phases:
 |---|---|---|
 | 0 | Fix the known issues, demo-breaking ones first | Done: `ad75b4b`, `fad3ce4`, `2c1a49a` |
 | 1 | Per-stage timeline for every job: where the time goes | Done |
-| 2 | Placement explanation, shim receipt and cluster stats in the CLI | Planned |
+| 2 | Placement explanation, shim receipt and cluster stats in the CLI | Done |
 | 3 | A web page served by the daemon (`/ui`) showing the same data live | Planned |
 | 4 | Benchmarks (local, cold, warm; 1–3 workers), a combined capstone script, and an updated demo flow | Planned |
 
@@ -179,14 +179,72 @@ script cannot spill would remove most of a cold run's wait. That changes when
 pool work can spill, so it is left as the next optimisation rather than folded
 into this phase.
 
-### Phase 2: explain and receipt views
+### Phase 2: explain, receipt and stats (done)
 
-- `pipedpeer job --id <id> --explain` shows every candidate node, its score or
-  the reason it was rejected, and why the chosen one won.
-- `pipedpeer job --id <id> --receipt` shows the shim's receipt: items run
-  remotely and locally, parts per node and their time, and the cost model's
-  decisions to ship or keep.
-- `pipedpeer stats` summarises the cluster: nodes, load and pool counters.
+**Why a node was chosen.** A run placed by the coordinator (`--remote`,
+`pipedpeer python`) keeps the whole decision: every node considered, its
+score or the reason it was rejected, and the load figures the score is made
+of.
+
+```
+$ pipedpeer job --last --explain
+Strategy: smart. 5 node(s) considered, 5 eligible.
+The job was estimated to need 512Mi (import estimate).
+
+   NODE       HOST           SOURCE      SCORE  CPU%  MEM%  JOBS  FREE CPU   FREE MEM
+ → 94bd5f98   fedora         discovery   0.753    26    50     0    8.9/12      7.5Gi
+   f631e17c   worker3        discovery   0.712     6    50     0     2.8/3      3.4Gi
+   ...
+Chosen: score=0.753, source=discovery
+```
+
+A run on the submitting machine says no placement was made.
+
+**What the shim distributed, and why.** Every intercepted run's receipt now
+comes back with the run, and is stored in its history:
+- The daemon points the shim at `<workdir>/.pipedpeer/receipt.json`.
+- It returns the receipt in the execution's final message.
+- `.pipedpeer/` is never synced into the project.
+
+The receipt counts each item once, by where its kept result came from. Local
+cores race slow remote chunks, so some items are computed in both places;
+those are reported separately. It lists items per peer and each dispatch. It
+also records every cost-model decision with its reason, for `pool.map`,
+`numpy.matmul`, `numpy.linalg.*`, `pandas.groupby` and `pandas.merge`.
+
+```
+$ pipedpeer job --last --receipt
+Items: 200 total
+  on other machines       15  ██
+  on the running node    185  ███████████████████████████
+  (75 computed on both: idle local cores raced the slowest remote chunks)
+
+By peer:
+  192.168.0.107:38080        31  ████
+  ...
+Cost model decisions:
+  shipped     pool.map             188 items x 0.038s = 7.17s of work, over the 0.50s worth a round trip
+```
+
+A run ends with one `Shim:` line summarising this.
+
+**The cluster at a glance.** `pipedpeer stats` (`--json` for the raw
+snapshot) shows:
+- every node's cores, load and free memory
+- the tasks running on it
+- its pool counters: chunks received, chunks from peers, items run, parts sent on, failures
+- this machine's recent runs, with total time, slowest stage and how much was distributed
+
+The data comes from `internal/clusterstats`, which the web page in Phase 3
+will reuse.
+
+The three views combine: `pipedpeer job --id <id> --timeline --explain --receipt`.
+
+**Fixed along the way.**
+- The receipt left out items the local cores computed while racing the
+  cluster, so its total fell short of the map: 103 of 200 in a live run.
+- The shim's `.pipedpeer/` files (for example its `__pycache__`) could be
+  synced back into the user's project.
 
 ### Phase 3: web page
 
