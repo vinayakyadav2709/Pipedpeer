@@ -4,7 +4,6 @@ package logging
 
 import (
 	"os"
-	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -15,10 +14,12 @@ var Logger zerolog.Logger
 func init() {
 	// Default: pretty console output for development.
 	// Can be overridden by calling SetupJSON() for production.
+	// Seconds in the time so `pipedpeer events` can order lines; no colour
+	// when stderr is a file (the daemon writes daemon.log this way).
 	output := zerolog.ConsoleWriter{
 		Out:        os.Stderr,
-		TimeFormat: time.Kitchen,
-		NoColor:    os.Getenv("NO_COLOR") != "",
+		TimeFormat: "15:04:05",
+		NoColor:    os.Getenv("NO_COLOR") != "" || !isTerminal(os.Stderr),
 	}
 	Logger = zerolog.New(output).With().Timestamp().Logger()
 
@@ -36,6 +37,15 @@ func init() {
 	default:
 		zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	}
+}
+
+// isTerminal reports whether f is a character device (a terminal).
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // SetupJSON switches to JSON-structured logging (for production/daemon mode).

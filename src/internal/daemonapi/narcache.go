@@ -440,10 +440,12 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		tmp.Close()
+		start := time.Now()
 		if err := s.importNARFile(tmp.Name()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "import: " + err.Error()})
 			return
 		}
+		logClosureImported(storePath, start, "partial")
 		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "imported": true})
 		return
 	}
@@ -552,11 +554,20 @@ func (s *Server) materializeClosure(storePath string) error {
 		return err
 	}
 	defer f.Close()
+	start := time.Now()
 	out, err := importNAR(f)
 	if err != nil {
 		return fmt.Errorf("nix-store --import: %v: %s", err, string(out))
 	}
+	logClosureImported(storePath, start, "full")
 	return nil
+}
+
+// logClosureImported is the "closure imported" event line (how = full |
+// partial) that `pipedpeer events` shows as environment work.
+func logClosureImported(storePath string, start time.Time, how string) {
+	log.Info().Str("store", storePath).Float64("secs", time.Since(start).Round(10*time.Millisecond).Seconds()).
+		Str("how", how).Msg("closure imported")
 }
 
 // importNARFile imports an archive into the local nix store without caching
