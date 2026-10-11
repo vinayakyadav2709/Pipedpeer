@@ -3,6 +3,7 @@ package setup
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -50,6 +51,23 @@ var firewallCmd = func(ctx context.Context, name string, args ...string) (string
 	return string(out), err
 }
 
+// geteuid is os.Geteuid, as a variable so tests can pretend to be root or not.
+var geteuid = os.Geteuid
+
+// asRoot prefixes sudo when not root (same pattern as setup.go).
+func asRoot(name string, args ...string) (string, []string) {
+	if geteuid() != 0 {
+		return "sudo", append([]string{name}, args...)
+	}
+	return name, args
+}
+
+// runRoot runs a command that needs root through firewallCmd.
+func runRoot(ctx context.Context, name string, args ...string) (string, error) {
+	n, a := asRoot(name, args...)
+	return firewallCmd(ctx, n, a...)
+}
+
 // lookPath is exec.LookPath, as a variable for the same reason.
 var lookPath = exec.LookPath
 
@@ -70,7 +88,11 @@ func openFirewall(ctx context.Context, port int, apply bool) firewallStatus {
 		}
 	}
 	if _, err := lookPath("ufw"); err == nil {
-		out, err := firewallCmd(ctx, "ufw", "status")
+		statusCmd := firewallCmd
+		if apply {
+			statusCmd = runRoot
+		}
+		out, err := statusCmd(ctx, "ufw", "status")
 		// "Status: inactive" does not contain "Status: active", but the
 		// firewalld case above shows how easily that stops being true, so
 		// the negative is ruled out explicitly.
@@ -97,11 +119,11 @@ func openFirewalld(ctx context.Context, port int, apply bool) firewallStatus {
 	// --permanent then --reload, so it survives a reboot. A rule that
 	// disappears on restart is worse than none: it works until the machine is
 	// rebooted and then fails in a way nobody connects to the reboot.
-	if out, err := firewallCmd(ctx, "firewall-cmd", "--permanent", "--add-port="+rule); err != nil {
+	if out, err := runRoot(ctx, "firewall-cmd", "--permanent", "--add-port="+rule); err != nil {
 		st.err = fmt.Errorf("firewall-cmd --add-port: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}
-	if out, err := firewallCmd(ctx, "firewall-cmd", "--reload"); err != nil {
+	if out, err := runRoot(ctx, "firewall-cmd", "--reload"); err != nil {
 		st.err = fmt.Errorf("firewall-cmd --reload: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}
@@ -114,14 +136,18 @@ func openUFW(ctx context.Context, port int, apply bool) firewallStatus {
 	st := firewallStatus{tool: "ufw"}
 	rule := fmt.Sprintf("%d/udp", port)
 
-	if out, err := firewallCmd(ctx, "ufw", "status"); err == nil && strings.Contains(out, rule) {
+	statusCmd := firewallCmd
+	if apply {
+		statusCmd = runRoot
+	}
+	if out, err := statusCmd(ctx, "ufw", "status"); err == nil && strings.Contains(out, rule) {
 		st.open = true
 		return st
 	}
 	if !apply {
 		return st
 	}
-	if out, err := firewallCmd(ctx, "ufw", "allow", rule); err != nil {
+	if out, err := runRoot(ctx, "ufw", "allow", rule); err != nil {
 		st.err = fmt.Errorf("ufw allow: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}
