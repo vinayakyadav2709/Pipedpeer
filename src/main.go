@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -122,6 +123,8 @@ func main() {
 		newTasksCmd(),
 		newMapCmd(),
 		newAuthCmd(),
+		newEventsCmd(),
+		newAttachCmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE
@@ -292,25 +295,19 @@ func newJoinCmd() *cobra.Command {
 			}
 			fmt.Printf("this node is %s\n", nodeID.ShortID())
 
-			fmt.Printf("waiting up to %s for peers", wait)
-			deadline := time.Now().Add(wait)
-			for time.Now().Before(deadline) {
-				if n := healthyPeerCount(); n > 0 {
-					fmt.Printf("\n\nconnected to %d peer(s):\n\n", n)
-					if err := printNodes(38080); err != nil {
-						return err
-					}
-					trustAfterJoin()
-					return nil
+			if n := waitForPeers(38080, wait); n > 0 {
+				fmt.Println()
+				if err := printNodes(38080); err != nil {
+					return err
 				}
-				fmt.Print(".")
-				time.Sleep(2 * time.Second)
+				trustAfterJoin()
+				return nil
 			}
 
 			// Not an error. A first machine has nobody to meet yet, and
 			// saying so is more useful than a non-zero exit that reads like
 			// the join failed.
-			fmt.Printf("\n\nno peers yet. This is normal for the first machine in a\n" +
+			fmt.Printf("\nThis is normal for the first machine in a\n" +
 				"cluster - run the same command on the others and they will find\n" +
 				"each other. Check with: pipedpeer nodes\n")
 			trustAfterJoin()
@@ -447,6 +444,8 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
+			cold, _ := cmd.Flags().GetBool("cold")
+			detach, _ := cmd.Flags().GetBool("detach")
 			pythonVersion, _ := cmd.Flags().GetString("python")
 			registryURL, _ := cmd.Flags().GetString("registry")
 			memOverride, _ := cmd.Flags().GetString("mem")
@@ -519,6 +518,35 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
 
+			if checkOnly {
+				return runCheckOnly(checkOnlyOptions{
+					ScriptPath:     scriptPath,
+					DaemonHost:     daemonHost,
+					DaemonPort:     daemonPort,
+					Remote:         remote,
+					RequireGPU:     requireGPU,
+					PreferGPU:      preferGPU,
+					RequiredGPUMem: requiredGPUMem,
+					RequiredCores:  requiredCores,
+					DDPNodes:       ddpNodes,
+					Pkgs:           pkgs,
+					PythonVersion:  pythonVersion,
+					RegistryURL:    registryURL,
+					Strategy:       strategy,
+					JobName:        jobName,
+					NodeID:         nodeID,
+					EstMemBytes:    resReq.MemBytes,
+					EstTier:        resReq.Tier,
+				})
+			}
+
+			// Ctrl+C, a kill or a closed terminal stops the job everywhere
+			// (local script, pool chunks on peers, --remote job, every DDP
+			// rank). A second Ctrl+C exits at once.
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer stop()
+			go func() { <-ctx.Done(); stop() }()
+
 			// DDP: --ddp N caps the rank count; without it, DDP auto-activates
 			// when the script uses torch.distributed and every eligible node
 			// joins the ring. Min is always 1 (--ddp 1 is a plain run).
@@ -532,7 +560,12 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					worldSize = min(ddpNodes, eligible)
 				}
 				if worldSize >= 2 {
+					if detach {
+						fmt.Println("detach is not supported for DDP/map runs; Ctrl+C stops it")
+					}
+					_, stopSuspend := watchSuspend(ctx, false)
 					err := runDDP(ddpRunOptions{
+						Ctx:            ctx,
 						Nodes:          worldSize,
 						DaemonPort:     daemonPort,
 						MasterPort:     ddpPort,
@@ -553,10 +586,11 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						Strategy:       strategy,
 						MemOverride:    memOverride,
 					})
+					stopSuspend()
 					// A ring that measures slower than one machine falls
 					// through to the ordinary single-node path below.
 					if !errors.Is(err, errRingNotWorthIt) {
-						return err
+						return runOutcome(err)
 					}
 					fmt.Printf("[coordinator] running on one node: every ring available measures slower\n")
 				} else if ddpNodes > 1 {
@@ -609,22 +643,18 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					return fmt.Errorf("no eligible node found — run without --remote to execute on this machine")
 				}
 
-				if checkOnly {
-					fmt.Printf("[coordinator] Would place on node %s (%s)\n",
-						decision.ChosenNode.NodeID[:min(8, len(decision.ChosenNode.NodeID))], decision.Reason)
-					fmt.Println("checks complete")
-					return nil
-				}
-
-				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-				defer cancel()
-
 				scriptArgs := args
 
 				// The node tells us which GPU it reserved; honour that unless
 				// the user pinned devices explicitly with --gpu-id.
 				var reservedGPU atomic.Int64
 				reservedGPU.Store(-1)
+				// The lease the placement took, so the job keeps it alive.
+				var placedLease atomic.Value
+				placedLease.Store("")
+
+				detachCh, stopSuspend := watchSuspend(ctx, true)
+				defer stopSuspend()
 
 				executor := func(host string, port int, targetNodeID string) error {
 					devices := gpuID
@@ -633,7 +663,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 							devices = strconv.FormatInt(idx, 10)
 						}
 					}
-					return app.Run(app.Options{
+					return app.Run(ctx, app.Options{
 						ScriptPath:        scriptPath,
 						DaemonHost:        host,
 						DaemonPort:        port,
@@ -651,6 +681,10 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						PlacementSource:   "coordinator",
 						EstimatedMemBytes: estimatedMemBytes,
 						EstimationTier:    estimationTier,
+						Cold:              cold,
+						Detach:            detach,
+						DetachCh:          detachCh,
+						LeaseID:           placedLease.Load().(string),
 					})
 				}
 
@@ -660,11 +694,12 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				coord.SetOnPlacement(func(r *coordinator.LeaseResult) {
 					reservedGPU.Store(int64(r.GPUIndex))
+					placedLease.Store(r.LeaseID)
 				})
 
 				result, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
 				if err != nil {
-					return err
+					return runOutcome(err)
 				}
 
 				fmt.Printf("[coordinator] Task completed successfully on node %s\n",
@@ -699,13 +734,10 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			}
 			fmt.Println("lease committed — starting execution")
 
-			if checkOnly {
-				fmt.Println("checks complete")
-				_ = daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, "cancelled")
-				return nil
-			}
+			detachCh, stopSuspend := watchSuspend(ctx, true)
+			defer stopSuspend()
 
-			runErr := app.Run(app.Options{
+			runErr := app.Run(ctx, app.Options{
 				ScriptPath:        scriptPath,
 				DaemonHost:        daemonHost,
 				DaemonPort:        daemonPort,
@@ -726,15 +758,28 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				PlacementReason:   placementReason,
 				EstimatedMemBytes: estimatedMemBytes,
 				EstimationTier:    estimationTier,
+				Cold:              cold,
+				Detach:            detach,
+				DetachCh:          detachCh,
+				LeaseID:           acceptResp.LeaseID,
 			})
 
-			completeStatus := jobhistory.StateSucceeded
-			if runErr != nil {
-				completeStatus = jobhistory.StateFailed
+			// A detached job still holds its lease; the node releases it
+			// when the job ends.
+			if !errors.Is(runErr, daemonctl.ErrDetached) {
+				completeStatus := jobhistory.StateSucceeded
+				switch {
+				case errors.Is(runErr, context.Canceled):
+					completeStatus = jobhistory.StateCancelled
+				case runErr != nil:
+					completeStatus = jobhistory.StateFailed
+				}
+				if err := daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, completeStatus); err != nil {
+					fmt.Fprintf(os.Stderr, "could not complete lease %s: %v\n", acceptResp.LeaseID, err)
+				}
 			}
-			_ = daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, completeStatus)
 
-			return runErr
+			return runOutcome(runErr)
 		},
 	}
 	cmd.Flags().String("host", "", "Daemon host:port, or a registered node ID")
@@ -745,7 +790,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
 	cmd.Flags().Int("cores", 0, "Minimum free CPU cores required on the target node")
-	cmd.Flags().Bool("check-only", false, "Only check acceptance, don't execute")
+	cmd.Flags().Bool("check-only", false, "Check imports, environment, placement and closure without running the script")
+	cmd.Flags().Bool("cold", false, "Send the environment as if the node had none, to time a first run")
+	cmd.Flags().Bool("detach", false, "Start the job, print its id and return; reattach with pipedpeer attach <id>")
 	cmd.Flags().Bool("remote", false, "Run on another machine in the cluster (any node except this one); without this the script runs on this machine")
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
@@ -761,6 +808,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 }
 
 type ddpRunOptions struct {
+	Ctx            context.Context // cancelling it stops every rank
 	Nodes          int
 	DaemonPort     int
 	MasterPort     int
@@ -1033,7 +1081,7 @@ func runDDP(o ddpRunOptions) error {
 				EstimatedMemBytes: resReq.MemBytes,
 				EstimationTier:    resReq.Tier,
 			}
-			errs <- app.RunTask(env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+			errs <- app.RunTask(o.Ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
 		}(i, n)
 	}
 
@@ -1528,8 +1576,11 @@ func newMapCmd() *cobra.Command {
 			}
 			defer env.Close()
 
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer cancel()
+			go func() { <-ctx.Done(); cancel() }()
+			_, stopSuspend := watchSuspend(ctx, false)
+			defer stopSuspend()
 
 			base := app.Options{
 				DaemonHost:        "",
@@ -1551,7 +1602,7 @@ func newMapCmd() *cobra.Command {
 					o.DaemonHost = host
 					o.DaemonPort = port
 					o.TargetID = targetNodeID
-					return app.RunTask(env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					return app.RunTask(ctx, env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
 				}
 				statusFn := func(msg string) {}
 				res, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
@@ -1561,7 +1612,7 @@ func newMapCmd() *cobra.Command {
 				return res.NodeID, nil
 			}
 
-			return app.RunMap(tasks, base, concurrency, resultsDir, env, run, reduce)
+			return runOutcome(app.RunMap(tasks, base, concurrency, resultsDir, env, run, reduce))
 		},
 	}
 	cmd.Flags().String("script", "", "Path to Python script (required)")
@@ -1652,12 +1703,19 @@ func newJobsCmd() *cobra.Command {
 			}
 			fmt.Printf("history path: %s\n", historyPath)
 			fmt.Println("ID\tSTATUS\tMODE\tJOB\tJOB_SET\tTARGET\tHOST\tDURATION_MS\tSTARTED")
+			warned := false
 			for _, it := range items {
 				mode := "fg"
+				status := it.Status
 				if it.Detached {
 					mode = "bg"
+					// History only knows what the submitter last saw; a
+					// detached job's daemon knows whether it has finished.
+					if status == jobhistory.StateRunning {
+						status = detachedJobStatus(it.ID, &warned)
+					}
 				}
-				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", it.ID, it.Status, mode, it.JobName, it.JobSet, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
+				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", jobhistory.ShortID(it.ID), status, mode, it.JobName, it.JobSet, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
 			}
 			return nil
 		},
@@ -1682,6 +1740,97 @@ func newJobsCmd() *cobra.Command {
 	return cmd
 }
 
+// detachedJobStatus asks the daemon running a detached job how it is doing.
+// On any failure it shows "?" and warns once per listing.
+func detachedJobStatus(id string, warned *bool) string {
+	r, _, err := jobhistory.ReadRecord(id)
+	if err == nil && (r.RemoteJobID == "" || r.DaemonEndpoint == "") {
+		err = errors.New("no daemon recorded for it")
+	}
+	var st daemonctl.JobState
+	if err == nil {
+		var host, portStr string
+		var port int
+		if host, portStr, err = net.SplitHostPort(r.DaemonEndpoint); err == nil {
+			if port, err = strconv.Atoi(portStr); err == nil {
+				st, err = daemonctl.JobStatus(host, port, r.RemoteJobID)
+			}
+		}
+	}
+	if err != nil {
+		if !*warned {
+			*warned = true
+			fmt.Fprintf(os.Stderr, "could not ask the daemon about detached job %s: %v\n", jobhistory.ShortID(id), err)
+		}
+		return "?"
+	}
+	return st.Status
+}
+
+func newAttachCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "attach <id>",
+		Short: "Follow a detached job again: replay its output, follow it live, fetch its results",
+		Long: "Reattach to a job started with --detach or Ctrl+Z on this machine. <id> is the " +
+			"id `pipedpeer jobs` shows. Ctrl+C while attached stops the job.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer stop()
+			go func() { <-ctx.Done(); stop() }()
+			return runOutcome(app.Attach(ctx, args[0]))
+		},
+	}
+}
+
+// runOutcome turns a run's error into the command's result: a detach is
+// success (the job keeps running), a cancel says so in one line.
+func runOutcome(err error) error {
+	switch {
+	case errors.Is(err, daemonctl.ErrDetached):
+		return nil
+	case errors.Is(err, context.Canceled):
+		fmt.Println("cancelled — remote work stopped")
+	}
+	return err
+}
+
+// watchSuspend turns Ctrl+Z (SIGTSTP) into a detach for a single run: the
+// returned channel closes on the first one. Where detach is not offered
+// (DDP, map) Ctrl+Z says so and the run carries on. stop gives Ctrl+Z back
+// to the shell.
+func watchSuspend(ctx context.Context, detachable bool) (<-chan struct{}, func()) {
+	detach := make(chan struct{})
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTSTP)
+	done := make(chan struct{})
+	go func() {
+		closed := false
+		for {
+			select {
+			case <-sig:
+				if !detachable {
+					fmt.Println("detach is not supported for DDP/map runs; Ctrl+C stops it")
+				} else if !closed {
+					closed = true
+					close(detach)
+				}
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return detach, func() {
+		once.Do(func() {
+			signal.Stop(sig)
+			close(done)
+		})
+	}
+}
+
 func newJobCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "job",
@@ -1692,7 +1841,7 @@ func newJobCmd() *cobra.Command {
 			if id == "" {
 				return fmt.Errorf("--id is required")
 			}
-			r, dir, err := jobhistory.ReadRecord(id)
+			r, dir, err := jobhistory.Resolve(id)
 			if err != nil {
 				return err
 			}
@@ -1878,32 +2027,7 @@ func printNodes(daemonPort int) error {
 		return nil
 	}
 
-	fmt.Printf("%-10s %-12s %-10s %-6s %-6s %-10s %-14s %-10s %s\n",
-		"NODE_ID", "HOST", "STATE", "JOBS", "CORES", "MEM AVAIL", "GPU", "PATH", "SOURCE")
-	for _, n := range nodes {
-		gpuDesc := "-"
-		if name := n.Capabilities["gpu_name"]; name != "" {
-			gpuDesc = truncate(name, 14)
-		}
-		host := n.Capabilities["hostname"]
-		if host == "" {
-			host = hostFromEndpoint(n.SSHEndpoint)
-		}
-		cores := n.Capabilities["cpu_cores"]
-		if cores == "" {
-			cores = "-"
-		}
-		// How this peer is reached. A peer that is being routed around
-		// should be visible as such rather than simply absent, which is the
-		// failure a relay-free design has to avoid.
-		path := n.Capabilities[daemonapi.PathCapability]
-		if path == "" {
-			path = "-"
-		}
-		fmt.Printf("%-10s %-12s %-10s %-6d %-6s %-10s %-14s %-10s %s\n",
-			shortID(n.NodeID), truncate(host, 12), n.State, n.Load.ActiveJobs, cores,
-			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, path, n.Source)
-	}
+	printNodeTable(os.Stdout, nodes)
 	printUnreachable(os.Stdout, daemonPort)
 	return nil
 }

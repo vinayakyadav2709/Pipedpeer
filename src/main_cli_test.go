@@ -96,8 +96,10 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when no eligible remote node, got none")
 	}
-	if !strings.Contains(errOut, "no eligible node found") {
-		t.Fatalf("expected 'no eligible node found' error, got: %s", errOut)
+	// check-only reports it as "NOT READY: no eligible node other than this
+	// machine"; a real run as "no eligible node found".
+	if !strings.Contains(errOut, "no eligible node") {
+		t.Fatalf("expected 'no eligible node' error, got: %s", errOut)
 	}
 }
 
@@ -238,8 +240,9 @@ func TestJobsListAndJobDetail(t *testing.T) {
 
 	// Test `jobs` command
 	out := runCLIWithXDG(t, stateDir, xdg, "jobs")
-	if !strings.Contains(out, "1234567890") {
-		t.Fatalf("expected job ID in jobs output, got: %s", out)
+	// jobs shows the short id a person types: the last 8 digits.
+	if !strings.Contains(out, "34567890") {
+		t.Fatalf("expected short job ID in jobs output, got: %s", out)
 	}
 	if !strings.Contains(out, "succeeded") {
 		t.Fatalf("expected 'succeeded' in jobs output, got: %s", out)
@@ -371,7 +374,7 @@ func TestNodesCLIShowsSelf(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 	}
 
-	if !strings.Contains(out, "NODE_ID") {
+	if !strings.Contains(out, "MEM FREE") {
 		t.Fatalf("no nodes table at all:\n%s", out)
 	}
 	if !strings.Contains(out, "self") {
