@@ -41,6 +41,10 @@ type Record struct {
 	DegradedMode    bool   `json:"degraded_mode,omitempty"`
 	CandidateCount  int    `json:"candidate_count,omitempty"`
 	PlacementReason string `json:"placement_reason,omitempty"`
+	// Strategy and Candidates are the coordinator's whole decision: every
+	// node it considered and what it saw, for `pipedpeer job --explain`.
+	Strategy   string      `json:"strategy,omitempty"`
+	Candidates []Candidate `json:"candidates,omitempty"`
 	// Resource estimation and tracking
 	PeakMemBytes      int64  `json:"peak_mem_bytes,omitempty"`
 	EstimatedMemBytes int64  `json:"estimated_mem_bytes,omitempty"`

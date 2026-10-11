@@ -244,6 +244,11 @@ type shimReceipt struct {
 		RanElsewhere int    `json:"ran_elsewhere"`
 		Via          string `json:"via"`
 	} `json:"parts"`
+	Decisions []struct {
+		Op      string `json:"op"`
+		Shipped bool   `json:"shipped"`
+		Why     string `json:"why"`
+	} `json:"decisions"`
 }
 
 // runPoolScript runs src under the shim against an out-of-process fake daemon.
@@ -732,4 +737,49 @@ os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
 assert shim._pool_width(None) == 1, shim._pool_width(None)
 print("PINNED-OK")
 `, "PINNED-OK")
+}
+
+// The receipt says what the cost model decided and why, not only what ran
+// where: when a run that should have spread out stays home, the reason is the
+// first thing anyone asks for.
+func TestReceiptRecordsWhyWorkShippedOrStayed(t *testing.T) {
+	res := runPoolScript(t, map[string]string{"job.py": poolScript}, "job.py")
+	assertDistributed(t, res, "POOL-OK")
+	shipped := false
+	for _, d := range res.receipt.Decisions {
+		if d.Op == "pool.map" && d.Shipped && strings.Contains(d.Why, "worth a round trip") {
+			shipped = true
+		}
+	}
+	if !shipped {
+		t.Errorf("a distributed map left no 'shipped' decision with its reason: %+v", res.receipt.Decisions)
+	}
+	// Every item is accounted for exactly once: those that ran remotely and
+	// those whose local result was kept. Items the local cores computed while
+	// racing the cluster were missing, and the total fell short of the map.
+	// The fake daemon runs remote parts on the origin, so "local" includes them.
+	if got := res.receipt.RemoteItems + res.receipt.LocalItems; got < 64 {
+		t.Errorf("receipt accounts for %d items of a 64-item map: %+v", got, res.receipt)
+	}
+
+	tiny := runPoolScript(t, map[string]string{"job.py": `
+import multiprocessing
+
+def inc(x):
+    return x + 1
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(2) as pool:
+        print("TINY-OK", sum(pool.map(inc, range(40))))
+`}, "job.py")
+	kept := false
+	for _, d := range tiny.receipt.Decisions {
+		if d.Op == "pool.map" && !d.Shipped && strings.Contains(d.Why, "under") {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Errorf("a map too small to ship left no 'kept local' decision: %+v\nstderr:\n%s",
+			tiny.receipt.Decisions, tiny.stderr)
+	}
 }

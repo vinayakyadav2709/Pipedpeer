@@ -113,6 +113,7 @@ func main() {
 		newTasksCmd(),
 		newMapCmd(),
 		newAuthCmd(),
+		newStatsCmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE
@@ -586,8 +587,15 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				var reservedGPU atomic.Int64
 				reservedGPU.Store(-1)
 				queuedAt := time.Now()
+				// The decision behind the current attempt, kept for the
+				// run's record so `job --explain` can show it.
+				var placed atomic.Pointer[coordinator.LeaseResult]
 
 				executor := func(host string, port int, targetNodeID string) error {
+					var decision coordinator.PlacementDecision
+					if r := placed.Load(); r != nil {
+						decision = r.Decision
+					}
 					devices := gpuID
 					if devices == "" {
 						if idx := reservedGPU.Load(); idx >= 0 {
@@ -609,7 +617,12 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						Envs:              envs,
 						Pkgs:              pkgs,
 						ScriptArgs:        scriptArgs,
-						PlacementSource:   "coordinator",
+						PlacementSource:   string(decision.Source),
+						DegradedMode:      decision.DegradedMode,
+						CandidateCount:    len(decision.Candidates),
+						PlacementReason:   decision.Reason,
+						Strategy:          strategy,
+						Candidates:        coordinator.ExplainCandidates(decision),
 						EstimatedMemBytes: estimatedMemBytes,
 						EstimationTier:    estimationTier,
 						QueuedAt:          queuedAt,
@@ -626,6 +639,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				coord.SetOnPlacement(func(r *coordinator.LeaseResult) {
 					reservedGPU.Store(int64(r.GPUIndex))
+					placed.Store(r)
 				})
 
 				result, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
@@ -1660,6 +1674,8 @@ func newJobCmd() *cobra.Command {
 			id, _ := cmd.Flags().GetString("id")
 			withOutput, _ := cmd.Flags().GetBool("output")
 			timeline, _ := cmd.Flags().GetBool("timeline")
+			explain, _ := cmd.Flags().GetBool("explain")
+			showReceipt, _ := cmd.Flags().GetBool("receipt")
 			if last, _ := cmd.Flags().GetBool("last"); last && id == "" {
 				recent, err := jobhistory.List(1)
 				if err != nil {
@@ -1677,9 +1693,28 @@ func newJobCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if timeline {
-				fmt.Printf("job %s  %s  %s\n\n", r.ID, filepath.Base(r.ScriptPath), r.Status)
-				jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
+			if timeline || explain || showReceipt {
+				fmt.Printf("job %s  %s  %s\n", r.ID, filepath.Base(r.ScriptPath), r.Status)
+				if explain {
+					fmt.Println("\n== Placement ==")
+					jobhistory.WriteExplanation(os.Stdout, r)
+				}
+				if timeline {
+					fmt.Println("\n== Timeline ==")
+					jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
+				}
+				if showReceipt {
+					fmt.Println("\n== Receipt ==")
+					rc, ok, err := jobhistory.ReadReceipt(dir)
+					switch {
+					case err != nil:
+						return err
+					case !ok:
+						fmt.Println("No receipt for this run (interception off, or run before receipts were kept).")
+					default:
+						jobhistory.WriteReceipt(os.Stdout, rc)
+					}
+				}
 				return nil
 			}
 			fmt.Printf("id: %s\n", r.ID)
@@ -1737,6 +1772,8 @@ func newJobCmd() *cobra.Command {
 	cmd.Flags().Bool("last", false, "Show the most recent job")
 	cmd.Flags().Bool("output", false, "Print stdout/stderr")
 	cmd.Flags().Bool("timeline", false, "Show where the run's time went, stage by stage")
+	cmd.Flags().Bool("explain", false, "Show every node considered for the run and why the chosen one won")
+	cmd.Flags().Bool("receipt", false, "Show what the shim sent to other machines, kept local, and why")
 	return cmd
 }
 

@@ -96,7 +96,13 @@ def _log(msg):
 # changing shape. It is a subset of dispatched_items, not a peer of it.
 _STATS = {"remote_items": 0, "local_items": 0, "dispatched_items": 0,
           "remote_failures": 0, "unshippable": 0, "shipped_pickled": 0,
-          "parts": []}
+          "parts": [], "decisions": [], "decisions_dropped": 0,
+          "mapped_items": 0, "remote_used": 0}
+# mapped_items counts items handed to an intercepted map, once each.
+# remote_used counts those whose kept result came from another machine. The
+# two counters above it count work done, and with local cores racing slow
+# remote chunks an item can be computed twice - so they can sum to more than
+# was mapped, and only these two say what the run's results are made of.
 _STATS_LOCK = threading.Lock()
 # The pid that actually intercepted something, claimed on the first record.
 # Pool workers and multiprocessing's own helper processes (the forkserver, on
@@ -120,9 +126,12 @@ def _record(kind, items, ok, error="", ms=0.0, receipt=None):
     how this went unnoticed the first time."""
     elsewhere = 0
     here = 0
+    by_peer = {}
     for p in (receipt or {}).get("parts", []):
-        if str(p.get("where", "")).startswith("peer:"):
+        where = str(p.get("where", ""))
+        if where.startswith("peer:"):
             elsewhere += int(p.get("items", 0))
+            by_peer[where[5:]] = by_peer.get(where[5:], 0) + int(p.get("items", 0))
         else:
             here += int(p.get("items", 0))
     with _STATS_LOCK:
@@ -142,7 +151,35 @@ def _record(kind, items, ok, error="", ms=0.0, receipt=None):
             entry["ran_on_origin"] = here
             if receipt:
                 entry["via"] = receipt.get("node", "")
+            if by_peer:
+                entry["peers"] = by_peer
         _STATS["parts"].append(entry)
+
+
+# Every time a cost model weighs shipping work against keeping it here, and
+# why it decided as it did. The counters above say what happened; this says
+# what the shim was thinking, which is the question when a run that should
+# have spread out stayed home. Capped: a loop calling np.dot a million times
+# must not grow the receipt without bound.
+_MAX_DECISIONS = 100
+_WHY = {"v": ""}
+
+
+def _decide(op, shipped, why, nbytes=0):
+    with _STATS_LOCK:
+        _claim_receipt()
+        if len(_STATS["decisions"]) >= _MAX_DECISIONS:
+            _STATS["decisions_dropped"] += 1
+            return
+        _STATS["decisions"].append({
+            "op": op, "shipped": bool(shipped), "why": why,
+            "mb": round(nbytes / 1e6, 1)})
+
+
+def _add_stat(key, n):
+    with _STATS_LOCK:
+        _claim_receipt()
+        _STATS[key] += n
 
 
 def _record_local(items):
@@ -285,6 +322,7 @@ class _ClusterPool:
                 yield r
 
     def _run(self, func, items, starmap=False):
+        _add_stat("mapped_items", len(items))
         self._resize()
         if not self._remote or len(items) <= self._measure_items:
             return self._local(func, items, starmap)
@@ -312,6 +350,7 @@ class _ClusterPool:
             _log("kernel %r has no source to send; shipping it by value"
                  % getattr(func, "__name__", "?"))
         if payload is None:
+            _decide("pool.map", False, "the function cannot be sent, by source or by value")
             _record("pool", len(tail), False, "unshippable")
             _log("kernel %r cannot ship at all, by source or by value; "
                  "staying local" % getattr(func, "__name__", "?"))
@@ -319,7 +358,12 @@ class _ClusterPool:
         if not _FORCE and len(tail) * cost < _POOL_MIN_WORK:
             _log("tail is %.2fs of work, below the %.2fs dispatch floor; staying local"
                  % (len(tail) * cost, _POOL_MIN_WORK))
+            _decide("pool.map", False, "%d items x %.3fs = %.2fs of work, under the %.2fs worth a round trip"
+                    % (len(tail), cost, len(tail) * cost, _POOL_MIN_WORK))
             return head_results + self._local(func, tail, starmap)
+        _decide("pool.map", True, "forced" if _FORCE else
+                "%d items x %.3fs = %.2fs of work, over the %.2fs worth a round trip"
+                % (len(tail), cost, len(tail) * cost, _POOL_MIN_WORK))
         return head_results + self._race(func, tail, starmap, cost, payload)
 
     def _local_ctx(self, func):
@@ -397,10 +441,17 @@ class _ClusterPool:
                 res = ctx.starmap(_apply, [(func, v) for v in vals])
             else:
                 res = ctx.map(func, vals)
+            won = 0
             with lock:
                 for i, v in zip(idxs, res):
                     if slots[i] is None:
                         slots[i] = v
+                        won += 1
+            # Counted only where the local result is the one kept: these items
+            # were missing from the receipt, which then summed to less than
+            # the map. A speculative re-run that lost is not counted twice.
+            if won:
+                _record_local(won)
 
         # Remote thread: dispatch remote chunks, first-wins into slots.
         # Chunks go out concurrently. Dispatching them one at a time capped
@@ -410,10 +461,14 @@ class _ClusterPool:
             res = self._remote_chunk(payload, chunk, starmap)
             if res is None:
                 return
+            won = 0
             with lock:
                 for orig_i, v in res:
                     if slots[orig_i] is None:
                         slots[orig_i] = v
+                        won += 1
+            if won:
+                _add_stat("remote_used", won)
 
         def remote_run():
             if not remote_chunks:
@@ -1109,7 +1164,7 @@ def _install_numpy():
         # 194 MB free.
         working = int((a.nbytes + b.nbytes + a.shape[0] * b.shape[1] * a.itemsize) * 8)
         return _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 8), 5, True,
-                                     200e9, working)
+                                     200e9, working, op="numpy.matmul")
 
     def _mm_no_fallback(a, b, err):
         """Refuse rather than fall back, when falling back means the OOM killer.
@@ -1203,7 +1258,8 @@ def _install_numpy():
             import numpy as _np
             if (a.ndim == 2 and _URL and _ENABLED
                     and not os.environ.get("PIPEDPEER_NUMPY_NESTED")
-                    and _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 4), 3, False, 1.5e9)):
+                    and _numpy_should_offload(a.nbytes, max(8, a.shape[0] // 4), 3, False, 1.5e9,
+                                              op="numpy.linalg." + name)):
                 try:
                     return _linalg_offload(name, a, args, kw)
                 except Exception as e:
@@ -1256,7 +1312,17 @@ def _daemon_open(req, timeout):
         raise RuntimeError("daemon HTTP %d: %s" % (e.code, e.read())) from e
 
 
-def _should_spill(nbytes, flops_per_byte):
+def _should_spill(nbytes, flops_per_byte, op="pandas"):
+    """_should_spill_why, with its decision recorded in the receipt when the
+    work was big enough to be considered at all."""
+    _WHY["v"] = ""
+    r = _should_spill_why(nbytes, flops_per_byte)
+    if _WHY["v"]:
+        _decide(op, r, _WHY["v"], nbytes)
+    return r
+
+
+def _should_spill_why(nbytes, flops_per_byte):
     """Latency cost model: spill nbytes of work (flops_per_byte per byte) when
     the estimated transfer + remote compute beats local single-node time.
     est_local = nbytes*flops_per_byte/1e9 (~1e9 flops/s effective), est_remote
@@ -1267,15 +1333,20 @@ def _should_spill(nbytes, flops_per_byte):
     if K < 2 or nbytes < _spill_min():
         return False
     if _FORCE:
+        _WHY["v"] = "forced (PIPEDPEER_DISTRIBUTE=force)"
         return True
     if flops_per_byte < 8 and nbytes <= 512 * 1024 * 1024:
+        _WHY["v"] = "too little compute per byte to pay for moving %.0f MB" % (nbytes / 1e6)
         return False
     bw = _measure_bandwidth()
     if not bw:
+        _WHY["v"] = "could not measure the link to the cluster"
         return False
     est_transfer = nbytes / bw
     est_local = nbytes * flops_per_byte / 1e9
     est_remote = est_local / K * 1.3
+    _WHY["v"] = ("here ~%.2fs, there ~%.2fs transfer + %.2fs compute on %d nodes"
+                 % (est_local, est_transfer, est_remote, K))
     return est_local > est_transfer + est_remote
 
 
@@ -1591,7 +1662,19 @@ _GPU_SPEEDUP = 6.0
 
 
 def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split,
-                          flops_per_sec, working_set=0):
+                          flops_per_sec, working_set=0, op="numpy"):
+    """_numpy_offload_why, with its decision recorded in the receipt when the
+    work was big enough to be considered at all."""
+    _WHY["v"] = ""
+    r = _numpy_offload_why(nbytes, flops_per_byte, round_trip, split,
+                           flops_per_sec, working_set)
+    if _WHY["v"]:
+        _decide(op, r, _WHY["v"], nbytes)
+    return r
+
+
+def _numpy_offload_why(nbytes, flops_per_byte, round_trip, split,
+                       flops_per_sec, working_set=0):
     """BLAS-realistic cost model for numpy offloads, calibrated to real BLAS
     throughput (matmul ~200 GFLOP/s, svd ~1.5 GFLOP/s on this cluster's numpy).
     est_transfer counts the full round trip (in + out, plus the replicated
@@ -1607,6 +1690,7 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split,
     if K < 2 or nbytes < _spill_min():
         return False
     if _FORCE:
+        _WHY["v"] = "forced (PIPEDPEER_DISTRIBUTE=force)"
         return True
 
     # Does it fit here at all? Everything below compares how long local takes
@@ -1618,6 +1702,8 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split,
         _log("%.0f MB working set against %.0f MB free: this does not fit here, "
              "so it goes to the cluster whatever the transfer costs"
              % (working_set / 1e6, _local_free_bytes() / 1e6))
+        _WHY["v"] = ("%.0f MB working set does not fit in %.0f MB free here"
+                     % (working_set / 1e6, _local_free_bytes() / 1e6))
         return True
 
     # Deciding is not free: the bandwidth probe ships 64 MB. A script doing one
@@ -1639,9 +1725,11 @@ def _numpy_should_offload(nbytes, flops_per_byte, round_trip, split,
 
     if not _offload_wins(nbytes, flops_per_byte, round_trip, split,
                          flops_per_sec, K, _OPTIMISTIC_BW, remote_flops):
+        _WHY["v"] += " (even on a 10 Gbit/s link)"
         return False
     bw = _measure_bandwidth()
     if not bw:
+        _WHY["v"] = "could not measure the link to the cluster"
         return False
     return _offload_wins(nbytes, flops_per_byte, round_trip, split,
                          flops_per_sec, K, bw, remote_flops)
@@ -1664,6 +1752,7 @@ def _offload_wins(nbytes, flops_per_byte, round_trip, split, flops_per_sec, K, b
         remote_flops_per_sec = flops_per_sec
     est_local = nbytes * flops_per_byte / flops_per_sec
     est_transfer = nbytes * round_trip / bw
+    _WHY["v"] = "here ~%.2fs, transfer ~%.2fs" % (est_local, est_transfer)
     if not split:
         # Single-worker offload (svd, eig) is not a race against local: it
         # relocates the work so a weak orchestrator is freed entirely, and is
@@ -1673,6 +1762,8 @@ def _offload_wins(nbytes, flops_per_byte, round_trip, split, flops_per_sec, K, b
         # of like machines, so it read "transfer + local < half of local".
         return est_transfer < est_local * 0.5
     est_remote = (nbytes * flops_per_byte / remote_flops_per_sec) / K * 1.3
+    _WHY["v"] = ("here ~%.2fs, there ~%.2fs transfer + %.2fs compute on %d nodes"
+                 % (est_local, est_transfer, est_remote, K))
     return est_local > est_transfer + est_remote
 
 
@@ -1750,7 +1841,7 @@ def _groupby_gate(gb):
         nbytes = df.memory_usage(deep=False).sum()
     except Exception:
         return False
-    if not _should_spill(nbytes, 4):
+    if not _should_spill(nbytes, 4, op="pandas.groupby"):
         return False
     for n in gb._grouper.names:
         if not (isinstance(n, str) and n in df.columns):
@@ -1867,7 +1958,7 @@ def _merge_gate(left, right):
         nbytes = left.memory_usage(deep=False).sum() + right.memory_usage(deep=False).sum()
     except Exception:
         return False
-    return _should_spill(nbytes, 2)
+    return _should_spill(nbytes, 2, op="pandas.merge")
 
 
 def _install_pandas():

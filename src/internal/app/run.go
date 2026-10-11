@@ -52,6 +52,8 @@ type Options struct {
 	DegradedMode    bool
 	CandidateCount  int
 	PlacementReason string
+	Strategy        string
+	Candidates      []jobhistory.Candidate
 	// Resource estimation
 	EstimatedMemBytes int64
 	EstimationTier    string
@@ -139,6 +141,8 @@ func RunTask(env *Environment, task Task) (runErr error) {
 	historyRecord.DegradedMode = opts.DegradedMode
 	historyRecord.CandidateCount = opts.CandidateCount
 	historyRecord.PlacementReason = opts.PlacementReason
+	historyRecord.Strategy = opts.Strategy
+	historyRecord.Candidates = opts.Candidates
 	historyRecord.EstimatedMemBytes = opts.EstimatedMemBytes
 	historyRecord.EstimationTier = opts.EstimationTier
 	historyRecord.StorePath = env.StorePath
@@ -230,6 +234,13 @@ func RunTask(env *Environment, task Task) (runErr error) {
 	historyRecord.PeakMemBytes = res.PeakBytes
 	_ = jobhistory.SaveText(historyDir, "stdout.log", res.Stdout)
 	_ = jobhistory.SaveText(historyDir, "stderr.log", res.Stderr)
+	var receiptLine string
+	if len(res.Receipt) > 0 {
+		_ = jobhistory.SaveReceipt(historyDir, res.Receipt)
+		if rc, ok, _ := jobhistory.ReadReceipt(historyDir); ok {
+			receiptLine = rc.Summary()
+		}
+	}
 
 	resultsDir := opts.ResultsDir
 	if resultsDir == "" {
@@ -266,6 +277,9 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		fmt.Printf("\n=== Done ===\n")
 		fmt.Printf("Timeline: %s (total %s)\n", jobhistory.Summary(timeline.Stages),
 			jobhistory.Total(timeline.Stages).Round(100*time.Millisecond))
+		if receiptLine != "" {
+			fmt.Printf("Shim: %s  (--receipt for detail)\n", receiptLine)
+		}
 		fmt.Printf("History: %s  (pipedpeer job --id %s --timeline)\n", historyDir, historyRecord.ID)
 	}
 	return nil
