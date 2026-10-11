@@ -327,6 +327,16 @@ func (s *Store) MarkHealthy(n Node) error {
 	if n.HealthScore == 0 {
 		n.HealthScore = 1.0
 	}
+	// The node that answered at a manual address is the node there, the same
+	// rule AddManual applies. Without it, every new identity found at a known
+	// address - a lab container recreated, an internet forwarder port reused
+	// by another peer - added a manual row beside the old one, and manual rows
+	// are never pruned: twenty-odd dead rows for a four-node lab.
+	if n.IsManual {
+		if err := s.forgetOthersAt(n.Host, n.Port, n.NodeID); err != nil {
+			return err
+		}
+	}
 	return s.UpsertNode(n)
 }
 
