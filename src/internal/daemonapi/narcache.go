@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -290,6 +291,22 @@ func closurePaths(storePath string) ([]string, error) {
 	return strings.Fields(string(out)), nil
 }
 
+// cudaName matches the store path names of CUDA builds: nixpkgs' cuda*
+// packages and the torch-cu126-* wheel set nixgen pins for GPU jobs.
+var cudaName = regexp.MustCompile(`(^|-)cu(da|1[0-9]{2}(-|$))`)
+
+// closureNeedsGPU reports whether a closure carries CUDA libraries, which
+// nixgen only puts in one when the job asked for a GPU.
+func closureNeedsGPU(paths []string) bool {
+	for _, p := range paths {
+		base := filepath.Base(p)
+		if i := strings.IndexByte(base, '-'); i >= 0 && cudaName.MatchString(base[i+1:]) {
+			return true
+		}
+	}
+	return false
+}
+
 // exportPaths writes a gzipped NAR carrying exactly the given store paths.
 func exportPaths(paths []string, destPath string) error {
 	if len(paths) == 0 {
@@ -386,34 +403,71 @@ func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
 // content-addressed, so importing it on every node lets pool spill (and only
 // pool spill) fan a task out to those nodes.
 func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
+	// Stream the parts, as handleJobUpload does. ParseMultipartForm held up
+	// to 512 MiB of the archive in a growing buffer before spilling the rest
+	// to os.TempDir(): a multi-GB CUDA closure took a receiver to ~1 GB RSS
+	// and the kernel killed its daemon mid-broadcast. The sender writes the
+	// fields before the archive, so the archive is handled as it arrives.
+	mr, err := r.MultipartReader()
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse form: " + err.Error()})
 		return
 	}
-	storePath := r.FormValue("store_path")
+	readField := func(p io.Reader) string {
+		b, _ := io.ReadAll(io.LimitReader(p, 4096))
+		return string(b)
+	}
+	var storePath string
+	var partial bool
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to parse form: " + err.Error()})
+			return
+		}
+		switch part.FormName() {
+		case "store_path":
+			storePath = readField(part)
+		case "partial":
+			partial = readField(part) == "1"
+		case "nar":
+			if storePath == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "store_path required (before nar)"})
+				return
+			}
+			status, body := s.importStoreNAR(part, storePath, partial)
+			part.Close()
+			writeJSON(w, status, body)
+			return
+		}
+		part.Close()
+	}
 	if storePath == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "store_path required"})
 		return
 	}
-	narFile, _, err := r.FormFile("nar")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required: " + err.Error()})
-		return
-	}
-	defer narFile.Close()
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nar file required"})
+}
 
+// importStoreNAR imports one streamed closure archive for handleStoreImport
+// and returns the status and JSON body to answer with.
+func (s *Server) importStoreNAR(nar io.Reader, storePath string, partial bool) (int, any) {
+	fail := func(status int, msg string) (int, any) {
+		return status, map[string]string{"error": msg}
+	}
 	// Which format arrived is decided by the bytes, not by the form field.
 	// The two ends are never upgraded in the same instant, and a stream read
 	// as the wrong format fails somewhere deep inside nix with an error
 	// about the archive rather than about the version.
-	br := bufio.NewReaderSize(narFile, 1024)
+	br := bufio.NewReaderSize(nar, 1024)
 	if narpack.IsArchive(br) {
 		if err := s.importSignedClosure(br, storePath); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return fail(http.StatusInternalServerError, err.Error())
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "imported": true, "signed": true})
-		return
+		return http.StatusOK, map[string]any{"cached": false, "imported": true, "signed": true}
 	}
 
 	// A partial archive carries only the paths this node was missing, which
@@ -422,45 +476,37 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 	// thing, and that node would be left with an unimportable fragment. So
 	// import it and cache nothing. If this node ever needs to seed a peer,
 	// ensureLocal re-exports the complete closure from its own store.
-	partial := r.FormValue("partial") == "1"
 	if partial {
 		if err := os.MkdirAll(s.narCache.dir, 0o755); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return fail(http.StatusInternalServerError, err.Error())
 		}
 		tmp, err := os.CreateTemp(s.narCache.dir, "partial-*.nar")
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return fail(http.StatusInternalServerError, err.Error())
 		}
 		defer os.Remove(tmp.Name())
 		if _, err := io.Copy(tmp, br); err != nil {
 			tmp.Close()
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return fail(http.StatusInternalServerError, err.Error())
 		}
 		tmp.Close()
 		start := time.Now()
 		if err := s.importNARFile(tmp.Name()); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "import: " + err.Error()})
-			return
+			return fail(http.StatusInternalServerError, "import: "+err.Error())
 		}
 		logClosureImported(storePath, start, "partial")
-		writeJSON(w, http.StatusOK, map[string]any{"cached": false, "imported": true})
-		return
+		return http.StatusOK, map[string]any{"cached": false, "imported": true}
 	}
 
 	// Cache the NAR and materialise the closure in the local nix store so
 	// /v1/pool/map can actually run it (<storePath>/bin/run must exist).
 	if _, err := s.narCache.store(storePath, br); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "cache nar: " + err.Error()})
-		return
+		return fail(http.StatusInternalServerError, "cache nar: "+err.Error())
 	}
 	if err := s.materializeClosure(storePath); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "materialise closure: " + err.Error()})
-		return
+		return fail(http.StatusInternalServerError, "materialise closure: "+err.Error())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cached": true})
+	return http.StatusOK, map[string]any{"cached": true}
 }
 
 // signedImport is narpack.Import, as a variable so a test can reach what

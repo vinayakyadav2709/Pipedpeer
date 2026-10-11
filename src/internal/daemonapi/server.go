@@ -211,6 +211,9 @@ type PeerHealth struct {
 	// peer old enough to predate the question, which is exactly the peer
 	// that must keep being sent the old format.
 	ClosureFormats string `json:"closure_formats"`
+	// GPU is the peer's GPU vendor ("" when it has none), so a CUDA closure
+	// is not pushed to a node that cannot use it.
+	GPU string `json:"gpu,omitempty"`
 }
 
 // TakesSignedClosures reports whether this peer can receive a closure in the
@@ -639,6 +642,25 @@ func (s *Server) broadcastClosure(storePath string) []string {
 			Msg("no healthy peers to broadcast the closure to; pool work will stay local")
 		return nil
 	}
+	// A CUDA closure is several GB and only a GPU node can use it. The
+	// broadcast is a warm-up for pool spill, and the node a GPU job is placed
+	// on gets the closure with the upload, so pushing it to CPU-only peers
+	// only costs minutes of transfer and their memory (rehearsal: 260 s and
+	// three OOM-killed receivers for a 4 s GPU script).
+	if paths, err := closurePaths(storePath); err != nil {
+		log.Warn().Err(err).Str("store", storePath).
+			Msg("cannot list the closure to tell whether it needs a GPU; broadcasting to every peer")
+	} else if closureNeedsGPU(paths) {
+		var skipped int
+		targets, skipped = gpuPeersOnly(targets)
+		if skipped > 0 {
+			log.Info().Int("skipped", skipped).Str("store", storePath).
+				Msg("not broadcasting a GPU closure to peers without a GPU")
+		}
+		if len(targets) == 0 {
+			return nil
+		}
+	}
 	log.Info().Int("peers", len(targets)).Str("store", storePath).
 		Msg("broadcasting closure to peers")
 
@@ -684,6 +706,17 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	wg.Wait()
 	sort.Strings(refused)
 	return refused
+}
+
+// gpuPeersOnly keeps the peers that report a GPU, and says how many it dropped.
+func gpuPeersOnly(peers []PeerHealth) ([]PeerHealth, int) {
+	var keep []PeerHealth
+	for _, ph := range peers {
+		if ph.GPU != "" {
+			keep = append(keep, ph)
+		}
+	}
+	return keep, len(peers) - len(keep)
 }
 
 // importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
@@ -2002,6 +2035,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.ReservedMem = h.ReservedMem
 	ph.Machine = h.Capabilities[heartbeat.MachineCapability]
 	ph.ClosureFormats = h.Capabilities[heartbeat.ClosureFormatCapability]
+	ph.GPU = h.Capabilities["gpu"]
 
 	capsJSON, _ := json.Marshal(h.Capabilities)
 	loadJSON, _ := json.Marshal(h.Load)

@@ -274,6 +274,9 @@ func writeEntry(tw *tar.Writer, name string, body []byte) error {
 	return err
 }
 
+// maxManifestBytes bounds the one archive entry Unpack holds in memory.
+const maxManifestBytes = 16 << 20
+
 // Unpack writes an archive's contents into a directory usable as a binary
 // cache, and returns what the sender said the roots are.
 func Unpack(r io.Reader, dir string) (Manifest, error) {
@@ -296,6 +299,12 @@ func Unpack(r io.Reader, dir string) (Manifest, error) {
 			return m, err
 		}
 		if name == ManifestName {
+			// Read into memory, so bounded: everything else in the archive
+			// streams to disk, and a peer must not be able to make this
+			// one entry cost the receiver its RAM.
+			if hdr.Size > maxManifestBytes {
+				return m, fmt.Errorf("closure manifest is %d bytes, over the %d limit", hdr.Size, maxManifestBytes)
+			}
 			body, err := io.ReadAll(tr)
 			if err != nil {
 				return m, err
