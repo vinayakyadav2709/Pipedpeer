@@ -2,12 +2,17 @@ package internet
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"net"
 	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/direct"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/portmap"
 	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 )
 
@@ -453,5 +458,69 @@ func TestTheForwarderOutlivesTheAttemptThatMadeIt(t *testing.T) {
 	m.mu.Unlock()
 	if !still {
 		t.Error("the peer was released although its connection is healthy")
+	}
+}
+
+// TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch.
+//
+// A peer woken by a punch request punches back at the candidates we
+// registered. The first registration leaves before the introducer has told us
+// our reflexive address, so it carries LAN addresses only; unless it is sent
+// again the moment that address is known, the woken peer aims only at a
+// private address on another network and a port-restricted router here drops
+// everything it sends. Seen in the NAT lab: two cone sites linked only by
+// collision, never by an ordinary punch.
+func TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch(t *testing.T) {
+	intro, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer intro.Close()
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := identity.KeyPair{Public: pub, Private: priv}
+	cert := selfSigned(t)
+	ep, err := direct.Listen(direct.Config{Key: key, Cluster: "c1", Cert: &cert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ep.Close()
+
+	m := New(Config{Rendezvous: intro.LocalAddr().String(), Cluster: "c1", Key: key})
+	m.endpoint = ep
+	m.keeper = &portmap.Keeper{}
+
+	m.onRegistered(context.Background(), "198.51.100.12:38447", nil)
+
+	_ = intro.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 2048)
+	n, _, err := intro.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("learning our reflexive address sent no new registration: %v", err)
+	}
+	var req struct {
+		Op         string   `json:"op"`
+		Candidates []string `json:"candidates"`
+	}
+	if err := json.Unmarshal(buf[:n], &req); err != nil {
+		t.Fatal(err)
+	}
+	want := "reflex:198.51.100.12:38447"
+	found := false
+	for _, c := range req.Candidates {
+		found = found || c == want
+	}
+	if req.Op != "register" || !found {
+		t.Fatalf("sent op %q with %v; want a registration carrying %s", req.Op, req.Candidates, want)
+	}
+
+	// The same address again is not news: no extra registration per reply.
+	m.onRegistered(context.Background(), "198.51.100.12:38447", nil)
+	_ = intro.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, _, err := intro.ReadFromUDP(buf); err == nil {
+		t.Error("re-registered on an unchanged address; every reply would cause another")
 	}
 }

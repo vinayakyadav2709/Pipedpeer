@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -280,6 +281,11 @@ func LocalDialer(addr string) func(context.Context) (net.Conn, error) {
 	}
 }
 
+// adoptWindow is how long an adopted socket takes new connections. The peer
+// dials the moment its spray hears back, so this is generous; a variable so a
+// test can shorten it.
+var adoptWindow = 30 * time.Second
+
 // Adopt makes a socket found by collision carry connections too.
 //
 // The collision leaves the working mapping on one of the many sockets opened
@@ -288,6 +294,14 @@ func LocalDialer(addr string) func(context.Context) (net.Conn, error) {
 // worth spraying at. The peer that found us will dial the address belonging
 // to THAT socket, so unless something is listening there the collision
 // achieves nothing.
+//
+// Only ctx's values are used, never its deadline. The caller is the
+// collision, which returns as soon as this socket is adopted, while the peer's
+// dial is still in flight; bound to its context, the listener closed
+// mid-handshake and quic-go answered CONNECTION_REFUSED - every collision in
+// the NAT lab (lab-nat.sh nat) failed that way. The socket takes new
+// connections for adoptWindow, then stays open only while a connection it
+// accepted lives, and is closed after the last one (or by Close).
 //
 // The prober is shared, so probes arriving on an adopted socket are answered
 // exactly as on the main one.
@@ -302,16 +316,31 @@ func (e *Endpoint) Adopt(ctx context.Context, conn *net.UDPConn) error {
 	e.adopted = append(e.adopted, tr)
 	e.mu.Unlock()
 
+	life := context.WithoutCancel(ctx)
 	go func() {
-		defer tr.Close()
-		defer ln.Close()
+		window, cancel := context.WithTimeout(life, adoptWindow)
+		defer cancel()
+		var live sync.WaitGroup
 		for {
-			c, err := ln.Accept(ctx)
+			c, err := ln.Accept(window)
 			if err != nil {
-				return
+				break
 			}
-			go e.accept(ctx, c)
+			live.Add(1)
+			go func() {
+				defer live.Done()
+				e.accept(life, c) // returns when the connection ends
+			}()
 		}
+		_ = ln.Close()
+		live.Wait()
+		_ = tr.Close()
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			e.log("direct: closing the adopted socket %s: %v", conn.LocalAddr(), err)
+		}
+		e.mu.Lock()
+		e.adopted = slices.DeleteFunc(e.adopted, func(t *quic.Transport) bool { return t == tr })
+		e.mu.Unlock()
 	}()
 	return nil
 }
