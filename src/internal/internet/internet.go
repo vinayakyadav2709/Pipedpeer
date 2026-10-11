@@ -35,6 +35,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -416,6 +417,10 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 	if err != nil {
 		return err
 	}
+	// The race answers with an IPv4-mapped address while candidates are plain
+	// IPv4: unmap it, or nothing ever matches and every ordinary punch is
+	// labelled "punched".
+	at = netip.AddrPortFrom(at.Addr().Unmap(), at.Port())
 
 	conn, err := m.endpoint.Dial(ctx, node, at)
 	if err != nil {
@@ -427,14 +432,19 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 		return err
 	}
 
-	kind := "punched"
+	return m.linkUp(ctx, node, conn, pathKind(cands, at))
+}
+
+// pathKind names how at was reached: the kind of the candidate it is, or
+// "punched" when it is none of them (a collision found it).
+func pathKind(cands []direct.Candidate, at netip.AddrPort) string {
+	at = netip.AddrPortFrom(at.Addr().Unmap(), at.Port())
 	for _, c := range cands {
 		if c.Addr == at {
-			kind = string(c.Kind)
-			break
+			return string(c.Kind)
 		}
 	}
-	return m.linkUp(ctx, node, conn, kind)
+	return "punched"
 }
 
 // raceOrCollide finds an address that answers, by the ordinary punch or, when
@@ -530,6 +540,8 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 		conn, from, err := direct.OpenMany(cctx, known, m.node(), 10*time.Second)
 		if err == nil {
 			hits <- found{at: from, conn: conn}
+		} else if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			m.cfg.Log("collision toward %s: %v", short(node), err)
 		}
 	}()
 
@@ -650,7 +662,7 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 	if conn != nil {
 		go func() {
 			<-conn.Context().Done()
-			m.dropLink(node)
+			m.dropLinkIf(node, ln)
 		}()
 	}
 	// When the forwarder stops accepting, this link cannot carry anything
@@ -660,7 +672,7 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 	// to reconnect - a cluster that had silently stopped distributing while
 	// claiming a direct path. Observed after a large closure transfer, and it
 	// did not recover in ten minutes; only a restart brought it back.
-	defer m.dropLink(node)
+	defer m.dropLinkIf(node, ln)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -691,14 +703,20 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 	}
 }
 
-func (m *Manager) dropLink(node string) {
+func (m *Manager) dropLink(node string) { m.dropLinkIf(node, nil) }
+
+// dropLinkIf drops node's link only if it is the one serving ln (nil: any).
+// A dead link's watchers fire after a reconnect may have replaced it, and
+// must not tear down the replacement.
+func (m *Manager) dropLinkIf(node string, ln net.Listener) {
 	m.mu.Lock()
 	link := m.peers[node]
-	delete(m.peers, node)
-	m.mu.Unlock()
-	if link == nil {
+	if link == nil || (ln != nil && link.listener != ln) {
+		m.mu.Unlock()
 		return
 	}
+	delete(m.peers, node)
+	m.mu.Unlock()
 	link.stop()
 	_ = link.listener.Close()
 	if link.conn != nil {
