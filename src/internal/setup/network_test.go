@@ -20,7 +20,8 @@ type fakeFirewall struct {
 
 func (f *fakeFirewall) install(t *testing.T) {
 	t.Helper()
-	oldLook, oldCmd := lookPath, firewallCmd
+	oldLook, oldCmd, oldEuid := lookPath, firewallCmd, geteuid
+	geteuid = func() int { return 0 }
 	lookPath = func(name string) (string, error) {
 		if f.present[name] {
 			return "/usr/bin/" + name, nil
@@ -38,7 +39,7 @@ func (f *fakeFirewall) install(t *testing.T) {
 		}
 		return "", nil
 	}
-	t.Cleanup(func() { lookPath, firewallCmd = oldLook, oldCmd })
+	t.Cleanup(func() { lookPath, firewallCmd, geteuid = oldLook, oldCmd, oldEuid })
 }
 
 func (f *fakeFirewall) didRun(want string) bool {
@@ -211,5 +212,52 @@ func TestTheReportedPortIsTheOneUsed(t *testing.T) {
 	if DirectPort() != 38447 {
 		t.Errorf("DirectPort() = %d; it must match internet.DefaultPort, or setup "+
 			"opens a port nothing listens on", DirectPort())
+	}
+}
+
+// TestFirewallChangesGoThroughSudoWhenNotRoot. Mutations need root; the
+// diagnosis-only run must never prompt for a password.
+func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
+	f := &fakeFirewall{
+		present: map[string]bool{"firewall-cmd": true},
+		replies: map[string]string{
+			"firewall-cmd --state":                "running\n",
+			"firewall-cmd --query-port=38447/udp": "no\n",
+		},
+	}
+	f.install(t)
+	geteuid = func() int { return 1000 }
+	openFirewall(context.Background(), 38447, true)
+	for _, want := range []string{
+		"sudo firewall-cmd --permanent --add-port=38447/udp",
+		"sudo firewall-cmd --reload",
+	} {
+		if !f.didRun(want) {
+			t.Errorf("missing %q; ran %v", want, f.ran)
+		}
+	}
+
+	u := &fakeFirewall{
+		present: map[string]bool{"ufw": true},
+		replies: map[string]string{"sudo ufw status": "Status: active\n"},
+	}
+	u.install(t)
+	geteuid = func() int { return 1000 }
+	openFirewall(context.Background(), 38447, true)
+	if !u.didRun("sudo ufw allow 38447/udp") {
+		t.Errorf("ufw allow not via sudo; ran %v", u.ran)
+	}
+
+	d := &fakeFirewall{
+		present: map[string]bool{"ufw": true},
+		replies: map[string]string{"ufw status": "Status: active\n"},
+	}
+	d.install(t)
+	geteuid = func() int { return 1000 }
+	openFirewall(context.Background(), 38447, false)
+	for _, r := range d.ran {
+		if strings.HasPrefix(r, "sudo ") {
+			t.Errorf("diagnosis-only run used sudo: %v", d.ran)
+		}
 	}
 }
