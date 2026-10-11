@@ -96,7 +96,7 @@ def _log(msg):
 # changing shape. It is a subset of dispatched_items, not a peer of it.
 _STATS = {"remote_items": 0, "local_items": 0, "dispatched_items": 0,
           "remote_failures": 0, "unshippable": 0, "shipped_pickled": 0,
-          "parts": []}
+          "parts": [], "by_where": {}}
 _STATS_LOCK = threading.Lock()
 # The pid that actually intercepted something, claimed on the first record.
 # Pool workers and multiprocessing's own helper processes (the forkserver, on
@@ -120,17 +120,23 @@ def _record(kind, items, ok, error="", ms=0.0, receipt=None):
     how this went unnoticed the first time."""
     elsewhere = 0
     here = 0
+    where_n = {}
     for p in (receipt or {}).get("parts", []):
-        if str(p.get("where", "")).startswith("peer:"):
-            elsewhere += int(p.get("items", 0))
+        w = str(p.get("where", "")) or "local"
+        n = int(p.get("items", 0))
+        where_n[w] = where_n.get(w, 0) + n
+        if w.startswith("peer:"):
+            elsewhere += n
         else:
-            here += int(p.get("items", 0))
+            here += n
     with _STATS_LOCK:
         _claim_receipt()
         if ok:
             _STATS["dispatched_items"] += items
             _STATS["remote_items"] += elsewhere
             _STATS["local_items"] += here
+            for w, n in where_n.items():
+                _STATS["by_where"][w] = _STATS["by_where"].get(w, 0) + n
         elif error == "unshippable":
             _STATS["unshippable"] += items
         else:
@@ -149,21 +155,31 @@ def _record_local(items):
     with _STATS_LOCK:
         _claim_receipt()
         _STATS["local_items"] += items
+        _STATS["by_where"]["local"] = _STATS["by_where"].get("local", 0) + items
 
 
 @atexit.register
 def _write_receipt():
-    path = os.environ.get("PIPEDPEER_RECEIPT")
-    if not path or _RECEIPT_OWNER[0] != os.getpid():
+    if _RECEIPT_OWNER[0] != os.getpid():
         return
     import json
+    with _STATS_LOCK:
+        body = json.dumps(_STATS)
+        summary = json.dumps({k: v for k, v in _STATS.items() if k != "parts"})
+    if _ENABLED:
+        try:
+            sys.stderr.write("[pipedpeer] receipt " + summary + "\n")
+            sys.stderr.flush()
+        except Exception as e:
+            _log("could not print receipt: %r" % (e,))
+    path = os.environ.get("PIPEDPEER_RECEIPT")
+    if not path:
+        return
     try:
-        with _STATS_LOCK:
-            body = json.dumps(_STATS)
         with open(path, "w") as f:
             f.write(body)
-    except Exception:
-        pass
+    except Exception as e:
+        _log("could not write receipt file %s: %r" % (path, e))
 
 
 class _ClusterPool:
