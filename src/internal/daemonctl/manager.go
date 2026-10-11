@@ -1,6 +1,7 @@
 package daemonctl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -190,8 +191,17 @@ func processRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	// A zombie still answers signal 0 but is dead. State is the field after
+	// the ")" that closes the command name.
+	if data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+		if i := bytes.LastIndexByte(data, ')'); i >= 0 && i+2 < len(data) && data[i+2] == 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func readInt(path string) (int, error) {
