@@ -67,10 +67,12 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	importScan := pythondeps.ExtractImportScan(absScriptPath)
 
 	var imports []string
+	fromLock := false
 	uvLockPath := filepath.Join(projectRoot, "uv.lock")
 	if uvPkgs, err := pythondeps.ParseUVLock(uvLockPath); err == nil {
 		fmt.Printf("      Found uv.lock in project root\n")
 		imports = uvPkgs
+		fromLock = true
 	} else {
 		imports = importScan.ExternalDeps
 		if len(imports) > 0 {
@@ -85,6 +87,13 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	nixPkgs := pythondeps.ResolvePackages(imports, opts.Pkgs)
 	for _, pkg := range nixPkgs {
 		fmt.Printf("      Using Nix package: %s\n", pkg)
+	}
+	// uv.lock names are distributions, not imports: the table does not apply.
+	if !fromLock {
+		if missing := unpackaged(imports, opts.Pkgs); len(missing) > 0 {
+			fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
+				strings.Join(missing, ", "))
+		}
 	}
 
 	// On disk, not in RAM: the exported closure is written here and a torch
@@ -151,6 +160,25 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	}
 
 	return env, nil
+}
+
+// unpackaged lists imports with no nix package, leaving out any the user
+// named with --pkg (python3Packages.tqdm covers "tqdm").
+func unpackaged(imports, pkgs []string) []string {
+	var out []string
+	for _, imp := range pythondeps.UnresolvedImports(imports) {
+		covered := false
+		for _, p := range pkgs {
+			if strings.EqualFold(p[strings.LastIndex(p, ".")+1:], imp) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, imp)
+		}
+	}
+	return out
 }
 
 func findProjectRoot(scriptDir string) string {

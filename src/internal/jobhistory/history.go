@@ -1,7 +1,9 @@
 package jobhistory
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
@@ -47,6 +49,10 @@ type Record struct {
 	EstimationTier    string `json:"estimation_tier,omitempty"` // "user", "historical", "filesize", "import"
 	// Live stage tracking
 	Stage string `json:"stage,omitempty"` // "building", "exporting", "uploading", "executing"
+	// Background runs: where the job keeps running after the submitter
+	// detached, so attach can find it again.
+	RemoteJobID    string `json:"remote_job_id,omitempty"`
+	DaemonEndpoint string `json:"daemon_endpoint,omitempty"` // host:port
 }
 
 type JobSummary struct {
@@ -121,7 +127,10 @@ func Finalize(dir string, r Record, runErr error) error {
 	if err == nil {
 		r.DurationMs = finished.Sub(start).Milliseconds()
 	}
-	if runErr != nil {
+	if errors.Is(runErr, context.Canceled) {
+		r.Status = StateCancelled
+		r.Error = runErr.Error()
+	} else if runErr != nil {
 		r.Status = StateFailed
 		r.Error = runErr.Error()
 	} else {
@@ -167,6 +176,45 @@ func ReadRecord(id string) (Record, string, error) {
 		return Record{}, "", err
 	}
 	return r, dir, nil
+}
+
+// ShortID is the id a person types: the last 8 digits of the nanosecond id.
+// Not the first 8 — those are the same for every job started within the same
+// 100 seconds, which is every job of a finale.
+func ShortID(id string) string {
+	if len(id) > 8 {
+		return id[len(id)-8:]
+	}
+	return id
+}
+
+// Resolve finds a record by its full id, or by a prefix or suffix (ShortID)
+// that matches exactly one record.
+func Resolve(id string) (Record, string, error) {
+	if id == "" {
+		return Record{}, "", fmt.Errorf("job id is required")
+	}
+	if r, dir, err := ReadRecord(id); err == nil {
+		return r, dir, nil
+	}
+	entries, err := os.ReadDir(BaseDir())
+	if err != nil && !os.IsNotExist(err) {
+		return Record{}, "", err
+	}
+	var matches []string
+	for _, e := range entries {
+		if e.IsDir() && (strings.HasPrefix(e.Name(), id) || strings.HasSuffix(e.Name(), id)) {
+			matches = append(matches, e.Name())
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Record{}, "", fmt.Errorf("job %s not found in this machine's history (%s); attach works only on the machine that started the job", id, BaseDir())
+	case 1:
+		return ReadRecord(matches[0])
+	default:
+		return Record{}, "", fmt.Errorf("job id %s matches %d jobs; give more digits", id, len(matches))
+	}
 }
 
 func ReadRecordAt(dir string) (Record, error) {
