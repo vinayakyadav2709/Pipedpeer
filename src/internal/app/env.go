@@ -67,10 +67,12 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	importScan := pythondeps.ExtractImportScan(absScriptPath)
 
 	var imports []string
+	usedLock := false
 	uvLockPath := filepath.Join(projectRoot, "uv.lock")
 	if uvPkgs, err := pythondeps.ParseUVLock(uvLockPath); err == nil {
 		fmt.Printf("      Found uv.lock in project root\n")
 		imports = uvPkgs
+		usedLock = true
 	} else {
 		imports = importScan.ExternalDeps
 		if len(imports) > 0 {
@@ -85,6 +87,19 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	nixPkgs := pythondeps.ResolvePackages(imports, opts.Pkgs)
 	for _, pkg := range nixPkgs {
 		fmt.Printf("      Using Nix package: %s\n", pkg)
+	}
+	// A uv.lock lists packages, not imports, so only the scan can be checked.
+	if !usedLock {
+		var missing []string
+		for _, imp := range pythondeps.UnresolvedImports(imports) {
+			if !explicitlyNamed(imp, opts.Pkgs) {
+				missing = append(missing, imp)
+			}
+		}
+		if len(missing) > 0 {
+			fmt.Printf("      Warning: no Nix package known for: %s\n", strings.Join(missing, ", "))
+			fmt.Printf("      The script will fail to import them on the node; name the package with --pkg <name>\n")
+		}
 	}
 
 	// On disk, not in RAM: the exported closure is written here and a torch
@@ -169,4 +184,15 @@ func findProjectRoot(scriptDir string) string {
 			return scriptDir
 		}
 	}
+}
+
+// explicitlyNamed reports whether --pkg already names a package for imp, in
+// which case an unknown import is not a problem.
+func explicitlyNamed(imp string, pkgs []string) bool {
+	for _, p := range pkgs {
+		if strings.EqualFold(p, imp) {
+			return true
+		}
+	}
+	return false
 }

@@ -367,3 +367,22 @@ func keysOf(m map[string]bool) []string {
 	sort.Strings(out)
 	return out
 }
+
+// Internet peers all sit behind forwarders on 127.0.0.1. One leaving must
+// remove only its own entry, not every forwarder on the loopback address.
+func TestRemoveManualAtKeepsOtherForwarders(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertNode(Node{NodeID: "peer-a", Host: "127.0.0.1", Port: 40001, Source: "manual", IsManual: true})
+	_ = s.UpsertNode(Node{NodeID: "peer-b", Host: "127.0.0.1", Port: 40002, Source: "manual", IsManual: true})
+
+	if n, err := s.RemoveManualAt("127.0.0.1", 40001); err != nil || n != 1 {
+		t.Fatalf("remove one forwarder: n=%d err=%v, want 1", n, err)
+	}
+	nodes, err := s.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].NodeID != "peer-b" {
+		t.Fatalf("left %+v, want only peer-b", nodes)
+	}
+}

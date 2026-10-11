@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -76,7 +77,7 @@ func TestResolvePackages(t *testing.T) {
 	explicit := []string{"pillow", reqFile, "boto3"}
 
 	got := ResolvePackages(astImports, explicit)
-	want := []string{"flask", "scipy", "Pillow", "numpy", "pandas", "pytest", "unknown-pkg", "boto3"}
+	want := []string{"flask", "scipy", "pillow", "numpy", "pandas", "pytest", "unknown-pkg", "boto3"}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolved packages mismatch\nwant: %#v\n got: %#v", want, got)
@@ -154,5 +155,23 @@ func TestTrailingCommentDoesNotHideAnImport(t *testing.T) {
 	got := importedModules("import numpy, pandas  # both needed")
 	if len(got) != 2 || got[0] != "numpy" || got[1] != "pandas" {
 		t.Errorf("got %v, want numpy and pandas", got)
+	}
+}
+
+func TestUnresolvedImports(t *testing.T) {
+	got := UnresolvedImports([]string{"numpy", "cv2", "PIL", "somethingobscure"})
+	if !reflect.DeepEqual(got, []string{"somethingobscure"}) {
+		t.Fatalf("unresolved = %#v, want only the unknown import", got)
+	}
+}
+
+// Every mapped name must be a nixpkgs python attribute: "Pillow" was not, and
+// any script importing PIL failed to build. Checked against the attribute
+// spelling rules nixpkgs uses (lowercase, hyphens), not a live evaluation.
+func TestMappedNamesAreLowercase(t *testing.T) {
+	for imp, pkg := range nixpkgsMapping {
+		if pkg != strings.ToLower(pkg) {
+			t.Errorf("%s maps to %q; nixpkgs python attributes are lowercase", imp, pkg)
+		}
 	}
 }

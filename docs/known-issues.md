@@ -19,6 +19,19 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Pool: `items_zlib` is dropped when the daemon splits work | 049a1aa |
 | Internet: unreachable reasons never reach `pipedpeer nodes` | They are kept by the daemon, served by `/v1/nodes`, and listed under the `nodes` table |
 | `--remote` gives up after one look (demo run sheet) | It waits up to 15 s for a node (`PIPEDPEER_REMOTE_WAIT`), and says why each node was turned down |
+| Observed 2: three tests fail, not skip, without torch | The shim test gate counts the weighted sampler as needing torch |
+| Pool: `runMicroChunks` answers in JSON; the shim reads frames | Micro-chunked requests answer in the format they were asked in, with a receipt |
+| Pool: forwarded work is recorded as `local` | The forwarding node relabels the peer's `local` parts as `peer:<addr>` before passing the answer on |
+| Internet: `RemovePeer` removes every `127.0.0.1` forwarder | Removal matches host and port |
+| Pool sizing reads `os.cpu_count()` (demo run sheet) | `_usable_cores()` honours CPU affinity and the cgroup `cpu.max` quota |
+| A third-party import missing from the resolver table is silently dropped (report) | The build warns and names the imports, and `--pkg` silences it. The table also covered `import PIL` with a package name nixpkgs lacks (`Pillow`, now `pillow`), and listed pip names (`opencv`) where scripts use import names (`cv2`, `bs4`, `skimage`) |
+| Data races in the `nattype` and `portmap` tests | Fixed in the tests; `go test -race ./...` is clean |
+
+## Not bugs, recorded so they are not reported again
+
+- **`imap_unordered` returns results in order.** That is allowed: "unordered" promises no order, and input order is one of them. The cost is that a slow item holds back the rest of its batch.
+- **numpy's `@` operator is not intercepted.** It cannot be: `numpy.ndarray` is an immutable C type, and `ndarray.__matmul__` cannot be replaced (`TypeError: cannot set '__matmul__' attribute of immutable type`). Write `np.matmul(a, b)` or `a.dot(b)` for a product that should be distributed.
+- **A forwarded request can fan out again.** It is meant to: the origin forwarded because it lacked the memory to run the work, and the peer spreading it further is how the work gets done. A sub-chunk landing back on the origin carries no forwarding mark, so it can be forwarded once more, but never in a loop.
 
 ## Observed
 

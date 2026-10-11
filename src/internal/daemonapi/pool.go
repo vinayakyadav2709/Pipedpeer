@@ -863,7 +863,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				starmap: req.Starmap, itemsB64: req.ItemsB64, itemsZlib: req.ItemsZlib, noSplit: req.NoSplit,
 				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
-				chunkDir: chunkDirFor(storePath),
+				chunkDir:    chunkDirFor(storePath),
+				originLocal: fromLocalShim,
+				prov:        &provenance{},
 			}
 			s.runMicroChunks(w, runPath, storePath, ch, safe, submitter)
 			return
@@ -904,25 +906,32 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if frames {
-		// Frames response: small header line + raw pickle result frames. The
-		// receipt rides in the header so the submitter learns where the work
-		// ran, not merely that it was accepted.
-		recJSON, _ := json.Marshal(ch.prov.snapshot())
-		hdr := fmt.Sprintf("{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
-			len(results), s.nodeID, recJSON)
-		w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
-		w.WriteHeader(http.StatusOK)
-		body := make([]byte, 0, 1024)
-		body = append(body, hdr...)
-		for _, r := range results {
-			body = putFrame(body, resultPickle(r))
-		}
-		w.Write(body)
+	s.writePoolResults(w, ch.frames, results, ch.prov)
+}
+
+// writePoolResults answers a pool map in the format it was asked in. Frames
+// are a small header line followed by raw pickle result frames; the receipt
+// rides in the header so the submitter learns where the work ran, not merely
+// that it was accepted.
+func (s *Server) writePoolResults(w http.ResponseWriter, frames bool, results []any, prov *provenance) {
+	if !frames {
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	recJSON, _ := json.Marshal(prov.snapshot())
+	hdr := fmt.Sprintf("{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
+		len(results), s.nodeID, recJSON)
+	w.Header().Set("Content-Type", framesContentType)
+	w.WriteHeader(http.StatusOK)
+	body := make([]byte, 0, 1024)
+	body = append(body, hdr...)
+	for _, r := range results {
+		body = putFrame(body, resultPickle(r))
+	}
+	w.Write(body)
 }
+
+const framesContentType = "application/vnd.pipedpeer.frames"
 
 // resultPickle extracts the raw pickle bytes a result carries. Results are
 // standardised on raw pickle bytes internally; only the wire edges base64.
@@ -971,6 +980,9 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		case sub.noFanout:
 			part, err = s.pool.runLocal(runPath, storePath, &sub)
+			if err == nil {
+				sub.prov.record("local", len(sub.items), 0)
+			}
 		default:
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		}
@@ -980,7 +992,9 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 		}
 		results = append(results, part...)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	// In the format the shim asked for: it reads frames whenever it sent
+	// them, and a JSON answer here failed to parse on its side.
+	s.writePoolResults(w, ch.frames, results, ch.prov)
 }
 
 // forwardPoolMap relays the raw request to a peer (one hop) so a weak
@@ -1001,9 +1015,48 @@ func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, sto
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+		if ct == framesContentType {
+			body = relabelForwardedReceipt(body, peer)
+		}
+	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 	return true
+}
+
+// relabelForwardedReceipt rewrites the receipt in a forwarded frames answer so
+// the peer's own share reads as the peer's. The peer reports it as "local",
+// which is true from where it stands, but the submitter reads "local" as "ran
+// on the node I asked", and a forwarded run then looked as if it had never
+// left the origin.
+func relabelForwardedReceipt(body []byte, peer string) []byte {
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		return body
+	}
+	var hdr map[string]any
+	if json.Unmarshal(body[:nl], &hdr) != nil {
+		return body
+	}
+	rec, _ := hdr["receipt"].(map[string]any)
+	parts, _ := rec["parts"].([]any)
+	if len(parts) == 0 {
+		return body
+	}
+	for _, p := range parts {
+		if m, ok := p.(map[string]any); ok && m["where"] == "local" {
+			m["where"] = "peer:" + peer
+		}
+	}
+	newHdr, err := json.Marshal(hdr)
+	if err != nil {
+		return body
+	}
+	out := make([]byte, 0, len(newHdr)+len(body)-nl)
+	out = append(out, newHdr...)
+	return append(out, body[nl:]...)
 }
 
 // runChunk dispatches one chunk, preferring a warm worker and falling back to
