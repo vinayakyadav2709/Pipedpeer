@@ -47,7 +47,7 @@ if [[ "$role" == "gpu-laptop" ]] && ! command -v nvidia-smi >/dev/null 2>&1; the
 fi
 
 echo "==> [$role] setup (nix, crun, identity, firewall, daemon)"
-# Opens the ports itself (sudo). If the firewall still blocks peers on Ubuntu: sudo ufw disable
+# Opens the ports itself (sudo): 38080/tcp 38099/udp 38447/udp 38445/udp 29500-29509/tcp (setup.FirewallRules). If the firewall still blocks peers on Ubuntu: sudo ufw disable
 pipedpeer setup -y
 
 echo "==> [$role] cluster secret"

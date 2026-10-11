@@ -66,7 +66,7 @@ func TestAnActiveFirewallIsOpenedForTheDirectPort(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), 38447, true)
+	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
 	if !st.open || !st.changed {
 		t.Fatalf("port not opened: %+v", st)
 	}
@@ -99,7 +99,7 @@ func TestAPortThatIsAlreadyOpenIsLeftAlone(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), 38447, true)
+	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
 	if !st.open {
 		t.Error("an already-open port was reported closed")
 	}
@@ -123,7 +123,7 @@ func TestNothingIsChangedWithoutConsent(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), 38447, false)
+	st := openFirewall(context.Background(), []string{"38447/udp"}, false)
 	if st.changed {
 		t.Error("the firewall was changed without consent")
 	}
@@ -146,7 +146,7 @@ func TestUFWIsHandledToo(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), 38447, true)
+	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
 	if st.tool != "ufw" || !st.changed {
 		t.Fatalf("ufw not handled: %+v", st)
 	}
@@ -171,7 +171,7 @@ func TestAnInactiveFirewallIsNotTouched(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), 38447, true)
+	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
 	if st.tool != "" {
 		t.Errorf("tool = %q, want none: neither firewall is running", st.tool)
 	}
@@ -197,7 +197,7 @@ func TestAFailureToOpenIsReportedNotSwallowed(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), 38447, true)
+	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
 	if st.err == nil {
 		t.Fatal("a failed rule change was reported as success")
 	}
@@ -227,7 +227,7 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	}
 	f.install(t)
 	geteuid = func() int { return 1000 }
-	openFirewall(context.Background(), 38447, true)
+	openFirewall(context.Background(), []string{"38447/udp"}, true)
 	for _, want := range []string{
 		"sudo firewall-cmd --permanent --add-port=38447/udp",
 		"sudo firewall-cmd --reload",
@@ -243,7 +243,7 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	}
 	u.install(t)
 	geteuid = func() int { return 1000 }
-	openFirewall(context.Background(), 38447, true)
+	openFirewall(context.Background(), []string{"38447/udp"}, true)
 	if !u.didRun("sudo ufw allow 38447/udp") {
 		t.Errorf("ufw allow not via sudo; ran %v", u.ran)
 	}
@@ -254,10 +254,47 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	}
 	d.install(t)
 	geteuid = func() int { return 1000 }
-	openFirewall(context.Background(), 38447, false)
+	openFirewall(context.Background(), []string{"38447/udp"}, false)
 	for _, r := range d.ran {
 		if strings.HasPrefix(r, "sudo ") {
 			t.Errorf("diagnosis-only run used sudo: %v", d.ran)
 		}
+	}
+}
+
+// TestEveryDaemonPortIsOpened. Opening only the QUIC port left the daemon API,
+// discovery and the DDP master range blocked on a college PC.
+func TestEveryDaemonPortIsOpened(t *testing.T) {
+	want := []string{"38080/tcp", "38099/udp", "38447/udp", "38445/udp", "29500-29509/tcp"}
+	got := FirewallRules()
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("FirewallRules() = %v, want %v", got, want)
+	}
+
+	f := &fakeFirewall{
+		present: map[string]bool{"firewall-cmd": true},
+		replies: map[string]string{"firewall-cmd --state": "running\n"},
+	}
+	f.install(t)
+	openFirewall(context.Background(), got, true)
+	for _, r := range want {
+		if !f.didRun("firewall-cmd --permanent --add-port=" + r) {
+			t.Errorf("firewalld: %s not added; ran %v", r, f.ran)
+		}
+	}
+
+	u := &fakeFirewall{
+		present: map[string]bool{"ufw": true},
+		replies: map[string]string{"ufw status": "Status: active\n38447/udp ALLOW\n"},
+	}
+	u.install(t)
+	openFirewall(context.Background(), got, true)
+	for _, r := range []string{"38080/tcp", "38099/udp", "38445/udp", "29500:29509/tcp"} {
+		if !u.didRun("ufw allow " + r) {
+			t.Errorf("ufw: %s not allowed; ran %v", r, u.ran)
+		}
+	}
+	if u.didRun("ufw allow 38447/udp") {
+		t.Error("ufw: an already-allowed rule was added again")
 	}
 }
