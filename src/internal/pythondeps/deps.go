@@ -2,6 +2,8 @@ package pythondeps
 
 import (
 	"bufio"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -202,56 +204,79 @@ func topLevelModule(s string) string {
 }
 
 func ExtractImportScan(scriptPath string) ImportScan {
-	file, err := os.Open(scriptPath)
-	if err != nil {
-		return ImportScan{}
-	}
-	defer file.Close()
+	rootDir := filepath.Dir(scriptPath)
 
-	scriptDir := filepath.Dir(scriptPath)
-
-	var deps []string
-	var localFiles []string
+	var deps, localFiles []string
 	seenDeps := make(map[string]bool)
 	seenLocal := make(map[string]bool)
-	reader := bufio.NewReader(file)
+	visited := map[string]bool{scriptPath: true}
+	queue := []string{scriptPath}
 
-	for {
-		line, _, err := reader.ReadLine()
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	addLocal := func(p string) {
+		if !seenLocal[p] {
+			seenLocal[p] = true
+			localFiles = append(localFiles, p)
+		}
+		if !visited[p] {
+			visited[p] = true
+			queue = append(queue, p)
+		}
+	}
+
+	// Local modules are scanned too (a helper that imports seaborn needs it in
+	// the closure); visited stops import cycles.
+	for len(queue) > 0 {
+		path := queue[0]
+		queue = queue[1:]
+		file, err := os.Open(path)
 		if err != nil {
-			break
+			if path == scriptPath {
+				return ImportScan{}
+			}
+			fmt.Fprintf(os.Stderr, "pythondeps: cannot scan %s for imports: %v\n", path, err)
+			continue
 		}
-
-		lineStr := strings.TrimSpace(string(line))
-		for _, imp := range importedModules(lineStr) {
-			localFile := filepath.Join(scriptDir, imp+".py")
-			localPackage := filepath.Join(scriptDir, imp, "__init__.py")
-
-			if _, err := os.Stat(localFile); err == nil {
-				if !seenLocal[localFile] {
-					seenLocal[localFile] = true
-					localFiles = append(localFiles, localFile)
+		modDir := filepath.Dir(path)
+		reader := bufio.NewReader(file)
+		for {
+			line, _, err := reader.ReadLine()
+			if err != nil {
+				break
+			}
+			for _, imp := range importedModules(strings.TrimSpace(string(line))) {
+				found := false
+				for _, dir := range []string{modDir, rootDir} {
+					if f := filepath.Join(dir, imp+".py"); exists(f) {
+						addLocal(f)
+						found = true
+						break
+					}
+					if pkg := filepath.Join(dir, imp, "__init__.py"); exists(pkg) {
+						addLocal(pkg)
+						// pkg.sub imports are not tracked per line: scan the
+						// package's other modules, which are bundled anyway.
+						filepath.WalkDir(filepath.Dir(pkg), func(p string, d fs.DirEntry, err error) error {
+							if err == nil && !d.IsDir() && strings.HasSuffix(p, ".py") && !visited[p] {
+								visited[p] = true
+								queue = append(queue, p)
+							}
+							return nil
+						})
+						found = true
+						break
+					}
 				}
-				continue
-			}
-
-			if _, err := os.Stat(localPackage); err == nil {
-				if !seenLocal[localPackage] {
-					seenLocal[localPackage] = true
-					localFiles = append(localFiles, localPackage)
+				if found || stdlibModules[imp] {
+					continue
 				}
-				continue
-			}
-
-			if stdlibModules[imp] {
-				continue
-			}
-
-			if !seenDeps[imp] {
-				seenDeps[imp] = true
-				deps = append(deps, imp)
+				if !seenDeps[imp] {
+					seenDeps[imp] = true
+					deps = append(deps, imp)
+				}
 			}
 		}
+		file.Close()
 	}
 
 	return ImportScan{ExternalDeps: deps, LocalFiles: localFiles}
