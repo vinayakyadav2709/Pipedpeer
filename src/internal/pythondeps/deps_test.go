@@ -241,3 +241,12 @@ func TestMappedNamesAreLowercase(t *testing.T) {
 		}
 	}
 }
+
+func TestParseRequirementsHashContinuations(t *testing.T) {
+	in := "numpy==1.26.4 \\\n    --hash=sha256:aa \\\n    --hash=sha256:bb\nrequests==2.31.0 \\\n    --hash=sha256:cc  # via x\n"
+	got := ParseRequirements(in)
+	want := []string{"numpy", "requests"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("want %v got %v", want, got)
+	}
+}
