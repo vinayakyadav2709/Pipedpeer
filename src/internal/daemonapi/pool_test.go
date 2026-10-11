@@ -764,9 +764,9 @@ func TestClosureBroadcastPushesToLackingPeer(t *testing.T) {
 		t.Fatal("s2 must not be runnable for an absent store path")
 	}
 
-	// broadcastClosure reports nothing and swallows per-peer failures by design
-	// (a peer that cannot import is simply not offered spill work), so the
-	// outcome is asserted on the peer instead. It waits for its pushes, so
+	// broadcastClosure only reports per-peer refusals (a peer that cannot
+	// import is simply not offered spill work), so the outcome is asserted on
+	// the peer instead. It waits for its pushes, so
 	// there is nothing to poll for.
 	s1.broadcastClosure(storePath)
 

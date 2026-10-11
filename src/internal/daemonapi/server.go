@@ -565,7 +565,11 @@ func (s *Server) healthyPeers() ([]PeerHealth, int) {
 // not have it yet, so pool spill can fan a single task out to multiple nodes.
 // Best-effort and parallel: a peer that fails to import is simply not offered
 // spill work (runChunk always keeps the local part, so nothing is lost).
-func (s *Server) broadcastClosure(storePath string) {
+//
+// It returns one line per peer that refused the closure, for the submitter.
+// Logged here alone, a refusal left the user with "local 80 items" and no
+// reason: the shim only sees that no peer holds the closure.
+func (s *Server) broadcastClosure(storePath string) []string {
 	// Export from our own store when no upload filled the cache: a job that
 	// lands on the machine that built its closure uploads no NAR, and without
 	// one this node seeds no peers and nothing can ever spill.
@@ -575,7 +579,7 @@ func (s *Server) broadcastClosure(storePath string) {
 		// the run will look healthy while staying entirely local. Say so.
 		log.Warn().Str("store", storePath).
 			Msg("no closure archive to broadcast; peers cannot take pool work")
-		return
+		return nil
 	}
 	targets, known := s.healthyPeers()
 	if len(targets) == 0 && known == 0 {
@@ -593,10 +597,20 @@ func (s *Server) broadcastClosure(storePath string) {
 		// peers were added, so they are known but not yet marked healthy.
 		log.Warn().Int("known_peers", known).
 			Msg("no healthy peers to broadcast the closure to; pool work will stay local")
-		return
+		return nil
 	}
 	log.Info().Int("peers", len(targets)).Str("store", storePath).
 		Msg("broadcasting closure to peers")
+
+	var refusedMu sync.Mutex
+	var refused []string
+	refuse := func(ph *PeerHealth, err error) {
+		peer := fmt.Sprintf("%s:%d", ph.Host, ph.Port)
+		log.Warn().Err(err).Str("peer", peer).Msg("closure broadcast failed")
+		refusedMu.Lock()
+		refused = append(refused, fmt.Sprintf("peer %s did not take this environment, so it gets no pool work: %v", peer, err))
+		refusedMu.Unlock()
+	}
 
 	// Serial mode imports one peer at a time (shared-RAM rig); default parallel.
 	if s.serialImports.Load() {
@@ -606,11 +620,11 @@ func (s *Server) broadcastClosure(storePath string) {
 				continue
 			}
 			if err := s.importStoreOnPeer(&ph, storePath, narPath); err != nil {
-				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
-					Msg("closure broadcast failed")
+				refuse(&ph, err)
 			}
 		}
-		return
+		sort.Strings(refused)
+		return refused
 	}
 
 	var wg sync.WaitGroup
@@ -623,12 +637,13 @@ func (s *Server) broadcastClosure(storePath string) {
 		go func() {
 			defer wg.Done()
 			if err := s.importStoreOnPeer(&ph, storePath, narPath); err != nil {
-				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
-					Msg("closure broadcast failed")
+				refuse(&ph, err)
 			}
 		}()
 	}
 	wg.Wait()
+	sort.Strings(refused)
+	return refused
 }
 
 // importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
@@ -711,6 +726,14 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		// The peer answers {"error": ...}; the bare text reads better on the
+		// submitter's terminal than escaped JSON.
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			return fmt.Errorf("import returned %d: %s", resp.StatusCode, e.Error)
+		}
 		return fmt.Errorf("import %s returned %d: %s", url, resp.StatusCode, string(body))
 	}
 	return nil

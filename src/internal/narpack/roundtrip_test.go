@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 )
 
 // The round trip against a real nix, which is the only thing that can settle
@@ -152,9 +154,16 @@ func TestASignedClosureSurvivesTheTransfer(t *testing.T) {
 }
 
 // scratchImport imports into a store of its own under the given rules, and
-// reports what nix said.
-func scratchImport(t *testing.T, cacheTar []byte, roots []string, trusted string) error {
+// reports what nix said. cluster is what the daemon's trusted-keys file holds;
+// the test's own data dir keeps the real one out of it.
+func scratchImport(t *testing.T, cacheTar []byte, roots []string, trusted string, cluster ...string) error {
 	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if len(cluster) > 0 {
+		if err := nixsign.WriteTrustedKeys(cluster); err != nil {
+			t.Fatal(err)
+		}
+	}
 	dir := t.TempDir()
 	if _, err := Unpack(bytes.NewReader(cacheTar), dir); err != nil {
 		t.Fatal(err)
@@ -219,5 +228,24 @@ func TestAClosureFromAnUntrustedSenderIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "signature") {
 		t.Fatalf("refused, but not over the signature: %v", err)
+	}
+}
+
+// TestAClosureSignedByAClusterKeyIsAcceptedWithoutEditingNixConf is how a
+// fresh worker receives work: its nix.conf trusts nobody in the cluster (setup
+// ran before any peer existed), and the key arrives through the daemon's
+// trusted-keys file on the import command alone.
+func TestAClosureSignedByAClusterKeyIsAcceptedWithoutEditingNixConf(t *testing.T) {
+	nix := nixOrSkip(t)
+	secret, public := signingKey(t, "narpack-test-cluster")
+	storePath, cache := publishOne(t, nix, secret)
+	_, unrelated := signingKey(t, "narpack-test-nixconf-only")
+
+	var buf bytes.Buffer
+	if err := Pack(cache, []string{storePath}, []string{storePath}, nil, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := scratchImport(t, buf.Bytes(), []string{storePath}, unrelated, public); err != nil {
+		t.Fatalf("a closure signed by a cluster key was refused: %v", err)
 	}
 }

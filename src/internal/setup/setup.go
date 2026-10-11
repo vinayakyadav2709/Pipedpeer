@@ -114,8 +114,11 @@ func createNixStore() error {
 }
 
 // multiUserNix reports whether nix builds go through a root nix-daemon
-// (Determinate installer, distro multi-user setups). Single-user installs
-// never check closure signatures for the owning user, so they need nothing.
+// (Determinate installer, distro multi-user setups). Single-user installs DO
+// check closure signatures, but nix takes the cluster's keys from the import
+// command there (narpack.Import passes extra-trusted-public-keys from the
+// daemon's trusted-keys file), so they need no nix.conf edit. A multi-user
+// daemon ignores that option from an untrusted user, hence this check.
 func multiUserNix() bool {
 	out, err := exec.Command("systemctl", "is-active", "nix-daemon").Output()
 	return err == nil && strings.TrimSpace(string(out)) == "active"
@@ -135,6 +138,7 @@ func acceptsPeerClosures() bool {
 		return true
 	}
 	if !multiUserNix() {
+		// Trust is supplied per import; see multiUserNix.
 		return true
 	}
 	nixPath, err := nixstore.SystemNix()

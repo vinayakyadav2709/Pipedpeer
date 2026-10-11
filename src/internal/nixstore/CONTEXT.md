@@ -63,7 +63,7 @@ Pushing a closure to peers after an upload so pool spill can use them; only peer
 _Avoid_: broadcast (the function name, not the concept)
 
 **Trusted keys**:
-The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll.
+The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`); a multi-user nix-daemon ignores that from an untrusted user, so there setup writes them to nix.conf.
 
 ## Invariants
 
@@ -71,6 +71,7 @@ The nix public keys of cluster nodes, each proved against the fingerprint it is 
 - A received signed archive imports the root this node asked for, never the one the sender's manifest names (`4c3ca3b`).
 - A signed archive holds only the paths one peer lacked, so it is never cached or forwarded as a closure.
 - Setup never writes `require-sigs = false`; a machine that already has it is left alone (`cf2e3ae`).
+- A signed import never passes `--no-check-sigs`; it adds the cluster keys to what nix already trusts, for that one command.
 - Builds name the flake as `path:` (`app/env.go` `flakeRef`), so a `$HOME` that is a git checkout cannot make nix refuse the untracked `flake.nix` (`35a0050`).
 
 ## Entry points
