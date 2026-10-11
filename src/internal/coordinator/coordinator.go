@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
@@ -752,6 +754,18 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 		if execErr == nil {
 			_ = c.CompleteLease(daemonURL, result.LeaseID, "succeeded", result.NodeID)
 			return result, nil // success!
+		}
+
+		// Detached: the job keeps running on the node, which releases the
+		// lease when the job ends. No retry.
+		if errors.Is(execErr, daemonctl.ErrDetached) {
+			return result, execErr
+		}
+
+		// Cancelled by the caller: no "failed" lease, no backoff, no retry.
+		if ctx.Err() != nil {
+			_ = c.CompleteLease(daemonURL, result.LeaseID, "cancelled", result.NodeID)
+			return nil, fmt.Errorf("task cancelled: %w", ctx.Err())
 		}
 
 		// Execution failed — complete as failed and reschedule
