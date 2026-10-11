@@ -92,6 +92,22 @@ public IP.
 ./join-machine.sh <introducer-ip> <token>         # box-b, then box-c
 ```
 
+Then, once all three have joined, **on each machine**:
+
+```bash
+pipedpeer trust
+```
+
+A multi-user Nix (the Determinate installer, or any machine running
+`nix-daemon`) accepts closures only from signing keys listed in its
+`nix.conf`, and a machine learns its peers' keys only after they join. So
+box-a, which joined first, does not yet trust b and c, and every job sent to it
+would fail with "lacks a signature by a trusted key". `pipedpeer trust` adds the
+keys the daemon has collected (one sudo, then `nix-daemon` restarts). It says
+"nothing to do" on a single-user or private store, and on a machine that already
+trusts every key. Re-running `pipedpeer setup -y` does the same. The daemon log
+names `pipedpeer trust` whenever it meets a key its Nix does not trust.
+
 ### 4. Check, then rehearse
 
 On box-a:

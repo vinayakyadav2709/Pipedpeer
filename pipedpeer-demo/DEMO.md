@@ -115,6 +115,13 @@ after a reboot.
 Run it on box-a first; it will say "no peers yet", which is correct for the
 first machine. As b and c join, they find each other.
 
+Once all three have joined, run `pipedpeer trust` on each. A multi-user Nix
+(`nix-daemon`, as the Determinate installer sets up) accepts closures only from
+signing keys in its `nix.conf`, and box-a met b and c after its own join. It
+adds the collected keys with one sudo, and says "nothing to do" where nothing
+is needed. `join` already does this when it finds peers, so it is box-a, the
+first machine, that needs it.
+
 ### Confirm it worked
 
 On any machine:
@@ -383,7 +390,8 @@ script once before the audience.
 
 **A job fails with "lacks a signature by a trusted key".**
 The receiving machine is enforcing signatures and does not yet trust this
-cluster's keys. Re-run `pipedpeer setup -y` there — it adds them.
+cluster's keys. Run `pipedpeer trust` there (or re-run `pipedpeer setup -y`) —
+it adds them. A machine that joined before the others always needs this once.
 
 **`pipedpeer run` says no eligible node for a GPU script.**
 The GPU machines have not joined, or their driver is not visible. Check the GPU

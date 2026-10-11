@@ -1,11 +1,14 @@
 package setup
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
 
@@ -149,11 +152,91 @@ func TestSetupNeverDisablesSignatureCheckingSystemWide(t *testing.T) {
 // cluster were trusted. Saying what is missing is the useful answer.
 func TestSetupWithNoKeysYetChangesNothing(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	ran := fakeTrust(t, func(keys []string) ([]string, bool, error) { return keys, true, nil })
 	err := trustClusterKeys()
-	if err == nil {
-		t.Fatal("setup edited the nix config with no cluster keys to trust")
+	if err == nil || len(*ran) > 0 {
+		t.Fatalf("setup edited the nix config with no cluster keys to trust (err=%v)", err)
 	}
-	if !strings.Contains(err.Error(), "start the daemon") {
+	if !errors.Is(err, errNoKeysYet) || !strings.Contains(err.Error(), "pipedpeer trust") {
 		t.Errorf("the error does not say what to do about it: %v", err)
+	}
+}
+
+// fakeTrust replaces system nix with untrusted and records every root script
+// instead of running it.
+func fakeTrust(t *testing.T, untrusted func([]string) ([]string, bool, error)) *[]string {
+	t.Helper()
+	su, rr, pe := systemUntrusted, runAsRoot, trustPollEvery
+	t.Cleanup(func() { systemUntrusted, runAsRoot, trustPollEvery = su, rr, pe })
+	var ran []string
+	systemUntrusted = untrusted
+	runAsRoot = func(script string) error { ran = append(ran, script); return nil }
+	trustPollEvery = time.Millisecond
+	return &ran
+}
+
+func writeClusterKeys(t *testing.T, keys ...string) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := nixsign.WriteTrustedKeys(keys); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTrustAsksForRootOnlyWhereNixConfDecides: `pipedpeer trust` is a no-op
+// on a private store, a single-user nix, or one that already trusts the keys,
+// and writes only the missing keys on a multi-user nix.
+func TestTrustAsksForRootOnlyWhereNixConfDecides(t *testing.T) {
+	const self, peer = "pipedpeer-self:AAAA=", "pipedpeer-peer:BBBB="
+	cases := []struct {
+		name      string
+		untrusted func([]string) ([]string, bool, error)
+		wantRoot  bool
+		wantMsg   string
+	}{
+		{"single-user or private", func([]string) ([]string, bool, error) { return nil, false, nil }, false, "each import"},
+		{"multi-user, trusted", func([]string) ([]string, bool, error) { return nil, true, nil }, false, "already trusts"},
+		{"multi-user, peer missing", func([]string) ([]string, bool, error) { return []string{peer}, true, nil }, true, "1 more"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writeClusterKeys(t, self, peer)
+			ran := fakeTrust(t, c.untrusted)
+			msg, err := Trust()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(msg, c.wantMsg) {
+				t.Errorf("message %q does not say %q", msg, c.wantMsg)
+			}
+			if got := len(*ran) > 0; got != c.wantRoot {
+				t.Fatalf("ran as root: %v, want %v (%v)", got, c.wantRoot, *ran)
+			}
+			if c.wantRoot && (!strings.Contains((*ran)[0], peer) || strings.Contains((*ran)[0], self)) {
+				t.Errorf("root script should add only the missing key:\n%s", (*ran)[0])
+			}
+		})
+	}
+}
+
+// TestJoinTrustsOnlyOnceAPeersKeyIsKnown: with only this node's own key,
+// join must not spend a sudo prompt; with a peer's key it applies trust.
+func TestJoinTrustsOnlyOnceAPeersKeyIsKnown(t *testing.T) {
+	missingAll := func(keys []string) ([]string, bool, error) { return keys, true, nil }
+
+	writeClusterKeys(t, "pipedpeer-self:AAAA=")
+	ran := fakeTrust(t, missingAll)
+	if err := TrustAfterJoin(5 * time.Millisecond); err != nil || len(*ran) > 0 {
+		t.Fatalf("join asked for root with no peer key: err=%v ran=%v", err, *ran)
+	}
+
+	writeClusterKeys(t, "pipedpeer-self:AAAA=", "pipedpeer-peer:BBBB=")
+	if err := TrustAfterJoin(0); err != nil || len(*ran) != 1 {
+		t.Fatalf("join did not apply trust once a peer key was known: err=%v ran=%v", err, *ran)
+	}
+
+	ran = fakeTrust(t, func([]string) ([]string, bool, error) { return nil, false, nil })
+	if err := TrustAfterJoin(0); err != nil || len(*ran) > 0 {
+		t.Fatalf("join asked for root on a nix that takes keys per import: err=%v ran=%v", err, *ran)
 	}
 }

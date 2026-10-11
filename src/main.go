@@ -94,6 +94,7 @@ func main() {
 		newStopCmd(),
 		newStatusCmd(),
 		newSetupCmd(),
+		newTrustCmd(),
 		newRunCmd(),
 		newDashboardCmd(),
 		newJobsCmd(),
@@ -288,7 +289,13 @@ func newJoinCmd() *cobra.Command {
 			for time.Now().Before(deadline) {
 				if n := healthyPeerCount(); n > 0 {
 					fmt.Printf("\n\nconnected to %d peer(s):\n\n", n)
-					return printNodes(38080)
+					if err := printNodes(38080); err != nil {
+						return err
+					}
+					// About one poll cycle: the daemon records a peer's
+					// key at the end of the poll that found it.
+					trustAfterJoin(15 * time.Second)
+					return nil
 				}
 				fmt.Print(".")
 				time.Sleep(2 * time.Second)
@@ -300,11 +307,42 @@ func newJoinCmd() *cobra.Command {
 			fmt.Printf("\n\nno peers yet. This is normal for the first machine in a\n" +
 				"cluster - run the same command on the others and they will find\n" +
 				"each other. Check with: pipedpeer nodes\n")
+			trustAfterJoin(0)
 			return nil
 		},
 	}
 	cmd.Flags().DurationVar(&wait, "wait", 90*time.Second, "how long to wait for peers before returning")
 	return cmd
+}
+
+// trustAfterJoin lets a multi-user nix accept the peers just met. A failure
+// does not undo the join, so it is reported, not returned.
+func trustAfterJoin(wait time.Duration) {
+	if err := setup.TrustAfterJoin(wait); err != nil {
+		fmt.Fprintf(os.Stderr, "could not make system nix trust the cluster's keys: %v\n"+
+			"peers' closures will be refused here until `pipedpeer trust` succeeds\n", err)
+	}
+}
+
+func newTrustCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "trust",
+		Short: "Let system nix accept closures signed by this cluster's nodes",
+		Long: "A multi-user nix (nix-daemon) accepts only signing keys listed in nix.conf. " +
+			"This adds the keys the daemon has collected from the cluster's peers (one sudo, " +
+			"then nix-daemon restarts), so their closures import here. Run it after new " +
+			"machines join. It does nothing on a private store or a single-user nix, which " +
+			"take the keys with each import.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			msg, err := setup.Trust()
+			if err != nil {
+				return err
+			}
+			fmt.Println(msg)
+			return nil
+		},
+	}
 }
 
 // healthyPeerCount counts peers other than this node that are usable now.
