@@ -188,7 +188,7 @@ func TestRequirementsBeside(t *testing.T) {
 	if got := RequirementsBeside(d); got != p {
 		t.Fatalf("got %q", got)
 	}
-	if got := ResolvePackages(nil, []string{p}); len(got) != 0 || len(RequirementsUnmapped([]string{p})) != 1 {
+	if got := ResolvePackages(nil, []string{p}); len(got) != 0 {
 		t.Fatalf("requirements not read: %v", got)
 	}
 }

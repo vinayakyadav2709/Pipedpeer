@@ -379,7 +379,7 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 		if strings.HasSuffix(req, ".txt") {
 			names, _ := readRequirements(req)
 			for _, n := range names {
-				add(ResolveNixPackage(n)) // unmapped names go through RequirementsUnmapped
+				add(ResolveNixPackage(n))
 			}
 		} else {
 			if mapped := ResolveNixPackage(req); mapped != "" {
@@ -391,25 +391,6 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 	}
 
 	return result
-}
-
-// RequirementsUnmapped lists the distribution names in the requirements files
-// among pkgs that the built-in table does not know. They are never attribute
-// names yet: the caller probes nixpkgs for them.
-func RequirementsUnmapped(pkgs []string) []string {
-	var out []string
-	for _, p := range pkgs {
-		if !strings.HasSuffix(p, ".txt") {
-			continue
-		}
-		names, _ := readRequirements(p)
-		for _, n := range names {
-			if ResolveNixPackage(n) == "" {
-				out = append(out, n)
-			}
-		}
-	}
-	return out
 }
 
 func readRequirements(path string) ([]string, error) {
