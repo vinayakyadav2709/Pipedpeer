@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +33,8 @@ func TestMain(m *testing.M) {
 			}
 			held = append(held, b)
 		}
-		os.Exit(len(held) & 0) // 0; reached only if the limit did not hold
+		runtime.KeepAlive(held) // hold the allocations live
+		os.Exit(0)              // reached only if the limit did not hold
 	}
 
 	// A test run started from a shell or an ssh session lands in a session

@@ -126,23 +126,6 @@ func runCLIEWithEnv(t *testing.T, stateDir, xdg string, args ...string) (string,
 	return stdout.String(), stderr.String(), err
 }
 
-func extractNodeID(t *testing.T, jsonData []byte) string {
-	t.Helper()
-	// Simple extraction without importing encoding/json
-	s := string(jsonData)
-	prefix := `"node_id": "`
-	idx := strings.Index(s, prefix)
-	if idx < 0 {
-		t.Fatalf("node_id not found in: %s", s)
-	}
-	rest := s[idx+len(prefix):]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		t.Fatalf("node_id not terminated in: %s", s)
-	}
-	return rest[:end]
-}
-
 func freePort(t *testing.T) int {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
