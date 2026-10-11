@@ -73,7 +73,7 @@ func TestDetachClosesWith4001AndNoCancel(t *testing.T) {
 	detach := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, _, _, err := StreamExecute(context.Background(), host, port, "job1", ExecConfig{LeaseID: "L1"}, detach)
+		_, err := StreamExecute(context.Background(), host, port, "job1", ExecConfig{LeaseID: "L1"}, detach)
 		done <- err
 	}()
 	if s := next(t, got); s != "lease=L1" {
@@ -100,7 +100,7 @@ func TestCancelSendsCancelFrameAndWaitsForDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, _, _, err := StreamExecute(ctx, host, port, "job2", ExecConfig{}, nil)
+		_, err := StreamExecute(ctx, host, port, "job2", ExecConfig{}, nil)
 		done <- err
 	}()
 	next(t, got) // config

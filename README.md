@@ -56,7 +56,7 @@ cached per peer); otherwise it runs locally, exactly as before.
 | `pandas.read_csv/read_parquet` (large files) | Chunked out-of-core reads across nodes, streamed back on demand |
 | `df.groupby(...).agg(...)` / `df.merge/join` | Hash-shuffle: each node reduces its share of the keys, partials are combined exactly at the origin |
 | `torch` training with `pipedpeer run --ddp K` | `K` ranks placed on the cluster; DDP process group, `DistributedDataParallel` wrapping and gradient sync happen transparently |
-| `joblib.Parallel` / `sklearn` (e.g. `RandomForestClassifier(n_jobs=-1)`) | Job batches routed through the same cluster pool; sklearn's thread preference is overridden only inside the shim |
+| `joblib.Parallel` / `sklearn` (e.g. `RandomForestClassifier(n_jobs=-1)`) | Same path as `Pool.map`: the first tasks run here on joblib's own backend to measure them, the rest race between this machine and the cluster; calls too small to be worth a round trip stay local |
 | `np.matmul` / `np.dot` / `np.tensordot` (large arrays) | Block-row slicing: each worker computes its share, origin concatenates |
 | `np.linalg.svd` / `np.linalg.eig` (large 2-D) | Whole matrix offloaded to one worker |
 

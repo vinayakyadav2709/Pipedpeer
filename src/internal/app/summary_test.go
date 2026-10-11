@@ -11,7 +11,7 @@ import (
 )
 
 func TestSummaryRendering(t *testing.T) {
-	stderr := "warn: x\n" + receiptPrefix + `{"remote_items":80,"local_items":40,"by_where":{"local":40,"peer:10.88.0.12:38080":40,"peer:10.88.0.13:38080":40}}` + "\nmore\n"
+	rcpt := []byte(`{"remote_items":80,"local_items":40,"by_where":{"local":40,"peer:10.88.0.12:38080":40,"peer:10.88.0.13:38080":40}}`)
 	s := summary{
 		Host:       "10.88.0.1",
 		BuildTime:  2100 * time.Millisecond,
@@ -19,7 +19,7 @@ func TestSummaryRendering(t *testing.T) {
 		ScriptRan:  true,
 		ScriptTime: 12300 * time.Millisecond,
 		Peak:       412_000_000,
-		Stderr:     stderr,
+		Receipt:    rcpt,
 		Files:      &daemonctl.ResultManifest{New: []string{"a"}, Updated: []string{"b", "c"}},
 		Total:      14900 * time.Millisecond,
 	}
@@ -41,7 +41,7 @@ func TestSummaryRendering(t *testing.T) {
 
 	// Cancelled, nothing ran remotely, a peer with no known name.
 	s = summary{Host: "h", Total: 6200 * time.Millisecond, Err: fmt.Errorf("x: %w", context.Canceled),
-		Stderr: receiptPrefix + `{"by_where":{"peer:127.0.0.1:4000":5}}` + "\n"}
+		Receipt: []byte(`{"by_where":{"peer:127.0.0.1:4000":5}}`)}
 	lines, unresolved = summaryLines(s, "h", nil)
 	got = strings.Join(lines, "\n")
 	if !strings.Contains(got, "ran on       h\n") || !strings.Contains(got, "5 items: 5 on 1 other (127.0.0.1:4000 5)") ||

@@ -325,6 +325,8 @@ func requiredPython(src string) []string {
 	add("numpy", "import numpy", "np.")
 	add("sklearn", "import sklearn", "from sklearn")
 	add("joblib", "import joblib", "joblib.")
+	// The weighted sampler imports torch inside __iter__, so a script that
+	// only names the sampler needs torch too.
 	add("torch", "import torch", "torch.", "_WeightedShardSampler", "_weighted_batches")
 	return deps
 }
@@ -573,7 +575,11 @@ assert sklearn_calls > 0, "sklearn's joblib batches never reached the cluster"
 # A lambda cannot be shipped - it has no importable definition and no source
 # the shim can send - so this phase is expected to stay local. What matters is
 # that it stays *correct*, and that the shim does not claim to have distributed
-# it.
+# it. The fake daemon ran the forest's tasks in this process, leaving the
+# runner's nesting marker set, which would skip interception and pass this
+# phase without testing it.
+import os
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
 before = POOL_CALLS[0]
 res = joblib.Parallel(n_jobs=-1)(joblib.delayed(lambda a, b: a + b)(i, i) for i in range(12))
 assert res == [2 * i for i in range(12)], res
@@ -582,11 +588,66 @@ assert lambda_calls == 0, (
     "a lambda was shipped to the cluster (%d call(s)); it has no definition the "
     "worker could resolve, so this would have failed remotely and fallen back "
     "silently" % lambda_calls)
+assert any(d["op"] == "joblib" and not d["shipped"] and "pickled" in d["why"]
+           for d in shim._STATS["decisions"]), shim._STATS["decisions"]
 
 assert MAX_CHUNK[0] > 0, "no joblib batch reached the cluster"
 print("JOBLIB-OK")
 `, "JOBLIB-OK",
-		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+		// Sixteen trees on 200 rows is milliseconds of work, which the cost
+		// model rightly keeps local; a zero floor makes it ship anyway.
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
+		"PIPEDPEER_POOL_MIN_WORK=0")
+}
+
+// TestShimJoblibRacesInChunks pins the fix for a seven-fold slowdown: the
+// old joblib backend sent one task per round trip and waited for each before
+// the next, so RandomForest(n_jobs=-1) fitted one tree at a time across the
+// whole cluster. A call with real work must now go out as multi-task chunks,
+// come back in order, and leave a decision in the receipt; a trivial one must
+// stay local.
+func TestShimJoblibRacesInChunks(t *testing.T) {
+	runShimPythonEnv(t, "t7b", shimFakeDaemon+`
+import time
+import joblib
+
+def slow(i):
+    time.sleep(0.05)
+    return i * 3
+
+before = POOL_CALLS[0]
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(slow)(i) for i in range(60))
+assert res == [i * 3 for i in range(60)], res
+calls = POOL_CALLS[0] - before
+assert calls > 0, "60 x 50ms of joblib work never reached the cluster"
+assert calls < 30, "%d round trips for 60 tasks: still dispatching one at a time" % calls
+assert any(d["op"] == "joblib" and d["shipped"] for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+
+# A large array every task shares travels once per chunk, in the globals
+# frame, not inside each task.
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+import numpy as np
+big = np.arange(512 * 1024, dtype=np.float64)          # 4 MB
+def slow_sum(arr, i):
+    time.sleep(0.05)
+    return float(arr[i])
+MAX_CHUNK[0] = 0
+before = POOL_CALLS[0]
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(slow_sum)(big, i) for i in range(60))
+assert res == [float(i) for i in range(60)], res
+assert POOL_CALLS[0] > before, "the shared-array call never reached the cluster"
+assert 0 < MAX_CHUNK[0] < big.nbytes // 4, "a task carried the array itself: %d bytes" % MAX_CHUNK[0]
+
+# The fake daemon runs tasks in this process, so the remote runner's nesting
+# marker lands here; on a real peer it lands in that peer's worker.
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+before = POOL_CALLS[0]
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(abs)(-i) for i in range(24))
+assert res == list(range(24)), res
+assert POOL_CALLS[0] == before, "microseconds of work were shipped"
+assert any(d["op"] == "joblib" and not d["shipped"] for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+print("JOBLIB-RACE-OK")
+`, "JOBLIB-RACE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // TestShimNumPyInterception (T8) runs unmodified np.matmul/np.tensordot and

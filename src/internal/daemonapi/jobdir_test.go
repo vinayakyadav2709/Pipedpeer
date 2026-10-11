@@ -32,7 +32,7 @@ func TestTheDaemonPrunerNeverTouchesJobHistory(t *testing.T) {
 		}
 	}
 	history := filepath.Join(jobhistory.BaseDir(), "1700000000000000000")
-	work := filepath.Join(s.jobDir, "job-old")
+	work := filepath.Join(s.jobDir, "00000000-0000-4000-8000-0000000000aa") // a daemon job ID
 	mkOld(history)
 	mkOld(work)
 

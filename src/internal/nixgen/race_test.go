@@ -126,3 +126,50 @@ print("chunk-ok")
 		t.Fatalf("chunk probe unexpected output: %q", out)
 	}
 }
+
+// A faster cluster must take more than half. Chunks used to be dealt
+// alternately before anything ran, so this machine owned half the items
+// whatever the cluster could do, and adding workers stopped helping once
+// they had finished their half: 00_pool took 23 s on one, two and three
+// workers alike.
+func TestShimRaceSharesFollowSpeed(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0644); err != nil {
+		t.Fatal(err)
+	}
+	src := `
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import shim_mod
+
+def slow(vals):                      # one local lane, 50 ms an item
+    out = []
+    for v in vals:
+        time.sleep(0.05)
+        out.append(("L", v))
+    return out
+
+def fast(chunk):                     # the cluster: 5 ms a chunk
+    time.sleep(0.005)
+    return [(i, ("R", v)) for i, v in chunk]
+
+items = list(range(80))
+r = shim_mod._race_items(items, 0.05, 1, slow, fast)
+assert [v for _, v in r] == items, r[:5]
+remote = sum(1 for tag, _ in r if tag == "R")
+assert remote > len(items) * 3 // 4, "the cluster took only %d of %d" % (remote, len(items))
+print("shares-ok")
+`
+	script := filepath.Join(dir, "probe.py")
+	if err := os.WriteFile(script, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(python, script, dir).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "shares-ok") {
+		t.Fatalf("shares probe failed:\n%s\n%v", out, err)
+	}
+}

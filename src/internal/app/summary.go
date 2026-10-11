@@ -18,9 +18,6 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 )
 
-// receiptPrefix starts the one stderr line the shim writes at exit (C-RCPT).
-const receiptPrefix = "[pipedpeer] receipt "
-
 // receipt is the shim's account of where the script's parallel items ran.
 type receipt struct {
 	RemoteItems int            `json:"remote_items"`
@@ -38,7 +35,7 @@ type summary struct {
 	ScriptRan  bool
 	ScriptTime time.Duration // 0 when unknown (attach)
 	Peak       int64
-	Stderr     string // the job's stderr, receipt line included
+	Receipt    json.RawMessage // the shim's receipt from the done frame; nil without one
 	Files      *daemonctl.ResultManifest
 	Total      time.Duration
 	Err        error
@@ -68,19 +65,15 @@ func closureLine(up *daemonctl.UploadResponse, uploadTime time.Duration, cold bo
 	return ""
 }
 
-// lastReceipt finds the newest receipt line in the job's stderr.
-func lastReceipt(stderr string) (receipt, bool) {
+// parseReceipt reads the shim's receipt (C-RCPT2). No receipt is not an error:
+// the job may not have used the shim.
+func parseReceipt(raw json.RawMessage) (receipt, bool) {
 	var rc receipt
-	i := strings.LastIndex(stderr, receiptPrefix)
-	if i < 0 {
+	if len(raw) == 0 {
 		return rc, false
 	}
-	line := stderr[i+len(receiptPrefix):]
-	if nl := strings.IndexByte(line, '\n'); nl >= 0 {
-		line = line[:nl]
-	}
-	if err := json.Unmarshal([]byte(line), &rc); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: unreadable pipedpeer receipt %q: %v\n", line, err)
+	if err := json.Unmarshal(raw, &rc); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: unreadable pipedpeer receipt %q: %v\n", raw, err)
 		return rc, false
 	}
 	return rc, true
@@ -180,7 +173,7 @@ func summaryLines(s summary, ranOn string, names map[string]string) (lines []str
 			add("script", strings.Join(v, " · "))
 		}
 	}
-	if rc, ok := lastReceipt(s.Stderr); ok {
+	if rc, ok := parseReceipt(s.Receipt); ok {
 		var line string
 		line, unresolved = spreadLine(rc, ranOn, names)
 		if line != "" {
@@ -214,7 +207,7 @@ func summaryLines(s summary, ranOn string, names map[string]string) (lines []str
 func printSummary(w io.Writer, s summary) {
 	ranOn := daemonHostname(s.Host, s.Port)
 	names := map[string]string{}
-	if _, ok := lastReceipt(s.Stderr); ok {
+	if len(s.Receipt) > 0 {
 		names = peerNames(s.Host, s.Port)
 	}
 	lines, unresolved := summaryLines(s, ranOn, names)

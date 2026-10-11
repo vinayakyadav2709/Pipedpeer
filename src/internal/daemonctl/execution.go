@@ -64,6 +64,30 @@ type outputMessage struct {
 	// PeakMemBytes mirrors the daemon's field so the client can learn the
 	// job's real footprint and record it for the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
+	// Timing is the node's own split of the execution; absent from a daemon
+	// too old to send it.
+	Timing *ExecTiming `json:"timing,omitempty"`
+	// Receipt is the shim's account of the run, when it wrote one.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
+}
+
+// ExecTiming mirrors the daemon's account of one execution, in milliseconds.
+type ExecTiming struct {
+	ImportMs int64 `json:"import_ms"`
+	SetupMs  int64 `json:"setup_ms"`
+	RunMs    int64 `json:"run_ms"`
+}
+
+// ExecResult is what StreamExecute learned about a run.
+type ExecResult struct {
+	// PeakBytes is the peak memory the job used, as the daemon measured it.
+	PeakBytes int64
+	Stdout    string
+	Stderr    string
+	// Timing is nil when the daemon did not report one.
+	Timing *ExecTiming
+	// Receipt is the shim's raw JSON receipt, nil when there was none.
+	Receipt json.RawMessage
 }
 
 // UploadOptions tunes one upload.
@@ -81,6 +105,9 @@ type UploadResponse struct {
 	JobID     string   `json:"job_id"`
 	StorePath string   `json:"store_path"`
 	Warnings  []string `json:"warnings,omitempty"`
+	// SeedMs is the part of the upload the daemon spent giving the closure to
+	// its peers.
+	SeedMs int64 `json:"seed_ms,omitempty"`
 
 	// Closure is "on-node" (nothing sent), "partial" (only missing paths)
 	// or "full" (the whole archive).
@@ -236,24 +263,26 @@ const cancelWait = 5 * time.Second
 const closeDetach = 4001
 
 // StreamExecute connects to the daemon WebSocket and streams job output to stdout/stderr.
-// Blocks until the job completes.
-// It returns the peak memory the job used (bytes) as reported by the daemon.
+// Blocks until the job completes. The ExecResult holds whatever was read,
+// error or not: peak memory, output, and the node's timing and receipt from
+// the done frame.
 //
 // ctx cancelled: the daemon is told to stop the job ({"cancel":true}) and the
 // returned error wraps context.Canceled. detach closed: the connection closes
 // with code 4001 and no cancel, the job keeps running, and the error wraps
-// ErrDetached. A nil detach never fires.
-func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig, detach <-chan struct{}) (int64, string, string, error) {
+// ErrDetached. A nil detach never fires. A script that exits non-zero returns
+// *RemoteExitError.
+func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig, detach <-chan struct{}) (ExecResult, error) {
 	conn, err := dialJobSocket(ctx, host, port, "/v1/jobs/"+url.PathEscape(jobID)+"/exec")
 	if err != nil {
-		return 0, "", "", err
+		return ExecResult{}, err
 	}
 	defer conn.Close()
 
 	// Written before streamJob starts its writer goroutine, so the two
 	// writes never overlap (gorilla allows one writer at a time).
 	if err := conn.WriteJSON(cfg); err != nil {
-		return 0, "", "", fmt.Errorf("send config: %w", err)
+		return ExecResult{}, fmt.Errorf("send config: %w", err)
 	}
 	return streamJob(ctx, conn, detach)
 }
@@ -293,7 +322,7 @@ type cancelFrame struct {
 
 // streamJob prints a job's output frames until the done frame, handling
 // cancel (ctx) and detach. Shared by exec and attach.
-func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}) (int64, string, string, error) {
+func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}) (ExecResult, error) {
 	var cancelled, detached atomic.Bool
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -324,29 +353,26 @@ func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}
 		wg.Wait()
 	}()
 
-	var peakBytes int64
+	var res ExecResult
 	stdoutBuf := new(strings.Builder)
 	stderrBuf := new(strings.Builder)
-	var rf receiptFilter
-	flushHeld := func() {
-		if s := rf.flush(); s != "" {
-			fmt.Fprint(os.Stderr, s)
-		}
+	result := func() ExecResult {
+		res.Stdout, res.Stderr = stdoutBuf.String(), stderrBuf.String()
+		return res
 	}
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			flushHeld()
 			switch {
 			case detached.Load():
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("job keeps running on the node: %w", ErrDetached)
+				return result(), fmt.Errorf("job keeps running on the node: %w", ErrDetached)
 			case cancelled.Load():
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+				return result(), fmt.Errorf(
 					"cancelled; the daemon did not confirm the job stopped within %s (%v): %w", cancelWait, err, context.Canceled)
 			case websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway):
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
+				return result(), nil
 			}
-			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("connection lost: %w", err)
+			return result(), fmt.Errorf("connection lost: %w", err)
 		}
 
 		var out outputMessage
@@ -356,41 +382,38 @@ func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}
 		}
 
 		if out.Error != "" {
-			flushHeld()
-			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote: %s", out.Error)
+			return result(), fmt.Errorf("remote: %s", out.Error)
 		}
 
 		// Raw chunks, printed as they come: \r redraws stay in place.
 		fmt.Print(out.O)
-		if show, _ := rf.filter(out.E); show != "" {
-			fmt.Fprint(os.Stderr, show)
-		}
+		fmt.Fprint(os.Stderr, out.E)
 		stdoutBuf.WriteString(out.O)
 		stderrBuf.WriteString(out.E)
 
 		if out.Done {
-			flushHeld()
 			if out.PeakMemBytes > 0 {
-				peakBytes = out.PeakMemBytes
+				res.PeakBytes = out.PeakMemBytes
 			}
+			res.Timing, res.Receipt = out.Timing, out.Receipt
 			// A job that finished cleanly just before the cancel landed did
 			// finish: report it as such.
 			if out.Cancelled || (cancelled.Load() && out.ExitCode != 0) {
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+				return result(), fmt.Errorf(
 					"job cancelled (exit code %d): %w", out.ExitCode, context.Canceled)
 			}
 			if out.OOMKilled {
 				// Without this the user sees "exited with code 137" and has
 				// no way to know the node protected itself on purpose.
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+				return result(), fmt.Errorf(
 					"job ran out of memory: the kernel killed it for exceeding its %s limit. "+
 						"Raise it with --mem, or reduce what the script holds in memory at once",
 					humanBytes(out.MemLimitBytes))
 			}
 			if out.ExitCode != 0 {
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote job exited with code %d", out.ExitCode)
+				return result(), &RemoteExitError{Code: out.ExitCode}
 			}
-			return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
+			return result(), nil
 		}
 	}
 }
@@ -569,6 +592,29 @@ func ExportNAR(storePath, destPath string) error {
 	return export.Run()
 }
 
+// ignoreExcludes turns one .pipedpeerignore line into tar exclude flags.
+//
+// The file is written gitignore-style, and tar does not read gitignore. A
+// directory written "data/" never matched, because tar compares the pattern
+// against member names, which carry no trailing slash - so every "dir/" line
+// excluded nothing, `pipedpeer init`'s template included, and the demo's
+// 1.1 GB CSV went into the upload of every script beside it. A leading slash
+// anchors the pattern at the project root, as in gitignore; tar needs that
+// spelled as the member name, "./data", and matched anchored.
+func ignoreExcludes(line string) []string {
+	if line == "" || strings.HasPrefix(line, "#") {
+		return nil
+	}
+	line = strings.TrimRight(line, "/")
+	if line == "" {
+		return nil
+	}
+	if strings.HasPrefix(line, "/") {
+		return []string{"--anchored", "--exclude=." + line, "--no-anchored"}
+	}
+	return []string{"--exclude=" + line}
+}
+
 // CreateWorkspaceTar creates a tarball of the project directory at destPath.
 // It writes a sitecustomize.py into .pipedpeer/shim/ inside the archive, so a
 // node that enables the interception shim can put that dir on PYTHONPATH and
@@ -582,10 +628,7 @@ func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 
 	if content, err := os.ReadFile(ignoreFile); err == nil {
 		for _, line := range strings.Split(string(content), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				args = append(args, "--exclude="+line)
-			}
+			args = append(args, ignoreExcludes(strings.TrimSpace(line))...)
 		}
 	}
 
@@ -663,4 +706,15 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d bytes", n)
 	}
+}
+
+// RemoteExitError is a script that ran to completion on its node and exited
+// non-zero. Unlike a lost connection or a dead node, it says nothing about
+// where the script ran.
+type RemoteExitError struct {
+	Code int
+}
+
+func (e *RemoteExitError) Error() string {
+	return fmt.Sprintf("remote job exited with code %d", e.Code)
 }

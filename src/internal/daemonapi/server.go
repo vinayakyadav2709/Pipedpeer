@@ -97,6 +97,8 @@ type Server struct {
 	// unreachableReporter names the internet peers with no direct path, and
 	// why (fingerprint → reason). Set by internet mode.
 	unreachableReporter func() map[string]string
+	// stats caches the /v1/stats snapshot briefly.
+	stats statsCache
 
 	stopSweep chan struct{}
 
@@ -433,6 +435,10 @@ const DetachedJobRetention = 24 * time.Hour
 // not touched within olderThan. Dir names are job IDs, so the jobs map can be
 // reconciled by name. A finished detached job goes DetachedJobRetention after
 // it finished instead, whatever its dir's mtime.
+//
+// The directory is shared with the submitter's job history and holds the NAR
+// cache, so only entries named like a daemon job ID (a UUID) are candidates;
+// anything else belongs to someone else.
 func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(s.jobDir)
 	if err != nil {
@@ -445,6 +451,9 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 	removed := 0
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		if _, err := uuid.Parse(e.Name()); err != nil {
 			continue
 		}
 		s.jobsMu.Lock()
@@ -1200,8 +1209,10 @@ func (s *Server) buildRouter() {
 	// No-op until a token is configured, so an existing cluster keeps working
 	// until its operator opts in. Once one is set, every endpoint here is
 	// behind it — including /health, which is how peers decide who exists.
-	r.Use(authtoken.Middleware)
+	r.Use(exceptUIPage(authtoken.Middleware))
 
+	r.Get("/ui", s.handleUI)
+	r.Get("/v1/stats", s.handleStats)
 	r.Get("/health", s.handleHealth)
 	r.Post("/v1/accept", s.handleAccept)
 	r.Post("/v1/commit", s.handleCommit)
@@ -1320,14 +1331,22 @@ func (s *Server) handleRoundRobin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
-		return
-	}
-	dbNodes, err := s.store.ListAll()
+	nodes, err := s.nodeList()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+// nodeList is the cluster as /v1/nodes serves it.
+func (s *Server) nodeList() ([]nodeResp, error) {
+	if s.store == nil {
+		return []nodeResp{}, nil
+	}
+	dbNodes, err := s.store.ListAll()
+	if err != nil {
+		return nil, err
 	}
 
 	// How each peer is reached, when anything knows. Carried in the
@@ -1347,7 +1366,59 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		nodes = append(nodes, resp)
 	}
-	writeJSON(w, http.StatusOK, nodes)
+	return nodes, nil
+}
+
+// ReasonCapability carries why a peer cannot be reached.
+const ReasonCapability = "unreachable_reason"
+
+// withUnreachable marks the rows the unreachable reporter names (State
+// "unreachable", the reason under ReasonCapability) and appends a row for each
+// such peer the store never held. Only /v1/stats uses it: `pipedpeer nodes`
+// prints /v1/peers/unreachable itself.
+func (s *Server) withUnreachable(nodes []nodeResp) []nodeResp {
+	s.mu.Lock()
+	f := s.unreachableReporter
+	s.mu.Unlock()
+	if f == nil {
+		return nodes
+	}
+	marks := f()
+	if len(marks) == 0 {
+		return nodes
+	}
+	left := make(map[string]string, len(marks))
+	for id, reason := range marks {
+		left[id] = reason
+	}
+	for i := range nodes {
+		reason, ok := left[nodes[i].NodeID]
+		if !ok {
+			continue
+		}
+		delete(left, nodes[i].NodeID)
+		caps := make(map[string]string, len(nodes[i].Capabilities)+1)
+		for k, v := range nodes[i].Capabilities {
+			caps[k] = v
+		}
+		caps[ReasonCapability] = reason
+		nodes[i].Capabilities = caps
+		nodes[i].State = "unreachable"
+	}
+	ids := make([]string, 0, len(left))
+	for id := range left {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		nodes = append(nodes, nodeResp{
+			NodeID:       id,
+			Capabilities: map[string]string{ReasonCapability: left[id]},
+			State:        "unreachable",
+			Source:       "internet",
+		})
+	}
+	return nodes
 }
 
 // PathCapability is where the route to a peer travels.

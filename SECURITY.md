@@ -21,6 +21,7 @@ What protects the boundary:
 - **The token is sent only to hosts that prove they hold it.** Before a token
   goes to a non-loopback host, that host answers a challenge on `/health`, so a
   look-alike on the network does not receive it.
+- **The cluster page at `/ui` loads without the token** (a browser cannot send the header); it asks for the token, and its data, `/v1/stats`, stays behind it.
 - **Closures are signed** with the node identity key and imported with the
   receiving Nix's own signature policy.
 

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -77,7 +78,7 @@ func TestResolvePackages(t *testing.T) {
 	explicit := []string{"pillow", reqFile, "boto3"}
 
 	got := ResolvePackages(astImports, explicit)
-	want := []string{"flask", "scipy", "Pillow", "numpy", "pandas", "pytest", "boto3"}
+	want := []string{"flask", "scipy", "pillow", "numpy", "pandas", "pytest", "boto3"}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolved packages mismatch\nwant: %#v\n got: %#v", want, got)
@@ -181,7 +182,7 @@ func TestRequirementsBeside(t *testing.T) {
 		t.Fatal("no file, want empty")
 	}
 	p := filepath.Join(d, "requirements.txt")
-	if err := os.WriteFile(p, []byte("rich==13\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("nomappedpkg==13\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := RequirementsBeside(d); got != p {
@@ -220,5 +221,23 @@ func TestParseRequirementsForms(t *testing.T) {
 	want := []string{"numpy", "scikit-learn", "foo", "bar"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("want %v got %v", want, got)
+	}
+}
+
+func TestUnresolvedImportsKnowsImportAliases(t *testing.T) {
+	got := UnresolvedImports([]string{"numpy", "cv2", "PIL", "somethingobscure"})
+	if !reflect.DeepEqual(got, []string{"somethingobscure"}) {
+		t.Fatalf("unresolved = %#v, want only the unknown import", got)
+	}
+}
+
+// Every mapped name must be a nixpkgs python attribute: "Pillow" was not, and
+// any script importing PIL failed to build. Checked against the attribute
+// spelling rules nixpkgs uses (lowercase, hyphens), not a live evaluation.
+func TestMappedNamesAreLowercase(t *testing.T) {
+	for imp, pkg := range nixpkgsMapping {
+		if pkg != strings.ToLower(pkg) {
+			t.Errorf("%s maps to %q; nixpkgs python attributes are lowercase", imp, pkg)
+		}
 	}
 }

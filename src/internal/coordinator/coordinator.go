@@ -149,6 +149,44 @@ func New(cfg Config) *Coordinator {
 	}
 }
 
+// FindNodeWithin looks for a node repeatedly until one is chosen, the window
+// passes, or ctx ends, and returns the last decision either way.
+//
+// One look is not enough straight after a daemon starts or a peer joins: the
+// health poller and discovery have not caught up, and the cluster looks empty
+// for a few seconds although it is not.
+func (c *Coordinator) FindNodeWithin(ctx context.Context, window, interval time.Duration, waiting func()) PlacementDecision {
+	deadline := time.Now().Add(window)
+	decision := c.FindNode()
+	for decision.ChosenNode.NodeID == "" && time.Now().Before(deadline) {
+		if waiting != nil {
+			waiting()
+			waiting = nil
+		}
+		select {
+		case <-ctx.Done():
+			return decision
+		case <-time.After(interval):
+		}
+		decision = c.FindNode()
+	}
+	return decision
+}
+
+// RejectionSummary lists why each candidate was turned down, one per line,
+// for an error message that would otherwise only say "no eligible node".
+func (d PlacementDecision) RejectionSummary() string {
+	var b strings.Builder
+	for _, cand := range d.Candidates {
+		if !cand.Rejected {
+			continue
+		}
+		id := cand.Node.NodeID
+		fmt.Fprintf(&b, "  %s: %s\n", id[:min(8, len(id))], cand.RejectReason)
+	}
+	return b.String()
+}
+
 // FindNode selects the best node for a task.
 // Called per-task — always fetches fresh data.
 func (c *Coordinator) FindNode() PlacementDecision {
@@ -771,6 +809,12 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 		// Execution failed — complete as failed and reschedule
 		_ = c.CompleteLease(daemonURL, result.LeaseID, "failed", result.NodeID)
 
+		// Unless the failure would follow the task to any node.
+		var pe *permanentError
+		if errors.As(execErr, &pe) {
+			return nil, pe.err
+		}
+
 		// Back off before trying again. Some failures are not the node's fault
 		// (a full disk, a script that always crashes) and retrying flat out
 		// makes them worse: each attempt re-does the closure build and export.
@@ -790,6 +834,21 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 
 		// Loop back to placement — never auto-cancel
 	}
+}
+
+// permanentError marks an execution failure that rescheduling cannot fix.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// Permanent marks err as one that would recur on any node, so ExecuteWithRetry
+// returns it instead of placing the task again. A nil err stays nil.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err: err}
 }
 
 // DefaultExecBackoffBase is the first wait after a failed execution.

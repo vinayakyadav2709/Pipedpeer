@@ -139,6 +139,25 @@ type OutputMessage struct {
 	// Cancelled is set on the Done frame when the client's cancel frame
 	// stopped the job; ExitCode is still whatever the process returned.
 	Cancelled bool `json:"cancelled,omitempty"`
+	// Timing splits the node's share of the run into its parts. Set on the
+	// Done frame, so the submitter can tell a slow script from a slow
+	// sandbox or a closure import.
+	Timing *ExecTiming `json:"timing,omitempty"`
+	// Receipt is the shim's account of the run - what it shipped, what it
+	// kept, and why - when the job was intercepted and wrote one.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
+}
+
+// ExecTiming is how a node spent one execution, in milliseconds.
+type ExecTiming struct {
+	// ImportMs is importing the closure into this node's store; zero when it
+	// was already there.
+	ImportMs int64 `json:"import_ms"`
+	// SetupMs is everything between the request and the script starting,
+	// the import excluded: the sandbox, the memory cap, the environment.
+	SetupMs int64 `json:"setup_ms"`
+	// RunMs is the script itself, from its start to its exit.
+	RunMs int64 `json:"run_ms"`
 }
 
 // JobRecord tracks a single uploaded job on the daemon.
@@ -189,6 +208,10 @@ type UploadResponse struct {
 	// Warnings are for the submitter's terminal: peers that refused the
 	// closure, and why, so a run that stays local says what kept it there.
 	Warnings []string `json:"warnings,omitempty"`
+	// SeedMs is how long the upload spent giving the closure to this node's
+	// peers before answering, so the submitter's timeline can show it apart
+	// from the transfer itself.
+	SeedMs int64 `json:"seed_ms,omitempty"`
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -210,6 +233,12 @@ func shellQuote(s string) string {
 // pathExists reports whether a path exists on disk. Used to short-circuit NAR
 // re-imports when a prior task already materialised the closure.
 func pathExists(p string) bool {
+	if host := nixstore.HostPath(p); host != p {
+		// Lstat: links inside the store point at other /nix paths, which
+		// resolve only inside the namespace.
+		_, err := os.Lstat(host)
+		return err == nil
+	}
 	_, err := os.Stat(p)
 	return err == nil
 }
@@ -420,11 +449,15 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	// so the closure is already where it will run — skip the broadcast and keep
 	// it off the other (non-executing) peers.
 	var warnings []string
+	var seed time.Duration
 	if skipBroadcast != "1" {
+		seedStart := time.Now()
 		warnings = s.broadcastClosure(storePath)
+		seed = time.Since(seedStart)
 	}
 
-	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath, Warnings: warnings})
+	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath,
+		Warnings: warnings, SeedMs: seed.Milliseconds()})
 }
 
 // extractWorkspaceTar unpacks the workspace stream into workDir, refusing
@@ -521,6 +554,13 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// Every frame is recorded in the job's output log before the websocket
 	// sees it, so `pipedpeer attach` replays exactly what a live client got.
 	jobLog := s.jobOutput(jobID)
+
+	// Timing for the done frame: closure import, sandbox setup, the script.
+	execStart := time.Now()
+	var receiptPath string
+	var importDur, runDur time.Duration
+	var runStart time.Time
+
 	outCh := make(chan OutputMessage, 64)
 	writerDone := make(chan struct{})
 	go func() {
@@ -618,6 +658,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// skip the (expensive) NAR open + re-import entirely.
 	runEntry := filepath.Join(job.StorePath, "bin", "run")
 	if !pathExists(runEntry) {
+		importStart := time.Now()
 		narFile, err := os.Open(job.NarPath)
 		if err != nil {
 			fail("open nar: " + err.Error())
@@ -632,6 +673,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			fail(fmt.Sprintf("nix-store --import: %v: %s", err, string(out)))
 			return
 		}
+		importDur = time.Since(importStart)
 	}
 
 	if cancelled() {
@@ -675,6 +717,13 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
 			"PIPEDPEER_NODE_ID="+s.nodeID,
 		)
+		// The shim writes its receipt here at exit and the Done frame carries
+		// it back, so every run's record says what was distributed and why.
+		if !envsContain(cfg.Envs, "PIPEDPEER_RECEIPT=") {
+			receiptPath = filepath.Join(job.WorkDir, ".pipedpeer", "receipt.json")
+			_ = os.Remove(receiptPath)
+			cfg.Envs = append(cfg.Envs, "PIPEDPEER_RECEIPT="+receiptPath)
+		}
 		// The job talks back to this daemon for every intercepted primitive,
 		// so it needs the token too. Without it interception would 401 and
 		// fall back to local work, which looks like a slow job rather than a
@@ -747,6 +796,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
+		runStart = time.Now()
 		if err := cmd.Start(); err != nil {
 			fail("start command: " + err.Error())
 			return
@@ -759,6 +809,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		readers.Wait()
 		cmd.Wait()
+		runDur = time.Since(runStart)
 		close(procDone)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
@@ -952,6 +1003,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
+		runStart = time.Now()
 		if err := cmd.Start(); err != nil {
 			fail("start crun: " + err.Error())
 			return
@@ -963,12 +1015,30 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		readers.Wait()
 		cmd.Wait()
+		runDur = time.Since(runStart)
 		close(procDone)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	done := OutputMessage{ExitCode: exitCode, PeakMemBytes: peakBytes}
+	done := OutputMessage{ExitCode: exitCode, PeakMemBytes: peakBytes,
+		Timing: &ExecTiming{
+			ImportMs: importDur.Milliseconds(),
+			SetupMs:  (runStart.Sub(execStart) - importDur).Milliseconds(),
+			RunMs:    runDur.Milliseconds(),
+		}}
+	if receiptPath != "" {
+		switch b, err := os.ReadFile(receiptPath); {
+		case os.IsNotExist(err):
+			// The shim writes a receipt only when it intercepted something.
+		case err != nil:
+			log.Warn().Err(err).Str("job", jobID).Msg("cannot read the shim's receipt; the run has none")
+		case !json.Valid(b):
+			log.Warn().Str("job", jobID).Int("bytes", len(b)).Msg("shim receipt is not valid JSON; the run has none")
+		default:
+			done.Receipt = b
+		}
+	}
 	// 137 is SIGKILL. With a cap in force and a fresh kill recorded under our
 	// cgroup, the cause is the cap; without the counter moving it could just
 	// as well have been an operator's kill -9, so it is not claimed.
@@ -1049,6 +1119,11 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		}
 		rel = filepath.ToSlash(rel)
 		present[rel] = true
+		// pipedpeer's own files - the shim, its bytecode, the receipt - are
+		// not the job's output and must not land in the user's project.
+		if strings.HasPrefix(rel, ".pipedpeer/") {
+			return nil
+		}
 
 		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
 			return nil

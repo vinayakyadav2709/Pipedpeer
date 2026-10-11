@@ -10,3 +10,6 @@ note "CPU = cores and how busy they are now; GPU = card, load and memory in use.
 note "That is what the scheduler weighs when it places work."
 note "PATH 'lan' = a direct link on this network. No VPN, no cluster manager."
 note "LAPTOP-A only introduced the machines (rendezvous); it carries none of their traffic."
+echo
+note "Second screen: the live page every daemon serves. Open it now and leave it up."
+show "$PIPE" ui --print

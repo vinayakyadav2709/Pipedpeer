@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,10 +61,10 @@ func TestEndpointIndependentMappingIsPunchable(t *testing.T) {
 // per destination gives a third peer an address that was never valid for it,
 // so no amount of coordination produces a direct path.
 func TestAddressDependentMappingNeedsARelay(t *testing.T) {
-	n := 0
+	// Both reflectors answer from their own goroutines.
+	var n atomic.Int32
 	varying := func(net.Addr) string {
-		n++
-		return "203.0.113.7:5000" + string(rune('0'+n))
+		return "203.0.113.7:5000" + string(rune('0'+n.Add(1)))
 	}
 	a := fakeReflector(t, varying)
 	b := fakeReflector(t, varying)
@@ -129,9 +130,17 @@ func TestProbeUsesOneLocalPort(t *testing.T) {
 	if _, err := Probe(context.Background(), []string{a, b}, time.Second); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	close(ports)
+	// Drained rather than closed: a reflector still answering a late
+	// retransmit would otherwise send on a closed channel.
 	var first string
-	for p := range ports {
+	for drained := false; !drained; {
+		var p string
+		select {
+		case p = <-ports:
+		default:
+			drained = true
+			continue
+		}
 		if first == "" {
 			first = p
 			continue

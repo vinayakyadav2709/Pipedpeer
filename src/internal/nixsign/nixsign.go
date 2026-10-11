@@ -52,6 +52,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
@@ -220,6 +221,8 @@ func WriteTrustedKeys(keys []string) error {
 	// Written via a temporary file and renamed, so a reader never sees a
 	// half-written list and conclude the cluster trusts nobody.
 	// Unique temp name: concurrent pollers must not share one.
+	trustedKeysMu.Lock()
+	defer trustedKeysMu.Unlock()
 	f, err := os.CreateTemp(dir, "trusted-public-keys-*.tmp")
 	if err != nil {
 		return err
@@ -240,6 +243,8 @@ func WriteTrustedKeys(keys []string) error {
 	}
 	return werr
 }
+
+var trustedKeysMu sync.Mutex
 
 func sortStrings(s []string) {
 	for i := 1; i < len(s); i++ {
