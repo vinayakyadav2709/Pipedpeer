@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -257,5 +258,155 @@ func TestPoolMapForwardToPeer(t *testing.T) {
 		if want != int64((i+1)*2) {
 			t.Fatalf("result %d: got %v, want %v", i, want, (i+1)*2)
 		}
+	}
+}
+
+// framesReceipt is the first line of a frames reply.
+type framesReceipt struct {
+	ResultsFrames int `json:"results_frames"`
+	Receipt       struct {
+		Node  string     `json:"node"`
+		Parts []provPart `json:"parts"`
+	} `json:"receipt"`
+}
+
+// postFramesPoolMap posts items 1..n as protocol-2 pickled ints in a frames
+// body and returns the status, the reply's header line and the int results.
+func postFramesPoolMap(t *testing.T, url, storePath string, n int, requiredMem int64) (int, framesReceipt, []int64) {
+	t.Helper()
+	var items []json.RawMessage
+	for i := 1; i <= n; i++ {
+		items = append(items, json.RawMessage{0x80, 2, 'K', byte(i), '.'})
+	}
+	hdr, _ := json.Marshal(map[string]any{
+		"func_src":     "def run(x):\n    return x * 2\n",
+		"items_frames": n,
+		"required_mem": requiredMem,
+	})
+	req, err := http.NewRequest("POST", url+"/v1/pool/map", bytes.NewReader(buildFrames(hdr, nil, items)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/vnd.pipedpeer.frames")
+	req.Header.Set("X-Pipedpeer-Store", storePath)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("pool/map: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var rec framesReceipt
+	if resp.StatusCode != http.StatusOK {
+		t.Logf("reply %d: %s", resp.StatusCode, body)
+		return resp.StatusCode, rec, nil
+	}
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		t.Fatalf("frames reply has no header line: %q", body)
+	}
+	if err := json.Unmarshal(body[:nl], &rec); err != nil {
+		t.Fatalf("frames reply header %q: %v", body[:nl], err)
+	}
+	var vals []int64
+	rest := body[nl+1:]
+	for len(rest) > 0 {
+		f, r, err := readFrame(rest)
+		if err != nil {
+			t.Fatalf("frame %d: %v", len(vals), err)
+		}
+		rest = r
+		if len(f) < 3 || f[len(f)-3] != 'K' || f[len(f)-1] != '.' {
+			t.Fatalf("unexpected pickle frame %q", f)
+		}
+		vals = append(vals, int64(f[len(f)-2]))
+	}
+	return resp.StatusCode, rec, vals
+}
+
+func receiptItems(rec framesReceipt) int {
+	n := 0
+	for _, p := range rec.Receipt.Parts {
+		n += p.Items
+	}
+	return n
+}
+
+// TestMicroChunksAnswerInFrames: a frames request split into micro-chunks
+// must be answered in frames with a receipt. A JSON reply reads as zero
+// results to the shim, which then reruns the whole map locally.
+func TestMicroChunksAnswerInFrames(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	fakeRun(t, storePath)
+
+	s := New("node-" + strings.Repeat("m", 8))
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	defer s.StopWarmWorkers()
+
+	required := memAvailBytes(t) * 6 / 10 // micro-split, still admitted
+	status, rec, vals := postFramesPoolMap(t, srv.URL, storePath, 60, required)
+	if status != http.StatusOK {
+		t.Fatalf("status %d, want 200", status)
+	}
+	if rec.ResultsFrames != 60 || len(vals) != 60 {
+		t.Fatalf("results_frames=%d frames=%d, want 60", rec.ResultsFrames, len(vals))
+	}
+	for i, v := range vals {
+		if v != int64((i+1)*2) {
+			t.Fatalf("result %d: got %d, want %d", i, v, (i+1)*2)
+		}
+	}
+	if got := receiptItems(rec); got != 60 {
+		t.Fatalf("receipt parts cover %d items, want 60: %+v", got, rec.Receipt.Parts)
+	}
+}
+
+// TestAForwardedReceiptNamesThePeer: work a weak orchestrator forwarded whole
+// ran on the peer, so the receipt must say so, never "local".
+func TestAForwardedReceiptNamesThePeer(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	fakeRun(t, storePath)
+
+	s1 := New("node-" + strings.Repeat("c", 8))
+	s2 := New("node-" + strings.Repeat("d", 8))
+	avail := memAvailBytes(t)
+	s1.mu.Lock()
+	s1.leases["reserve"] = &Lease{LeaseID: "reserve", State: LeaseRunning, MemBytes: avail - 100*1024*1024}
+	s1.mu.Unlock()
+
+	srv1 := httptest.NewServer(s1.Handler())
+	srv2 := httptest.NewServer(s2.Handler())
+	defer srv1.Close()
+	defer srv2.Close()
+	defer s1.StopWarmWorkers()
+	defer s2.StopWarmWorkers()
+
+	peerHost := strings.TrimPrefix(srv2.URL, "http://")
+	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{peerHost} })
+
+	status, rec, vals := postFramesPoolMap(t, srv1.URL, storePath, 40, 300*1024*1024)
+	if status != http.StatusOK {
+		t.Fatalf("forward: status %d, want 200", status)
+	}
+	if len(vals) != 40 || rec.ResultsFrames != 40 {
+		t.Fatalf("results_frames=%d frames=%d, want 40", rec.ResultsFrames, len(vals))
+	}
+	if rec.Receipt.Node != s2.nodeID {
+		t.Fatalf("receipt node %q, want the peer's %q", rec.Receipt.Node, s2.nodeID)
+	}
+	if got := receiptItems(rec); got != 40 {
+		t.Fatalf("receipt parts cover %d items, want 40: %+v", got, rec.Receipt.Parts)
+	}
+	for _, p := range rec.Receipt.Parts {
+		if p.Where != "peer:"+peerHost {
+			t.Fatalf("part %+v: want where=peer:%s", p, peerHost)
+		}
+	}
+}
+
+func TestARelabelledJSONReplyPassesThrough(t *testing.T) {
+	body := []byte(`{"results":[{"pickle":"gAJLAi4="}]}` + "\n")
+	if got := relabelForwardedReceipt(body, "h:1"); !bytes.Equal(got, body) {
+		t.Fatalf("JSON reply changed: %q", got)
 	}
 }

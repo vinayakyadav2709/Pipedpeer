@@ -864,6 +864,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
+				// originLocal stays unset: setting it here would change
+				// placement, which is out of this path's remit.
+				prov: &provenance{},
 			}
 			s.runMicroChunks(w, runPath, storePath, ch, safe, submitter)
 			return
@@ -904,24 +907,35 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if frames {
-		// Frames response: small header line + raw pickle result frames. The
-		// receipt rides in the header so the submitter learns where the work
-		// ran, not merely that it was accepted.
-		recJSON, _ := json.Marshal(ch.prov.snapshot())
-		hdr := fmt.Sprintf("{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
-			len(results), s.nodeID, recJSON)
-		w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
-		w.WriteHeader(http.StatusOK)
-		body := make([]byte, 0, 1024)
-		body = append(body, hdr...)
-		for _, r := range results {
-			body = putFrame(body, resultPickle(r))
-		}
-		w.Write(body)
+	s.writePoolReply(w, frames, results, ch.prov)
+}
+
+// writePoolReply answers a pool request in the shape it was asked in: frames
+// for a frames request (the shim reads only results_frames and the frames that
+// follow, so a JSON reply to it would look like zero results), JSON otherwise.
+func (s *Server) writePoolReply(w http.ResponseWriter, frames bool, results []any, prov *provenance) {
+	if !frames {
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	// Frames response: small header line + raw pickle result frames. The
+	// receipt rides in the header so the submitter learns where the work
+	// ran, not merely that it was accepted.
+	w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
+	w.WriteHeader(http.StatusOK)
+	body := make([]byte, 0, 1024)
+	body = append(body, poolFramesHeader(len(results), s.nodeID, prov.snapshot())...)
+	for _, r := range results {
+		body = putFrame(body, resultPickle(r))
+	}
+	w.Write(body)
+}
+
+// poolFramesHeader is the first line of a frames reply.
+func poolFramesHeader(n int, node string, parts []provPart) []byte {
+	recJSON, _ := json.Marshal(parts) // []provPart always marshals
+	return fmt.Appendf(nil, "{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
+		n, node, recJSON)
 }
 
 // resultPickle extracts the raw pickle bytes a result carries. Results are
@@ -971,6 +985,9 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		case sub.noFanout:
 			part, err = s.pool.runLocal(runPath, storePath, &sub)
+			if err == nil {
+				ch.prov.record("local", len(sub.items), 0)
+			}
 		default:
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		}
@@ -980,15 +997,18 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 		}
 		results = append(results, part...)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	s.writePoolReply(w, ch.frames, results, ch.prov)
 }
 
 // forwardPoolMap relays the raw request to a peer (one hop) so a weak
 // orchestrator forwards heavy work instead of refusing it. Returns true when
-// the peer answered; the status and body are copied verbatim.
+// the peer answered. The status and body are copied, except that a frames
+// receipt is relabelled so the work the peer ran itself reads as "peer:<peer>":
+// to the submitter it ran on another machine, not on this one.
 func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, storePath string) bool {
 	fwd, err := http.NewRequest("POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
 	if err != nil {
+		log.Printf("[pool] forward to %s: building request: %v", peer, err)
 		return false
 	}
 	fwd.Header.Set("Content-Type", "application/json")
@@ -997,13 +1017,55 @@ func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, sto
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(fwd)
 	if err != nil {
+		log.Printf("[pool] forward to %s failed: %v", peer, err)
 		return false
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[pool] forward to %s: reading reply: %v", peer, err)
+		return false
+	}
+	if resp.StatusCode == http.StatusOK {
+		body = relabelForwardedReceipt(body, peer)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 	return true
+}
+
+// relabelForwardedReceipt rewrites a frames reply's receipt so every part the
+// peer ran itself ("local") reads "peer:<peer>". The node and the frames are
+// kept. A JSON reply carries no receipt and passes through untouched.
+func relabelForwardedReceipt(body []byte, peer string) []byte {
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		return body
+	}
+	var hdr struct {
+		ResultsFrames *int `json:"results_frames"`
+		Receipt       struct {
+			Node  string     `json:"node"`
+			Parts []provPart `json:"parts"`
+		} `json:"receipt"`
+	}
+	if err := json.Unmarshal(body[:nl], &hdr); err != nil {
+		log.Printf("[pool] forwarded reply from %s has an unreadable first line; receipt left as sent: %v", peer, err)
+		return body
+	}
+	if hdr.ResultsFrames == nil {
+		return body // JSON reply
+	}
+	for i := range hdr.Receipt.Parts {
+		if hdr.Receipt.Parts[i].Where == "local" {
+			hdr.Receipt.Parts[i].Where = "peer:" + peer
+		}
+	}
+	out := poolFramesHeader(*hdr.ResultsFrames, hdr.Receipt.Node, hdr.Receipt.Parts)
+	return append(out, body[nl+1:]...)
 }
 
 // runChunk dispatches one chunk, preferring a warm worker and falling back to

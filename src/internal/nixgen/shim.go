@@ -1281,8 +1281,9 @@ def _maybe_compress(items, header):
     try, keep the result only if it is meaningfully smaller, and record the
     choice in the header rather than guessing again on the other side.
 
-    The daemon relays these bytes without looking inside them, so this is
-    settled entirely between the shim and the worker - no wire change.
+    The daemon relays these bytes without looking inside them, and carries
+    the items_zlib flag across every header it rebuilds when it splits
+    or forwards the work, so the choice reaches whichever worker runs it.
     """
     if not items:
         return items
