@@ -106,7 +106,7 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 
 	stage(4, "Building locally...")
 	nixSystem := nixgen.NixArch()
-	cmd, cleanup, err := nixstore.Cmd(tmpDir, "nix", "build", ".#packages."+nixSystem+".default",
+	cmd, cleanup, err := nixstore.Cmd(tmpDir, "nix", "build", flakeRef(nixSystem),
 		"--option", "build-users-group", "")
 	if err != nil {
 		env.Close()
@@ -167,3 +167,7 @@ func findProjectRoot(scriptDir string) string {
 		}
 	}
 }
+
+// flakeRef uses the path: type so Nix does not treat the scratch dir as part
+// of an enclosing git tree (e.g. a git-tracked $HOME).
+func flakeRef(system string) string { return "path:.#packages." + system + ".default" }
