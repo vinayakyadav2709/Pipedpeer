@@ -53,11 +53,34 @@ type outputMessage struct {
 	// PeakMemBytes mirrors the daemon's field so the client can learn the
 	// job's real footprint and record it for the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
+	// Timing is the node's own split of the execution; absent from a daemon
+	// too old to send it.
+	Timing *ExecTiming `json:"timing,omitempty"`
+}
+
+// ExecTiming mirrors the daemon's account of one execution, in milliseconds.
+type ExecTiming struct {
+	ImportMs int64 `json:"import_ms"`
+	SetupMs  int64 `json:"setup_ms"`
+	RunMs    int64 `json:"run_ms"`
+}
+
+// ExecResult is what StreamExecute learned about a run.
+type ExecResult struct {
+	// PeakBytes is the peak memory the job used, as the daemon measured it.
+	PeakBytes int64
+	Stdout    string
+	Stderr    string
+	// Timing is nil when the daemon did not report one.
+	Timing *ExecTiming
 }
 
 type uploadResponse struct {
 	JobID     string `json:"job_id"`
 	StorePath string `json:"store_path"`
+	// SeedMs is the part of the upload the daemon spent giving the closure to
+	// its peers.
+	SeedMs int64 `json:"seed_ms,omitempty"`
 }
 
 // UploadJob sends workspace tarball + NAR closure to the daemon.
@@ -157,8 +180,8 @@ func storeCached(host string, port int, storePath string) bool {
 
 // StreamExecute connects to the daemon WebSocket and streams job output to stdout/stderr.
 // Blocks until the job completes or context is cancelled.
-// It returns the peak memory the job used (bytes) as reported by the daemon.
-func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (int64, string, string, error) {
+func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg ExecConfig) (ExecResult, error) {
+	var timing *ExecTiming
 	url := fmt.Sprintf("ws://%s:%d/v1/jobs/%s/exec", host, port, jobID)
 
 	// The websocket dialer does not go through http.DefaultTransport, so the
@@ -170,12 +193,12 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, wsHeaders)
 	if err != nil {
-		return 0, "", "", fmt.Errorf("websocket dial: %w", err)
+		return ExecResult{PeakBytes: 0, Stdout: "", Stderr: "", Timing: timing}, fmt.Errorf("websocket dial: %w", err)
 	}
 	defer conn.Close()
 
 	if err := conn.WriteJSON(cfg); err != nil {
-		return 0, "", "", fmt.Errorf("send config: %w", err)
+		return ExecResult{PeakBytes: 0, Stdout: "", Stderr: "", Timing: timing}, fmt.Errorf("send config: %w", err)
 	}
 
 	var peakBytes int64
@@ -185,9 +208,9 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
+				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, nil
 			}
-			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("connection lost: %w", err)
+			return ExecResult{PeakBytes: 0, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, fmt.Errorf("connection lost: %w", err)
 		}
 
 		var out outputMessage
@@ -196,7 +219,7 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 		}
 
 		if out.Error != "" {
-			return 0, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote: %s", out.Error)
+			return ExecResult{PeakBytes: 0, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, fmt.Errorf("remote: %s", out.Error)
 		}
 
 		fmt.Print(out.O)
@@ -208,18 +231,19 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 			if out.PeakMemBytes > 0 {
 				peakBytes = out.PeakMemBytes
 			}
+			timing = out.Timing
 			if out.OOMKilled {
 				// Without this the user sees "exited with code 137" and has
 				// no way to know the node protected itself on purpose.
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf(
+				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, fmt.Errorf(
 					"job ran out of memory: the kernel killed it for exceeding its %s limit. "+
 						"Raise it with --mem, or reduce what the script holds in memory at once",
 					humanBytes(out.MemLimitBytes))
 			}
 			if out.ExitCode != 0 {
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), &RemoteExitError{Code: out.ExitCode}
+				return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, &RemoteExitError{Code: out.ExitCode}
 			}
-			return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
+			return ExecResult{PeakBytes: peakBytes, Stdout: stdoutBuf.String(), Stderr: stderrBuf.String(), Timing: timing}, nil
 		}
 	}
 }

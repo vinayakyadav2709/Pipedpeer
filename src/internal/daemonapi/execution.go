@@ -128,6 +128,22 @@ type OutputMessage struct {
 	// It is set on the Done frame so the submitter can learn a job's real
 	// footprint and feed the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
+	// Timing splits the node's share of the run into its parts. Set on the
+	// Done frame, so the submitter can tell a slow script from a slow
+	// sandbox or a closure import.
+	Timing *ExecTiming `json:"timing,omitempty"`
+}
+
+// ExecTiming is how a node spent one execution, in milliseconds.
+type ExecTiming struct {
+	// ImportMs is importing the closure into this node's store; zero when it
+	// was already there.
+	ImportMs int64 `json:"import_ms"`
+	// SetupMs is everything between the request and the script starting,
+	// the import excluded: the sandbox, the memory cap, the environment.
+	SetupMs int64 `json:"setup_ms"`
+	// RunMs is the script itself, from its start to its exit.
+	RunMs int64 `json:"run_ms"`
 }
 
 // JobRecord tracks a single uploaded job on the daemon.
@@ -165,6 +181,10 @@ func (f FileStamp) changed(other FileStamp) bool {
 type UploadResponse struct {
 	JobID     string `json:"job_id"`
 	StorePath string `json:"store_path"`
+	// SeedMs is how long the upload spent giving the closure to this node's
+	// peers before answering, so the submitter's timeline can show it apart
+	// from the transfer itself.
+	SeedMs int64 `json:"seed_ms,omitempty"`
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -389,11 +409,14 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	// DDP ranks upload directly to their own node and every rank does the same,
 	// so the closure is already where it will run — skip the broadcast and keep
 	// it off the other (non-executing) peers.
+	var seed time.Duration
 	if skipBroadcast != "1" {
+		seedStart := time.Now()
 		s.broadcastClosure(storePath)
+		seed = time.Since(seedStart)
 	}
 
-	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
+	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath, SeedMs: seed.Milliseconds()})
 }
 
 // extractWorkspaceTar unpacks the workspace stream into workDir, refusing
@@ -488,8 +511,12 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// If the closure's run entrypoint already exists in the local store, a
 	// prior task (or a shared /nix/store volume) already materialised it —
 	// skip the (expensive) NAR open + re-import entirely.
+	execStart := time.Now()
+	var importDur, runDur time.Duration
+	var runStart time.Time
 	runEntry := filepath.Join(job.StorePath, "bin", "run")
 	if !pathExists(runEntry) {
+		importStart := time.Now()
 		narFile, err := os.Open(job.NarPath)
 		if err != nil {
 			writeWS(OutputMessage{Error: "open nar: " + err.Error()})
@@ -510,6 +537,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			s.jobsMu.Unlock()
 			return
 		}
+		importDur = time.Since(importStart)
 	}
 
 	s.jobsMu.Lock()
@@ -638,6 +666,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
+		runStart = time.Now()
 		if err := cmd.Start(); err != nil {
 			writeWS(OutputMessage{Error: "start command: " + err.Error()})
 			s.jobsMu.Lock()
@@ -650,6 +679,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		readers.Wait()
 		cmd.Wait()
+		runDur = time.Since(runStart)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	} else {
@@ -840,6 +870,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
+		runStart = time.Now()
 		if err := cmd.Start(); err != nil {
 			writeWS(OutputMessage{Error: "start crun: " + err.Error()})
 			s.jobsMu.Lock()
@@ -852,11 +883,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		readers.Wait()
 		cmd.Wait()
+		runDur = time.Since(runStart)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	done := OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
+	done := OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes,
+		Timing: &ExecTiming{
+			ImportMs: importDur.Milliseconds(),
+			SetupMs:  (runStart.Sub(execStart) - importDur).Milliseconds(),
+			RunMs:    runDur.Milliseconds(),
+		}}
 	// 137 is SIGKILL. With a cap in force and a fresh kill recorded under our
 	// cgroup, the cause is the cap; without the counter moving it could just
 	// as well have been an operator's kill -9, so it is not claimed.
