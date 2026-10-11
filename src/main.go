@@ -2676,6 +2676,9 @@ func runDaemon(args []string) {
 		log.Warn().Msgf(format, args...)
 	})
 
+	// Detached jobs started here finish here (results, record) when they end.
+	go app.WatchDetached(context.Background(), log)
+
 	log.Info().Int("port", port).Str("node_id", nodeID.ShortID()).
 		Int("max_concurrent", maxConcurrent).Msg("daemon starting")
 	if err := server.ListenAndServe(port); err != nil {

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -57,6 +58,12 @@ type Record struct {
 	// detached, so attach can find it again.
 	RemoteJobID    string `json:"remote_job_id,omitempty"`
 	DaemonEndpoint string `json:"daemon_endpoint,omitempty"` // host:port
+	// Collected: the job's end was brought back here (output log, results
+	// in LocalSyncRoot, record finalized) by whoever saw it end first: the
+	// daemon's watcher or attach.
+	Collected bool `json:"collected,omitempty"`
+	// ExitCode is the script's exit code as its node reported it.
+	ExitCode int `json:"exit_code,omitempty"`
 	// Stages is the run's timeline: every step, where it ran, and how long
 	// it took, the environment build included.
 	Stages []Stage `json:"stages,omitempty"`
@@ -128,7 +135,13 @@ func UpdateStage(dir, stage string) {
 }
 
 func Finalize(dir string, r Record, runErr error) error {
-	finished := time.Now().UTC()
+	return FinalizeAt(dir, r, runErr, time.Now())
+}
+
+// FinalizeAt is Finalize for a run that ended at finished rather than now: a
+// detached job collected after it ended.
+func FinalizeAt(dir string, r Record, runErr error, finished time.Time) error {
+	finished = finished.UTC()
 	r.FinishedAt = finished.Format(time.RFC3339Nano)
 	start, err := time.Parse(time.RFC3339Nano, r.StartedAt)
 	if err == nil {
@@ -162,6 +175,25 @@ func WriteManifest(dir string, manifest any) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// CollectedOutput is the file, in a record's directory, holding a detached
+// job's whole output as its node sent it, one frame per line.
+const CollectedOutput = "output.jsonl"
+
+// Lock takes an exclusive lock on a record's directory, waiting for it, so
+// two processes never finish the same detached job twice. Call unlock when
+// done.
+func Lock(dir string) (unlock func(), err error) {
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock %s: %w", dir, err)
+	}
+	return func() { f.Close() }, nil // closing the file drops the lock
 }
 
 func SaveText(dir, name, content string) error {

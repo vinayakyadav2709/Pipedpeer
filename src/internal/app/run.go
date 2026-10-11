@@ -316,6 +316,13 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		}
 	}
 
+	// Once the node has the job, a lost connection is a detach: the node keeps
+	// it running, so it is not run again elsewhere, and this machine's daemon
+	// collects it when it ends. Only where detaching is offered (not DDP/map).
+	if detach != nil && errors.Is(err, daemonctl.ErrConnectionLost) {
+		fmt.Fprintf(os.Stderr, "\nlost the connection to %s (%v); the job keeps running there\n", historyRecord.DaemonEndpoint, err)
+		err = fmt.Errorf("%v: %w", err, daemonctl.ErrDetached)
+	}
 	if errors.Is(err, daemonctl.ErrDetached) {
 		detached = true
 		historyRecord.Detached = true

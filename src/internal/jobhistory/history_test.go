@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestResolveByPrefixAndShortID(t *testing.T) {
@@ -46,4 +47,31 @@ func TestFinalizeCancelled(t *testing.T) {
 	if err != nil || got.Status != StateCancelled {
 		t.Fatalf("status %q, %v", got.Status, err)
 	}
+}
+
+// A collected detached job's duration ends when the job ended on its node,
+// not when this machine noticed.
+func TestFinalizeAtUsesTheNodesFinishTime(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	r, dir, err := NewRecord("x.py", "", "", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := time.Parse(time.RFC3339Nano, r.StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Collected = true
+	if err := FinalizeAt(dir, r, nil, start.Add(90*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadRecordAt(dir)
+	if err != nil || got.DurationMs != 90000 || !got.Collected || got.Status != StateSucceeded {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	unlock, err := Lock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
 }
