@@ -728,6 +728,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						ScriptPath:        scriptPath,
 						DaemonHost:        host,
 						DaemonPort:        port,
+						SelfDaemonPort:    daemonPort,
 						Submitter:         submitter,
 						TargetID:          targetNodeID,
 						JobName:           jobName,
@@ -2684,7 +2685,7 @@ func runDaemon(args []string) {
 	})
 
 	// Detached jobs started here finish here (results, record) when they end.
-	go app.WatchDetached(context.Background(), log)
+	go app.WatchDetached(context.Background(), log, port)
 
 	log.Info().Int("port", port).Str("node_id", nodeID.ShortID()).
 		Int("max_concurrent", maxConcurrent).Msg("daemon starting")

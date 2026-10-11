@@ -26,13 +26,16 @@ const collectTimeout = 10 * time.Minute
 // collectEvery it finishes each detached job started from this machine whose
 // node reports it ended, exactly as a foreground run finishes (see collect),
 // so detaching only changes whether the output is watched live. A node that
-// cannot be reached is retried on the next tick; each job warns once.
-func WatchDetached(ctx context.Context, log zerolog.Logger) {
+// cannot be reached is retried on the next tick; each job warns once. A node
+// that stays unreachable for goneAfter while this machine reaches other
+// peers (selfPort is the local daemon's port), or that no longer knows the
+// job, fails the record with the reason and the command to run it again.
+func WatchDetached(ctx context.Context, log zerolog.Logger, selfPort int) {
 	warned := map[string]bool{}
 	t := time.NewTicker(collectEvery)
 	defer t.Stop()
 	for {
-		collectDetached(ctx, log, warned)
+		collectDetached(ctx, log, warned, selfPort)
 		select {
 		case <-ctx.Done():
 			return
@@ -42,7 +45,7 @@ func WatchDetached(ctx context.Context, log zerolog.Logger) {
 }
 
 // collectDetached is one pass of WatchDetached over the job history.
-func collectDetached(ctx context.Context, log zerolog.Logger, warned map[string]bool) {
+func collectDetached(ctx context.Context, log zerolog.Logger, warned map[string]bool, selfPort int) {
 	base := jobhistory.BaseDir()
 	entries, err := os.ReadDir(base)
 	if err != nil {
@@ -72,11 +75,18 @@ func collectDetached(ctx context.Context, log zerolog.Logger, warned map[string]
 			log.Info().Str("job", rec.ID).Msg(strings.TrimSpace(fmt.Sprintf(format, args...)))
 		}
 		cctx, cancel := context.WithTimeout(ctx, collectTimeout)
-		got, n, done, err := collect(cctx, dir, note)
+		got, n, done, _, err := collect(cctx, dir, note)
 		cancel()
 		if err != nil {
-			// ponytail: a job its node no longer knows is retried every tick
-			// for the daemon's lifetime; cheap, and the warning says why.
+			if reason, gone := nodeGone(dir, rec, err, selfPort); gone {
+				if ferr := failGone(dir, reason); ferr != nil {
+					log.Warn().Err(ferr).Str("job", rec.ID).Msg("could not mark a detached job whose node is gone as failed")
+				} else {
+					delete(warned, rec.ID)
+					log.Warn().Str("job", rec.ID).Str("from", rec.DaemonEndpoint).Msg("detached job failed: " + reason)
+				}
+				continue
+			}
 			if !warned[rec.ID] {
 				warned[rec.ID] = true
 				log.Warn().Err(err).Str("job", rec.ID).Str("from", rec.DaemonEndpoint).
@@ -84,12 +94,82 @@ func collectDetached(ctx context.Context, log zerolog.Logger, warned map[string]
 			}
 			continue
 		}
+		if !done && rec.UnreachableSince != "" {
+			setUnreachableSince(dir, "") // the node answers again
+		}
 		if done && n > 0 {
 			delete(warned, rec.ID)
 			log.Info().Str("job", got.ID).Str("from", got.DaemonEndpoint).Int64("bytes", n).
 				Str("status", got.Status).Int("files", got.ReceivedFiles).Msg("job collected")
 		}
 	}
+}
+
+// goneAfter is how long a detached job's node may stay unreachable, while
+// this machine reaches other peers, before the job counts as lost.
+var goneAfter = 24 * time.Hour
+
+// nodeGone decides whether collecting failed because the job is lost for
+// good: its node no longer knows it (HTTP 404), or the node has not answered
+// for goneAfter while other peers did. It starts and keeps that clock on the
+// record, so a daemon restart does not reset it.
+func nodeGone(dir string, rec jobhistory.Record, err error, selfPort int) (string, bool) {
+	rerun := fmt.Sprintf("rerun with: pipedpeer run %s --remote", rec.ScriptPath)
+	if strings.Contains(err.Error(), "HTTP 404") {
+		return fmt.Sprintf("node %s no longer has the job; %s", rec.DaemonEndpoint, rerun), true
+	}
+	if !nodeUnreachable(err) {
+		return "", false
+	}
+	if _, online := anyPeerAnswers(selfPort, rec.DaemonEndpoint); !online {
+		return "", false // this machine may be the one offline: no verdict
+	}
+	since, perr := time.Parse(time.RFC3339, rec.UnreachableSince)
+	if perr != nil {
+		setUnreachableSince(dir, time.Now().UTC().Format(time.RFC3339))
+		return "", false
+	}
+	if time.Since(since) < goneAfter {
+		return "", false
+	}
+	return fmt.Sprintf("node %s gone (unreachable since %s while other peers answer); %s",
+		rec.DaemonEndpoint, rec.UnreachableSince, rerun), true
+}
+
+// setUnreachableSince records (or, with "", clears) when the node stopped
+// answering.
+func setUnreachableSince(dir, at string) {
+	unlock, err := jobhistory.Lock(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not lock %s to note its node's reachability: %v\n", dir, err)
+		return
+	}
+	defer unlock()
+	r, err := jobhistory.ReadRecordAt(dir)
+	if err == nil {
+		r.UnreachableSince = at
+		err = jobhistory.SaveRecord(dir, r)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not note its node's reachability in %s: %v\n", dir, err)
+	}
+}
+
+// failGone finalizes a detached job lost with its node as failed.
+func failGone(dir, reason string) error {
+	unlock, err := jobhistory.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	r, err := jobhistory.ReadRecordAt(dir)
+	if err != nil {
+		return err
+	}
+	if !pendingDetached(r) {
+		return nil // collected or finished meanwhile
+	}
+	return jobhistory.Finalize(dir, r, errors.New(reason))
 }
 
 // pendingDetached: a detached job this machine has not finished yet.
@@ -122,40 +202,41 @@ func splitEndpoint(ep string) (string, int, error) {
 // record finalized and marked Collected. done is false, with no error, while
 // the job still runs. Idempotent: under the record's lock, a job already
 // collected is returned as it is, so the watcher and attach never sync twice.
+// jobErr is the job's own outcome, typed as a foreground run returns it.
 // n is the output bytes fetched, 0 when nothing was done.
-func collect(ctx context.Context, dir string, note func(string, ...any)) (rec jobhistory.Record, n int64, done bool, err error) {
+func collect(ctx context.Context, dir string, note func(string, ...any)) (rec jobhistory.Record, n int64, done bool, jobErr, err error) {
 	unlock, err := jobhistory.Lock(dir)
 	if err != nil {
-		return rec, 0, false, err
+		return rec, 0, false, nil, err
 	}
 	defer unlock()
 	rec, err = jobhistory.ReadRecordAt(dir)
 	if err != nil {
-		return rec, 0, false, err
+		return rec, 0, false, nil, err
 	}
 	if rec.Collected {
-		return rec, 0, true, nil
+		return rec, 0, true, recordErr(rec), nil
 	}
 	host, port, err := splitEndpoint(rec.DaemonEndpoint)
 	if err != nil {
-		return rec, 0, false, err
+		return rec, 0, false, nil, err
 	}
 	st, err := daemonctl.JobStatus(host, port, rec.RemoteJobID)
 	if err != nil {
-		return rec, 0, false, err
+		return rec, 0, false, nil, err
 	}
 	if !jobEnded(st.Status) {
-		return rec, 0, false, nil
+		return rec, 0, false, nil, nil
 	}
 
 	outPath := filepath.Join(dir, jobhistory.CollectedOutput)
 	n, err = fetchOutputFile(ctx, host, port, rec.RemoteJobID, outPath)
 	if err != nil {
-		return rec, n, false, err
+		return rec, n, false, nil, err
 	}
 	res, execErr, err := replayToLogs(dir, outPath)
 	if err != nil {
-		return rec, n, false, err
+		return rec, n, false, nil, err
 	}
 	if res.PeakBytes > 0 {
 		rec.PeakMemBytes = res.PeakBytes
@@ -197,10 +278,10 @@ func collect(ctx context.Context, dir string, note func(string, ...any)) (rec jo
 	}
 	rec.Collected = true
 	if err := jobhistory.FinalizeAt(dir, rec, runErr, finished); err != nil {
-		return rec, n, false, fmt.Errorf("finalize job history %s: %w", dir, err)
+		return rec, n, false, nil, fmt.Errorf("finalize job history %s: %w", dir, err)
 	}
 	rec, err = jobhistory.ReadRecordAt(dir)
-	return rec, n, err == nil, err
+	return rec, n, err == nil, runErr, err
 }
 
 // fetchOutputFile saves a job's whole output at path, replacing it only once
