@@ -67,7 +67,10 @@ birthday-collision fallback for the hardest pair of NATs, onto direct QUIC links
 authenticated by per-node Ed25519 keys. No relay carries job data. In a
 three-worker container lab, a repeat submission took 0.83\,s against 23.4\,s for
 the first. Interception costs $1.24\times$ the start-up of a job that imports
-nothing heavy. 615 of 617 tests pass with none failing, and a mutation audit
+nothing heavy, and about 0.12\,s on a job it declines. A run can be stopped on
+every machine with one interrupt, or detached and reattached, and a training ring
+continues when a rank dies and grows when a machine returns. \textbf{TODO-NUM} of \textbf{TODO-NUM} tests pass
+with \textbf{TODO-NUM} failing, and a mutation audit
 breaking 95 features is caught in every case. Measurements recorded between real machines during development are
 reported with their provenance and are not claimed beyond it.
 \end{abstract}
@@ -203,6 +206,10 @@ The client scans imports, resolves them to packages, and builds a Nix closure
 from a flake that pins an \emph{exact} package-set revision. A branch would
 resolve differently on different days and change the store path; an exact pin
 makes the store path a stable name for an environment across machines and time.
+An import the mapping table does not know is looked up as the package of the same
+name in the pinned set, the scan follows the script's own modules, and a
+\texttt{requirements.txt} beside the script is honoured; an import still
+unresolved is reported before the run rather than dropped.
 
 Before uploading, the client asks whether the target can already run the
 closure. If not, it lists the closure's store paths and asks which are missing,
@@ -211,7 +218,11 @@ sending only those; adding one package to an environment a peer already held sen
 the closure to peers that cannot yet run it, since only those that can are
 offered distributed work. Between daemons the push is a signed binary cache
 produced and imported by Nix itself, signed with the sending node's key, so the
-receiver's signature policy applies. Caches are pruned least-recently-used.
+receiver's signature policy applies. The archive names its signer, whose key the
+receiver checks against the signer's published identity before trusting it for
+that import; on a multi-user Nix, whose daemon ignores keys passed per command,
+a root-owned helper installed at set-up can only add or remove keys of the
+cluster's form. Caches are pruned least-recently-used.
 
 \subsection{Joining Across Networks}
 \label{sec:nat}
@@ -227,16 +238,22 @@ belongs to the socket that opened it. Both sides probe every candidate pair ever
 is no address to publish; that side opens 256 sockets toward the peer while the
 other sends 600 probes to random ports, and the socket that is hit is kept. The
 winning path carries QUIC with a hello signed by each node's Ed25519 key, checked
-against the node it meant to reach, and is exposed locally as a loopback
+against the node it meant to reach; the hello signs the session's exported keying
+material \cite{rfc5705} and proves the cluster secret by an HMAC over it, so it
+cannot be replayed on another session. The link is exposed locally as a loopback
 forwarder registered as an ordinary node, so placement, transfer and gradient
-exchange run over it unchanged. A peer with no path is reported and routed
-around, never relayed.
+exchange run over it unchanged. A peer with no path is reported with its reason
+and routed around, never relayed. A container lab with cone and symmetric
+translators found four defects that kept such links from forming or lasting,
+among them a collision-found socket that stopped listening, and kept a read
+deadline, once adopted; all are fixed.
 
 The daemon API requires the cluster's shared secret on every route when one is
-configured, and serves pinned TLS and HTTP on one port. These protections are
-optional and partial: without a secret the daemon is open, TLS is trust on first
-use and can fall back to plain text, and the set of keys trusted to sign closures
-is not yet bound to an authenticated identity.
+configured, sends it only to hosts that answer a challenge with an HMAC, and
+serves pinned TLS and HTTP on one port. These protections are optional and
+partial: without a secret the daemon is open, TLS is trust on first use and can
+fall back to plain text, and the set of keys trusted to sign closures is not yet
+bound to an authenticated identity.
 
 \subsection{Transparent Interception}
 \label{sec:intercept}
@@ -262,7 +279,32 @@ preserved. For data-parallel training, ranks post gradients to the lead node's
 daemon port rather than building a rank-to-rank mesh, and the daemon returns one
 sample-weighted average, $\sum_i n_i g_i / \sum_i n_i$, in half precision by
 default. Returning every rank's gradient instead had made two machines 21 times
-slower than one.
+slower than one. Samples are assigned to ranks by a weighted rendezvous hash
+\cite{thaler1998rendezvous}, so when a rank dies the lead daemon stops waiting
+for it and the survivors take its share at the next epoch boundary, while over
+95\% of each survivor's samples stay in place; the ring still depends on rank
+0's machine, whose daemon holds the synchronisation.
+A rank whose machine returns, or a new eligible node, joins a running ring at
+the next epoch boundary from the lead's model and optimiser snapshot, fetched
+through the lead daemon, and the rendezvous hash moves about $1/n$ of the
+samples to it; this needs a script that uses a data loader.
+
+\subsection{Operating a Run}
+\label{sec:ops}
+
+A run is meant to feel like running Python locally, so the client also stops,
+detaches and reports. An interrupt or a closed terminal sends one cancel frame;
+the executing daemon signals the job's process group and kills it two seconds
+later, and parallel chunks the job had asked for stop on every peer because
+each carries its request's context. A connection that ends without that frame
+never kills the job: the daemon logs every output frame in the job's directory,
+binds the lease to the job so that it outlives its expiry while the job runs,
+and lets the submitter detach and later reattach, replaying the log without gaps
+or repeats. Output is forwarded as raw chunks, so progress bars redraw. Each run
+ends with a summary of where its items ran, drawn from a receipt the shim prints
+at exit; a dry run builds the environment and reports unresolved imports, the
+parallel calls found in the source and the intended placement; and a per-machine
+events feed turns the daemon's log into plain-language lines.
 
 \section{The Cost Model}
 \label{sec:cost}
@@ -307,7 +349,8 @@ local cores re-run any chunk not yet returned, and the call returns once the
 local side has covered every item, so an unresponsive cluster degrades to a local
 pool. Beneath that, every intercepted call falls back to the original on
 exception, a failed peer is skipped, a dead worker is respawned, and a failed job
-is rescheduled with back-off. A mutation audit disables 95 features one at a
+is rescheduled with back-off; a cancelled one is not retried, and a training
+ring continues on the ranks that are left. A mutation audit disables 95 features one at a
 time --- among them gradient weighting, the rebalance hysteresis, roommate memory
 accounting and the router-mapping checks --- and the suite fails for every one.
 
@@ -321,12 +364,17 @@ measures correctness, overhead and caching, and \textbf{cannot} measure
 multi-machine speedup. \emph{Recorded}: multi-machine figures measured by hand
 during development and recorded in the commit that each justified, on two
 machines over a home link or over Tailscale; they were not repeated for this
-paper.
+paper. A third set comes from a rehearsal of the demonstration on a second host
+(16 threads, one laptop GPU), in containers shaped like a college laboratory;
+it too measures function and cost, not speedup.
 
 \subsection{Lab results}
 
-\textbf{Tests.} 615 of 617 tests pass and none fail; the remaining two are
-opt-in integration tests. All 95 mutations are caught.
+\textbf{Tests.} \textbf{TODO-NUM} of \textbf{TODO-NUM} tests pass,
+\textbf{TODO-NUM} fail and \textbf{TODO-NUM} are skipped (opt-in integration
+tests); before the latest round it was 615 of 617 with none failing. All 95
+mutations are caught.
+% from rehearsal: verifier's final go test -v -count=1 ./... counts
 
 \textbf{Environment cache.} The first submission of a job took 23.4\,s. The
 second landed on a worker that had not yet received the closure and took 8.1\,s;
@@ -342,10 +390,12 @@ median of 0.83\,s (Fig.~\ref{fig:cache}).
 
 \textbf{Interception cost.} Start-up of a job that imports nothing heavy is
 $1.24\times$ that without the shim, within the project's $3\times$ budget (eager
-patching had cost $20\times$). A whole-job comparison on a parallel map is not
-informative on this bed: with interception on, the shim distributed 18 of 48
-items in every run, adding about 0.3\,s on one host, and two of the disabled
-runs failed once and were rescheduled.
+patching had cost $20\times$). On a whole job that the cost model declines, a
+16-item map with 0.01\,s of work, the median over five runs was 0.796\,s with
+interception against 0.678\,s without, every receipt showing nothing dispatched:
+interception that declines costs about 0.12\,s per job (second host). An earlier
+whole-job comparison was not informative, because its workload had grown large
+enough to dispatch.
 
 \textbf{Distribution and failure.} With distribution forced, 18 of 48
 parallel-map items ran on three other daemons in every run, with identical
@@ -353,7 +403,17 @@ checksums. The end-to-end fault-injection run, which kills a worker holding
 chunks, did not test recovery: on the freshly created lab the job ran on a node
 that already held its closure, the workers never received it, and the parallel
 map stayed local. We report it as a failed experiment; recovery is evidenced
-here only by tests in which every remote chunk fails.
+here only by tests in which every remote chunk fails. The cause was later traced
+to every worker refusing the broadcast closure for want of a trusted signing key
+(Section~\ref{sec:env}).
+
+\textbf{Rehearsal.} In the venue-shaped lab, the headline parallel map took
+\textbf{TODO-NUM}\,s on its first run and \textbf{TODO-NUM}\,s cached; a GPU job
+submitted from a node without a GPU ran on the GPU node in \textbf{TODO-NUM}\,s;
+an interrupt stopped work on every peer within \textbf{TODO-NUM}\,s; a detached
+job was reattached and returned its results; and a two-rank GPU ring on one
+shared GPU finished after one rank was killed, in \textbf{TODO-NUM}\,s.
+% from rehearsal: V1 summary (headline cold/cached, GPU step, Ctrl+C drill, detach/attach) and V2 (ring with a killed rank)
 
 \subsection{Recorded multi-machine results}
 
@@ -414,7 +474,8 @@ Proven in production       & \textbf{no} & yes & yes & yes & yes \\
 \subsection{Threats to validity}
 
 The lab shares one processor among all workers, so it cannot show speedup and
-distorts transfer costs. The recorded multi-machine figures were taken by hand,
+distorts transfer costs; the rehearsal lab likewise cannot show wireless
+links, two physical GPUs or a campus network's rules. The recorded multi-machine figures were taken by hand,
 mostly once or a few times each, on whatever machines and links were at hand,
 and are evidence of behaviour rather than a controlled experiment; one
 single-sample figure in the project's history was later found to be wrong by a
@@ -434,8 +495,9 @@ current form because the first version measured slower than doing nothing.
 Future work is led by closing the remaining security gaps --- binding trusted
 signing keys to authenticated identities, requiring rather than preferring TLS,
 and authorisation finer than one shared secret --- then a relay of last resort for
-peers no direct path can join, locality- and topology-aware placement, and a
-controlled multi-machine evaluation.
+peers no direct path can join, locality- and topology-aware placement, a
+parallel script and a training ring that survive their submitter and rank 0, and
+a controlled multi-machine evaluation.
 
 \begin{thebibliography}{00}
 
@@ -470,6 +532,10 @@ controlled multi-machine evaluation.
 \bibitem{rfc6887} D.~Wing, S.~Cheshire, M.~Boucadair, R.~Penno, and P.~Selkirk, ``Port Control Protocol (PCP),'' RFC~6887, IETF, Apr. 2013.
 
 \bibitem{ford2005p2p} B.~Ford, P.~Srisuresh, and D.~Kegel, ``Peer-to-peer communication across network address translators,'' in \textit{Proc. USENIX Annual Technical Conf.}, 2005, pp.~179--192.
+
+\bibitem{rfc5705} E.~Rescorla, ``Keying material exporters for Transport Layer Security (TLS),'' RFC~5705, IETF, Mar. 2010.
+
+\bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Netw.}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
 
 \end{thebibliography}
 

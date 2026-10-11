@@ -146,7 +146,8 @@ We declare that the work titled \textbf{\projecttitle} is our own work carried o
 
 \noindent The program is distributed by \textbf{intercepting the parallel primitives it already uses}. A shim injected into the job's interpreter replaces \texttt{multiprocessing.Pool}, pandas \texttt{groupby} and \texttt{merge}, chunked file readers, NumPy linear algebra, \texttt{joblib} and torch data-parallel training. Pool kernels travel as source or, for lambdas and closures, by value through cloudpickle. Work is shared between machines in proportion to their measured throughput, and a cost model ships numerical work only when computing locally would cost more than moving it. Every remote path degrades to the local one, with one deliberate exception: a matrix product that fits neither locally nor on the cluster raises an error rather than exhausting the machine.
 
-\noindent Machines on different networks are joined with one command. A small introducer exchanges candidate addresses; the machines then ask their routers for a port mapping or punch through them, falling back to a birthday-collision search for the hardest pair of NATs, and carry all traffic over a direct, mutually authenticated QUIC link. No relay carries job data. Each daemon's API is protected by an optional shared secret and pinned TLS, closures are signed with each node's ed25519 key, and jobs run by default in a \texttt{crun} sandbox under their own memory ceiling where the node supports it. Of 617 tests, 615 pass, none fail and two are opt-in integration tests; a mutation audit that breaks 95 features one at a time is caught by the tests in every case. A fault-injection run on the container lab did not distribute work and so did not test recovery, and is reported as such. Speedups between real machines are reported only as recorded during development, with their provenance, and are not claimed beyond them.
+\noindent Machines on different networks are joined with one command. A small introducer exchanges candidate addresses; the machines then ask their routers for a port mapping or punch through them, falling back to a birthday-collision search for the hardest pair of NATs, and carry all traffic over a direct, mutually authenticated QUIC link. No relay carries job data. Each daemon's API is protected by an optional shared secret and pinned TLS, closures are signed with each node's ed25519 key, and jobs run by default in a \texttt{crun} sandbox under their own memory ceiling where the node supports it. A run can be watched (a plain-language events feed, CPU and GPU load per node, a closing summary of where its work ran), checked beforehand by a dry run, stopped everywhere with one interrupt, or detached and reattached later; a training ring continues when a rank dies and takes back a machine that returns. Of \textbf{TODO-NUM} tests, \textbf{TODO-NUM} pass, \textbf{TODO-NUM} fail and \textbf{TODO-NUM} are skipped; % from rehearsal: verifier's final go test -v counts
+a mutation audit that breaks 95 features one at a time is caught by the tests in every case. A fault-injection run on the container lab did not distribute work and so did not test recovery, and is reported as such. Speedups between real machines are reported only as recorded during development, with their provenance, and are not claimed beyond them.
 
 \vspace{1cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal, Transparent Interception, Nix, Content-Addressed Caching, OCI Sandboxing, Cost-Based Scheduling, Fault Tolerance.
@@ -874,7 +875,13 @@ is hit is the one kept, since its mapping is the reachable one.
 \textbf{The link.} The winning path carries QUIC \cite{rfc9000} with TLS~1.3.
 Inside it each side sends a hello signed with its Ed25519 node key, and each
 checks that the key's fingerprint is the node it meant to reach and that the
-cluster identifier matches. The link is then exposed to the rest of the daemon
+cluster identifier matches. TLS on this link skips certificate checks, so a
+node's identity rests on the hello. The hello therefore signs the session's
+exported keying material \cite{rfc5705} and proves the cluster secret with an
+HMAC over the same value, so it is valid for one session and one cluster only;
+an earlier hello, which signed only the cluster and a nonce the signer chose,
+could be replayed by a peer to a third node to pass as its sender. A node on an
+older build is refused and told why. The link is then exposed to the rest of the daemon
 as a TCP forwarder on a loopback port, registered as an ordinary node; each
 local connection becomes one QUIC stream to the peer's daemon. Placement, closure
 transfer and gradient exchange therefore work over the link unchanged.
@@ -885,9 +892,23 @@ or \texttt{punched-in} when the peer dialled.
 \textbf{No relay.} A relay was built and then removed from the data path,
 because a relay carries every byte of every job and becomes the cluster's
 bottleneck and its cost. A peer with no direct path is logged with the reason,
-never offered to the scheduler, and retried after a back-off. A live link does
-not depend on the introducer: with the introducer suspended, a peer was reached
-in 0.03\,s.
+never offered to the scheduler, and retried after a back-off; \texttt{pipedpeer
+nodes} lists it under the table with that reason. A live link does not depend on
+the introducer: with the introducer suspended, a peer was reached in 0.03\,s.
+
+\textbf{What a NAT lab found.} Until a container lab with real translators
+existed (Section~\ref{sec:workloads}), punching was exercised only at live
+demonstrations. The lab showed peers behind NAT rarely linking, for four reasons,
+all since fixed. The socket a birthday collision found listened under the
+search's context, which ended on adoption, so the peer's dial met a closed
+listener; it now accepts dials for 30\,s and stays open while any link it
+accepted lives. The same socket kept the search's read deadline, so after
+adoption every read failed and its links died about 90\,s later; the deadline is
+now cleared. A node registered before it knew its public address, so a woken
+peer punched at a private address on another network; it now registers again as
+soon as it learns that address, before asking anyone to punch. And the race
+returned an IPv4-mapped address that never matched a candidate, so an ordinary
+punch was labelled a collision.
 
 % ------------------------------------------------------------
 \section{Security and Identity}
@@ -914,7 +935,10 @@ or a given secret, readable only by the user. Every route on the daemon,
 requests carry it automatically. Jobs receive it in their environment so that
 the shim can reach its own daemon, which means a job's code can read it. With no
 secret configured the daemon accepts every request, which is the earlier
-behaviour.
+behaviour. The secret is attached only to a host that has proved it holds it:
+a remote host is first challenged and must return an HMAC over the challenge,
+whereas the LAN sweep once sent the secret in plain HTTP to every host on the
+subnet that answered on the port.
 
 \textbf{Pinned TLS.} Each daemon creates a self-signed ECDSA certificate on first
 start. TLS and plain HTTP share the daemon port; the listener inspects the first
@@ -940,16 +964,32 @@ machine with signatures required, a closure signed by a trusted peer imported an
 ran, and the same closure was refused once the sender's key was removed from the
 list.
 
+\textbf{Getting peer keys to Nix.} On a fresh cluster the first job never left
+its submitter: every worker refused the closure as lacking a trusted signature,
+because the worker knew the sender's key only in its own list and Nix trusts
+only what its configuration names. Three changes close this without relaxing
+the signature requirement. The import passes the cluster's keys to that one copy
+operation. An archive names its signer and key, which the receiver checks
+against the signer's published identity before trusting it for that import, so
+a job sent right after joining is not refused for want of a poll. And because a
+multi-user Nix daemon ignores keys passed by a user it does not trust, set-up
+installs, with the one privileged step it already needs, a root-owned copy of
+the binary and a rule letting the user run only that file; run under that name,
+the binary does nothing but add or remove keys of the cluster's fixed form, each
+in its own configuration include, and restarts the Nix daemon. The daemon calls
+it for a key system Nix does not yet trust, before importing, and retries a
+failure every 15 minutes. A refused import is reported to the submitter.
+
 \textbf{What remains uncovered.} The secret is one per cluster, so there is no
 per-user or per-node authorisation, and every holder can run code on every node.
 The trusted-key list is built from every node in the node store, including nodes
-found by unauthenticated LAN discovery, so a key is not bound to an
-authenticated identity. No signature check takes place on a private or
-single-user Nix store, and the older closure format, which a submitter still uses
-for its own upload, is imported without one. The optional registry and LAN
-discovery are unauthenticated. The QUIC hello's nonce is chosen by the signer
-and is not bound to the session, and any key that knows the cluster identifier
-is admitted. Section~\ref{sec:security} returns to these.
+found by unauthenticated LAN discovery, so a key in that list is not bound to an
+authenticated identity. With the key helper installed, anyone holding the
+cluster secret can get signed paths trusted by system Nix on every machine with
+no human involved, as was already true after a manual trust step. The older
+closure format, which a submitter still uses for its own upload, is imported
+without a signature check. The optional registry and LAN discovery are
+unauthenticated. Section~\ref{sec:security} returns to these.
 
 \section{Placement and Scoring}
 \label{sec:placement}
@@ -1061,13 +1101,34 @@ not see an import split across continuation lines or performed through
 \texttt{\_\_import\_\_} or \texttt{importlib}, and it can pick up import-like
 text inside a multi-line string. Each name is then classified as a local file, a
 standard library module (from a list of 124), or an external dependency, and
-external names are resolved through a 35-entry mapping table that handles cases
+external names are resolved through a 40-entry mapping table that handles cases
 such as \texttt{sklearn} to \texttt{scikit-learn}.
 
-\textbf{The limitation, stated plainly.} A third-party import absent from that
-table resolves to nothing and is silently omitted from the closure. There is no
-package index lookup. A \texttt{uv.lock} file, which replaces detection entirely
-when present, and an explicit \texttt{-{}-pkg} flag are the escape hatches.
+\textbf{Imports outside the table.} Until October a third-party import absent
+from that table resolved to nothing and was silently omitted from the closure,
+so the job died on an import error on the node. Such an import is now looked up
+as the attribute of the same name in the pinned package set's Python packages,
+with one evaluation for all of them, and added when it exists. Only what is
+still missing is reported, before anything runs, with the flag that would add
+it; a failed evaluation says so and falls back to the warning. A
+\texttt{requirements.txt} beside the script is read as if it had been passed
+with \texttt{-{}-pkg}. The scan also follows the script's own modules: a helper
+module's imports used to go unread, so a helper importing a plotting library
+left the environment without it. Each local module is now scanned against its
+own directory and then the script's, with a visited set so that import cycles
+end. A \texttt{uv.lock} file, which replaces detection entirely when present,
+and an explicit \texttt{-{}-pkg} flag remain the escape hatches.
+
+\textbf{Common packages built ahead of time.} There is no layered base
+environment; what environments share is Nix's own store paths, and a transfer
+sends only the paths a peer lacks (Section~\ref{sec:cache}). A preparation
+step uses that: it builds one environment importing the usual scientific set
+(numpy, pandas, scikit-learn, scipy, matplotlib, seaborn, tqdm and CUDA torch)
+on every machine through the dry run of Section~\ref{sec:observe}, so a script
+seen for the first time shares those paths and fetches only what it adds. A
+teacher-style script's first run took \textbf{TODO-NUM} without that step and
+\textbf{TODO-NUM} with it.
+% from rehearsal: teacher-script first run without and with prep-4-common (V1 PKG-PREP)
 
 \textbf{The keystone.} Nix \cite{dolstra2004nix} names every build output by a
 hash of its inputs. The generated flake pins an \emph{exact} nixpkgs
@@ -1140,6 +1201,16 @@ evicted is derived data and was rebuilt. Workspace archives above 1\,MiB and all
 results archives are compressed with Zstandard \cite{rfc8878}; readers recognise
 Zstandard, gzip or plain archives by their leading bytes.
 
+\textbf{A transfer that can be seen.} The client times packing the closure and
+sending it; on a terminal the send draws a progress bar, and otherwise it prints
+one line with the paths, bytes and time. A flag, \texttt{-{}-cold}, sends the
+whole closure as if the node had none, skipping both questions and the path
+difference, so that a first run can be timed on a warm cluster. It cannot undo
+the submitter's own build or the node's earlier import, and the run summary
+marks such a send as cold; true first-run cost therefore comes from fresh
+machines. A signature refusal on import is no longer swallowed: the upload
+returns it and the client prints why the peer took no work.
+
 \section{Execution and Isolation}
 \label{sec:sandbox}
 
@@ -1172,7 +1243,10 @@ each job runs in its own cgroup with a memory limit, and an equal swap limit, of
 512\,MiB floor, clamped to what the node can grant but never below what admission
 approved. When the job is killed and the cgroup's out-of-memory counter has
 risen, the client is told the job ran out of memory and how to raise
-\texttt{-{}-mem}, rather than seeing a bare exit code.
+\texttt{-{}-mem}, rather than seeing a bare exit code. A job with no estimate
+used to run with no limit at all; it is now capped at 4\,GiB, with a note
+pointing to \texttt{-{}-mem}, and the node still lowers that to what it can
+spare.
 
 \textbf{A memory ceiling for the daemon.} Per-job limits covered only sandboxed
 jobs; parallel chunks run in warm worker processes in the daemon's own cgroup,
@@ -1180,9 +1254,12 @@ and a pool benchmark on a development machine once drove it into a global
 out-of-memory condition in which the kernel killed an unrelated process.
 \texttt{pipedpeer start} therefore launches the daemon in a user
 \texttt{systemd} scope with a memory ceiling of half the machine and swap
-refused, where a user \texttt{systemd} is available; a daemon without one, such
-as one in a container, has no enforced ceiling and relies on its admission
-budget alone. A softer throttling limit was rejected on measurement: a 3\,GiB
+refused, where a user \texttt{systemd} is available. A daemon without one, such
+as one in a container, runs a watchdog instead: every second it sums the memory
+of the daemon's children and, past half the machine or the configured ceiling,
+kills the largest child and logs it, never the daemon. It stands down where a
+cgroup already sets a limit, and an allocation fast enough to outrun a
+one-second poll is not caught. A softer throttling limit was rejected on measurement: a 3\,GiB
 allocation under a 1\,GiB soft limit stalled at 998\,MiB with 7,381 throttling
 events and no progress for minutes, which is worse than a failed job. Daemons on
 one machine, recognised by the kernel's boot identifier, subtract one another's
@@ -1210,6 +1287,49 @@ during the run are returned, with deletions carried in a manifest, so a job
 cannot overwrite the submitter's own sources. On extraction the submitter
 refuses any path that escapes its directory, and the worker skips such paths in
 an incoming workspace.
+
+\textbf{Output as it is written.} The daemon used to split a job's output into
+lines, so a progress bar that redraws one line with a carriage return showed
+only its final state. It now forwards each read of up to 4\,KB unchanged,
+carrying an incomplete trailing UTF-8 character into the next chunk, and the
+submitter prints the bytes as they arrive, so a progress bar on a remote node
+animates on the submitter's terminal.
+
+\textbf{Stopping a job.} Until October nothing could stop a running job: the
+daemon never watched its client, and an interrupt left the script, its parallel
+chunks on peers and every training rank running. An interrupt, a termination
+signal or a closed terminal now makes the client send one cancel frame on the
+execution channel. The daemon signals the job's process group, or asks
+\texttt{crun} to, and kills it two seconds later if it is still alive; the final
+frame records the cancellation. The cancel reaches remote runs, \texttt{map} and
+every training rank. Chunks that a killed script had asked for stop as well:
+each carries its request's context, so when the request ends the local workers
+are killed by process group and forwards to peers are dropped, with nothing
+re-run. The coordinator records the lease as cancelled and does not retry. A
+connection that ends \emph{without} a cancel frame --- a crash, a lost network,
+a detach --- never kills the job, which is what background mode builds on. In
+the rehearsal, peers stopped \textbf{TODO-NUM}\,s after the interrupt.
+% from rehearsal: R5 Ctrl+C mid-Pool, seconds until peers' /v1/pool/stats stop growing
+
+\textbf{Background mode.} The daemon keeps every frame of a job's output in a
+log in the job's directory, in the order a live client saw it. A detach flag,
+or the suspend key during a foreground run, closes the channel normally without
+a cancel frame; the client prints the job's short identifier and the command to
+reattach, and the prompt returns. \texttt{pipedpeer attach} replays the log,
+follows live without gaps or repeats, downloads the results at the end and
+prints the run summary; an interrupt during attach cancels the job. Two
+invariants make this safe. A lease follows its job: the execution request
+carries the lease identifier, and the sweeper keeps a lease bound to a running
+job past its expiry without renewals, because a detached or crashed submitter
+renews nothing, so a node's admission never thinks a busy slot free. And a
+detached job's directory is pruned 24 hours after it ends, while its output log
+is capped at 50\,MB, keeping its newest half behind a note of what was dropped
+and never the final frame, so a job that prints without end cannot fill a disk.
+A job still marked running when its daemon starts is failed with a final frame
+saying the daemon restarted, so an attach ends rather than waits. A remote job
+survives its submitter vanishing and can be attached when the submitter
+returns; a parallel script cannot, because it runs on the submitter. Detach is
+offered for single runs, not for training rings or \texttt{map}.
 
 \section{Transparent Interception}
 \label{sec:intercept}
@@ -1366,6 +1486,33 @@ more synchronisation time than computation. Throttling one rank from 8 CPUs to 1
 and back moved the shares from 64:36 to 84:16 and then to 70:30. A round that a
 straggler has not joined completes without it after 45 seconds.
 
+\textbf{When a rank dies.} Until October one failed rank failed the whole run,
+although the round already closed without it. The client now prints which rank
+died and on which host, tells the lead daemon, which stops waiting for that rank
+and finishes any round held on it, and the survivors take new shares at the next
+epoch boundary. The run fails only if no rank finishes or the user interrupts
+it, and the error names the real rank rather than a loop count. Samples are
+assigned to ranks by a weighted rendezvous hash \cite{thaler1998rendezvous}
+rather than the hash-modulo routing of the parallel map, which would move most
+samples when one rank left; the rendezvous hash keeps each survivor's share
+exact and over 95\% of its samples in place. Losing rank 0's machine still ends
+the run, because its daemon holds the synchronisation, and a script that slices
+its own tensors instead of using a data loader is not re-spread.
+
+\textbf{When a machine comes back.} A rank whose machine returns, or a new
+eligible node, joins the running ring at the next epoch boundary instead of
+sitting idle. The client watches the nodes and starts a rank there; the joiner
+skips ahead with empty passes over its data loader, loads the lead's model and
+optimiser snapshot through the lead daemon, and the shim's world size and
+rendezvous-hash shards grow to include it, so about $1/n$ of the data moves. The
+daemon's averaging group grows with it. Only data-loader scripts can grow; a
+script that slices its own tensors gets one line saying so. The refit now runs
+once per synchronisation and reaches every rank, where it used to hand new
+shares to one rank per cadence. Losing rank 0's machine still ends the run. In
+the rehearsal a returning rank was training again \textbf{TODO-NUM}\,s after its
+node came back.
+% from rehearsal: V2 two-container GPU lab, seconds from node healthy to the rejoined rank's first sync
+
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_4.10_ddp.png}}
@@ -1441,7 +1588,8 @@ decomposition, two orders of magnitude slower locally, does ship.
 \label{sec:ft}
 
 The invariant is that using the cluster is never worse than not using it. Five
-independent layers enforce it.
+independent layers enforce it for parallel work; a training ring that loses a
+rank continues on the survivors (Section~\ref{sec:intercept}).
 
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
   \item \textbf{The race.} Chunks are dealt alternately to the local side and the
@@ -1458,7 +1606,8 @@ independent layers enforce it.
   \item \textbf{Worker respawn.} A dead warm worker is restarted, falling back to
   a one-shot process if that fails.
   \item \textbf{Rescheduling.} A failed job is placed again with backoff doubling
-  from 2 seconds to a 2 minute ceiling. Tasks are never dropped.
+  from 2 seconds to a 2 minute ceiling. Tasks are never dropped; a cancelled
+  one is not retried.
 \end{enumerate}
 
 \begin{figure}[H]
@@ -1487,6 +1636,51 @@ The historical tier closes a feedback loop. The worker samples the job's process
 tree while it runs and records the peak, and that measurement sizes the next
 run's admission request.
 
+\section{Seeing What the Cluster Does}
+\label{sec:observe}
+
+Most of what a daemon did was visible only in its log. The demonstration work of
+October made it visible without adding a daemon endpoint beyond the two for
+background mode.
+
+\textbf{An events feed.} \texttt{pipedpeer events} prints, in plain language,
+what this machine's daemon has done: peers joining and leaving, links made and
+the reason a peer has no path, leases, jobs started, finished and cancelled,
+environments sent and imported, keys trusted, and parallel work received and
+forwarded. Node identifiers are replaced by host names, repeated lines are
+collapsed, and a follow mode prints events as they happen. It reads the daemon's
+log, which mixes three formats from two logging libraries, with the project's
+own parser; the daemon gained one log line for each event that had none, and its
+log times now carry seconds. The feed is per machine: a sender sees what it sent
+and to whom, and a receiver who sent what.
+
+\textbf{Load on screen.} Each node's heartbeat always carried its load; the
+node table and the terminal dashboard now show cores and CPU use, free memory,
+and the GPU's name, utilisation and memory, and the dashboard adds the last few
+events and a status line. A peer with no direct path is listed under the table
+with its reason, even when no peer is reachable. Joining redraws one line with
+the time left and the peers found, prints events above it, and on timeout lists
+the unreachable peers with three hints.
+
+\textbf{A real dry run.} The check-only flag used to take a lease and cancel it.
+It now builds the environment where Nix is present, lists imports with no
+package, names the parallel calls in the source that can spread (a regular
+expression over the script, since a Python parser would need a Python on the
+submitter), and reports the memory estimate, the GPU and ring choice, where the
+job would go and how much of its closure that node holds, ending ready or not
+ready with the reasons. Without Nix the build is reported as skipped, not
+failed.
+
+\textbf{A run summary.} Every run except a detached one ends with at most eight
+lines: where it ran, the environment build time, what happened to the closure
+(already present, a partial send, or a full or cold send with size and time),
+the script's time and peak memory, how its items spread across machines, the
+files that came back, and the total, or the moment it was cancelled. The spread
+comes from a receipt the shim prints on its error stream at exit, with items
+counted by where they ran; the client hides that line and parses it. The
+receipt now also counts the items the executing machine ran itself, including a
+chunk it re-ran after a peer failed.
+
 \section{Test Workloads}
 \label{sec:workloads}
 
@@ -1502,6 +1696,19 @@ distributed training, matrix multiplication decisions, closure transfer and
 interception start-up; a cross-network acceptance script checks that peers on
 different networks link directly; and two scripts audit the tests themselves
 (Section~\ref{sec:res-tests}).
+
+Three rigs were added in October. A NAT lab places each node on its own private
+network behind a router container --- two cone and two symmetric translators ---
+with the introducer on a public network, and asserts that cone pairs punch and
+take work, that a cone--symmetric pair links by the birthday search, that the
+symmetric pair is reported unreachable with its reason, and that a multi-user
+Nix node set up once takes work from a node that joins later without a prompt.
+A venue-shaped lab puts containers on one bridge network as a college LAN, with
+the host's own daemon as the GPU machine and introducer and one container on
+multi-user Nix standing in for the lab's Ubuntu machines; a two-container lab
+shares the host's one GPU between two nodes for the training ring. One script
+combines every kind of intercepted work, and five scripts written the way a
+student would write them stand in for code the system has never seen.
 
 % ============================================================
 \chapter{Results and Discussion}
@@ -1531,6 +1738,13 @@ it comes from. Raw output for each is kept in the project's
   by hand between 26 and 29 August 2026 and recorded in the commit message of the
   change each one justified. They are quoted verbatim, with the commit, in the
   raw directory. They were not repeated for this report.
+  \item \textbf{12 October 2026 runs.} On a second host (Fedora~44, 16
+  hardware threads, an RTX~3060 laptop GPU): the re-run of the idle
+  interception measurement at commit \texttt{08ce1d4}, the test suite after the
+  demonstration round, and the rehearsal of the demonstration in the
+  venue-shaped container lab and a two-container GPU lab at commit
+  \textbf{TODO-NUM}. Labelled as such.
+  % from rehearsal: the commit the V1/V2 verifier built
 \end{itemize}
 
 \textbf{One caveat governs the laboratory results.} All three workers are
@@ -1568,7 +1782,18 @@ Skipped & 2   & integration tests that need an explicit opt-in flag \\
 The same suite on the same host \emph{without} torch installed gave 607 passed,
 3 failed and 7 skipped. The three failures are tests of the weighted training
 sampler that raise when torch is missing rather than skipping; this is recorded
-as a defect of the tests rather than of the code they test.
+as a defect of the tests rather than of the code they test; they now skip.
+
+After the October rounds (the leftover fixes and the demonstration work), the
+same suite gave \textbf{TODO-NUM} passed, \textbf{TODO-NUM} failed and
+\textbf{TODO-NUM} skipped across \textbf{TODO-NUM} packages.
+% from rehearsal: verifier's final go test -v -count=1 ./... at the verified commit
+New tests cover, among others, the hello's binding to its session, the
+secret going only to hosts that prove it, a cancel frame ending a running job
+within three seconds, a detached job running to completion with every output
+frame logged, attach replaying a running job with no duplicates, a job-bound
+lease outliving its expiry while the job runs, a GPU-less submitter left out of
+a GPU ring, and an import followed through a helper module.
 
 Two further checks were run, both of which exist because a green test suite had
 previously been misleading in this project. The first, \textbf{the skip check},
@@ -1677,6 +1902,32 @@ magnitude larger; they are recorded as a defect, not as variation. The idle cost
 of interception is therefore not measured by this table; the start-up
 measurement below is the direct evidence for it. (August's version of this
 harness on the other host gave 0.85\,s disabled against 0.93\,s enabled.)
+
+The measurement was repeated on 12 October with a workload small enough that
+the cost model declines it: a 16-item parallel map whose tail is 0.01\,s of work
+against a 0.5\,s dispatch floor. The harness now fails any run whose receipt
+shows a dispatched item, and a forced run of the same workload does dispatch,
+so the decline is the cost model's choice and not a dead cluster.
+
+\begin{table}[H]
+\centering
+\caption{Whole-job time of a declined 16-item parallel map (12 October 2026,
+second host, five runs each)}
+\label{tab:shimidle}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{4.2cm} C{1.8cm} C{3.4cm} X}
+\toprule
+\textbf{Configuration} & \textbf{Median} & \textbf{Range} & \textbf{Notes} \\
+\midrule
+Interception disabled & 0.678\,s & 0.671 -- 0.852\,s & \\
+Interception enabled  & 0.796\,s & 0.747 -- 0.797\,s & plus one cold first run of 7.03\,s; every receipt shows nothing dispatched \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Interception that declines therefore costs about 0.12\,s per job: the
+measurement of the head of the map plus the decision.
 
 Interpreter start-up for a job that imports nothing heavy is measured directly.
 
@@ -1846,7 +2097,67 @@ Mutations in the test audit & 95, all caught \\
 \end{table}
 
 The August figure of 24,679 lines counted test files together with source; on
-that basis the October total is 55,149 lines.
+that basis the October total is 55,149 lines. After the 12 October rounds the
+same counts are \textbf{TODO-NUM} lines of source, \textbf{TODO-NUM} lines of
+tests and \textbf{TODO-NUM} tests run.
+% from rehearsal: line counts with the same command as the table, at the verified commit; tests from the verifier's final go test -v
+
+\section{Rehearsing the Demonstration}
+\label{sec:res-rehearsal}
+
+Before the demonstration in a college laboratory, the whole of it was rehearsed
+on one laptop: the venue-shaped container lab for the processor steps, and two
+containers sharing the laptop's one GPU for the GPU step and the training ring.
+The containers share one processor, so these figures show what the steps cost
+and that each works, not speedup. A cold run is the first ever on fresh
+containers; a cached run follows it.
+
+\begin{table}[H]
+\centering
+\caption{Demonstration steps, first run and cached (12 October 2026, container
+labs on one laptop)}
+\label{tab:rehearsal}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{X C{2.4cm} C{2.4cm}}
+\toprule
+\textbf{Step} & \textbf{Cold} & \textbf{Cached} \\
+\midrule
+Live join, until connected & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Headline parallel map & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Map over a lambda, \texttt{-{}-cold} then cached & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+GPU job submitted from a GPU-less node & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Two-rank GPU ring on one shared GPU & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Combined script & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Five student-style scripts & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Unseen script, without and with common packages & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Every script at once & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+% from rehearsal: V1 evidence summary for the processor rows, V2 for the GPU and ring rows
+
+\begin{table}[H]
+\centering
+\caption{Failure drills in the rehearsal}
+\label{tab:drills}
+\renewcommand{\arraystretch}{1.3}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{X C{4.4cm}}
+\toprule
+\textbf{Drill} & \textbf{Result} \\
+\midrule
+Interrupt during a parallel map: time until peers stop & \textbf{TODO-NUM} \\
+Terminal closed during a run & \textbf{TODO-NUM} \\
+Detach, then attach while running and after it finished & \textbf{TODO-NUM} \\
+Submitter's network removed during a remote job, then attach & \textbf{TODO-NUM} \\
+A node stopped during a run & \textbf{TODO-NUM} \\
+A training rank killed during a run & \textbf{TODO-NUM} \\
+A training rank's machine back during a run & \textbf{TODO-NUM} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+% from rehearsal: V1 R5 drills; V2 for the two ring rows
 
 \section{Comparative Analysis}
 \label{sec:comparison}
@@ -1928,7 +2239,8 @@ Fault injection that actually distributes & the October run did not distribute (
 Hole-punch success rate across many networks & each link was observed individually; no survey of NAT types was made \\
 Two GPUs in one machine & no available machine has a second usable GPU \\
 Peer discovery latency & containers share the host's loopback, so the figure would not be meaningful \\
-The seven demonstration workloads end to end & not run for this report; the training workloads pull multi-gigabyte CUDA environments \\
+The seven demonstration workloads end to end & not run for the October pass; rehearsed in containers on 12 October (Section~\ref{sec:res-rehearsal}) \\
+Speedup, wireless networks, two physical GPUs and a college network's rules & the rehearsal ran in containers on one laptop; these come only from the venue \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -1997,11 +2309,23 @@ first cluster with a GPU.
   packaging and their own interception layer.
   \item \textbf{Linux workers.} The sandbox, cgroups and the store are
   Linux-specific. The private-store seed is built for x86\_64 only.
-  \item \textbf{The submitter must survive the job.} It holds the lease and
-  receives the output stream.
-  \item \textbf{Silent dependency omission.} A third-party import absent from the
-  resolver's 35-entry table is dropped from the environment without a diagnostic
-  (Section~\ref{sec:env}). This is the most user-visible sharp edge.
+  \item \textbf{A parallel script needs its submitter.} A remote job survives its
+  submitter vanishing and can be attached later (Section~\ref{sec:sandbox}), but
+  a script whose parallel work is spread runs on the submitter, so that machine
+  must survive the job.
+  \item \textbf{A training ring needs rank 0's machine.} A ring continues
+  without any other rank, but rank 0's daemon holds the synchronisation, and
+  re-spreading a dead rank's data needs a data loader.
+  \item \textbf{Dependencies outside the package set.} An import that neither the
+  table nor the package set knows is reported before the run rather than dropped
+  silently (Section~\ref{sec:env}), but the job still needs the user to name a
+  package for it.
+  \item \textbf{Interception gaps.} Only the \texttt{map} of a process-pool
+  executor is intercepted, not \texttt{submit}; grouped aggregation on
+  categorical keys is never split; and numerical work under 32\,MB never leaves
+  the node, by design.
+  \item \textbf{A per-machine view.} The events feed shows one machine's
+  daemon; there is no cluster-wide view.
   \item \textbf{A partial sandbox.} Memory is limited per job, but the job runs as
   user 0 inside the container with the host's network, without a seccomp filter,
   and isolation is skipped with a warning on a node lacking \texttt{crun} or user
@@ -2049,14 +2373,27 @@ corrected, since this report documents the system as it stands:
   for the developers in the repository's documentation notes.
 \end{enumerate}
 
+Most of these have since been fixed. The build now runs outside the user's
+repository; the three tests skip without torch; the fresh-laboratory failure was
+traced to every worker refusing the broadcast closure for want of a trusted key
+and fixed as Section~\ref{sec:trust} describes; and the compressed-item flag, the
+reply framing, the receipt's count of locally run items, the forwarder removal,
+the secret sent to subnet probes and the unprivileged firewall commands were
+each fixed in a commit of their own. The early-closed output stream was the
+daemon reaping a job before its output readers had drained the pipes; it now
+waits for them.
+
 \section{Security}
 \label{sec:security}
 
 The previous version of this report stated that PipedPeer had no
 authentication, no authorisation and no transport encryption. That is no longer
 true, and Section~\ref{sec:trust} describes what replaced it: a shared secret on
-every route, pinned TLS on the daemon port, QUIC links authenticated by node
-keys across networks, and closures signed by the node that built them.
+every route, sent only to hosts that prove they hold it; pinned TLS on the
+daemon port; QUIC links across networks authenticated by node keys, with each
+hello bound to its session and the secret; and closures signed by the node that
+built them, whose keys reach system Nix through a root-owned helper that can do
+nothing else.
 
 What remains is still significant and is stated plainly. The secret is optional,
 and a daemon without one accepts any request that reaches it, which means
@@ -2065,9 +2402,10 @@ holder of it can run code on every node; there is no per-user authority, and
 jobs themselves can read the secret. TLS on a local network is trust on first
 use and can be downgraded to plain text by an attacker who can break the
 handshake. The list of keys trusted to sign closures is not bound to an
-authenticated identity, some import paths do not check signatures at all, and
-the optional registry is unauthenticated. The repository's own security
-statement still describes the earlier design and has not been updated. The
+authenticated identity, and with the key helper any holder of the secret can
+get signed paths trusted on every machine; the submitter's own upload is
+imported without a signature check; and the optional registry is
+unauthenticated. The repository's security statement describes these limits. The
 system is therefore suitable for machines whose owners trust one another, joined
 over networks they do not need to trust, which is a substantial change from
 before; it is not suitable for a cluster of mutually untrusting participants.
@@ -2088,8 +2426,12 @@ before; it is not suitable for a cluster of mutually untrusting participants.
   \item \textbf{Topology-aware placement.} Whole jobs are placed on scalar
   metrics, blind to network distance; link cost is measured only where work is
   divided. A graph-structured representation \cite{zhao2023} would address this.
-  \item \textbf{Submitter fault tolerance}, allowing a submitter to disconnect
-  and collect results later.
+  \item \textbf{Submitter fault tolerance for parallel scripts.} A remote job
+  can already be detached and collected later; a script whose parallel work is
+  spread cannot yet outlive its submitter, and a training ring cannot yet
+  outlive rank 0's machine.
+  \item \textbf{A cluster-wide view}, merging every machine's events, and a web
+  page for the same statistics.
   \item \textbf{Additional runtimes} beyond Python.
   \item \textbf{A controlled multi-machine evaluation}, repeating the hand
   measurements of Chapter~\ref{chap:results} as a scripted experiment across
@@ -2240,6 +2582,10 @@ arXiv:2312.02471, 2023.
 \bibitem{bernstein2012ed25519} D.~J.~Bernstein, N.~Duif, T.~Lange, P.~Schwabe, and B.-Y.~Yang, ``High-speed high-security signatures,'' \textit{J. Cryptographic Engineering}, vol.~2, no.~2, pp.~77--89, 2012.
 
 \bibitem{rfc8878} Y.~Collet and M.~Kucherawy, ``Zstandard compression and the `application/zstd' media type,'' RFC~8878, Internet Engineering Task Force, Feb. 2021.
+
+\bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Networking}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
+
+\bibitem{rfc5705} E.~Rescorla, ``Keying material exporters for Transport Layer Security (TLS),'' RFC~5705, Internet Engineering Task Force, Mar. 2010.
 
 \end{thebibliography}
 
