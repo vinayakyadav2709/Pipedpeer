@@ -14,11 +14,13 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gorilla/websocket"
@@ -166,6 +168,11 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 	// is refused and the job fails with a bare "bad handshake".
 	var wsHeaders http.Header
 	if tok := authtoken.Current(); tok != "" {
+		// Same rule as the transport: the token goes only to a host that has
+		// shown it already holds it.
+		if err := authtoken.Prove(ctx, net.JoinHostPort(host, strconv.Itoa(port))); err != nil {
+			return 0, "", "", err
+		}
 		wsHeaders = http.Header{authtoken.Header: []string{tok}}
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, wsHeaders)
