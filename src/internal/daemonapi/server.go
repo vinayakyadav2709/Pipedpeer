@@ -74,6 +74,10 @@ type Lease struct {
 	// is held for RunningLeaseTTL past this, so a long job that keeps
 	// renewing is never reaped while a submitter that died releases its slot.
 	RenewedAt time.Time `json:"renewed_at"`
+	// JobID is the job running under this lease (set by bindLease when the
+	// job starts). While that job lives the sweeper keeps the lease without
+	// renewals, so a detached or crashed submitter cannot free a busy slot.
+	JobID string `json:"job_id,omitempty"`
 }
 
 // Server is the daemon API server that manages job leases and resource reservations.
@@ -421,9 +425,14 @@ func (s *Server) StartSweeper() {
 // before the sweeper removes them.
 const JobRetention = 7 * 24 * time.Hour
 
+// DetachedJobRetention is how long a job that was detached from keeps its
+// dir (output log + results for `pipedpeer attach`) after it finished.
+const DetachedJobRetention = 24 * time.Hour
+
 // PruneCompletedJobDirs removes job directories (and their in-memory records)
 // not touched within olderThan. Dir names are job IDs, so the jobs map can be
-// reconciled by name.
+// reconciled by name. A finished detached job goes DetachedJobRetention after
+// it finished instead, whatever its dir's mtime.
 func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(s.jobDir)
 	if err != nil {
@@ -438,12 +447,27 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 		if !e.IsDir() {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
-			continue
+		s.jobsMu.Lock()
+		job := s.jobs[e.Name()]
+		detachedDone := job != nil && job.Detached && !job.FinishedAt.IsZero()
+		var finished time.Time
+		if detachedDone {
+			finished = job.FinishedAt
 		}
-		if !info.ModTime().Before(cutoff) {
-			continue
+		s.jobsMu.Unlock()
+		if detachedDone {
+			if time.Since(finished) < DetachedJobRetention {
+				continue
+			}
+		} else {
+			info, err := e.Info()
+			if err != nil {
+				log.Warn().Err(err).Str("dir", e.Name()).Msg("cannot stat job dir; not pruning it")
+				continue
+			}
+			if !info.ModTime().Before(cutoff) {
+				continue
+			}
 		}
 		if err := os.RemoveAll(filepath.Join(s.jobDir, e.Name())); err != nil {
 			return removed, err
@@ -802,20 +826,32 @@ func (s *Server) persist() {
 // stopped renewing, so a genuinely long job is never cut off mid-run.
 func (s *Server) sweepExpired() {
 	now := time.Now()
+	// Which bound jobs are still alive, read before s.mu so the two locks are
+	// never held together.
+	alive := s.liveJobIDs()
+	type expired struct{ id, state string }
+	var gone []expired
 	s.mu.Lock()
 	for id, lease := range s.leases {
 		switch lease.State {
 		case LeaseReserved:
 			if now.After(lease.ExpiresAt.Add(s.gracePeriod)) {
 				delete(s.leases, id)
+				gone = append(gone, expired{id, string(lease.State)})
 			}
 		case LeaseRunning:
+			// A lease follows its job: while the job runs, no renewal is
+			// needed (the submitter may have detached or died).
+			if lease.JobID != "" && alive[lease.JobID] {
+				continue
+			}
 			last := lease.RenewedAt
 			if last.IsZero() {
 				last = lease.CreatedAt
 			}
 			if s.runningLeaseTTL > 0 && now.Sub(last) > s.runningLeaseTTL {
 				delete(s.leases, id)
+				gone = append(gone, expired{id, string(lease.State)})
 			}
 		}
 	}
@@ -824,6 +860,69 @@ func (s *Server) sweepExpired() {
 	// itself.
 	s.mu.Unlock()
 	s.persist()
+	for _, g := range gone {
+		log.Warn().Str("lease", g.id).Str("state", g.state).Msg("lease expired")
+	}
+}
+
+// liveJobIDs is the set of jobs that have not finished yet (uploaded,
+// importing or running).
+func (s *Server) liveJobIDs() map[string]bool {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	alive := make(map[string]bool)
+	for id, j := range s.jobs {
+		switch j.Status {
+		case "done", "failed", "cancelled":
+		default:
+			alive[id] = true
+		}
+	}
+	return alive
+}
+
+// bindLease ties a lease to the job running under it, so the lease lives
+// as long as the job (see sweepExpired) and ends with it (releaseJobLease).
+// An unknown lease is logged and ignored: the job still runs.
+func (s *Server) bindLease(leaseID, jobID string) {
+	if leaseID == "" {
+		return
+	}
+	s.mu.Lock()
+	lease, ok := s.leases[leaseID]
+	if ok {
+		lease.JobID = jobID
+	}
+	s.mu.Unlock()
+	if !ok {
+		log.Warn().Str("lease", leaseID).Str("job", jobID).Msg("job names a lease this node does not hold; running it unbound")
+		return
+	}
+	s.persist()
+}
+
+// releaseJobLease frees the lease bound to jobID when the job ends. A lease
+// the submitter already completed is simply gone; nothing is logged then.
+func (s *Server) releaseJobLease(jobID, status string) {
+	if jobID == "" {
+		return
+	}
+	var released []string
+	s.mu.Lock()
+	for id, l := range s.leases {
+		if l.JobID == jobID {
+			delete(s.leases, id)
+			released = append(released, id)
+		}
+	}
+	s.mu.Unlock()
+	if len(released) == 0 {
+		return
+	}
+	s.persist()
+	for _, id := range released {
+		log.Info().Str("lease", id).Str("status", status).Msg("lease released")
+	}
 }
 
 // SetRunningLeaseTTL overrides how long a running lease survives without a
@@ -1110,6 +1209,8 @@ func (s *Server) buildRouter() {
 	r.Post("/v1/jobs/upload", s.handleJobUpload)
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
+	r.Get("/v1/jobs/{id}/attach", s.handleJobAttach)
+	r.Get("/v1/jobs/{id}/status", s.handleJobStatus)
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
@@ -1616,8 +1717,14 @@ func (s *Server) pollAllNodes() {
 	wg.Wait()
 
 	s.peersMu.Lock()
+	prev := s.peerHealths
 	s.peerHealths = finalHealths
 	s.peersMu.Unlock()
+	hostnames := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		hostnames[n.NodeID] = n.Hostname
+	}
+	logPeerChanges(prev, finalHealths, hostnames)
 
 	// 4. Forget auto-discovered nodes that have been gone a while. Manual
 	//    entries survive — see nodestore.PruneStale.
@@ -1626,6 +1733,30 @@ func (s *Server) pollAllNodes() {
 	// 5. Keep the list of signing keys this cluster uses current, so nix can
 	//    require a signature and still accept peer closures.
 	s.refreshTrustedKeys()
+}
+
+// logPeerChanges writes "peer up" for a peer healthy now and not before, and
+// "peer down" for one healthy before and not now (or gone from the table), so
+// `pipedpeer events` can show joins and leaves on the discovery path too.
+func logPeerChanges(prev, next map[string]*PeerHealth, hostnames map[string]string) {
+	healthy := func(m map[string]*PeerHealth, at string) bool {
+		ph := m[at]
+		return ph != nil && ph.Status == "healthy"
+	}
+	emit := func(msg, at string, ph *PeerHealth) {
+		log.Info().Str("peer", ph.NodeID).Str("host", hostnames[ph.NodeID]).
+			Str("at", at).Str("source", ph.Source).Msg(msg)
+	}
+	for at, ph := range next {
+		if ph != nil && healthy(next, at) && !healthy(prev, at) {
+			emit("peer up", at, ph)
+		}
+	}
+	for at, ph := range prev {
+		if ph != nil && healthy(prev, at) && !healthy(next, at) {
+			emit("peer down", at, ph)
+		}
+	}
 }
 
 // refreshTrustedKeys records which keys this cluster signs store paths with.
@@ -1974,6 +2105,8 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	s.leases[leaseID] = lease
 	s.mu.Unlock()
 	s.persist()
+	log.Info().Str("lease", leaseID).Str("job", req.JobName).Str("submitter", req.SubmitterNode).
+		Int64("mem", req.RequiredMemBytes).Msg("lease granted")
 
 	return acceptResponse{
 		Accepted:  true,
@@ -2057,6 +2190,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 		delete(s.leases, req.LeaseID)
 		s.mu.Unlock()
 		s.persist()
+		log.Warn().Str("lease", req.LeaseID).Str("state", string(LeaseReserved)).Msg("lease expired")
 		return commitResponse{Committed: false, NodeID: s.nodeID, Reason: "lease expired"}, http.StatusGone
 	}
 
@@ -2108,11 +2242,15 @@ func (s *Server) processComplete(req completeRequest) {
 			}
 		}
 	}
+	_, found := s.leases[leaseID]
 	if leaseID != "" {
 		delete(s.leases, leaseID)
 	}
 	s.mu.Unlock()
 	s.persist()
+	if found {
+		log.Info().Str("lease", leaseID).Str("status", req.Status).Msg("lease released")
+	}
 }
 
 func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
@@ -2132,6 +2270,7 @@ func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
 	delete(s.leases, req.LeaseID)
 	s.mu.Unlock()
 	s.persist()
+	log.Info().Str("lease", req.LeaseID).Str("status", "cancelled").Msg("lease released")
 
 	return map[string]string{"status": "cancelled"}, http.StatusOK
 }
