@@ -33,6 +33,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
+	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
@@ -151,10 +152,10 @@ type Server struct {
 	selfPort int
 	selfCaps map[string]string
 
-	// Cluster keys already checked against system nix, so each untrusted
-	// one is warned about once (see warnUntrustedKeys).
-	trustMu      sync.Mutex
-	trustChecked map[string]bool
+	// When each cluster key is next checked against system nix (see
+	// warnUntrustedKeys).
+	trustMu   sync.Mutex
+	trustNext map[string]time.Time
 }
 
 // healthResponse is the payload of GET /health. It carries the node's full
@@ -1678,39 +1679,70 @@ func (s *Server) refreshTrustedKeys() {
 	s.warnUntrustedKeys(trusted)
 }
 
-// systemUntrusted is nixsign.SystemUntrusted, replaced in tests.
-var systemUntrusted = nixsign.SystemUntrusted
+// Seams for tests: what system nix trusts, and the root-owned key helper.
+var (
+	systemUntrusted = nixsign.SystemUntrusted
+	helperInstalled = nixtrust.Installed
+	helperAdd       = nixtrust.Add
+)
 
-// warnUntrustedKeys logs, once per key, a cluster key that system nix will
-// refuse: a multi-user nix-daemon ignores the keys narpack.Import passes, so
-// closures signed by it fail here until nix.conf lists it. The daemon cannot
-// fix that itself (it needs sudo), so it names the command that does. Only
-// keys not seen before are checked, so a steady cluster runs no nix command
-// per poll. Returns the keys it warned about.
+// trustRetry is how long a key system nix refused waits before the daemon
+// tries it again, so a missing helper or a broken sudo rule costs one nix
+// command and one warning per key per interval, not per poll.
+const trustRetry = 15 * time.Minute
+
+// trustSettled marks a key system nix trusts: never checked again.
+var trustSettled = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// warnUntrustedKeys makes system nix trust the cluster keys it would refuse:
+// a multi-user nix-daemon ignores the keys narpack.Import passes, so closures
+// signed by a key fail here until nix.conf lists it. Where setup installed the
+// root-owned key helper (ADR-0018) the daemon adds the key through it with
+// `sudo -n`, no prompt; otherwise, or if that fails, it warns and names
+// `pipedpeer trust`, and tries again after trustRetry. Only keys due a check
+// are looked at, so a steady cluster runs no nix command per poll. Returns the
+// keys it warned about.
 func (s *Server) warnUntrustedKeys(keys []string) []string {
 	s.trustMu.Lock()
 	defer s.trustMu.Unlock()
-	if s.trustChecked == nil {
-		s.trustChecked = map[string]bool{}
+	if s.trustNext == nil {
+		s.trustNext = map[string]time.Time{}
 	}
-	var fresh []string
+	now := time.Now()
+	var due []string
 	for _, k := range keys {
-		if !s.trustChecked[k] {
-			fresh = append(fresh, k)
+		if next, seen := s.trustNext[k]; !seen || !now.Before(next) {
+			due = append(due, k)
 		}
 	}
-	if len(fresh) == 0 {
+	if len(due) == 0 {
 		return nil
 	}
-	missing, _, err := systemUntrusted(fresh)
+	missing, _, err := systemUntrusted(due)
 	if err != nil {
-		log.Warn().Err(err).Int("keys", len(fresh)).
+		log.Warn().Err(err).Int("keys", len(due)).
 			Msg("could not check which cluster keys system nix trusts; peer closures may be refused here (fix: pipedpeer trust)")
+		for _, k := range due {
+			s.trustNext[k] = now.Add(trustRetry)
+		}
+		return nil
 	}
-	for _, k := range fresh {
-		s.trustChecked[k] = true
+	for _, k := range due {
+		s.trustNext[k] = trustSettled
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if helperInstalled() {
+		err := helperAdd(missing)
+		if err == nil {
+			log.Info().Strs("keys", missing).Msg("system nix now trusts these cluster keys (added through the pipedpeer key helper)")
+			return nil
+		}
+		log.Warn().Err(err).Strs("keys", missing).Msg("the pipedpeer key helper could not add these cluster keys")
 	}
 	for _, k := range missing {
+		s.trustNext[k] = now.Add(trustRetry)
 		log.Warn().Str("key", k).
 			Msg("system nix does not trust this cluster key, so closures it signed are refused here; run `pipedpeer trust` on this machine")
 	}

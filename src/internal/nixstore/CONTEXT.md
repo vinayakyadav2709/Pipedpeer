@@ -38,7 +38,7 @@ A store path plus everything it references; the unit that travels.
 A `/nix` the machine already has, single- or multi-user.
 
 **Private store**:
-A store in the user's data directory bound at `/nix` inside a user namespace, used only when no system store is usable ([ADR-0013](../../../docs/adr/0013-rootless-private-nix-store.md)).
+A store in the user's data directory bound at `/nix` inside a user namespace, used only when no system store is usable. Setup prefers a system nix (an installed one, else the Determinate installer when root is available) and seeds a private store only without root, after a failed install, or with `PIPEDPEER_FORCE_PRIVATE_NIX=1` (`setup.chooseNix`; [ADR-0013](../../../docs/adr/0013-rootless-private-nix-store.md), amended 2026-10-12).
 
 **Seed**:
 Downloading a static nix into a private store.
@@ -63,7 +63,7 @@ Pushing a closure to peers after an upload so pool spill can use them; only peer
 _Avoid_: broadcast (the function name, not the concept)
 
 **Trusted keys**:
-The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`); a multi-user nix-daemon ignores that from an untrusted user, so there setup writes them to nix.conf. Keys that arrive after setup need root again: `pipedpeer join` applies them when peers answer in time, `pipedpeer trust` applies them later, and the daemon warns once per untrusted key (`nixsign.SystemUntrusted`).
+The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`); a multi-user nix-daemon ignores that from an untrusted user, so there they must be in nix.conf. Setup's one sudo installs a root-owned key helper and a NOPASSWD sudoers rule for it; the daemon then adds each new untrusted key through it (`sudo -n`), and warns, naming `pipedpeer trust`, only when that fails (`nixsign.SystemUntrusted`, `nixtrust`, [ADR-0018](../../../docs/adr/0018-root-owned-nix-key-helper.md)). `join` and `trust` install the helper if setup did not.
 
 ## Invariants
 
@@ -82,4 +82,4 @@ The nix public keys of cluster nodes, each proved against the fingerprint it is 
 - Submitter upload and diff: `daemonctl/execution.go` `UploadJob`, `daemonctl/closurediff.go` `seedClosure`.
 - Daemon store routes: `daemonapi/narcache.go` `handleStoreMissing`, `handleStoreCheck`, `handleStoreImport`, `importSignedClosure`; seeding `daemonapi/server.go` `broadcastClosure`, `importStoreOnPeer`; signed path `daemonapi/signedclosure.go` `signedClosureFor`.
 - Archives: `narpack/narpack.go` `Publish`, `Pack`, `Import`; pruning `narpack/prune.go` `Prune`; compression sniffing `tarcodec/`.
-- Signing and trust: `nixsign/nixsign.go` `SignPaths`, `WriteTrustedKeys`; `nixsign/collect.go` `Collect`; `daemonapi/server.go` `refreshTrustedKeys`; setup `setup/setup.go` `trustClusterKeys`; the mode check `nixsign/system.go` `SystemUntrusted`.
+- Signing and trust: `nixsign/nixsign.go` `SignPaths`, `WriteTrustedKeys`; `nixsign/collect.go` `Collect`; `daemonapi/server.go` `refreshTrustedKeys`; setup `setup/setup.go` `trustClusterKeys`, `installHelper`; the mode check `nixsign/system.go` `SystemUntrusted`; the root helper `nixtrust/nixtrust.go` `Main`, `ValidKey`; the daemon's use `daemonapi/server.go` `warnUntrustedKeys`.
