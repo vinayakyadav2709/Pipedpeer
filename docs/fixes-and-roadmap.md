@@ -9,7 +9,7 @@ The work is in phases:
 | Phase | What | Status |
 |---|---|---|
 | 0 | Fix the known issues, demo-breaking ones first | Done: `ad75b4b`, `fad3ce4`, `2c1a49a` |
-| 1 | Per-stage timeline for every job: where the time goes | In progress |
+| 1 | Per-stage timeline for every job: where the time goes | Done |
 | 2 | Placement explanation, shim receipt and cluster stats in the CLI | Planned |
 | 3 | A web page served by the daemon (`/ui`) showing the same data live | Planned |
 | 4 | Benchmarks (local, cold, warm; 1–3 workers), a combined capstone script, and an updated demo flow | Planned |
@@ -127,20 +127,57 @@ cores. A pool job there logs `using 3 workers`, not one per host core.
 
 ## Next phases
 
-### Phase 1: per-stage timeline
+### Phase 1: per-stage timeline (done)
 
-- Every job records when each stage started and how long it took:
-  1. detecting imports
-  2. resolving packages
-  3. generating the flake
-  4. the Nix build
-  5. exporting the closure
-  6. uploading
-  7. execution
-  8. syncing results back
-- `pipedpeer job --id <id> --timeline` prints them as a waterfall.
-- This shows where the 10–14 s of fixed overhead per run goes, and gives the
-  cold versus warm comparison for the demo.
+Every run now records a timeline in its history record (`stages` in
+`metadata.json`). The stages are:
+
+| Stage | Where it runs | What it covers |
+|---|---|---|
+| placement | submitter | How long the coordinator spent finding a node. Only when the coordinator picked one |
+| detect imports, resolve packages, generate flake, nix build, export closure | submitter | Building the environment |
+| upload | submitter → node | Sending the workspace, and the closure if the node lacked it |
+| seed peers | node | The node giving the closure to its own peers before it answers the upload, so pool work can spill to them |
+| closure import | node | Importing the closure into the node's store. Only when it was not there yet |
+| sandbox setup | node | Everything between the request and the script starting |
+| script | node | The script itself |
+| stream + wrap-up | node | What is left of the execution: output streaming and the round trip. Only when it is 50 ms or more |
+| sync results | submitter | Bringing changed files back |
+
+Nodes report their share of the run themselves, in the final message of the
+execution stream. A node running an older version gets a single `execute`
+stage instead.
+
+**Seeing it:**
+
+```bash
+pipedpeer run job.py                        # the run ends with a one-line "Timeline: ..."
+pipedpeer job --last --timeline             # waterfall for the most recent job
+pipedpeer job --id <id> --timeline          # waterfall for any job
+```
+
+Example (a cold run on this machine, with 5 peers discovered):
+
+```
+STAGE             WHERE        START      TIME
+nix build         local         +0ms      3.5s  █████████████
+export closure    local        +3.5s       6ms               █
+upload            e5b24777     +3.5s       1ms               █
+seed peers        e5b24777     +3.5s      6.5s               █████████████████████████
+sandbox setup     e5b24777    +10.0s       1ms                                         █
+script            e5b24777    +10.0s      97ms                                         █
+sync results      local       +10.1s       7ms                                         █
+total                                    10.1s
+```
+
+The same script run again warm took 0.8 s in total (upload 2 ms, no seeding).
+
+**What it found.** The "10–14 s of fixed overhead" in the run sheet is the Nix
+build plus seeding peers, and both are cold-run costs. Seeding is synchronous,
+and it happens even for a script that never uses a pool. Skipping it when the
+script cannot spill would remove most of a cold run's wait. That changes when
+pool work can spill, so it is left as the next optimisation rather than folded
+into this phase.
 
 ### Phase 2: explain and receipt views
 

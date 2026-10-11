@@ -47,6 +47,9 @@ type Record struct {
 	EstimationTier    string `json:"estimation_tier,omitempty"` // "user", "historical", "filesize", "import"
 	// Live stage tracking
 	Stage string `json:"stage,omitempty"` // "building", "exporting", "uploading", "executing"
+	// Stages is the run's timeline: every step, where it ran, and how long
+	// it took, the environment build included.
+	Stages []Stage `json:"stages,omitempty"`
 }
 
 type JobSummary struct {

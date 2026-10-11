@@ -55,6 +55,9 @@ type Options struct {
 	// Resource estimation
 	EstimatedMemBytes int64
 	EstimationTier    string
+	// QueuedAt is when the coordinator started looking for a node, so the
+	// timeline can show placement. Zero when the node was given.
+	QueuedAt time.Time
 }
 
 func Run(opts Options) (runErr error) {
@@ -141,7 +144,17 @@ func RunTask(env *Environment, task Task) (runErr error) {
 	historyRecord.StorePath = env.StorePath
 	_ = jobhistory.SaveRecord(historyDir, historyRecord)
 
+	// The timeline starts with how long the coordinator spent finding a node
+	// (when it did), then the environment build, then this run's own steps.
+	timeline := &jobhistory.Timeline{}
+	if !opts.QueuedAt.IsZero() && len(env.Stages) > 0 {
+		if built, err := time.Parse(time.RFC3339Nano, env.Stages[0].At); err == nil && built.After(opts.QueuedAt) {
+			timeline.Add("placement", "local", opts.QueuedAt, built.Sub(opts.QueuedAt))
+		}
+	}
+	timeline.Stages = append(timeline.Stages, env.Stages...)
 	defer func() {
+		historyRecord.Stages = timeline.Stages
 		_ = jobhistory.Finalize(historyDir, historyRecord, runErr)
 	}()
 	_ = jobhistory.CopyFileTo(historyDir, task.Script, "script.py")
@@ -163,10 +176,27 @@ func RunTask(env *Environment, task Task) (runErr error) {
 	note("      Project root: %s\n", env.ProjectRoot)
 	note("      Script: %s\n", env.ScriptRel)
 
+	node := opts.DaemonHost
+	if opts.TargetID != "" {
+		node = shortNode(opts.TargetID)
+	}
+	uploadStart := time.Now()
 	uploadResp, err := daemonctl.UploadJob(opts.DaemonHost, opts.DaemonPort,
 		env.WorkspaceTar, env.NarPath, env.StorePath, env.ScriptRel, opts.SkipBroadcast)
+	uploadDur := time.Since(uploadStart)
 	if err != nil {
+		timeline.Add("upload", node, uploadStart, uploadDur)
 		return fmt.Errorf("upload failed: %v", err)
+	}
+	// The node answers the upload only after handing the closure to its own
+	// peers, which on a cold cluster is most of the wait.
+	seed := time.Duration(uploadResp.SeedMs) * time.Millisecond
+	if seed > uploadDur {
+		seed = uploadDur
+	}
+	timeline.Add("upload", node, uploadStart, uploadDur-seed)
+	if seed > 0 {
+		timeline.Add("seed peers", node, uploadStart.Add(uploadDur-seed), seed)
 	}
 	note("      Uploaded job %s\n", uploadResp.JobID)
 
@@ -191,19 +221,23 @@ func RunTask(env *Environment, task Task) (runErr error) {
 		MemLimitBytes: memLimitFor(opts.EstimatedMemBytes),
 	}
 
-	peakBytes, stdoutText, stderrText, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
+	execStart := time.Now()
+	res, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
+	addExecStages(timeline, node, execStart, time.Since(execStart), res.Timing)
 	if err != nil {
 		return fmt.Errorf("execution failed: %w", err)
 	}
-	historyRecord.PeakMemBytes = peakBytes
-	_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutText)
-	_ = jobhistory.SaveText(historyDir, "stderr.log", stderrText)
+	historyRecord.PeakMemBytes = res.PeakBytes
+	_ = jobhistory.SaveText(historyDir, "stdout.log", res.Stdout)
+	_ = jobhistory.SaveText(historyDir, "stderr.log", res.Stderr)
 
 	resultsDir := opts.ResultsDir
 	if resultsDir == "" {
 		resultsDir = env.ProjectRoot
 	}
+	endSync := timeline.Begin("sync results", "local")
 	manifest, err := daemonctl.DownloadResults(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, resultsDir)
+	endSync()
 	if err != nil {
 		note("      Warning: results download failed: %v\n", err)
 	} else {
@@ -230,9 +264,34 @@ func RunTask(env *Environment, task Task) (runErr error) {
 
 	if task.StageFmt != "" {
 		fmt.Printf("\n=== Done ===\n")
-		fmt.Printf("History: %s\n", historyDir)
+		fmt.Printf("Timeline: %s (total %s)\n", jobhistory.Summary(timeline.Stages),
+			jobhistory.Total(timeline.Stages).Round(100*time.Millisecond))
+		fmt.Printf("History: %s  (pipedpeer job --id %s --timeline)\n", historyDir, historyRecord.ID)
 	}
 	return nil
+}
+
+// addExecStages splits the execution into the node's own account of it - the
+// closure import, the sandbox setup, the script itself - and whatever is left
+// over, which is the round trip and output streaming. A node too old to
+// report timing gets a single "execute" stage.
+func addExecStages(t *jobhistory.Timeline, node string, start time.Time, total time.Duration, tm *daemonctl.ExecTiming) {
+	if tm == nil {
+		t.Add("execute", node, start, total)
+		return
+	}
+	ms := func(v int64) time.Duration { return time.Duration(v) * time.Millisecond }
+	at := start
+	if tm.ImportMs > 0 {
+		t.Add("closure import", node, at, ms(tm.ImportMs))
+		at = at.Add(ms(tm.ImportMs))
+	}
+	t.Add("sandbox setup", node, at, ms(tm.SetupMs))
+	at = at.Add(ms(tm.SetupMs))
+	t.Add("script", node, at, ms(tm.RunMs))
+	if rest := total - ms(tm.ImportMs+tm.SetupMs+tm.RunMs); rest >= 50*time.Millisecond {
+		t.Add("stream + wrap-up", node, at.Add(ms(tm.RunMs)), rest)
+	}
 }
 
 // memLimitFor turns a memory estimate into a cgroup ceiling.

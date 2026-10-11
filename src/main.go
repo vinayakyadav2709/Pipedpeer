@@ -585,6 +585,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				// the user pinned devices explicitly with --gpu-id.
 				var reservedGPU atomic.Int64
 				reservedGPU.Store(-1)
+				queuedAt := time.Now()
 
 				executor := func(host string, port int, targetNodeID string) error {
 					devices := gpuID
@@ -611,6 +612,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						PlacementSource:   "coordinator",
 						EstimatedMemBytes: estimatedMemBytes,
 						EstimationTier:    estimationTier,
+						QueuedAt:          queuedAt,
 					})
 					if app.IsPermanent(err) {
 						return coordinator.Permanent(err)
@@ -1657,12 +1659,28 @@ func newJobCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, _ := cmd.Flags().GetString("id")
 			withOutput, _ := cmd.Flags().GetBool("output")
+			timeline, _ := cmd.Flags().GetBool("timeline")
+			if last, _ := cmd.Flags().GetBool("last"); last && id == "" {
+				recent, err := jobhistory.List(1)
+				if err != nil {
+					return err
+				}
+				if len(recent) == 0 {
+					return fmt.Errorf("no jobs recorded yet")
+				}
+				id = recent[0].ID
+			}
 			if id == "" {
-				return fmt.Errorf("--id is required")
+				return fmt.Errorf("--id is required (or --last for the most recent job)")
 			}
 			r, dir, err := jobhistory.ReadRecord(id)
 			if err != nil {
 				return err
+			}
+			if timeline {
+				fmt.Printf("job %s  %s  %s\n\n", r.ID, filepath.Base(r.ScriptPath), r.Status)
+				jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
+				return nil
 			}
 			fmt.Printf("id: %s\n", r.ID)
 			fmt.Printf("status: %s\n", r.Status)
@@ -1687,6 +1705,9 @@ func newJobCmd() *cobra.Command {
 			fmt.Printf("unchanged_files: %d\n", r.UnchangedFiles)
 			fmt.Printf("manifest_path: %s\n", r.ManifestPath)
 			fmt.Printf("history_dir: %s\n", dir)
+			if len(r.Stages) > 0 {
+				fmt.Printf("timeline: %s\n", jobhistory.Summary(r.Stages))
+			}
 			if withOutput {
 				stdout, _ := jobhistory.ReadOptionalText(dir, "stdout.log")
 				stderr, _ := jobhistory.ReadOptionalText(dir, "stderr.log")
@@ -1713,7 +1734,9 @@ func newJobCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("id", "", "Job ID")
+	cmd.Flags().Bool("last", false, "Show the most recent job")
 	cmd.Flags().Bool("output", false, "Print stdout/stderr")
+	cmd.Flags().Bool("timeline", false, "Show where the run's time went, stage by stage")
 	return cmd
 }
 
