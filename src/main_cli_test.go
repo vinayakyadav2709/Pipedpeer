@@ -84,7 +84,10 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
 
 	// --remote excludes this machine, and with nothing else in the cluster
-	// the run must fail loudly instead of queuing forever.
+	// the run must fail loudly instead of queuing forever. One look only:
+	// given its usual wait, discovery finds whatever else runs on this
+	// network, and the cluster is no longer empty.
+	t.Setenv("PIPEDPEER_REMOTE_WAIT", "0s")
 	_, errOut, err := runCLIEWithEnv(t,
 		stateDir, xdg,
 		"run",

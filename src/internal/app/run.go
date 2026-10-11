@@ -91,7 +91,7 @@ func Run(opts Options) (runErr error) {
 		}
 	})
 	if err != nil {
-		return err
+		return &BuildError{Err: err}
 	}
 	defer env.Close()
 
@@ -193,7 +193,7 @@ func RunTask(env *Environment, task Task) (runErr error) {
 
 	peakBytes, stdoutText, stderrText, err := daemonctl.StreamExecute(context.Background(), opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg)
 	if err != nil {
-		return fmt.Errorf("execution failed: %v", err)
+		return fmt.Errorf("execution failed: %w", err)
 	}
 	historyRecord.PeakMemBytes = peakBytes
 	_ = jobhistory.SaveText(historyDir, "stdout.log", stdoutText)

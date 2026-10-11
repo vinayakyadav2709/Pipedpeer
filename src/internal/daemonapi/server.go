@@ -89,6 +89,9 @@ type Server struct {
 	// pathReporter says how each peer is reached, keyed by local address.
 	// Set by internet mode; nil when nothing is joined over the internet.
 	pathReporter func() map[string]string
+	// unreachable holds peers with no direct path and why, keyed by node ID,
+	// so `pipedpeer nodes` can show them instead of leaving them out.
+	unreachable map[string]unreachablePeer
 
 	stopSweep chan struct{}
 
@@ -415,6 +418,10 @@ const JobRetention = 7 * 24 * time.Hour
 // PruneCompletedJobDirs removes job directories (and their in-memory records)
 // not touched within olderThan. Dir names are job IDs, so the jobs map can be
 // reconciled by name.
+//
+// The directory is shared with the submitter's job history and holds the NAR
+// cache, so only entries named like a daemon job ID (a UUID) are candidates;
+// anything else belongs to someone else.
 func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(s.jobDir)
 	if err != nil {
@@ -427,6 +434,9 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 	removed := 0
 	for _, e := range entries {
 		if !e.IsDir() {
+			continue
+		}
+		if _, err := uuid.Parse(e.Name()); err != nil {
 			continue
 		}
 		info, err := e.Info()
@@ -1207,7 +1217,76 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		nodes = append(nodes, resp)
 	}
-	writeJSON(w, http.StatusOK, nodes)
+	writeJSON(w, http.StatusOK, s.withUnreachable(nodes))
+}
+
+// ReasonCapability carries why a peer cannot be reached.
+const ReasonCapability = "unreachable_reason"
+
+type unreachablePeer struct {
+	reason string
+	at     time.Time
+}
+
+// MarkUnreachable records that a peer has no direct path, and why. The
+// scheduler already routes around such a peer; recording it is what keeps a
+// machine that stopped serving visible rather than simply missing.
+func (s *Server) MarkUnreachable(nodeID, reason string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.unreachable == nil {
+		s.unreachable = map[string]unreachablePeer{}
+	}
+	s.unreachable[nodeID] = unreachablePeer{reason: reason, at: time.Now()}
+}
+
+// ClearUnreachable forgets a peer's unreachable mark once a path exists.
+func (s *Server) ClearUnreachable(nodeID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.unreachable, nodeID)
+}
+
+// withUnreachable adds the reason to listed nodes that have no path, and a row
+// for each such peer the store never held.
+func (s *Server) withUnreachable(nodes []nodeResp) []nodeResp {
+	s.mu.Lock()
+	marks := make(map[string]unreachablePeer, len(s.unreachable))
+	for id, u := range s.unreachable {
+		marks[id] = u
+	}
+	s.mu.Unlock()
+	if len(marks) == 0 {
+		return nodes
+	}
+	for i := range nodes {
+		u, ok := marks[nodes[i].NodeID]
+		if !ok {
+			continue
+		}
+		delete(marks, nodes[i].NodeID)
+		if nodes[i].Capabilities == nil {
+			nodes[i].Capabilities = map[string]string{}
+		}
+		nodes[i].Capabilities[ReasonCapability] = u.reason
+		if nodes[i].State != "healthy" {
+			nodes[i].State = "unreachable"
+		}
+	}
+	ids := make([]string, 0, len(marks))
+	for id := range marks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		nodes = append(nodes, nodeResp{
+			NodeID:       id,
+			Capabilities: map[string]string{ReasonCapability: marks[id].reason},
+			State:        "unreachable",
+			Source:       "internet",
+		})
+	}
+	return nodes
 }
 
 // PathCapability is where the route to a peer travels.
