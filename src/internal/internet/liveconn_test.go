@@ -19,9 +19,9 @@ import (
 //
 // Real rather than a stub because the thing under test is what a connection
 // reports about itself, and a stub would only report what the test told it to.
-func liveConn(t *testing.T) *quic.Conn {
+// selfSigned is a throwaway TLS certificate, as a node's own is.
+func selfSigned(t *testing.T) tls.Certificate {
 	t.Helper()
-
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +36,12 @@ func liveConn(t *testing.T) *quic.Conn {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func liveConn(t *testing.T) *quic.Conn {
+	t.Helper()
+	cert := selfSigned(t)
 
 	ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
 		Certificates: []tls.Certificate{cert},

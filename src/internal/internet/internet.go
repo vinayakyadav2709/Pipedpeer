@@ -283,8 +283,21 @@ func (m *Manager) onPunchRequest(ctx context.Context, p rendezvous.Punch) {
 func (m *Manager) onRegistered(ctx context.Context, you string, peers []rendezvous.Peer) {
 	if ap, err := netip.ParseAddrPort(you); err == nil {
 		m.mu.Lock()
+		changed := m.reflex != ap
 		m.reflex = ap
 		m.mu.Unlock()
+		// Re-register before asking anyone to punch. A peer we ask is woken
+		// with the candidates we REGISTERED, and the first registration goes
+		// out before the introducer has told us our reflexive address, so it
+		// carries LAN addresses only. The woken peer then punched back at a
+		// private address on another network and never at our public one,
+		// and a port-restricted router on our side dropped everything it
+		// sent: in the NAT lab two cone sites never linked by an ordinary
+		// punch, only by collision (FIX-NAT2). Sent first, on the same
+		// socket, so it reaches the introducer before the punch requests.
+		if changed {
+			m.sync(ctx)
+		}
 	}
 
 	live := map[string]bool{}
@@ -532,9 +545,10 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 			}
 			m.cfg.Log("collision: %s reached us on a second socket; listening there too", short(node))
 			// Their dial is what completes this; nothing to connect to from
-			// here, so report it as not-yet rather than as failure.
+			// here, so report it as not-yet rather than as failure. Its
+			// linkUp clears the backoff and the reason.
 			return netip.AddrPort{}, &direct.Unreachable{
-				Peer: node, Reason: direct.ReasonTimeout, Tried: len(cands),
+				Peer: node, Reason: direct.ReasonAwaitingDial, Tried: len(cands),
 			}
 		}
 		m.cfg.Log("collision found %s at %s", short(node), h.at)

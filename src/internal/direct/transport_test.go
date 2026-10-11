@@ -464,3 +464,46 @@ func TestAnOlderPeerIsReportedAsAVersionMismatch(t *testing.T) {
 		t.Errorf("dial to a /1 peer returned %v; want %q", err, ReasonVersion)
 	}
 }
+
+// TestAnAdoptedSocketOutlivesTheCollisionThatFoundIt.
+//
+// The collision adopts the socket a peer's probe landed on and returns at
+// once; the peer's dial arrives after. Bound to the collision's context, the
+// listener closed mid-handshake and quic-go answered CONNECTION_REFUSED, which
+// is how every collision failed in the NAT lab. A link it accepted must also
+// outlive the accept window.
+func TestAnAdoptedSocketOutlivesTheCollisionThatFoundIt(t *testing.T) {
+	old := adoptWindow
+	adoptWindow = 300 * time.Millisecond
+	t.Cleanup(func() { adoptWindow = old })
+
+	server := endpoint(t, testKey(t), "c1", echoService(t))
+	client := endpoint(t, testKey(t), "c1", nil)
+
+	sock, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collision, cancel := context.WithCancel(context.Background())
+	if err := server.Adopt(collision, sock); err != nil {
+		t.Fatal(err)
+	}
+	cancel() // the collision returns as soon as the socket is adopted
+
+	ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
+	defer done()
+	at := sock.LocalAddr().(*net.UDPAddr).AddrPort()
+	conn, err := client.Dial(ctx, server.key.Fingerprint(), at)
+	if err != nil {
+		t.Fatalf("dialling the adopted socket after the collision returned: %v", err)
+	}
+	defer conn.CloseWithError(0, "")
+	if got := roundTrip(t, ctx, conn, "through the collision"); got != "through the collision" {
+		t.Fatalf("echoed %q", got)
+	}
+
+	time.Sleep(2 * adoptWindow)
+	if got := roundTrip(t, ctx, conn, "after the window"); got != "after the window" {
+		t.Fatalf("a link on the adopted socket died with its accept window: echoed %q", got)
+	}
+}

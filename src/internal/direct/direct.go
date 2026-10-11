@@ -137,9 +137,16 @@ func sortByRank(cs []Candidate) {
 type Reason string
 
 const (
-	// ReasonBothSymmetric: neither router will say where the other should
-	// send. No protocol solves this; the peer cannot serve work.
-	ReasonBothSymmetric Reason = "both ends allocate a fresh port per destination"
+	// ReasonBothSymmetric: the punch and the port-space collision both went
+	// unanswered. Said as what was seen, with the usual cause after it: this
+	// end cannot tell that the far router is symmetric, only that nothing
+	// came back. No protocol solves the pair it usually is.
+	ReasonBothSymmetric Reason = "no reply to the punch or to a port-space collision " +
+		"(both ends likely allocate a fresh port per destination)"
+	// ReasonAwaitingDial: the peer's collision probe landed on one of our
+	// sockets, so the link is the peer's dial to finish, not ours. Not a
+	// failure yet; it clears when that dial arrives.
+	ReasonAwaitingDial Reason = "the peer's collision probe reached us; waiting for it to dial"
 	// ReasonNoCandidates: the peer offered nowhere to try.
 	ReasonNoCandidates Reason = "the peer published no addresses to try"
 	// ReasonTimeout: probes went out and nothing came back. Usually a
