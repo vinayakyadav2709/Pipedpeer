@@ -8,6 +8,18 @@ Paths are relative to `src/`. Each entry says how it was established:
 - **Observed:** it happened during a run.
 - **Read:** it was traced in the code but not exercised.
 
+## Resolved since
+
+| Issue | Fixed by |
+|---|---|
+| Observed 1: the build hangs when `$HOME` is a git repository | The flake is built as `path:.`, so Nix never treats the scratch directory as part of an enclosing repository. A failed build, or a script that exits with an error, is no longer rescheduled forever: both would fail the same way on any node (`app.IsPermanent`, `coordinator.Permanent`) |
+| Observed 4: the cluster's signing keys could not be recorded | `WriteTrustedKeys` writes through a uniquely named temporary file |
+| Observed 5: daemon start-up prunes job history | Each pruner only removes its own entries: the daemon only UUID-named job directories, the history only directories holding a record |
+| Observed 6: a job's output stream closes early | a7bb9a5 waits for both output readers before reaping the job |
+| Pool: `items_zlib` is dropped when the daemon splits work | 049a1aa |
+| Internet: unreachable reasons never reach `pipedpeer nodes` | They are kept by the daemon, served by `/v1/nodes`, and listed under the `nodes` table |
+| `--remote` gives up after one look (demo run sheet) | It waits up to 15 s for a node (`PIPEDPEER_REMOTE_WAIT`), and says why each node was turned down |
+
 ## Observed
 
 1. **The build hangs forever when `$HOME` is a git repository.**

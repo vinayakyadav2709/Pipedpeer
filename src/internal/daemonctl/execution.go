@@ -217,7 +217,7 @@ func StreamExecute(ctx context.Context, host string, port int, jobID string, cfg
 					humanBytes(out.MemLimitBytes))
 			}
 			if out.ExitCode != 0 {
-				return peakBytes, stdoutBuf.String(), stderrBuf.String(), fmt.Errorf("remote job exited with code %d", out.ExitCode)
+				return peakBytes, stdoutBuf.String(), stderrBuf.String(), &RemoteExitError{Code: out.ExitCode}
 			}
 			return peakBytes, stdoutBuf.String(), stderrBuf.String(), nil
 		}
@@ -481,4 +481,15 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d bytes", n)
 	}
+}
+
+// RemoteExitError is a script that ran to completion on its node and exited
+// non-zero. Unlike a lost connection or a dead node, it says nothing about
+// where the script ran.
+type RemoteExitError struct {
+	Code int
+}
+
+func (e *RemoteExitError) Error() string {
+	return fmt.Sprintf("remote job exited with code %d", e.Code)
 }

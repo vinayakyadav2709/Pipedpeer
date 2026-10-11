@@ -52,6 +52,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
@@ -218,13 +219,32 @@ func WriteTrustedKeys(keys []string) error {
 	}
 	body := strings.Join(out, " ") + "\n"
 	// Written via a temporary file and renamed, so a reader never sees a
-	// half-written list and conclude the cluster trusts nobody.
-	tmp := TrustedKeysFile() + ".tmp"
-	if err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {
+	// half-written list and conclude the cluster trusts nobody. The temporary
+	// name is unique: with one shared name, two writers (two daemon goroutines,
+	// or the daemon and setup) renamed each other's file away and the loser
+	// failed with "no such file or directory".
+	trustedKeysMu.Lock()
+	defer trustedKeysMu.Unlock()
+	tmp, err := os.CreateTemp(dir, "trusted-public-keys-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, TrustedKeysFile())
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	if _, err := tmp.WriteString(body); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), TrustedKeysFile())
 }
+
+var trustedKeysMu sync.Mutex
 
 func sortStrings(s []string) {
 	for i := 1; i < len(s); i++ {

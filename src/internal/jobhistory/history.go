@@ -261,9 +261,19 @@ func QueryPeakMem(scriptPath string, limit int) []int64 {
 	return peaks
 }
 
+// IsRecordDir reports whether dir holds a history record. The history shares
+// its directory with the daemon's own job directories, NAR cache and state
+// file, so a pruner that removed every old directory there deleted whatever
+// the daemon kept beside it.
+func IsRecordDir(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "metadata.json"))
+	return err == nil
+}
+
 // Prune removes history entries whose directory has not been modified within
 // olderThan (dir mtime ≈ when the run finished and its artifacts were
-// written). Returns the number of entries removed.
+// written). Only directories holding a record are considered. Returns the
+// number of entries removed.
 func Prune(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(BaseDir())
 	if err != nil {
@@ -278,12 +288,16 @@ func Prune(olderThan time.Duration) (int, error) {
 		if !e.IsDir() {
 			continue
 		}
+		dir := filepath.Join(BaseDir(), e.Name())
+		if !IsRecordDir(dir) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			if err := os.RemoveAll(filepath.Join(BaseDir(), e.Name())); err != nil {
+			if err := os.RemoveAll(dir); err != nil {
 				return removed, err
 			}
 			removed++

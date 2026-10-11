@@ -554,8 +554,18 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				// A remote run must fail loudly when there is no node at all
 				// instead of queuing forever: the user can just drop --remote.
-				decision := coord.FindNode()
+				// PIPEDPEER_REMOTE_WAIT overrides the window; 0 takes one look.
+				wait := 15 * time.Second
+				if v, err := time.ParseDuration(os.Getenv("PIPEDPEER_REMOTE_WAIT")); err == nil && v >= 0 {
+					wait = v
+				}
+				decision := coord.FindNodeWithin(cmd.Context(), wait, time.Second, func() {
+					fmt.Printf("[coordinator] no eligible node yet; waiting up to %s for peers to report in...\n", wait)
+				})
 				if decision.ChosenNode.NodeID == "" {
+					if why := decision.RejectionSummary(); why != "" {
+						fmt.Print("[coordinator] nodes turned down:\n" + why)
+					}
 					return fmt.Errorf("no eligible node found — run without --remote to execute on this machine")
 				}
 
@@ -583,7 +593,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 							devices = strconv.FormatInt(idx, 10)
 						}
 					}
-					return app.Run(app.Options{
+					err := app.Run(app.Options{
 						ScriptPath:        scriptPath,
 						DaemonHost:        host,
 						DaemonPort:        port,
@@ -602,6 +612,10 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						EstimatedMemBytes: estimatedMemBytes,
 						EstimationTier:    estimationTier,
 					})
+					if app.IsPermanent(err) {
+						return coordinator.Permanent(err)
+					}
+					return err
 				}
 
 				statusFn := func(msg string) {
@@ -1501,7 +1515,11 @@ func newMapCmd() *cobra.Command {
 					o.DaemonHost = host
 					o.DaemonPort = port
 					o.TargetID = targetNodeID
-					return app.RunTask(env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					err := app.RunTask(env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					if app.IsPermanent(err) {
+						return coordinator.Permanent(err)
+					}
+					return err
 				}
 				statusFn := func(msg string) {}
 				res, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
@@ -1852,6 +1870,20 @@ func printNodes(daemonPort int) error {
 		fmt.Printf("%-10s %-12s %-10s %-6d %-6s %-10s %-14s %-10s %s\n",
 			shortID(n.NodeID), truncate(host, 12), n.State, n.Load.ActiveJobs, cores,
 			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, path, n.Source)
+	}
+	// Reasons go under the table: they are sentences, and a column wide
+	// enough for them would push everything else off the screen.
+	first := true
+	for _, n := range nodes {
+		reason := n.Capabilities[daemonapi.ReasonCapability]
+		if reason == "" {
+			continue
+		}
+		if first {
+			fmt.Println("\nNo direct path (not offered work):")
+			first = false
+		}
+		fmt.Printf("  %s  %s\n", shortID(n.NodeID), reason)
 	}
 	return nil
 }
@@ -2208,6 +2240,7 @@ func runDaemon(args []string) {
 					if err != nil {
 						return
 					}
+					server.ClearUnreachable(node)
 					if err := server.AddPeer(host, p); err != nil {
 						log.Warn().Err(err).Str("peer", node).Msg("could not register relayed peer")
 						return
@@ -2219,6 +2252,7 @@ func runDaemon(args []string) {
 					// direct path is not offered work - the scheduler routes
 					// around it - and the reason travels so a machine that
 					// quietly stopped serving is visible instead of missing.
+					server.MarkUnreachable(node, reason)
 					log.Info().Str("peer", node).Str("reason", reason).
 						Msg("peer has no direct path; not offering it work")
 				},

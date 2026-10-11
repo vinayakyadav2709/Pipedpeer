@@ -1131,3 +1131,96 @@ func TestExecuteWithRetryHandsTheExecutorAReachableDaemon(t *testing.T) {
 		t.Errorf("worker still reports %d active job(s); the lease was not completed", got)
 	}
 }
+
+// A failure marked permanent ends the loop at once: the task is not placed
+// again, the error reaches the caller unwrapped, and the lease is released.
+func TestExecuteWithRetryStopsOnPermanentFailure(t *testing.T) {
+	daemon := daemonapi.NewWithConfig("worker-perm", 5*time.Second, 2*time.Second, 100*time.Millisecond)
+	daemonSrv := httptest.NewServer(daemon.Handler())
+	defer daemonSrv.Close()
+
+	host, port := splitHostPort(t, daemonSrv.Listener.Addr().String())
+
+	coord := New(Config{
+		SelfIdentity:     makeID("submitter", "sub", "x86_64-linux"),
+		SelfSSH:          "root@localhost:22",
+		SelfDaemon:       fakeDaemon(t),
+		RequiredMemBytes: 1024,
+		RetryInterval:    50 * time.Millisecond,
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{{
+				NodeID: "worker-perm", SSHEndpoint: "root@" + host + ":22",
+				DaemonPort:  port,
+				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
+				HealthScore: 1.0, State: "healthy",
+			}}
+		},
+	})
+
+	scriptErr := fmt.Errorf("remote job exited with code 1")
+	var execCount int32
+	executor := func(host string, port int, nodeID string) error {
+		atomic.AddInt32(&execCount, 1)
+		return Permanent(scriptErr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := coord.ExecuteWithRetry(ctx, executor, nil)
+	if err != scriptErr {
+		t.Fatalf("got error %v, want the executor's own error", err)
+	}
+	if n := atomic.LoadInt32(&execCount); n != 1 {
+		t.Fatalf("executed %d times, want 1", n)
+	}
+	if daemon.ActiveLeases() != 0 {
+		t.Fatalf("expected 0 leases after a permanent failure, got %d", daemon.ActiveLeases())
+	}
+}
+
+// Straight after start-up the cluster can look empty for a moment. A single
+// look then reported "no eligible node" for a cluster that had one.
+func TestFindNodeWithinWaitsForALateNode(t *testing.T) {
+	var looks int32
+	coord := New(Config{
+		SelfIdentity:     makeID("submitter", "sub", "x86_64-linux"),
+		SelfSSH:          "root@localhost:22",
+		SelfDaemon:       fakeDaemon(t),
+		RequiredMemBytes: 1024,
+		NoSelf:           true,
+		DiscoverFn: func() []registry.NodeRecord {
+			if atomic.AddInt32(&looks, 1) < 3 {
+				return nil
+			}
+			return []registry.NodeRecord{{
+				NodeID: "late-worker", SSHEndpoint: "root@10.0.0.9:22", DaemonPort: 38080,
+				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
+				HealthScore: 1.0, State: "healthy",
+			}}
+		},
+	})
+
+	waited := 0
+	d := coord.FindNodeWithin(context.Background(), 5*time.Second, 10*time.Millisecond, func() { waited++ })
+	if d.ChosenNode.NodeID != "late-worker" {
+		t.Fatalf("chose %q, want the node that appeared on the third look (reason: %s)", d.ChosenNode.NodeID, d.Reason)
+	}
+	if waited != 1 {
+		t.Fatalf("waiting callback ran %d times, want once", waited)
+	}
+
+	// With nothing ever appearing it gives up when the window closes.
+	empty := New(Config{
+		SelfIdentity: makeID("submitter", "sub", "x86_64-linux"),
+		SelfDaemon:   fakeDaemon(t),
+		NoSelf:       true,
+		DiscoverFn:   func() []registry.NodeRecord { return nil },
+	})
+	start := time.Now()
+	if d := empty.FindNodeWithin(context.Background(), 100*time.Millisecond, 10*time.Millisecond, nil); d.ChosenNode.NodeID != "" {
+		t.Fatalf("chose %q from an empty cluster", d.ChosenNode.NodeID)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("did not give up when the window closed")
+	}
+}
