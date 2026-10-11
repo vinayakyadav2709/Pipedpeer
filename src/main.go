@@ -1853,6 +1853,15 @@ func printNodes(daemonPort int) error {
 			shortID(n.NodeID), truncate(host, 12), n.State, n.Load.ActiveJobs, cores,
 			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, path, n.Source)
 	}
+	bad, err := fetchUnreachable(daemonPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not list peers with no direct path: %v\n", err)
+	} else if len(bad) > 0 {
+		fmt.Println("\nPeers with no direct path (not offered work):")
+		for _, p := range bad {
+			fmt.Printf("  %-10s %s\n", shortID(p.Peer), p.Reason)
+		}
+	}
 	return nil
 }
 
@@ -2196,6 +2205,7 @@ func runDaemon(args []string) {
 			mgr := internet.New(internet.Config{
 				Rendezvous: rendezvousAddr,
 				Cluster:    rendezvous.ClusterID(authtoken.Current()),
+				Secret:     authtoken.Current(),
 				Key:        key,
 				Cert:       &cert,
 				DaemonPort: port,
@@ -2227,8 +2237,14 @@ func runDaemon(args []string) {
 					if err != nil {
 						return
 					}
-					p, _ := strconv.Atoi(portStr)
-					_ = server.RemovePeer(host, p)
+					p, err := strconv.Atoi(portStr)
+					if err != nil {
+						log.Warn().Err(err).Str("peer", node).Str("addr", addr).Msg("could not parse departed peer address")
+						return
+					}
+					if err := server.RemovePeer(host, p); err != nil {
+						log.Warn().Err(err).Str("peer", node).Str("addr", addr).Msg("could not remove departed peer")
+					}
 					log.Info().Str("peer", node).Msg("peer left")
 				},
 				Log: func(format string, args ...any) {
@@ -2238,6 +2254,7 @@ func runDaemon(args []string) {
 			// So `pipedpeer nodes` can show how each peer is reached, and
 			// a machine being routed around is visible rather than absent.
 			server.SetPathReporter(mgr.Paths)
+			server.SetUnreachableReporter(mgr.Unreachable)
 			go mgr.Run(internetCtx)
 			log.Info().Str("rendezvous", rendezvousAddr).Msg("internet mode enabled")
 		}
