@@ -1,17 +1,17 @@
 [coordinator] Resource estimate: 512 MiB (tier=import)
 [coordinator] --remote: discovering a node other than this machine...
-[coordinator] Placed on node aaaac1c7 (lease=1a410d5f)
-[coordinator] Lease committed — executing on aaaac1c7
+[coordinator] Placed on node bcf910e3 (lease=07e8e14d)
+[coordinator] Lease committed — executing on bcf910e3
 === Pipedpeer CLI ===
-Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map/pool_map.py
-Daemon: 192.168.0.107:38082
+Script: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle/pool_idle.py
+Daemon: 192.168.0.200:38083
 
 [1/7] Detecting imports...
 
 [2/7] Parsing dependencies...
 
 [3/7] Generating flake.nix...
-      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-3589229743/flake.nix
+      Created: /home/yeet/.cache/pipedpeer/scratch/build-2530251028/flake.nix
 
 [4/7] Building locally...
       Built successfully
@@ -20,27 +20,28 @@ Daemon: 192.168.0.107:38082
       Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
 
 [6/7] Uploading to daemon...
-      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map
-      Script: pool_map.py
+      Project root: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle
+      Script: pool_idle.py
       Closure already on the node; nothing to send
-      Uploaded job c0e3831e-d9d9-4172-8707-acf1a0d1cc63
+      Uploaded job 566c1edc-ce6f-4997-ba95-0022a89ad728
 
 [7/7] Executing on remote...
-POOLMAP-OK items=48 seconds=0.1317 checksum=470568233.455799
-      Synced 1 file(s) to /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map (1 new, 0 updated, 0 deleted)
+POOLIDLE-OK items=16 seconds=0.1136 checksum=623749.555711
+      Synced 2 file(s) to /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle (2 new, 0 updated, 0 deleted)
 
 === Done ===
-History: /home/rs/.local/share/pipedpeer/jobs/1790955002905893164
-[coordinator] Task completed successfully on node aaaac1c7
+History: /home/yeet/.local/share/pipedpeer/jobs/1791747648698898162
+[coordinator] Task completed successfully on node bcf910e3
 warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
 warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
-warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-3589229743/flake.lock": 
+warning: creating lock file "/home/yeet/.cache/pipedpeer/scratch/build-2530251028/flake.lock": 
 • Added input 'nixpkgs':
     'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
 warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
 tar: Removing leading `/' from member names
 tar: Removing leading `/' from hard link targets
-[pipedpeer] using 12 workers, not the 8 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
-[pipedpeer] using 12 workers, not the 8 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
-[pipedpeer] local 12 items
-[pipedpeer] remote ok: 18 items in 186 ms on 192.168.0.107:38080, 192.168.0.107:38083
+[pipedpeer] using 16 workers, not the 8 requested (cores=16); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 16 workers, not the 8 requested (cores=16); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 8 items
+[pipedpeer] tail is 0.01s of work, below the 0.50s dispatch floor; staying local
+[pipedpeer] local 8 items
