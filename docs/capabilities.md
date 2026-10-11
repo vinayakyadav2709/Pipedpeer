@@ -8,9 +8,9 @@ What the system does today and where it stops. Each row names its evidence (path
 |---|---|---|
 | Run an unmodified Python script on another node | `pipedpeer run` / `pipedpeer python`; environment from imports or `uv.lock` | `main.go` `newRunCmd`, `internal/app/env.go` `BuildEnvironment` |
 | Scatter one script over many inputs | `pipedpeer map` with `--inputs`, `--args-file` or `--split`, optional local `--reduce` | `main.go` `newMapCmd`, `internal/app/mapset.go` |
-| Spread `multiprocessing.Pool` / `ProcessPoolExecutor` work | Only when the cost model says it wins; lambdas, closures and partials ship by value | [ADR-0002](adr/0002-never-slower-than-local.md), [ADR-0017](adr/0017-kernels-ship-as-source-then-cloudpickle.md) |
+| Spread `multiprocessing.Pool` / `ProcessPoolExecutor` work | Only when the cost model says it wins; lambdas, closures and partials ship by value. Single calls (`executor.submit`, `Pool.apply_async`/`apply`) are batched after a 20 ms idle window and spread like a map; calls with keyword arguments stay local | [ADR-0002](adr/0002-never-slower-than-local.md), [ADR-0017](adr/0017-kernels-ship-as-source-then-cloudpickle.md) |
 | Spread joblib / scikit-learn `n_jobs` | joblib backend routed through the same pool | `internal/nixgen/shim.go` `_install_joblib` |
-| Distribute pandas groupby/merge and large CSV/parquet reads | Hash-shuffle and out-of-core partitioned reads | `internal/nixgen/shim.go` `_install_pandas`, `_install_io` |
+| Distribute pandas groupby/merge and large CSV/parquet reads | Hash-shuffle and out-of-core partitioned reads; categorical keys included (`observed=False` restores the empty categories) | `internal/nixgen/shim.go` `_install_pandas`, `_install_io` |
 | Offload large numpy matmul/dot/tensordot, svd/eig | Module functions only; the `@` operator is not intercepted | `internal/nixgen/shim.go` `_install_numpy`, [known-issues](known-issues.md#read-in-the-code-not-exercised) |
 | Train torch DDP across nodes | `--ddp K`, sync through the daemon, ranks chosen by measured throughput; a sync closes without a dead rank after 45 s | [ADR-0010](adr/0010-gradient-sync-through-the-daemon.md), `5f807f7` |
 | Find LAN peers with no configuration | UDP broadcast, TCP `/health` sweep when broadcast is filtered | `internal/discovery/` |

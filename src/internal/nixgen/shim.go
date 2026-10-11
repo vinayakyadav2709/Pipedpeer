@@ -182,6 +182,204 @@ def _write_receipt():
         _log("could not write receipt file %s: %r" % (path, e))
 
 
+def _cluster_ready():
+    """True when there is a cluster to spill to. NUM_SHARDS counts this node
+    too, so "1" means there is nobody: dispatching then posts work to our own
+    daemon, which runs it through a single serialised warm worker while the
+    local pool sits idle - strictly slower than doing it here."""
+    try:
+        shards = int(_NUM_SHARDS)
+    except ValueError:
+        shards = 0
+    return bool(_URL) and _ENABLED and shards >= 2
+
+
+# How long the submit queue must sit idle before it is sent as one batch. A
+# submit loop queues its items microseconds apart, so the whole loop lands in
+# one batch; a lone submit waits this long before it runs.
+_SUBMIT_IDLE = 0.02
+_BATCH_FUTURE = []
+
+
+def _batch_future(batcher):
+    """A real concurrent.futures.Future whose result() sends the queued batch
+    at once instead of waiting out the idle window. wait() and as_completed()
+    read the future's state directly, so the idle window is what sends theirs.
+    The class is built on first use: importing concurrent.futures at startup
+    would charge every job for it."""
+    if not _BATCH_FUTURE:
+        import concurrent.futures as _cf
+
+        class Future(_cf.Future):
+            def result(self, timeout=None):
+                self._pp_batcher.flush()
+                return super().result(timeout)
+
+            def exception(self, timeout=None):
+                self._pp_batcher.flush()
+                return super().exception(timeout)
+
+        _BATCH_FUTURE.append(Future)
+    fut = _BATCH_FUTURE[0]()
+    fut._pp_batcher = batcher
+    return fut
+
+
+class _BatchResult:
+    """multiprocessing's AsyncResult over a batched future."""
+
+    def __init__(self, fut):
+        self._f = fut
+
+    def ready(self):
+        return self._f.done()
+
+    def successful(self):
+        if not self._f.done():
+            raise ValueError("%r not ready" % self)
+        return self._f.exception() is None
+
+    def wait(self, timeout=None):
+        import concurrent.futures as _cf
+        self._f._pp_batcher.flush()
+        _cf.wait([self._f], timeout)
+
+    def get(self, timeout=None):
+        try:
+            return self._f.result(timeout)
+        except TimeoutError:
+            import multiprocessing
+            raise multiprocessing.TimeoutError
+
+
+def _settle(entry, result, err):
+    """Fire the call's callback, then complete its future - the order
+    multiprocessing uses, so get() never returns before the callback ran."""
+    fn, _args, fut, callback, error_callback = entry
+    try:
+        if err is None:
+            if callback is not None:
+                callback(result)
+        elif error_callback is not None:
+            error_callback(err)
+    except Exception as e:
+        _log("callback for %r raised %r; the result is still delivered"
+             % (getattr(fn, "__name__", "?"), e))
+    if fut.done():
+        return
+    if err is None:
+        fut.set_result(result)
+    else:
+        fut.set_exception(err)
+
+
+class _SubmitBatcher:
+    """Turns single calls (executor.submit, Pool.apply_async) into maps.
+
+    One call has no tail to spill, so these used to run local only, and a
+    loop of them - a map in disguise - never left the machine. Calls are
+    queued; once the queue has been idle for _SUBMIT_IDLE, or someone asks
+    for a result, they are grouped by function and each group goes through
+    _ClusterPool._run as a starmap, where the usual measurement and cost
+    gate decide what ships. A group that fails is re-run locally call by
+    call, so an exception lands on the one future that raised it.
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        self._cv = threading.Condition()
+        self._q = []          # (fn, args, future, callback, error_callback)
+        self._now = False
+        self._busy = 0
+        self._last = 0.0
+        self._thread = None
+
+    def submit(self, fn, args, callback=None, error_callback=None):
+        fut = _batch_future(self)
+        with self._cv:
+            self._q.append((fn, tuple(args), fut, callback, error_callback))
+            self._last = time.monotonic()
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._loop, name="pipedpeer-submit", daemon=True)
+                self._thread.start()
+            self._cv.notify_all()
+        return fut
+
+    def flush(self):
+        with self._cv:
+            if self._q:
+                self._now = True
+                self._cv.notify_all()
+
+    def drain(self):
+        """Send what is queued and wait until every batch has finished."""
+        if threading.current_thread() is self._thread:
+            return            # a callback closing its own pool
+        with self._cv:
+            if self._q:
+                self._now = True
+                self._cv.notify_all()
+            while self._q or self._busy:
+                self._cv.wait()
+
+    def _loop(self):
+        while True:
+            with self._cv:
+                while not self._q:
+                    self._cv.wait()
+                while not self._now:
+                    left = self._last + _SUBMIT_IDLE - time.monotonic()
+                    if left <= 0:
+                        break
+                    self._cv.wait(left)
+                batch, self._q, self._now = self._q, [], False
+                self._busy += 1
+            try:
+                self._dispatch(batch)
+            except BaseException as e:
+                # Never leave a caller blocked on a future nobody will set.
+                _log("submitted batch of %d calls failed outside the calls "
+                     "themselves (%r)" % (len(batch), e))
+                for entry in batch:
+                    if not entry[2].done():
+                        _settle(entry, None, e)
+            finally:
+                with self._cv:
+                    self._busy -= 1
+                    self._cv.notify_all()
+
+    def _dispatch(self, batch):
+        groups = {}
+        for entry in batch:
+            if entry[2].set_running_or_notify_cancel():
+                groups.setdefault(id(entry[0]), []).append(entry)
+        for group in groups.values():
+            fn = group[0][0]
+            try:
+                results = self._pool._run(fn, [e[1] for e in group], starmap=True)
+            except Exception as e:
+                _log("batch of %d %r calls raised (%r); re-running each "
+                     "locally so the error lands on its own call"
+                     % (len(group), getattr(fn, "__name__", "?"), e))
+                self._one_by_one(fn, group)
+                continue
+            for entry, r in zip(group, results):
+                _settle(entry, r, None)
+
+    def _one_by_one(self, fn, group):
+        ctx = self._pool._local_ctx(fn)
+        _record_local(len(group))
+        pending = [(entry, ctx.apply_async(fn, entry[1])) for entry in group]
+        for entry, ar in pending:
+            try:
+                r = ar.get()
+            except Exception as e:
+                _settle(entry, None, e)
+            else:
+                _settle(entry, r, None)
+
+
 class _ClusterPool:
     """drop-in replacement for multiprocessing.Pool.
 
@@ -193,15 +391,7 @@ class _ClusterPool:
 
     def __init__(self, processes=None, initializer=None, initargs=(), maxtasksperchild=None):
         import multiprocessing.pool as _mp
-        # NUM_SHARDS counts this node too, so "1" means there is nobody to
-        # spill to. Dispatching then posts work to our own daemon, which runs
-        # it through a single serialised warm worker while the local pool sits
-        # idle — strictly slower than doing it here.
-        try:
-            shards = int(_NUM_SHARDS)
-        except ValueError:
-            shards = 0
-        self._remote = bool(_URL) and _ENABLED and shards >= 2
+        self._remote = _cluster_ready()
         self._requested = processes
         self._init = (initializer, initargs, maxtasksperchild)
         self._procs = _pool_width(processes)
@@ -215,6 +405,7 @@ class _ClusterPool:
         self._measure_items = 4
         self._spilled = False
         self._threads = None
+        self._batcher = None
         atexit.register(self.close)
 
     def _resize(self):
@@ -228,6 +419,8 @@ class _ClusterPool:
         want = _pool_width(self._requested)
         if want == self._procs:
             return
+        if self._batcher is not None and self._batcher._busy:
+            return                        # a submitted batch is using this pool
         import multiprocessing.pool as _mp
         initializer, initargs, maxtasksperchild = self._init
         try:
@@ -250,23 +443,32 @@ class _ClusterPool:
 
     # ---- the four Pool workhorses ----
     #
-    # apply and apply_async are single calls: there is no tail to spill, so
-    # they run locally. They still have to ask which local pool can take the
-    # callable - a lambda cannot be sent to a worker process, and handing one
-    # to the process pool raises PicklingError. map and imap reach the same
-    # routing through _run; these two are the paths that bypassed it.
+    # apply and apply_async are single calls. With a cluster they queue in a
+    # _SubmitBatcher, so a loop of them is sent as one starmap through _run.
+    # Without one, or with keyword arguments (a starmap item is positional
+    # only), they run locally - on whichever local pool can take the
+    # callable: a lambda cannot be sent to a worker process, and handing one
+    # to the process pool raises PicklingError.
     def apply(self, func, args=(), kwds=None):
         # kwds defaults to None here and to {} in multiprocessing, and it is
         # passed straight through to func(*args, **kwds). So pool.apply(f, (x,))
         # - the ordinary call, with no keyword arguments - raised "argument
         # after ** must be a mapping, not NoneType" from inside the worker,
         # which reads as a bug in the user's function.
-        return self._local_ctx(func).apply(func, args=args, kwds=kwds or {})
+        return self.apply_async(func, args, kwds).get()
 
     def apply_async(self, func, args=(), kwds=None, callback=None, error_callback=None):
+        if self._remote and not kwds:
+            return _BatchResult(self._submits().submit(
+                func, args, callback, error_callback))
         return self._local_ctx(func).apply_async(
             func, args=args, kwds=kwds or {},
             callback=callback, error_callback=error_callback)
+
+    def _submits(self):
+        if self._batcher is None:
+            self._batcher = _SubmitBatcher(self)
+        return self._batcher
 
     def map(self, func, iterable, chunksize=None):
         return self._run(func, list(iterable))
@@ -456,22 +658,36 @@ class _ClusterPool:
         # Local runs its share; when done, re-run any remote chunk still not
         # filled (straggler tail). done is set once local has given every item a
         # chance, so the caller can always return a complete result.
+        # An item that raises here used to kill this thread before done was
+        # set, so the caller waited forever instead of seeing the exception
+        # a stock Pool.map raises. The error is carried back and re-raised.
+        failed = []
+
         def local_run():
-            fill([p for c in local_chunks for p in c])
-            while True:
-                with lock:
-                    pending = [p for c in remote_chunks for p in c if slots[p[0]] is unset]
-                if not pending:
-                    break
-                fill(pending)  # idle local cores re-run the stragglers
-            done.set()
+            try:
+                fill([p for c in local_chunks for p in c])
+                while True:
+                    with lock:
+                        pending = [p for c in remote_chunks for p in c if slots[p[0]] is unset]
+                    if not pending:
+                        break
+                    fill(pending)  # idle local cores re-run the stragglers
+            except BaseException as e:
+                failed.append(e)
+            finally:
+                done.set()
 
         done = threading.Event()
-        t_local = threading.Thread(target=local_run)
-        t_remote = threading.Thread(target=remote_run)
+        # Explicitly not daemons: a thread inherits daemon from its creator,
+        # and a batch of submits runs on the daemon batcher thread, so its
+        # in-flight chunks would be killed at exit and never reach the receipt.
+        t_local = threading.Thread(target=local_run, daemon=False)
+        t_remote = threading.Thread(target=remote_run, daemon=False)
         t_local.start()
         t_remote.start()
         done.wait()  # local guarantees a complete result
+        if failed:
+            raise failed[0]
         return slots
 
     def _remote_chunk(self, payload, chunk, starmap):
@@ -547,6 +763,8 @@ class _ClusterPool:
         return out
 
     def close(self):
+        if self._batcher is not None:
+            self._batcher.drain()     # queued calls finish before the pool goes
         try:
             self._ctx.close()
             self._ctx.terminate()
@@ -1467,6 +1685,13 @@ def _hash_owners(n, weights, quotas, order=None):
     order is the sequence samples claim room in (the epoch's shuffle);
     samples left when every quota is full are the dropped remainder.
     Returns one list per rank, in claim order.
+
+    Runs every epoch, so it is mostly numpy. Until the first rank is full
+    every sample simply gets its top rank, so that prefix is assigned in
+    one vectorised step from a running argmax (no n x ranks matrix). Only
+    the samples after the first overflow - about sqrt(n) for proportional
+    quotas - take the per-sample loop, with their full preference order.
+    The assignment is the same as the plain greedy loop's.
     """
     import numpy as _np
     live = [r for r, w in enumerate(weights) if w > 0 and quotas[r] > 0]
@@ -1474,31 +1699,60 @@ def _hash_owners(n, weights, quotas, order=None):
     if not live:
         return owners
     idx = _np.arange(n, dtype=_np.uint64)
-    scores = _np.empty((len(live), n))
-    for j, r in enumerate(live):
-        # splitmix64 of (sample, rank): stable across processes and runs,
-        # unlike Python's salted hash().
-        x = idx * _np.uint64(0x9E3779B97F4A7C15) + _np.uint64((r + 1) * 0x632BE59BD9B4E019 % (1 << 64))
-        x ^= x >> _np.uint64(30)
-        x *= _np.uint64(0xBF58476D1CE4E5B9)
-        x ^= x >> _np.uint64(27)
-        x *= _np.uint64(0x94D049BB133111EB)
-        x ^= x >> _np.uint64(31)
-        u = ((x >> _np.uint64(11)).astype(_np.float64) + 0.5) / float(1 << 53)
-        scores[j] = weights[r] / -_np.log(u)
-    prefs = _np.argsort(-scores, axis=0).T.tolist()  # per sample: live slots, best first
+    top = _hash_score(idx, live[0], weights[live[0]])
+    best = _np.zeros(n, dtype=_np.intp)
+    for j in range(1, len(live)):
+        s = _hash_score(idx, live[j], weights[live[j]])
+        better = s > top              # strict: a tie keeps the earlier rank, as argsort did
+        best[better] = j
+        top = _np.where(better, s, top)
+    del idx, top
+    seq = _np.arange(n) if order is None else _np.asarray(order, dtype=_np.intp)
+    first = best[seq]
     room = [quotas[r] for r in live]
+    # Before the first overflow every claim succeeds, so after head claims
+    # the total quota is used up at the latest.
+    head = min(sum(room), len(seq))
+    for j in range(len(live)):
+        pos = _np.flatnonzero(first == j)
+        if len(pos) > room[j]:
+            head = min(head, int(pos[room[j]]))
+    for j, r in enumerate(live):
+        mine = seq[:head][first[:head] == j]
+        owners[r] = mine.tolist()
+        room[j] -= len(mine)
     left = sum(room)
-    for s in (order if order is not None else range(n)):
+    rest = seq[head:]
+    if left == 0 or not len(rest):
+        return owners
+    ridx = rest.astype(_np.uint64)
+    scores = _np.stack([_hash_score(ridx, r, weights[r]) for r in live])
+    prefs = _np.argsort(-scores, axis=0).T.tolist()  # per sample: live slots, best first
+    for s, pref in zip(rest.tolist(), prefs):
         if left == 0:
             break
-        for j in prefs[s]:
+        for j in pref:
             if room[j]:
                 room[j] -= 1
                 left -= 1
                 owners[live[j]].append(s)
                 break
     return owners
+
+
+def _hash_score(idx, r, w):
+    """Weighted rendezvous score of rank r for samples idx (uint64 array):
+    splitmix64 of (sample, rank), stable across processes and runs unlike
+    Python's salted hash(), scaled by the rank's share w."""
+    import numpy as _np
+    x = idx * _np.uint64(0x9E3779B97F4A7C15) + _np.uint64((r + 1) * 0x632BE59BD9B4E019 % (1 << 64))
+    x ^= x >> _np.uint64(30)
+    x *= _np.uint64(0xBF58476D1CE4E5B9)
+    x ^= x >> _np.uint64(27)
+    x *= _np.uint64(0x94D049BB133111EB)
+    x ^= x >> _np.uint64(31)
+    u = ((x >> _np.uint64(11)).astype(_np.float64) + 0.5) / float(1 << 53)
+    return w / -_np.log(u)
 
 
 def _push_window(values, v, cap):
@@ -1730,7 +1984,57 @@ def _offload_wins(nbytes, flops_per_byte, round_trip, split, flops_per_sec, K, b
 def _groupby_worker_src():
     return ("import pandas as _pd\n"
             "def run(sub):\n"
-            "    return sub.groupby(_by, as_index=_as_index, sort=False, dropna=_dropna).agg(_spec, *_args, **_kwargs)\n")
+            "    return sub.groupby(_by, as_index=_as_index, sort=False, dropna=_dropna, observed=True).agg(_spec, *_args, **_kwargs)\n")
+
+
+def _groupby_observed(gb):
+    """The observed= a groupby really runs with. pandas before 2.1 defaults
+    to False, 2.1-2.x stores no_default and treats it as False, 3.x defaults
+    to True; an explicit True or False from the call wins."""
+    obs = getattr(gb, "observed", False)
+    if obs is True or obs is False:
+        return obs
+    import pandas as _pd
+    return int(_pd.__version__.split(".")[0]) >= 3
+
+
+def _add_unobserved(df, keys, as_index, dropna, spec, args, kw, res):
+    """Add the category combinations no row has, as observed=False shows them.
+
+    Every partial runs with observed=True: with observed=False each node
+    would emit every category and the concat would repeat them. The missing
+    rows come from aggregating an empty frame of the same dtypes, which
+    yields every combination with its empty-group value (0 for sum and
+    count, NaN for mean) - the value pandas itself gives an empty group.
+
+    A plain key beside a categorical one contributes its observed values to
+    the product. An empty frame has none, so such a key is made categorical
+    over its observed values for the empty aggregation and cast back after."""
+    import pandas as _pd
+    e = df.iloc[0:0].copy()
+    plain = {}
+    for k in keys:
+        if not isinstance(df[k].dtype, _pd.CategoricalDtype):
+            if not dropna and df[k].isna().any():
+                raise ValueError("NaN in a plain key beside a categorical one")
+            plain[k] = df[k].dtype
+            e[k] = _pd.Categorical([], categories=df[k].dropna().unique())
+    empty = e.groupby(keys, as_index=True, sort=False, dropna=dropna,
+                      observed=False).agg(spec, *args, **kw)
+    if plain:
+        empty.index = _pd.MultiIndex.from_arrays(
+            [empty.index.get_level_values(k).astype(plain[k]) if k in plain
+             else empty.index.get_level_values(k) for k in keys], names=keys)
+    if not as_index:
+        res = res.set_index(keys)
+        if not isinstance(empty, _pd.DataFrame):      # size() and the like
+            empty = empty.to_frame(res.columns[0])
+    missing = empty[~empty.index.isin(res.index)]
+    if len(missing):
+        res = _pd.concat([res, missing])
+    if not as_index:
+        res = res.reset_index()
+    return res
 
 
 def _groupby_shuffle(gb, spec, args, kw):
@@ -1763,7 +2067,7 @@ def _groupby_shuffle(gb, spec, args, kw):
     local = df[buckets == 0]
     if len(local):
         parts.append(local.groupby(keys, as_index=as_index, sort=False,
-                                   dropna=dropna).agg(spec, *args, **kw))
+                                   dropna=dropna, observed=True).agg(spec, *args, **kw))
     remote = [df[buckets == b] for b in range(1, K) if (buckets == b).any()]
     if remote:
         globals_pickle = pickle.dumps({
@@ -1783,6 +2087,9 @@ def _groupby_shuffle(gb, spec, args, kw):
         blobs = _pool_send(header, globals_pickle, [pickle.dumps(d) for d in remote], 1800)
         parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
+    if (any(isinstance(df[k].dtype, _pd.CategoricalDtype) for k in keys)
+            and not _groupby_observed(gb)):
+        res = _add_unobserved(gb.obj, keys, as_index, dropna, spec, args, kw, res)
     if as_index:
         return res.sort_index()
     return res.reset_index(drop=True).sort_values(by=keys, kind="stable").reset_index(drop=True)
@@ -1790,7 +2097,8 @@ def _groupby_shuffle(gb, spec, args, kw):
 
 def _groupby_gate(gb):
     """True when a DataFrameGroupBy.agg should shuffle: big enough to pay for
-    the transfer, keys are plain columns (no index/categorical/array keys)."""
+    the transfer, keys are plain or categorical columns (no index/array
+    keys)."""
     from pandas.core.groupby import generic as _gbg
     if not isinstance(gb, _gbg.DataFrameGroupBy):
         return False
@@ -1805,8 +2113,6 @@ def _groupby_gate(gb):
         return False
     for n in gb._grouper.names:
         if not (isinstance(n, str) and n in df.columns):
-            return False
-        if getattr(df[n].dtype, "categories", None) is not None:
             return False
     return True
 
@@ -3937,9 +4243,12 @@ def _make_cluster_executor(base):
     onto concurrent.futures.ProcessPoolExecutor wholesale, but _ClusterPool
     takes processes= rather than max_workers= and has neither submit() nor
     shutdown(), so constructing an executor by keyword or calling submit() on
-    one raised inside any job that touched the futures API. Everything except
-    map() is now the stock executor; only map() is intercepted, and its real
-    signature (several iterables, an iterator result) is honoured.
+    one raised inside any job that touched the futures API. map() and
+    submit() are intercepted, everything else is the stock executor, and
+    map()'s real signature (several iterables, an iterator result) is
+    honoured. submit() queues in the pool's _SubmitBatcher when there is a
+    cluster and the call has no keyword arguments; otherwise it is the stock
+    submit.
     """
 
     class _ClusterExecutor(base):
@@ -3947,6 +4256,22 @@ def _make_cluster_executor(base):
             super().__init__(max_workers, *a, **kw)
             self._pp_workers = max_workers
             self._pp_pool = None
+            self._pp_closed = False
+
+        def _pp(self):
+            if self._pp_pool is None:
+                # Lazy: the stock executor spawns its own workers on first
+                # stock submit, so an executor never pays for two pools
+                # unless it uses both paths.
+                self._pp_pool = _ClusterPool(processes=self._pp_workers)
+            return self._pp_pool
+
+        def submit(self, fn, /, *args, **kwargs):
+            if kwargs or not _cluster_ready():
+                return super().submit(fn, *args, **kwargs)
+            if self._pp_closed:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            return self._pp()._submits().submit(fn, args)
 
         def map(self, fn, *iterables, timeout=None, chunksize=1):
             if not iterables:
@@ -3955,16 +4280,16 @@ def _make_cluster_executor(base):
                 items, starmap = list(iterables[0]), False
             else:
                 items, starmap = list(zip(*iterables)), True
-            if self._pp_pool is None:
-                # Lazy: the stock executor spawns its own workers on first
-                # submit, so a map-only executor never pays for two pools.
-                self._pp_pool = _ClusterPool(processes=self._pp_workers)
-            return iter(self._pp_pool._run(fn, items, starmap))
+            return iter(self._pp()._run(fn, items, starmap))
 
         def shutdown(self, wait=True, **kw):
-            if self._pp_pool is not None:
-                self._pp_pool.close()
-                self._pp_pool = None
+            self._pp_closed = True
+            pool, self._pp_pool = self._pp_pool, None
+            if pool is not None:
+                if wait:
+                    pool.close()      # drains queued submits first
+                else:
+                    threading.Thread(target=pool.close, daemon=True).start()
             super().shutdown(wait, **kw)
 
     _ClusterExecutor.__name__ = base.__name__
