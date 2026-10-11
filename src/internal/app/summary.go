@@ -16,13 +16,16 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 )
 
 // receipt is the shim's account of where the script's parallel items ran.
+// ByWhere counts work done, which exceeds the items mapped when local cores
+// race slow remote chunks; jobhistory.Receipt's Total/FromElsewhere/Raced
+// count each item once.
 type receipt struct {
-	RemoteItems int            `json:"remote_items"`
-	LocalItems  int            `json:"local_items"`
-	ByWhere     map[string]int `json:"by_where"`
+	jobhistory.Receipt
+	ByWhere map[string]int `json:"by_where"`
 }
 
 // summary is what a single run measured, rendered at its end.
@@ -111,8 +114,17 @@ func spreadLine(rc receipt, ranOn string, names map[string]string) (line string,
 	if total == 0 {
 		return "", nil
 	}
+	raced := ""
+	if rc.MappedItems > 0 {
+		// Count items once: the work counters include raced duplicates.
+		total = rc.Total()
+		local = total - rc.FromElsewhere()
+		if n := rc.Raced(); n > 0 {
+			raced = fmt.Sprintf(" · %d computed twice (local cores raced slow chunks)", n)
+		}
+	}
 	if len(peers) == 0 {
-		return fmt.Sprintf("%d items, all on %s", total, ranOn), unresolved
+		return fmt.Sprintf("%d items, all on %s", total, ranOn) + raced, unresolved
 	}
 	type kv struct {
 		name string
@@ -134,15 +146,18 @@ func spreadLine(rc receipt, ranOn string, names map[string]string) (line string,
 	for i, p := range list {
 		parts[i] = fmt.Sprintf("%s %d", p.name, p.n)
 	}
+	if rc.MappedItems > 0 {
+		remote = rc.FromElsewhere()
+	}
 	others := fmt.Sprintf("%d on %d other", remote, len(list))
 	if len(list) > 1 {
 		others += "s"
 	}
 	others += " (" + strings.Join(parts, ", ") + ")"
 	if local == 0 {
-		return fmt.Sprintf("%d items: %s", total, others), unresolved
+		return fmt.Sprintf("%d items: %s", total, others) + raced, unresolved
 	}
-	return fmt.Sprintf("%d items: %d on %s, %s", total, local, ranOn, others), unresolved
+	return fmt.Sprintf("%d items: %d on %s, %s", total, local, ranOn, others) + raced, unresolved
 }
 
 // summaryLines renders s. ranOn is the executing machine's hostname.

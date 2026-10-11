@@ -53,3 +53,20 @@ func TestCheckOnlyHost(t *testing.T) {
 		}
 	}
 }
+
+// V1 rehearsal: check-only called humanize "not packaged" while the run
+// found it in nixpkgs. Both now ask nixpkgs the same way.
+func TestCheckOnlyProbesUnknownPackages(t *testing.T) {
+	probe := func(names []string) (map[string]bool, error) {
+		return map[string]bool{"humanize": true}, nil
+	}
+	pkgs, missing, err := resolveUnknown([]string{"numpy"}, []string{"humanize", "notarealpkg_xyz"}, probe)
+	if err != nil || strings.Join(pkgs, ",") != "numpy,humanize" || strings.Join(missing, ",") != "notarealpkg_xyz" {
+		t.Fatalf("pkgs %v missing %v err %v", pkgs, missing, err)
+	}
+	// No nix: nothing is probed and every unknown name stays unknown.
+	pkgs, missing, err = resolveUnknown([]string{"numpy"}, []string{"humanize"}, nil)
+	if err != nil || strings.Join(pkgs, ",") != "numpy" || strings.Join(missing, ",") != "humanize" {
+		t.Fatalf("no probe: pkgs %v missing %v err %v", pkgs, missing, err)
+	}
+}

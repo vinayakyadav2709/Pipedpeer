@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -190,6 +191,16 @@ func runCheckOnly(o checkOnlyOptions) error {
 	}
 	// The run's own resolution, requirements.txt beside the script included.
 	pkgs, unknown := app.PlanPackages(absScript, scan.ExternalDeps, o.Pkgs, false)
+	// Ask nixpkgs for names the table lacks, as the run does (PKG-AUTO).
+	var probe func([]string) (map[string]bool, error)
+	nixErr := nixAvailable()
+	if nixErr == nil {
+		probe = app.ProbePythonPackages
+	}
+	pkgs, unknown, probeErr := resolveUnknown(pkgs, unknown, probe)
+	if probeErr != nil {
+		fmt.Fprintf(os.Stderr, "check-only: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), probeErr)
+	}
 	if len(pkgs) > 0 {
 		c.line("packages", strings.Join(pkgs, ", "))
 	}
@@ -197,7 +208,11 @@ func runCheckOnly(o checkOnlyOptions) error {
 		c.line("local", fmt.Sprintf("%d file(s) bundled with the script", len(scan.LocalFiles)))
 	}
 	for _, name := range unknown {
-		c.warn("not packaged", name+" (looked up in nixpkgs at run time; else add --pkg)")
+		if probe != nil && probeErr == nil {
+			c.warn("not packaged", name+" (not in nixpkgs; the job will fail to import it — add --pkg <nixpkgs name>)")
+		} else {
+			c.warn("not packaged", name+" (looked up in nixpkgs at run time; else add --pkg)")
+		}
 	}
 
 	// What the shim (or DDP) can spread.
@@ -331,9 +346,9 @@ func runCheckOnly(o checkOnlyOptions) error {
 	// Environment: built for real when nix is here, so a broken flake or a
 	// missing package shows now rather than mid-demo.
 	var storePath string
-	if err := nixAvailable(); err != nil {
+	if nixErr != nil {
 		c.warn("environment", "skipped (no nix on this machine)")
-		fmt.Fprintf(os.Stderr, "check-only: environment build skipped: %v\n", err)
+		fmt.Fprintf(os.Stderr, "check-only: environment build skipped: %v\n", nixErr)
 	} else {
 		c.line("environment", "building (first build of a new env takes minutes)")
 		start := time.Now()
@@ -373,6 +388,21 @@ func runCheckOnly(o checkOnlyOptions) error {
 	}
 	fmt.Println(c.paint("32", "checks complete"))
 	return nil
+}
+
+// resolveUnknown moves the unknown names nixpkgs has (per probe) into pkgs,
+// the way a run does. A nil probe (no nix here) leaves unknown as is.
+func resolveUnknown(pkgs, unknown []string, probe func([]string) (map[string]bool, error)) ([]string, []string, error) {
+	if probe == nil || len(unknown) == 0 {
+		return pkgs, unknown, nil
+	}
+	found, missing, err := pythondeps.SplitByExistence(unknown, probe)
+	for _, f := range found {
+		if !slices.Contains(pkgs, f) {
+			pkgs = append(pkgs, f)
+		}
+	}
+	return pkgs, missing, err
 }
 
 // buildEnvQuiet builds the environment with BuildEnvironment's step lines

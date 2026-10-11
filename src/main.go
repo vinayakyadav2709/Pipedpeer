@@ -90,9 +90,11 @@ func main() {
 		// A command that fails at run time should say why, not print its
 		// flags: the flags were fine, the network was not.
 		SilenceUsage: true,
-		Use:          "pipedpeer",
-		Short:        "Decentralized compute orchestrator",
-		Long:         "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
+		// main prints the error, so a cancel already reported stays one line.
+		SilenceErrors: true,
+		Use:           "pipedpeer",
+		Short:         "Decentralized compute orchestrator",
+		Long:          "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
 	}
 
 	viper.SetEnvPrefix("PIPEDPEER")
@@ -160,6 +162,9 @@ func main() {
 	rootCmd.SetArgs(args)
 
 	if err := rootCmd.Execute(); err != nil {
+		if !errors.Is(err, errCancelReported) {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -1841,9 +1846,7 @@ func newDashboardCmd() *cobra.Command {
 			}
 			m.refresh()
 
-			p := tea.NewProgram(m, tea.WithAltScreen())
-			_, err = p.Run()
-			return err
+			return runDashboard(tea.NewProgram(m, tea.WithAltScreen()))
 		},
 	}
 	cmd.Flags().Int("port", 38080, "Daemon API port")
@@ -1959,9 +1962,13 @@ func runOutcome(err error) error {
 		return nil
 	case errors.Is(err, context.Canceled):
 		fmt.Println("cancelled — remote work stopped")
+		return errCancelReported
 	}
 	return err
 }
+
+// errCancelReported fails the command (exit 1) without a second error line.
+var errCancelReported = errors.New("cancelled")
 
 // watchSuspend turns Ctrl+Z (SIGTSTP) into a detach for a single run: the
 // returned channel closes on the first one. Where detach is not offered
