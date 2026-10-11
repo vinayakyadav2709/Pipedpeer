@@ -1,0 +1,12 @@
+# Pool.map remote dispatch: why it falls back to local
+# collected 2026-08-25T17:07:18+05:30
+
+## Case 1: kernel defined in the submitting script's __main__
+(see S_dist1.log)
+
+## Case 2: kernel moved into an adjacent module shipped in the workspace
+
+## What the shim reports to the job
+[pipedpeer] remote failed (daemon HTTP 500: b'{"error":"pool run failed: exit status 1"}\n'); local covers it
+[pipedpeer] remote failed (daemon HTTP 500: b'{"error":"pool run failed: exit status 1"}\n'); local covers it
+[pipedpeer] remote failed (daemon HTTP 500: b'{"error":"pool run failed: exit status 1"}\n'); local covers it
