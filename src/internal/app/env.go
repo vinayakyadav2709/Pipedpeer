@@ -6,6 +6,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
@@ -99,28 +100,24 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	}
 
 	stage(2, "Parsing dependencies...")
-	pkgs := opts.Pkgs
-	if req := pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)); req != "" {
+	if pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)) != "" {
 		fmt.Printf("      Using requirements.txt beside the script (as if passed with --pkg)\n")
-		pkgs = append(append([]string{}, pkgs...), req)
 	}
-	nixPkgs := pythondeps.ResolvePackages(imports, pkgs)
-	// uv.lock names are distributions, not imports: the table does not apply.
-	if !fromLock {
-		unknown := append(unpackaged(imports, pkgs), pythondeps.RequirementsUnmapped(pkgs)...)
-		if len(unknown) > 0 {
-			found, missing, err := pythondeps.SplitByExistence(unknown, probePythonPackages)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
-			}
-			for _, f := range found {
-				fmt.Printf("      Not in the built-in table, but nixpkgs has python3Packages.%s: using it\n", f)
+	nixPkgs, unknown := PlanPackages(absScriptPath, imports, opts.Pkgs, fromLock)
+	if len(unknown) > 0 {
+		found, missing, err := pythondeps.SplitByExistence(unknown, probePythonPackages)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
+		}
+		for _, f := range found {
+			fmt.Printf("      Not in the built-in table, but nixpkgs has python3Packages.%s: using it\n", f)
+			if !slices.Contains(nixPkgs, f) {
 				nixPkgs = append(nixPkgs, f)
 			}
-			if len(missing) > 0 {
-				fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
-					strings.Join(missing, ", "))
-			}
+		}
+		if len(missing) > 0 {
+			fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
+				strings.Join(missing, ", "))
 		}
 	}
 	for _, pkg := range nixPkgs {
@@ -195,14 +192,70 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	return env, nil
 }
 
+// PlanPackages turns a script's imports, its --pkg values and its
+// requirements files (the one beside the script included) into nix packages,
+// reading each requirements file once. unknown lists, once each, the names the
+// built-in table does not know: every unmapped requirement name, plus the
+// imports nothing covers unless fromLock (uv.lock names are distributions, not
+// imports, so the import check does not apply). The caller probes nixpkgs for
+// unknown. Used by a run and by `run --check-only`, so both list the same.
+func PlanPackages(absScriptPath string, imports, pkgs []string, fromLock bool) (nix, unknown []string) {
+	if req := pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)); req != "" {
+		pkgs = append(append([]string{}, pkgs...), req)
+	}
+	var plain, reqNames []string
+	read := map[string]bool{}
+	for _, p := range pkgs {
+		if !strings.HasSuffix(p, ".txt") {
+			plain = append(plain, p)
+			continue
+		}
+		key := p
+		if abs, err := filepath.Abs(p); err == nil {
+			key = abs
+		}
+		if read[key] {
+			continue
+		}
+		read[key] = true
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "      warning: cannot read %s: %v\n", p, err)
+			continue
+		}
+		reqNames = append(reqNames, pythondeps.ParseRequirements(string(b))...)
+	}
+	nix = pythondeps.ResolvePackages(imports, plain)
+	addUnknown := func(n string) {
+		if !slices.Contains(unknown, n) {
+			unknown = append(unknown, n)
+		}
+	}
+	for _, n := range reqNames {
+		if m := pythondeps.ResolveNixPackage(n); m == "" {
+			addUnknown(n)
+		} else if !slices.Contains(nix, m) {
+			nix = append(nix, m)
+		}
+	}
+	if !fromLock {
+		for _, imp := range unpackaged(imports, append(plain, reqNames...)) {
+			addUnknown(imp)
+		}
+	}
+	return nix, unknown
+}
+
 // unpackaged lists imports with no nix package, leaving out any the user
-// named with --pkg (python3Packages.tqdm covers "tqdm").
+// named with --pkg or a requirements file (python3Packages.tqdm covers
+// "tqdm", the requirement "foo-bar" covers "foo_bar").
 func unpackaged(imports, pkgs []string) []string {
+	norm := strings.NewReplacer("_", "-").Replace
 	var out []string
 	for _, imp := range pythondeps.UnresolvedImports(imports) {
 		covered := false
 		for _, p := range pkgs {
-			if strings.EqualFold(p[strings.LastIndex(p, ".")+1:], imp) {
+			if strings.EqualFold(norm(p[strings.LastIndex(p, ".")+1:]), norm(imp)) {
 				covered = true
 				break
 			}

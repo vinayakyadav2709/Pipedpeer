@@ -80,7 +80,8 @@ func (r Receipt) Total() int {
 	if r.MappedItems > 0 {
 		return r.MappedItems
 	}
-	return r.RemoteItems + r.LocalItems + r.Unshippable
+	// Unshippable items ran here and are already in LocalItems.
+	return r.RemoteItems + r.LocalItems
 }
 
 // FromElsewhere is how many items' results came from another machine.
@@ -96,7 +97,7 @@ func (r Receipt) Raced() int {
 	if r.MappedItems == 0 {
 		return 0
 	}
-	return max(0, r.RemoteItems+r.LocalItems+r.Unshippable-r.MappedItems)
+	return max(0, r.RemoteItems+r.LocalItems-r.MappedItems)
 }
 
 // Summary is a one-line account for the end of a run, or "" when the shim

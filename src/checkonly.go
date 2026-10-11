@@ -95,26 +95,6 @@ func scanSpreads(src string) []spreadHit {
 	return hits
 }
 
-// unpackagedImports lists imports with no nix package, minus any the user
-// supplied by hand with --pkg (matched on the last dotted segment).
-func unpackagedImports(imports, pkgs []string) []string {
-	var out []string
-	for _, imp := range pythondeps.UnresolvedImports(imports) {
-		covered := false
-		for _, p := range pkgs {
-			seg := p[strings.LastIndex(p, ".")+1:]
-			if strings.EqualFold(seg, imp) {
-				covered = true
-				break
-			}
-		}
-		if !covered {
-			out = append(out, imp)
-		}
-	}
-	return out
-}
-
 // fit cuts s to checkLineWidth runes, marking the cut.
 func fit(s string) string {
 	r := []rune(s)
@@ -208,14 +188,16 @@ func runCheckOnly(o checkOnlyOptions) error {
 	} else {
 		c.line("imports", strings.Join(scan.ExternalDeps, ", "))
 	}
-	if pkgs := pythondeps.ResolvePackages(scan.ExternalDeps, o.Pkgs); len(pkgs) > 0 {
+	// The run's own resolution, requirements.txt beside the script included.
+	pkgs, unknown := app.PlanPackages(absScript, scan.ExternalDeps, o.Pkgs, false)
+	if len(pkgs) > 0 {
 		c.line("packages", strings.Join(pkgs, ", "))
 	}
 	if len(scan.LocalFiles) > 0 {
 		c.line("local", fmt.Sprintf("%d file(s) bundled with the script", len(scan.LocalFiles)))
 	}
-	for _, imp := range unpackagedImports(scan.ExternalDeps, o.Pkgs) {
-		c.warn("not packaged", imp+" (add --pkg)")
+	for _, name := range unknown {
+		c.warn("not packaged", name+" (looked up in nixpkgs at run time; else add --pkg)")
 	}
 
 	// What the shim (or DDP) can spread.

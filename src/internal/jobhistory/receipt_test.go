@@ -69,3 +69,22 @@ func TestReceiptCountsRacedItemsOnce(t *testing.T) {
 		t.Errorf("rendering:\n%s", b.String())
 	}
 }
+
+// The shim runs an unshippable tail locally, so those items are already in
+// local_items; unshippable only says why they stayed.
+func TestUnshippableItemsAreNotCountedTwice(t *testing.T) {
+	// 100 mapped: 20 measured here, 80 could not ship and also ran here.
+	r := Receipt{MappedItems: 100, LocalItems: 100, Unshippable: 80}
+	if r.Raced() != 0 {
+		t.Errorf("Raced = %d, want 0", r.Raced())
+	}
+	old := Receipt{LocalItems: 100, Unshippable: 80}
+	if old.Total() != 100 {
+		t.Errorf("Total without mapped_items = %d, want 100", old.Total())
+	}
+	var b strings.Builder
+	WriteReceipt(&b, r)
+	if !strings.Contains(b.String(), "on the running node     20") || strings.Contains(b.String(), "computed on both") {
+		t.Errorf("rendering:\n%s", b.String())
+	}
+}
