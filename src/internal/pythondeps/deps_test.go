@@ -77,7 +77,7 @@ func TestResolvePackages(t *testing.T) {
 	explicit := []string{"pillow", reqFile, "boto3"}
 
 	got := ResolvePackages(astImports, explicit)
-	want := []string{"flask", "scipy", "Pillow", "numpy", "pandas", "pytest", "unknown-pkg", "boto3"}
+	want := []string{"flask", "scipy", "Pillow", "numpy", "pandas", "pytest", "boto3"}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolved packages mismatch\nwant: %#v\n got: %#v", want, got)
@@ -187,7 +187,7 @@ func TestRequirementsBeside(t *testing.T) {
 	if got := RequirementsBeside(d); got != p {
 		t.Fatalf("got %q", got)
 	}
-	if got := ResolvePackages(nil, []string{p}); len(got) != 1 || got[0] != "rich" {
+	if got := ResolvePackages(nil, []string{p}); len(got) != 0 || len(RequirementsUnmapped([]string{p})) != 1 {
 		t.Fatalf("requirements not read: %v", got)
 	}
 }
@@ -211,5 +211,14 @@ func TestExtractImportScanRecursesIntoLocalModules(t *testing.T) {
 	sort.Strings(want)
 	if !reflect.DeepEqual(got.ExternalDeps, want) {
 		t.Fatalf("deps %v want %v", got.ExternalDeps, want)
+	}
+}
+
+func TestParseRequirementsForms(t *testing.T) {
+	in := "# c\n\n-r other.txt\n-e .\n--index-url https://x\nNumPy[extra]>=1.2 ; python_version<'3.12'\nscikit_learn==1.0\npkg @ https://h/p.whl\n./local\nfoo; sys_platform=='linux'\nbar  # note\n"
+	got := ParseRequirements(in)
+	want := []string{"numpy", "scikit-learn", "foo", "bar"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("want %v got %v", want, got)
 	}
 }
