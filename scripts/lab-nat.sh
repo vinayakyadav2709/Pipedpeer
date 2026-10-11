@@ -110,7 +110,8 @@ links() { [[ -n "$(path_to "$1" "$2")" ]]; }
 # A Pool job from <submitter>; afterwards the caller reads the workers' tallies.
 run_pool() {
 	local sub="$1"
-	x "$sub" sh -c 'mkdir -p /work && : > /work/.pipedpeerignore && cat > /work/task.py' <<'EOF'
+	# -i: without it exec drops stdin and the task arrives empty (and "passes").
+	"$rt" exec -i "$(ctr "$sub")" sh -c 'mkdir -p /work && : > /work/.pipedpeerignore && cat > /work/task.py' <<'EOF'
 import os, time
 from multiprocessing import Pool
 
