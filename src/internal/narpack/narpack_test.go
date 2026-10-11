@@ -3,10 +3,13 @@ package narpack
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 )
 
 // A narinfo's URL names the archive file, and the suffix depends on how the
@@ -272,5 +275,53 @@ func TestPackingAnUnpublishedPathFails(t *testing.T) {
 		[]string{"/nix/store/aaaa-root", "/nix/store/zzzz-never-published"}, nil, &buf)
 	if err == nil {
 		t.Fatal("packing a path with no narinfo was accepted")
+	}
+}
+
+// TestImportHandsNixTheClusterKeys is the fix for fresh workers refusing
+// every closure: nix trusts only what it is told, and setup runs before any
+// peer key exists. The keys the daemon collected go on the command itself,
+// signatures stay required, and nothing switches the check off.
+func TestImportHandsNixTheClusterKeys(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	if err := nixsign.WriteTrustedKeys([]string{"peer-b:BBBB", "peer-a:AAAA"}); err != nil {
+		t.Fatal(err)
+	}
+	argv := importArgv("/cache", []string{"/nix/store/x-root"}, clusterKeys())
+	joined := strings.Join(argv, "\x00")
+	if !strings.Contains(joined, "--option\x00extra-trusted-public-keys\x00peer-a:AAAA peer-b:BBBB\x00") {
+		t.Fatalf("the cluster's keys are not passed to nix: %q", argv)
+	}
+	if strings.Contains(joined, "no-check-sigs") || strings.Contains(joined, "require-sigs") {
+		t.Fatalf("import must keep signatures required: %q", argv)
+	}
+	if argv[len(argv)-1] != "/nix/store/x-root" {
+		t.Fatalf("roots must come last: %q", argv)
+	}
+}
+
+func TestImportWithNoClusterKeysAddsNoOption(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	argv := importArgv("/cache", []string{"/nix/store/x-root"}, clusterKeys())
+	if strings.Contains(strings.Join(argv, " "), "extra-trusted-public-keys") {
+		t.Fatalf("an empty key list was passed to nix: %q", argv)
+	}
+}
+
+// A refusal has to be readable where it lands: on the submitter, as the
+// reason a peer took no work.
+func TestARefusedImportSaysWhyInOneLine(t *testing.T) {
+	out := "copying 2 paths...\ncopying path '/nix/store/a-x' from 'file:///c'...\n" +
+		"error: cannot add path '/nix/store/b-env' because it lacks a signature by a trusted key\n"
+	err := importError(errors.New("exit status 1"), out, "peer-a:AAAA")
+	msg := err.Error()
+	if strings.Contains(msg, "copying path") {
+		t.Fatalf("progress lines buried the reason: %s", msg)
+	}
+	if !strings.Contains(msg, "lacks a signature by a trusted key") || !strings.Contains(msg, "pipedpeer setup") {
+		t.Fatalf("refusal lost its reason or its remedy: %s", msg)
+	}
+	if msg := importError(errors.New("exit status 1"), out, "").Error(); !strings.Contains(msg, "knows no cluster keys") {
+		t.Fatalf("an empty key list is not named: %s", msg)
 	}
 }

@@ -52,6 +52,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rs/zerolog/log"
+
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
 
@@ -348,24 +351,81 @@ var importSeam []string
 // This is where the signature is checked. It is an ordinary substitution, so
 // nix applies the receiving store's own rules: with require-sigs on, a path
 // no trusted key signed is refused and the error says so. There is
-// deliberately no --no-check-sigs here. A machine that wants to accept
-// unsigned paths says so in its own configuration, which is the only place
-// its owner can see the decision.
+// deliberately no --no-check-sigs here.
+//
+// How the cluster's keys reach nix: this command passes them itself, as
+// extra-trusted-public-keys read from nixsign.TrustedKeysFile, which the
+// daemon rewrites every poll from token-proven peers. Nothing in the
+// machine's nix configuration is edited and signatures stay required; the
+// keys only ADD to what nix.conf trusts, for this one copy. Relying on
+// nix.conf alone left a fresh worker refusing every closure: setup runs
+// before any peer key exists, and a single-user nix checks signatures just
+// as a multi-user one does.
+//
+// One case this cannot cover: a multi-user nix-daemon ignores trusted-key
+// settings from a user it does not list in trusted-users, so there the keys
+// must be in nix.conf (`pipedpeer setup`, as root) and a key learned later
+// needs setup again. The refusal says so.
 func Import(ctx context.Context, cacheDir string, roots []string) error {
 	if len(roots) == 0 {
 		return fmt.Errorf("nothing to import")
 	}
-	argv := append([]string{"nix", "copy", "--from", cacheURI(cacheDir)}, importSeam...)
-	argv = append(argv, roots...)
-	cmd, done, err := nixstore.Cmd("", argv...)
+	keys := clusterKeys()
+	cmd, done, err := nixstore.Cmd("", importArgv(cacheDir, roots, keys)...)
 	if err != nil {
 		return err
 	}
 	defer done()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("nix copy from a peer's closure: %v: %s", err, strings.TrimSpace(string(out)))
+		return importError(err, string(out), keys)
 	}
 	return nil
+}
+
+// importArgv is the nix command Import runs. The cluster's keys come after
+// importSeam so they add to whatever trust list a test's scratch store sets.
+func importArgv(cacheDir string, roots []string, keys string) []string {
+	argv := append([]string{"nix", "copy", "--from", cacheURI(cacheDir)}, importSeam...)
+	if keys != "" {
+		argv = append(argv, "--option", "extra-trusted-public-keys", keys)
+	}
+	return append(argv, roots...)
+}
+
+// clusterKeys is the trusted-keys file as one space-separated value, or ""
+// when there is none yet.
+func clusterKeys() string {
+	body, err := os.ReadFile(nixsign.TrustedKeysFile())
+	if err != nil && !os.IsNotExist(err) {
+		log.Warn().Err(err).Str("file", nixsign.TrustedKeysFile()).
+			Msg("could not read the cluster's trusted keys; importing with nix.conf's keys only")
+	}
+	return strings.Join(strings.Fields(string(body)), " ")
+}
+
+// importError keeps what nix said that matters. Its output lists every path
+// it copied before the one it refused, which buried the reason in a
+// submitter's log under dozens of "copying path" lines.
+func importError(err error, out, keys string) error {
+	var said []string
+	for _, line := range strings.Split(out, "\n") {
+		if l := strings.TrimSpace(line); strings.HasPrefix(l, "error:") || strings.HasPrefix(l, "warning:") {
+			said = append(said, l)
+		}
+	}
+	msg := strings.Join(said, "; ")
+	if msg == "" {
+		msg = strings.TrimSpace(out)
+	}
+	if strings.Contains(out, "lacks a signature by a trusted key") {
+		if keys == "" {
+			msg += fmt.Sprintf(" (this node knows no cluster keys yet: %s is empty or missing; it fills once the daemon has polled its peers)",
+				nixsign.TrustedKeysFile())
+		} else {
+			msg += " (the sender's key is not among this node's cluster keys, or this nix is a multi-user daemon that ignores keys from untrusted users: run `pipedpeer setup` here as an admin)"
+		}
+	}
+	return fmt.Errorf("nix copy from a peer's closure: %v: %s", err, msg)
 }
 
 // FormatName is what a sender calls this archive on the wire, and what a

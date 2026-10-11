@@ -58,8 +58,9 @@ type outputMessage struct {
 }
 
 type uploadResponse struct {
-	JobID     string `json:"job_id"`
-	StorePath string `json:"store_path"`
+	JobID     string   `json:"job_id"`
+	StorePath string   `json:"store_path"`
+	Warnings  []string `json:"warnings,omitempty"`
 }
 
 // UploadJob sends workspace tarball + NAR closure to the daemon.
@@ -136,6 +137,11 @@ func UploadJob(host string, port int, workspacePath, narPath, storePath, scriptP
 	var result uploadResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("invalid upload response: %w", err)
+	}
+	// Peers that refused the environment: without this the run just stays
+	// local and the reason sits in a daemon log on another machine.
+	for _, w := range result.Warnings {
+		fmt.Fprintf(os.Stderr, "      Warning: %s\n", w)
 	}
 	return &result, nil
 }

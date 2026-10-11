@@ -165,6 +165,9 @@ func (f FileStamp) changed(other FileStamp) bool {
 type UploadResponse struct {
 	JobID     string `json:"job_id"`
 	StorePath string `json:"store_path"`
+	// Warnings are for the submitter's terminal: peers that refused the
+	// closure, and why, so a run that stays local says what kept it there.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -395,11 +398,12 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	// DDP ranks upload directly to their own node and every rank does the same,
 	// so the closure is already where it will run — skip the broadcast and keep
 	// it off the other (non-executing) peers.
+	var warnings []string
 	if skipBroadcast != "1" {
-		s.broadcastClosure(storePath)
+		warnings = s.broadcastClosure(storePath)
 	}
 
-	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
+	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath, Warnings: warnings})
 }
 
 // extractWorkspaceTar unpacks the workspace stream into workDir, refusing
