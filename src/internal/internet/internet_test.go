@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/direct"
+	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 )
 
 // TestOneMissedRegistrationDoesNotDropAPeer. The address book is UDP, so a
@@ -292,6 +293,51 @@ func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
 	// And once the penalty expires, the same addresses are fair game again.
 	if !shouldTry(entry, old, entry.until.Add(time.Second)) {
 		t.Error("the penalty never expires")
+	}
+}
+
+// TestUnreachablePeersCarryTheirReason.
+//
+// A peer with no direct path is not offered work, so `pipedpeer nodes` is the
+// only place it stays visible. It is listed with the reason while the
+// introducer still lists it and no link exists, and not otherwise: a linked
+// peer is reachable, and one that stopped registering is gone, not stuck.
+func TestUnreachablePeersCarryTheirReason(t *testing.T) {
+	m := New(Config{Rendezvous: "203.0.113.9:38445"})
+	cands := []string{"reflex:203.0.113.1:41000"}
+	reg := func(nodes ...string) {
+		var peers []rendezvous.Peer
+		for _, n := range nodes {
+			peers = append(peers, rendezvous.Peer{Node: n, Candidates: cands})
+		}
+		// The backoff holds for these candidates, so no connect is started.
+		m.onRegistered(context.Background(), "", peers)
+	}
+
+	m.noPath("beef", &direct.Unreachable{Peer: "beef", Reason: direct.ReasonBothSymmetric}, candKey(cands))
+	m.noPath("cafe", &direct.Unreachable{Peer: "cafe", Reason: direct.ReasonTimeout}, candKey(cands))
+	if got := m.Unreachable(); len(got) != 0 {
+		t.Errorf("reported %v before the introducer listed anyone", got)
+	}
+	reg("beef", "cafe")
+	got := m.Unreachable()
+	if got["beef"] != string(direct.ReasonBothSymmetric) || got["cafe"] != string(direct.ReasonTimeout) {
+		t.Fatalf("Unreachable() = %v, want each peer with its own reason", got)
+	}
+
+	// A link clears it.
+	if err := m.linkUp(context.Background(), "beef", nil, "punched"); err != nil {
+		t.Fatal(err)
+	}
+	defer m.closeAll()
+	if r, ok := m.Unreachable()["beef"]; ok {
+		t.Errorf("a linked peer is still reported unreachable: %q", r)
+	}
+
+	// A peer the introducer stops listing is no longer reported.
+	reg("beef")
+	if r, ok := m.Unreachable()["cafe"]; ok {
+		t.Errorf("a peer that stopped registering is still reported: %q", r)
 	}
 }
 
