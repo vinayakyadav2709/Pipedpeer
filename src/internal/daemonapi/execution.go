@@ -241,6 +241,21 @@ func gpuDriverLibs(dir string) []string {
 // looks there finds them without help.
 const gpuDriverMountDir = "/run/opengl-driver/lib"
 
+// addGPUSysModule exposes /sys/module read-only to a GPU job. libcuda and
+// NVML read /sys/module/nvidia*; without it cuInit returns 304 and torch
+// quietly falls back to the CPU (bench/gpu_test.go found this).
+func addGPUSysModule(c *ociConfig, rootfsDir, jobID string) {
+	const dir = "/sys/module"
+	if _, err := os.Stat(dir); err != nil {
+		log.Warn().Err(err).Str("job", jobID).Msg("GPU job without /sys/module: CUDA will not initialise in the sandbox")
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(rootfsDir, "sys", "module"), 0755); err != nil {
+		log.Warn().Err(err).Str("job", jobID).Msg("creating the /sys/module mount point")
+	}
+	c.Mounts = append(c.Mounts, ociMount{Destination: dir, Type: "bind", Source: dir, Options: []string{"rbind", "ro"}})
+}
+
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	// Same reasoning as the sandbox env: stdout is a pipe, and python would
 	// otherwise sit on a full training run's prints until exit.
@@ -751,6 +766,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if cfg.GPU {
+			addGPUSysModule(&ociCfg, rootfsDir, jobID)
 			gpuInfo := gpu.Detect()
 			for _, d := range gpuInfo.Devices {
 				ociCfg.Linux.Devices = append(ociCfg.Linux.Devices, ociDevice{
