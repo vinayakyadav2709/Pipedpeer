@@ -34,6 +34,11 @@ func Attach(ctx context.Context, id string) error {
 		return fmt.Errorf("job %s: %w", short, err)
 	}
 
+	if !rec.Collected && rec.Status != jobhistory.StateRunning {
+		// Finished without its output coming back (its node was lost).
+		fmt.Printf("job %s (%s) is %s: %s\n", short, filepath.Base(rec.ScriptPath), rec.Status, rec.Error)
+		return recordErr(rec)
+	}
 	if rec.Collected {
 		fmt.Printf("job %s (%s) finished on %s; its output, saved on this machine:\n\n", short, filepath.Base(rec.ScriptPath), rec.DaemonEndpoint)
 		if err := replaySaved(dir); err != nil {
@@ -46,7 +51,7 @@ func Attach(ctx context.Context, id string) error {
 		// job's outcome, and its record must say so.
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), collectTimeout)
 		note := func(format string, args ...any) { fmt.Printf(format, args...) }
-		got, _, done, err := collect(cctx, dir, note)
+		got, _, done, _, err := collect(cctx, dir, note)
 		cancel()
 		switch {
 		case err != nil && streamErr != nil:

@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
@@ -87,13 +89,13 @@ func TestWatcherCollectsFinishedDetachedJob(t *testing.T) {
 	log := zerolog.Nop()
 	warned := map[string]bool{}
 
-	collectDetached(context.Background(), log, warned)
+	collectDetached(context.Background(), log, warned, deadPort(t))
 	if r, _ := jobhistory.ReadRecordAt(dir); r.Collected || r.Status != jobhistory.StateRunning {
 		t.Fatalf("running job collected early: %+v", r)
 	}
 
 	status.Store("done")
-	collectDetached(context.Background(), log, warned)
+	collectDetached(context.Background(), log, warned, deadPort(t))
 	r, err := jobhistory.ReadRecordAt(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +117,7 @@ func TestWatcherCollectsFinishedDetachedJob(t *testing.T) {
 	if err := os.Remove(filepath.Join(project, "out", "result.txt")); err != nil {
 		t.Fatal(err)
 	}
-	collectDetached(context.Background(), log, warned)
+	collectDetached(context.Background(), log, warned, deadPort(t))
 
 	// Attach replays from disk with the node gone.
 	srv.Close()
@@ -128,16 +130,10 @@ func TestWatcherCollectsFinishedDetachedJob(t *testing.T) {
 }
 
 func TestWatcherRetriesUnreachableNode(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close() // nothing listens there now
-	dir, _ := detachedRecord(t, "j2", addr)
+	dir, _ := detachedRecord(t, "j2", deadAddr(t))
 	warned := map[string]bool{}
 	for i := 0; i < 2; i++ {
-		collectDetached(context.Background(), zerolog.Nop(), warned)
+		collectDetached(context.Background(), zerolog.Nop(), warned, deadPort(t))
 	}
 	r, err := jobhistory.ReadRecordAt(dir)
 	if err != nil {
@@ -148,5 +144,114 @@ func TestWatcherRetriesUnreachableNode(t *testing.T) {
 	}
 	if !warned[r.ID] {
 		t.Fatal("no warning recorded for the unreachable node")
+	}
+}
+
+// deadAddr is a local address nothing listens on.
+func deadAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+func deadPort(t *testing.T) int {
+	_, p, _ := net.SplitHostPort(deadAddr(t))
+	n, _ := strconv.Atoi(p)
+	return n
+}
+
+// localDaemon fakes this machine's daemon listing a self node and one peer at
+// peerAddr; it returns the daemon's port.
+func localDaemon(t *testing.T, peerAddr string) int {
+	t.Helper()
+	ph, pp, _ := net.SplitHostPort(peerAddr)
+	peerPort, _ := strconv.Atoi(pp)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"ssh_endpoint": "me@127.0.0.1:22", "daemon_port": deadPort(t), "source": "self"},
+			{"ssh_endpoint": "user@" + ph + ":22", "daemon_port": peerPort, "source": "discovery"},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	_, p, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	n, _ := strconv.Atoi(p)
+	return n
+}
+
+// livePeer is a peer that answers /health.
+func livePeer(t *testing.T) string {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+func fastProbes(t *testing.T) {
+	tries, gap := lostProbeTries, lostProbeGap
+	lostProbeTries, lostProbeGap = 2, 10*time.Millisecond
+	t.Cleanup(func() { lostProbeTries, lostProbeGap = tries, gap })
+}
+
+func TestJudgeLostConnection(t *testing.T) {
+	fastProbes(t)
+	dead := deadAddr(t)
+	dh, dp, _ := net.SplitHostPort(dead)
+	deadNodePort, _ := strconv.Atoi(dp)
+
+	// The node died while a peer still answers: the failover reruns it.
+	if v, why := judgeLostConnection(dh, deadNodePort, "j", localDaemon(t, livePeer(t))); v != lostRerun {
+		t.Fatalf("node dead, peer up: verdict %d (%s), want rerun", v, why)
+	}
+	// Nothing answers: this machine is offline, the job runs on.
+	if v, why := judgeLostConnection(dh, deadNodePort, "j", localDaemon(t, deadAddr(t))); v != lostDetach {
+		t.Fatalf("offline: verdict %d (%s), want detach", v, why)
+	}
+	// The node answers: running → detach, ended → collect.
+	var status atomic.Value
+	status.Store("running")
+	node := fakeNode(t, "j3", &status)
+	nh, np, _ := net.SplitHostPort(strings.TrimPrefix(node.URL, "http://"))
+	nodePort, _ := strconv.Atoi(np)
+	if v, _ := judgeLostConnection(nh, nodePort, "j3", deadPort(t)); v != lostDetach {
+		t.Fatalf("node runs the job: verdict %d, want detach", v)
+	}
+	status.Store("done")
+	if v, _ := judgeLostConnection(nh, nodePort, "j3", deadPort(t)); v != lostEnded {
+		t.Fatalf("job ended: verdict %d, want ended", v)
+	}
+	// The node answers but lost the job: rerun.
+	if v, _ := judgeLostConnection(nh, nodePort, "other", deadPort(t)); v != lostRerun {
+		t.Fatalf("unknown job: verdict %d, want rerun", v)
+	}
+}
+
+func TestWatcherFailsJobWhoseNodeIsGone(t *testing.T) {
+	saved := goneAfter
+	goneAfter = 0
+	t.Cleanup(func() { goneAfter = saved })
+	dir, _ := detachedRecord(t, "j4", deadAddr(t))
+	self := localDaemon(t, livePeer(t))
+	warned := map[string]bool{}
+
+	collectDetached(context.Background(), zerolog.Nop(), warned, self)
+	r, _ := jobhistory.ReadRecordAt(dir)
+	if r.UnreachableSince == "" || r.Status != jobhistory.StateRunning {
+		t.Fatalf("first unreachable tick: %+v", r)
+	}
+	collectDetached(context.Background(), zerolog.Nop(), warned, self)
+	r, _ = jobhistory.ReadRecordAt(dir)
+	if r.Status != jobhistory.StateFailed || !strings.Contains(r.Error, "gone") || !strings.Contains(r.Error, "pipedpeer run") {
+		t.Fatalf("node gone past goneAfter: %+v", r)
+	}
+	if err := Attach(context.Background(), r.ID); err == nil || !strings.Contains(err.Error(), "gone") {
+		t.Fatalf("attach of a lost job: %v", err)
 	}
 }

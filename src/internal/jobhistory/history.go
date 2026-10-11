@@ -62,6 +62,9 @@ type Record struct {
 	// in LocalSyncRoot, record finalized) by whoever saw it end first: the
 	// daemon's watcher or attach.
 	Collected bool `json:"collected,omitempty"`
+	// UnreachableSince (RFC3339): when a detached job's node stopped
+	// answering while other peers did; empty while it answers.
+	UnreachableSince string `json:"unreachable_since,omitempty"`
 	// ExitCode is the script's exit code as its node reported it.
 	ExitCode int `json:"exit_code,omitempty"`
 	// Stages is the run's timeline: every step, where it ran, and how long

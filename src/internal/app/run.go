@@ -19,9 +19,12 @@ type Options struct {
 	ScriptPath string
 	DaemonHost string
 	DaemonPort int
-	TargetID   string
-	JobName    string
-	Isolate    bool
+	// SelfDaemonPort is this machine's daemon, asked for its peers when the
+	// connection to the node breaks; 0 means the default port.
+	SelfDaemonPort int
+	TargetID       string
+	JobName        string
+	Isolate        bool
 	// GPU means this job wants a device: it drives placement and selects the
 	// CUDA build of torch. Off, the closure is several gigabytes smaller —
 	// importing torch is not the same as wanting a GPU.
@@ -316,12 +319,25 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		}
 	}
 
-	// Once the node has the job, a lost connection is a detach: the node keeps
-	// it running, so it is not run again elsewhere, and this machine's daemon
-	// collects it when it ends. Only where detaching is offered (not DDP/map).
+	// A lost connection is ambiguous: the node died (run the job elsewhere,
+	// the failover) or this machine went offline (the job runs on: detach,
+	// and this machine's daemon collects it). Only where detaching is offered
+	// (not DDP/map).
+	endedOnNode := false
 	if detach != nil && errors.Is(err, daemonctl.ErrConnectionLost) {
-		fmt.Fprintf(os.Stderr, "\nlost the connection to %s (%v); the job keeps running there\n", historyRecord.DaemonEndpoint, err)
-		err = fmt.Errorf("%v: %w", err, daemonctl.ErrDetached)
+		fmt.Fprintf(os.Stderr, "\nlost the connection to %s (%v); checking whether the node or this machine went away...\n", historyRecord.DaemonEndpoint, err)
+		verdict, why := judgeLostConnection(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, opts.SelfDaemonPort)
+		switch verdict {
+		case lostRerun:
+			fmt.Fprintf(os.Stderr, "the node is gone: %s; running the job elsewhere\n", why)
+		case lostEnded:
+			fmt.Fprintf(os.Stderr, "%s; collecting it\n", why)
+			endedOnNode = true
+			err = fmt.Errorf("%v: %w", err, daemonctl.ErrDetached)
+		default:
+			fmt.Fprintf(os.Stderr, "%s; the job keeps running there\n", why)
+			err = fmt.Errorf("%v: %w", err, daemonctl.ErrDetached)
+		}
 	}
 	if errors.Is(err, daemonctl.ErrDetached) {
 		detached = true
@@ -336,6 +352,14 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 				historyDir, saveErr, uploadResp.JobID, historyRecord.DaemonEndpoint)
 		}
 		short := jobhistory.ShortID(historyRecord.ID)
+		if endedOnNode {
+			got, _, done, jobErr, cerr := collect(context.WithoutCancel(ctx), historyDir, note)
+			if cerr == nil && done {
+				printSummary(os.Stdout, recordSummary(historyDir, got, opts.DaemonHost, opts.DaemonPort))
+				return jobErr
+			}
+			fmt.Fprintf(os.Stderr, "warning: could not collect job %s now (%v); this machine's daemon retries\n", short, cerr)
+		}
 		fmt.Printf("\ndetached — job %s keeps running\n", short)
 		fmt.Printf("  reattach: pipedpeer attach %s\n", short)
 		return fmt.Errorf("job %s detached: %w", short, err)
