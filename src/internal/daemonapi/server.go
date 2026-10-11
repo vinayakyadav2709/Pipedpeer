@@ -475,6 +475,7 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 		s.jobsMu.Lock()
 		delete(s.jobs, e.Name())
 		s.jobsMu.Unlock()
+		jobLogs.Delete(filepath.Join(s.jobDir, e.Name(), jobOutputFile))
 		removed++
 	}
 	return removed, nil

@@ -159,6 +159,11 @@ type JobRecord struct {
 	// Cancelled: the client's cancel frame stopped the job.
 	Cancelled  bool
 	FinishedAt time.Time
+	// Pgid and PgidStart (its leader's start, ms since the epoch): an
+	// unisolated job's process group, so a restarted daemon can stop a job
+	// that outlived the old one, and nothing else (pids get reused).
+	Pgid      int   `json:",omitempty"`
+	PgidStart int64 `json:",omitempty"`
 }
 
 // FileStamp identifies a file version well enough to tell whether a job
@@ -746,6 +751,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			fail("start command: " + err.Error())
 			return
 		}
+		s.recordJobGroup(job, cmd.Process.Pid)
 
 		procDone := make(chan struct{})
 		go superviseCancel(jobID, cancelCh, procDone, signalGroup(jobID, cmd.Process.Pid))
