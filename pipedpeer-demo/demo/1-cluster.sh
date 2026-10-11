@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Step 1 - three machines, three networks, one cluster.
+# Step 2 of the run sheet - every machine in the room, one cluster (LAPTOP-A).
 source "$(dirname "$0")/_lib.sh"
 
-banner "Step 1 - the cluster"
+banner "The cluster"
 show "$PIPE" nodes
 echo
-note "Three rows, all healthy. HOST = three different machines."
-note "PATH 'punched' / 'punched-in' = a direct link through both routers - no VPN, no port forwarding."
-note "GPU column: the scheduler knows which machines can take GPU work."
-note "The introducer only introduced them; it carries none of the traffic."
+note "One row per machine, all 'healthy'. The '*' row is this laptop."
+note "CPU = cores and how busy they are now; GPU = card, load and memory in use."
+note "That is what the scheduler weighs when it places work."
+note "PATH 'lan' = a direct link on this network. No VPN, no cluster manager."
+note "LAPTOP-A only introduced the machines (rendezvous); it carries none of their traffic."

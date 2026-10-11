@@ -57,10 +57,39 @@ pause() {
 	read -r -p "${DIM}  [enter to continue]${N}" _
 }
 
-# Machines in the cluster with an NVIDIA card, from the node table.
-gpu_nodes() { "$PIPE" nodes 2>/dev/null | tail -n +2 | grep -ci nvidia || true; }
-
-# Healthy peers, not counting this machine.
-peer_count() {
-	"$PIPE" nodes 2>/dev/null | awk 'NR>1 && $NF != "self" && $3 == "healthy"' | wc -l
+# Counts from the daemon's own /v1/nodes JSON, not the printed table (its
+# columns change; its GPU cell drops the word NVIDIA). GPU = the same test the
+# scheduler uses (main.go ddpHasGPU). Healthy peers only; this machine always.
+#   node_count peers      healthy peers, not this machine
+#   node_count gpu-peers  healthy peers with a GPU (what --remote can reach)
+#   node_count gpu-all    healthy machines with a GPU, this one included
+#   node_count gpu-self   1 if this machine has a GPU
+DAEMON_PORT="${PIPEDPEER_DAEMON_PORT:-38080}"
+node_count() {
+	python3 - "$DAEMON_PORT" "$1" <<'PY'
+import json, sys, urllib.request
+port, what = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/nodes", timeout=3) as r:
+        nodes = json.load(r)
+except Exception as e:
+    print(f"  (counting nodes: daemon on port {port} not answering: {e}; counted 0)", file=sys.stderr)
+    print(0)
+    sys.exit(0)
+def gpu(n):
+    c, l = n.get("capabilities") or {}, n.get("load") or {}
+    return c.get("gpu", "none") not in ("", "none") or bool(l.get("gpu_model")) or bool(l.get("gpus"))
+up = [n for n in nodes or [] if n.get("state") == "healthy" or n.get("source") == "self"]
+peers = [n for n in up if n.get("source") != "self"]
+pick = {
+    "peers": peers,
+    "gpu-peers": [n for n in peers if gpu(n)],
+    "gpu-all": [n for n in up if gpu(n)],
+    "gpu-self": [n for n in up if n.get("source") == "self" and gpu(n)],
+}[what]
+print(len(pick))
+PY
 }
+
+gpu_nodes() { node_count gpu-all; }
+peer_count() { node_count peers; }

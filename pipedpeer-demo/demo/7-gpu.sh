@@ -1,23 +1,40 @@
 #!/usr/bin/env bash
-# Step 7 - plain PyTorch training, placed only on machines with a GPU.
+# GPU highlight - a PC with no GPU trains on a laptop's GPU (run on a PC).
+#
+#   ./demo/7-gpu.sh
+#
+# The torch environment is several GB. It must already be built here and on
+# the GPU laptops (demo/prep-3-gpu.sh, at the setup visit). Never cold on stage.
 source "$(dirname "$0")/_lib.sh"
 
-banner "Step 7 - GPU training"
-g=$(gpu_nodes)
+banner "GPU training from a machine without one"
+g=$(node_count gpu-peers)
 if [[ "$g" -eq 0 ]]; then
-	note "No GPU machine in the cluster - skipping. Say: 'GPU is a hard filter; with none, it would refuse rather than run slowly.'"
+	note "No GPU machine among the peers - skipping. Say: 'GPU is a hard filter; with none, it would refuse rather than run slowly.'"
 	exit 0
 fi
-show grep -n "DistributedDataParallel\|init_process_group\|torchrun" 04_torch_ddp.py || note "^ none of those appear in the file."
-note "Put 'watch -n1 nvidia-smi' on the GPU machines' screens now."
-pause
-if [[ "$g" -ge 2 ]]; then
-	note "--ddp 2: two ranks on the two GPU machines. The shim sets up the process group and syncs gradients."
-	typed pipedpeer run 04_torch_ddp.py --ddp 2
-	"$PIPE" run 04_torch_ddp.py --ddp 2 2>&1 | grep -E 'using GPU|rank|epoch [0-9] step +0 |training done|final loss|TOTAL|Placed|completed'
-else
-	note "One GPU machine: the job is placed there because the script imports torch and uses CUDA."
-	typed pipedpeer run 04_torch_ddp.py
-	"$PIPE" run 04_torch_ddp.py 2>&1 | grep -E 'using GPU|epoch [0-9] step +0 |training done|final loss|TOTAL|Placed|completed'
+if [[ "$(node_count gpu-self)" -gt 0 ]]; then
+	note "This machine HAS a GPU. The point lands better from a college PC - run it there."
 fi
-note "The machine without a GPU was never given a rank - filtered, not tried and failed."
+show grep -n "cuda\|DistributedDataParallel\|init_process_group" 04_torch_ddp.py
+note "Plain PyTorch: 'cuda if available'. Nothing about other machines in it."
+note "On the GPU laptops' screens now:   watch -n1 nvidia-smi"
+pause
+
+# grep keeps the screen short; the summary lines say where it ran.
+keep='using GPU|using CPU|rank [0-9]|epoch [0-9] step +0 |training done|final loss|TOTAL|ran on|closure|^ *total|cancelled'
+
+note "One GPU: --remote sends it off this machine, --gpu force allows only GPU machines."
+typed pipedpeer run 04_torch_ddp.py --remote --gpu force
+"$PIPE" run 04_torch_ddp.py --remote --gpu force 2>&1 | grep -E "$keep"
+echo
+note "'using GPU: ...' printed by a machine that has no GPU. The script did not change."
+
+if [[ "$g" -ge 2 ]]; then
+	pause
+	note "Two GPUs: --ddp 2 = one rank on each laptop's GPU; gradients synced after every step."
+	typed pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
+	"$PIPE" run 04_torch_ddp.py --ddp 2 --gpu force 2>&1 | grep -E "$keep"
+	echo
+	note "Both nvidia-smi screens jumped. The PCs were never given a rank - filtered, not tried and failed."
+fi
