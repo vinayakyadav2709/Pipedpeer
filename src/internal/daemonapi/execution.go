@@ -171,15 +171,12 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// defaultJobDir holds the daemon's own working state: per-job work dirs,
+// daemon-state.json and the NAR cache. It is deliberately not
+// jobhistory.BaseDir() (<data>/pipedpeer/jobs): the daemon prunes this dir
+// hourly by mtime, and sharing it would delete the CLI's job history.
 func defaultJobDir() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "pipedpeer", "jobs")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(userdir.Data(), "jobs")
-	}
-	return filepath.Join(home, ".local", "share", "pipedpeer", "jobs")
+	return filepath.Join(userdir.Data(), "work")
 }
 
 func shellQuote(s string) string {
