@@ -5,7 +5,9 @@ import (
 	"bufio"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
@@ -23,7 +25,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -47,6 +52,9 @@ type ExecConfig struct {
 	// Everything else about memory here is an estimate checked at admission;
 	// this is the only part the kernel enforces.
 	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
+	// LeaseID binds the submitter's lease to this job: the node keeps it while
+	// the job runs and releases it when the job ends, renewals or not.
+	LeaseID string `json:"lease_id,omitempty"`
 }
 
 // OCI config structures for crun bundle generation.
@@ -128,6 +136,9 @@ type OutputMessage struct {
 	// It is set on the Done frame so the submitter can learn a job's real
 	// footprint and feed the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
+	// Cancelled is set on the Done frame when the client's cancel frame
+	// stopped the job; ExitCode is still whatever the process returned.
+	Cancelled bool `json:"cancelled,omitempty"`
 }
 
 // JobRecord tracks a single uploaded job on the daemon.
@@ -143,6 +154,11 @@ type JobRecord struct {
 	// WorkDir. Results are diffed against it so only what the job actually
 	// produced or changed travels back.
 	Uploaded map[string]FileStamp
+	// Detached: the client left without cancelling and the job ran on.
+	Detached bool
+	// Cancelled: the client's cancel frame stopped the job.
+	Cancelled  bool
+	FinishedAt time.Time
 }
 
 // FileStamp identifies a file version well enough to tell whether a job
@@ -490,44 +506,16 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeWS := func(m OutputMessage) {
-		data, _ := json.Marshal(m)
-		conn.WriteMessage(websocket.TextMessage, data)
+	started := time.Now()
+	if cfg.LeaseID != "" {
+		// The lease now lives as long as the job, not as long as the
+		// submitter keeps renewing it: a detached submitter renews nothing.
+		s.bindLease(cfg.LeaseID, jobID)
 	}
 
-	// If the closure's run entrypoint already exists in the local store, a
-	// prior task (or a shared /nix/store volume) already materialised it —
-	// skip the (expensive) NAR open + re-import entirely.
-	runEntry := filepath.Join(job.StorePath, "bin", "run")
-	if !pathExists(runEntry) {
-		narFile, err := os.Open(job.NarPath)
-		if err != nil {
-			writeWS(OutputMessage{Error: "open nar: " + err.Error()})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
-			return
-		}
-		defer narFile.Close()
-
-		// Import NAR into local Nix store — uses nix multicall binary
-		// invoked as nix-store via argv[0].
-		out, err := importNAR(narFile)
-		if err != nil {
-			writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
-			return
-		}
-	}
-
-	s.jobsMu.Lock()
-	job.Status = "running"
-	s.jobsMu.Unlock()
-
-	runPath := filepath.Join(cfg.StorePath, "bin", "run")
-
+	// Every frame is recorded in the job's output log before the websocket
+	// sees it, so `pipedpeer attach` replays exactly what a live client got.
+	jobLog := s.jobOutput(jobID)
 	outCh := make(chan OutputMessage, 64)
 	writerDone := make(chan struct{})
 	go func() {
@@ -536,6 +524,11 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		// on outCh, and the job cannot finish until they do.
 		var lost bool
 		for m := range outCh {
+			if m.Done {
+				jobLog.Finish(m)
+			} else {
+				jobLog.Append(m)
+			}
 			if lost {
 				continue
 			}
@@ -545,6 +538,110 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
+
+	// The client may send one more frame, {"cancel":true}. A connection that
+	// ends without it (detach, crash, network loss) leaves the job running.
+	cancelCh := make(chan struct{})
+	var finished atomic.Bool
+	var cancelOnce sync.Once
+	requestCancel := func() {
+		if finished.Load() {
+			return
+		}
+		cancelOnce.Do(func() {
+			log.Info().Str("job", jobID).Msg("cancel requested by the submitter")
+			close(cancelCh)
+		})
+	}
+	// An attach client's cancel frame stops the job the same way.
+	jobLog.SetCancel(requestCancel)
+	go s.readExecClient(conn, job, jobID, cancelCh, requestCancel, &finished)
+	cancelled := func() bool {
+		select {
+		case <-cancelCh:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// finish sends the done frame, records how the job ended and lets the
+	// lease go. Every path out of this handler past this point goes through it.
+	finish := func(done OutputMessage) {
+		wasCancelled := cancelled()
+		finished.Store(true)
+		done.Done = true
+		done.Cancelled = wasCancelled
+		outCh <- done
+		close(outCh)
+		<-writerDone
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+
+		status := "done"
+		switch {
+		case wasCancelled:
+			status = "cancelled"
+		case done.ExitCode != 0:
+			status = "failed"
+		}
+		s.jobsMu.Lock()
+		job.Status = status
+		job.Cancelled = wasCancelled
+		job.FinishedAt = time.Now()
+		s.jobsMu.Unlock()
+		if cfg.LeaseID != "" {
+			s.releaseJobLease(jobID, status)
+		}
+		s.persist()
+
+		secs := time.Since(started).Round(100 * time.Millisecond).Seconds()
+		if wasCancelled {
+			log.Info().Str("job", jobID).Float64("secs", secs).Msg("job cancelled")
+		} else {
+			log.Info().Str("job", jobID).Int("exit", done.ExitCode).Float64("secs", secs).
+				Str("peak", humanize.IBytes(uint64(max(done.PeakMemBytes, 0)))).Msg("job finished")
+		}
+	}
+	// fail ends a job that never got a process to run.
+	fail := func(msg string) {
+		outCh <- OutputMessage{Error: msg}
+		finish(OutputMessage{ExitCode: 1})
+	}
+
+	// If the closure's run entrypoint already exists in the local store, a
+	// prior task (or a shared /nix/store volume) already materialised it —
+	// skip the (expensive) NAR open + re-import entirely.
+	runEntry := filepath.Join(job.StorePath, "bin", "run")
+	if !pathExists(runEntry) {
+		narFile, err := os.Open(job.NarPath)
+		if err != nil {
+			fail("open nar: " + err.Error())
+			return
+		}
+		defer narFile.Close()
+
+		// Import NAR into local Nix store — uses nix multicall binary
+		// invoked as nix-store via argv[0].
+		out, err := importNAR(narFile)
+		if err != nil {
+			fail(fmt.Sprintf("nix-store --import: %v: %s", err, string(out)))
+			return
+		}
+	}
+
+	if cancelled() {
+		// Cancelled while the closure was importing: nothing to stop, so do
+		// not start it. 130 is what a shell reports for a job stopped by Ctrl+C.
+		finish(OutputMessage{ExitCode: 130})
+		return
+	}
+
+	s.jobsMu.Lock()
+	job.Status = "running"
+	s.jobsMu.Unlock()
+	log.Info().Str("job", jobID).Str("script", cfg.ScriptPath).Bool("gpu", cfg.GPU).Msg("job started")
+
+	runPath := filepath.Join(cfg.StorePath, "bin", "run")
 
 	var exitCode int
 	var peakBytes int64
@@ -605,12 +702,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	if cfg.Isolate {
 		if _, err := exec.LookPath("crun"); err != nil {
 			if sandboxRequired {
-				writeWS(OutputMessage{Error: "this node keeps its nix store in the user's " +
+				fail("this node keeps its nix store in the user's " +
 					"data directory, which only the sandbox can mount at /nix — but crun is " +
-					"not installed, so nothing can run. Install it with `pipedpeer setup`."})
-				s.jobsMu.Lock()
-				job.Status = "failed"
-				s.jobsMu.Unlock()
+					"not installed, so nothing can run. Install it with `pipedpeer setup`.")
 				return
 			}
 			outCh <- OutputMessage{E: "[pipedpeer] crun not found on this node — running unisolated\n"}
@@ -623,12 +717,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				"so jobs run unisolated.\n    " + why + "\n"}
 			usernsOnce.Do(func() { log.Warn().Str("reason", why).Msg("no user namespace: jobs run unisolated") })
 			if sandboxRequired {
-				writeWS(OutputMessage{Error: "this node keeps its nix store in the user's " +
+				fail("this node keeps its nix store in the user's " +
 					"data directory, which only the sandbox can mount at /nix — but this " +
-					"machine refuses user namespaces, so nothing can run.\n" + why})
-				s.jobsMu.Lock()
-				job.Status = "failed"
-				s.jobsMu.Unlock()
+					"machine refuses user namespaces, so nothing can run.\n" + why)
 				return
 			}
 			cfg.Isolate = false
@@ -645,21 +736,24 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
 		cmd := exec.Command("sh", "-c", runCmd)
+		// Its own process group, so a cancel reaches python and everything
+		// it started, not just the shell.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			writeWS(OutputMessage{Error: "start command: " + err.Error()})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
+			fail("start command: " + err.Error())
 			return
 		}
 
+		procDone := make(chan struct{})
+		go superviseCancel(jobID, cancelCh, procDone, signalGroup(jobID, cmd.Process.Pid))
 		readers := streamOutput(stdout, stderr, outCh)
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		readers.Wait()
 		cmd.Wait()
+		close(procDone)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	} else {
@@ -848,46 +942,35 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		defer os.RemoveAll(bundleDir)
 
 		cmd := exec.Command("crun", "run", "--bundle", bundleDir, containerID)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			writeWS(OutputMessage{Error: "start crun: " + err.Error()})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
+			fail("start crun: " + err.Error())
 			return
 		}
 
+		procDone := make(chan struct{})
+		go superviseCancel(jobID, cancelCh, procDone, signalContainer(jobID, containerID, cmd.Process.Pid))
 		readers := streamOutput(stdout, stderr, outCh)
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
 		readers.Wait()
 		cmd.Wait()
+		close(procDone)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	done := OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
+	done := OutputMessage{ExitCode: exitCode, PeakMemBytes: peakBytes}
 	// 137 is SIGKILL. With a cap in force and a fresh kill recorded under our
 	// cgroup, the cause is the cap; without the counter moving it could just
 	// as well have been an operator's kill -9, so it is not claimed.
-	if exitCode == 137 && capBytes > 0 && oomKills(capParent) > oomBefore {
+	if exitCode == 137 && capBytes > 0 && !cancelled() && oomKills(capParent) > oomBefore {
 		done.OOMKilled = true
 		done.MemLimitBytes = capBytes
 	}
-	outCh <- done
-	close(outCh)
-	<-writerDone
-	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-
-	s.jobsMu.Lock()
-	if exitCode == 0 {
-		job.Status = "done"
-	} else {
-		job.Status = "failed"
-	}
-	s.jobsMu.Unlock()
-	s.persist()
+	finish(done)
 	releaseHeapAfterWork()
 }
 
@@ -1146,25 +1229,147 @@ func oomKills(parent string) int64 {
 	return 0
 }
 
-// streamOutput forwards a job's stdout and stderr to outCh line by line. The
-// caller must wait on the returned group before cmd.Wait: Wait closes the
-// pipes as soon as the process exits, and a reader still draining the last
-// lines then fails with "file already closed" — which the submitter reads as
-// a failed job and reschedules, even though the script exited 0.
+// streamOutput forwards a job's stdout and stderr to outCh as raw chunks, so
+// a progress bar redrawing its line with \r reaches the submitter as it
+// happens, not at the next newline. A chunk never ends inside a UTF-8
+// character: the incomplete tail is carried into the next one. The caller
+// must wait on the returned group before cmd.Wait: Wait closes the pipes as
+// soon as the process exits, and a reader still draining the last bytes then
+// fails with "file already closed" — which the submitter reads as a failed
+// job and reschedules, even though the script exited 0.
 func streamOutput(stdout, stderr io.Reader, outCh chan<- OutputMessage) *sync.WaitGroup {
 	var wg sync.WaitGroup
 	forward := func(r io.Reader, name string, msg func(string) OutputMessage) {
 		defer wg.Done()
-		scanner := bufio.NewScanner(r)
-		for scanner.Scan() {
-			outCh <- msg(scanner.Text() + "\n")
-		}
-		if err := scanner.Err(); err != nil {
-			outCh <- OutputMessage{Error: name + " scanner: " + err.Error()}
+		buf := make([]byte, 4096)
+		carry := 0
+		for {
+			n, err := r.Read(buf[carry:])
+			n += carry
+			cut := completeUTF8(buf[:n])
+			if cut > 0 {
+				outCh <- msg(string(buf[:cut]))
+			}
+			carry = copy(buf, buf[cut:n])
+			if err != nil {
+				if carry > 0 {
+					outCh <- msg(string(buf[:carry]))
+				}
+				if !errors.Is(err, io.EOF) {
+					outCh <- OutputMessage{Error: name + " read: " + err.Error()}
+				}
+				return
+			}
 		}
 	}
 	wg.Add(2)
 	go forward(stdout, "stdout", func(l string) OutputMessage { return OutputMessage{O: l} })
 	go forward(stderr, "stderr", func(l string) OutputMessage { return OutputMessage{E: l} })
 	return &wg
+}
+
+// completeUTF8 returns how much of b can be sent without splitting a UTF-8
+// character: all of it, or up to the start of an incomplete trailing one.
+func completeUTF8(b []byte) int {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if utf8.FullRune(b[i:]) {
+				return len(b)
+			}
+			return i
+		}
+	}
+	return len(b)
+}
+
+// readExecClient reads the frames a client sends after the config frame.
+// {"cancel":true} calls requestCancel. A connection that ends without one while
+// the job still runs (close 4001 "detach", a crash, a lost network) marks the
+// job detached and leaves it running: only an explicit cancel kills a job.
+func (s *Server) readExecClient(conn *websocket.Conn, job *JobRecord, jobID string,
+	cancelCh <-chan struct{}, requestCancel func(), finished *atomic.Bool) {
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if finished.Load() {
+				return
+			}
+			select {
+			case <-cancelCh:
+				return
+			default:
+			}
+			s.jobsMu.Lock()
+			job.Detached = true
+			s.jobsMu.Unlock()
+			s.persist()
+			log.Info().Str("job", jobID).Str("why", err.Error()).Msg("client left; job keeps running")
+			return
+		}
+		var f struct {
+			Cancel bool `json:"cancel"`
+		}
+		if err := json.Unmarshal(msg, &f); err != nil || !f.Cancel {
+			log.Warn().Str("job", jobID).Str("frame", string(msg)).Msg("ignoring unexpected frame from exec client")
+			continue
+		}
+		requestCancel()
+	}
+}
+
+// superviseCancel stops a running job once cancelCh closes: SIGTERM so the
+// script can clean up, SIGKILL if it is still there 2 s later.
+func superviseCancel(jobID string, cancelCh, procDone <-chan struct{}, signal func(syscall.Signal)) {
+	select {
+	case <-procDone:
+		return
+	case <-cancelCh:
+	}
+	signal(syscall.SIGTERM)
+	select {
+	case <-procDone:
+	case <-time.After(2 * time.Second):
+		log.Warn().Str("job", jobID).Msg("job ignored SIGTERM for 2 s; killing it")
+		signal(syscall.SIGKILL)
+	}
+}
+
+// signalGroup signals the process group led by pid (the job's shell).
+func signalGroup(jobID string, pid int) func(syscall.Signal) {
+	return func(sig syscall.Signal) {
+		if err := syscall.Kill(-pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			log.Warn().Err(err).Str("job", jobID).Int("pgid", pid).Str("signal", sig.String()).
+				Msg("could not signal the job's process group")
+		}
+	}
+}
+
+// signalContainer signals every process in the job's crun container. Inside
+// the container's pid namespace the script is pid 1, which ignores SIGTERM
+// unless it installs a handler, so --all (the whole cgroup) is tried first.
+// If crun cannot do it, SIGKILL falls back to `crun delete -f` and SIGTERM to
+// crun's own process group.
+func signalContainer(jobID, containerID string, crunPid int) func(syscall.Signal) {
+	group := signalGroup(jobID, crunPid)
+	return func(sig syscall.Signal) {
+		name := "TERM"
+		if sig == syscall.SIGKILL {
+			name = "KILL"
+		}
+		out, err := exec.Command("crun", "kill", "--all", containerID, name).CombinedOutput()
+		if err == nil {
+			return
+		}
+		log.Warn().Err(err).Str("job", jobID).Str("output", strings.TrimSpace(string(out))).
+			Msg("crun kill --all failed; falling back")
+		if sig == syscall.SIGKILL {
+			if out, err := exec.Command("crun", "delete", "-f", containerID).CombinedOutput(); err != nil {
+				log.Warn().Err(err).Str("job", jobID).Str("output", strings.TrimSpace(string(out))).
+					Msg("crun delete -f failed; killing crun's process group")
+				group(sig)
+			}
+			return
+		}
+		group(sig)
+	}
 }
