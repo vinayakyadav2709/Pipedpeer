@@ -289,6 +289,11 @@ func runPoolScriptWith(t *testing.T, python string, files map[string]string, mai
 		"PIPEDPEER_NUM_SHARDS=3",
 		"PIPEDPEER_STORE_PATH=/nix/store/fake",
 		"PIPEDPEER_RECEIPT="+receiptPath,
+		// Each script's own Pool size, not every core here. Local and the
+		// cluster pull from one queue, so a 12-core test machine finishes
+		// 64 x 20ms before the first round trip returns and nothing is left
+		// for the cluster - correct, and useless to a test of dispatching.
+		"PIPEDPEER_RESPECT_POOL_SIZE=1",
 	)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
@@ -549,6 +554,10 @@ import multiprocessing, os, time
 def work(x):
     time.sleep(0.01)
     return x
+
+# The harness keeps every other test's own pool size; this one is about
+# not keeping it.
+os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
 
 if __name__ == "__main__":
     with multiprocessing.Pool(2) as pool:

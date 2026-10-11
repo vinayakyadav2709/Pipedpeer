@@ -623,6 +623,21 @@ assert calls > 0, "60 x 50ms of joblib work never reached the cluster"
 assert calls < 30, "%d round trips for 60 tasks: still dispatching one at a time" % calls
 assert any(d["op"] == "joblib" and d["shipped"] for d in shim._STATS["decisions"]), shim._STATS["decisions"]
 
+# A large array every task shares travels once per chunk, in the globals
+# frame, not inside each task.
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+import numpy as np
+big = np.arange(512 * 1024, dtype=np.float64)          # 4 MB
+def slow_sum(arr, i):
+    time.sleep(0.05)
+    return float(arr[i])
+MAX_CHUNK[0] = 0
+before = POOL_CALLS[0]
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(slow_sum)(big, i) for i in range(60))
+assert res == [float(i) for i in range(60)], res
+assert POOL_CALLS[0] > before, "the shared-array call never reached the cluster"
+assert 0 < MAX_CHUNK[0] < big.nbytes // 4, "a task carried the array itself: %d bytes" % MAX_CHUNK[0]
+
 # The fake daemon runs tasks in this process, so the remote runner's nesting
 # marker lands here; on a real peer it lands in that peer's worker.
 os.environ.pop("PIPEDPEER_JB_NESTED", None)

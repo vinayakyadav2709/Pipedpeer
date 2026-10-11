@@ -568,9 +568,28 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
                             (n + 1) // 2))
     chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
 
-    # Interleave chunk ownership so neither side is strictly first.
-    local_chunks = chunks[::2]
-    remote_chunks = chunks[1::2]
+    # One queue both sides pull from, so each takes chunks as fast as it
+    # finishes them. Ownership used to be dealt alternately up front, which
+    # fixed this machine's share at half however many peers there were: a
+    # three-worker cluster ran 00_pool no faster than a one-worker one,
+    # because the half left here took as long as the whole job did elsewhere.
+    queue = list(chunks)
+    remote_taken = []
+    claimed = {}       # id(chunk) -> when a peer took it; None once it failed
+    remote_secs = []   # how long finished remote chunks took
+
+    def take(remote=False):
+        # Popping and recording a remote claim happen under one lock: split,
+        # local could find the queue empty and the claim not yet listed, and
+        # return with that chunk's slots still empty.
+        with lock:
+            if not queue:
+                return None
+            chunk = queue.pop(0)
+            if remote:
+                remote_taken.append(chunk)
+                claimed[id(chunk)] = time.monotonic()
+            return chunk
 
     def fill(pairs):
         """Run user func over (idx, item) pairs and first-wins into slots."""
@@ -589,46 +608,85 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
         if won:
             _record_local(won)
 
-    # Remote thread: dispatch remote chunks, first-wins into slots.
-    # Chunks go out concurrently. Dispatching them one at a time capped
-    # the whole cluster's throughput at a single chunk, so a peer sat idle
-    # between round trips no matter how many cores it had.
-    def deliver(chunk):
-        res = run_remote(chunk)
-        if res is None:
-            return
-        won = 0
-        with lock:
-            for orig_i, v in res:
-                if slots[orig_i] is None:
-                    slots[orig_i] = v
-                    won += 1
-        if won:
-            _add_stat("remote_used", won)
+    # Remote threads: each pulls a chunk, dispatches it, first-wins into
+    # slots, and pulls the next. Several are in flight at once: one at a time
+    # capped the whole cluster's throughput at a single chunk, so a peer sat
+    # idle between round trips no matter how many cores it had. A failed
+    # chunk stops that thread pulling; local re-runs what it held.
+    def deliver_loop():
+        while True:
+            chunk = take(remote=True)
+            if chunk is None:
+                return
+            t0 = time.monotonic()
+            res = run_remote(chunk)
+            if res is None:
+                with lock:
+                    claimed[id(chunk)] = None
+                return
+            won = 0
+            with lock:
+                for orig_i, v in res:
+                    if slots[orig_i] is None:
+                        slots[orig_i] = v
+                        won += 1
+            with lock:
+                remote_secs.append(time.monotonic() - t0)
+            if won:
+                _add_stat("remote_used", won)
+
+    def local_secs(chunk):
+        return per_item_cost * len(chunk) / max(1, min(width, len(chunk)))
+
+    def worth_rerunning(chunk, now):
+        """Re-run a peer's chunk here only when that beats waiting for it.
+
+        Re-running everything a peer held the moment local ran dry made a
+        fast origin redo the cluster's work every time, so a peer's answer
+        rarely won and adding peers changed nothing. A chunk that failed is
+        re-run at once. Once some peer answers have come back, local takes a
+        chunk when its own run would finish before the peer is expected to,
+        or the peer is well overdue. Before any have, it gives the peer
+        twice the chunk's local time plus 0.7 s - the most this costs over
+        never dispatching at all.
+        """
+        start = claimed.get(id(chunk))
+        if start is None:
+            return True
+        here = local_secs(chunk)
+        if not remote_secs:
+            return now > start + 2 * here + 0.7
+        expected = sum(remote_secs) / len(remote_secs)
+        return now + here < start + expected or now > start + 1.5 * expected + 0.2
 
     def remote_run():
-        if not remote_chunks:
-            return
-        inflight = max(1, min(_REMOTE_INFLIGHT, len(remote_chunks)))
-        if inflight == 1:
-            for chunk in remote_chunks:
-                deliver(chunk)
-            return
-        import concurrent.futures as _cfut
-        with _cfut.ThreadPoolExecutor(max_workers=inflight) as ex:
-            list(ex.map(deliver, remote_chunks))
+        inflight = max(1, min(_REMOTE_INFLIGHT, len(chunks) - 1))
+        threads = [threading.Thread(target=deliver_loop, daemon=True) for _ in range(inflight)]
+        for t in threads:
+            t.start()
 
-    # Local runs its share; when done, re-run any remote chunk still not
-    # filled (straggler tail). done is set once local has given every item a
-    # chance, so the caller can always return a complete result.
+    # Local pulls until the queue is empty, then re-runs any chunk a peer
+    # still holds (straggler tail). done is set once local has given every
+    # item a chance, so the caller can always return a complete result.
     def local_run():
-        fill([p for c in local_chunks for p in c])
         while True:
-            with lock:
-                pending = [p for c in remote_chunks for p in c if slots[p[0]] is None]
-            if not pending:
+            chunk = take()
+            if chunk is None:
                 break
-            fill(pending)  # idle local cores re-run the stragglers
+            fill(chunk)
+        while True:
+            now = time.monotonic()
+            with lock:
+                open_chunks = [c for c in remote_taken
+                               if any(slots[p[0]] is None for p in c)]
+                rerun = [p for c in open_chunks if worth_rerunning(c, now)
+                         for p in c if slots[p[0]] is None]
+            if not open_chunks:
+                break
+            if rerun:
+                fill(rerun)  # idle local cores re-run the stragglers
+            else:
+                time.sleep(0.02)
         done.set()
 
     done = threading.Event()
@@ -3882,14 +3940,49 @@ def _install_joblib():
     # kwargs) task. The runner marks PIPEDPEER_JB_NESTED so worker-side joblib
     # calls (RF fit inside a GridSearchCV task) run inline instead of
     # recursing into the mesh.
+    #
+    # Arrays several tasks share travel once per chunk, in the globals frame,
+    # and each task carries a reference instead. sklearn hands every tree the
+    # whole training set, so a chunk of three trees used to ship X three
+    # times - 77 MB for 01_sklearn_rf's 25 MB X - and the transfer, not the
+    # trees, set the pace.
     jb_payload = {
-        "src": ("import os\ndef run(item):\n"
+        "src": ("import os\n"
+                "def _pp_unshare(x):\n"
+                "    if type(x) is tuple and len(x) == 2 and x[0] == '__pp_shared__':\n"
+                "        return globals()[x[1]]\n"
+                "    return x\n"
+                "def run(item):\n"
                 "    os.environ['PIPEDPEER_JB_NESTED'] = '1'\n"
                 "    f, a, k = item\n"
+                "    a = tuple(_pp_unshare(x) for x in a)\n"
+                "    k = {n: _pp_unshare(v) for n, v in k.items()}\n"
                 "    return f(*a, **k)\n"),
         "name": "run",
         "gvars": {},
     }
+
+    def _jb_share(chunk):
+        """Move large arrays out of a chunk's tasks into its globals."""
+        keys, shared = {}, {}
+
+        def ref(x):
+            nb = getattr(x, "nbytes", 0)
+            if not isinstance(nb, int) or nb < (1 << 20):
+                return x
+            key = keys.get(id(x))
+            if key is None:
+                key = keys[id(x)] = "_pp_shared_%d" % len(keys)
+                shared[key] = x
+            return ("__pp_shared__", key)
+
+        items = [(i, (f, tuple(ref(x) for x in a), {n: ref(v) for n, v in k.items()}))
+                 for i, (f, a, k) in chunk]
+        return items, shared
+
+    def _jb_remote(chunk):
+        items, shared = _jb_share(chunk)
+        return _ClusterPool._remote_chunk(dict(jb_payload, gvars=shared), items, False, "joblib")
 
     _ORIG_PARALLEL_INIT = _jp.Parallel.__init__
     _ORIG_PARALLEL_CALL = _jp.Parallel.__call__
@@ -3960,8 +4053,7 @@ def _install_joblib():
         _log("joblib: %d tasks, %.3fs each; racing this machine against the cluster"
              % (len(tail), cost))
         return head_results + _race_items(
-            tail, cost, width, run_local,
-            lambda chunk: _ClusterPool._remote_chunk(jb_payload, chunk, False, "joblib"))
+            tail, cost, width, run_local, _jb_remote)
 
     try:
         _jp.Parallel.__init__ = _parallel_init
