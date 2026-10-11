@@ -29,6 +29,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/coordinator"
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
@@ -1003,7 +1004,7 @@ func runDDP(o ddpRunOptions) error {
 	ranks = append(ranks, rank0)
 	ranks = append(ranks, peers...)
 
-	errs := make(chan error, o.Nodes)
+	errs := make(chan ddpRankResult, o.Nodes)
 	for i, n := range ranks {
 		go func(i int, n registry.NodeRecord) {
 			// Ranks sharing a machine must not share its accelerator: both
@@ -1081,16 +1082,25 @@ func runDDP(o ddpRunOptions) error {
 				EstimatedMemBytes: resReq.MemBytes,
 				EstimationTier:    resReq.Tier,
 			}
-			errs <- app.RunTask(o.Ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+			errs <- ddpRankResult{rank: i, err: app.RunTask(o.Ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})}
 		}(i, n)
 	}
 
-	var firstErr error
-	for i := 0; i < o.Nodes; i++ {
-		if err := <-errs; err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("rank %d failed: %w", i, err)
-		}
+	hosts := make([]string, len(ranks))
+	for i, n := range ranks {
+		hosts[i] = ddpHostName(n)
 	}
+	leadHost := ddpExtractHost(rank0.SSHEndpoint)
+	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, func(rank int, err error) {
+		// torch's own mesh (gloo/nccl) cannot lose a member; only the
+		// daemon-backed sync can be told to carry on.
+		if b := os.Getenv("PIPEDPEER_DDP_BACKEND"); b == "gloo" || b == "nccl" {
+			return
+		}
+		if err := ddpReportDown(leadHost, rank0.DaemonPort, jobSet, rank, len(ranks), err); err != nil {
+			fmt.Fprintf(os.Stderr, "[ddp] could not tell the lead daemon rank %d is gone (%v); the ring waits 45 s per sync for it instead\n", rank, err)
+		}
+	})
 	if firstErr != nil {
 		if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 			fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n", masterAddr, masterPort)
@@ -2458,6 +2468,11 @@ func runDaemon(args []string) {
 		}
 		os.Exit(0)
 	}()
+
+	// The daemon lives until os.Exit, so the watchdog needs no cancel.
+	cgroups.StartCeilingWatchdog(context.Background(), func(format string, args ...any) {
+		log.Warn().Msgf(format, args...)
+	})
 
 	log.Info().Int("port", port).Str("node_id", nodeID.ShortID()).
 		Int("max_concurrent", maxConcurrent).Msg("daemon starting")

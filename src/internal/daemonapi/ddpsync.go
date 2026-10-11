@@ -149,6 +149,25 @@ type ddpRun struct {
 	dropped map[int]bool
 	// seen is when this run last synced, so it can be forgotten.
 	seen time.Time
+
+	// A rank that died: every survivor must take the new shares at the SAME
+	// epoch boundary, or two ranks slice the data differently for an epoch
+	// and their step counts part. So the notice rides the reply to one
+	// agreed sync (downSeq), which every live rank fetches.
+	lastSeq  int64
+	downNote string       // reply fragment carrying the new shares
+	downSeq  int64        // first sync whose reply carries it
+	downTold map[int]bool // ranks that already have it
+}
+
+// run returns a group's run state, creating it. Caller holds the board lock.
+func (b *ddpBoard) run(group string) *ddpRun {
+	r := b.runs[group]
+	if r == nil {
+		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}}
+		b.runs[group] = r
+	}
+	return r
 }
 
 func newDDPBoard() *ddpBoard {
@@ -161,10 +180,9 @@ func newDDPBoard() *ddpBoard {
 
 // observe records what a rank reported. Caller holds the board lock.
 func (b *ddpBoard) observe(group string, rank int, rep rankReport) {
-	r := b.runs[group]
-	if r == nil {
-		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}}
-		b.runs[group] = r
+	r := b.run(group)
+	if r.dropped[rank] {
+		return // a dead rank's last report must not win it a share back
 	}
 	r.reports[rank] = rep
 	r.seen = time.Now()
@@ -359,6 +377,10 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	if e.expected < 1 {
 		e.expected = 1
 	}
+	if run := s.ddp.run(req.Group); req.Seq > run.lastSeq {
+		run.lastSeq = req.Seq
+		run.seen = time.Now()
+	}
 	if req.SyncEvery > e.syncEvery {
 		e.syncEvery = req.SyncEvery
 	}
@@ -483,6 +505,9 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		e.fetched[req.Rank] = true
 		rebalanceJSON := s.ddp.rebalanceFor(req.Group, e.world)
+		if note := s.ddp.downNoteFor(req.Group, req.Rank, req.Seq); note != "" {
+			rebalanceJSON = note // the planner is silent after a death anyway
+		}
 		if len(e.fetched) >= e.expectedCount() || rerr != nil {
 			delete(s.ddp.entries, key)
 		}
