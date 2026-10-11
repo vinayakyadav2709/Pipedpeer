@@ -360,6 +360,7 @@ func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}
 		res.Stdout, res.Stderr = stdoutBuf.String(), stderrBuf.String()
 		return res
 	}
+	stdoutW, stderrW := io.MultiWriter(os.Stdout, stdoutBuf), io.MultiWriter(os.Stderr, stderrBuf)
 	for {
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
@@ -372,7 +373,7 @@ func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}
 			case websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway):
 				return result(), nil
 			}
-			return result(), fmt.Errorf("connection lost: %w", err)
+			return result(), fmt.Errorf("%w: %w", ErrConnectionLost, err)
 		}
 
 		var out outputMessage
@@ -381,39 +382,8 @@ func streamJob(ctx context.Context, conn *websocket.Conn, detach <-chan struct{}
 			continue
 		}
 
-		if out.Error != "" {
-			return result(), fmt.Errorf("remote: %s", out.Error)
-		}
-
-		// Raw chunks, printed as they come: \r redraws stay in place.
-		fmt.Print(out.O)
-		fmt.Fprint(os.Stderr, out.E)
-		stdoutBuf.WriteString(out.O)
-		stderrBuf.WriteString(out.E)
-
-		if out.Done {
-			if out.PeakMemBytes > 0 {
-				res.PeakBytes = out.PeakMemBytes
-			}
-			res.Timing, res.Receipt = out.Timing, out.Receipt
-			// A job that finished cleanly just before the cancel landed did
-			// finish: report it as such.
-			if out.Cancelled || (cancelled.Load() && out.ExitCode != 0) {
-				return result(), fmt.Errorf(
-					"job cancelled (exit code %d): %w", out.ExitCode, context.Canceled)
-			}
-			if out.OOMKilled {
-				// Without this the user sees "exited with code 137" and has
-				// no way to know the node protected itself on purpose.
-				return result(), fmt.Errorf(
-					"job ran out of memory: the kernel killed it for exceeding its %s limit. "+
-						"Raise it with --mem, or reduce what the script holds in memory at once",
-					humanBytes(out.MemLimitBytes))
-			}
-			if out.ExitCode != 0 {
-				return result(), &RemoteExitError{Code: out.ExitCode}
-			}
-			return result(), nil
+		if done, err := applyFrame(out, &res, stdoutW, stderrW, cancelled.Load()); done {
+			return result(), err
 		}
 	}
 }
