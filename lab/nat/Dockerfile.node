@@ -3,3 +3,5 @@
 # each daemon over loopback).
 FROM docker.io/nixos/nix:2.31.3
 RUN nix-env -iA nixpkgs.crun nixpkgs.iproute2 nixpkgs.curl
+# nixos/nix puts no /usr/local/bin on PATH; the binary is bind-mounted there.
+ENV PATH=/usr/local/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin

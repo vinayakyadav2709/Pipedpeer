@@ -134,7 +134,7 @@ func Main(args []string) int {
 
 func run(args []string, file string, restart func() error) error {
 	if len(args) < 2 || (args[0] != "add" && args[0] != "remove") {
-		return errors.New("usage: pipedpeer-nix-trust add|remove <key>...")
+		return errors.New("usage: pipedpeer-nix-trust add|remove <key> [key ...]")
 	}
 	if len(args)-1 > maxKeys {
 		return fmt.Errorf("at most %d keys at once", maxKeys)
