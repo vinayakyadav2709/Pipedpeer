@@ -366,7 +366,11 @@ class _ClusterPool:
         # the tail's wall time.
         self._spilled = True
         n = len(items)
-        slots = [None] * n
+        # A sentinel, not None: a kernel that returns None would otherwise
+        # leave its slot looking unfilled, and local_run would re-run it
+        # forever.
+        unset = object()
+        slots = [unset] * n
         lock = threading.Lock()
         # A chunk has to be wide enough to fill the node that receives it. The
         # adaptive size targets half a second of work taken one item at a
@@ -399,8 +403,14 @@ class _ClusterPool:
                 res = ctx.map(func, vals)
             with lock:
                 for i, v in zip(idxs, res):
-                    if slots[i] is None:
+                    if slots[i] is unset:
                         slots[i] = v
+            # Every item this machine ran: its share and the stragglers it
+            # re-ran for a failed or slow chunk. Leaving these out made a
+            # lab receipt cover 44 of 80 items. The receipt counts work,
+            # not winners, so an item a slow peer also finished counts on
+            # both sides and the sum can exceed the map, never fall short.
+            _record_local(len(idxs))
 
         # Remote thread: dispatch remote chunks, first-wins into slots.
         # Chunks go out concurrently. Dispatching them one at a time capped
@@ -412,7 +422,7 @@ class _ClusterPool:
                 return
             with lock:
                 for orig_i, v in res:
-                    if slots[orig_i] is None:
+                    if slots[orig_i] is unset:
                         slots[orig_i] = v
 
         def remote_run():
@@ -434,7 +444,7 @@ class _ClusterPool:
             fill([p for c in local_chunks for p in c])
             while True:
                 with lock:
-                    pending = [p for c in remote_chunks for p in c if slots[p[0]] is None]
+                    pending = [p for c in remote_chunks for p in c if slots[p[0]] is unset]
                 if not pending:
                     break
                 fill(pending)  # idle local cores re-run the stragglers
