@@ -1,33 +1,84 @@
 # Fixes and roadmap
 
-This records what was fixed after the report was written (branch
-`nightly-fixes-s`, October 2026), how to check each fix, and what comes next.
-`known-issues.md` holds the original defect list and marks each entry resolved.
+This records the work done after the report was written, on branch
+`nightly-fixes-s` in October 2026. It covers what changed, how to test each
+part, and what comes next. `known-issues.md` holds the original defect list,
+with each entry marked when resolved.
 
-The work is in phases:
+| Phase | What | Status | Commits |
+|---|---|---|---|
+| 0 | Fix the known issues, demo-breaking ones first | Done | `ad75b4b`, `fad3ce4`, `2c1a49a` |
+| 1 | A per-stage timeline for every run: where the time goes | Done | `b30092d` |
+| 2 | Why a node was chosen, what the shim distributed, and the cluster at a glance | Done | `6d04e97` |
+| 3 | A live web page served by the daemon at `/ui` | In progress | |
+| 4 | Benchmarks, a combined capstone script, and the updated demo flow | Planned | |
 
-| Phase | What | Status |
-|---|---|---|
-| 0 | Fix the known issues, demo-breaking ones first | Done: `ad75b4b`, `fad3ce4`, `2c1a49a` |
-| 1 | Per-stage timeline for every job: where the time goes | Done |
-| 2 | Placement explanation, shim receipt and cluster stats in the CLI | Done |
-| 3 | A web page served by the daemon (`/ui`) showing the same data live | Planned |
-| 4 | Benchmarks (local, cold, warm; 1–3 workers), a combined capstone script, and an updated demo flow | Planned |
+Every phase below has the same parts:
+- **What changed**
+- **Test it automatically**
+- **Try it by hand**: commands, and what you should see
+- **Limits**
 
-## Phase 0: what was fixed
+---
 
-### Fixes that could break a demo (`ad75b4b`)
+## Before testing anything
+
+Build the new binary, and restart the local daemon on it:
+
+```bash
+cd ~/Projects/Pipedpeer
+make build                       # writes bin/pipedpeer
+alias pp="$PWD/bin/pipedpeer"
+pp stop; pp start
+```
+
+`make install` replaces the installed `pipedpeer` with it.
+
+Every daemon in a cluster needs the new binary for the parts that involve a
+node:
+- the node's own timings (Phase 1)
+- returning the receipt (Phase 2)
+- the discovery proof (Phase 0)
+
+A node on an older binary still works. It reports a single `execute` stage and
+no receipt.
+
+**The whole test suite:**
+
+```bash
+cd src && go test -race ./... ; cd ..
+```
+
+Every package passes. The exception is `TestLeaseExpiryRedirectsTask`, which
+can fail under the full race suite because of CPU starvation. It passes on its
+own, and failed the same way before any of this work (see Phase 0, "Limits").
+
+A scratch folder for the by-hand checks:
+
+```bash
+mkdir -p /tmp/pptest && cd /tmp/pptest && touch .pipedpeerignore
+```
+
+`.pipedpeerignore` marks the project root, so only this folder is uploaded.
+
+---
+
+## Phase 0: fix the known issues
+
+### What changed
+
+**Fixes that could break a demo** (`ad75b4b`)
 
 | Problem | Fix |
 |---|---|
-| The build hung forever when the home directory is a git repository: Nix refused the generated `flake.nix` as "not tracked by Git", and the run was retried without end | The flake is built as `path:.`, so Nix never treats the scratch directory as part of an enclosing repository |
-| A script that crashed, or an environment that failed to build, was rescheduled forever, rebuilding each time | Both fail the same way on any node, so the run stops and reports the error. A job killed by a signal (exit code above 128, such as a node shutting down or running out of memory) is still retried elsewhere |
-| Daemon start-up deleted job history: the history and the daemon's job directories share `jobs/`, and each pruner removed the other's entries | The daemon removes only UUID-named job directories. The history removes only directories holding a record |
+| The build hung forever when the home directory is a git repository. Nix refused the generated `flake.nix` as "not tracked by Git", and the run was retried without end | The flake is built as `path:.`, so Nix never treats the scratch directory as part of an enclosing repository |
+| A script that crashed, or an environment that failed to build, was rescheduled forever, rebuilding each time | Both would fail the same way on any node, so the run stops and reports the error. A job killed by a signal (exit code above 128, such as a node shutting down or running out of memory) is still retried elsewhere |
+| Daemon start-up deleted job history. The history and the daemon's job directories share `jobs/`, and each pruner removed the other's entries | The daemon removes only UUID-named job directories. The history removes only directories holding a record |
 | The cluster's signing keys sometimes could not be recorded: two writers renamed each other's temporary file away | Each write uses its own uniquely named temporary file |
-| `--remote` looked for a node once and could report "no eligible node found" spuriously | It waits up to 15 s for a node (`PIPEDPEER_REMOTE_WAIT`, e.g. `0s` for one look), and lists why each node was turned down |
-| A peer with no direct path was only logged, and never shown | `pipedpeer nodes` lists it under "No direct path", with the reason |
+| `--remote` looked for a node once, and could report "no eligible node found" spuriously | It waits up to 15 s for a node, and lists why each one was turned down. `PIPEDPEER_REMOTE_WAIT` changes the wait (`0s` takes one look) |
+| A peer with no direct path was only logged, never shown | `pipedpeer nodes` lists it under "No direct path", with the reason |
 
-### Pool, shim and resolver fixes (`fad3ce4`)
+**Pool, shim and resolver fixes** (`fad3ce4`)
 
 | Problem | Fix |
 |---|---|
@@ -35,128 +86,167 @@ The work is in phases:
 | Work a weak node forwarded to a peer came back labelled `local`, so receipts credited the origin | The forwarding node relabels it `peer:<address>` |
 | One internet peer leaving removed every peer behind a `127.0.0.1` forwarder | Removal matches host and port |
 | The pool sized itself by `os.cpu_count()`, so a pinned or CPU-limited job started more workers than it had cores | It uses the CPU affinity and the cgroup `cpu.max` quota |
-| `import PIL` mapped to a package nixpkgs does not have (`Pillow`), so the build failed | Mapped to `pillow`. Import names that differ from package names (`cv2`, `bs4`, `skimage`) and common packages (tqdm, seaborn, statsmodels, xgboost, lightgbm, polars, pyarrow, numba, sympy, networkx, plotly, h5py, tabulate, rich) were added |
+| `import PIL` mapped to a package nixpkgs does not have (`Pillow`), so the build failed | Mapped to `pillow`. Added import names that differ from package names (`cv2`, `bs4`, `skimage`), and common packages: tqdm, seaborn, statsmodels, xgboost, lightgbm, polars, pyarrow, numba, sympy, networkx, plotly, h5py, tabulate, rich |
 | An import with no known package was silently dropped, and the script failed later on the node | The build prints a warning naming it, and suggests `--pkg` |
 | Three tests failed, rather than skipped, without torch | They skip |
-| Data races in the `nattype` and `portmap` tests | Fixed; `go test -race ./...` is clean |
+| Data races in the `nattype` and `portmap` tests | Fixed |
 
-### Security and setup fixes (`2c1a49a`)
+**Security and setup fixes** (`2c1a49a`)
 
 | Problem | Fix |
 |---|---|
-| LAN discovery sent the cluster secret to every address on the subnet | Probes send an HMAC proof bound to the probed address and the time. The proof opens `GET /health` only, for two minutes |
-| Firewall changes during setup ran without `sudo` and failed for a normal user | Changes go through `sudo`; checks stay unprivileged |
+| LAN discovery sent the cluster secret to every address on the subnet | Probes send an HMAC proof bound to the probed address and the time. It opens `GET /health` only, for two minutes |
+| Firewall changes during setup ran without `sudo`, and failed for a normal user | Changes go through `sudo`; checks stay unprivileged |
 | Setup aborted on a fresh machine because no peer keys were known yet | Setup trusts this node's own key and records it. Peers' keys are added on a later run |
-| The punch nonce was identical every time (zero-seeded generator) | Drawn from `crypto/rand` |
+| The punch nonce was identical every time (a zero-seeded generator) | Drawn from `crypto/rand` |
 | Partial closures were written to `$TMPDIR`, often a RAM-backed tmpfs | Written to the on-disk scratch directory |
 | With a private Nix store, the daemon checked the host's `/nix/store` and concluded closures were missing | `/nix` paths are looked up inside the private store |
 | `SECURITY.md` still said there was no authentication | Rewritten for the current design and its limits |
 
-### Investigated, not changed
-
-- **`imap_unordered` returns results in order.** "Unordered" allows any order,
-  input order included. The cost is that a slow item holds back its batch.
-- **numpy's `@` is not intercepted.** Python refuses to patch operators on
-  `numpy.ndarray` (an immutable C type). Use `np.matmul(a, b)` or `a.dot(b)` for
-  a product that should be distributed.
-- **A forwarded pool request can fan out again.** This is intended: the origin
-  forwarded because it lacked memory, and the peer spreading the work is how
-  it gets done.
-- **`TestLeaseExpiryRedirectsTask` can fail under `go test -race ./...`.** It
-  passes alone and as a package, before and after these changes. Under the
-  load of the whole race suite its heartbeats are starved.
-- **Closures not reaching peers when a job runs on the submitting host** (known
-  issue 3). This still needs checking on a live cluster. The original log shows
-  the shim's cost model keeping all 80 items local, which is a different cause
-  from a missing closure.
-
-## How to check the fixes
-
-Build first. Every command below uses the new binary.
+### Test it automatically
 
 ```bash
-make build
-alias pp="$PWD/bin/pipedpeer"
-pp stop; pp start
+cd src && go test -count=1 -run 'TestPrune|TestIsPermanent|TestExecuteWithRetryStopsOnPermanent|TestFindNodeWithin|TestUnreachable|TestTrustedKeysSurvive|TestPoolMapMicroChunksAnswerInFrames|TestRelabelForwarded|TestRemoveManualAt|TestPoolWidthFollowsCPUPinning|TestUnresolvedImports|TestMappedNamesAreLowercase|TestProbeProves|TestProofIsBound|TestFirewallChangesGoThroughSudo|TestSetupWithNoKeysYet|TestHostPath|TestRemoteRunFails' ./... ; cd ..
 ```
 
-**Automated: every fix has a regression test.**
+### Try it by hand
+
+Run these in `/tmp/pptest`.
+
+**1. A crashing script stops instead of retrying forever.**
 
 ```bash
-cd src && go test -race ./... ; cd ..
-```
-
-**By hand:**
-
-```bash
-mkdir -p /tmp/pptest && cd /tmp/pptest
-
-# A crashing script stops instead of looping: one traceback, no "Rescheduling".
 printf 'print("start")\n1/0\n' > bad.py
 pp run bad.py --remote
+```
 
-# Unknown imports are named; PIL builds.
+Expect one `ZeroDivisionError`, then the command exits. There is no
+`Rescheduling (attempt 2)`.
+
+**2. Unknown imports are named, and PIL builds.**
+
+```bash
 printf 'import foobarbaz\n' > unknown.py
 pp run unknown.py 2>&1 | grep -A1 Warning
 printf 'from PIL import Image\nprint("PIL OK")\n' > pil.py
 pp run pil.py
+```
 
-# Building with the cache inside a git repository.
+Expect `Warning: no Nix package known for: foobarbaz`, then `PIL OK`.
+
+**3. Building with the cache inside a git repository.**
+
+```bash
 rm -rf /tmp/gitcache && mkdir /tmp/gitcache && git -C /tmp/gitcache init -q
 printf 'print("built fine")\n' > ok.py
 XDG_CACHE_HOME=/tmp/gitcache/cache pp run ok.py
+```
 
-# History survives a daemon restart.
+Expect `built fine`. Before the fix: "flake.nix … is not tracked by Git",
+retried forever.
+
+**4. Job history survives a daemon restart.**
+
+```bash
 ID=$(ls ~/.local/share/pipedpeer/jobs | grep -E '^[0-9]+$' | head -1)
 touch -d '10 days ago' ~/.local/share/pipedpeer/jobs/$ID
 pp stop && pp start && sleep 5
 ls -d ~/.local/share/pipedpeer/jobs/$ID && echo "history kept"
-
-# --remote waits for peers, or says why each node was turned down.
-pp stop && pp start && pp run ok.py --remote --check-only
-
-# Discovery with a secret set: /health refuses a request without it, peers
-# are still found. Needs the new binary on every machine.
-pp auth set
-curl -s -o /dev/null -w '%{http_code}\n' localhost:38080/health   # 401
-pp nodes
 ```
 
-The pool sizing fix shows on the docker bench rig, where each worker has three
-cores. A pool job there logs `using 3 workers`, not one per host core.
+**5. `--remote` waits for peers.**
 
-## Next phases
+```bash
+pp stop && pp start && pp run ok.py --remote --check-only
+```
 
-### Phase 1: per-stage timeline (done)
+Expect either "waiting up to 15s…" followed by `Would place on node …`, or a
+list of why each node was turned down.
 
-Every run now records a timeline in its history record (`stages` in
-`metadata.json`). The stages are:
+**6. Discovery doesn't send the secret.** Every machine needs the new binary
+for this one.
+
+```bash
+pp auth set
+curl -s -o /dev/null -w '%{http_code}\n' localhost:38080/health   # 401
+pp nodes                                                          # peers still found
+```
+
+**7. Pool sizing follows pinning.** On the docker bench rig (3 cores per
+worker), a pool job's log reads `using 3 workers`, not one per host core.
+
+### Limits
+
+- **`imap_unordered` returns results in order.** "Unordered" allows any order,
+  input order included. The cost is that a slow item holds back its batch.
+- **numpy's `@` is not intercepted.** Python refuses to patch operators on
+  `numpy.ndarray`, which is an immutable C type. Write `np.matmul(a, b)` or
+  `a.dot(b)` for a product that should be distributed.
+- **A forwarded pool request can fan out again.** This is intended: the origin
+  forwarded the work because it lacked memory, and the peer spreading it is how
+  it gets done.
+- **`TestLeaseExpiryRedirectsTask` can fail under `go test -race ./...`.** It
+  passes alone and as a package, before and after this work. Under the load of
+  the whole race suite its heartbeats are starved.
+- **Known issue 3 (closures not reaching peers when a job runs on the
+  submitting host) still needs a live check.** The original log shows the
+  cost model keeping all 80 items local, which is a different cause. Since
+  Phase 2, `--receipt` on such a run says which it is.
+
+---
+
+## Phase 1: where a run's time goes
+
+### What changed
+
+Every run now records a timeline in its history (`stages` in `metadata.json`):
 
 | Stage | Where it runs | What it covers |
 |---|---|---|
-| placement | submitter | How long the coordinator spent finding a node. Only when the coordinator picked one |
-| detect imports, resolve packages, generate flake, nix build, export closure | submitter | Building the environment |
-| upload | submitter → node | Sending the workspace, and the closure if the node lacked it |
-| seed peers | node | The node giving the closure to its own peers before it answers the upload, so pool work can spill to them |
+| placement | this machine | The coordinator finding a node. Only when the coordinator picked one |
+| detect imports, resolve packages, generate flake, nix build, export closure | this machine | Building the environment |
+| upload | this machine → node | Sending the workspace, and the closure if the node lacked it |
+| seed peers | node | The node giving the closure to its own peers before it answers, so pool work can spill to them |
 | closure import | node | Importing the closure into the node's store. Only when it was not there yet |
-| sandbox setup | node | Everything between the request and the script starting |
+| sandbox setup | node | From the request to the script starting |
 | script | node | The script itself |
-| stream + wrap-up | node | What is left of the execution: output streaming and the round trip. Only when it is 50 ms or more |
-| sync results | submitter | Bringing changed files back |
+| stream + wrap-up | node | The rest of the execution: output streaming and the round trip. Only when it is 50 ms or more |
+| sync results | this machine | Bringing changed files back |
 
-Nodes report their share of the run themselves, in the final message of the
-execution stream. A node running an older version gets a single `execute`
-stage instead.
+Nodes measure their own stages. They send the measurements in the
+execution's final message, and the seeding time in the upload's answer.
 
-**Seeing it:**
+Where it shows:
+- Every run now ends with a one-line `Timeline:` summary.
+- `pipedpeer job --timeline` draws the timeline as bars on a shared time axis.
+- `pipedpeer job --last` picks the most recent run, so no ID needs copying.
+
+### Test it automatically
 
 ```bash
-pipedpeer run job.py                        # the run ends with a one-line "Timeline: ..."
-pipedpeer job --last --timeline             # waterfall for the most recent job
-pipedpeer job --id <id> --timeline          # waterfall for any job
+cd src && go test -count=1 -run 'TestTimelineSummaryTotalAndWaterfall|TestWaterfallWithNoStages|TestBeginEnd|TestExecStagesSplitTheNodesAccount|TestExecutionReportsTiming' ./... ; cd ..
 ```
 
-Example (a cold run on this machine, with 5 peers discovered):
+`TestExecutionReportsTiming` runs a real daemon in the test. It uploads a
+script that sleeps 300 ms, executes it, and checks that the node reported at
+least 300 ms of script time.
+
+### Try it by hand
+
+```bash
+cd /tmp/pptest
+printf 'import time\nt=time.time()\nsum(i*i for i in range(3_000_000))\nprint("done in %%.2fs" %% (time.time()-t))\n' > job.py
+pp run job.py
+pp job --last --timeline
+```
+
+The run ends with a line such as:
+
+```
+Timeline: detect imports 0ms · … · nix build 520ms · export closure 5ms · upload 5.3s · sandbox setup 0ms · script 254ms · sync results 8ms (total 6.1s)
+```
+
+and `job --last --timeline` draws it:
 
 ```
 STAGE             WHERE        START      TIME
@@ -170,24 +260,136 @@ sync results      local       +10.1s       7ms                                  
 total                                    10.1s
 ```
 
-The same script run again warm took 0.8 s in total (upload 2 ms, no seeding).
+**To see cold against warm, run the same script twice.** The second run skips
+seeding, and its build is a cache hit:
 
-**What it found.** The "10–14 s of fixed overhead" in the run sheet is the Nix
-build plus seeding peers, and both are cold-run costs. Seeding is synchronous,
-and it happens even for a script that never uses a pool. Skipping it when the
-script cannot spill would remove most of a cold run's wait. That changes when
-pool work can spill, so it is left as the next optimisation rather than folded
-into this phase.
+| | Nix build | Seed peers | Script | Total |
+|---|---|---|---|---|
+| Cold (new closure, 5 peers) | 3.5 s | 6.5 s | 0.1 s | 10.1 s |
+| Warm (same script again) | 0.45 s | – | 0.3 s | 0.8 s |
 
-### Phase 2: explain, receipt and stats (done)
+A cold run needs a closure the peers have never seen. Import a package not
+used before, such as `from tabulate import tabulate`.
 
-**Why a node was chosen.** A run placed by the coordinator (`--remote`,
-`pipedpeer python`) keeps the whole decision: every node considered, its
-score or the reason it was rejected, and the load figures the score is made
-of.
+### Limits
+
+- **Seeding is the largest cold-run cost.** It is synchronous, and it happens
+  even for a script that never uses a pool. Skipping it when the script cannot
+  spill would remove most of a cold run's wait. That changes when pool work can
+  spill, so it is left as the next optimisation.
+- **A node on an older binary shows one `execute` stage** instead of setup,
+  import and script.
+- **`placement` is recorded only when the coordinator chose the node** (with
+  `--remote`, or `pipedpeer python`).
+
+---
+
+## Phase 2: why that node, what was distributed, and the cluster
+
+### What changed
+
+**`pipedpeer job --explain`: why a node was chosen.** A run placed by the
+coordinator keeps the whole decision:
+- every node considered
+- its score, or the reason it was rejected
+- the load figures the score is made of: CPU, memory, running jobs, free cores and free memory
+
+**`pipedpeer job --receipt`: what the shim distributed, and why.** For every
+intercepted run, the daemon points the shim's receipt at
+`<workdir>/.pipedpeer/receipt.json`. It returns the receipt with the run, and
+the run's history keeps it. The receipt shows:
+- how many items' results came from other machines, and how many from the
+  running node, counting each item once
+- how many items were computed on both sides, because local cores raced slow
+  remote chunks
+- items per peer, and each dispatch with its time
+- every cost-model decision with its reason, for `pool.map`, `numpy.matmul`,
+  `numpy.linalg.*`, `pandas.groupby` and `pandas.merge`
+
+A run ends with a one-line `Shim:` summary of it.
+
+**`pipedpeer stats`: the cluster at a glance.** It shows:
+- every node's cores, CPU use, free memory and running tasks
+- each node's pool counters: chunks received, chunks from peers, items run,
+  parts sent on to peers, failures
+- this machine's recent runs, with total time, slowest stage and how much was
+  distributed
+
+`--json` prints the same snapshot as data. It is built by
+`internal/clusterstats`, which the Phase 3 web page reuses.
+
+**Fixed along the way:**
+- The receipt left out items the local cores computed while racing the
+  cluster. A live 200-item map showed 103.
+- It then counted items computed on both sides twice, and showed 230.
+- The shim's own `.pipedpeer/` files (its `__pycache__`, the receipt) could be
+  synced back into the user's project. That directory is now excluded.
+
+### Test it automatically
+
+```bash
+cd src && go test -count=1 -run 'TestExplanation|TestExplainCandidatesMarksTheWinner|TestReceipt|TestEmptyReceipt|TestCollectAsksEachNode' ./... ; cd ..
+```
+
+`TestReceiptReturnsWithTheRunNotTheResults` runs a real daemon. It checks that
+the receipt comes back with the run, and that nothing under `.pipedpeer/` is
+synced into the project.
+
+`TestReceiptRecordsWhyWorkShippedOrStayed` runs the real shim against a fake
+cluster. It checks three things:
+- A worthwhile map records a "shipped" decision with its reason.
+- A tiny map records "kept local".
+- Every item is accounted for.
+
+### Try it by hand
+
+A pool script whose work is worth spreading:
+
+```bash
+cd /tmp/pptest
+cat > pool.py <<'EOF'
+import multiprocessing, time
+def work(x):
+    s = 0
+    for i in range(200_000):
+        s += i * x
+    return s
+if __name__ == "__main__":
+    t = time.time()
+    with multiprocessing.Pool(4) as p:
+        r = p.map(work, range(200))
+    print("POOL", len(r), "in %.2fs" % (time.time() - t))
+EOF
+pp run pool.py
+pp job --last --receipt
+```
+
+The run ends with a line such as
+`Shim: 15 of 200 items ran on other machines · 5 peer(s) · 1 shipped / 0 kept local`.
+The receipt then shows:
 
 ```
-$ pipedpeer job --last --explain
+Items: 200 total
+  on other machines       15  ██
+  on the running node    185  ███████████████████████████
+  (75 computed on both: idle local cores raced the slowest remote chunks)
+
+By peer:
+  192.168.0.107:38080        31  ████
+  172.21.0.3:38080           18  ██
+  ...
+Cost model decisions:
+  shipped     pool.map             188 items x 0.038s = 7.17s of work, over the 0.50s worth a round trip
+```
+
+A run placed by the coordinator, explained:
+
+```bash
+pp run job.py --remote
+pp job --last --explain
+```
+
+```
 Strategy: smart. 5 node(s) considered, 5 eligible.
 The job was estimated to need 512Mi (import estimate).
 
@@ -198,67 +400,55 @@ The job was estimated to need 512Mi (import estimate).
 Chosen: score=0.753, source=discovery
 ```
 
-A run on the submitting machine says no placement was made.
+The cluster:
 
-**What the shim distributed, and why.** Every intercepted run's receipt now
-comes back with the run, and is stored in its history:
-- The daemon points the shim at `<workdir>/.pipedpeer/receipt.json`.
-- It returns the receipt in the execution's final message.
-- `.pipedpeer/` is never synced into the project.
-
-The receipt counts each item once, by where its kept result came from. Local
-cores race slow remote chunks, so some items are computed in both places;
-those are reported separately. It lists items per peer and each dispatch. It
-also records every cost-model decision with its reason, for `pool.map`,
-`numpy.matmul`, `numpy.linalg.*`, `pandas.groupby` and `pandas.merge`.
-
-```
-$ pipedpeer job --last --receipt
-Items: 200 total
-  on other machines       15  ██
-  on the running node    185  ███████████████████████████
-  (75 computed on both: idle local cores raced the slowest remote chunks)
-
-By peer:
-  192.168.0.107:38080        31  ████
-  ...
-Cost model decisions:
-  shipped     pool.map             188 items x 0.038s = 7.17s of work, over the 0.50s worth a round trip
+```bash
+pp stats
+pp stats --json | head -40
 ```
 
-A run ends with one `Shim:` line summarising this.
+```
+Cluster: 6 node(s), 6 healthy · 36 cores · 28 GiB free memory · 2 GPU node(s) · 0 task(s) running
 
-**The cluster at a glance.** `pipedpeer stats` (`--json` for the raw
-snapshot) shows:
-- every node's cores, load and free memory
-- the tasks running on it
-- its pool counters: chunks received, chunks from peers, items run, parts sent on, failures
-- this machine's recent runs, with total time, slowest stage and how much was distributed
+NODE       HOST           STATE       CORES  CPU%   MEM FREE JOBS     CHUNKS FROM PEER ITEMS RUN TO PEERS FAILED
+e5b24777   fedora         healthy*       12     6    7.5 GiB    0          6        0         0       29      0
+4ea2071a   worker1        healthy         3     6    3.4 GiB    0         61       61        94        0      0
+...
+Recent runs from this machine:
+ID                   SCRIPT             STATUS     NODE          TOTAL  SLOWEST STAGE          DISTRIBUTED
+1791725631738480222  pool.py            succeeded  e5b24777       2.3s  seed peers 1s          15/200 items remote
+```
 
-The data comes from `internal/clusterstats`, which the web page in Phase 3
-will reuse.
+All three views at once: `pp job --last --timeline --explain --receipt`.
 
-The three views combine: `pipedpeer job --id <id> --timeline --explain --receipt`.
+### Limits
 
-**Fixed along the way.**
-- The receipt left out items the local cores computed while racing the
-  cluster, so its total fell short of the map: 103 of 200 in a live run.
-- The shim's `.pipedpeer/` files (for example its `__pycache__`) could be
-  synced back into the user's project.
+- **`--explain` covers runs the coordinator placed.** A plain `pipedpeer run`
+  executes on this machine, and says that no placement was made. Runs from
+  `pipedpeer map` are not recorded yet.
+- **On a fast orchestrator, local cores win most races.** In the run above,
+  only 15 of 200 results came from elsewhere, though 90 items were run
+  remotely. The receipt shows this honestly. Spreading pays more with a weaker
+  orchestrator, or with heavier items.
+- **Pool counters in `stats` count since each daemon started**, not per run.
 
-### Phase 3: web page
+---
 
-- `http://<node>:38080/ui` is a page embedded in the daemon. It needs no extra
-  service.
-- It shows nodes, running tasks, each job's timeline and its receipt, and
-  refreshes every couple of seconds.
-- It reads the same data as the CLI, from one `/v1/stats` endpoint.
+## Phase 3: the web page (in progress)
 
-### Phase 4: benchmarks and the demo
+- `http://<node>:38080/ui` is a page embedded in the daemon, with no extra
+  service and no build step.
+- It shows the cluster, the nodes, running tasks, and recent runs. Each run
+  can be opened for its timeline, its placement and its receipt.
+- It refreshes itself every two seconds.
+- It reads one endpoint, `/v1/stats`, which serves the same snapshot as
+  `pipedpeer stats --json`.
 
-- A committed benchmark driver produces one CSV and the charts. It runs every
-  demo script locally, cold and warm, on one, two and three workers.
-- A capstone script chains the earlier ones: pandas out-of-core → numpy features
-  → scikit-learn → a pool of lambdas → result files synced back.
-- The run sheet gets real per-step timings, a step for the capstone and the web
-  page, and the timeline and receipt in the proof step.
+## Phase 4: benchmarks and the demo (planned)
+
+- **A committed benchmark driver.** It produces one CSV and the charts, running
+  every demo script locally, cold and warm, on one, two and three workers.
+- **A capstone script** that chains the earlier ones: pandas out-of-core →
+  numpy features → scikit-learn → a pool of lambdas → result files synced back.
+- **An updated run sheet** with real per-step timings, a step for the capstone
+  and one for the web page, and the timeline and receipt in the proof step.
