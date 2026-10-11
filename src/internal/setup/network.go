@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/internet"
 	"github.com/pipedpeer/pipedpeer/internal/portmap"
 )
@@ -76,7 +77,7 @@ var lookPath = exec.LookPath
 // Returns what it found even when it changes nothing, because "no firewall is
 // running" and "the port was opened" are both worth printing and are
 // different answers.
-func openFirewall(ctx context.Context, port int, apply bool) firewallStatus {
+func openFirewall(ctx context.Context, rules []string, apply bool) firewallStatus {
 	if _, err := lookPath("firewall-cmd"); err == nil {
 		out, err := firewallCmd(ctx, "firewall-cmd", "--state")
 		// Compared exactly, not by substring: firewalld answers "not
@@ -84,7 +85,7 @@ func openFirewall(ctx context.Context, port int, apply bool) firewallStatus {
 		// firewall would have been treated as an active one and rules added
 		// to it for nothing.
 		if err == nil && strings.TrimSpace(out) == "running" {
-			return openFirewalld(ctx, port, apply)
+			return openFirewalld(ctx, rules, apply)
 		}
 	}
 	if _, err := lookPath("ufw"); err == nil {
@@ -98,18 +99,23 @@ func openFirewall(ctx context.Context, port int, apply bool) firewallStatus {
 		// the negative is ruled out explicitly.
 		if err == nil && strings.Contains(out, "Status: active") &&
 			!strings.Contains(out, "Status: inactive") {
-			return openUFW(ctx, port, apply)
+			return openUFW(ctx, rules, apply)
 		}
 	}
 	return firewallStatus{open: true}
 }
 
-func openFirewalld(ctx context.Context, port int, apply bool) firewallStatus {
+func openFirewalld(ctx context.Context, rules []string, apply bool) firewallStatus {
 	st := firewallStatus{tool: "firewalld"}
-	rule := fmt.Sprintf("%d/udp", port)
-
-	if out, err := firewallCmd(ctx, "firewall-cmd", "--query-port="+rule); err == nil &&
-		strings.HasPrefix(strings.TrimSpace(out), "yes") {
+	var missing []string
+	for _, rule := range rules {
+		if out, err := firewallCmd(ctx, "firewall-cmd", "--query-port="+rule); err == nil &&
+			strings.HasPrefix(strings.TrimSpace(out), "yes") {
+			continue
+		}
+		missing = append(missing, rule)
+	}
+	if len(missing) == 0 {
 		st.open = true
 		return st
 	}
@@ -119,40 +125,58 @@ func openFirewalld(ctx context.Context, port int, apply bool) firewallStatus {
 	// --permanent then --reload, so it survives a reboot. A rule that
 	// disappears on restart is worse than none: it works until the machine is
 	// rebooted and then fails in a way nobody connects to the reboot.
-	if out, err := runRoot(ctx, "firewall-cmd", "--permanent", "--add-port="+rule); err != nil {
-		st.err = fmt.Errorf("firewall-cmd --add-port: %v (%s)", err, strings.TrimSpace(out))
-		return st
+	var undo []string
+	for _, rule := range missing {
+		if out, err := runRoot(ctx, "firewall-cmd", "--permanent", "--add-port="+rule); err != nil {
+			st.err = fmt.Errorf("firewall-cmd --add-port=%s: %v (%s)", rule, err, strings.TrimSpace(out))
+			return st
+		}
+		undo = append(undo, "sudo firewall-cmd --permanent --remove-port="+rule)
 	}
 	if out, err := runRoot(ctx, "firewall-cmd", "--reload"); err != nil {
 		st.err = fmt.Errorf("firewall-cmd --reload: %v (%s)", err, strings.TrimSpace(out))
 		return st
 	}
 	st.open, st.changed = true, true
-	st.undo = fmt.Sprintf("sudo firewall-cmd --permanent --remove-port=%s && sudo firewall-cmd --reload", rule)
+	st.undo = strings.Join(undo, " && ") + " && sudo firewall-cmd --reload"
 	return st
 }
 
-func openUFW(ctx context.Context, port int, apply bool) firewallStatus {
+// ufwRule is the ufw spelling of a firewalld rule: ranges use ':' not '-'.
+func ufwRule(rule string) string { return strings.ReplaceAll(rule, "-", ":") }
+
+func openUFW(ctx context.Context, rules []string, apply bool) firewallStatus {
 	st := firewallStatus{tool: "ufw"}
-	rule := fmt.Sprintf("%d/udp", port)
 
 	statusCmd := firewallCmd
 	if apply {
 		statusCmd = runRoot
 	}
-	if out, err := statusCmd(ctx, "ufw", "status"); err == nil && strings.Contains(out, rule) {
+	out, serr := statusCmd(ctx, "ufw", "status")
+	var missing []string
+	for _, rule := range rules {
+		if serr == nil && strings.Contains(out, ufwRule(rule)) {
+			continue
+		}
+		missing = append(missing, ufwRule(rule))
+	}
+	if len(missing) == 0 {
 		st.open = true
 		return st
 	}
 	if !apply {
 		return st
 	}
-	if out, err := runRoot(ctx, "ufw", "allow", rule); err != nil {
-		st.err = fmt.Errorf("ufw allow: %v (%s)", err, strings.TrimSpace(out))
-		return st
+	var undo []string
+	for _, rule := range missing {
+		if out, err := runRoot(ctx, "ufw", "allow", rule); err != nil {
+			st.err = fmt.Errorf("ufw allow %s: %v (%s)", rule, err, strings.TrimSpace(out))
+			return st
+		}
+		undo = append(undo, "sudo ufw delete allow "+rule)
 	}
 	st.open, st.changed = true, true
-	st.undo = fmt.Sprintf("sudo ufw delete allow %s", rule)
+	st.undo = strings.Join(undo, " && ")
 	return st
 }
 
@@ -169,22 +193,24 @@ func networkReport(port int, apply bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	fw := openFirewall(ctx, port, apply)
+	rules := FirewallRules()
+	list := strings.Join(rules, ", ")
+	fw := openFirewall(ctx, rules, apply)
 	switch {
 	case fw.err != nil:
-		fmt.Printf("    firewall     ✗  %s is running and port %d/udp could not be opened:\n", fw.tool, port)
+		fmt.Printf("    firewall     ✗  %s is running and ports %s could not be opened:\n", fw.tool, list)
 		fmt.Printf("                    %v\n", fw.err)
 		fmt.Printf("                    Peers will not be able to reach this machine directly.\n")
 	case fw.tool == "":
-		fmt.Printf("    firewall     ✓  none running; port %d/udp is reachable\n", port)
+		fmt.Printf("    firewall     ✓  none running; %s reachable\n", list)
 	case fw.changed:
-		fmt.Printf("    firewall     ✓  opened %d/udp in %s\n", port, fw.tool)
-		fmt.Printf("                    Only authenticated, encrypted QUIC is accepted there.\n")
+		fmt.Printf("    firewall     ✓  opened %s in %s\n", list, fw.tool)
+		fmt.Printf("                    Daemon API (token-authenticated), discovery, and signed-identity QUIC only.\n")
 		fmt.Printf("                    Undo with: %s\n", fw.undo)
 	case fw.open:
-		fmt.Printf("    firewall     ✓  %s already allows %d/udp\n", fw.tool, port)
+		fmt.Printf("    firewall     ✓  %s already allows %s\n", fw.tool, list)
 	default:
-		fmt.Printf("    firewall     ✗  %s is running and blocks %d/udp\n", fw.tool, port)
+		fmt.Printf("    firewall     ✗  %s is running and blocks %s\n", fw.tool, list)
 		fmt.Printf("                    Re-run with -y to open it, or allow it yourself.\n")
 	}
 
@@ -200,6 +226,25 @@ func networkReport(port int, apply bool) {
 	default:
 		fmt.Printf("    router       ~  no port mapping offered\n")
 		fmt.Printf("                    Normal: many routers have it switched off. Peers will punch.\n")
+	}
+}
+
+// FirewallRules is every port a peer must reach on this machine, firewalld
+// spelling. Each has the listener it serves:
+//
+//	38080/tcp        daemon API, daemonapi/server.go:335 (main.go flags "--port")
+//	38099/udp        LAN discovery, discovery/discovery.go:39
+//	38447/udp        direct QUIC, internet.DefaultPort internet/internet.go:61
+//	                 (direct/transport.go:217)
+//	38445/udp        rendezvous address book, netcheck.go:563 (introducer role)
+//	29500-29509/tcp  DDP master range, main.go:1032 ddpPickMasterPort
+func FirewallRules() []string {
+	return []string{
+		"38080/tcp",
+		"38099/udp",
+		fmt.Sprintf("%d/udp", DirectPort()),
+		fmt.Sprintf("%d/udp", clustercfg.DefaultPort),
+		"29500-29509/tcp",
 	}
 }
 

@@ -25,7 +25,12 @@ source "$(dirname "$0")/_lib.sh"
 check() {
 	local t0=$SECONDS log
 	log="$(mktemp)"
-	"$PIPE" run "$1" --check-only 2>&1 | tee "$log" | grep -E 'environment|not packaged|checks complete|NOT READY'
+	"$PIPE" run "$1" --check-only 2>&1 | tee "$log" | grep -E 'environment|not packaged|checks complete|NOT READY' || true
+	if grep -q 'NOT READY' "$log"; then
+		echo "${R}  NOT READY reported for $1 (see above)${N}" >&2
+		rm -f "$log"
+		return 1
+	fi
 	if ! grep -q 'built in' "$log"; then
 		echo "${R}  no 'built in' line for $1 - the environment was not built (see above)${N}" >&2
 		rm -f "$log"
