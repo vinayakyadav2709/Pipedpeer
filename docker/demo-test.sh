@@ -34,7 +34,7 @@ snapshot() { # snapshot <step>: processes + daemon log + store + files + traffic
     docker exec "$n" sh -c "ps aux | grep -E 'pipedpeer|nix-build|python|run ' | grep -v grep" > "$d/$1-ps.txt" 2>&1
     docker exec "$n" sh -c "tail -50 /tmp/pipedpeer/daemon.log" > "$d/$1-daemon.log" 2>&1
     docker exec "$n" sh -c "echo 'store entries:'; ls /nix/store | wc -l; ls -d /nix/store/*-run 2>/dev/null" > "$d/$1-store.txt" 2>&1
-    docker exec "$n" sh -c "ls -la /root/.local/share/pipedpeer/jobs 2>/dev/null | head -12" > "$d/$1-files.txt" 2>&1
+    docker exec "$n" sh -c "for d in jobs work; do echo \"\$d (history / daemon job dirs):\"; ls -la /root/.local/share/pipedpeer/\$d 2>/dev/null | head -12; done" > "$d/$1-files.txt" 2>&1
     docker exec "$n" pipedpeer traffic > "$d/$1-traffic.txt" 2>&1
   done
 }
