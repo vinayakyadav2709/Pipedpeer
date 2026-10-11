@@ -231,6 +231,9 @@ func (s *Server) handleDDPSnapshotGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b := s.ddp
+	// take reads the snapshot but leaves the join open: it ends only once the
+	// joiner has the whole snapshot, so a write that breaks can be retried.
+	var joined *ddpJoin
 	take := func() ([]byte, <-chan struct{}, bool) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
@@ -242,13 +245,8 @@ func (s *Server) handleDDPSnapshotGet(w http.ResponseWriter, r *http.Request) {
 		if j.snap == nil {
 			return nil, j.ready, true
 		}
-		snap := j.snap
-		// It loads the ring as of the boundary, so the note that announced
-		// its own arrival is not news to it.
-		run.noteTold[rank] = true
-		run.join = nil
-		log.Info().Str("group", group).Int("rank", rank).Int("world", run.world).Msg("ddp rank joined")
-		return snap, nil, true
+		joined = j
+		return j.snap, nil, true
 	}
 	snap, ready, ok := take()
 	if ok && snap == nil {
@@ -269,5 +267,20 @@ func (s *Server) handleDDPSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", DDPFramesContentType)
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(snap)
+	if _, err := w.Write(snap); err != nil {
+		log.Warn().Err(err).Str("group", group).Int("rank", rank).Int("bytes", len(snap)).
+			Msg("ddp snapshot write to the joining rank failed; its next poll gets it again")
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	run := b.runs[group]
+	if run == nil || run.join != joined {
+		return // the ring dropped the joiner, or a new join began, meanwhile
+	}
+	// It loads the ring as of the boundary, so the note that announced its
+	// own arrival is not news to it.
+	run.noteTold[rank] = true
+	run.join = nil
+	log.Info().Str("group", group).Int("rank", rank).Int("world", run.world).Msg("ddp rank joined")
 }

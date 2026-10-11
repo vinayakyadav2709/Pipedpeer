@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -78,6 +79,19 @@ func TestUIPageIsSelfContained(t *testing.T) {
 	for _, bad := range []string{"<script src", "<link ", "https://", "http://"} {
 		if strings.Contains(page, bad) {
 			t.Errorf("the page references an outside resource (%q)", bad)
+		}
+	}
+}
+
+// Errors are never silent: every catch on the page leaves a console line.
+func TestUIPageCatchesLog(t *testing.T) {
+	blocks := regexp.MustCompile(`catch\s*(\([^)]*\))?\s*\{([^{}]*)\}`).FindAllStringSubmatch(string(uiPage), -1)
+	if len(blocks) == 0 {
+		t.Fatal("found no catch blocks; the pattern no longer matches the page")
+	}
+	for _, b := range blocks {
+		if !strings.Contains(b[2], "console.") {
+			t.Errorf("catch block logs nothing: %s", b[0])
 		}
 	}
 }
