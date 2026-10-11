@@ -30,7 +30,8 @@ with one, it trains on that one.
 | Screen | Shows | Command |
 |---|---|---|
 | Projector (box-a) | the demo terminal, large font | `cd pipedpeer-demo` |
-| Second window on box-a, or a second projector | live cluster view | `pipedpeer dashboard` |
+| Second window on box-a, or a second projector | live cluster page in a browser: nodes, runs, each run's timeline and where its work went | `pipedpeer ui` (opens `http://<box-a>:38080/ui`) |
+| Terminal alternative | the same, in a terminal | `pipedpeer dashboard` |
 | box-b / box-c | the worker side — proves it is peer-to-peer | `pipedpeer dashboard`, and `watch -n1 nvidia-smi` for step 7 |
 
 ---
@@ -163,9 +164,10 @@ notes for you, on screen; read them or paraphrase them.
 | 7 | `./demo/7-gpu.sh` | 2 min | needs a GPU machine |
 | 8 | `./demo/8-files.sh` | 1 min | |
 | 9 | `./demo/9-failover.sh` | 2 min | |
-| 10 | `./demo/10-proof.sh` | 1 min | |
+| 10 | `./demo/10-capstone.sh` | 2 min | |
+| 11 | `./demo/11-proof.sh` | 2 min | |
 
-Running short on time: drop 4 and 5 first, then 7. Steps 2, 3, 9 and 10 carry
+Running short on time: drop 4 and 5 first, then 7. Steps 2, 3, 9 and 11 carry
 the argument.
 
 ### 0 — The problem (talk, no commands)
@@ -187,6 +189,9 @@ the argument.
 > made a direct connection through both routers — hole-punching, the way video
 > calls do. The introducer only told them about each other; none of our
 > traffic goes through it."
+
+It ends by printing the address of the live page (`pipedpeer ui --print`).
+Open it on the second screen now; every later step shows up there as it runs.
 
 **If a row is missing or `PATH` is `-`:** carry on with the machines you have,
 and say so. Fix later with `pipedpeer net-check` (DEMO.md Troubleshooting).
@@ -216,8 +221,9 @@ probably dropped. Say what the table shows.
 ### 4 — scikit-learn · `./demo/4-sklearn.sh` *(optional)*
 
 > "`n_jobs=-1` normally means every core on this machine. Here it means every
-> core in the cluster, and the script doesn't know. Each tree is a task the
-> cluster schedules."
+> core in the cluster, and the script doesn't know. Each tree is a task: this
+> machine starts on the first few to measure them, then races the rest
+> against the other machines, and whichever finishes a tree first wins."
 
 It is the longest step. Talk about how it works while it runs (next section).
 
@@ -278,13 +284,33 @@ still busy, or not reporting healthy.
 
 **Afterwards, on box-c:** `pipedpeer start` — it rejoins on its own.
 
-### 10 — The receipts · `./demo/10-proof.sh`
+### 10 — Everything at once · `./demo/10-capstone.sh`
 
-**Show:** `pipedpeer traffic` **on box-b and box-c**.
+**Show:** the five `[n/5]` stage lines with their times, `results/` appearing
+on box-a, and the `Shim:` line. On the second screen, click the run: its
+timeline, and how many items went to each machine.
 
-> "Every claim that work ran somewhere else can be checked on the machine that
-> ran it. This is box-b's own ledger of work it did for box-a — the laptop
-> can't fake it."
+> "One ordinary script: pandas reads a CSV and averages it, NumPy builds
+> features, scikit-learn trains a forest, `multiprocessing.Pool` bootstraps
+> the accuracy, and it writes its results. Every one of those is a library
+> call the shim intercepts on its own — the CSV is parsed in chunks on the
+> other machines, the trees train on all of them, and the result files come
+> back here."
+
+Don't sell this one on speed. Its point is that all of it works from one
+file. Use the rehearsal number if asked: [timing table](#what-does-the-first-run-cost).
+
+### 11 — The receipts · `./demo/11-proof.sh`
+
+**Show:** the last run's timeline, then its receipt (the cost model's decision
+for each kind of work, and the items per machine). Then `pipedpeer traffic`
+**on box-b and box-c**.
+
+> "This is where the last run's time went, stage by stage, and what was sent to
+> which machine and why — including what was kept here because shipping it
+> would have been slower. And every claim that work ran somewhere else can be
+> checked on the machine that ran it: this is box-b's own ledger of work it
+> did for box-a. The laptop can't fake it."
 
 ### Close
 
@@ -302,7 +328,7 @@ Use these while step 4 or the cluster half of step 2 is running.
   it is built once, cached, and shipped as a content-addressed closure — the
   other machines need nothing pre-installed.
 - **Interception, not rewriting.** A small shim, loaded before the script,
-  replaces `multiprocessing.Pool`, joblib's backend (scikit-learn),
+  replaces `multiprocessing.Pool`, `joblib.Parallel` (scikit-learn),
   some NumPy/pandas calls and the PyTorch optimizer step with versions that
   can use the cluster. The script is never edited.
 - **Scheduling.** Each machine reports cores, free memory and GPUs. A cost
@@ -322,25 +348,32 @@ Use these while step 4 or the cluster half of step 2 is running.
 
 ### "What does the first run cost?"
 
-Measured on the docker bench rig (4 containers on one 12-core host, 3 cores
-each), first run on fresh machines vs later runs, median of 5:
+Measured on the docker bench rig (a 3-core "laptop" and three 3-core workers,
+all on one 12-thread host), with `scripts/bench-matrix.sh`. Script time in
+seconds, median:
 
-| Script | First run | Later runs | Faster by | Of which: the script itself |
-|---|---|---|---|---|
-| 00_pool | 72 s | 35 s | 2.1× | ~24 s both |
-| 01_sklearn_rf | 294 s | 233 s | 1.3× | ~190–220 s both |
-| 02_numpy_heavy | 118 s | 68 s | 1.7× | ~56 s both |
-| 03_pandas_ooc | 85 s | 24 s | 3.5× | ~12 s both |
-| 06_pool_lambda | 67 s | 16 s | 4.1× | ~4 s both |
+| Script | This machine alone | 3 workers, warm | |
+|---|---|---|---|
+| 00_pool | 37.4 | 19.6 | 1.9× faster |
+| 01_sklearn_rf | 36.0 | 21.9 | 1.6× faster |
+| 06_pool_lambda | cannot run | 5.2 | |
+| 02_numpy_heavy | 50.9 | 62.3 | slower: keep for "if asked" |
+| 03_pandas_ooc | 9.1 | 32.6 | slower: forced out-of-core where the file fits |
+| 07_capstone | 13.4 | 20.0 | slower: shows breadth, not speed |
 
-The cache removes 35–90 s of setup (building and shipping the environment) and
-leaves the computation unchanged, so short jobs gain most. Every run still has
-~10–14 s of fixed overhead outside the script — the next thing to optimise.
+Around the script, a warm run adds a 1–2 s build check, about 3 s of seeding
+peers for scripts that use the cluster, and the upload of any data that ships
+with the script (13 s for the 1.1 GB pandas CSV). Restarting every daemon
+("cold") added a second or two at most.
 
-Caveats to state with it: one host, so the "network" is a local bridge; all
-containers shared one Nix store, which makes first runs look cheaper than they
-are on separate machines; the pandas rows were measured before the
-out-of-core fix, so they are the single-machine fallback.
+**The first run ever** adds the Nix build of the environment. On the rig that
+was about a minute for scikit-learn's closure, fetched from the binary cache;
+the run's own `pipedpeer job --last --timeline` shows it as `nix build`.
+
+Caveats to state with it: one host, so the "network" is a local bridge and
+the workers are slices of the same CPU. On real machines across real links,
+`demo/prep-2-rehearse.sh` measures the same thing; trust its numbers over
+these.
 
 ### "Isn't this just Ray / Dask?"
 

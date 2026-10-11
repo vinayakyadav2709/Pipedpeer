@@ -11,7 +11,7 @@ with each entry marked when resolved.
 | 1 | A per-stage timeline for every run: where the time goes | Done | `b30092d` |
 | 2 | Why a node was chosen, what the shim distributed, and the cluster at a glance | Done | `6d04e97` |
 | 3 | A live web page served by the daemon at `/ui` | Done | `fddf510` |
-| 4 | Benchmarks, a combined capstone script, and the updated demo flow | Planned | |
+| 4 | Benchmarks, a combined capstone script, and the updated demo flow | Done | `6c3d41b`, `3ec5100`, DOCSCOMMIT |
 
 Every phase below has the same parts:
 - **What changed**
@@ -524,11 +524,167 @@ curl -s localhost:38080/v1/stats | python3 -m json.tool | head -30
   stage.
 - **The page is read-only.** It cannot start or stop runs.
 
-## Phase 4: benchmarks and the demo (planned)
+## Phase 4: benchmarks, the capstone, and the demo flow
 
-- **A committed benchmark driver.** It produces one CSV and the charts, running
-  every demo script locally, cold and warm, on one, two and three workers.
-- **A capstone script** that chains the earlier ones: pandas out-of-core →
-  numpy features → scikit-learn → a pool of lambdas → result files synced back.
-- **An updated run sheet** with real per-step timings, a step for the capstone
-  and one for the web page, and the timeline and receipt in the proof step.
+### What changed
+
+**The rig, brought up to date.** All four docker containers now run this
+branch's binary. Two things about the rig itself turned up on the way, and
+neither is a Pipedpeer bug:
+- **The shared `/nix/store` had lost paths.** All four containers bind-mount
+  one store, but each keeps its own Nix database, so one container's garbage
+  collection can delete paths another still lists as valid. The capstone's
+  build failed with `cannot find -lgcc_s`. Repaired with
+  `nix-store --verify --repair` and `nix-store --repair-path`.
+- **The host's own daemon joins the rig** over the docker bridge (it shows up
+  as `fedora`, 12 cores). The benchmark refuses to run while it is healthy;
+  stop it (`pp stop`) for the duration.
+
+**Three slowdowns, found by timing the rig and fixed** (`6c3d41b`):
+
+| Problem | Cause | Fix |
+|---|---|---|
+| `RandomForest(n_jobs=-1)` took 32 s on the cluster and 4.5 s on the orchestrator alone. The old 01_sklearn_rf numbers (190–240 s, against 34 s locally) were the same bug | The joblib backend sent one task per round trip and waited for it before joblib submitted the next. A peer runs one request at a time, so the cluster fitted one tree at a time | joblib calls take `Pool.map`'s path: the first tasks run here on joblib's own backend, which measures them; below 0.5 s of work they stay local; otherwise the rest race between this machine and multi-task chunks sent to peers. The race is now shared code (`_race_items`), and joblib work appears in the receipt as its own kind |
+| Every script in the demo root took ~12 s to tar and upload | `.pipedpeerignore` lines written gitignore-style (`03_pandas_ooc/`, `results/`) reached tar with the slash and matched nothing, so the 1.1 GB CSV went into every upload. `pipedpeer init`'s own template is written that way | Trailing slashes are dropped; a leading slash anchors the pattern at the project root |
+| The capstone's Pool stage rebuilt its pool mid-run on the 3 GB orchestrator | The pool's own worker processes counted against the free memory used to size it, so each map shrank 3 workers to 2 | The workers' private memory counts as reclaimable when the pool re-sizes |
+
+**Three more, found by the first full benchmark run** (`3ec5100`):
+
+| Problem | Cause | Fix |
+|---|---|---|
+| Adding workers changed nothing: 00_pool took 23 s on one, two and three workers | The race dealt chunks alternately before anything ran, so the origin always owned half the items, and its half took as long as the whole job did elsewhere | Both sides pull from one queue, so shares follow speed. Once the queue is empty, a chunk a peer still holds is re-run here only when that beats the peer's measured round trip, or the peer is overdue. Before any round trip has been measured, it waits at most twice the chunk's local time plus 0.7 s |
+| `RandomForest` got no faster with more workers | sklearn passes the whole training set to every tree, so a chunk of three trees shipped X (25 MB) three times | Arrays the tasks in a chunk share travel once, in the globals frame the pool protocol already has; each task carries a reference |
+| Every second back-to-back run of 02_numpy_heavy was refused in under 0.1 s ("insufficient memory") | Admission ran while the previous job's memory was still being handed back | A run on this machine waits out a memory refusal for up to the placement window (`PIPEDPEER_REMOTE_WAIT`, 15 s). Other refusals still fail at once |
+
+**The capstone, `pipedpeer-demo/07_capstone/`.** One plain script, five
+stages, each timing itself:
+1. pandas: `read_csv` of a 2 M-row, ~200 MB CSV and `groupby().mean()` - out-of-core, the chunks parsed on the cluster
+2. numpy: pairwise features and a Gram matrix (the cost model keeps it local)
+3. scikit-learn: `RandomForestClassifier(n_estimators=80, n_jobs=-1)`
+4. `multiprocessing.Pool`: 48 tasks × 100 bootstrap resamples of the test accuracy
+5. files: `results/by_category.csv`, `feature_importance.csv` and `summary.json`, synced back
+
+It has its own workspace and `.pipedpeerignore`, like 03, so its data ships
+only with it. `make_data.py` writes the CSV (`DEMO_CAPSTONE_ROWS` sizes it);
+`setup.sh` runs it. It uses a named function for the Pool, not a lambda:
+under stock Python a lambda cannot be pickled at all, which would leave no
+local baseline, and step 3 already makes that point.
+
+**The benchmark driver, `scripts/bench-matrix.sh`.** It runs every demo
+script from `pp-orch` (3 cores) in three modes:
+- **local:** the same closure with interception off (`-e PIPEDPEER_SHIM=0`). Same Python, same packages, same 3 cores, nothing shipped.
+- **cold:** every running daemon restarted just before the run, so there are no warm worker pools and no cached chunks. The closure is already in the store.
+- **warm:** `RUNS` more runs straight after.
+
+It switches between 1, 2 and 3 workers by stopping and starting their
+daemons, and waits until `pp-orch` sees exactly that many. It holds a
+sleep inhibitor while it runs (a laptop that suspended mid-run turned a 25 s
+run into 90 minutes in the record). Each run writes a row to
+`docker/bench-results/matrix-<stamp>/matrix.csv`:
+- exit code, wall clock, the script's own `TOTAL`
+- the job record's nix build, upload, seeding, script and sync times
+- the receipt's items and items run elsewhere
+
+`summary.txt` holds the medians.
+
+**The demo flow:**
+- **Step 1** ends by printing the live page's address (`pipedpeer ui --print`) for the second screen.
+- **Step 10, `10-capstone.sh`,** is new: the capstone, showing each stage's time, `results/` arriving, and the `Shim:` line.
+- **Step 11, `11-proof.sh`** (was 10), now shows `pipedpeer job --last --timeline` and `--receipt` before `pipedpeer traffic`.
+- `setup.sh` generates the capstone's data and rehearses it.
+- `prep-2-rehearse.sh` times it against its local baseline.
+- DEMO-SCRIPT.md and DEMO-PREP.md follow these changes, and the "first run cost" table uses the new numbers.
+
+### Results
+
+Two full runs on the docker rig (three 3-core workers, a 3-core
+orchestrator, one 12-thread laptop underneath), one on each fix commit. The
+final run's rows are in `docs/bench-3ec5100.csv` and its medians in
+`docs/bench-3ec5100.txt`. Script `TOTAL`, in seconds, median of the runs:
+
+| Script | local | 1 worker | 2 workers | 3 workers | Best vs local |
+|---|---|---|---|---|---|
+| 00_pool | 37.4 | 23.3 | 20.4 | 19.6 | **1.9× faster** |
+| 06_pool_lambda | fails (`PicklingError`) | 4.8 | 5.2 | 5.2 | runs at all |
+| 01_sklearn_rf | 36.0 | 24.8 | 23.0 | 21.9 | **1.6× faster** |
+| 02_numpy_heavy | 50.9 | 56.2 | 60.8 | 62.3 | 1.1–1.2× slower |
+| 03_pandas_ooc | 9.1 | 37.5 | 27.2 | 32.6 | 3× slower (forced out-of-core) |
+| 07_capstone | 13.4 | 19.4 | 18.2 | 20.0 | 1.4× slower |
+
+The cluster columns are warm runs. Cold runs (all daemons just restarted)
+were within a second or two of warm for every script, because the closure was
+already in the store.
+
+**Before and after this phase's fixes, on 3 workers:**
+- 00_pool: 23.3 s → 19.6 s.
+- 01_sklearn_rf: 41.1 s → 21.9 s. The old benchmark had it at 190–240 s.
+- Time outside the script (wall minus `TOTAL`) for 00_pool fell from 12–14 s to under a second. What remains elsewhere is visible in each run's timeline:
+  - **01_sklearn_rf:** the Nix build check (2 s) and seeding peers (3 s). Seeding costs 3 s even when every peer already holds the closure; skipping it is the next optimisation.
+  - **03_pandas_ooc:** tarring (9 s) and uploading (4 s) its own 1.1 GB CSV, which has to ship with it.
+
+**What the numbers say:**
+- **The Pool and sklearn steps win, and keep improving with each worker.** The gains are smaller than the core count suggests, because the workers' cpusets include the laptop's efficiency cores and hyperthreads.
+- **02_numpy_heavy gets slower with each worker.** Its svd is shipped whole to one node, which on this rig is a slower core than the orchestrator's. Shipping 134 MB matrices buys nothing when every "machine" is the same CPU. It belongs in "if asked".
+- **03_pandas_ooc is forced out-of-core with `PIPEDPEER_OOC_MIN`** on a machine where the file fits. Reading 1.1 GB in 64 MB chunks across the bridge cannot beat one local parse. It shows that the read *can* go out-of-core, not that it is faster.
+- **The capstone pays for the same forced out-of-core read** and for materialising the sample, and its forest is small. It shows breadth, not speed.
+
+### Test it automatically
+
+```bash
+cd src && go test -count=1 -run 'TestShimJoblib|TestShimRace|TestPoolResizeCounts|TestIgnoreFile|TestAcceptWaits' -v . ./internal/nixgen/ ./internal/daemonctl/ ; cd ..
+```
+
+These check six things:
+- **`TestShimJoblibRacesInChunks`:** 60 × 50 ms of joblib work reaches the cluster in under 30 round trips, comes back in order, and leaves a "shipped" decision; 24 trivial tasks stay local with a "kept" decision.
+- **`TestShimJoblibBackendDistributes`:** an unmodified RandomForest still distributes, and a lambda stays local with the reason recorded. This test used to pass its lambda phase without testing it: the fake daemon's nesting marker leaked into the test process.
+- **`TestPoolResizeCountsItsOwnWorkersAsFree`:** a pool doesn't shrink over its own workers' memory.
+- **`TestIgnoreFileExcludesDirectoriesWrittenWithASlash`:** `dir/`, `/dir` and `*.log` lines exclude what gitignore would. It fails on the old code.
+- **`TestShimRaceSharesFollowSpeed`:** with a fast cluster and one slow local lane, the cluster takes more than three quarters of the items. The old split gave it exactly 40 of 80. `TestShimJoblibRacesInChunks` also checks that a 4 MB array shared by every task never travels inside one.
+- **`TestAcceptWaitsOutMemoryButNothingElse`:** a memory refusal is asked again; a GPU refusal, or a zero window, fails at once.
+
+### Try it by hand
+
+The capstone, on this machine and on the cluster:
+
+```bash
+cd pipedpeer-demo/07_capstone
+python3 make_data.py                                      # once, ~200 MB
+pp run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7 -e PIPEDPEER_SHIM=0   # baseline
+pp run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7                        # cluster
+pp job --last --receipt     # joblib, pool.map decisions; items per peer
+ls results/
+```
+
+On the cluster run, the sklearn stage prints `joblib: 76 tasks, 0.3s each;
+racing this machine against the cluster`. Before the fix it printed eighty
+`joblib: dispatching 1 tasks` lines instead.
+
+The ignore fix:
+
+```bash
+cd pipedpeer-demo
+pp run 00_pool.py | grep Timeline     # "export closure" a few ms, was 8.9 s
+```
+
+The benchmark (rig up with the bench overlay, host daemon stopped):
+
+```bash
+cd docker && COMPOSE_FILE=docker-compose.yml:docker-compose.bench.yml docker compose up -d && cd ..
+docker cp bin/pipedpeer pp-orch:/usr/local/bin/pipedpeer     # and each worker; restart their daemons
+pp stop
+SCRIPTS="07_capstone.py" WORKERS="3" RUNS=1 scripts/bench-matrix.sh   # ~2 min
+scripts/bench-matrix.sh                                              # everything, ~45 min
+```
+
+### Limits
+
+- **One host.** The rig's four containers share one machine, so the
+  "network" is a local bridge and the workers' cores are pinned slices of one
+  CPU. Real links add latency and cut bandwidth. That favours local for
+  data-heavy steps, which is what `prep-2-rehearse.sh` exists to measure on
+  the real machines.
+- **"Cold" is not "first run ever".** The closure is already in the rig's
+  shared store. The first run on a fresh machine adds the Nix build, minutes
+  for scikit-learn's closure; the run's timeline shows it.
+- **The capstone is not a speedup at this size,** and isn't sold as one: its
+  point is that five kinds of work run from one plain file.

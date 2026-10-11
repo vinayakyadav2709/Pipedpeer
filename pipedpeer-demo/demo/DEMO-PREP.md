@@ -61,7 +61,9 @@ Open UDP ports 38443–38446 in its cloud firewall.
 ```
 
 Read `demo/rehearsal-results.txt` afterwards. Any step less than about 1.2×
-faster on your real networks comes out of the live demo.
+faster on your real networks comes out of the live demo. The capstone row
+(step 10) is there for the time it takes, not to win: keep the step either
+way, and quote the number honestly.
 
 If pandas is slow over your links, rehearse again with a smaller file:
 
@@ -82,9 +84,10 @@ Then on box-a:
 ./demo/prep-1-check.sh
 ```
 
-**Screens:** the demo terminal on the projector, `pipedpeer dashboard` in a
-second window, and `pipedpeer dashboard` (plus `watch -n1 nvidia-smi` for step
-7) on box-b and box-c.
+**Screens:** the demo terminal on the projector; the live page in a browser on
+the second screen (`pipedpeer ui` opens it; step 1 prints the address); and
+`pipedpeer dashboard` (plus `watch -n1 nvidia-smi` for step 7) on box-b and
+box-c.
 
 **The demo**, all on box-a. Each script pauses at `[enter to continue]` so you
 can talk; the yellow `>` lines are notes for you.
@@ -100,11 +103,12 @@ can talk; the yellow `>` lines are notes for you.
 | 7 | `./demo/7-gpu.sh` | GPU training *(skips itself with no GPU machine)* |
 | 8 | `./demo/8-files.sh` | Files the job changed coming back to the laptop |
 | 9 | `./demo/9-failover.sh` | Stopping a machine mid-job, still the right answer |
-| 10 | `./demo/10-proof.sh` | The other machines' own record of the work they ran |
+| 10 | `./demo/10-capstone.sh` | One plain script: pandas, NumPy, scikit-learn, Pool and files together |
+| 11 | `./demo/11-proof.sh` | The last run's timeline and receipt, then the other machines' own record |
 
 - **Step 9:** when the `remote ok` lines start, run `pipedpeer stop` on box-c.
   Afterwards, `pipedpeer start` on box-c.
-- **Step 10:** also run `pipedpeer traffic` on box-b and box-c.
+- **Step 11:** also run `pipedpeer traffic` on box-b and box-c.
 - **Short on time:** drop 4 and 5 first, then 7.
 - **Step 8 says "no eligible node found":** read the "nodes turned down" lines it
   prints; it has already waited 15 s.

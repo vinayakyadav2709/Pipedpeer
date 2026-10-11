@@ -833,7 +833,7 @@ with deletions carried in a manifest. On extraction:
 | `numpy.linalg.svd`, `eig` | Whole matrix to one worker | cost model, unsplit form |
 | pandas `groupby().agg()` and named aggregations, `merge`, `join` | Hash shuffle on the key; bucket 0 local | cost model; above 512 MB unless forced |
 | `pandas.read_csv`, `read_parquet` | Out-of-core, in 64 MB chunks at record boundaries | file larger than half of free memory |
-| `joblib.Parallel`, scikit-learn `n_jobs` | One batch per request | any cluster; no cost model |
+| `joblib.Parallel`, scikit-learn `n_jobs` | Same as `Pool.map`: measure a head on joblib's own backend, then race local against multi-task remote chunks | 0.5 s of work; batches holding a lock stay local |
 | torch `matmul`, `mm` | Row blocks | size only (≥ 32 MB) |
 | torch training (`--ddp`) | Gradients averaged by the lead daemon | opt-in |
 

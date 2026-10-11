@@ -33,6 +33,12 @@ Paths are relative to `src/`. Each entry says how it was established:
 | `closurediff.go` writes to `$TMPDIR` (Temp files) | Writes to the on-disk scratch directory |
 | `pathExists` checks the host `/nix/store`, not the private store | `/nix` paths are mapped into the private store (`nixstore.HostPath`) |
 | Observed 8: `SECURITY.md` is out of date | Rewritten to describe the secret, pinned TLS, signed closures and what they do not cover |
+| Found on the rig (Phase 4): `RandomForest(n_jobs=-1)` is 6–7× slower on the cluster than on one machine | joblib calls take `Pool.map`'s path: a measured head, the dispatch floor, then a race in multi-task chunks. The old backend sent one task per round trip and waited for each |
+| Found on the rig (Phase 4): `.pipedpeerignore` lines ending in `/` exclude nothing | Trailing slashes are dropped before tar sees the pattern, and a leading slash anchors it at the project root. Every root demo was uploading the 1.1 GB pandas CSV |
+| Found on the rig (Phase 4): a memory-bound pool shrinks itself between maps | The pool's own workers count as reclaimable when it re-sizes |
+| Found on the rig (Phase 4): more workers do not make a pool map faster | Local and cluster pull from one queue instead of splitting the items in half up front |
+| Found on the rig (Phase 4): sklearn ships the training set once per tree | Arrays the tasks in a chunk share travel once per chunk |
+| Found on the rig (Phase 4): a run straight after another is refused for memory | A run on this machine waits out a memory refusal for up to 15 s |
 
 ## Not bugs, recorded so they are not reported again
 
