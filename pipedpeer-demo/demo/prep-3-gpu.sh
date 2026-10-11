@@ -24,7 +24,7 @@ step() {
 	fi
 }
 
-banner "GPU prep on $(hostname)"
+banner "GPU prep on $(uname -n)"
 if [[ "$(node_count gpu-self)" -gt 0 ]]; then
 	note "This machine has a GPU: building and running the GPU script here, on its own GPU."
 	step 04_torch_ddp.py --gpu force
