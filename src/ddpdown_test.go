@@ -69,3 +69,38 @@ func TestCancelIsNotADeath(t *testing.T) {
 		t.Error("a cancelled rank was reported down")
 	}
 }
+
+// TestAScriptFailureOnOneRankFailsTheRun: rank 0 crashing at checkpoint save
+// is the script failing, not a lost machine. The ring still carries on (the
+// others must not stall), but the run must not exit 0.
+func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
+	results := make(chan ddpRankResult, 2)
+	results <- ddpRankResult{rank: 0, err: errors.New("execution failed: remote job exited with code 1")}
+	results <- ddpRankResult{rank: 1}
+	var out bytes.Buffer
+	var downs []int
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil,
+		func(rank int, err error) { downs = append(downs, rank) })
+	if err == nil || !strings.Contains(err.Error(), "rank 0 on a") {
+		t.Fatalf("got %v, want a failure naming rank 0 on a", err)
+	}
+	if len(downs) != 1 {
+		t.Errorf("lead daemon told about %v, want [0] so the ring does not stall", downs)
+	}
+	// A rank killed by a signal (machine stopping) is a loss, not a failure.
+	results <- ddpRankResult{rank: 1, err: errors.New("execution failed: remote job exited with code 137")}
+	results <- ddpRankResult{rank: 0}
+	if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, func(int, error) {}); err != nil {
+		t.Errorf("a signalled rank failed the run: %v", err)
+	}
+}
+
+// TestARerunUnderTheSameNameGetsAFreshGroup: the lead daemon remembers a
+// group's dropped ranks for ten minutes, so a re-run must not reuse it.
+func TestARerunUnderTheSameNameGetsAFreshGroup(t *testing.T) {
+	now := time.Now()
+	a, b := ddpGroupName("train", now), ddpGroupName("train", now.Add(time.Second))
+	if a == b || !strings.HasPrefix(a, "ddp-train-") {
+		t.Errorf("groups %q and %q: want distinct, prefixed ddp-train-", a, b)
+	}
+}

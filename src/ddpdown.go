@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -35,8 +36,10 @@ func ddpHostName(n registry.NodeRecord) string {
 
 // ddpAwaitRanks waits for every rank, including ranks started mid-run
 // (announced on added). A rank that fails while others still run is reported
-// through onDown and the ring carries on without it. The run fails only when
-// no rank finishes, or on cancel; the first rank error is returned then.
+// through onDown and the ring carries on without it. The run fails when no
+// rank finishes, on cancel, or when a rank's script itself exited non-zero
+// (a crash at checkpoint save is a failed run, not a lost machine); the ring
+// still carries on so the other ranks do not stall on it.
 //
 // A rank still waiting to join when only joiners are left is stopped after
 // ddpJoinGrace: the ring it was joining has finished.
@@ -48,6 +51,7 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 	stopped := false
 	var firstErr error
 	var died []int
+	var scriptErr error
 	ok := 0
 	for running > 0 {
 		if grace == nil && !stopped && len(joiners) > 0 && running == len(joiners) {
@@ -91,8 +95,16 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 				continue // a cancel stops every rank; nobody died
 			}
 			died = append(died, r.rank)
+			script := ddpScriptFailed(r.err)
+			if script && scriptErr == nil {
+				scriptErr = fmt.Errorf("rank %d on %s: the script failed: %w", r.rank, host, r.err)
+			}
 			if running > 0 {
-				fmt.Fprintf(w, "[ddp] rank %d on %s died; continuing on %d\n", r.rank, host, running)
+				if script {
+					fmt.Fprintf(w, "[ddp] rank %d on %s: its script failed; continuing on %d, but the run will fail\n", r.rank, host, running)
+				} else {
+					fmt.Fprintf(w, "[ddp] rank %d on %s died; continuing on %d\n", r.rank, host, running)
+				}
 				fmt.Fprintf(w, "[ddp]   cause: %v\n", r.err)
 				onDown(r.rank, r.err)
 			}
@@ -101,10 +113,44 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 	if ctx.Err() != nil || ok == 0 {
 		return firstErr
 	}
+	if scriptErr != nil {
+		return scriptErr
+	}
 	if len(died) > 0 {
 		fmt.Fprintf(w, "[ddp] finished on %d of %d ranks (lost: %v)\n", ok, len(hosts), died)
 	}
 	return nil
+}
+
+// ddpExitCode matches the error daemonctl.StreamExecute returns when the job
+// ran to its end and the script exited non-zero.
+var ddpExitCode = regexp.MustCompile(`remote job exited with code (\d+)`)
+
+// ddpScriptFailed says whether a rank's error is its script failing rather
+// than its machine going away. A code above 128 is a signal (the node
+// stopping, the memory watchdog) and counts as a loss, as does anything that
+// is not a reported exit: a dropped connection, an OOM kill.
+//
+// ponytail: matches daemonctl's message; a typed exit error there would be
+// sturdier (outside this cluster).
+func ddpScriptFailed(err error) bool {
+	m := ddpExitCode.FindStringSubmatch(err.Error())
+	if m == nil {
+		return false
+	}
+	code, _ := strconv.Atoi(m[1])
+	return code > 0 && code <= 128
+}
+
+// ddpGroupName names a run's sync group. Unique per run even under a fixed
+// --job-name: the lead daemon keeps a group's dropped ranks and shares for
+// ten minutes, and a re-run sharing the name would start with a dead rank.
+func ddpGroupName(jobName string, now time.Time) string {
+	nonce := strconv.FormatInt(now.UnixNano(), 36)
+	if jobName == "" {
+		return "ddp-" + nonce
+	}
+	return "ddp-" + jobName + "-" + nonce
 }
 
 // ddpReportDown tells the lead rank's daemon that a rank is gone, so the

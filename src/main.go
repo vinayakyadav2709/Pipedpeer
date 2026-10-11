@@ -999,10 +999,7 @@ func runDDP(o ddpRunOptions) error {
 	}
 	defer env.Close()
 
-	jobSet := "ddp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	if o.JobName != "" {
-		jobSet = "ddp-" + o.JobName
-	}
+	jobSet := ddpGroupName(o.JobName, time.Now())
 
 	ranks := make([]registry.NodeRecord, 0, o.Nodes)
 	ranks = append(ranks, rank0)
