@@ -106,6 +106,7 @@ can talk; the yellow `>` lines are notes for you.
   Afterwards, `pipedpeer start` on box-c.
 - **Step 10:** also run `pipedpeer traffic` on box-b and box-c.
 - **Short on time:** drop 4 and 5 first, then 7.
-- **Step 8 says "no eligible node found":** run it again.
+- **Step 8 says "no eligible node found":** read the "nodes turned down" lines it
+  prints; it has already waited 15 s.
 
 **Afterwards:** `pipedpeer stop` on each machine.

@@ -17,7 +17,8 @@ re-measured and checked against the code on 2026-10-02.
 | `benchmarks/RESULTS.md` | Measured results. Each one is tagged with its source (October run, August run, or commit message), and the test bed and its limits are stated. |
 | `benchmarks/bench.py` | The lab harness. It runs against whatever cluster is up. |
 | `benchmarks/raw/` | Raw output behind every number quoted. `C_commit_measurements.md` quotes the multi-machine measurements verbatim from their commits. |
-| `known-issues.md` | Defects found while documenting, recorded rather than fixed. |
+| `known-issues.md` | Defects found while documenting, each marked when resolved. |
+| `fixes-and-roadmap.md` | What was fixed after the report, how to check each fix, and the phases that come next. |
 
 ## Rebuilding
 

@@ -262,9 +262,9 @@ decision about your training run, not something to guess.
 > one, and all three changes are here now. Deletion is limited to files the job
 > was sent, so nothing else on this machine can be touched."
 
-**If it says "no eligible node found":** run it again. That is a known one-shot
-check in `--remote` that can miss a peer right after a heavy job (it is on the
-fix list).
+**If it says "no eligible node found":** it has already waited 15 s for a peer
+and printed why each node was turned down. Read those lines: usually a peer is
+still busy, or not reporting healthy.
 
 ### 9 — Kill a machine · `./demo/9-failover.sh`
 
@@ -356,10 +356,6 @@ no shared filesystem, no cluster manager.
 - Two symmetric NATs with no port mapping (often a phone hotspot) cannot be
   punched through.
 - Running jobs needs Linux (namespaces + crun) on the machines doing the work.
-- `--remote` gives up on its first look for a peer instead of waiting a moment;
-  right after a heavy job it can report "no eligible node" spuriously.
-- The pool sizer reads `os.cpu_count()`, which ignores CPU pinning (cgroups /
-  taskset); in a CPU-limited container it can start more workers than cores.
 
 ---
 
