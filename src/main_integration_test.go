@@ -480,7 +480,7 @@ echo "hidden" > secret.txt
 	}
 
 	// Verify that secret.txt was NOT sent to the remote (it wouldn't exist there)
-	secretExistsOnRemote := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls /tmp/pipedpeer/jobs/*/work/secret.txt 2>/dev/null || echo missing"))
+	secretExistsOnRemote := strings.TrimSpace(dockerExec(t, ctx, labDir, "ls \"${XDG_DATA_HOME:-$HOME/.local/share}\"/pipedpeer/work/*/work/secret.txt 2>/dev/null || echo missing"))
 	if secretExistsOnRemote != "missing" {
 		t.Fatalf("secret.txt was incorrectly sent to remote!")
 	}
