@@ -72,6 +72,9 @@ type JobStats struct {
 	Receipt    *jobhistory.Receipt    `json:"receipt,omitempty"`
 	Candidates []jobhistory.Candidate `json:"candidates,omitempty"`
 	Reason     string                 `json:"placement_reason,omitempty"`
+	// Source is how the node was chosen: "self" for this machine, a
+	// coordinator source such as "discovery", or "explicit" for --host.
+	Source string `json:"placement_source,omitempty"`
 }
 
 // Snapshot is the whole picture at one moment.
@@ -144,7 +147,7 @@ func RecentJobs(limit int) []JobStats {
 			ID: r.ID, Script: filepath.Base(r.ScriptPath), Status: r.Status, Stage: r.Stage,
 			RunHost: r.RunHost, TargetID: r.TargetID, StartedAt: r.StartedAt,
 			TotalMs: jobhistory.Total(r.Stages).Milliseconds(), Stages: r.Stages,
-			Candidates: r.Candidates, Reason: r.PlacementReason,
+			Candidates: r.Candidates, Reason: r.PlacementReason, Source: r.PlacementSource,
 		}
 		if js.TotalMs == 0 {
 			js.TotalMs = r.DurationMs

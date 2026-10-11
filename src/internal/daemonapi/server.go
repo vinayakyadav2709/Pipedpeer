@@ -92,6 +92,8 @@ type Server struct {
 	// unreachable holds peers with no direct path and why, keyed by node ID,
 	// so `pipedpeer nodes` can show them instead of leaving them out.
 	unreachable map[string]unreachablePeer
+	// stats caches the /v1/stats snapshot briefly.
+	stats statsCache
 
 	stopSweep chan struct{}
 
@@ -1077,8 +1079,10 @@ func (s *Server) buildRouter() {
 	// No-op until a token is configured, so an existing cluster keeps working
 	// until its operator opts in. Once one is set, every endpoint here is
 	// behind it — including /health, which is how peers decide who exists.
-	r.Use(authtoken.Middleware)
+	r.Use(exceptUIPage(authtoken.Middleware))
 
+	r.Get("/ui", s.handleUI)
+	r.Get("/v1/stats", s.handleStats)
 	r.Get("/health", s.handleHealth)
 	r.Post("/v1/accept", s.handleAccept)
 	r.Post("/v1/commit", s.handleCommit)
@@ -1190,14 +1194,22 @@ func (s *Server) handleRoundRobin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
-		return
-	}
-	dbNodes, err := s.store.ListAll()
+	nodes, err := s.nodeList()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+// nodeList is the cluster as /v1/nodes serves it.
+func (s *Server) nodeList() ([]nodeResp, error) {
+	if s.store == nil {
+		return []nodeResp{}, nil
+	}
+	dbNodes, err := s.store.ListAll()
+	if err != nil {
+		return nil, err
 	}
 
 	// How each peer is reached, when anything knows. Carried in the
@@ -1217,7 +1229,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		nodes = append(nodes, resp)
 	}
-	writeJSON(w, http.StatusOK, s.withUnreachable(nodes))
+	return s.withUnreachable(nodes), nil
 }
 
 // ReasonCapability carries why a peer cannot be reached.

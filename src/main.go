@@ -114,6 +114,7 @@ func main() {
 		newMapCmd(),
 		newAuthCmd(),
 		newStatsCmd(),
+		newUICmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE

@@ -119,7 +119,7 @@ func printStats(s clusterstats.Snapshot) {
 			truncate(node, 10), (time.Duration(j.TotalMs) * time.Millisecond).Round(100*time.Millisecond),
 			truncate(slowest, 22), dist)
 	}
-	fmt.Println("\nDetail: pipedpeer job --id <ID> --timeline --explain --receipt")
+	fmt.Println("\nDetail: pipedpeer job --id <ID> --timeline --explain --receipt   ·   live page: pipedpeer ui")
 }
 
 func slowestStage(stages []jobhistory.Stage) (jobhistory.Stage, bool) {
