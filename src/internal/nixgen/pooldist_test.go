@@ -714,3 +714,63 @@ print("compress-ok")
 		t.Fatalf("unexpected output: %q", out)
 	}
 }
+
+// TestTheReceiptAccountsForEveryItem: local_items + remote_items must cover
+// the whole map. The race's local share (and the stragglers it re-runs for a
+// failed chunk) went uncounted, so a lab run of 80 items reported 44. The
+// receipt counts executions, so an item both sides ran counts twice: the sum
+// may exceed the map but never fall short. The
+// "remote fails" case stands in for a worker killed mid-run: the fake daemon
+// has no PIPEDPEER_SHIM in its environment, so odd items raise only there.
+// The "returns None" case pins the slot sentinel: None used to read as
+// "not filled yet", and the straggler loop re-ran those items forever.
+func TestTheReceiptAccountsForEveryItem(t *testing.T) {
+	const tmpl = `
+import multiprocessing, os, time
+
+FAIL_REMOTE = %s
+
+def work(x):
+    time.sleep(0.02)
+    if FAIL_REMOTE and x %% 2 and not os.environ.get("PIPEDPEER_SHIM"):
+        raise RuntimeError("worker killed")
+    return %s
+
+if __name__ == "__main__":
+    with multiprocessing.Pool(4) as pool:
+        got = pool.map(work, list(range(64)))
+    assert got == [work(x) for x in range(64)], "wrong results: %%r" %% (got[:8],)
+    print("POOL-OK")
+`
+	for _, tc := range []struct {
+		name, fail, ret string
+		wantFailures    bool
+	}{
+		{"all remote ok", "False", "x * x", false},
+		{"remote chunks fail", "True", "x * x", true},
+		{"kernel returns None", "False", "None", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := fmt.Sprintf(tmpl, tc.fail, tc.ret)
+			res := runPoolScript(t, map[string]string{"job.py": script}, "job.py")
+			if !strings.Contains(res.stdout, "POOL-OK") {
+				t.Fatalf("missing sentinel\nstdout:\n%s\nstderr:\n%s", res.stdout, res.stderr)
+			}
+			if len(res.receipt.Parts) == 0 {
+				t.Fatalf("no chunk was offered to the cluster, so the race never ran: %+v\nstderr:\n%s", res.receipt, res.stderr)
+			}
+			if got := res.receipt.LocalItems + res.receipt.RemoteItems; got < 64 {
+				t.Errorf("receipt covers %d of 64 items (local %d, remote %d): %+v",
+					got, res.receipt.LocalItems, res.receipt.RemoteItems, res.receipt)
+			}
+			if tc.wantFailures {
+				// Every remote chunk failed: this machine ran all 64, exactly once.
+				if res.receipt.RemoteFailures == 0 || res.receipt.RemoteItems != 0 || res.receipt.LocalItems != 64 {
+					t.Errorf("want remote failures, remote 0, local 64: %+v", res.receipt)
+				}
+			} else if res.receipt.RemoteFailures > 0 || res.receipt.RemoteItems == 0 {
+				t.Errorf("want remote work and no failures: %+v\nstderr:\n%s", res.receipt, res.stderr)
+			}
+		})
+	}
+}
