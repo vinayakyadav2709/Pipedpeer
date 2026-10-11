@@ -92,6 +92,22 @@ From a checkout, the same script works directly:
 Requires Linux to *run* jobs (`crun` sandbox, Linux namespaces, GPU device
 nodes). macOS builds work as a submitting client.
 
+Then, on each machine:
+
+```bash
+pipedpeer setup -y          # one sudo: installs nix and the nix key helper
+pipedpeer join <address>    # or with no address on a LAN
+```
+
+The install script needs no root. `setup` uses a nix you already have, or
+installs the multi-user nix (Determinate installer) when sudo is available; on
+a machine where you have no root it falls back to a private store in your
+data directory. On a multi-user nix it also installs a small root-owned key
+helper, so peers that join later are trusted with no further prompt
+([ADR-0018](docs/adr/0018-root-owned-nix-key-helper.md)); `pipedpeer trust`
+does the same by hand if that step failed, and `pipedpeer setup --uninstall`
+removes it.
+
 ## Quickstart
 
 ```bash

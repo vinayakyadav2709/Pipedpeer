@@ -21,6 +21,7 @@ What the system does today and where it stops. Each row names its evidence (path
 | Install and run without root | crun in `~/.local/bin`, private nix store | [ADR-0012](adr/0012-crun-only-runtime.md), [ADR-0013](adr/0013-rootless-private-nix-store.md) |
 | Use a worker's NVIDIA GPU inside the sandbox | Driver libraries bind-mounted into the job | `92191d3`, `internal/daemonapi/execution.go` `gpuDriverLibDir` |
 | Ship an environment once | Only store paths a peer lacks travel; signed where the peer supports it | [ADR-0011](adr/0011-signed-closures-via-binary-cache.md), `193e1bf` |
+| Accept closures from peers that join after setup, with no prompt | On a multi-user nix, setup's one sudo installs a root-owned key helper the daemon calls with `sudo -n`; a private store or single-user nix takes the keys with each import | [ADR-0018](adr/0018-root-owned-nix-key-helper.md), `internal/nixtrust/` |
 | Return only what a job produced | Results are files created or modified by the job | `2befd26` |
 | Submit from macOS | Submit-only client; jobs run on Linux | [README](../README.md#install) |
 

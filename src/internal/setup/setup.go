@@ -1,19 +1,18 @@
 package setup
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -125,9 +124,12 @@ const (
 	trustApply                      // nix.conf decides, and lacks some keys
 )
 
-// Seams for tests: what system nix trusts, and the one command run as root.
+// Seams for tests: what system nix trusts, the key helper, and the one
+// command run as root.
 var (
 	systemUntrusted = nixsign.SystemUntrusted
+	helperReady     = nixtrust.Ready
+	helperAdd       = nixtrust.Add
 	runAsRoot       = func(script string) error {
 		argv := []string{"sh", "-c", script}
 		if os.Geteuid() != 0 {
@@ -139,16 +141,7 @@ var (
 		cmd.Stdin = os.Stdin
 		return cmd.Run()
 	}
-	trustPollEvery = 2 * time.Second
 )
-
-// errNoKeysYet: nix.conf decides here, but there is nothing to put in it yet.
-var errNoKeysYet = errors.New("no cluster keys known yet")
-
-func noKeysYet() error {
-	return fmt.Errorf("%w (%s is empty); start the daemon and, once the other "+
-		"machines have joined, run `pipedpeer trust`", errNoKeysYet, nixsign.TrustedKeysFile())
-}
 
 // clusterKeys are the keys the daemon collected from token-proven peers
 // (plus its own), rewritten every poll.
@@ -183,13 +176,14 @@ func decideTrust(keys []string) (trustStep, []string, error) {
 	return trustApply, missing, nil
 }
 
-// acceptsPeerClosures reports whether this node can import a peer's closure.
+// acceptsPeerClosures reports whether this node can import a peer's closure,
+// now and as peers join.
 //
 // A multi-user nix-daemon refuses a store path no trusted key signed - "lacks
-// a signature by a trusted key" - so a stock worker could not receive work at
-// all: jobs uploaded fine and died at import. Closures are signed now, and
-// travel in a form that keeps the signature, so what a machine needs is to
-// trust this cluster's keys.
+// a signature by a trusted key". Closures are signed and travel in a form that
+// keeps the signature, so what such a machine needs is to trust this
+// cluster's keys, and the key helper so the daemon can add the keys of peers
+// that join later.
 func acceptsPeerClosures() bool {
 	keys, err := clusterKeys()
 	if err != nil {
@@ -201,27 +195,23 @@ func acceptsPeerClosures() bool {
 		fmt.Printf("    %v\n", err)
 		return false
 	}
-	return step == trustNotNeeded || step == trustDone
+	return step == trustNotNeeded || (step != trustApply && helperReady())
 }
 
-// trustClusterKeys is setup's nix-imports step.
+// trustClusterKeys is setup's nix-imports step: install the key helper on a
+// multi-user nix and add the keys known so far. With none known yet there is
+// nothing to fail about: the daemon adds them through the helper as peers
+// join.
 func trustClusterKeys() error {
 	keys, err := clusterKeys()
 	if err != nil {
 		return err
 	}
 	step, missing, err := decideTrust(keys)
-	switch {
-	case err != nil:
+	if err != nil || step == trustNotNeeded {
 		return err
-	case step == trustNoKeys:
-		// Editing nix.conf to no effect would read as if the cluster were
-		// trusted. Saying what is missing is the useful answer.
-		return noKeysYet()
-	case step == trustApply:
-		return applyTrust(missing)
 	}
-	return nil
+	return applyTrust(missing)
 }
 
 // Trust makes system nix accept the cluster's keys if it must be told, and
@@ -238,53 +228,41 @@ func Trust() (string, error) {
 	case step == trustNotNeeded:
 		return "nothing to do: this nix takes the cluster's keys with each import " +
 			"(private store, single-user nix, or signature checking off)", nil
-	case step == trustDone:
-		return fmt.Sprintf("nothing to do: system nix already trusts all %d cluster key(s)", len(keys)), nil
-	case step == trustNoKeys:
-		return "", noKeysYet()
 	}
 	if err := applyTrust(missing); err != nil {
 		return "", err
 	}
+	switch step {
+	case trustNoKeys:
+		return "no cluster keys known yet; the daemon adds them through the key helper as peers join", nil
+	case trustDone:
+		return fmt.Sprintf("nothing to do: system nix already trusts all %d cluster key(s)", len(keys)), nil
+	}
 	return fmt.Sprintf("system nix now trusts %d more cluster key(s)", len(missing)), nil
 }
 
-// TrustAfterJoin is join's last step. On a multi-user nix the keys of the
-// peers just met must be in nix.conf before their closures import here, so it
-// waits up to wait for a peer's key to be recorded and then applies trust
-// (one sudo prompt). With no peer key by then it says what to run later.
-func TrustAfterJoin(wait time.Duration) error {
-	deadline := time.Now().Add(wait)
-	for {
-		keys, err := clusterKeys()
-		if err != nil {
-			return err
-		}
-		step, missing, err := decideTrust(keys)
-		if err != nil {
-			return err
-		}
-		if step == trustNotNeeded {
-			return nil
-		}
-		// The file always holds this node's own key, so a peer's makes two.
-		if len(keys) > 1 {
-			if step != trustApply {
-				return nil
-			}
-			fmt.Println("this machine's nix accepts only the signing keys listed in nix.conf; adding the cluster's (sudo):")
-			return applyTrust(missing)
-		}
-		if !time.Now().Before(deadline) {
-			fmt.Println("this machine's nix accepts only the signing keys listed in nix.conf, and no peer's key is known yet:\n" +
-				"run `pipedpeer trust` here once the other machines have joined")
-			return nil
-		}
-		time.Sleep(trustPollEvery)
+// TrustAfterJoin is join's last step. On a multi-user nix without the key
+// helper it installs it (one sudo prompt), so the daemon can add the keys of
+// the peers just met, and of any that join later, by itself.
+func TrustAfterJoin() error {
+	keys, err := clusterKeys()
+	if err != nil {
+		return err
 	}
+	step, missing, err := decideTrust(keys)
+	if err != nil {
+		return err
+	}
+	if step == trustNotNeeded || (step != trustApply && helperReady()) {
+		return nil
+	}
+	fmt.Println("this machine's nix accepts only the signing keys listed in nix.conf; " +
+		"installing pipedpeer's key helper so the daemon can add the cluster's (sudo):")
+	return applyTrust(missing)
 }
 
-// applyTrust appends keys to nix.conf as root and restarts nix-daemon.
+// applyTrust has the key helper add keys, installing it first (the one sudo
+// prompt) when sudo does not already let this user run it.
 //
 // Trust this cluster's keys. Do not switch the check off.
 //
@@ -292,49 +270,231 @@ func TrustAfterJoin(wait time.Duration) error {
 // signatures for EVERYTHING on the machine - every channel, every
 // substituter, every user - so that pipedpeer could import one unsigned peer
 // closure. That is a system-wide reduction bought for one program's
-// convenience, and it outlives the program.
+// convenience, and it outlives the program. It was needed only while
+// `nix-store --export`, which drops signatures, carried every transfer;
+// closures now travel as a small binary cache that keeps them.
 //
-// It was necessary for a while, and the reason is worth remembering:
-// `nix-store --export`, which every transfer used, does not serialise
-// signatures, so a correctly signed closure was refused anyway. Closures now
-// travel as a small binary cache, where the signature is part of each path's
-// metadata and survives the journey - measured between two machines, with the
-// receiving one importing under require-sigs = true and refusing the same
-// closure when the sending node's key was taken out of its trust list.
-//
-// So this writes one line: these specific keys are trusted, and everything
-// else is refused exactly as strictly as before. Only keys nix lacks are
-// written, so re-running it does not grow the file.
+// So the helper writes one setting: these specific keys are trusted, and
+// everything else is refused exactly as strictly as before.
 func applyTrust(keys []string) error {
-	fmt.Println("    → Trusting this cluster's signing keys...")
-
-	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
-	// nix.custom.conf for local changes; plain multi-user installs edit
-	// nix.conf itself.
-	target := "/etc/nix/nix.conf"
-	if _, err := os.Stat("/etc/nix/nix.custom.conf"); err == nil {
-		target = "/etc/nix/nix.custom.conf"
+	if !helperReady() {
+		if err := installHelper(); err != nil {
+			return err
+		}
 	}
+	if len(keys) == 0 {
+		return nil
+	}
+	fmt.Printf("    → Trusting %d cluster signing key(s); signature checking stays ON for everything else.\n", len(keys))
+	return helperAdd(keys)
+}
 
-	fmt.Printf("      Adding extra-trusted-public-keys to %s.\n", target)
-	fmt.Println("      Signature checking stays ON for everything else.")
+// nixConfTarget is the file setup adds the helper's include line to.
+// Determinate marks /etc/nix/nix.conf "do not modify" and includes
+// nix.custom.conf for local changes; plain multi-user installs edit nix.conf.
+func nixConfTarget() string {
+	if _, err := os.Stat("/etc/nix/nix.custom.conf"); err == nil {
+		return "/etc/nix/nix.custom.conf"
+	}
+	return "/etc/nix/nix.conf"
+}
 
-	if err := runAsRoot(nixConfigRepair(strings.Join(keys, " "), target)); err != nil {
-		return fmt.Errorf("could not update %s: %w", target, err)
+// installHelper puts the key helper, its sudoers rule and the include line in
+// place, as root (ADR-0018).
+func installHelper() error {
+	src, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("finding this binary to install as the key helper: %w", err)
+	}
+	if err := nixtrust.CheckRootOwned(nixtrust.HelperPath); err != nil {
+		return fmt.Errorf("not installing the nix key helper: %w", err)
+	}
+	login := ""
+	if geteuid() != 0 {
+		u, err := user.Current()
+		if err != nil {
+			return fmt.Errorf("looking up the current user: %w", err)
+		}
+		if err := nixtrust.ValidUser(u.Username); err != nil {
+			return err
+		}
+		login = u.Username
+	}
+	target := nixConfTarget()
+	fmt.Println("    → Installing pipedpeer's nix key helper, so the daemon can trust")
+	fmt.Println("      new peers' keys without a prompt:")
+	fmt.Printf("      %s (root-owned copy of this binary)\n", nixtrust.HelperPath)
+	if login != "" {
+		fmt.Printf("      %s (lets %s run only that helper)\n", nixtrust.SudoersFile, login)
+	}
+	fmt.Printf("      one include line in %s\n", target)
+	if err := runAsRoot(helperInstallScript(src, login, target)); err != nil {
+		return fmt.Errorf("could not install the nix key helper: %w", err)
 	}
 	return nil
 }
 
-// nixConfigRepair is the edit setup makes to a machine's nix configuration.
+// shq quotes s for sh.
+func shq(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// helperInstallScript is what installHelper runs as root, kept apart so what
+// a user's system gets can be asserted without changing it. With login empty
+// (setup runs as root) no sudoers rule is needed or written. The sudoers rule
+// is checked with visudo before it is moved into place: a broken file there
+// would lock the machine out of sudo.
+func helperInstallScript(src, login, target string) string {
+	dir := filepath.Dir(nixtrust.HelperPath)
+	staged := filepath.Join(dir, ".pipedpeer-nix-trust.new")
+	lines := []string{
+		"set -eu",
+		"install -d -o root -g root -m 0755 " + shq(dir),
+		"install -o root -g root -m 0755 " + shq(src) + " " + shq(staged),
+		"mv -f " + shq(staged) + " " + shq(nixtrust.HelperPath),
+	}
+	if login != "" {
+		lines = append(lines,
+			// sudo skips files in sudoers.d whose name holds a dot.
+			"tmp=$(mktemp "+shq(filepath.Dir(nixtrust.SudoersFile))+"/.pipedpeer.XXXXXX)",
+			`trap 'rm -f "$tmp"' EXIT`,
+			"printf '%s' "+shq(nixtrust.SudoersRule(login))+` > "$tmp"`,
+			`chmod 0440 "$tmp"`,
+			`visudo -cf "$tmp" >/dev/null`,
+			`mv -f "$tmp" `+shq(nixtrust.SudoersFile),
+		)
+	}
+	lines = append(lines,
+		"grep -qxF "+shq(nixtrust.IncludeLine)+" "+shq(target)+" 2>/dev/null || "+
+			"printf '\\n%s\\n' "+shq(nixtrust.IncludeLine)+" >> "+shq(target),
+	)
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// helperUninstallScript undoes helperInstallScript and drops the keys it
+// trusted; nix-daemon restarts so it stops trusting them.
+func helperUninstallScript() string {
+	inc := shq(nixtrust.IncludeLine)
+	return strings.Join([]string{
+		"set -eu",
+		"rm -f " + shq(nixtrust.SudoersFile) + " " + shq(nixtrust.HelperPath) + " " + shq(nixtrust.KeysFile),
+		"for f in /etc/nix/nix.conf /etc/nix/nix.custom.conf; do",
+		"  if grep -qxF " + inc + ` "$f" 2>/dev/null; then`,
+		"    grep -vxF " + inc + ` "$f" > "$f.pipedpeer-new" || true`,
+		`    cat "$f.pipedpeer-new" > "$f"`,
+		`    rm -f "$f.pipedpeer-new"`,
+		"  fi",
+		"done",
+		"systemctl try-restart nix-daemon",
+	}, "\n") + "\n"
+}
+
+// Uninstall removes what setup installed as root: the key helper, its
+// sudoers rule, the include line and the keys file. It is
+// `pipedpeer setup --uninstall`.
+func Uninstall() error {
+	fmt.Println("  Removing pipedpeer's nix key helper, its sudoers rule and the keys it trusted (sudo)...")
+	if err := runAsRoot(helperUninstallScript()); err != nil {
+		return fmt.Errorf("could not remove the nix key helper: %w", err)
+	}
+	fmt.Println("  Done. System nix no longer trusts the cluster's keys.")
+	return nil
+}
+
+// nixRoute is how setup gets this machine a nix.
+type nixRoute int
+
+const (
+	nixUseSystem     nixRoute = iota // a system nix is installed; at most its store is missing
+	nixInstallSystem                 // install the Determinate multi-user nix (needs root)
+	nixUsePrivate                    // seed a private store in the user's data directory
+)
+
+// chooseNix says how setup gets a nix (ADR-0013, as amended 2026-10-12).
 //
-// Separated from running it so what gets written to a user's system file as
-// root can be asserted without editing anything. What must never reappear
-// here is `require-sigs = false`: it would be one line in a diff, it would
-// work, and it would silently stop the machine checking signatures on
-// everything it ever installs.
-func nixConfigRepair(trustedKeys, target string) string {
-	return fmt.Sprintf("echo 'extra-trusted-public-keys = %s' >> %s && systemctl restart nix-daemon",
-		trustedKeys, target)
+// A system nix is the reliable one: its nix-daemon builds without user
+// namespaces, every tool and doc expects /nix, and closures land in the store
+// other machines' setups also use. So a nix already present is used, and with
+// root available the Determinate installer puts one in. The private store is
+// the fallback for a machine the user cannot administer.
+// PIPEDPEER_FORCE_PRIVATE_NIX=1 forces it, as nixstore.Private does.
+func chooseNix(forcePrivate, systemNix, canRoot bool) nixRoute {
+	switch {
+	case forcePrivate:
+		return nixUsePrivate
+	case systemNix:
+		return nixUseSystem
+	case canRoot:
+		return nixInstallSystem
+	}
+	return nixUsePrivate
+}
+
+// canBecomeRoot reports whether installing a system nix can get root here:
+// running as root, sudo without a password, or sudo with a terminal to ask
+// on. It cannot know whether the password will be accepted; installNix falls
+// back to the private store when the installer fails.
+var canBecomeRoot = func() bool {
+	if geteuid() == 0 {
+		return true
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return false
+	}
+	if exec.Command("sudo", "-n", "true").Run() == nil {
+		return true
+	}
+	fi, err := os.Stdin.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// Seams for installNix's three routes.
+var (
+	seedPrivate = func() error {
+		return nixstore.Seed(func(f string, a ...any) { fmt.Printf(f, a...) })
+	}
+	installDeterminate = func() error {
+		fmt.Println("    → Installing Nix (Determinate Systems installer, needs sudo)...")
+		cmd := exec.Command("sh", "-c",
+			`curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm`)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		return cmd.Run()
+	}
+	makeNixStore = createNixStore
+)
+
+// installNix is the nix prerequisite's install step.
+func installNix() error {
+	route := chooseNix(os.Getenv("PIPEDPEER_FORCE_PRIVATE_NIX") == "1", nixInstalled(), canBecomeRoot())
+	switch route {
+	case nixUseSystem:
+		// A nix that is installed but storeless only needs the store: running
+		// a full installer over a packaged nix would leave two of them.
+		err := makeNixStore()
+		if err == nil {
+			return nil
+		}
+		// A machine where /nix cannot be created is what the private store
+		// exists for.
+		fmt.Printf("    → Could not create the system store (%v); using a private store instead\n", err)
+	case nixInstallSystem:
+		err := installDeterminate()
+		if err == nil {
+			return nil
+		}
+		fmt.Printf("    → The system nix installer failed (%v); using a private store instead,\n"+
+			"      which needs no root but builds inside a user namespace\n", err)
+	case nixUsePrivate:
+		if os.Getenv("PIPEDPEER_FORCE_PRIVATE_NIX") == "1" {
+			fmt.Println("    → PIPEDPEER_FORCE_PRIVATE_NIX=1: using a private store")
+		} else {
+			fmt.Println("    → No root here (no sudo), so nix goes in a private store in your data\n" +
+				"      directory; a system nix (Determinate installer) is preferred where root is available")
+		}
+	}
+	return seedPrivate()
 }
 
 func getPrereqs() []prereq {
@@ -385,37 +545,7 @@ func getPrereqs() []prereq {
 		// crun comes before nix deliberately: a private store is bound at
 		// /nix inside a namespace that crun builds, so seeding one needs
 		// the runtime already in place.
-		{name: "nix", check: nixUsable, install: func() error {
-			// A nix that is installed but storeless only needs the store:
-			// running a full installer over a packaged nix would leave two of
-			// them on the machine.
-			if nixInstalled() {
-				if err := createNixStore(); err == nil {
-					return nil
-				}
-				// Falls through to the private store: a machine where /nix
-				// cannot be created is exactly the case it exists for.
-			}
-
-			// Try the unprivileged route first. The Determinate installer
-			// needs root, which a user does not have on a machine they do not
-			// administer, and asking for it is the single biggest barrier to
-			// joining a cluster. A private store needs none: it lives in the
-			// user's data directory and is bound at /nix inside a namespace.
-			if err := nixstore.Seed(func(f string, a ...any) { fmt.Printf(f, a...) }); err == nil {
-				return nil
-			} else if os.Geteuid() != 0 {
-				fmt.Printf("    → Private store unavailable (%v); falling back to the system installer\n", err)
-			}
-
-			fmt.Println("    → Installing Nix (Determinate Systems installer)...")
-			cmd := exec.Command("sh", "-c",
-				`curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm`)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-			return cmd.Run()
-		}},
+		{name: "nix", check: nixUsable, install: installNix},
 		{name: "nix-imports", check: acceptsPeerClosures, install: trustClusterKeys},
 	}
 }
@@ -503,12 +633,7 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 			}
 
 			for _, p := range toInstall {
-				if err := p.install(); errors.Is(err, errNoKeysYet) {
-					// Not fatal: the daemon this run starts is what learns
-					// the keys. `pipedpeer join` and `pipedpeer trust` finish it.
-					fmt.Printf("    %-12s -  %v\n", p.name, err)
-					continue
-				} else if err != nil {
+				if err := p.install(); err != nil {
 					return 0, fmt.Errorf("install %s failed: %w", p.name, err)
 				}
 				fmt.Printf("    %-12s ✓  installed\n", p.name)

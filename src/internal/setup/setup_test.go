@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 )
 
 // Fedora's nix-core RPM installs the nix binary and nothing else — no store.
@@ -132,47 +132,64 @@ func TestSetupFindsNixOffPath(t *testing.T) {
 // This guards the line reappearing: it would be one line in a diff, it would
 // work, and nothing else in the system would notice.
 func TestSetupNeverDisablesSignatureCheckingSystemWide(t *testing.T) {
-	script := nixConfigRepair("pipedpeer-abc:AAAA= pipedpeer-def:BBBB=", "/etc/nix/nix.custom.conf")
-
-	if strings.Contains(script, "require-sigs") {
-		t.Fatalf("setup writes a require-sigs setting into the machine's nix config:\n%s", script)
+	keys := nixtrust.FileContent([]string{"pipedpeer-abc:AAAA=", "pipedpeer-def:BBBB="})
+	script := helperInstallScript("/home/u/.local/bin/pipedpeer", "u", "/etc/nix/nix.custom.conf")
+	for _, s := range []string{keys, script, helperUninstallScript()} {
+		if strings.Contains(s, "require-sigs") {
+			t.Fatalf("setup writes a require-sigs setting into the machine's nix config:\n%s", s)
+		}
 	}
-	if !strings.Contains(script, "extra-trusted-public-keys = pipedpeer-abc:AAAA= pipedpeer-def:BBBB=") {
-		t.Errorf("setup does not trust the cluster's keys:\n%s", script)
-	}
-	if !strings.Contains(script, "/etc/nix/nix.custom.conf") {
-		t.Errorf("setup edits the wrong file:\n%s", script)
+	if !strings.Contains(keys, "extra-trusted-public-keys = pipedpeer-abc:AAAA= pipedpeer-def:BBBB=") {
+		t.Errorf("the helper does not trust the cluster's keys:\n%s", keys)
 	}
 }
 
-// TestSetupWithNoKeysYetChangesNothing.
-//
-// Appending "extra-trusted-public-keys = " with nothing after it would edit a
-// system file as root to no effect, and leave a line that reads as if the
-// cluster were trusted. Saying what is missing is the useful answer.
-func TestSetupWithNoKeysYetChangesNothing(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	ran := fakeTrust(t, func(keys []string) ([]string, bool, error) { return keys, true, nil })
-	err := trustClusterKeys()
-	if err == nil || len(*ran) > 0 {
-		t.Fatalf("setup edited the nix config with no cluster keys to trust (err=%v)", err)
+// The root script installs a root-owned copy of the binary, a sudoers rule
+// checked by visudo before it is moved into place, and the include line once,
+// in the right file.
+func TestTheHelperInstallScript(t *testing.T) {
+	script := helperInstallScript("/home/o'brien/bin/pipedpeer", "obrien", "/etc/nix/nix.custom.conf")
+	for _, want := range []string{
+		"set -eu",
+		`install -o root -g root -m 0755 '/home/o'\''brien/bin/pipedpeer' '/usr/local/libexec/.pipedpeer-nix-trust.new'`,
+		"mv -f '/usr/local/libexec/.pipedpeer-nix-trust.new' '/usr/local/libexec/pipedpeer-nix-trust'",
+		"printf '%s' 'obrien ALL=(root) NOPASSWD: /usr/local/libexec/pipedpeer-nix-trust *\n' > \"$tmp\"",
+		`chmod 0440 "$tmp"`,
+		`visudo -cf "$tmp"`,
+		`mv -f "$tmp" '/etc/sudoers.d/pipedpeer'`,
+		"grep -qxF '!include /etc/nix/pipedpeer-trusted-keys.conf' '/etc/nix/nix.custom.conf' 2>/dev/null || printf",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("install script lacks %q:\n%s", want, script)
+		}
 	}
-	if !errors.Is(err, errNoKeysYet) || !strings.Contains(err.Error(), "pipedpeer trust") {
-		t.Errorf("the error does not say what to do about it: %v", err)
+	if strings.Index(script, "visudo") > strings.Index(script, "/etc/sudoers.d/pipedpeer'") {
+		t.Errorf("the sudoers rule is moved into place before visudo checks it:\n%s", script)
+	}
+	if root := helperInstallScript("/usr/bin/pipedpeer", "", "/etc/nix/nix.conf"); strings.Contains(root, "sudoers") {
+		t.Errorf("running as root needs no sudoers rule:\n%s", root)
+	}
+	un := helperUninstallScript()
+	for _, want := range []string{nixtrust.SudoersFile, nixtrust.HelperPath, nixtrust.KeysFile, "grep -vxF '!include", "systemctl try-restart nix-daemon"} {
+		if !strings.Contains(un, want) {
+			t.Errorf("uninstall script lacks %q:\n%s", want, un)
+		}
 	}
 }
 
 // fakeTrust replaces system nix with untrusted and records every root script
-// instead of running it.
-func fakeTrust(t *testing.T, untrusted func([]string) ([]string, bool, error)) *[]string {
+// and helper call instead of running them. The helper starts not installed;
+// a root script installs it.
+func fakeTrust(t *testing.T, untrusted func([]string) ([]string, bool, error)) (ran, added *[]string) {
 	t.Helper()
-	su, rr, pe := systemUntrusted, runAsRoot, trustPollEvery
-	t.Cleanup(func() { systemUntrusted, runAsRoot, trustPollEvery = su, rr, pe })
-	var ran []string
+	su, rr, hr, ha := systemUntrusted, runAsRoot, helperReady, helperAdd
+	t.Cleanup(func() { systemUntrusted, runAsRoot, helperReady, helperAdd = su, rr, hr, ha })
+	ran, added = new([]string), new([]string)
 	systemUntrusted = untrusted
-	runAsRoot = func(script string) error { ran = append(ran, script); return nil }
-	trustPollEvery = time.Millisecond
-	return &ran
+	runAsRoot = func(script string) error { *ran = append(*ran, script); return nil }
+	helperReady = func() bool { return len(*ran) > 0 }
+	helperAdd = func(keys []string) error { *added = append(*added, keys...); return nil }
+	return ran, added
 }
 
 func writeClusterKeys(t *testing.T, keys ...string) {
@@ -183,25 +200,43 @@ func writeClusterKeys(t *testing.T, keys ...string) {
 	}
 }
 
+// TestSetupWithNoKeysYetInstallsOnlyTheHelper: a fresh multi-user machine
+// knows no keys, and must not abort; the helper is what lets the daemon add
+// them later.
+func TestSetupWithNoKeysYetInstallsOnlyTheHelper(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	ran, added := fakeTrust(t, func(keys []string) ([]string, bool, error) { return keys, true, nil })
+	if err := trustClusterKeys(); err != nil {
+		t.Fatal(err)
+	}
+	if len(*ran) != 1 || len(*added) != 0 {
+		t.Fatalf("root scripts %d, keys added %v; want the helper installed and nothing added", len(*ran), *added)
+	}
+	if !acceptsPeerClosures() {
+		t.Error("with the helper in place and no keys yet, setup should report nix-imports ok")
+	}
+}
+
 // TestTrustAsksForRootOnlyWhereNixConfDecides: `pipedpeer trust` is a no-op
-// on a private store, a single-user nix, or one that already trusts the keys,
-// and writes only the missing keys on a multi-user nix.
+// on a private store or single-user nix, installs the helper once on a
+// multi-user nix, and adds only the missing keys through it.
 func TestTrustAsksForRootOnlyWhereNixConfDecides(t *testing.T) {
 	const self, peer = "pipedpeer-self:AAAA=", "pipedpeer-peer:BBBB="
 	cases := []struct {
 		name      string
 		untrusted func([]string) ([]string, bool, error)
 		wantRoot  bool
+		wantAdded []string
 		wantMsg   string
 	}{
-		{"single-user or private", func([]string) ([]string, bool, error) { return nil, false, nil }, false, "each import"},
-		{"multi-user, trusted", func([]string) ([]string, bool, error) { return nil, true, nil }, false, "already trusts"},
-		{"multi-user, peer missing", func([]string) ([]string, bool, error) { return []string{peer}, true, nil }, true, "1 more"},
+		{"single-user or private", func([]string) ([]string, bool, error) { return nil, false, nil }, false, nil, "each import"},
+		{"multi-user, trusted", func([]string) ([]string, bool, error) { return nil, true, nil }, true, nil, "already trusts"},
+		{"multi-user, peer missing", func([]string) ([]string, bool, error) { return []string{peer}, true, nil }, true, []string{peer}, "1 more"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			writeClusterKeys(t, self, peer)
-			ran := fakeTrust(t, c.untrusted)
+			ran, added := fakeTrust(t, c.untrusted)
 			msg, err := Trust()
 			if err != nil {
 				t.Fatal(err)
@@ -212,31 +247,78 @@ func TestTrustAsksForRootOnlyWhereNixConfDecides(t *testing.T) {
 			if got := len(*ran) > 0; got != c.wantRoot {
 				t.Fatalf("ran as root: %v, want %v (%v)", got, c.wantRoot, *ran)
 			}
-			if c.wantRoot && (!strings.Contains((*ran)[0], peer) || strings.Contains((*ran)[0], self)) {
-				t.Errorf("root script should add only the missing key:\n%s", (*ran)[0])
+			if strings.Join(*added, " ") != strings.Join(c.wantAdded, " ") {
+				t.Errorf("helper added %v, want %v", *added, c.wantAdded)
+			}
+			// A second run finds the helper and asks for no root.
+			if _, err := Trust(); err != nil || len(*ran) > 1 {
+				t.Errorf("second trust: err=%v root scripts=%d", err, len(*ran))
 			}
 		})
 	}
 }
 
-// TestJoinTrustsOnlyOnceAPeersKeyIsKnown: with only this node's own key,
-// join must not spend a sudo prompt; with a peer's key it applies trust.
-func TestJoinTrustsOnlyOnceAPeersKeyIsKnown(t *testing.T) {
+// TestJoinInstallsTheHelperOnce: join on a multi-user nix without the helper
+// installs it (one prompt) and adds what is known; with it, join asks nothing.
+func TestJoinInstallsTheHelperOnce(t *testing.T) {
 	missingAll := func(keys []string) ([]string, bool, error) { return keys, true, nil }
 
 	writeClusterKeys(t, "pipedpeer-self:AAAA=")
-	ran := fakeTrust(t, missingAll)
-	if err := TrustAfterJoin(5 * time.Millisecond); err != nil || len(*ran) > 0 {
-		t.Fatalf("join asked for root with no peer key: err=%v ran=%v", err, *ran)
+	ran, added := fakeTrust(t, missingAll)
+	if err := TrustAfterJoin(); err != nil || len(*ran) != 1 || len(*added) != 1 {
+		t.Fatalf("join did not install the helper and add the key: err=%v ran=%d added=%v", err, len(*ran), *added)
+	}
+	trusted := func([]string) ([]string, bool, error) { return nil, true, nil }
+	systemUntrusted = trusted
+	if err := TrustAfterJoin(); err != nil || len(*ran) != 1 {
+		t.Fatalf("join asked for root again with the helper installed: err=%v ran=%d", err, len(*ran))
 	}
 
-	writeClusterKeys(t, "pipedpeer-self:AAAA=", "pipedpeer-peer:BBBB=")
-	if err := TrustAfterJoin(0); err != nil || len(*ran) != 1 {
-		t.Fatalf("join did not apply trust once a peer key was known: err=%v ran=%v", err, *ran)
-	}
-
-	ran = fakeTrust(t, func([]string) ([]string, bool, error) { return nil, false, nil })
-	if err := TrustAfterJoin(0); err != nil || len(*ran) > 0 {
+	ran, _ = fakeTrust(t, func([]string) ([]string, bool, error) { return nil, false, nil })
+	if err := TrustAfterJoin(); err != nil || len(*ran) > 0 {
 		t.Fatalf("join asked for root on a nix that takes keys per import: err=%v ran=%v", err, *ran)
+	}
+}
+
+// TestSetupPrefersTheSystemNix: an installed nix is used; with root
+// available the system installer runs; only without root (or when forced)
+// does nix go in a private store, and a failed installer falls back to it.
+func TestSetupPrefersTheSystemNix(t *testing.T) {
+	cases := []struct {
+		force, system, root bool
+		want                nixRoute
+	}{
+		{false, true, true, nixUseSystem},
+		{false, true, false, nixUseSystem},
+		{false, false, true, nixInstallSystem},
+		{false, false, false, nixUsePrivate},
+		{true, true, true, nixUsePrivate},
+		{true, false, true, nixUsePrivate},
+	}
+	for _, c := range cases {
+		if got := chooseNix(c.force, c.system, c.root); got != c.want {
+			t.Errorf("chooseNix(force=%v, system=%v, root=%v) = %v, want %v", c.force, c.system, c.root, got, c.want)
+		}
+	}
+
+	cbr, sp, id, mk := canBecomeRoot, seedPrivate, installDeterminate, makeNixStore
+	t.Cleanup(func() { canBecomeRoot, seedPrivate, installDeterminate, makeNixStore = cbr, sp, id, mk })
+	var did []string
+	seedPrivate = func() error { did = append(did, "private"); return nil }
+	installErr := errors.New("sudo: a password is required")
+	installDeterminate = func() error { did = append(did, "determinate"); return installErr }
+	makeNixStore = func() error { did = append(did, "store"); return nil }
+	t.Setenv("PIPEDPEER_FORCE_PRIVATE_NIX", "")
+	if nixInstalled() {
+		t.Skip("a nix is installed here, so the no-system-nix routes cannot be driven")
+	}
+	canBecomeRoot = func() bool { return true }
+	if err := installNix(); err != nil || strings.Join(did, ",") != "determinate,private" {
+		t.Errorf("with root and a failing installer: err=%v did=%v, want determinate then private", err, did)
+	}
+	did = nil
+	canBecomeRoot = func() bool { return false }
+	if err := installNix(); err != nil || strings.Join(did, ",") != "private" {
+		t.Errorf("without root: err=%v did=%v, want private only", err, did)
 	}
 }

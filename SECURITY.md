@@ -31,6 +31,15 @@ What does not protect you:
 - Any job's code can read the token (it is passed as `PIPEDPEER_TOKEN`).
 - One token for everyone: there is no per-user or per-node authorisation.
 - The standalone registry and LAN discovery are unauthenticated.
+- **On a multi-user nix, cluster keys reach system nix automatically.** Setup
+  installs a root-owned helper and a sudoers rule letting your user run it
+  without a password ([ADR-0018](docs/adr/0018-root-owned-nix-key-helper.md));
+  the daemon uses it to make nix trust each peer's signing key. So anyone with
+  the token, and any process running as your user, can get signed store paths
+  into the system store that every user of that nix shares. That is the same
+  exposure a manual `pipedpeer trust` gives, now without a prompt. The helper
+  accepts only well-formed pipedpeer keys and writes only its own include
+  file. `pipedpeer setup --uninstall` removes it and the keys.
 
 ## What you must do
 

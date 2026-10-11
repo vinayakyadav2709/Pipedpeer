@@ -38,6 +38,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/ping"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
@@ -50,6 +51,13 @@ import (
 )
 
 func main() {
+	// First of all: run from the root-owned key helper (sudo lets the user
+	// run that file as root with any arguments), this binary does nothing
+	// but add or remove nix keys (ADR-0018).
+	if nixtrust.IsHelper() {
+		os.Exit(nixtrust.Main(os.Args[1:]))
+	}
+
 	// Before anything dials out. The daemon path returns just below, so
 	// installing these later left the daemon itself - the process that does
 	// nearly all the peer traffic - neither authenticating nor encrypting
@@ -292,9 +300,7 @@ func newJoinCmd() *cobra.Command {
 					if err := printNodes(38080); err != nil {
 						return err
 					}
-					// About one poll cycle: the daemon records a peer's
-					// key at the end of the poll that found it.
-					trustAfterJoin(15 * time.Second)
+					trustAfterJoin()
 					return nil
 				}
 				fmt.Print(".")
@@ -307,7 +313,7 @@ func newJoinCmd() *cobra.Command {
 			fmt.Printf("\n\nno peers yet. This is normal for the first machine in a\n" +
 				"cluster - run the same command on the others and they will find\n" +
 				"each other. Check with: pipedpeer nodes\n")
-			trustAfterJoin(0)
+			trustAfterJoin()
 			return nil
 		},
 	}
@@ -315,10 +321,11 @@ func newJoinCmd() *cobra.Command {
 	return cmd
 }
 
-// trustAfterJoin lets a multi-user nix accept the peers just met. A failure
-// does not undo the join, so it is reported, not returned.
-func trustAfterJoin(wait time.Duration) {
-	if err := setup.TrustAfterJoin(wait); err != nil {
+// trustAfterJoin lets a multi-user nix accept the peers just met and those
+// that join later. A failure does not undo the join, so it is reported, not
+// returned.
+func trustAfterJoin() {
+	if err := setup.TrustAfterJoin(); err != nil {
 		fmt.Fprintf(os.Stderr, "could not make system nix trust the cluster's keys: %v\n"+
 			"peers' closures will be refused here until `pipedpeer trust` succeeds\n", err)
 	}
@@ -329,10 +336,11 @@ func newTrustCmd() *cobra.Command {
 		Use:   "trust",
 		Short: "Let system nix accept closures signed by this cluster's nodes",
 		Long: "A multi-user nix (nix-daemon) accepts only signing keys listed in nix.conf. " +
-			"This adds the keys the daemon has collected from the cluster's peers (one sudo, " +
-			"then nix-daemon restarts), so their closures import here. Run it after new " +
-			"machines join. It does nothing on a private store or a single-user nix, which " +
-			"take the keys with each import.",
+			"This adds the keys the daemon has collected from the cluster's peers through " +
+			"pipedpeer's root-owned key helper, installing it first if setup did not (one sudo); " +
+			"after that the daemon adds new peers' keys itself, with no prompt. " +
+			"It does nothing on a private store or a single-user nix, which take the keys " +
+			"with each import.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			msg, err := setup.Trust()
@@ -406,6 +414,9 @@ Use -y to skip the install confirmation prompt.`,
 			autoYes, _ := cmd.Flags().GetBool("yes")
 			noInstall, _ := cmd.Flags().GetBool("no-install")
 			port, _ := cmd.Flags().GetInt("port")
+			if uninstall, _ := cmd.Flags().GetBool("uninstall"); uninstall {
+				return setup.Uninstall()
+			}
 
 			_, err := setup.Run(autoYes, noInstall, port)
 			return err
@@ -413,6 +424,7 @@ Use -y to skip the install confirmation prompt.`,
 	}
 	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation, auto-install")
 	cmd.Flags().Bool("no-install", false, "Check only, don't install anything")
+	cmd.Flags().Bool("uninstall", false, "Remove the nix key helper, its sudoers rule and the keys it made system nix trust")
 	cmd.Flags().Int("port", 38080, "Daemon port")
 	return cmd
 }
