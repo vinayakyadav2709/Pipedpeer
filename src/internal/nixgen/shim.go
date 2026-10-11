@@ -6,8 +6,8 @@ package nixgen
 // daemon — no code changes required on the user's script.
 //
 // The design (see handoff.md §4/D1): interception only, no SDK. It patches
-// multiprocessing.Pool, concurrent.futures.ProcessPoolExecutor and registers a
-// joblib backend, leaving thread pools alone (shared memory).
+// multiprocessing.Pool, concurrent.futures.ProcessPoolExecutor and
+// joblib.Parallel, leaving thread pools alone (shared memory).
 const ShimSitecustomize = `# Auto-imported by Python at startup when on PYTHONPATH.
 # Patches parallel primitives to route through the local pipedpeer daemon.
 import atexit
@@ -246,7 +246,7 @@ class _ClusterPool:
         it. multiprocessing.Pool cannot grow or shrink, so this rebuilds it
         between calls; within a single map the width is fixed.
         """
-        want = _pool_width(self._requested)
+        want = _pool_width(self._requested, self._workers_memory())
         if want == self._procs:
             return
         import multiprocessing.pool as _mp
@@ -268,6 +268,28 @@ class _ClusterPool:
             old.terminate()
         except Exception:
             pass
+
+    def _workers_memory(self):
+        """Private memory held by this pool's own worker processes.
+
+        _resize measures free memory with those workers already running, so
+        without this they counted against the pool that owns them: on a 3 GB
+        orchestrator the first map always found less room than the pool was
+        sized with, shrank 3 workers to 2 and paid for a rebuild doing it.
+        """
+        total = 0
+        try:
+            page = os.sysconf("SC_PAGE_SIZE")
+        except (ValueError, OSError):
+            return 0
+        for proc in getattr(self._ctx, "_pool", None) or []:
+            try:
+                with open("/proc/%d/statm" % proc.pid) as f:
+                    fields = f.read().split()
+                total += max(0, int(fields[1]) - int(fields[2])) * page
+            except (OSError, ValueError, IndexError, AttributeError):
+                pass
+        return total
 
     # ---- the four Pool workhorses ----
     #
@@ -402,108 +424,21 @@ class _ClusterPool:
         return ctx.map(func, items)
 
     def _race(self, func, items, starmap, per_item_cost, payload):
-        # D2: local and remote each pull ~half the tail concurrently; when local
-        # finishes its share and a remote chunk is still in flight, an idle
-        # local core speculatively re-runs it — first result wins per item.
-        # Worst case (remote dead/absent) local eventually does everything, so
-        # this is never slower than a plain local Pool; a working remote halves
-        # the tail's wall time.
         self._spilled = True
-        n = len(items)
-        slots = [None] * n
-        lock = threading.Lock()
-        # A chunk has to be wide enough to fill the node that receives it. The
-        # adaptive size targets half a second of work taken one item at a
-        # time, which for an item costing about a second collapses to a single
-        # item per round trip: the peer then runs one item on one core and
-        # sixteen sit idle while the origin waits out the latency. Sizing to
-        # at least the local pool width uses this machine as the stand-in for
-        # a peer's core count, which is the best estimate the shim has.
-        #
-        # Capped at half the tail, because ownership alternates: one chunk
-        # would be dealt to the local side and the cluster handed nothing.
-        chunk_size = max(1, min(max(_adaptive_chunk(per_item_cost), self._procs),
-                                (n + 1) // 2))
-        chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
 
-        # Interleave chunk ownership so neither side is strictly first.
-        local_chunks = chunks[::2]
-        remote_chunks = chunks[1::2]
-
-        def fill(pairs):
-            """Run user func over (idx, item) pairs and first-wins into slots."""
-            idxs = [p[0] for p in pairs]
-            vals = [p[1] for p in pairs]
+        def run_local(vals):
             ctx = self._local_ctx(func)
             if starmap:
                 # _apply carries func as an argument, so a process pool would
                 # have to pickle it as data; route by the same test either way.
-                res = ctx.starmap(_apply, [(func, v) for v in vals])
-            else:
-                res = ctx.map(func, vals)
-            won = 0
-            with lock:
-                for i, v in zip(idxs, res):
-                    if slots[i] is None:
-                        slots[i] = v
-                        won += 1
-            # Counted only where the local result is the one kept: these items
-            # were missing from the receipt, which then summed to less than
-            # the map. A speculative re-run that lost is not counted twice.
-            if won:
-                _record_local(won)
+                return ctx.starmap(_apply, [(func, v) for v in vals])
+            return ctx.map(func, vals)
 
-        # Remote thread: dispatch remote chunks, first-wins into slots.
-        # Chunks go out concurrently. Dispatching them one at a time capped
-        # the whole cluster's throughput at a single chunk, so a peer sat idle
-        # between round trips no matter how many cores it had.
-        def deliver(chunk):
-            res = self._remote_chunk(payload, chunk, starmap)
-            if res is None:
-                return
-            won = 0
-            with lock:
-                for orig_i, v in res:
-                    if slots[orig_i] is None:
-                        slots[orig_i] = v
-                        won += 1
-            if won:
-                _add_stat("remote_used", won)
+        return _race_items(items, per_item_cost, self._procs, run_local,
+                           lambda chunk: self._remote_chunk(payload, chunk, starmap))
 
-        def remote_run():
-            if not remote_chunks:
-                return
-            width = max(1, min(_REMOTE_INFLIGHT, len(remote_chunks)))
-            if width == 1:
-                for chunk in remote_chunks:
-                    deliver(chunk)
-                return
-            import concurrent.futures as _cfut
-            with _cfut.ThreadPoolExecutor(max_workers=width) as ex:
-                list(ex.map(deliver, remote_chunks))
-
-        # Local runs its share; when done, re-run any remote chunk still not
-        # filled (straggler tail). done is set once local has given every item a
-        # chance, so the caller can always return a complete result.
-        def local_run():
-            fill([p for c in local_chunks for p in c])
-            while True:
-                with lock:
-                    pending = [p for c in remote_chunks for p in c if slots[p[0]] is None]
-                if not pending:
-                    break
-                fill(pending)  # idle local cores re-run the stragglers
-            done.set()
-
-        done = threading.Event()
-        t_local = threading.Thread(target=local_run)
-        t_remote = threading.Thread(target=remote_run)
-        t_local.start()
-        t_remote.start()
-        done.wait()  # local guarantees a complete result
-        return slots
-
-    def _remote_chunk(self, payload, chunk, starmap):
+    @staticmethod
+    def _remote_chunk(payload, chunk, starmap, kind="pool"):
         """Dispatch one chunk to the cluster; returns [(orig_idx, result), ...]
         or None on failure (local already has the work covered). chunk is a list
         of (orig_idx, item) pairs, payload is the _func_payload triple.
@@ -552,12 +487,12 @@ class _ClusterPool:
                 raise RuntimeError("got %d results for %d items" % (len(blobs), len(idxs)))
             out = [(idxs[i], pickle.loads(b)) for i, b in enumerate(blobs)]
         except Exception as e:
-            _record("pool", len(idxs), False, str(e), (time.monotonic() - t0) * 1000)
+            _record(kind, len(idxs), False, str(e), (time.monotonic() - t0) * 1000)
             _log("remote failed (%s); local covers it" % e)
             return None
         ms = (time.monotonic() - t0) * 1000
         receipt = info.get("receipt")
-        _record("pool", len(out), True, "", ms, receipt)
+        _record(kind, len(out), True, "", ms, receipt)
         if payload.get("pickled"):
             # Counted here rather than where the tier is chosen, so it counts
             # items that were actually SENT by value. Counting the tail at
@@ -600,6 +535,109 @@ class _ClusterPool:
 
     def __exit__(self, *a):
         self.close()
+
+
+def _race_items(items, per_item_cost, width, run_local, run_remote):
+    """Run items on this machine and the cluster at once, first result wins.
+
+    run_local(values) returns their results in order; run_remote(chunk) takes
+    [(index, value), ...] and returns [(index, result), ...], or None when the
+    chunk failed. width is the local lane count. Shared by Pool.map and joblib,
+    so both get the same never-slower-than-local guarantee.
+    """
+    # D2: local and remote each pull ~half the tail concurrently; when local
+    # finishes its share and a remote chunk is still in flight, an idle
+    # local core speculatively re-runs it — first result wins per item.
+    # Worst case (remote dead/absent) local eventually does everything, so
+    # this is never slower than a plain local Pool; a working remote halves
+    # the tail's wall time.
+    n = len(items)
+    slots = [None] * n
+    lock = threading.Lock()
+    # A chunk has to be wide enough to fill the node that receives it. The
+    # adaptive size targets half a second of work taken one item at a
+    # time, which for an item costing about a second collapses to a single
+    # item per round trip: the peer then runs one item on one core and
+    # sixteen sit idle while the origin waits out the latency. Sizing to
+    # at least the local pool width uses this machine as the stand-in for
+    # a peer's core count, which is the best estimate the shim has.
+    #
+    # Capped at half the tail, because ownership alternates: one chunk
+    # would be dealt to the local side and the cluster handed nothing.
+    chunk_size = max(1, min(max(_adaptive_chunk(per_item_cost), width),
+                            (n + 1) // 2))
+    chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
+
+    # Interleave chunk ownership so neither side is strictly first.
+    local_chunks = chunks[::2]
+    remote_chunks = chunks[1::2]
+
+    def fill(pairs):
+        """Run user func over (idx, item) pairs and first-wins into slots."""
+        idxs = [p[0] for p in pairs]
+        vals = [p[1] for p in pairs]
+        res = run_local(vals)
+        won = 0
+        with lock:
+            for i, v in zip(idxs, res):
+                if slots[i] is None:
+                    slots[i] = v
+                    won += 1
+        # Counted only where the local result is the one kept: these items
+        # were missing from the receipt, which then summed to less than
+        # the map. A speculative re-run that lost is not counted twice.
+        if won:
+            _record_local(won)
+
+    # Remote thread: dispatch remote chunks, first-wins into slots.
+    # Chunks go out concurrently. Dispatching them one at a time capped
+    # the whole cluster's throughput at a single chunk, so a peer sat idle
+    # between round trips no matter how many cores it had.
+    def deliver(chunk):
+        res = run_remote(chunk)
+        if res is None:
+            return
+        won = 0
+        with lock:
+            for orig_i, v in res:
+                if slots[orig_i] is None:
+                    slots[orig_i] = v
+                    won += 1
+        if won:
+            _add_stat("remote_used", won)
+
+    def remote_run():
+        if not remote_chunks:
+            return
+        inflight = max(1, min(_REMOTE_INFLIGHT, len(remote_chunks)))
+        if inflight == 1:
+            for chunk in remote_chunks:
+                deliver(chunk)
+            return
+        import concurrent.futures as _cfut
+        with _cfut.ThreadPoolExecutor(max_workers=inflight) as ex:
+            list(ex.map(deliver, remote_chunks))
+
+    # Local runs its share; when done, re-run any remote chunk still not
+    # filled (straggler tail). done is set once local has given every item a
+    # chance, so the caller can always return a complete result.
+    def local_run():
+        fill([p for c in local_chunks for p in c])
+        while True:
+            with lock:
+                pending = [p for c in remote_chunks for p in c if slots[p[0]] is None]
+            if not pending:
+                break
+            fill(pending)  # idle local cores re-run the stragglers
+        done.set()
+
+    done = threading.Event()
+    t_local = threading.Thread(target=local_run)
+    t_remote = threading.Thread(target=remote_run)
+    t_local.start()
+    t_remote.start()
+    done.wait()  # local guarantees a complete result
+    return slots
 
 
 def _cgroup_stat(path, key):
@@ -744,7 +782,7 @@ def _imap_batch(procs):
     return max(64, procs * 32)
 
 
-def _pool_width(requested):
+def _pool_width(requested, reclaim=0):
     """How many local workers to run.
 
     A hand-picked process count is a guess about the machine the author had
@@ -763,6 +801,9 @@ def _pool_width(requested):
     n = cores
     avail = _avail_bytes()
     if avail > 0:
+        # reclaim is what an existing pool's workers hold: rebuilding the
+        # pool frees it, so it is memory a new width can count on.
+        avail += reclaim
         # Nothing here knows the per-worker working set before the job runs,
         # so assume a conservative 256MB rather than none: a box with many
         # cores and little free memory must not fan out to all of them.
@@ -3822,159 +3863,112 @@ def _install_joblib():
     except ImportError:
         return
     if not (_URL and _ENABLED) or int(_NUM_SHARDS) < 2:
-        _log("joblib backend skipped (no cluster peers)")
+        _log("joblib interception skipped (no cluster peers)")
         return
 
-    import pickle
-    class _SafePickler(pickle.Pickler):
-        """Pickler subclass that replaces unpicklable _thread.lock objects
-        with fresh threading.Lock() — the remote worker gets a usable lock.
-        Safety net: shared-memory accumulator batches already run locally, but
-        any other lock-bearing object that reaches dispatch still ships."""
-        def reducer_override(self, obj):
-            import _thread, threading
-            if type(obj).__name__ == 'lock' and type(obj).__module__ == '_thread':
-                return (threading.Lock, ())
-            return NotImplemented
-
-    def _jb_has_shared_accumulator(batch):
+    def _jb_has_shared_accumulator(tasks):
         # sklearn's _accumulate_prediction-style tasks ship as
         # (bound_method, X, all_proba_list, threading.Lock): they mutate the
         # shared list in place (the lock is the tell) and return None. Shipped
         # to a remote worker the mutation lands on a copy and is lost, so any
-        # batch carrying a lock in its args must run in-process.
-        for t in _jb_tasks(batch):
+        # call carrying a lock in its args must run in-process.
+        for t in tasks:
             if any(type(x).__module__ == "_thread" and type(x).__name__ == "lock"
                    for x in t[1]):
                 return True
         return False
 
-    def _jb_tasks(batch):
-        # joblib submits BatchedCalls whose .items are (func, args, kwargs)
-        # tuples; a bare callable is a single task.
-        items = getattr(batch, "items", None)
-        if items is None:
-            return [(batch, (), {})]
-        return items
-
-    def _safe_pickle(obj):
-        """Pickle an object, replacing unpicklable _thread.lock with fresh locks."""
-        import io as _io
-        buf = _io.BytesIO()
-        _SafePickler(buf, protocol=pickle.HIGHEST_PROTOCOL).dump(obj)
-        return buf.getvalue()
-
-    def _jb_dispatch(batch):
-        # One joblib batch per /v1/pool/map round trip. The runner marks
-        # PIPEDPEER_JB_NESTED so worker-side joblib calls (RF fit inside a
-        # GridSearchCV task) run inline instead of recursing into the mesh.
-        # ponytail: sklearn passes X/y to every task, so the payload ships
-        # once per task; a memmap/temp-folder pass (like loky) is the upgrade.
-        import base64
-        import json
-        import pickle
-        import urllib.request
-        items = _jb_tasks(batch)
-        payload = [base64.b64encode(_safe_pickle(t)).decode() for t in items]
-        _log('joblib: dispatching %d tasks (%.0f KB) to cluster' % (len(items), sum(len(q) for q in payload) / 1024))
-        req = {
-            "func_src": ("import os\ndef run(item):\n"
-                         "    os.environ['PIPEDPEER_JB_NESTED'] = '1'\n"
-                         "    f, a, k = item\n"
-                         "    return f(*a, **k)\n"),
-            "func_name": "run",
-            "items": payload,
-            "items_b64": True,
-            "starmap": False,
-        }
-        req["required_mem"] = 2 * sum(len(p) for p in payload)
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 600) as resp:
-            rs = json.loads(resp.read())["results"]
-        return [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
-
-    class _JBJob:
-        """Future-like object satisfying joblib's retrieve_result contract."""
-        __slots__ = ("results", "error")
-
-        def __init__(self, results=None, error=None):
-            self.results = results
-            self.error = error
-
-    class _PipedpeerBackend(_jp.ParallelBackendBase):
-        supports_retrieve_callback = False
-        supports_timeout = False
-        supports_sharedmem = True
-        supports_return_generator = True
-
-        def effective_n_jobs(self, n_jobs):
-            # The cluster is the "cpu count": batches are sized for the mesh.
-            if n_jobs < 0:
-                return int(_NUM_SHARDS)
-            if n_jobs == 0:
-                return _usable_cores()
-            return n_jobs
-
-        def submit(self, func, callback=None):
-            if os.environ.get("PIPEDPEER_JB_NESTED") or not (_URL and _ENABLED):
-                try:
-                    job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
-                except BaseException as e:
-                    job = _JBJob(error=e)
-            else:
-                if _jb_has_shared_accumulator(func):
-                    # _accumulate_prediction-style tasks mutate a shared list
-                    # guarded by the lock in their args; only in-process shared
-                    # memory makes the mutation visible, so run them locally.
-                    job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
-                else:
-                    try:
-                        job = _JBJob(results=_jb_dispatch(func))
-                    except BaseException as e:
-                        # D2/D3: a remote node adds capacity, never subtracts.
-                        _log("joblib remote failed (%s); local covers it" % e)
-                        try:
-                            job = _JBJob(results=[f(*a, **k) for f, a, k in _jb_tasks(func)])
-                        except BaseException as e2:
-                            job = _JBJob(error=e2)
-            if callback is not None:
-                callback(job)
-            return job
-
-        def retrieve_result(self, job, timeout=None):
-            if job.error is not None:
-                raise job.error
-            return job.results
+    # The remote side of a joblib call: each item is one delayed (func, args,
+    # kwargs) task. The runner marks PIPEDPEER_JB_NESTED so worker-side joblib
+    # calls (RF fit inside a GridSearchCV task) run inline instead of
+    # recursing into the mesh.
+    jb_payload = {
+        "src": ("import os\ndef run(item):\n"
+                "    os.environ['PIPEDPEER_JB_NESTED'] = '1'\n"
+                "    f, a, k = item\n"
+                "    return f(*a, **k)\n"),
+        "name": "run",
+        "gvars": {},
+    }
 
     _ORIG_PARALLEL_INIT = _jp.Parallel.__init__
+    _ORIG_PARALLEL_CALL = _jp.Parallel.__call__
 
     def _parallel_init(self, *args, **kw):
         _ORIG_PARALLEL_INIT(self, *args, **kw)
-        # sklearn forces prefer="threads" in most fit paths, which would
-        # bypass a default backend entirely; force ours on any resolved
-        # backend once there is real parallel work and we are not already
-        # nested on a worker.
-        if (os.environ.get("PIPEDPEER_JB_NESTED")
-                or not (_URL and _ENABLED) or self.n_jobs in (0, 1)):
-            return
-        self._backend = _PipedpeerBackend(nesting_level=0)
-        # Auto-batching sizes batches from measured duration, and against a
-        # synchronous remote submit it never grows past one task — a 1-item
-        # chunk is unsplittable, so nothing fans out. Under force, pin a batch
-        # size worth splitting.
-        if _FORCE and self.batch_size == 'auto':
-            self.batch_size = max(2, 4 * int(_NUM_SHARDS))
+        # n_jobs None, 0 or 1 asked for no parallelism, and a worker that is
+        # already running a task from the mesh runs its own calls inline.
+        self._pp_cluster = (not os.environ.get("PIPEDPEER_JB_NESTED")
+                            and self.n_jobs not in (None, 0, 1))
+
+    def _parallel_call(self, iterable):
+        """joblib's Parallel, with the same split as Pool.map.
+
+        This used to be a backend whose submit() sent each batch to the
+        cluster and waited for it before joblib could submit the next. Auto
+        batching never grows past one task against a synchronous submit, so
+        a forest of 80 trees became 80 round trips one after another - and a
+        peer runs one request at a time - so the cluster fitted one tree at
+        a time while this machine alone fits one per core. Seven times
+        slower, on every n_jobs=-1 in sklearn.
+
+        Now the whole call is one map: the first few tasks run here on
+        joblib's own backend (threads for sklearn, which shares memory and
+        releases the GIL), which measures them; the rest race between this
+        machine and multi-task chunks sent to peers, exactly like Pool.map.
+        Generators and return_as other than a list keep stock joblib.
+        """
+        if (not getattr(self, "_pp_cluster", False)
+                or getattr(self, "return_as", "list") != "list"):
+            return _ORIG_PARALLEL_CALL(self, iterable)
+        tasks = list(iterable)
+
+        def run_local(vals):
+            if not vals:
+                return []
+            return _ORIG_PARALLEL_CALL(self, vals)
+
+        n = len(tasks)
+        _add_stat("mapped_items", n)
+        width = _usable_cores()
+        head_n = max(4, min(width, n // 2))
+        if n <= head_n or _jb_has_shared_accumulator(tasks):
+            _record_local(n)
+            return run_local(tasks)
+        head, tail = tasks[:head_n], tasks[head_n:]
+        t0 = time.monotonic()
+        head_results = run_local(head)
+        _record_local(len(head))
+        cost = (time.monotonic() - t0) * max(1, min(len(head), width)) / len(head)
+
+        import pickle
+        try:
+            pickle.dumps(tail[0])
+        except Exception:
+            # A lambda or a closure: plain pickle has no name to send it by.
+            _decide("joblib", False, "the task cannot be pickled to send")
+            _record_local(len(tail))
+            return head_results + run_local(tail)
+        if not _FORCE and len(tail) * cost < _POOL_MIN_WORK:
+            _decide("joblib", False, "%d tasks x %.3fs = %.2fs of work, under the %.2fs worth a round trip"
+                    % (len(tail), cost, len(tail) * cost, _POOL_MIN_WORK))
+            _record_local(len(tail))
+            return head_results + run_local(tail)
+        _decide("joblib", True, "forced" if _FORCE else
+                "%d tasks x %.3fs = %.2fs of work, over the %.2fs worth a round trip"
+                % (len(tail), cost, len(tail) * cost, _POOL_MIN_WORK))
+        _log("joblib: %d tasks, %.3fs each; racing this machine against the cluster"
+             % (len(tail), cost))
+        return head_results + _race_items(
+            tail, cost, width, run_local,
+            lambda chunk: _ClusterPool._remote_chunk(jb_payload, chunk, False, "joblib"))
 
     try:
-        _jp.register_parallel_backend(
-            "pipedpeer", lambda *a, **k: _PipedpeerBackend(nesting_level=0), make_default=True)
         _jp.Parallel.__init__ = _parallel_init
-        _log("joblib backend 'pipedpeer' installed as default")
+        _jp.Parallel.__call__ = _parallel_call
+        _log("joblib interception installed")
     except Exception as e:
-        _log("joblib backend installation failed: %s" % e)
+        _log("joblib interception failed: %s" % e)
 _install()
 `
 

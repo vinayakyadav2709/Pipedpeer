@@ -428,6 +428,29 @@ func ExportNAR(storePath, destPath string) error {
 	return export.Run()
 }
 
+// ignoreExcludes turns one .pipedpeerignore line into tar exclude flags.
+//
+// The file is written gitignore-style, and tar does not read gitignore. A
+// directory written "data/" never matched, because tar compares the pattern
+// against member names, which carry no trailing slash - so every "dir/" line
+// excluded nothing, `pipedpeer init`'s template included, and the demo's
+// 1.1 GB CSV went into the upload of every script beside it. A leading slash
+// anchors the pattern at the project root, as in gitignore; tar needs that
+// spelled as the member name, "./data", and matched anchored.
+func ignoreExcludes(line string) []string {
+	if line == "" || strings.HasPrefix(line, "#") {
+		return nil
+	}
+	line = strings.TrimRight(line, "/")
+	if line == "" {
+		return nil
+	}
+	if strings.HasPrefix(line, "/") {
+		return []string{"--anchored", "--exclude=." + line, "--no-anchored"}
+	}
+	return []string{"--exclude=" + line}
+}
+
 // CreateWorkspaceTar creates a tarball of the project directory at destPath.
 // It writes a sitecustomize.py into .pipedpeer/shim/ inside the archive, so a
 // node that enables the interception shim can put that dir on PYTHONPATH and
@@ -441,10 +464,7 @@ func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 
 	if content, err := os.ReadFile(ignoreFile); err == nil {
 		for _, line := range strings.Split(string(content), "\n") {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				args = append(args, "--exclude="+line)
-			}
+			args = append(args, ignoreExcludes(strings.TrimSpace(line))...)
 		}
 	}
 

@@ -739,6 +739,38 @@ print("PINNED-OK")
 `, "PINNED-OK")
 }
 
+// A pool's own workers must not count against it. _resize measures free memory
+// with them running, so on a memory-bound machine every map found less room
+// than the pool was built with and rebuilt it narrower, paying for a second
+// pool start in the middle of the job.
+func TestPoolResizeCountsItsOwnWorkersAsFree(t *testing.T) {
+	runShimPython(t, "reclaim", `
+import os
+import sitecustomize as shim
+
+os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
+shim._usable_cores = lambda: 2
+budget = int(2 * (256 << 20) / 0.4) + 1     # exactly room for two workers
+shim._avail_bytes = lambda: budget
+
+def inc(x):
+    return x + 1
+
+if __name__ == "__main__":
+    pool = shim._ClusterPool()
+    assert pool._procs == 2, pool._procs
+    held = pool._workers_memory()
+    assert held > 0, "a running pool reported no memory held by its workers"
+    # The workers now hold memory the machine no longer reports as free.
+    shim._avail_bytes = lambda: budget - held
+    pool._resize()
+    assert pool._procs == 2, "shrank to %d over its own workers' memory" % pool._procs
+    assert pool.map(inc, range(4)) == [1, 2, 3, 4]
+    pool.close()
+    print("RECLAIM-OK")
+`, "RECLAIM-OK")
+}
+
 // The receipt says what the cost model decided and why, not only what ran
 // where: when a run that should have spread out stays home, the reason is the
 // first thing anyone asks for.

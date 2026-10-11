@@ -155,7 +155,7 @@ func WriteReceipt(w io.Writer, r Receipt) {
 		fmt.Fprintf(w, "  could not ship      %6d  %s\n", r.Unshippable, bar(r.Unshippable, total, 30))
 	}
 	if r.ShippedPickled > 0 {
-		fmt.Fprintf(w, "  (%d sent by value: lambdas, closures or methods)\n", r.ShippedPickled)
+		fmt.Fprintf(w, "  (%d sent by value: lambdas, closures, partials or methods)\n", r.ShippedPickled)
 	}
 	if r.RemoteFailures > 0 {
 		fmt.Fprintf(w, "  %d dispatch(es) failed and were redone locally\n", r.RemoteFailures)
