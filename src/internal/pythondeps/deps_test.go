@@ -163,3 +163,30 @@ func TestUnresolvedImports(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestSplitByExistence(t *testing.T) {
+	exists := func(names []string) (map[string]bool, error) {
+		return map[string]bool{"rich": true}, nil
+	}
+	found, missing, err := SplitByExistence([]string{"Rich", "nopkg_xyz"}, exists)
+	if err != nil || len(found) != 1 || found[0] != "rich" || len(missing) != 1 || missing[0] != "nopkg_xyz" {
+		t.Fatalf("found=%v missing=%v err=%v", found, missing, err)
+	}
+}
+
+func TestRequirementsBeside(t *testing.T) {
+	d := t.TempDir()
+	if RequirementsBeside(d) != "" {
+		t.Fatal("no file, want empty")
+	}
+	p := filepath.Join(d, "requirements.txt")
+	if err := os.WriteFile(p, []byte("rich==13\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := RequirementsBeside(d); got != p {
+		t.Fatalf("got %q", got)
+	}
+	if got := ResolvePackages(nil, []string{p}); len(got) != 1 || got[0] != "rich" {
+		t.Fatalf("requirements not read: %v", got)
+	}
+}

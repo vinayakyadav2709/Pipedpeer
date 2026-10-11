@@ -366,3 +366,37 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 
 	return result
 }
+
+// RequirementsBeside returns the requirements.txt next to the script, or "".
+func RequirementsBeside(scriptDir string) string {
+	p := filepath.Join(scriptDir, "requirements.txt")
+	if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		return p
+	}
+	return ""
+}
+
+// SplitByExistence sorts unresolved imports into those whose lower-case name
+// exists as a python package (per exists) and those that do not. The name
+// returned for a found import is the lower-case package name.
+func SplitByExistence(imports []string, exists func(names []string) (map[string]bool, error)) (found, missing []string, err error) {
+	if len(imports) == 0 {
+		return nil, nil, nil
+	}
+	names := make([]string, len(imports))
+	for i, imp := range imports {
+		names[i] = strings.ToLower(imp)
+	}
+	ok, err := exists(names)
+	if err != nil {
+		return nil, imports, err
+	}
+	for i, n := range names {
+		if ok[n] {
+			found = append(found, n)
+		} else {
+			missing = append(missing, imports[i])
+		}
+	}
+	return found, missing, nil
+}

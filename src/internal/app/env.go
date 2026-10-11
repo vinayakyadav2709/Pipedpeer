@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
@@ -84,16 +85,31 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	}
 
 	stage(2, "Parsing dependencies...")
-	nixPkgs := pythondeps.ResolvePackages(imports, opts.Pkgs)
-	for _, pkg := range nixPkgs {
-		fmt.Printf("      Using Nix package: %s\n", pkg)
+	pkgs := opts.Pkgs
+	if req := pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)); req != "" {
+		fmt.Printf("      Using requirements.txt beside the script (as if passed with --pkg)\n")
+		pkgs = append(append([]string{}, pkgs...), req)
 	}
+	nixPkgs := pythondeps.ResolvePackages(imports, pkgs)
 	// uv.lock names are distributions, not imports: the table does not apply.
 	if !fromLock {
-		if missing := unpackaged(imports, opts.Pkgs); len(missing) > 0 {
-			fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
-				strings.Join(missing, ", "))
+		if unknown := unpackaged(imports, pkgs); len(unknown) > 0 {
+			found, missing, err := pythondeps.SplitByExistence(unknown, probePythonPackages)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
+			}
+			for _, f := range found {
+				fmt.Printf("      Not in the built-in table, but nixpkgs has python3Packages.%s: using it\n", f)
+				nixPkgs = append(nixPkgs, f)
+			}
+			if len(missing) > 0 {
+				fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
+					strings.Join(missing, ", "))
+			}
 		}
+	}
+	for _, pkg := range nixPkgs {
+		fmt.Printf("      Using Nix package: %s\n", pkg)
 	}
 
 	// On disk, not in RAM: the exported closure is written here and a torch
@@ -199,3 +215,29 @@ func findProjectRoot(scriptDir string) string {
 // flakeRef uses the path: type so Nix does not treat the scratch dir as part
 // of an enclosing git tree (e.g. a git-tracked $HOME).
 func flakeRef(system string) string { return "path:.#packages." + system + ".default" }
+
+// probePythonPackages asks the pinned nixpkgs, in one nix eval, which of names
+// exist as python3Packages attributes. Names are import names already vetted
+// as [A-Za-z0-9_] by pythondeps, so they are safe inside the expression.
+func probePythonPackages(names []string) (map[string]bool, error) {
+	var list strings.Builder
+	for _, n := range names {
+		list.WriteString(`"` + n + `" `)
+	}
+	expr := fmt.Sprintf(`let ps = (builtins.getFlake %q).legacyPackages.%s.python3Packages; in builtins.listToAttrs (map (n: { name = n; value = ps ? ${n}; }) [ %s])`,
+		nixgen.NixpkgsRef, nixgen.NixArch(), list.String())
+	cmd, cleanup, err := nixstore.Cmd(os.TempDir(), "nix", "eval", "--json", "--expr", expr)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nix eval: %w", err)
+	}
+	res := map[string]bool{}
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, fmt.Errorf("nix eval output: %w", err)
+	}
+	return res, nil
+}
