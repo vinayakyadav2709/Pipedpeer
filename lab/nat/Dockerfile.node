@@ -1,0 +1,5 @@
+# A pipedpeer node: the lab/ worker image (single-user nix as root, crun) plus
+# iproute2 (to route through its site's router) and curl (the script asks
+# each daemon over loopback).
+FROM docker.io/nixos/nix:2.31.3
+RUN nix-env -iA nixpkgs.crun nixpkgs.iproute2 nixpkgs.curl

@@ -1,0 +1,15 @@
+# A machine like a user's laptop: systemd as PID 1, a sudo user `pp` whose
+# sudo asks for a password, and (installed by scripts/lab-nat.sh once systemd
+# is up) a multi-user nix-daemon from the Determinate installer. The installer
+# runs at boot, not here, because it needs a running systemd to set up the
+# daemon.
+FROM docker.io/library/debian:bookworm
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		systemd systemd-sysv dbus dbus-user-session sudo curl ca-certificates \
+		xz-utils iproute2 crun git procps \
+	&& rm -rf /var/lib/apt/lists/* \
+	&& useradd -m -s /bin/bash -G sudo pp \
+	&& echo 'pp:pp' | chpasswd
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
