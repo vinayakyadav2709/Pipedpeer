@@ -42,7 +42,7 @@ src/                     the CLI and daemon (single Go module)
   internal/nixgen/       environment (flake) generation
   internal/nodestore/    persistent view of known nodes (sqlite)
   internal/registry/     optional standalone node registry
-scripts/                 build, test, lint, bootstrap, install
+scripts/                 build, test, lint, install
 bench/                   sandbox and GPU benchmarks (separate module)
 lab/                     container cluster for local multi-node testing
 ```
