@@ -423,23 +423,25 @@ if __name__ == "__main__":
 }
 
 // TestShimPoolUnshippableStaysLocalQuietly pins the other half of the
-// contract: a kernel that stock multiprocessing runs happily but that cannot
-// be rebuilt from source on a worker. functools.partial is the everyday case
-// — it pickles locally by reference to a module function, but has no source
-// of its own. Interception must decline it, stay correct, stay quiet, and say
-// so in the receipt. Before serialisation moved inside the try, a callable
-// the shim could not ship raised out of the dispatch thread and printed a
-// traceback the user never asked for.
+// contract: a kernel with no source of its own (a functools.partial) that
+// cannot ship by value either, because it holds a lock. A plain partial over
+// a module function now ships by value whenever cloudpickle is present
+// (13b906b), so the lock is what keeps this kernel unshippable on every host.
+// Interception must decline it, stay correct, stay quiet, and say so in the
+// receipt. Before serialisation moved inside the try, a callable the shim
+// could not ship raised out of the dispatch thread and printed a traceback
+// the user never asked for.
 func TestShimPoolUnshippableStaysLocalQuietly(t *testing.T) {
 	script := `
-import functools, multiprocessing, time
+import functools, multiprocessing, threading, time
 
-def scaled(factor, x):
-    time.sleep(0.02)
+def scaled(guard, factor, x):
+    with guard:
+        time.sleep(0.02)
     return x * factor
 
 if __name__ == "__main__":
-    kernel = functools.partial(scaled, 2)
+    kernel = functools.partial(scaled, threading.Lock(), 2)
     with multiprocessing.Pool(4) as pool:
         got = pool.map(kernel, list(range(64)))
     assert got == [x * 2 for x in range(64)], "wrong results"
