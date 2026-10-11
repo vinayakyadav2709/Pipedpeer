@@ -325,7 +325,9 @@ func requiredPython(src string) []string {
 	add("numpy", "import numpy", "np.")
 	add("sklearn", "import sklearn", "from sklearn")
 	add("joblib", "import joblib", "joblib.")
-	add("torch", "import torch", "torch.")
+	// The weighted sampler imports torch inside __iter__, so a script that
+	// only names the sampler needs torch too.
+	add("torch", "import torch", "torch.", "_WeightedShardSampler")
 	return deps
 }
 

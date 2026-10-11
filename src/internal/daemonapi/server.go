@@ -1460,7 +1460,7 @@ func (s *Server) RemovePeer(host string, port int) error {
 	if s.store == nil {
 		return fmt.Errorf("node store unavailable")
 	}
-	_, err := s.store.RemoveManual(host)
+	_, err := s.store.RemoveManualAt(host, port)
 	return err
 }
 

@@ -712,3 +712,24 @@ print("compress-ok")
 		t.Fatalf("unexpected output: %q", out)
 	}
 }
+
+// A pinned job must size its pool to the cores it may run on, not the
+// machine's total: on a 12-core host pinned to one core, a 12-wide pool only
+// time-slices that core twelve ways.
+func TestPoolWidthFollowsCPUPinning(t *testing.T) {
+	runShimPython(t, "pinned", `
+import os
+import sitecustomize as shim
+
+if not hasattr(os, "sched_setaffinity"):
+    print("PINNED-OK")
+    raise SystemExit(0)
+allowed = sorted(os.sched_getaffinity(0))
+assert shim._usable_cores() <= len(allowed), shim._usable_cores()
+os.sched_setaffinity(0, {allowed[0]})
+assert shim._usable_cores() == 1, "pinned to one core, sized for %d" % shim._usable_cores()
+os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
+assert shim._pool_width(None) == 1, shim._pool_width(None)
+print("PINNED-OK")
+`, "PINNED-OK")
+}

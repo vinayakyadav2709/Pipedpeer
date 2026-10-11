@@ -644,6 +644,40 @@ def _avail_bytes():
     return avail
 
 
+def _usable_cores():
+    """Cores this process may actually run on.
+
+    os.cpu_count() is the machine's total, which overcounts whenever the job is
+    pinned (taskset, a container's cpuset) or throttled (a cgroup cpu.max
+    quota): the pool then starts more workers than there are cores to run
+    them, and they only time-slice each other.
+    """
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    try:
+        with open("/proc/self/cgroup") as f:
+            own = next((l[3:].strip() for l in f if l.startswith("0::")), None)
+    except OSError:
+        own = None
+    if own is not None:
+        # A quota on any ancestor binds, so walk up and keep the smallest.
+        path = "/sys/fs/cgroup" + own
+        while True:
+            try:
+                with open(path + "/cpu.max") as f:
+                    quota, period = f.read().split()[:2]
+                if quota != "max":
+                    n = min(n, max(1, -(-int(quota) // int(period))))
+            except (OSError, ValueError):
+                pass
+            if path in ("/sys/fs/cgroup", "/sys/fs/cgroup/"):
+                break
+            path = os.path.dirname(path)
+    return max(1, n)
+
+
 def _imap_batch(procs):
     """Items to buffer before running a batch of a lazy imap."""
     override = os.environ.get("PIPEDPEER_IMAP_BATCH", "").strip()
@@ -668,7 +702,7 @@ def _pool_width(requested):
     times over - and those break rather than slow down when overridden.
     PIPEDPEER_RESPECT_POOL_SIZE=1 hands the decision back.
     """
-    cores = os.cpu_count() or 1
+    cores = _usable_cores()
     if os.environ.get("PIPEDPEER_RESPECT_POOL_SIZE") == "1" and requested:
         return max(1, int(requested))
     n = cores
@@ -3790,7 +3824,7 @@ def _install_joblib():
             if n_jobs < 0:
                 return int(_NUM_SHARDS)
             if n_jobs == 0:
-                return os.cpu_count() or 1
+                return _usable_cores()
             return n_jobs
 
         def submit(self, func, callback=None):
