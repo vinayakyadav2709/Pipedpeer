@@ -93,7 +93,8 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	nixPkgs := pythondeps.ResolvePackages(imports, pkgs)
 	// uv.lock names are distributions, not imports: the table does not apply.
 	if !fromLock {
-		if unknown := unpackaged(imports, pkgs); len(unknown) > 0 {
+		unknown := append(unpackaged(imports, pkgs), pythondeps.RequirementsUnmapped(pkgs)...)
+		if len(unknown) > 0 {
 			found, missing, err := pythondeps.SplitByExistence(unknown, probePythonPackages)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
@@ -226,7 +227,10 @@ func probePythonPackages(names []string) (map[string]bool, error) {
 	}
 	expr := fmt.Sprintf(`let ps = (builtins.getFlake %q).legacyPackages.%s.python3Packages; in builtins.listToAttrs (map (n: { name = n; value = ps ? ${n}; }) [ %s])`,
 		nixgen.NixpkgsRef, nixgen.NixArch(), list.String())
-	cmd, cleanup, err := nixstore.Cmd(os.TempDir(), "nix", "eval", "--json", "--expr", expr)
+	if err := os.MkdirAll(userdir.Cache(), 0o755); err != nil {
+		return nil, err
+	}
+	cmd, cleanup, err := nixstore.Cmd(userdir.Cache(), "nix", "eval", "--json", "--expr", expr)
 	if err != nil {
 		return nil, err
 	}

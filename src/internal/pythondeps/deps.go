@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -360,25 +361,9 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 
 	for _, req := range explicitPkgs {
 		if strings.HasSuffix(req, ".txt") {
-			content, err := os.ReadFile(req)
-			if err != nil {
-				continue
-			}
-			lines := strings.Split(string(content), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				pkgName := line
-				if idx := strings.IndexAny(line, "=>~<"); idx != -1 {
-					pkgName = strings.TrimSpace(line[:idx])
-				}
-				if mapped := ResolveNixPackage(pkgName); mapped != "" {
-					add(mapped)
-				} else {
-					add(pkgName)
-				}
+			names, _ := readRequirements(req)
+			for _, n := range names {
+				add(ResolveNixPackage(n)) // unmapped names go through RequirementsUnmapped
 			}
 		} else {
 			if mapped := ResolveNixPackage(req); mapped != "" {
@@ -390,6 +375,63 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 	}
 
 	return result
+}
+
+// RequirementsUnmapped lists the distribution names in the requirements files
+// among pkgs that the built-in table does not know. They are never attribute
+// names yet: the caller probes nixpkgs for them.
+func RequirementsUnmapped(pkgs []string) []string {
+	var out []string
+	for _, p := range pkgs {
+		if !strings.HasSuffix(p, ".txt") {
+			continue
+		}
+		names, _ := readRequirements(p)
+		for _, n := range names {
+			if ResolveNixPackage(n) == "" {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+func readRequirements(path string) ([]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: cannot read %s: %v\n", path, err)
+		return nil, err
+	}
+	return ParseRequirements(string(content)), nil
+}
+
+var reqName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
+
+// ParseRequirements returns the normalised (lower-case, "_" and "." as "-")
+// distribution names in a requirements.txt. Options (-r, -e, --index-url),
+// URLs, paths and anything else that is not a plain name are skipped with a
+// warning naming the line.
+func ParseRequirements(content string) []string {
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.Index(line, " #"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name := reqName.FindString(line)
+		rest := strings.TrimSpace(line[len(name):])
+		// Only extras, a version spec or an environment marker may follow.
+		if strings.HasPrefix(line, "-") || strings.ContainsAny(line, "/\\@") || name == "" ||
+			(rest != "" && !strings.ContainsAny(rest[:1], "[=<>~!;")) || strings.HasSuffix(name, ".") {
+			fmt.Fprintf(os.Stderr, "      warning: requirements line skipped (not a plain package name): %s\n", line)
+			continue
+		}
+		out = append(out, strings.NewReplacer("_", "-", ".", "-").Replace(strings.ToLower(name)))
+	}
+	return out
 }
 
 // RequirementsBeside returns the requirements.txt next to the script, or "".
