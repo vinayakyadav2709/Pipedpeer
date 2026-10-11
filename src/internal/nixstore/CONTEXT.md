@@ -63,7 +63,7 @@ Pushing a closure to peers after an upload so pool spill can use them; only peer
 _Avoid_: broadcast (the function name, not the concept)
 
 **Trusted keys**:
-The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`); a multi-user nix-daemon ignores that from an untrusted user, so there they must be in nix.conf. Setup's one sudo installs a root-owned key helper and a NOPASSWD sudoers rule for it; the daemon then adds each new untrusted key through it (`sudo -n`), and warns, naming `pipedpeer trust`, only when that fails (`nixsign.SystemUntrusted`, `nixtrust`, [ADR-0018](../../../docs/adr/0018-root-owned-nix-key-helper.md)). `join` and `trust` install the helper if setup did not.
+The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`), plus the sender's own key from the archive manifest when it proves it belongs to the signer the manifest names, so a node that has not polled the sender yet still accepts its first closure; a multi-user nix-daemon ignores that from an untrusted user, so there they must be in nix.conf. Setup's one sudo installs a root-owned key helper and a NOPASSWD sudoers rule for it; the daemon then adds each new untrusted key through it (`sudo -n`), and warns, naming `pipedpeer trust`, only when that fails (`nixsign.SystemUntrusted`, `nixtrust`, [ADR-0018](../../../docs/adr/0018-root-owned-nix-key-helper.md)). `join` and `trust` install the helper if setup did not.
 
 ## Invariants
 

@@ -69,6 +69,13 @@ const ManifestName = "pipedpeer-closure.json"
 type Manifest struct {
 	Format int      `json:"format"`
 	Roots  []string `json:"roots"`
+	// Signer and SignerKey name the node that signed the closure and its nix
+	// public key. A fresh receiver has not polled the sender yet, so without
+	// them it refuses the first closure from every new peer. The receiver
+	// trusts the key only if it proves it belongs to Signer (nixsign.Verify).
+	// Optional: an older sender omits them and its receiver relies on polling.
+	Signer    string `json:"signer,omitempty"`
+	SignerKey string `json:"signer_key,omitempty"`
 }
 
 // Narinfo is the part of a .narinfo file this package needs.
@@ -187,6 +194,12 @@ func Index(cacheDir string) (map[string]Narinfo, error) {
 // is what a peer that could not answer the question has to be assumed to
 // mean: sending too much is slow, sending too little is a broken import.
 func Pack(cacheDir string, roots, closure, want []string, w io.Writer) error {
+	return PackSigned(Manifest{}, cacheDir, roots, closure, want, w)
+}
+
+// PackSigned is Pack with the signer named in the manifest (m.Signer,
+// m.SignerKey); its Format and Roots are filled in here.
+func PackSigned(m Manifest, cacheDir string, roots, closure, want []string, w io.Writer) error {
 	if len(roots) == 0 {
 		return fmt.Errorf("no roots to pack")
 	}
@@ -206,7 +219,8 @@ func Pack(cacheDir string, roots, closure, want []string, w io.Writer) error {
 	}
 
 	tw := tar.NewWriter(w)
-	body, err := json.Marshal(Manifest{Format: Format, Roots: roots})
+	m.Format, m.Roots = Format, roots
+	body, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
@@ -366,11 +380,14 @@ var importSeam []string
 // settings from a user it does not list in trusted-users, so there the keys
 // must be in nix.conf and a key learned later needs `pipedpeer trust`
 // (setup's trust step, as root). The refusal says so.
-func Import(ctx context.Context, cacheDir string, roots []string) error {
+//
+// extraKeys are trusted for this import alone: the sender's own key, already
+// proved by the caller, so a peer this node has not polled yet is not refused.
+func Import(ctx context.Context, cacheDir string, roots []string, extraKeys ...string) error {
 	if len(roots) == 0 {
 		return fmt.Errorf("nothing to import")
 	}
-	keys := clusterKeys()
+	keys := strings.Join(strings.Fields(clusterKeys()+" "+strings.Join(extraKeys, " ")), " ")
 	cmd, done, err := nixstore.Cmd("", importArgv(cacheDir, roots, keys)...)
 	if err != nil {
 		return err

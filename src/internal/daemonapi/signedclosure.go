@@ -8,6 +8,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -140,7 +141,15 @@ func (s *Server) signedClosureFor(ph *PeerHealth, storePath string) (path string
 		cleanup()
 		return "", nil, false
 	}
-	if err := narpack.Pack(cacheDir, []string{storePath}, paths, missing, f); err != nil {
+	// Named in the manifest so a peer that has not polled this node yet can
+	// still check the signature (importSignedClosure).
+	var signer narpack.Manifest
+	if self, err := identity.Key(); err == nil {
+		signer.Signer, signer.SignerKey = self.Fingerprint(), nixsign.PublicKey(self)
+	} else {
+		log.Warn().Err(err).Msg("no node key to name in the closure; a peer that has not polled this node will refuse it")
+	}
+	if err := narpack.PackSigned(signer, cacheDir, []string{storePath}, paths, missing, f); err != nil {
 		f.Close()
 		cleanup()
 		log.Info().Err(err).Msg("cannot pack the closure; falling back to the unsigned transfer")

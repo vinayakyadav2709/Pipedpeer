@@ -470,6 +470,18 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 // depend on this machine having built one.
 var signedImport = narpack.Import
 
+// senderKey is the manifest's signer key if it proves it belongs to the
+// signer it names; an archive with none yields none (an older sender).
+func senderKey(m narpack.Manifest) ([]string, error) {
+	if m.SignerKey == "" && m.Signer == "" {
+		return nil, nil
+	}
+	if err := nixsign.Verify(m.SignerKey, m.Signer); err != nil {
+		return nil, fmt.Errorf("refusing a closure whose signer key does not belong to its sender: %w", err)
+	}
+	return []string{m.SignerKey}, nil
+}
+
 // importSignedClosure takes a closure whose signatures survived the journey
 // and lets nix decide whether to accept it.
 //
@@ -482,6 +494,13 @@ var signedImport = narpack.Import
 // substitution, so the machine's own nix configuration decides - which is the
 // only place its owner can see and change the decision. If it says the
 // closure lacks a trusted signature, that error is what the submitter sees.
+//
+// The one key added is the sender's own, named in the manifest: a fresh node
+// has not polled the sender yet, so its trusted-keys file lacks it and the
+// first closure from every new peer was refused. The request is already
+// token-authenticated, which is the same bar a key learned by polling clears,
+// and the key must prove it belongs to the node it names. It is trusted for
+// this import only; the next poll records it for good.
 func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
 	dir, err := userdir.Scratch("signedimport-*")
 	if err != nil {
@@ -500,7 +519,11 @@ func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
 	if storePath == "" && len(m.Roots) > 0 {
 		roots = m.Roots
 	}
-	if err := signedImport(context.Background(), dir, roots); err != nil {
+	senderKeys, err := senderKey(m)
+	if err != nil {
+		return err
+	}
+	if err := signedImport(context.Background(), dir, roots, senderKeys...); err != nil {
 		return err
 	}
 	log.Info().Str("store", storePath).Int("roots", len(m.Roots)).
