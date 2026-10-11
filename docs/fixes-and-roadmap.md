@@ -10,7 +10,7 @@ with each entry marked when resolved.
 | 0 | Fix the known issues, demo-breaking ones first | Done | `ad75b4b`, `fad3ce4`, `2c1a49a` |
 | 1 | A per-stage timeline for every run: where the time goes | Done | `b30092d` |
 | 2 | Why a node was chosen, what the shim distributed, and the cluster at a glance | Done | `6d04e97` |
-| 3 | A live web page served by the daemon at `/ui` | In progress | |
+| 3 | A live web page served by the daemon at `/ui` | Done | see `git log` |
 | 4 | Benchmarks, a combined capstone script, and the updated demo flow | Planned | |
 
 Every phase below has the same parts:
@@ -434,15 +434,95 @@ All three views at once: `pp job --last --timeline --explain --receipt`.
 
 ---
 
-## Phase 3: the web page (in progress)
+## Phase 3: the live web page
 
-- `http://<node>:38080/ui` is a page embedded in the daemon, with no extra
-  service and no build step.
-- It shows the cluster, the nodes, running tasks, and recent runs. Each run
-  can be opened for its timeline, its placement and its receipt.
-- It refreshes itself every two seconds.
-- It reads one endpoint, `/v1/stats`, which serves the same snapshot as
-  `pipedpeer stats --json`.
+### What changed
+
+Every daemon now serves a page at **`http://<machine>:38080/ui`**. It needs
+no extra service, no build step and no internet access: the page is one file
+compiled into the binary.
+
+It refreshes every two seconds and shows:
+- **Summary tiles:** healthy nodes, cores, free memory, GPU nodes, tasks running.
+- **Nodes:** each node's state (a coloured dot plus a word), cores, a CPU meter, free memory, running tasks and pool counters. Hovering a meter shows CPU and memory. An unreachable node shows its reason.
+- **Recent runs from this machine:** when it started, status, node, total time, slowest stage, and a small bar of how much ran elsewhere.
+- **The selected run:**
+  - **Where the time went:** the Phase 1 timeline as bars on a time axis. Blue is this machine, orange is the node that ran it. Hover any bar for its start and duration.
+  - **Where the work ran:** the Phase 2 receipt. The headline is "N of M items ran on other machines", with a split bar, items per peer, and the cost model's decisions with their reasons.
+  - **Why this node:** the Phase 2 placement table, or a plain sentence when no choice was made.
+
+Clicking a run selects it, and the address becomes `/ui#run=<id>`, so a run
+can be linked to directly. The page has a pause button and a light/dark toggle
+(it follows the system theme otherwise), and it works at phone width.
+
+**The data.** The page reads one endpoint, `GET /v1/stats`. It returns the
+same snapshot as `pipedpeer stats --json`, from the same `clusterstats`
+package, and is cached for one second so several open tabs don't multiply the
+calls to every node.
+
+**With a shared secret set:**
+- The page itself loads without the secret, because a browser cannot attach a header to the address-bar request. The page holds no data.
+- `/v1/stats` and every other route still require the secret.
+- The page asks for the secret once, keeps it in that browser only, and sends it with each request.
+- A Content-Security-Policy confines the page to its own daemon.
+
+**`pipedpeer ui`** prints the page's address, both for this machine and from
+elsewhere on the network, and opens it in a browser. `--print` only prints.
+
+Screenshots: `docs/screenshots/ui-light.png`, `ui-dark.png` and `ui-phone.png`.
+
+### Test it automatically
+
+```bash
+cd src && go test -count=1 -run 'TestUIPage' -v ./internal/daemonapi/ ; cd ..
+```
+
+These tests check four things:
+- `/ui` loads without the secret when one is set.
+- `/v1/stats`, `/v1/nodes` and a path-traversal attempt (`/ui/../v1/stats`) are refused without it.
+- `/v1/stats` with the secret returns a snapshot.
+- The page references no outside resource.
+
+### Try it by hand
+
+```bash
+pp stop; pp start            # the daemon must be running the new binary
+pp run pool.py               # something to show (see Phase 2)
+pp ui                        # opens http://127.0.0.1:38080/ui
+```
+
+What to check on the page:
+1. The tiles and the nodes table match `pp stats`.
+2. The newest run is selected. Its timeline matches `pp job --last --timeline`,
+   and "Where the work ran" matches `pp job --last --receipt`.
+3. Start another run (`pp run pool.py`) while the page is open. It appears at
+   the top within two seconds, as `running · executing`, then `succeeded`.
+4. Click an older run. The address changes to `#run=<id>`, and reloading keeps
+   it selected.
+5. Open the page from another machine, using the "From elsewhere" address
+   printed by `pp ui`.
+6. Set a secret (`pp auth set`, then restart the daemon) and reload. The page
+   asks for the secret; paste the one `pp auth show` prints. Check that
+   `curl localhost:38080/v1/stats` returns 401.
+7. Narrow the window to phone width. The tables scroll sideways, and the
+   timeline still draws.
+
+Without a browser:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' localhost:38080/ui      # 200
+curl -s localhost:38080/v1/stats | python3 -m json.tool | head -30
+```
+
+### Limits
+
+- **"Recent runs" are the runs submitted from the machine whose page you
+  opened.** Each machine keeps its own history. Open the page on the
+  submitting machine to see its runs.
+- **The page polls; it does not stream.** A stage shorter than two seconds
+  may pass between refreshes, but the finished run's timeline shows every
+  stage.
+- **The page is read-only.** It cannot start or stop runs.
 
 ## Phase 4: benchmarks and the demo (planned)
 
