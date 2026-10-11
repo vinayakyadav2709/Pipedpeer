@@ -264,3 +264,46 @@ func TestARefitReachesEveryRank(t *testing.T) {
 		t.Fatalf("new shares reached ranks at syncs %v; want both, at the same one", told)
 	}
 }
+
+// failingWriter is a joiner whose connection breaks mid-snapshot.
+type failingWriter struct{ h http.Header }
+
+func (f *failingWriter) Header() http.Header       { return f.h }
+func (f *failingWriter) WriteHeader(int)           {}
+func (f *failingWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// A snapshot write that fails leaves the join in place, so the joiner's next
+// poll gets the snapshot instead of 410.
+func TestAFailedSnapshotWriteKeepsTheJoin(t *testing.T) {
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	ringOfTwo(t, ts, "g", 1, true)
+	if code, out := postJSON(t, ts, "/v1/ddp/join", map[string]any{"group": "g", "rank": 2, "world": 3}); code != 200 {
+		t.Fatalf("join refused: %d %v", code, out)
+	}
+	hdr, _ := json.Marshal(map[string]any{"group": "g", "rank": 0, "join": 2})
+	snap := putFrame(append(hdr, '\n'), []byte("model+optimizer"))
+	resp, err := ts.Client().Post(ts.URL+"/v1/ddp/snapshot", DDPFramesContentType, bytes.NewReader(snap))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("snapshot upload: HTTP %d", resp.StatusCode)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/ddp/snapshot?group=g&rank=2", nil)
+	s.handleDDPSnapshotGet(&failingWriter{h: http.Header{}}, req)
+
+	rec := httptest.NewRecorder()
+	s.handleDDPSnapshotGet(rec, httptest.NewRequest(http.MethodGet, "/v1/ddp/snapshot?group=g&rank=2", nil))
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), snap) {
+		t.Fatalf("retry after a broken write: HTTP %d %q, want 200 and the snapshot", rec.Code, rec.Body.Bytes())
+	}
+	s.ddp.mu.Lock()
+	defer s.ddp.mu.Unlock()
+	if s.ddp.runs["g"].join != nil {
+		t.Error("the join is still open after the snapshot was delivered")
+	}
+}

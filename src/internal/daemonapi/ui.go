@@ -2,10 +2,8 @@ package daemonapi
 
 import (
 	_ "embed"
-	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -80,21 +78,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 func toStatsNodes(nodes []nodeResp) []clusterstats.Node {
 	out := make([]clusterstats.Node, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, clusterstats.Node{
-			NodeID: n.NodeID, Host: hostOf(n.SSHEndpoint), Port: n.DaemonPort,
-			State: n.State, Source: n.Source, Capabilities: n.Capabilities, Load: n.Load,
-		})
+		out = append(out, clusterstats.NodeFromAPI(n.NodeID, n.SSHEndpoint, n.DaemonPort,
+			n.State, n.Source, n.Capabilities, n.Load))
 	}
 	return out
-}
-
-// hostOf pulls the host out of "user@host:port".
-func hostOf(endpoint string) string {
-	if i := strings.Index(endpoint, "@"); i >= 0 {
-		endpoint = endpoint[i+1:]
-	}
-	if h, _, err := net.SplitHostPort(endpoint); err == nil {
-		return h
-	}
-	return endpoint
 }

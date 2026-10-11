@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,31 @@ type Node struct {
 	Source       string            `json:"source"`
 	Capabilities map[string]string `json:"capabilities,omitempty"`
 	Load         registry.LoadInfo `json:"load"`
+}
+
+// NodeFromAPI is a row of the daemon's /v1/nodes as a Node. The CLI's `stats`
+// and the daemon's /ui both build their rows with it, so both ask a node's
+// daemon at the same address.
+func NodeFromAPI(nodeID, sshEndpoint string, daemonPort int, state, source string,
+	caps map[string]string, load registry.LoadInfo) Node {
+	return Node{NodeID: nodeID, Host: hostOf(sshEndpoint), Port: daemonPort,
+		State: state, Source: source, Capabilities: caps, Load: load}
+}
+
+// hostOf pulls the host out of "user@host:port", keeping an IPv6 address in
+// its brackets so it drops straight into a URL. An empty endpoint is this
+// machine.
+func hostOf(endpoint string) string {
+	if i := strings.Index(endpoint, "@"); i >= 0 {
+		endpoint = endpoint[i+1:]
+	}
+	if i := strings.LastIndex(endpoint, ":"); i >= 0 && !strings.HasSuffix(endpoint, "]") {
+		endpoint = endpoint[:i]
+	}
+	if endpoint == "" {
+		return "127.0.0.1"
+	}
+	return endpoint
 }
 
 // PoolCounters is a node's tally of pool work since its daemon started.

@@ -240,9 +240,11 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const store = {
-    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
-    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
-    del(k) { try { localStorage.removeItem(k); } catch {} },
+    // Private windows and full quotas refuse storage: the page still works,
+    // it just asks for the token again next time.
+    get(k) { try { return localStorage.getItem(k); } catch (e) { console.warn("pipedpeer: cannot read " + k + " from localStorage", e); return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) { console.warn("pipedpeer: cannot save " + k + " to localStorage", e); } },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { console.warn("pipedpeer: cannot remove " + k + " from localStorage", e); } },
   };
 
   // ---- formatting ----
@@ -335,6 +337,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
       setLive("", "live · updated " + new Date().toLocaleTimeString());
       render();
     } catch (err) {
+      console.warn("pipedpeer: /v1/stats poll failed", err);
       setLive(lastOk && Date.now() - lastOk < 10000 ? "stale" : "down", "cannot reach the daemon");
     }
     timer = setTimeout(poll, 2000);

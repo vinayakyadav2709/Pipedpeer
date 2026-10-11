@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
 func TestCollectAsksEachNodeAndKeepsTheSilentOnes(t *testing.T) {
@@ -43,5 +45,26 @@ func TestCollectAsksEachNodeAndKeepsTheSilentOnes(t *testing.T) {
 	}
 	if byID["gone"].Reachable {
 		t.Error("a node that did not answer is marked reachable")
+	}
+}
+
+// The CLI's `stats` and the daemon's /ui build their rows here, so both read
+// a node's daemon at the same address.
+func TestNodeFromAPIParsesTheHost(t *testing.T) {
+	for endpoint, want := range map[string]string{
+		"root@10.0.1.5:22": "10.0.1.5",
+		"10.0.1.5:22":      "10.0.1.5",
+		"box":              "box",
+		"me@[::1]:22":      "[::1]", // bracketed, so http://[::1]:port works
+		"":                 "127.0.0.1",
+	} {
+		n := NodeFromAPI("id", endpoint, 38080, "healthy", "mdns", nil, registry.LoadInfo{})
+		if n.Host != want {
+			t.Errorf("NodeFromAPI(%q).Host = %q, want %q", endpoint, n.Host, want)
+		}
+	}
+	n := NodeFromAPI("id", "u@h:22", 1, "s", "src", map[string]string{"a": "b"}, registry.LoadInfo{ActiveJobs: 2})
+	if n.NodeID != "id" || n.Port != 1 || n.State != "s" || n.Source != "src" || n.Capabilities["a"] != "b" || n.Load.ActiveJobs != 2 {
+		t.Fatalf("fields not carried: %+v", n)
 	}
 }

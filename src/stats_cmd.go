@@ -18,10 +18,8 @@ import (
 func toStatsNodes(nodes []clusterNode) []clusterstats.Node {
 	out := make([]clusterstats.Node, 0, len(nodes))
 	for _, n := range nodes {
-		out = append(out, clusterstats.Node{
-			NodeID: n.NodeID, Host: hostFromEndpoint(n.SSHEndpoint), Port: n.DaemonPort,
-			State: n.State, Source: n.Source, Capabilities: n.Capabilities, Load: n.Load,
-		})
+		out = append(out, clusterstats.NodeFromAPI(n.NodeID, n.SSHEndpoint, n.DaemonPort,
+			n.State, n.Source, n.Capabilities, n.Load))
 	}
 	return out
 }
