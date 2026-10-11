@@ -37,7 +37,7 @@ check() {
 tfile="$(mktemp)"
 trap 'rm -f "$tfile"' EXIT
 
-banner "Common packages on $(hostname)"
+banner "Common packages on $(uname -n)"
 before=-
 if [[ -n "$teacher" ]]; then
 	note "Before: $teacher on a store without the common set."
@@ -56,7 +56,7 @@ if [[ -n "$teacher" ]]; then
 	after=-
 	check "$copy/$(basename "$teacher")" && after=$(<"$tfile")
 	rm -rf "$copy"
-	line="$(printf '%-18s %-8s %-8s %s' "teacher check" "$before" "$after" "$teacher (before / after common prep, $(hostname))")"
+	line="$(printf '%-18s %-8s %-8s %s' "teacher check" "$before" "$after" "$teacher (before / after common prep, $(uname -n))")"
 	echo "${B}  $line${N}"
 	[[ -f demo/rehearsal-results.txt ]] && echo "$line" >>demo/rehearsal-results.txt
 fi
