@@ -372,3 +372,95 @@ func roundTrip(t *testing.T, ctx context.Context, conn *quic.Conn, msg string) s
 	n, _ := io.ReadFull(st, buf)
 	return string(buf[:n])
 }
+
+// TestAHelloFromAnotherSessionIsRefused. The hello is signed over the TLS
+// session's exporter, so one captured from (or relayed out of) another
+// connection proves nothing on this one.
+func TestAHelloFromAnotherSessionIsRefused(t *testing.T) {
+	key := testKey(t)
+	ekmA := []byte(strings.Repeat("a", 32))
+	ekmB := []byte(strings.Repeat("b", 32))
+	h, err := signHello("c1", "s3cret", key, ekmA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := h.verify(ekmA, "s3cret"); err != nil || got != key.Fingerprint() {
+		t.Fatalf("the hello does not verify on its own session: %v", err)
+	}
+	if _, err := h.verify(ekmB, "s3cret"); err == nil {
+		t.Error("a hello signed for one session verified on another")
+	}
+	if _, err := h.verify(ekmA, "other"); err == nil {
+		t.Error("a hello verified against a cluster token its sender does not hold")
+	}
+}
+
+// TestAPeerWithoutTheSecretIsRefused. The cluster ID is known to the
+// introducer's operator, so it cannot be what admits a peer: an admitted peer
+// is polled with the token.
+func TestAPeerWithoutTheSecretIsRefused(t *testing.T) {
+	got := make(chan string, 4)
+	serverKey := testKey(t)
+	cert := testCert(t)
+	server, err := Listen(Config{
+		Port: 0, Key: serverKey, Cluster: "c1", Secret: "right", Cert: &cert,
+		Local:     echoService(t),
+		OnInbound: func(node string, _ *quic.Conn) { got <- node },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() { _ = server.Serve(ctx) }()
+
+	ccert := testCert(t)
+	client, err := Listen(Config{Port: 0, Key: testKey(t), Cluster: "c1", Secret: "wrong", Cert: &ccert})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	at := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), server.Port())
+	_, err = client.Dial(ctx, serverKey.Fingerprint(), at)
+	if u, ok := IsUnreachable(err); !ok || u.Reason != ReasonIdentity {
+		t.Errorf("dial with the wrong token returned %v; want %q", err, ReasonIdentity)
+	}
+	select {
+	case node := <-got:
+		t.Errorf("a peer without the cluster token was handed up: %s", node[:8])
+	case <-time.After(1500 * time.Millisecond):
+	}
+}
+
+// TestAnOlderPeerIsReportedAsAVersionMismatch. A /1 peer cannot speak the
+// bound hello; the dial should say "upgrade", not "impostor".
+func TestAnOlderPeerIsReportedAsAVersionMismatch(t *testing.T) {
+	cert := testCert(t)
+	ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"pipedpeer-direct/1"},
+		MinVersion:   tls.VersionTLS13,
+	}, quicConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	go func() {
+		for {
+			if _, err := ln.Accept(ctx); err != nil {
+				return
+			}
+		}
+	}()
+
+	client := endpoint(t, testKey(t), "c1", nil)
+	at := netip.MustParseAddrPort(ln.Addr().String())
+	_, err = client.Dial(ctx, testKey(t).Fingerprint(), at)
+	if u, ok := IsUnreachable(err); !ok || u.Reason != ReasonVersion {
+		t.Errorf("dial to a /1 peer returned %v; want %q", err, ReasonVersion)
+	}
+}
