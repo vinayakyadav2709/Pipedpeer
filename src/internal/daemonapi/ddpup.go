@@ -282,5 +282,6 @@ func (s *Server) handleDDPSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	// own arrival is not news to it.
 	run.noteTold[rank] = true
 	run.join = nil
+	run.loading = joined
 	log.Info().Str("group", group).Int("rank", rank).Int("world", run.world).Msg("ddp rank joined")
 }

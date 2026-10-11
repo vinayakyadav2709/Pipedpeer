@@ -87,6 +87,9 @@ type ddpEntry struct {
 	// partial is how many ranks actually contributed when a round completed
 	// short-handed; zero when everybody arrived.
 	partial int
+	// holdExpired: this round was held for a join handover past
+	// ddpHandoverHold, and said so.
+	holdExpired bool
 
 	// fingerprint detects ranks doing identical work. Sharding only happens
 	// automatically for DataLoader-based code; a script that slices its
@@ -187,6 +190,9 @@ type ddpRun struct {
 	sharded bool
 	// join is the rank joining now, if any.
 	join *ddpJoin
+	// loading is a joiner that has its snapshot and is loading it: rounds
+	// still wait for it until its first sync (handoverHolds).
+	loading *ddpJoin
 }
 
 // run returns a group's run state, creating it. Caller holds the board lock.
@@ -436,6 +442,9 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		if req.Sharded {
 			run.sharded = true
 		}
+		if run.loading != nil && run.loading.rank == req.Rank {
+			run.loading = nil // the joiner loaded the model and is syncing
+		}
 		if req.Seq > run.lastSeq {
 			run.lastSeq = req.Seq
 			run.seen = time.Now()
@@ -535,26 +544,44 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	s.ddp.mu.Unlock()
 
 	if !complete {
-		select {
-		case <-e.done:
-		case <-r.Context().Done():
-			return
-		case <-time.After(time.Until(partialAt)):
-			// Long enough to rule out an ordinary slow step, short enough
-			// that a dead rank does not cost the run. Complete with whoever
-			// turned up: averaging over fewer ranks is a smaller step in the
-			// same direction, and every rank still receives the identical
-			// result, so nobody drifts.
-			if !s.completePartial(key) {
-				writeJSON(w, http.StatusGatewayTimeout, map[string]string{
-					"error": "ddp sync timed out and too few ranks had arrived to " +
-						"average anything"})
+		partialC := time.After(time.Until(partialAt))
+		hardC := time.After(ddpHardTimeout)
+	wait:
+		for {
+			select {
+			case <-e.done:
+				break wait
+			case <-r.Context().Done():
+				return
+			case <-partialC:
+				// A rank handing over or loading the model at a join is busy,
+				// not dead: hold the round for it (bounded) rather than
+				// average without it.
+				if s.handoverHolds(req.Group, key) {
+					partialC = time.After(ddpHandoverPoll)
+					continue
+				}
+				// Long enough to rule out an ordinary slow step, short enough
+				// that a dead rank does not cost the run. Complete with whoever
+				// turned up: averaging over fewer ranks is a smaller step in the
+				// same direction, and every rank still receives the identical
+				// result, so nobody drifts.
+				if !s.completePartial(key) {
+					writeJSON(w, http.StatusGatewayTimeout, map[string]string{
+						"error": "ddp sync timed out and too few ranks had arrived to " +
+							"average anything"})
+					return
+				}
+				break wait
+			case <-hardC:
+				if s.handoverHolds(req.Group, key) {
+					hardC = nil // the hold has its own bound; partialC ends it
+					continue
+				}
+				writeJSON(w, http.StatusGatewayTimeout,
+					map[string]string{"error": "ddp sync timed out waiting for peer ranks"})
 				return
 			}
-		case <-time.After(ddpHardTimeout):
-			writeJSON(w, http.StatusGatewayTimeout,
-				map[string]string{"error": "ddp sync timed out waiting for peer ranks"})
-			return
 		}
 	}
 
@@ -648,6 +675,58 @@ func fnv1a(b []byte) uint64 {
 // and the old three-minute wait meant one lost machine stalled the run and
 // then failed it.
 var ddpPartialAfter = 45 * time.Second
+
+// ddpHandoverHold bounds how long a round is held open, from its creation,
+// for the ranks busy with a join handover. Under the shim's 240 s sync
+// timeout, so the held ranks are still waiting when the round closes.
+// ponytail: a model too big to hand over in this time joins late (the round
+// goes partial once); raise it together with the shim's timeout if that bites.
+var ddpHandoverHold = 200 * time.Second
+
+// ddpHandoverPoll is how often a held round looks again.
+var ddpHandoverPoll = time.Second
+
+// handoverHolds reports whether the round at key should keep waiting because
+// a join handover is in flight and the ranks it occupies (the one handing
+// over, and the joiner once the round counts it) have not posted yet.
+func (s *Server) handoverHolds(group, key string) bool {
+	s.ddp.mu.Lock()
+	defer s.ddp.mu.Unlock()
+	e := s.ddp.entries[key]
+	run := s.ddp.runs[group]
+	if e == nil || run == nil || e.result != nil || e.err != nil {
+		return false
+	}
+	j, handingOver := run.join, true
+	if j == nil {
+		j, handingOver = run.loading, false
+	}
+	if j == nil {
+		return false
+	}
+	arrived := func(rank int) bool {
+		if e.seen[rank] {
+			return true
+		}
+		_, ok := e.blobs[rank]
+		return ok
+	}
+	busy := (handingOver && !arrived(j.from) && !run.dropped[j.from]) ||
+		(j.rank < e.world && !arrived(j.rank) && !run.dropped[j.rank])
+	if !busy {
+		return false
+	}
+	if time.Since(e.created) > ddpHandoverHold {
+		if !e.holdExpired {
+			e.holdExpired = true
+			log.Warn().Str("group", group).Int("join", j.rank).Int("from", j.from).
+				Dur("held", time.Since(e.created).Round(time.Second)).
+				Msg("ddp join handover still in flight; closing the round without the ranks busy with it")
+		}
+		return false
+	}
+	return true
+}
 
 // ddpHardTimeout bounds the whole wait, for the case where partial completion
 // is not possible either.

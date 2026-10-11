@@ -307,3 +307,120 @@ func TestAFailedSnapshotWriteKeepsTheJoin(t *testing.T) {
 		t.Error("the join is still open after the snapshot was delivered")
 	}
 }
+
+// shortDDPWindows makes the partial window and the handover hold short.
+func shortDDPWindows(t *testing.T, hold time.Duration) {
+	t.Helper()
+	pa, hh, hp := ddpPartialAfter, ddpHandoverHold, ddpHandoverPoll
+	ddpPartialAfter, ddpHandoverHold, ddpHandoverPoll = 200*time.Millisecond, hold, 10*time.Millisecond
+	t.Cleanup(func() { ddpPartialAfter, ddpHandoverHold, ddpHandoverPoll = pa, hh, hp })
+}
+
+// joiningRing is a two-rank ring that rank 2 is joining, with rank 1 alone
+// in round 2: rank 0 is the one handing over the model.
+func joiningRing(t *testing.T) (*Server, *httptest.Server, chan map[string]any) {
+	t.Helper()
+	s := New("test-node")
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	ringOfTwo(t, ts, "g", 1, true)
+	if code, out := postJSON(t, ts, "/v1/ddp/join", map[string]any{"group": "g", "rank": 2, "world": 3}); code != 200 {
+		t.Fatalf("join refused: %d %v", code, out)
+	}
+	got := make(chan map[string]any, 1)
+	go func() { got <- ddpSyncHeader(t, ts, map[string]any{"group": "g", "seq": 2, "rank": 1, "world": 2}) }()
+	return s, ts, got
+}
+
+// A round waits for the rank handing the model to a joiner past the partial
+// window, and averages it in when it arrives.
+func TestASlowHandoverHoldsTheRoundOpen(t *testing.T) {
+	shortDDPWindows(t, time.Minute)
+	_, ts, got := joiningRing(t)
+	select {
+	case rep := <-got:
+		t.Fatalf("round closed without the rank handing over: %v", rep)
+	case <-time.After(4 * ddpPartialAfter):
+	}
+	rep0 := ddpSyncHeader(t, ts, map[string]any{"group": "g", "seq": 2, "rank": 0, "world": 2})
+	rep1 := <-got
+	if rep0["ranks"] != float64(2) || rep1["ranks"] != float64(2) {
+		t.Fatalf("round averaged %v / %v ranks, want 2", rep0["ranks"], rep1["ranks"])
+	}
+}
+
+// A handover that fails ends the join, and the held round closes partial.
+func TestAFailedHandoverReleasesTheRound(t *testing.T) {
+	shortDDPWindows(t, time.Minute)
+	_, ts, got := joiningRing(t)
+	time.Sleep(2 * ddpPartialAfter)
+	if code, out := postJSON(t, ts, "/v1/ddp/down", map[string]any{"group": "g", "rank": 2, "world": 3, "why": "handover failed"}); code != 200 {
+		t.Fatalf("down refused: %d %v", code, out)
+	}
+	select {
+	case rep := <-got:
+		if rep["ranks"] != float64(1) {
+			t.Fatalf("round averaged %v ranks, want 1 (partial)", rep["ranks"])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the round stayed held after the handover failed")
+	}
+}
+
+// The hold is bounded: a handover that never finishes stops holding rounds.
+func TestAHandoverHoldIsBounded(t *testing.T) {
+	shortDDPWindows(t, 600*time.Millisecond)
+	_, _, got := joiningRing(t)
+	select {
+	case rep := <-got:
+		if rep["ranks"] != float64(1) {
+			t.Fatalf("round averaged %v ranks, want 1 (partial)", rep["ranks"])
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the round was held past the bound")
+	}
+}
+
+// A joiner that has its snapshot and is loading it is waited for too.
+func TestALoadingJoinerHoldsTheRoundOpen(t *testing.T) {
+	shortDDPWindows(t, time.Minute)
+	s, ts, got := joiningRing(t)
+	ddpSyncHeader(t, ts, map[string]any{"group": "g", "seq": 2, "rank": 0, "world": 2})
+	<-got
+	hdr, _ := json.Marshal(map[string]any{"group": "g", "rank": 0, "join": 2})
+	resp, err := ts.Client().Post(ts.URL+"/v1/ddp/snapshot", DDPFramesContentType,
+		bytes.NewReader(putFrame(append(hdr, '\n'), []byte("model"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	rec := httptest.NewRecorder()
+	s.handleDDPSnapshotGet(rec, httptest.NewRequest(http.MethodGet, "/v1/ddp/snapshot?group=g&rank=2", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshot GET: %d", rec.Code)
+	}
+
+	both := make(chan []map[string]any, 1)
+	go func() {
+		out := make([]map[string]any, 2)
+		var wg sync.WaitGroup
+		for rank := range 2 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				out[rank] = ddpSyncHeader(t, ts, map[string]any{"group": "g", "seq": 3, "rank": rank, "world": 3})
+			}()
+		}
+		wg.Wait()
+		both <- out
+	}()
+	select {
+	case rep := <-both:
+		t.Fatalf("round closed while the joiner was loading: %v", rep)
+	case <-time.After(4 * ddpPartialAfter):
+	}
+	if rep := ddpSyncHeader(t, ts, map[string]any{"group": "g", "seq": 3, "rank": 2, "world": 3}); rep["ranks"] != float64(3) {
+		t.Fatalf("joiner's round averaged %v ranks, want 3", rep["ranks"])
+	}
+	<-both
+}
