@@ -78,6 +78,9 @@ func (s *Server) markRankDown(group string, rank, world int, why string) int {
 	}
 	r.weights = sharesWithout(weights, r.dropped)
 
+	if r.loading != nil && r.loading.rank == rank {
+		r.loading = nil
+	}
 	if j := r.join; j != nil {
 		switch {
 		case j.rank == rank:
