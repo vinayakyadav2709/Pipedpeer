@@ -398,7 +398,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
   const slowest = (stages) => (stages || []).reduce((a, s) => (!a || s.ms > a.ms ? s : a), null);
   const receiptCounts = (rc) => {
     if (!rc) return null;
-    const total = rc.mapped_items > 0 ? rc.mapped_items : (rc.remote_items + rc.local_items + (rc.unshippable || 0));
+    const total = rc.mapped_items > 0 ? rc.mapped_items : (rc.remote_items + rc.local_items); // unshippable items ran here and are in local_items
     const elsewhere = rc.mapped_items > 0 ? Math.min(rc.remote_used, rc.mapped_items) : rc.remote_items;
     return total > 0 ? { total, elsewhere, here: total - elsewhere } : null;
   };
@@ -485,7 +485,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     let html = `<h3>Where the work ran</h3>`;
     if (!c && !(rc.decisions || []).length) return html + `<p class="dim">The shim intercepted nothing: no pool, joblib, numpy or pandas call was big enough to consider.</p>`;
     if (c) {
-      const raced = rc.mapped_items > 0 ? Math.max(0, rc.remote_items + rc.local_items + (rc.unshippable || 0) - rc.mapped_items) : 0;
+      const raced = rc.mapped_items > 0 ? Math.max(0, rc.remote_items + rc.local_items - rc.mapped_items) : 0;
       html += `<div class="headline">${c.elsewhere} of ${c.total} items<small>ran on other machines (${Math.round((c.elsewhere / c.total) * 100)}%)</small></div>
         <div class="big-split" role="img" aria-label="${c.elsewhere} on other machines, ${c.here} on the running node">
           <span style="flex:${c.elsewhere};background:var(--there)" data-tip="<b>${c.elsewhere}</b> on other machines"></span>

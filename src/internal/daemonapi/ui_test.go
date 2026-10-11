@@ -95,3 +95,11 @@ func TestUIPageCatchesLog(t *testing.T) {
 		}
 	}
 }
+
+// The shim counts an unshippable tail in local_items already, so the page's
+// totals must not add it again (jobhistory.Receipt Total/Raced do the same).
+func TestUIPageCountsUnshippableOnce(t *testing.T) {
+	if m := regexp.MustCompile(`local_items\s*\+\s*\(?\s*rc\.unshippable`).FindString(string(uiPage)); m != "" {
+		t.Fatalf("page adds unshippable on top of local_items: %s", m)
+	}
+}
