@@ -54,6 +54,33 @@ func fetchClusterNodes(daemonPort int) ([]clusterNode, error) {
 	return nodes, nil
 }
 
+type unreachablePeer struct {
+	Peer   string `json:"peer"`
+	Reason string `json:"reason"`
+}
+
+// fetchUnreachable lists internet peers the daemon has no direct path to.
+// A daemon without the route (404) yields nil, nil.
+func fetchUnreachable(daemonPort int) ([]unreachablePeer, error) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/peers/unreachable", daemonPort))
+	if err != nil {
+		return nil, fmt.Errorf("daemon unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %s", resp.Status)
+	}
+	var out []unreachablePeer
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // fetchClusterTasks queries every healthy node's /v1/jobs concurrently and
 // returns the union, newest last. Nodes that fail to answer are skipped rather
 // than failing the whole view: a partial picture beats no picture.
