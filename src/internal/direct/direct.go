@@ -34,7 +34,6 @@ package direct
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -150,6 +149,9 @@ const (
 	// peer. Worth reporting loudly - it is either a misconfiguration or
 	// somebody else on the path.
 	ReasonIdentity Reason = "the machine that answered could not prove its identity"
+	// ReasonVersion: the peer speaks another version of the direct
+	// protocol. One side needs upgrading; retrying will not help.
+	ReasonVersion Reason = "the peer runs an incompatible pipedpeer version"
 )
 
 // Unreachable is the error returned when no direct path exists.
@@ -235,9 +237,6 @@ func newNonce() ([8]byte, error) {
 	_, err := rand.Read(n[:])
 	return n, err
 }
-
-// nonceHex is for logging an attempt without printing raw bytes.
-func nonceHex(n [8]byte) string { return hex.EncodeToString(n[:]) }
 
 // Gather collects the addresses this machine might be reachable at.
 //

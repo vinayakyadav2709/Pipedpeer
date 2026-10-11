@@ -2,9 +2,12 @@ package direct
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +25,25 @@ import (
 // ALPN keeps direct connections from being confused with relayed ones. They
 // speak the same handshake but arrive by different routes, and a peer that
 // dials one expecting the other should be told so rather than half-work.
-const ALPN = "pipedpeer-direct/1"
+//
+// /2: the hello is bound to the TLS session and proves the cluster token. A
+// /1 peer cannot produce either, so it fails at the handshake with a version
+// reason instead of an identity one.
+const ALPN = "pipedpeer-direct/2"
+
+// ekmLabel names the TLS exporter the hello is bound to (RFC 9266 style).
+// Both ends of one session derive the same bytes and no other session can, so
+// a hello lifted from one connection is worthless on another.
+const ekmLabel = "EXPORTER-pipedpeer-direct-hello"
+
+// macContext separates the token proof from any other HMAC of the token.
+const macContext = "pipedpeer-direct-mac|"
+
+// sessionEKM is the exporter value of conn's TLS session.
+func sessionEKM(conn *quic.Conn) ([]byte, error) {
+	cs := conn.ConnectionState().TLS
+	return cs.ExportKeyingMaterial(ekmLabel, nil, 32)
+}
 
 // helloContext binds a hello's signature to this purpose. Distinct from the
 // relay's, so a hello signed for one cannot be replayed at the other.
@@ -31,7 +52,10 @@ const helloContext = "direct-hello"
 // maxHeader bounds the preamble a peer can send before proving who it is.
 const maxHeader = 4096
 
-// hello proves identity, exactly as the relay's does.
+// hello proves identity as the relay's does, and more: the signature covers
+// the TLS session's exporter, so it cannot be replayed on another connection,
+// and Mac proves the sender holds the cluster token. The cluster ID alone is
+// known to the introducer's operator; the token is not.
 //
 // The node is not named, it is proved: the address a peer is entitled to is
 // the fingerprint of the key it signs with. That matters more here than on
@@ -44,11 +68,20 @@ type hello struct {
 	PubKey  string `json:"pubkey"`
 	Nonce   string `json:"nonce"`
 	Sig     string `json:"sig"`
+	Mac     string `json:"mac"`
 }
 
-func (h hello) verify() (string, error) {
-	if h.Cluster == "" || h.PubKey == "" || h.Nonce == "" || h.Sig == "" {
-		return "", fmt.Errorf("hello must carry a cluster, a public key, a nonce and a signature")
+func helloMAC(secret, cluster, pubkey string, ekm []byte) []byte {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte(macContext + cluster + "|" + pubkey + "|" + hex.EncodeToString(ekm)))
+	return m.Sum(nil)
+}
+
+// verify checks the hello against this session's exporter and this
+// cluster's token, and returns the fingerprint the sender proved.
+func (h hello) verify(ekm []byte, secret string) (string, error) {
+	if h.Cluster == "" || h.PubKey == "" || h.Nonce == "" || h.Sig == "" || h.Mac == "" {
+		return "", fmt.Errorf("hello must carry a cluster, a public key, a nonce, a signature and a mac")
 	}
 	pub, err := identity.DecodePublic(h.PubKey)
 	if err != nil {
@@ -58,23 +91,32 @@ func (h hello) verify() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("signature: %w", err)
 	}
-	if !identity.Verify(pub, helloContext, []byte(h.Cluster+"|"+h.Nonce), sig) {
-		return "", fmt.Errorf("signature does not match the public key offered")
+	if !identity.Verify(pub, helloContext, []byte(h.Cluster+"|"+h.Nonce+"|"+hex.EncodeToString(ekm)), sig) {
+		return "", fmt.Errorf("signature does not match the public key offered on this session")
+	}
+	mac, err := base64.StdEncoding.DecodeString(h.Mac)
+	if err != nil {
+		return "", fmt.Errorf("mac: %w", err)
+	}
+	if !hmac.Equal(mac, helloMAC(secret, h.Cluster, h.PubKey, ekm)) {
+		return "", fmt.Errorf("the peer could not prove it holds the cluster token")
 	}
 	return identity.Fingerprint(pub), nil
 }
 
-func signHello(cluster string, key identity.KeyPair) (hello, error) {
+func signHello(cluster, secret string, key identity.KeyPair, ekm []byte) (hello, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return hello{}, err
 	}
 	nonce := base64.StdEncoding.EncodeToString(raw[:])
+	pub := identity.EncodePublic(key.Public)
 	return hello{
 		Cluster: cluster,
-		PubKey:  identity.EncodePublic(key.Public),
+		PubKey:  pub,
 		Nonce:   nonce,
-		Sig:     base64.StdEncoding.EncodeToString(key.Sign(helloContext, []byte(cluster+"|"+nonce))),
+		Sig:     base64.StdEncoding.EncodeToString(key.Sign(helloContext, []byte(cluster+"|"+nonce+"|"+hex.EncodeToString(ekm)))),
+		Mac:     base64.StdEncoding.EncodeToString(helloMAC(secret, cluster, pub, ekm)),
 	}, nil
 }
 
@@ -113,6 +155,7 @@ type Endpoint struct {
 
 	key       identity.KeyPair
 	cluster   string
+	secret    string
 	onInbound func(string, *quic.Conn)
 	// local dials the service a peer's stream should be spliced to, which
 	// keeps everything above this ignorant of how the bytes arrived.
@@ -136,6 +179,9 @@ type Config struct {
 	Key identity.KeyPair
 	// Cluster scopes everything, as it does on the relay.
 	Cluster string
+	// Secret is the cluster token; proves membership in the direct hello.
+	// The cluster ID is not enough: the introducer's operator knows it.
+	Secret string
 	// Cert is this node's TLS certificate. Self-signed: identity is proved
 	// by the signed hello, not by a certificate chain.
 	Cert *tls.Certificate
@@ -176,6 +222,7 @@ func Listen(cfg Config) (*Endpoint, error) {
 		conn:      conn,
 		key:       cfg.Key,
 		cluster:   cfg.Cluster,
+		secret:    cfg.Secret,
 		local:     cfg.Local,
 		onInbound: cfg.OnInbound,
 		log:       cfg.Log,
@@ -304,8 +351,15 @@ func (e *Endpoint) accept(ctx context.Context, conn *quic.Conn) {
 		conn.CloseWithError(1, "bad hello")
 		return
 	}
-	node, err := h.verify()
+	ekm, err := sessionEKM(conn)
 	if err != nil {
+		e.log("direct: no TLS exporter on the session from %s: %v", conn.RemoteAddr(), err)
+		conn.CloseWithError(1, "")
+		return
+	}
+	node, err := h.verify(ekm, e.secret)
+	if err != nil {
+		e.log("direct: refused a hello from %s: %v", conn.RemoteAddr(), err)
 		conn.CloseWithError(1, "unauthenticated: "+err.Error())
 		return
 	}
@@ -319,7 +373,7 @@ func (e *Endpoint) accept(ctx context.Context, conn *quic.Conn) {
 
 	// Prove who we are in turn: the dialler raced several addresses and has
 	// to know it reached the one it meant.
-	mine, err := signHello(e.cluster, e.key)
+	mine, err := signHello(e.cluster, e.secret, e.key, ekm)
 	if err != nil {
 		conn.CloseWithError(1, "")
 		return
@@ -426,7 +480,15 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 	}
 	conn, err := e.transport.Dial(ctx, net.UDPAddrFromAddrPort(at), tlsConf, quicConfig())
 	if err != nil {
+		if isALPNMismatch(err) {
+			return nil, &Unreachable{Peer: node, Reason: ReasonVersion, Tried: 1}
+		}
 		return nil, fmt.Errorf("dialling %s at %s: %w", short(node), at, err)
+	}
+	ekm, err := sessionEKM(conn)
+	if err != nil {
+		conn.CloseWithError(1, "")
+		return nil, fmt.Errorf("no TLS exporter on the session to %s at %s: %w", short(node), at, err)
 	}
 
 	st, err := conn.OpenStreamSync(ctx)
@@ -434,7 +496,7 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 		conn.CloseWithError(1, "")
 		return nil, err
 	}
-	h, err := signHello(e.cluster, e.key)
+	h, err := signHello(e.cluster, e.secret, e.key, ekm)
 	if err != nil {
 		conn.CloseWithError(1, "")
 		return nil, err
@@ -459,6 +521,11 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 		if isAlreadyConnected(err) {
 			return nil, errAlreadyConnected
 		}
+		// The far side read our hello and refused it: no token, or a
+		// replayed one. That is an identity failure, not a silent peer.
+		if strings.Contains(err.Error(), "unauthenticated") {
+			return nil, &Unreachable{Peer: node, Reason: ReasonIdentity, Tried: 1}
+		}
 		return nil, fmt.Errorf("%s at %s never identified itself: %w", short(node), at, err)
 	}
 	if err := readJSON(rst, &theirs); err != nil {
@@ -467,8 +534,9 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 	}
 	_ = rst.Close()
 
-	got, err := theirs.verify()
+	got, err := theirs.verify(ekm, e.secret)
 	if err != nil {
+		e.log("direct: %s at %s sent a hello that does not verify: %v", short(node), at, err)
 		conn.CloseWithError(1, "")
 		return nil, &Unreachable{Peer: node, Reason: ReasonIdentity, Tried: 1}
 	}
@@ -501,6 +569,17 @@ var errAlreadyConnected = errors.New("the peer already has a link to us")
 // IsAlreadyConnected reports whether a dial failed only because a link
 // already exists.
 func IsAlreadyConnected(err error) bool { return errors.Is(err, errAlreadyConnected) }
+
+// noApplicationProtocol is TLS alert 120 as a QUIC crypto error (0x100 +
+// alert, RFC 9001 section 4.8): the peer speaks no ALPN we offered.
+const noApplicationProtocol = quic.TransportErrorCode(0x100 + 120)
+
+// isALPNMismatch reports whether a dial failed because the peer runs another
+// version of the direct protocol.
+func isALPNMismatch(err error) bool {
+	var te *quic.TransportError
+	return errors.As(err, &te) && te.ErrorCode == noApplicationProtocol
+}
 
 func isAlreadyConnected(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already connected")
