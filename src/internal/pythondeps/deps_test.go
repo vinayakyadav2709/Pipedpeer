@@ -156,3 +156,10 @@ func TestTrailingCommentDoesNotHideAnImport(t *testing.T) {
 		t.Errorf("got %v, want numpy and pandas", got)
 	}
 }
+
+func TestUnresolvedImports(t *testing.T) {
+	got := UnresolvedImports([]string{"numpy", "os", "foo", "tqdm", "seaborn", "bar"})
+	if len(got) != 2 || got[0] != "foo" || got[1] != "bar" {
+		t.Fatalf("got %v", got)
+	}
+}

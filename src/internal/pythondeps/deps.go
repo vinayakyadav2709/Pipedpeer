@@ -48,6 +48,11 @@ var nixpkgsMapping = map[string]string{
 	"uvicorn":        "uvicorn",
 	"pydantic":       "pydantic",
 	"click":          "click",
+	"tqdm":           "tqdm",
+	"seaborn":        "seaborn",
+	"sympy":          "sympy",
+	"networkx":       "networkx",
+	"statsmodels":    "statsmodels",
 }
 
 // Python standard library modules — these are always available and should
@@ -296,6 +301,18 @@ func ResolveNixPackage(pkg string) string {
 		return nixpkg
 	}
 	return ""
+}
+
+// UnresolvedImports returns the imports that have no nix package mapping and
+// are not standard library, in the order given.
+func UnresolvedImports(imports []string) []string {
+	var out []string
+	for _, imp := range imports {
+		if nixpkgsMapping[imp] == "" && !stdlibModules[imp] {
+			out = append(out, imp)
+		}
+	}
+	return out
 }
 
 func ResolvePackages(astImports []string, explicitPkgs []string) []string {
