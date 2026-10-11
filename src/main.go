@@ -1184,6 +1184,7 @@ func runDDP(o ddpRunOptions) error {
 	// Machines that come back, or turn up, join the ring. Only the daemon
 	// sync can grow: torch's own mesh is fixed at init.
 	added := make(chan ddpAdded)
+	startRanks := len(ranks) // ranks from here on are joiners
 	watchCtx, stopWatch := context.WithCancel(o.Ctx)
 	defer stopWatch()
 	if daemonSync {
@@ -1235,6 +1236,12 @@ func runDDP(o ddpRunOptions) error {
 	}
 
 	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, added, func(rank int, err error) {
+		// The script failed, so the run is lost: stop looking for machines
+		// to add (ddpAwaitRanks stops any that slip through). A joiner's
+		// crash is the join failing, as in ddpAwaitRanks.
+		if rank < startRanks && app.IsPermanent(err) {
+			stopWatch()
+		}
 		// torch's own mesh (gloo/nccl) cannot lose a member; only the
 		// daemon-backed sync can be told to carry on.
 		if !daemonSync {

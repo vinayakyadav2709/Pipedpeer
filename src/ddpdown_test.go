@@ -4,10 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 )
+
+// exited is the error a rank's app.RunTask returns when its script exited
+// with code.
+func exited(code int) error {
+	return fmt.Errorf("execution failed: %w", &daemonctl.RemoteExitError{Code: code})
+}
 
 // TestARankDyingMidRunDoesNotFailTheRing: rank 1 fails while the others are
 // still training; the run carries on, says which rank and where, tells the
@@ -75,7 +84,7 @@ func TestCancelIsNotADeath(t *testing.T) {
 // others must not stall), but the run must not exit 0.
 func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
 	results := make(chan ddpRankResult, 2)
-	results <- ddpRankResult{rank: 0, err: errors.New("execution failed: remote job exited with code 1")}
+	results <- ddpRankResult{rank: 0, err: exited(1)}
 	results <- ddpRankResult{rank: 1}
 	var out bytes.Buffer
 	var downs []int
@@ -87,11 +96,62 @@ func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
 	if len(downs) != 1 {
 		t.Errorf("lead daemon told about %v, want [0] so the ring does not stall", downs)
 	}
-	// A rank killed by a signal (machine stopping) is a loss, not a failure.
-	results <- ddpRankResult{rank: 1, err: errors.New("execution failed: remote job exited with code 137")}
+	// A rank killed by a signal (machine stopping), or a node that could not
+	// start the script (126/127), is a loss, not a failure.
+	for _, code := range []int{137, 126, 127} {
+		results <- ddpRankResult{rank: 1, err: exited(code)}
+		results <- ddpRankResult{rank: 0}
+		if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, func(int, error) {}); err != nil {
+			t.Errorf("a rank that exited %d failed the run: %v", code, err)
+		}
+	}
+}
+
+// TestAJoinersCrashDoesNotFailTheRun: a rank added mid-run that exits 1 while
+// joining (the lead refused it, a shape mismatch) never touched the training;
+// the ranks that trained finish and the run succeeds.
+func TestAJoinersCrashDoesNotFailTheRun(t *testing.T) {
+	results := make(chan ddpRankResult)
+	added := make(chan ddpAdded)
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, added, func(int, error) {})
+	}()
+	added <- ddpAdded{rank: 2, host: "pc-2", cancel: func() {}}
+	results <- ddpRankResult{rank: 2, err: exited(1)}
 	results <- ddpRankResult{rank: 0}
-	if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, func(int, error) {}); err != nil {
-		t.Errorf("a signalled rank failed the run: %v", err)
+	results <- ddpRankResult{rank: 1}
+	if err := <-done; err != nil {
+		t.Fatalf("a joiner's crash failed a run that trained fine: %v", err)
+	}
+	if !strings.Contains(out.String(), "rank 2 on pc-2") {
+		t.Errorf("the joiner's failure was not reported:\n%s", out.String())
+	}
+}
+
+// TestNoRankJoinsAfterTheScriptFailed: once a rank's script has failed the
+// run is lost, so a rank the grower starts afterwards is stopped at once
+// rather than run on (possibly the same failing node).
+func TestNoRankJoinsAfterTheScriptFailed(t *testing.T) {
+	results := make(chan ddpRankResult)
+	added := make(chan ddpAdded)
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, added, func(int, error) {})
+	}()
+	results <- ddpRankResult{rank: 0, err: exited(1)}
+	cancelled := false
+	added <- ddpAdded{rank: 2, host: "a", cancel: func() { cancelled = true }}
+	results <- ddpRankResult{rank: 2, err: context.Canceled}
+	results <- ddpRankResult{rank: 1}
+	err := <-done
+	if !cancelled {
+		t.Error("a rank started after the script failed was left running")
+	}
+	if err == nil || !strings.Contains(err.Error(), "rank 0 on a: the script failed") {
+		t.Fatalf("got %v, want rank 0's script failure", err)
 	}
 }
 
