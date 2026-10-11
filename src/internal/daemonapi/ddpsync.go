@@ -193,10 +193,29 @@ type ddpRun struct {
 func (b *ddpBoard) run(group string) *ddpRun {
 	r := b.runs[group]
 	if r == nil {
-		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}, noteTold: map[int]bool{}}
+		// seen from birth: a run first created by a rank going down (before
+		// any sync) would otherwise look ancient to sweep and lose its drops.
+		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}, noteTold: map[int]bool{}, seen: time.Now()}
 		b.runs[group] = r
 	}
 	return r
+}
+
+// liveIn counts the ranks in m the ring has not dropped. A dropped rank's
+// contribution stays in a round it reached before dying (reduce mode keeps
+// only the sum, and its batch is real data nobody else trains this epoch),
+// but it must not count toward closing the round: that would let a round
+// close on the dead rank alone and hand the live ranks a result without
+// their own gradients. Caller holds the board lock.
+func liveIn[V any](b *ddpBoard, group string, m map[int]V) int {
+	r := b.runs[group]
+	n := 0
+	for rank := range m {
+		if r == nil || !r.dropped[rank] {
+			n++
+		}
+	}
+	return n
 }
 
 func newDDPBoard() *ddpBoard {
@@ -493,7 +512,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				e.seen[req.Rank] = true
 			}
 		}
-		complete = e.err != nil || len(e.seen) >= e.expectedCount()
+		complete = e.err != nil || liveIn(s.ddp, req.Group, e.seen) >= e.expectedCount()
 		if complete && e.err == nil && e.result == nil {
 			e.result, e.resultScales, e.err = e.acc.meanSegmented()
 			if len(e.resultScales) > 0 {
@@ -503,7 +522,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		e.blobs[req.Rank] = blob
-		complete = len(e.blobs) >= e.expectedCount()
+		complete = liveIn(s.ddp, req.Group, e.blobs) >= e.expectedCount()
 	}
 	if complete {
 		select {

@@ -107,13 +107,13 @@ func (s *Server) markRankDown(group string, rank, world int, why string) int {
 		expected := max(1, e.world-b.dropsBelow(group, e.world))
 		e.expected = expected
 		switch {
-		case e.acc != nil && e.acc.count > 0 && len(e.seen) >= expected:
+		case e.acc != nil && e.acc.count > 0 && liveIn(b, group, e.seen) >= expected:
 			e.result, e.resultScales, e.err = e.acc.meanSegmented()
 			if len(e.resultScales) > 0 {
 				e.resultScale = e.resultScales[0]
 			}
 			e.acc = nil
-		case e.acc == nil && len(e.blobs) > 0 && len(e.blobs) >= expected:
+		case e.acc == nil && liveIn(b, group, e.blobs) >= expected:
 		default:
 			continue
 		}
