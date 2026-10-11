@@ -364,8 +364,8 @@ var importSeam []string
 //
 // One case this cannot cover: a multi-user nix-daemon ignores trusted-key
 // settings from a user it does not list in trusted-users, so there the keys
-// must be in nix.conf (`pipedpeer setup`, as root) and a key learned later
-// needs setup again. The refusal says so.
+// must be in nix.conf and a key learned later needs `pipedpeer trust`
+// (setup's trust step, as root). The refusal says so.
 func Import(ctx context.Context, cacheDir string, roots []string) error {
 	if len(roots) == 0 {
 		return fmt.Errorf("nothing to import")
@@ -422,7 +422,7 @@ func importError(err error, out, keys string) error {
 			msg += fmt.Sprintf(" (this node knows no cluster keys yet: %s is empty or missing; it fills once the daemon has polled its peers)",
 				nixsign.TrustedKeysFile())
 		} else {
-			msg += " (the sender's key is not among this node's cluster keys, or this nix is a multi-user daemon that ignores keys from untrusted users: run `pipedpeer setup` here as an admin)"
+			msg += " (the sender's key is not among this node's cluster keys yet, or this nix is a multi-user daemon that ignores keys from untrusted users: run `pipedpeer trust` on the receiving machine)"
 		}
 	}
 	return fmt.Errorf("nix copy from a peer's closure: %v: %s", err, msg)

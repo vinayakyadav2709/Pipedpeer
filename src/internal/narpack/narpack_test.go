@@ -318,7 +318,7 @@ func TestARefusedImportSaysWhyInOneLine(t *testing.T) {
 	if strings.Contains(msg, "copying path") {
 		t.Fatalf("progress lines buried the reason: %s", msg)
 	}
-	if !strings.Contains(msg, "lacks a signature by a trusted key") || !strings.Contains(msg, "pipedpeer setup") {
+	if !strings.Contains(msg, "lacks a signature by a trusted key") || !strings.Contains(msg, "pipedpeer trust") {
 		t.Fatalf("refusal lost its reason or its remedy: %s", msg)
 	}
 	if msg := importError(errors.New("exit status 1"), out, "").Error(); !strings.Contains(msg, "knows no cluster keys") {

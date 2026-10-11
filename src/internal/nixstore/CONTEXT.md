@@ -63,7 +63,7 @@ Pushing a closure to peers after an upload so pool spill can use them; only peer
 _Avoid_: broadcast (the function name, not the concept)
 
 **Trusted keys**:
-The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`); a multi-user nix-daemon ignores that from an untrusted user, so there setup writes them to nix.conf.
+The nix public keys of cluster nodes, each proved against the fingerprint it is published under, rewritten every poll. Each signed import hands them to nix on the command line (`extra-trusted-public-keys`); a multi-user nix-daemon ignores that from an untrusted user, so there setup writes them to nix.conf. Keys that arrive after setup need root again: `pipedpeer join` applies them when peers answer in time, `pipedpeer trust` applies them later, and the daemon warns once per untrusted key (`nixsign.SystemUntrusted`).
 
 ## Invariants
 
@@ -82,4 +82,4 @@ The nix public keys of cluster nodes, each proved against the fingerprint it is 
 - Submitter upload and diff: `daemonctl/execution.go` `UploadJob`, `daemonctl/closurediff.go` `seedClosure`.
 - Daemon store routes: `daemonapi/narcache.go` `handleStoreMissing`, `handleStoreCheck`, `handleStoreImport`, `importSignedClosure`; seeding `daemonapi/server.go` `broadcastClosure`, `importStoreOnPeer`; signed path `daemonapi/signedclosure.go` `signedClosureFor`.
 - Archives: `narpack/narpack.go` `Publish`, `Pack`, `Import`; pruning `narpack/prune.go` `Prune`; compression sniffing `tarcodec/`.
-- Signing and trust: `nixsign/nixsign.go` `SignPaths`, `WriteTrustedKeys`; `nixsign/collect.go` `Collect`; `daemonapi/server.go` `refreshTrustedKeys`; setup `setup/setup.go` `trustClusterKeys`.
+- Signing and trust: `nixsign/nixsign.go` `SignPaths`, `WriteTrustedKeys`; `nixsign/collect.go` `Collect`; `daemonapi/server.go` `refreshTrustedKeys`; setup `setup/setup.go` `trustClusterKeys`; the mode check `nixsign/system.go` `SystemUntrusted`.

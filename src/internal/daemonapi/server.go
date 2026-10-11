@@ -150,6 +150,11 @@ type Server struct {
 	selfSSH  string
 	selfPort int
 	selfCaps map[string]string
+
+	// Cluster keys already checked against system nix, so each untrusted
+	// one is warned about once (see warnUntrustedKeys).
+	trustMu      sync.Mutex
+	trustChecked map[string]bool
 }
 
 // healthResponse is the payload of GET /health. It carries the node's full
@@ -1670,6 +1675,46 @@ func (s *Server) refreshTrustedKeys() {
 	if err := nixsign.WriteTrustedKeys(trusted); err != nil {
 		log.Warn().Err(err).Msg("could not record the cluster's signing keys")
 	}
+	s.warnUntrustedKeys(trusted)
+}
+
+// systemUntrusted is nixsign.SystemUntrusted, replaced in tests.
+var systemUntrusted = nixsign.SystemUntrusted
+
+// warnUntrustedKeys logs, once per key, a cluster key that system nix will
+// refuse: a multi-user nix-daemon ignores the keys narpack.Import passes, so
+// closures signed by it fail here until nix.conf lists it. The daemon cannot
+// fix that itself (it needs sudo), so it names the command that does. Only
+// keys not seen before are checked, so a steady cluster runs no nix command
+// per poll. Returns the keys it warned about.
+func (s *Server) warnUntrustedKeys(keys []string) []string {
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	if s.trustChecked == nil {
+		s.trustChecked = map[string]bool{}
+	}
+	var fresh []string
+	for _, k := range keys {
+		if !s.trustChecked[k] {
+			fresh = append(fresh, k)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	missing, _, err := systemUntrusted(fresh)
+	if err != nil {
+		log.Warn().Err(err).Int("keys", len(fresh)).
+			Msg("could not check which cluster keys system nix trusts; peer closures may be refused here (fix: pipedpeer trust)")
+	}
+	for _, k := range fresh {
+		s.trustChecked[k] = true
+	}
+	for _, k := range missing {
+		log.Warn().Str("key", k).
+			Msg("system nix does not trust this cluster key, so closures it signed are refused here; run `pipedpeer trust` on this machine")
+	}
+	return missing
 }
 
 // staleNodeTTL is how long a discovered node may go unseen before it is

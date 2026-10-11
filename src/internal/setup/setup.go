@@ -1,12 +1,14 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
@@ -113,15 +115,72 @@ func createNixStore() error {
 	return nil
 }
 
-// multiUserNix reports whether nix builds go through a root nix-daemon
-// (Determinate installer, distro multi-user setups). Single-user installs DO
-// check closure signatures, but nix takes the cluster's keys from the import
-// command there (narpack.Import passes extra-trusted-public-keys from the
-// daemon's trusted-keys file), so they need no nix.conf edit. A multi-user
-// daemon ignores that option from an untrusted user, hence this check.
-func multiUserNix() bool {
-	out, err := exec.Command("systemctl", "is-active", "nix-daemon").Output()
-	return err == nil && strings.TrimSpace(string(out)) == "active"
+// trustStep is what trusting the cluster's keys needs on this machine.
+type trustStep int
+
+const (
+	trustNotNeeded trustStep = iota // nix takes the keys with each import, or checks no signatures
+	trustDone                       // nix.conf already lists every cluster key
+	trustNoKeys                     // nix.conf decides, and the daemon has recorded no keys yet
+	trustApply                      // nix.conf decides, and lacks some keys
+)
+
+// Seams for tests: what system nix trusts, and the one command run as root.
+var (
+	systemUntrusted = nixsign.SystemUntrusted
+	runAsRoot       = func(script string) error {
+		argv := []string{"sh", "-c", script}
+		if os.Geteuid() != 0 {
+			argv = append([]string{"sudo"}, argv...)
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		return cmd.Run()
+	}
+	trustPollEvery = 2 * time.Second
+)
+
+// errNoKeysYet: nix.conf decides here, but there is nothing to put in it yet.
+var errNoKeysYet = errors.New("no cluster keys known yet")
+
+func noKeysYet() error {
+	return fmt.Errorf("%w (%s is empty); start the daemon and, once the other "+
+		"machines have joined, run `pipedpeer trust`", errNoKeysYet, nixsign.TrustedKeysFile())
+}
+
+// clusterKeys are the keys the daemon collected from token-proven peers
+// (plus its own), rewritten every poll.
+func clusterKeys() ([]string, error) {
+	body, err := os.ReadFile(nixsign.TrustedKeysFile())
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	return strings.Fields(string(body)), nil
+}
+
+// decideTrust says what system nix needs for keys.
+//
+// A private store and a single-user nix take the keys from each import
+// (narpack.Import passes extra-trusted-public-keys), and a machine still
+// carrying require-sigs = false accepts anything - left alone, because turning
+// the check back on is the machine owner's decision. Only a multi-user
+// nix-daemon, which ignores per-command keys from untrusted users, needs them
+// in nix.conf.
+func decideTrust(keys []string) (trustStep, []string, error) {
+	missing, applies, err := systemUntrusted(keys)
+	switch {
+	case err != nil:
+		return trustApply, nil, fmt.Errorf("reading what nix trusts: %w", err)
+	case !applies:
+		return trustNotNeeded, nil, nil
+	case len(keys) == 0:
+		return trustNoKeys, nil, nil
+	case len(missing) == 0:
+		return trustDone, nil, nil
+	}
+	return trustApply, missing, nil
 }
 
 // acceptsPeerClosures reports whether this node can import a peer's closure.
@@ -132,91 +191,122 @@ func multiUserNix() bool {
 // travel in a form that keeps the signature, so what a machine needs is to
 // trust this cluster's keys.
 func acceptsPeerClosures() bool {
-	// A private store has no nix-daemon in front of it, so there is no
-	// signature policy to repair and nothing to edit as root.
-	if nixstore.Private() {
-		return true
-	}
-	if !multiUserNix() {
-		// Trust is supplied per import; see multiUserNix.
-		return true
-	}
-	nixPath, err := nixstore.SystemNix()
+	keys, err := clusterKeys()
 	if err != nil {
+		fmt.Printf("    could not read %s: %v\n", nixsign.TrustedKeysFile(), err)
 		return false
 	}
-	// Either answer is acceptable, and they mean different things.
-	//
-	// require-sigs off: an older machine still carrying the blanket
-	// workaround. It works, and setup no longer creates that state - it is
-	// left alone rather than "repaired", because turning the check back on
-	// is a decision about the whole machine and belongs to whoever owns it.
-	//
-	// require-sigs on AND this cluster's keys trusted: the machine checks
-	// every signature and accepts ours. That is the state worth having, and
-	// the one setup now produces.
-	out, err := exec.Command(nixPath, "config", "show", "require-sigs").Output()
-	if err == nil && strings.TrimSpace(string(out)) == "false" {
-		return true
+	step, _, err := decideTrust(keys)
+	if err != nil {
+		fmt.Printf("    %v\n", err)
+		return false
 	}
-	return clusterKeysAreTrusted(nixPath)
+	return step == trustNotNeeded || step == trustDone
 }
 
-// clusterKeysAreTrusted reports whether nix already accepts what this
-// cluster signs with.
-func clusterKeysAreTrusted(nixPath string) bool {
-	want, err := os.ReadFile(nixsign.TrustedKeysFile())
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(want))
-	if len(fields) == 0 {
-		return false
-	}
-	out, err := exec.Command(nixPath, "config", "show", "trusted-public-keys").Output()
-	if err != nil {
-		return false
-	}
-	for _, k := range fields {
-		if !strings.Contains(string(out), k) {
-			return false
-		}
-	}
-	return true
-}
-
+// trustClusterKeys is setup's nix-imports step.
 func trustClusterKeys() error {
-	// Trust this cluster's keys. Do not switch the check off.
-	//
-	// The old repair appended `require-sigs = false`, which stops nix
-	// verifying signatures for EVERYTHING on the machine - every channel,
-	// every substituter, every user - so that pipedpeer could import one
-	// unsigned peer closure. That is a system-wide reduction bought for one
-	// program's convenience, and it outlives the program.
-	//
-	// It was necessary for a while, and the reason is worth remembering:
-	// `nix-store --export`, which every transfer used, does not serialise
-	// signatures, so a correctly signed closure was refused anyway. Closures
-	// now travel as a small binary cache, where the signature is part of each
-	// path's metadata and survives the journey - measured between two
-	// machines, with the receiving one importing under require-sigs = true
-	// and refusing the same closure when the sending node's key was taken out
-	// of its trust list.
-	//
-	// So this writes one line: these specific keys are trusted, and
-	// everything else is refused exactly as strictly as before.
-	fmt.Println("    → Trusting this cluster's signing keys...")
-
-	keys, err := os.ReadFile(nixsign.TrustedKeysFile())
-	trusted := strings.TrimSpace(string(keys))
-	if err != nil || trusted == "" {
-		// Nothing to trust yet: the daemon writes this file once it knows
-		// its peers. Saying so is better than editing the machine's nix
-		// configuration to no effect.
-		return fmt.Errorf("no cluster keys known yet (%s is empty); "+
-			"start the daemon so it learns its peers, then re-run setup",
-			nixsign.TrustedKeysFile())
+	keys, err := clusterKeys()
+	if err != nil {
+		return err
 	}
+	step, missing, err := decideTrust(keys)
+	switch {
+	case err != nil:
+		return err
+	case step == trustNoKeys:
+		// Editing nix.conf to no effect would read as if the cluster were
+		// trusted. Saying what is missing is the useful answer.
+		return noKeysYet()
+	case step == trustApply:
+		return applyTrust(missing)
+	}
+	return nil
+}
+
+// Trust makes system nix accept the cluster's keys if it must be told, and
+// says in one line what it did. It is `pipedpeer trust`.
+func Trust() (string, error) {
+	keys, err := clusterKeys()
+	if err != nil {
+		return "", err
+	}
+	step, missing, err := decideTrust(keys)
+	switch {
+	case err != nil:
+		return "", err
+	case step == trustNotNeeded:
+		return "nothing to do: this nix takes the cluster's keys with each import " +
+			"(private store, single-user nix, or signature checking off)", nil
+	case step == trustDone:
+		return fmt.Sprintf("nothing to do: system nix already trusts all %d cluster key(s)", len(keys)), nil
+	case step == trustNoKeys:
+		return "", noKeysYet()
+	}
+	if err := applyTrust(missing); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("system nix now trusts %d more cluster key(s)", len(missing)), nil
+}
+
+// TrustAfterJoin is join's last step. On a multi-user nix the keys of the
+// peers just met must be in nix.conf before their closures import here, so it
+// waits up to wait for a peer's key to be recorded and then applies trust
+// (one sudo prompt). With no peer key by then it says what to run later.
+func TrustAfterJoin(wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		keys, err := clusterKeys()
+		if err != nil {
+			return err
+		}
+		step, missing, err := decideTrust(keys)
+		if err != nil {
+			return err
+		}
+		if step == trustNotNeeded {
+			return nil
+		}
+		// The file always holds this node's own key, so a peer's makes two.
+		if len(keys) > 1 {
+			if step != trustApply {
+				return nil
+			}
+			fmt.Println("this machine's nix accepts only the signing keys listed in nix.conf; adding the cluster's (sudo):")
+			return applyTrust(missing)
+		}
+		if !time.Now().Before(deadline) {
+			fmt.Println("this machine's nix accepts only the signing keys listed in nix.conf, and no peer's key is known yet:\n" +
+				"run `pipedpeer trust` here once the other machines have joined")
+			return nil
+		}
+		time.Sleep(trustPollEvery)
+	}
+}
+
+// applyTrust appends keys to nix.conf as root and restarts nix-daemon.
+//
+// Trust this cluster's keys. Do not switch the check off.
+//
+// The old repair appended `require-sigs = false`, which stops nix verifying
+// signatures for EVERYTHING on the machine - every channel, every
+// substituter, every user - so that pipedpeer could import one unsigned peer
+// closure. That is a system-wide reduction bought for one program's
+// convenience, and it outlives the program.
+//
+// It was necessary for a while, and the reason is worth remembering:
+// `nix-store --export`, which every transfer used, does not serialise
+// signatures, so a correctly signed closure was refused anyway. Closures now
+// travel as a small binary cache, where the signature is part of each path's
+// metadata and survives the journey - measured between two machines, with the
+// receiving one importing under require-sigs = true and refusing the same
+// closure when the sending node's key was taken out of its trust list.
+//
+// So this writes one line: these specific keys are trusted, and everything
+// else is refused exactly as strictly as before. Only keys nix lacks are
+// written, so re-running it does not grow the file.
+func applyTrust(keys []string) error {
+	fmt.Println("    → Trusting this cluster's signing keys...")
 
 	// Determinate marks /etc/nix/nix.conf "do not modify" and includes
 	// nix.custom.conf for local changes; plain multi-user installs edit
@@ -229,16 +319,7 @@ func trustClusterKeys() error {
 	fmt.Printf("      Adding extra-trusted-public-keys to %s.\n", target)
 	fmt.Println("      Signature checking stays ON for everything else.")
 
-	script := nixConfigRepair(trusted, target)
-	argv := []string{"sh", "-c", script}
-	if os.Geteuid() != 0 {
-		argv = append([]string{"sudo"}, argv...)
-	}
-	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Run(); err != nil {
+	if err := runAsRoot(nixConfigRepair(strings.Join(keys, " "), target)); err != nil {
 		return fmt.Errorf("could not update %s: %w", target, err)
 	}
 	return nil
@@ -422,7 +503,12 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 			}
 
 			for _, p := range toInstall {
-				if err := p.install(); err != nil {
+				if err := p.install(); errors.Is(err, errNoKeysYet) {
+					// Not fatal: the daemon this run starts is what learns
+					// the keys. `pipedpeer join` and `pipedpeer trust` finish it.
+					fmt.Printf("    %-12s -  %v\n", p.name, err)
+					continue
+				} else if err != nil {
 					return 0, fmt.Errorf("install %s failed: %w", p.name, err)
 				}
 				fmt.Printf("    %-12s ✓  installed\n", p.name)
