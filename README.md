@@ -39,6 +39,9 @@ When you submit a job:
 
 If a node dies mid-job, its lease expires and the job is placed somewhere else.
 
+Some limits are by design (one introducer, no relay): see
+[docs/known-issues.md](docs/known-issues.md#limitations-by-design).
+
 ## Transparent cluster acceleration
 
 `pipedpeer run` embeds a shim that routes your parallel primitives
@@ -108,6 +111,24 @@ remembered so later starts need no arguments:
 pipedpeer rendezvous               # on any machine with a public IP
 pipedpeer join <that-machines-ip>  # on each of the others
 ```
+
+### Run the introducer on a VPS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | sudo PIPEDPEER_INSTALL_DIR=/usr/local/bin bash
+sudo cp scripts/systemd/pipedpeer-rendezvous.service /etc/systemd/system/
+sudo systemctl enable --now pipedpeer-rendezvous
+journalctl -u pipedpeer-rendezvous -f
+```
+
+| Port | Needed for |
+|---|---|
+| 38445/udp | The address book. Required: peers `join` through it |
+| 38443-38444/udp | `pipedpeer net-check` reflectors |
+| 38446/udp | Only the `relay-test` / `relay-connect` diagnostics (daemons never relay) |
+
+Open UDP 38443-38446 in the cloud firewall, as in
+[pipedpeer-demo/DEMO.md](pipedpeer-demo/DEMO.md).
 
 For a full walkthrough on three machines across three networks, including what
 to watch while it runs, see **[pipedpeer-demo/DEMO.md](pipedpeer-demo/DEMO.md)**.
