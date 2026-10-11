@@ -25,6 +25,9 @@ func TestParseEventLine(t *testing.T) {
 		{`{"level":"info","message":"system nix now trusts these cluster keys"}`, "trust", "system nix now trusts these cluster keys", false},
 		{"2026/10/11 20:47:02 [pool] chunk: 40 items -> 3 part(s), 2 remote, 1 local", "pool", "chunk: 40 items -> 3 part(s), 2 remote, 1 local", false},
 		{"8:47PM INF daemon starting component=daemon max_concurrent=0 node_id=652290ff port=38080", "start", "daemon starting (port 38080)", false},
+		{`22:28:00 INF peer has no direct path; not offering it work component=daemon peer=56acaf8942e73a3e reason="no answer from any address"`, "nopath", "56acaf8942e73a3e has no direct path (no answer from any address); not offering it work", false},
+		{"2026/10/12 03:45:45 [pool] received pool/map from 127.0.0.1:34750: items=60 b64=false cache_keys=0 required_mem=6713398886 forwarded=\"\"", "pool", "received pool/map: 60 items", false},
+		{"22:28:00 INF internet: peer 1777eb7a reachable at 127.0.0.1:35247 (punched-in) component=daemon", "link", "1777eb7a reachable (punched-in)", false},
 		{`{"level":"warn","message":"withholding the cluster token"}`, "warn", "withholding the cluster token", true},
 	}
 	for _, c := range cases {
@@ -50,5 +53,15 @@ func TestCollapseAndNames(t *testing.T) {
 	}
 	if s := (clusterEvent{Kind: "join", Text: "t"}).String(); s != "          JOIN   t" {
 		t.Fatalf("string: %q", s)
+	}
+}
+
+func TestFingerprintNamedViaForwarderAddr(t *testing.T) {
+	names := map[string]string{"127.0.0.1:35247": "pc2"}
+	e, _ := parseEventLine("22:28:00 INF internet: peer 1777eb7a reachable at 127.0.0.1:35247 (punched-in) component=daemon")
+	e.learn(names)
+	left := clusterEvent{Kind: "leave", Text: "1777eb7afcac95a8 left"}.withNames(names)
+	if left.Text != "pc2 left" {
+		t.Fatalf("got %q", left.Text)
 	}
 }
