@@ -43,7 +43,6 @@ func (e clusterEvent) String() string {
 var (
 	ansiRe      = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	stdlibRe    = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) (.*)$`)
-	kvRe        = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*=`)
 	reachableRe = regexp.MustCompile(`^internet: peer (\S+) reachable at (\S+) \((.*)\)$`)
 	// kvPairRe is one zerolog console field; values with spaces are quoted.
 	kvPairRe   = regexp.MustCompile(`(?:^|\s)([A-Za-z_][A-Za-z0-9_.]*)=("(?:[^"\\]|\\.)*"|\S*)`)
