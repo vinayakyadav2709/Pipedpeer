@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -47,6 +48,16 @@ type firewallStatus struct {
 // firewallCmd runs a command, as a variable so tests can drive the logic
 // without a firewall.
 var firewallCmd = func(ctx context.Context, name string, args ...string) (string, error) {
+	// Run what lookPath found: ufw lives in /usr/sbin, which is not on a
+	// Debian user's PATH, so the bare name fails exactly where lookPath's
+	// fallback succeeded. Under sudo the tool is the first argument.
+	if name == "sudo" && len(args) > 0 {
+		if p, err := lookPath(args[0]); err == nil {
+			args = append([]string{p}, args[1:]...)
+		}
+	} else if p, err := lookPath(name); err == nil {
+		name = p
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -69,8 +80,27 @@ func runRoot(ctx context.Context, name string, args ...string) (string, error) {
 	return firewallCmd(ctx, n, a...)
 }
 
-// lookPath is exec.LookPath, as a variable for the same reason.
-var lookPath = exec.LookPath
+// lookPath is lookTool, as a variable for the same reason.
+var lookPath = lookTool
+
+// sbinDirs are where firewall tools live when PATH leaves them out: a Debian
+// or Ubuntu user's PATH has no /usr/sbin, so ufw was "not installed" while it
+// was active and setup reported no firewall running (V2 evidence 51).
+var sbinDirs = []string{"/usr/sbin", "/sbin"}
+
+// lookTool is exec.LookPath with a fallback to sbinDirs.
+func lookTool(name string) (string, error) {
+	p, err := exec.LookPath(name)
+	if err == nil {
+		return p, nil
+	}
+	for _, dir := range sbinDirs {
+		if p, serr := exec.LookPath(filepath.Join(dir, name)); serr == nil {
+			return p, nil
+		}
+	}
+	return "", err
+}
 
 // openFirewall allows the direct port on whichever host firewall is running.
 //

@@ -3,6 +3,8 @@ package setup
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -296,5 +298,27 @@ func TestEveryDaemonPortIsOpened(t *testing.T) {
 	}
 	if u.didRun("ufw allow 38447/udp") {
 		t.Error("ufw: an already-allowed rule was added again")
+	}
+}
+
+// TestUFWOutsidePATHIsFound. A Debian user's PATH has no /usr/sbin, where ufw
+// lives; looking it up on PATH alone reported "none running" while ufw was
+// active (V2 evidence 51).
+func TestUFWOutsidePATHIsFound(t *testing.T) {
+	sbin := t.TempDir()
+	tool := filepath.Join(sbin, "ufw")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	old := sbinDirs
+	sbinDirs = []string{filepath.Join(sbin, "absent"), sbin}
+	t.Cleanup(func() { sbinDirs = old })
+
+	if got, err := lookTool("ufw"); err != nil || got != tool {
+		t.Errorf("lookTool(ufw) = %q, %v; want %q", got, err, tool)
+	}
+	if _, err := lookTool("firewall-cmd"); err == nil {
+		t.Error("found a tool that is in neither PATH nor sbin")
 	}
 }
