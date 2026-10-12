@@ -329,7 +329,9 @@ func newJoinCmd() *cobra.Command {
 			// or with a different one, so it is in the wrong cluster or in
 			// none. Restarting is what makes the join take effect, and doing
 			// it here is better than printing an instruction to do it.
+			maxConc := 0
 			if daemonctl.Status().Running {
+				maxConc = daemonctl.RunningMaxConcurrent(38080)
 				fmt.Println("restarting the daemon to join through " + addr)
 				if err := daemonctl.Stop(); err != nil {
 					return err
@@ -338,7 +340,7 @@ func newJoinCmd() *cobra.Command {
 				fmt.Println("joining through " + addr)
 			}
 			os.Setenv(clustercfg.EnvVar, addr)
-			if err := daemonctl.Start(nodeID.NodeID, 38080, 0); err != nil {
+			if err := daemonctl.Start(nodeID.NodeID, 38080, maxConc); err != nil {
 				return err
 			}
 			fmt.Printf("this node is %s\n", nodeID.ShortID())
