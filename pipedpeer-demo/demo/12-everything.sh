@@ -18,6 +18,11 @@ note "Pool, a lambda Pool, sklearn, numpy, pandas, torch - one plain file."
 pause
 # Straight to the terminal: the tqdm bar redraws in place.
 show "$PIPE" run 07_everything.py
+rc=$?
 echo
+if [[ $rc -ne 0 ]]; then
+	echo "${R}  the run failed (exit $rc): read the Error line above${N}" >&2
+	exit "$rc"
+fi
 note "'section <name> <s>' lines: the script's own timing per part."
 note "Summary 'spread': which machines took the Pool items."
