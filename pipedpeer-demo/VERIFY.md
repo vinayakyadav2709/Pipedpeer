@@ -1139,7 +1139,7 @@ distinct words: 133  total words: 400000000
 **Still not run in any rehearsal:** the friend's real 2-GPU ring to the end
 (check 7c). V3 ran `prep-0-install.sh`, `setup-machine.sh`, `prep-1-check.sh`,
 `prep-2-rehearse.sh` and `prep-3-gpu.sh` (see SETUP.md), `pipedpeer dashboard`
-(check 5) and Ctrl+Z on `07_everything.py` (DEMO-SCRIPT.md step 11a).
+(check 5) and Ctrl+Z on `07_everything.py` (DEMO-SCRIPT.md backup B1).
 
 **V1 failed these; V2 passed them:**
 - `02_numpy_heavy.py` was killed at the 600M default memory cap. In V2 it ran

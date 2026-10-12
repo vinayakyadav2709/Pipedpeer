@@ -14,8 +14,9 @@ evidence files are in `~/Downloads/pipedpeer-work/evidence/v1/`.
 from rehearsal pass 2 (same lab, evidence in
 `~/Downloads/pipedpeer-work/evidence/v2/`). `<!-- V3 9949ad0: <file> -->`
 marks output from the final re-check (same lab, evidence in
-`~/Downloads/pipedpeer-work/evidence/v3/`). `<!-- V4 c567369: <file> -->` marks an
-expected line: a fix made after V3 changes it. `…` marks lines cut from an
+`~/Downloads/pipedpeer-work/evidence/v3/`). `<!-- V4 c567369: <file> -->` marks
+real output from the V4 re-check, run after the fixes made since V3 (evidence
+in `~/Downloads/pipedpeer-work/evidence/v4/`). `…` marks lines cut from an
 excerpt. In the excerpts, `yeet` is the
 rehearsal laptop (LAPTOP-A), and pc1–pc4 are the containers that stood in for
 the PCs.
@@ -33,8 +34,8 @@ the PCs.
   there (V3 ran prep-3 inside `nix shell …#python3`). The venue machines have
   it.
 - **Memory.** The containers had about 1.2 GB each. `07_everything.py` needs
-  about 3.1 GiB on the machine that runs it, so step 9 could not run on a lab
-  "PC" itself (see step 9).
+  about 3.1 GiB on the machine that runs it, so step 6 could not run on a lab
+  "PC" itself (see step 6).
 
 ---
 
@@ -42,10 +43,10 @@ the PCs.
 
 | Name | What | Role on the day |
 |---|---|---|
-| **LAPTOP-A** | Your Fedora laptop, NVIDIA GPU, ethernet if possible | runs `pipedpeer rendezvous`, shows `pipedpeer dashboard`, does steps 2, 4, 10, 11c, 12 |
-| **LAPTOP-B** | Teammate's Fedora laptop, NVIDIA GPU | shows `pipedpeer events -f`, does steps 7 and 11a, and is the second GPU |
-| **PC-1, PC-2** | College Ubuntu PCs, no GPU | do steps 3, 5, 6 and 9 (a PC sending GPU work is the point) |
-| **PC-3** | College Ubuntu PC | **left unjoined at prep**, joins live in step 1, gets stopped in step 10 |
+| **LAPTOP-A** | Your Fedora laptop, NVIDIA GPU, ethernet if possible | runs `pipedpeer rendezvous`, shows `pipedpeer dashboard`, does steps 2, 3, 8 and 9 (backup B3, B5, B7) |
+| **LAPTOP-B** | Teammate's Fedora laptop, NVIDIA GPU | shows `pipedpeer events -f`, is the second GPU in step 5 (backup B1, B6) |
+| **PC-1, PC-2** | College Ubuntu PCs, no GPU | do steps 4, 5, 6 and 7's dry run, and the end of 9 (a PC sending GPU work is the point; backup B2) |
+| **PC-3** | College Ubuntu PC | **left unjoined at prep**, joins live in step 1, gets stopped in step 8 |
 
 There is no projector. The graders look at laptop screens, so before you start:
 
@@ -58,7 +59,7 @@ There is no projector. The graders look at laptop screens, so before you start:
 |---|---|---|
 | LAPTOP-A, second terminal | `pipedpeer dashboard` | the whole demo |
 | LAPTOP-B, second terminal | `pipedpeer events -f` | the whole demo |
-| LAPTOP-A and LAPTOP-B, during step 6 | `watch -n1 nvidia-smi` | step 6 only |
+| LAPTOP-A and LAPTOP-B, during step 5 | `watch -n1 nvidia-smi` | step 5 only |
 | optional: a browser on LAPTOP-A | `pipedpeer ui --print`, then open the address it prints | if it reads better than the dashboard. V2 loaded it at 1366×768 with no console errors: tiles "Nodes healthy 5 of 5 · Cores 79 · GPU nodes 1", a node table, recent runs <!-- V2 31b5364: 68-ui-text.txt --> |
 
 The demo scripts in `demo/` stop at `[enter to continue]` so you can talk. The
@@ -118,7 +119,7 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 - **T−10 min:** open the two screens above and run `./demo/1-cluster.sh` once.
   Close anything that uses the network heavily (cloud sync, updates).
 - **Be honest about cold and warm.** Prep built and shipped everything, so on
-  stage nothing waits for a Nix build. Step 5 shows the first-run cost on
+  stage nothing waits for a Nix build. Step 4 shows the first-run cost on
   purpose.
 
 ---
@@ -130,27 +131,31 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 | 0 | the problem (talk) | — | 1 min | — |
 | 1 | live join | PC-3 | 1.8 s (V2), 5.2 s (V1) | same |
 | 2 | the cluster | LAPTOP-A | instant | — |
-| 3 | dry run (`--check-only`) | PC-1 | 0.8 s | 42 s for a new environment on an empty store |
-| 4 | headline: python3 vs pipedpeer | LAPTOP-A | 27 s (9.5 s python3 + 17.0 s pipedpeer) | — (prep builds it) |
-| 5 | cold vs cached | PC-2 | 4.8 s | 20.5 s send only; 169 s with build, empty store, 0.5 % loss (V1) |
-| 6 | GPU from a PC with no GPU | PC-1 | 7.6 s (`--remote`); 7.0 s (`--gpu force` alone, V3); `--ddp 2` 9.5 s | 1150–1261 s CUDA build, 635 s first `--ddp 2` ship: prep only |
-| 7 | pandas out-of-core (optional) | LAPTOP-B | 12.8 s | 34.0 s (first run after prep) |
-| 8 | the teacher's own script | any | 20–70 s for the students/ scripts | 39–54 s check without the common prep (V1) |
-| 9 | everything in one script | PC-2 (`--remote` on a small PC) | 26.7 s (V3, `--remote` from pc3) | 664.6 s (637.7 s build, V3); 700.6 s (V2): prep only |
-| 10 | failover: stop a PC mid-job | LAPTOP-A + PC-3 | 16.7 s (V2), 19.5 s (V1) | — |
-| 11a | Ctrl+Z, then `attach` | LAPTOP-B | job length + about 1 s | — |
-| 11b | the sender loses its network | PC-1 | job length; result back 1–15 s after reconnecting | — |
-| 11c | Ctrl+C stops everything | LAPTOP-A | about 10 s (8.6 s in V3) | — |
-| 12 | finale: every script at once | LAPTOP-A | 412.0 s in the containers (8 of 8 ok in V3; 534 s, 6 of 8 in V2) | — |
-| 13 | receipts | LAPTOP-A, then PC-2 | instant | — |
-| 14 | capstone (optional) | LAPTOP-A | 288 s | — |
+| 3 | headline: python3 vs pipedpeer | LAPTOP-A | 27 s (9.5 s python3 + 17.0 s pipedpeer) | — (prep builds it) |
+| 4 | cold vs cached | PC-2 | 4.8 s | 20.5 s send only; 169 s with build, empty store, 0.5 % loss (V1) |
+| 5 | GPU from a PC with no GPU | PC-1 | 7.6 s (`--remote`); 7.0 s (`--gpu force` alone, V3); `--ddp 2` 9.5 s | 1150–1261 s CUDA build, 635 s first `--ddp 2` ship: prep only |
+| 6 | everything in one script | PC-2 (`--remote` on a small PC) | 26.7 s (V3, `--remote` from pc3) | 664.6 s (637.7 s build, V3); 700.6 s (V2): prep only |
+| 7 | the teacher's own script: dry run, then their script | PC-1, then any | dry run 0.8 s; their script 19.6–69.5 s (second run, `students/` scripts, V2) | dry run 42 s on an empty store; their script 35.3–125.7 s on the first run after the common prep, of which the environment build is 0.4–7.1 s (V2) |
+| 8 | failover: stop a PC mid-job | LAPTOP-A + PC-3 | 16.7 s (V2), 19.5 s (V1) | — |
+| 9 | receipts | LAPTOP-A, then PC-2 | instant | — |
+
+**Total:** about 3 min of machine time with everything cached; with the
+talking, about 15 min. Plan for 15–20 min. **Shortest cut:** 1 join,
+3 headline, 5 GPU, 7 teacher, 8 failover.
+
+A script that imports packages outside the common set (numpy, pandas,
+scikit-learn, scipy, matplotlib, seaborn, tqdm, torch) builds its environment
+on its first run: tens of seconds to minutes. Talk through "how it works"
+(below) while it builds.
 
 The order follows what impresses most (DECIDED): (a) an unchanged script
 running across the room is the headline, (b) failover is the cherry on top,
 (c) the teacher's script shows it doesn't fall apart. If time is short, drop
-7, 14 and 11b first. Steps 1, 4, 6, 8 and 10 carry the argument.
+4, 6 and 9 first; steps 1, 3, 5, 7 and 8 carry the argument. Everything under
+"Backup" below is shown only if asked.
 
 ---
+
 
 ### 0 — The problem (talk)
 
@@ -266,41 +271,9 @@ scheduler weighs. PATH `lan` means a direct link; no VPN, no cluster manager."
 - **`unreachable` rows:** these are old identities of machines that were reset.
   Say "old entries" and move on.
 - **The GPU column shows `-` on a laptop:** run `nvidia-smi` there. If that
-  fails, the driver is broken and step 6 runs on the other laptop.
+  fails, the driver is broken and step 5 runs on the other laptop.
 
-### 3 — Dry run · PC-1 · `pipedpeer run 00_pool.py --remote --check-only`
-
-**Screen** (<!-- V1 8e14b9b: 12-checkonly-pc4-00pool.txt, run on the Ubuntu stand-in; V2 did not rerun this command, but its check-only runs in step 8 print the same layout: 100-c-teacher-cached-primes.txt -->):
-```
-CHECK 00_pool.py — nothing will run
-  imports      standard library only
-  spreads      multiprocessing.Pool (line 33)
-               split decided at run time by measured cost
-  memory       ~512 MiB (tier=import)
-  gpu          not used
-  placement    yeet (score=0.772, source=manual)
-  environment  building (first build of a new env takes minutes)
-…
-  environment  built in 0.7 s
-  store        /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
-  closure      already on yeet (26 paths)
-checks complete
-```
-
-**Say:** "Before it runs anything, it says what it will do: what the script
-imports, what it can spread, where it would go, and whether that machine
-already has the environment."
-
-**Time:** 0.8 s with the environment cached. On an empty store, the first
-build of this environment took 42.4 s (step 5's run on a fresh pc3).
-
-**Watch out for:**
-- **`warning: ignoring the client-specified setting 'build-users-group'`
-  lines:** a multi-user Nix prints these. They are harmless.
-- **`not packaged X`:** expected only for unusual imports; see step 8.
-- **No placement / "no eligible node":** check the step 2 table.
-
-### 4 — Headline · LAPTOP-A · `./demo/2-headline.sh`
+### 3 — Headline · LAPTOP-A · `./demo/2-headline.sh`
 
 The script shows the file, runs it with plain `python3`, then runs the same
 file with `pipedpeer run`.
@@ -362,7 +335,7 @@ from the lab visit.
 - **Two `using N workers, not the 16 requested` lines:** the shim sized the
   local pool. This is normal.
 
-### 5 — Cold vs cached · PC-2 · `./demo/2b-cold.sh`
+### 4 — Cold vs cached · PC-2 · `./demo/2b-cold.sh`
 
 **Screen** (<!-- V1 8e14b9b: 14-pc3-truecold-2b.txt, empty store, 0.5 % loss -->):
 ```
@@ -418,7 +391,7 @@ run fails.
 - **`--cold` resends the environment but does not undo this machine's build**
   (DECIDED). A truly first run also builds; quote the 42 s.
 
-### 6 — GPU from a PC with no GPU · PC-1 · `./demo/7-gpu.sh`
+### 5 — GPU from a PC with no GPU · PC-1 · `./demo/7-gpu.sh`
 
 Before you start: run `watch -n1 nvidia-smi` on LAPTOP-A and LAPTOP-B, and
 turn those screens round.
@@ -541,149 +514,8 @@ fixed that: V3 took 7.0 s, `ran on  yeet (192.168.0.200)`
 - **`7-gpu.sh` prints `No GPU machine among the peers - skipping`** while a
   GPU laptop is healthy: check `python3` exists on this PC (the script uses
   it to count nodes), then type the command by hand.
-- **Showing a machine dying on purpose:** stop the daemon on a machine that is
-  NOT the one in the `rank 0:` line. Rank 0 is the lead: it is the fastest GPU
-  machine, not necessarily the one you typed the command on.
-- **A GPU rank dies mid-run (`--ddp 2`):** the run prints
-  `[ddp] rank 1 on gpu1 died; continuing on 1` and carries on; when that
-  machine's daemon comes back it rejoins at the next epoch
-  (`rank 2 joins the ring … with rank 0's model and optimizer`,
-  114-c-ddp-down-up.txt). If the LEAD rank's machine dies (the one in the
-  `sync: daemon channel via` line), it says
-  `its machine leads the ring (rendezvous and sync), so the run can't continue without it`
-  and exits 1 (115-c-ddp-lead-dies.txt): say so and rerun.
 
-### 7 — pandas out-of-core (optional) · LAPTOP-B · `./demo/6-pandas.sh`
-
-**Screen** (<!-- V2 31b5364: 71-step-6-pandas.txt -->):
-```
-$ pipedpeer run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8
-[pipedpeer] read_csv: streaming 329 MB out-of-core
-read data.csv: 3,000,000 rows x 7 cols in 8.0s
-[pipedpeer] groupby: combining 5 chunk partials from the cluster
-groupby('cat').mean(): 1.0s
-cat
-alpha  1.498151e+06  0.499574  0.500078  0.500743  0.500440  0.500033
-beta   1.501307e+06  0.500057  0.499720  0.499787  0.499942  0.500040
-delta  1.499895e+06  0.500472  0.500003  0.499678  0.499779  0.500668
-gamma  1.500641e+06  0.499842  0.499994  0.499707  0.500116  0.500480
-TOTAL 9.0s
-```
-
-**Say:** "No machine held the whole file. Each one parsed its own chunks and
-sent back tiny per-group sums, so the means are exact."
-
-**Time:** 12.8 s for the step in V2 (script 9.0 s, 3,000,000 rows, 314 MB
-file); 34.0 s the first time after prep (70-setup-firstpass.txt).
-
-**Watch out for:**
-- **A red "fell back" line:** one machine has a different binary (compare the
-  hashes). The answer is still correct; say it ran on one machine.
-
-### 8 — The teacher's own script · any machine · `./demo/11-teacher.sh their.py [data files]`
-
-It copies the script into a fresh folder, runs `--check-only`, pauses, then
-runs it.
-
-**Screen**, `./demo/11-teacher.sh students/primes.py` on pc3
-(<!-- V2 cc56753: 100-c-teacher-cached-primes.txt -->):
-```
- Your script: primes.py
-================================================================
-  > Nothing edited. First a dry run: what it imports, what it would spread, where it would go.
-$ pipedpeer run primes.py --check-only
-CHECK primes.py — nothing will run
-  imports      standard library only
-  spreads      ProcessPoolExecutor (line 36)
-               split decided at run time by measured cost
-  memory       ~512 MiB (tier=import)
-  gpu          not used
-  placement    this machine (no --remote)
-  lease        remote daemon accepted job (lease=99cc3806), cancelled
-…
-  environment  built in 0.4 s
-  store        /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
-  closure      already on this machine (26 paths)
-checks complete
-…
-$ pipedpeer run primes.py
-…
-checking 16000000 numbers in 100 ranges
-[pipedpeer] local 13 items
-[pipedpeer] remote ok: 13 items in 4565 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.14:38080, 192.168.0.200:38080
-…
-primes below 16000000 : 1031130
-TOTAL 38.6s
-…
-=== Summary ===
-  ran on       pc3 (127.0.0.1)
-  environment  built in 0.4 s
-  closure      already on the node
-  script       38.8 s · peak memory 352 MB
-  spread       100 items: 26 on pc3, 74 on 4 others (yeet 35, pc2 17, pc4 12, pc1 10)
-  files back   none
-  total        39.3 s
-  > Files it wrote are in: /tmp/pipedpeer-teacher.VPlnA8
-```
-
-A script with a package outside the built-in table. From V1's stand-in, which
-imports `humanize` and a made-up package (<!-- V1 8e14b9b: 40-pkgauto-probe.txt, 41-teacher-unpackaged-run.txt, 42-teacher-humanize-run.txt -->).
-V1's check-only also listed `not packaged humanize (add --pkg)`; since FX-CLI
-1ef1058 check-only asks nixpkgs, and V3 listed only the made-up one
-(<!-- V3 9949ad0: docs-VERIFY-392-teacher-checkonly.txt, docs-VERIFY-392-teacher-run.txt -->):
-```
-CHECK teacher.py — nothing will run
-  imports      humanize, notarealpkg_xyz
-  packages     humanize
-  not packaged notarealpkg_xyz (not in nixpkgs; the job will fail to im…
-  spreads      multiprocessing.Pool (line 6)
-…
-checks complete
-$ pipedpeer run teacher.py
-…
-[2/7] Parsing dependencies...
-      Not in the built-in table, but nixpkgs has python3Packages.humanize: using it
-      Not packaged (the job will fail to import it): notarealpkg_xyz — add it with --pkg <nixpkgs name>
-…
-ModuleNotFoundError: No module named 'notarealpkg_xyz'
-```
-With the made-up import removed (<!-- V3 9949ad0: docs-VERIFY-401-teacher-humanize-run.txt -->):
-```
-[pipedpeer] remote ok: 219 items in 401 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.13:38080, 10.88.0.14:38080
-332,833,500
-…
-  spread       1000 items: 269 on yeet, 731 on 4 others (pc3 185, pc1 182, pc2 182, pc4 182)
-  files back   none
-  total        1.5 s
-```
-(V1's `spread` line said 1476 items for this 1000-item job; since FX-CLI and
-da6a8ef each item counts once.)
-
-**Say:** "Hand us anything with a Pool, a ProcessPoolExecutor or `n_jobs`. It
-finds the packages by itself, even ones it has never seen."
-
-**Time:** check-only took 5.7 s, including fetching the new package. On one
-`students/grid_search.py`, the check took **54 s → 4 s** before and after the
-common prep (pc3), and **39 s → 6 s** on LAPTOP-A.
-<!-- V1 8e14b9b: 15-pc3-pkgprep-before-after.txt, 17-prep2-rehearse-host.txt -->
-The whole step (check + run) for each `students/` script, cached, from pc3 in
-V2: `image_blur.py` 19.6 s, `monte_carlo_pi.py` 35.9 s, `primes.py` 39.3 s,
-`word_count.py` 42.5 s, `grid_search.py` 69.5 s
-(<!-- V2 cc56753: 100-c-teacher-cached-*.txt -->).
-
-**Watch out for:**
-- **`not packaged: X`:** rerun with `--pkg <nixpkgs name>`
-  (`python3Packages.X`), or switch to a script in `students/`.
-- **`Error: NOT READY: refused: … insufficient memory` and
-  `the run failed (exit 1)`:** the target's free memory dipped for a moment
-  (V2 saw ~240 MB on a container right after a big run;
-  100-c-teacher-refused-*.txt). Wait a few seconds and rerun.
-- **No `spreads` line:** the script has nothing parallel in it. It runs on one
-  machine; say so.
-- **The build runs for minutes:** the script uses packages outside the common
-  set. Talk through "how it works" (below) while it builds.
-
-### 9 — Everything in one script · PC-2 · `./demo/12-everything.sh`
+### 6 — Everything in one script · PC-2 · `./demo/12-everything.sh`
 
 **Screen:** `section <name> <s>` lines for each part: Pool, lambda Pool,
 sklearn, numpy, pandas, torch. A tqdm bar redraws in place, then the summary.
@@ -791,7 +623,146 @@ torch included; 700.6 s in V2): prep only. Cached: 26.7 s (V3, `--remote`).
 - **The tqdm bar prints many lines instead of redrawing:** the output is
   piped; run the script directly.
 
-### 10 — Failover · LAPTOP-A `./demo/9-failover.sh`, then on PC-3 `pipedpeer stop`
+### 7 — The teacher's own script · PC-1, then any machine
+
+**First, a dry run of a script they already saw** · PC-1 · `pipedpeer run 00_pool.py --remote --check-only`
+
+**Screen** (<!-- V1 8e14b9b: 12-checkonly-pc4-00pool.txt, run on the Ubuntu stand-in; V2 did not rerun this command, but its check-only runs below print the same layout: 100-c-teacher-cached-primes.txt -->):
+```
+CHECK 00_pool.py — nothing will run
+  imports      standard library only
+  spreads      multiprocessing.Pool (line 33)
+               split decided at run time by measured cost
+  memory       ~512 MiB (tier=import)
+  gpu          not used
+  placement    yeet (score=0.772, source=manual)
+  environment  building (first build of a new env takes minutes)
+…
+  environment  built in 0.7 s
+  store        /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+  closure      already on yeet (26 paths)
+checks complete
+```
+
+**Say:** "Before it runs anything, it says what it will do: what the script
+imports, what it can spread, where it would go, and whether that machine
+already has the environment."
+
+**Time:** 0.8 s with the environment cached. On an empty store, the first
+build of this environment took 42.4 s (step 4's run on a fresh pc3).
+
+**Watch out for:**
+- **`warning: ignoring the client-specified setting 'build-users-group'`
+  lines:** a multi-user Nix prints these. They are harmless.
+- **`not packaged X`:** expected only for unusual imports; see their script below.
+- **No placement / "no eligible node":** check the step 2 table.
+
+**Then their script** · any machine · `./demo/11-teacher.sh their.py [data files]`
+
+It copies the script into a fresh folder, runs `--check-only`, pauses, then
+runs it.
+
+**Screen**, `./demo/11-teacher.sh students/primes.py` on pc3
+(<!-- V2 cc56753: 100-c-teacher-cached-primes.txt -->):
+```
+ Your script: primes.py
+================================================================
+  > Nothing edited. First a dry run: what it imports, what it would spread, where it would go.
+$ pipedpeer run primes.py --check-only
+CHECK primes.py — nothing will run
+  imports      standard library only
+  spreads      ProcessPoolExecutor (line 36)
+               split decided at run time by measured cost
+  memory       ~512 MiB (tier=import)
+  gpu          not used
+  placement    this machine (no --remote)
+  lease        remote daemon accepted job (lease=99cc3806), cancelled
+…
+  environment  built in 0.4 s
+  store        /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+  closure      already on this machine (26 paths)
+checks complete
+…
+$ pipedpeer run primes.py
+…
+checking 16000000 numbers in 100 ranges
+[pipedpeer] local 13 items
+[pipedpeer] remote ok: 13 items in 4565 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.14:38080, 192.168.0.200:38080
+…
+primes below 16000000 : 1031130
+TOTAL 38.6s
+…
+=== Summary ===
+  ran on       pc3 (127.0.0.1)
+  environment  built in 0.4 s
+  closure      already on the node
+  script       38.8 s · peak memory 352 MB
+  spread       100 items: 26 on pc3, 74 on 4 others (yeet 35, pc2 17, pc4 12, pc1 10)
+  files back   none
+  total        39.3 s
+  > Files it wrote are in: /tmp/pipedpeer-teacher.VPlnA8
+```
+
+A script with a package outside the built-in table. From V1's stand-in, which
+imports `humanize` and a made-up package (<!-- V1 8e14b9b: 40-pkgauto-probe.txt, 41-teacher-unpackaged-run.txt, 42-teacher-humanize-run.txt -->).
+V1's check-only also listed `not packaged humanize (add --pkg)`; since FX-CLI
+1ef1058 check-only asks nixpkgs, and V3 listed only the made-up one
+(<!-- V3 9949ad0: docs-VERIFY-392-teacher-checkonly.txt, docs-VERIFY-392-teacher-run.txt -->):
+```
+CHECK teacher.py — nothing will run
+  imports      humanize, notarealpkg_xyz
+  packages     humanize
+  not packaged notarealpkg_xyz (not in nixpkgs; the job will fail to im…
+  spreads      multiprocessing.Pool (line 6)
+…
+checks complete
+$ pipedpeer run teacher.py
+…
+[2/7] Parsing dependencies...
+      Not in the built-in table, but nixpkgs has python3Packages.humanize: using it
+      Not packaged (the job will fail to import it): notarealpkg_xyz — add it with --pkg <nixpkgs name>
+…
+ModuleNotFoundError: No module named 'notarealpkg_xyz'
+```
+With the made-up import removed (<!-- V3 9949ad0: docs-VERIFY-401-teacher-humanize-run.txt -->):
+```
+[pipedpeer] remote ok: 219 items in 401 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.13:38080, 10.88.0.14:38080
+332,833,500
+…
+  spread       1000 items: 269 on yeet, 731 on 4 others (pc3 185, pc1 182, pc2 182, pc4 182)
+  files back   none
+  total        1.5 s
+```
+(V1's `spread` line said 1476 items for this 1000-item job; since FX-CLI and
+da6a8ef each item counts once.)
+
+**Say:** "Hand us anything with a Pool, a ProcessPoolExecutor or `n_jobs`. It
+finds the packages by itself, even ones it has never seen."
+
+**Time:** check-only took 5.7 s, including fetching the new package. On one
+`students/grid_search.py`, the check took **54 s → 4 s** before and after the
+common prep (pc3), and **39 s → 6 s** on LAPTOP-A.
+<!-- V1 8e14b9b: 15-pc3-pkgprep-before-after.txt, 17-prep2-rehearse-host.txt -->
+The whole step (check + run) for each `students/` script, cached, from pc3 in
+V2: `image_blur.py` 19.6 s, `monte_carlo_pi.py` 35.9 s, `primes.py` 39.3 s,
+`word_count.py` 42.5 s, `grid_search.py` 69.5 s
+(<!-- V2 cc56753: 100-c-teacher-cached-*.txt -->). The first run after the
+common prep took 35.3–125.7 s, of which the environment build was 0.4–7.1 s
+(<!-- V2 31b5364: 75-teacher-*.txt -->).
+
+**Watch out for:**
+- **`not packaged: X`:** rerun with `--pkg <nixpkgs name>`
+  (`python3Packages.X`), or switch to a script in `students/`.
+- **`Error: NOT READY: refused: … insufficient memory` and
+  `the run failed (exit 1)`:** the target's free memory dipped for a moment
+  (V2 saw ~240 MB on a container right after a big run;
+  100-c-teacher-refused-*.txt). Wait a few seconds and rerun.
+- **No `spreads` line:** the script has nothing parallel in it. It runs on one
+  machine; say so.
+- **The build runs for minutes:** the script uses packages outside the common
+  set. Talk through "how it works" (below) while it builds.
+
+### 8 — Failover · LAPTOP-A `./demo/9-failover.sh`, then on PC-3 `pipedpeer stop`
 
 Type `pipedpeer stop` on PC-3 as soon as the first `remote ok` line appears.
 
@@ -828,7 +799,84 @@ machine costs time, never correctness."
   moment. It is still the same checksum; say so. V1 showed no such line.
 - **A different checksum:** this is a real bug. Stop and say so.
 
-### 11a — Background a job, then attach · LAPTOP-B
+### 9 — Receipts · LAPTOP-A `./demo/10-proof.sh`, then on PC-2 `pipedpeer traffic`
+
+**Screen on LAPTOP-A:**
+- `pipedpeer jobs`.
+- `pipedpeer job --last --timeline` and `--receipt`.
+- `pipedpeer events --limit 15`.
+
+(<!-- V2 31b5364: 77-step-10-proof.txt -->):
+```
+  > The last run, stage by stage: build, upload, seeding the peers, the script, the sync.
+$ pipedpeer job --last --timeline
+job 1791770005089791190  00_pool.py  succeeded
+
+== Timeline ==
+STAGE             WHERE        START      TIME
+detect imports    local         +0ms       0ms  █
+…
+nix build         local         +0ms     386ms  █
+export closure    local       +386ms       7ms  █
+upload            06b9a112    +394ms       5ms  █
+seed peers        06b9a112    +400ms      70ms  █
+sandbox setup     06b9a112    +470ms      23ms   █
+script            06b9a112    +493ms     16.0s   ██████████████████████████████████████
+sync results      local       +16.5s       1ms                                         █
+total                                    16.5s
+
+  > What the shim sent to which machine, what it kept here, and the cost model's reason for each.
+$ pipedpeer job --last --receipt
+…
+== Receipt ==
+Items: 96 total
+  on other machines       12  ███
+  on the running node     84  ██████████████████████████
+
+By peer:
+  10.88.0.14:38080            9  ██
+  10.88.0.11:38080            3  █
+
+Cost model decisions:
+  shipped     pool.map             84 items x 1.626s = 136.61s of work, over the 0.50s worth a round trip
+
+$ pipedpeer events --limit 15
+07:26:30  POOL   received pool/map: 6 items
+…
+07:28:23  POOL   spawning warm worker for store /nix/store/cl5nqb9z7y77jw6zpk6q3rj46q9qmhp9-run
+…
+07:30:10  WORK   lease granted: job  from pc2
+```
+`pipedpeer stats` puts the cluster and the recent runs on one screen
+(<!-- V2 31b5364: 79-stats.txt -->):
+```
+Cluster: 5 node(s), 5 healthy · 79 cores · 4.3 GiB free memory · 1 GPU node(s) · 1 task(s) running
+…
+1791770005089791190  00_pool.py         succeeded  06b9a112      16.5s  script 16s             12/96 items remote
+```
+
+**Screen on PC-2** (<!-- V1 8e14b9b: 60-proof-receipts.txt -->):
+```
+$ pipedpeer traffic
+2026/10/11 22:27:20 [pool] received pool/map from 10.88.0.1:50986: items=49 b64=false cache_keys=0 required_mem=40 forwarded=""
+2026/10/11 22:27:20 [pool] received pool/map from 10.88.0.1:48414: items=57 b64=false cache_keys=0 required_mem=40 forwarded=""
+…
+```
+
+**Say:** "Each machine keeps its own receipts. This is PC-2's record of the
+work it did for the laptop. The laptop can't fake it."
+
+**Watch out for:**
+- **Empty traffic:** that PC took no pool work this session. Pick another PC.
+
+---
+
+## Backup: show only if asked
+
+Recreatable, but not part of the live flow. Show one only when someone asks
+about it.
+
+### B1 — Background a job, then attach · LAPTOP-B
 
 Type `pipedpeer run 07_everything.py`, press **Ctrl+Z** after the first
 `remote ok` line, then run `pipedpeer jobs`, then `pipedpeer attach <id>`.
@@ -927,7 +975,7 @@ follows live.
 - **"detach is not supported for DDP/map runs":** expected for `--ddp`. Ctrl+C
   is the only way to stop those.
 
-### 11b — The sender loses its network · PC-1
+### B2 — The sender loses its network · PC-1
 
 Run `pipedpeer run 04_torch_ddp.py --remote --gpu force` (or any long
 `--remote` job). Pull PC-1's cable or turn its Wi-Fi off. Plug it back in, then
@@ -1017,7 +1065,7 @@ after about 2 min 40 s (TCP timeout; 2 min 41 s in V3), and the result arrived
   job everywhere.
 - **A Pool job can't do this:** its script runs on the sender.
 
-### 11c — Ctrl+C stops everything · LAPTOP-A
+### B3 — Ctrl+C stops everything · LAPTOP-A
 
 Type `pipedpeer run 00_pool.py` and press **Ctrl+C** after the first
 `remote ok` line.
@@ -1069,7 +1117,21 @@ cancelled — remote work stopped
   ignore it; the job did stop. The two `resource_tracker … leaked semaphore`
   lines are expected.
 
-### 12 — Finale · LAPTOP-A · `./demo/13-finale.sh`
+### B4 — A GPU machine dies mid-run (`--ddp 2`) · from step 5
+
+- **Showing a machine dying on purpose:** stop the daemon on a machine that is
+  NOT the one in the `rank 0:` line. Rank 0 is the lead: it is the fastest GPU
+  machine, not necessarily the one you typed the command on.
+- **A GPU rank dies mid-run (`--ddp 2`):** the run prints
+  `[ddp] rank 1 on gpu1 died; continuing on 1` and carries on; when that
+  machine's daemon comes back it rejoins at the next epoch
+  (`rank 2 joins the ring … with rank 0's model and optimizer`,
+  114-c-ddp-down-up.txt). If the LEAD rank's machine dies (the one in the
+  `sync: daemon channel via` line), it says
+  `its machine leads the ring (rendezvous and sync), so the run can't continue without it`
+  and exits 1 (115-c-ddp-lead-dies.txt): say so and rerun.
+
+### B5 — Finale · LAPTOP-A · `./demo/13-finale.sh`
 
 You can also start one job by hand on each PC at the same time.
 
@@ -1131,77 +1193,34 @@ the lab visit.
 - **RAN ON shows `?`:** read that job's log.
 - **To stop the finale,** press Ctrl+C once. It stops every job.
 
-### 13 — Receipts · LAPTOP-A `./demo/10-proof.sh`, then on PC-2 `pipedpeer traffic`
+### B6 — pandas out-of-core · LAPTOP-B · `./demo/6-pandas.sh`
 
-**Screen on LAPTOP-A:**
-- `pipedpeer jobs`.
-- `pipedpeer job --last --timeline` and `--receipt`.
-- `pipedpeer events --limit 15`.
-
-(<!-- V2 31b5364: 77-step-10-proof.txt -->):
+**Screen** (<!-- V2 31b5364: 71-step-6-pandas.txt -->):
 ```
-  > The last run, stage by stage: build, upload, seeding the peers, the script, the sync.
-$ pipedpeer job --last --timeline
-job 1791770005089791190  00_pool.py  succeeded
-
-== Timeline ==
-STAGE             WHERE        START      TIME
-detect imports    local         +0ms       0ms  █
-…
-nix build         local         +0ms     386ms  █
-export closure    local       +386ms       7ms  █
-upload            06b9a112    +394ms       5ms  █
-seed peers        06b9a112    +400ms      70ms  █
-sandbox setup     06b9a112    +470ms      23ms   █
-script            06b9a112    +493ms     16.0s   ██████████████████████████████████████
-sync results      local       +16.5s       1ms                                         █
-total                                    16.5s
-
-  > What the shim sent to which machine, what it kept here, and the cost model's reason for each.
-$ pipedpeer job --last --receipt
-…
-== Receipt ==
-Items: 96 total
-  on other machines       12  ███
-  on the running node     84  ██████████████████████████
-
-By peer:
-  10.88.0.14:38080            9  ██
-  10.88.0.11:38080            3  █
-
-Cost model decisions:
-  shipped     pool.map             84 items x 1.626s = 136.61s of work, over the 0.50s worth a round trip
-
-$ pipedpeer events --limit 15
-07:26:30  POOL   received pool/map: 6 items
-…
-07:28:23  POOL   spawning warm worker for store /nix/store/cl5nqb9z7y77jw6zpk6q3rj46q9qmhp9-run
-…
-07:30:10  WORK   lease granted: job  from pc2
-```
-`pipedpeer stats` puts the cluster and the recent runs on one screen
-(<!-- V2 31b5364: 79-stats.txt -->):
-```
-Cluster: 5 node(s), 5 healthy · 79 cores · 4.3 GiB free memory · 1 GPU node(s) · 1 task(s) running
-…
-1791770005089791190  00_pool.py         succeeded  06b9a112      16.5s  script 16s             12/96 items remote
+$ pipedpeer run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8
+[pipedpeer] read_csv: streaming 329 MB out-of-core
+read data.csv: 3,000,000 rows x 7 cols in 8.0s
+[pipedpeer] groupby: combining 5 chunk partials from the cluster
+groupby('cat').mean(): 1.0s
+cat
+alpha  1.498151e+06  0.499574  0.500078  0.500743  0.500440  0.500033
+beta   1.501307e+06  0.500057  0.499720  0.499787  0.499942  0.500040
+delta  1.499895e+06  0.500472  0.500003  0.499678  0.499779  0.500668
+gamma  1.500641e+06  0.499842  0.499994  0.499707  0.500116  0.500480
+TOTAL 9.0s
 ```
 
-**Screen on PC-2** (<!-- V1 8e14b9b: 60-proof-receipts.txt -->):
-```
-$ pipedpeer traffic
-2026/10/11 22:27:20 [pool] received pool/map from 10.88.0.1:50986: items=49 b64=false cache_keys=0 required_mem=40 forwarded=""
-2026/10/11 22:27:20 [pool] received pool/map from 10.88.0.1:48414: items=57 b64=false cache_keys=0 required_mem=40 forwarded=""
-…
-```
+**Say:** "No machine held the whole file. Each one parsed its own chunks and
+sent back tiny per-group sums, so the means are exact."
 
-**Say:** "Each machine keeps its own receipts. This is PC-2's record of the
-work it did for the laptop. The laptop can't fake it."
+**Time:** 12.8 s for the step in V2 (script 9.0 s, 3,000,000 rows, 314 MB
+file); 34.0 s the first time after prep (70-setup-firstpass.txt).
 
 **Watch out for:**
-- **Empty traffic:** that PC took no pool work this session. Pick another PC.
+- **A red "fell back" line:** one machine has a different binary (compare the
+  hashes). The answer is still correct; say it ran on one machine.
 
-### 14 — Capstone (optional) · LAPTOP-A · `./demo/14-capstone.sh`
+### B7 — Capstone · LAPTOP-A · `./demo/14-capstone.sh`
 
 **Screen** (<!-- V2 31b5364: 78-step-14-capstone.txt -->):
 ```
