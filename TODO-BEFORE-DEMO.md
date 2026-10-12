@@ -50,9 +50,8 @@ mid-run, so it was left in the test state:
   the nix.conf include), and wrote `~/.local/share/pipedpeer/auth_token` and
   `cluster.json` for the test cluster.
 
-If the laptop that ran the rehearsal is around, its owner can restore
-everything from their backup in one go (the restore script there,
-`evidence/v3/61-friend-restore-pending.sh`). Otherwise, on this laptop:
+The rehearsal laptop's backup was deleted in its cleanup, so restore by hand,
+on this laptop:
 
 - [ ] `systemctl --user stop pp-v3-rendezvous; systemctl --user disable pp-v3-rendezvous`
       (ignore "not loaded")
