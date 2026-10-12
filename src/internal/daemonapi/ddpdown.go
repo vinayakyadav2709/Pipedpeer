@@ -42,10 +42,13 @@ func (s *Server) handleDDPDown(w http.ResponseWriter, r *http.Request) {
 // markRankDown drops a dead rank from a run and returns how many ranks are
 // left. Idempotent.
 func (s *Server) markRankDown(group string, rank, world int, why string) int {
-	b := s.ddp
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	s.ddp.mu.Lock()
+	defer s.ddp.mu.Unlock()
+	return s.ddp.markRankDownLocked(group, rank, world, why)
+}
 
+// markRankDownLocked is markRankDown for a caller that holds the board lock.
+func (b *ddpBoard) markRankDownLocked(group string, rank, world int, why string) int {
 	r := b.run(group)
 	if r.world == 0 {
 		r.world = world

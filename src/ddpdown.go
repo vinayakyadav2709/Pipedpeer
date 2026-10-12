@@ -14,6 +14,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -21,6 +22,18 @@ import (
 type ddpRankResult struct {
 	rank int
 	err  error
+}
+
+// ddpMissedStartExit is the exit status of a rank the lead daemon turned
+// away because it missed the start barrier (EX_TEMPFAIL; the shim's
+// _daemon_reduce). The ring is training without it: a loss, not a script
+// failure, and the machine may take a joining rank later.
+const ddpMissedStartExit = 75
+
+// ddpMissedStart reports whether a rank's job ended for missing the start.
+func ddpMissedStart(err error) bool {
+	var xe *daemonctl.RemoteExitError
+	return errors.As(err, &xe) && xe.Code == ddpMissedStartExit
 }
 
 // ddpHostName names a rank's machine the way a person knows it.
@@ -46,10 +59,16 @@ func ddpHostName(n registry.NodeRecord) string {
 // lost, and the grower may have picked the very node that failed.
 //
 // A rank still waiting to join when only joiners are left is stopped after
-// ddpJoinGrace: the ring it was joining has finished.
-func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResult, hosts []string, added <-chan ddpAdded, onDown func(rank int, err error)) error {
+// ddpJoinGrace: the ring it was joining has finished. So is any rank still
+// running ddpJoinGrace after one rank finished (stop[rank] cancels a starting
+// rank): ranks train in lockstep, so one finishing means the ring is done, and
+// a rank still going is one that missed the start barrier and is still
+// receiving its closure (V3 53: 3.8 GB over a relay).
+func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResult, hosts []string, stop []context.CancelFunc, added <-chan ddpAdded, onDown func(rank int, err error)) error {
 	hosts = append([]string(nil), hosts...)
 	running := len(hosts)
+	ended := map[int]bool{}
+	finished := false
 	joiners := map[int]context.CancelFunc{}
 	var grace <-chan time.Time
 	stopped := false
@@ -59,7 +78,7 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 	refused := map[int]bool{}
 	ok := 0
 	for running > 0 {
-		if grace == nil && !stopped && len(joiners) > 0 && running == len(joiners) {
+		if grace == nil && !stopped && (finished || len(joiners) > 0 && running == len(joiners)) {
 			grace = time.After(ddpJoinGrace)
 		}
 		select {
@@ -83,16 +102,24 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 				fmt.Fprintf(w, "[ddp] rank %d on %s: the ring finished before it could join; stopping it\n", rank, hosts[rank])
 				cancel()
 			}
+			for rank, cancel := range stop {
+				if cancel != nil && !ended[rank] {
+					fmt.Fprintf(w, "[ddp] rank %d on %s: the ring finished without it; stopping it\n", rank, hosts[rank])
+					cancel()
+				}
+			}
 			continue
 		case r := <-results:
 			running--
+			ended[r.rank] = true
 			_, joiner := joiners[r.rank]
 			delete(joiners, r.rank)
 			if r.err == nil {
 				ok++
+				finished = true
 				continue
 			}
-			if (refused[r.rank] || joiner && stopped) && errors.Is(r.err, context.Canceled) {
+			if (refused[r.rank] || stopped) && errors.Is(r.err, context.Canceled) && ctx.Err() == nil {
 				continue
 			}
 			host := "?"
@@ -106,7 +133,17 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 				continue // a cancel stops every rank; nobody died
 			}
 			died = append(died, r.rank)
-			script := !joiner && app.IsPermanent(r.err)
+			missed := !joiner && ddpMissedStart(r.err)
+			script := !joiner && !missed && app.IsPermanent(r.err)
+			if missed {
+				// The lead already dropped it and said so in rank 0's output;
+				// this is that rank's own process getting there late.
+				fmt.Fprintf(w, "[ddp] rank %d on %s was not ready when training started, so the ring went on without it\n", r.rank, host)
+				if running > 0 {
+					onDown(r.rank, r.err)
+				}
+				continue
+			}
 			if script && scriptErr == nil {
 				scriptErr = fmt.Errorf("rank %d on %s: the script failed: %w", r.rank, host, r.err)
 			}

@@ -28,7 +28,7 @@ func TestARankDyingMidRunDoesNotFailTheRing(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- ddpAwaitRanks(context.Background(), &out, results,
-			[]string{"laptop-a", "pc-2", "laptop-b"}, nil,
+			[]string{"laptop-a", "pc-2", "laptop-b"}, nil, nil,
 			func(rank int, err error) { downs = append(downs, rank) })
 	}()
 
@@ -55,7 +55,7 @@ func TestEveryRankFailingFailsTheRun(t *testing.T) {
 	results <- ddpRankResult{rank: 1, err: errors.New("ImportError")}
 	results <- ddpRankResult{rank: 0, err: errors.New("ImportError")}
 	var out bytes.Buffer
-	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, func(int, error) {})
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, nil, func(int, error) {})
 	if err == nil || !strings.Contains(err.Error(), "rank 1 on b") {
 		t.Fatalf("got %v, want the first failure, rank 1 on b", err)
 	}
@@ -70,7 +70,7 @@ func TestCancelIsNotADeath(t *testing.T) {
 	results <- ddpRankResult{rank: 0, err: context.Canceled}
 	results <- ddpRankResult{rank: 1}
 	called := false
-	err := ddpAwaitRanks(ctx, &bytes.Buffer{}, results, []string{"a", "b"}, nil, func(int, error) { called = true })
+	err := ddpAwaitRanks(ctx, &bytes.Buffer{}, results, []string{"a", "b"}, nil, nil, func(int, error) { called = true })
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("got %v, want the cancel", err)
 	}
@@ -88,7 +88,7 @@ func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
 	results <- ddpRankResult{rank: 1}
 	var out bytes.Buffer
 	var downs []int
-	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil,
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, nil,
 		func(rank int, err error) { downs = append(downs, rank) })
 	if err == nil || !strings.Contains(err.Error(), "rank 0 on a") {
 		t.Fatalf("got %v, want a failure naming rank 0 on a", err)
@@ -101,7 +101,7 @@ func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
 	for _, code := range []int{137, 126, 127} {
 		results <- ddpRankResult{rank: 1, err: exited(code)}
 		results <- ddpRankResult{rank: 0}
-		if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, func(int, error) {}); err != nil {
+		if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, nil, func(int, error) {}); err != nil {
 			t.Errorf("a rank that exited %d failed the run: %v", code, err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestAJoinersCrashDoesNotFailTheRun(t *testing.T) {
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, added, func(int, error) {})
+		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, added, func(int, error) {})
 	}()
 	added <- ddpAdded{rank: 2, host: "pc-2", cancel: func() {}}
 	results <- ddpRankResult{rank: 2, err: exited(1)}
@@ -139,7 +139,7 @@ func TestNoRankJoinsAfterTheScriptFailed(t *testing.T) {
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, added, func(int, error) {})
+		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, added, func(int, error) {})
 	}()
 	results <- ddpRankResult{rank: 0, err: exited(1)}
 	cancelled := false
@@ -174,7 +174,7 @@ func TestTheLeadDyingEndsTheRun(t *testing.T) {
 	results <- ddpRankResult{rank: 1}
 	var out bytes.Buffer
 	called := false
-	err := ddpAwaitRanks(context.Background(), &out, results, []string{"gpu1", "gpu2"}, nil,
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"gpu1", "gpu2"}, nil, nil,
 		func(int, error) { called = true })
 	if err == nil || !strings.Contains(err.Error(), "leads the ring") {
 		t.Fatalf("got %v, want a failure saying the lead's machine died", err)
@@ -184,5 +184,42 @@ func TestTheLeadDyingEndsTheRun(t *testing.T) {
 	}
 	if called {
 		t.Error("the dead lead daemon was told a rank is down")
+	}
+}
+
+// TestARankThatMissedTheStartIsALossNotAFailure: the lead turned rank 1 away
+// (exit 75) while rank 0 trained; the run succeeds and says why. A rank still
+// running a grace after another finished (its closure still arriving) is
+// stopped instead of holding the run open.
+func TestARankThatMissedTheStartIsALossNotAFailure(t *testing.T) {
+	results := make(chan ddpRankResult, 2)
+	results <- ddpRankResult{rank: 1, err: exited(ddpMissedStartExit)}
+	results <- ddpRankResult{rank: 0}
+	var out bytes.Buffer
+	if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, nil, func(int, error) {}); err != nil {
+		t.Fatalf("a rank that missed the start failed the run: %v", err)
+	}
+	if !strings.Contains(out.String(), "rank 1 on b was not ready when training started") {
+		t.Errorf("no plain message for the late rank:\n%s", out.String())
+	}
+
+	old := ddpJoinGrace
+	ddpJoinGrace = 50 * time.Millisecond
+	t.Cleanup(func() { ddpJoinGrace = old })
+	results = make(chan ddpRankResult, 2)
+	stopped := make(chan struct{})
+	stop := []context.CancelFunc{nil, func() { close(stopped); results <- ddpRankResult{rank: 1, err: context.Canceled} }}
+	results <- ddpRankResult{rank: 0}
+	out.Reset()
+	if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, stop, nil, func(int, error) {}); err != nil {
+		t.Fatalf("stopping a straggler failed the run: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Error("the straggler was never stopped")
+	}
+	if !strings.Contains(out.String(), "rank 1 on b: the ring finished without it") {
+		t.Errorf("no message for the stopped straggler:\n%s", out.String())
 	}
 }

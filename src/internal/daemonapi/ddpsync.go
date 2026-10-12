@@ -101,6 +101,15 @@ type ddpEntry struct {
 	fingerprint uint64
 	sameWork    bool
 	checked     bool
+	// fingerprinted counts the contributions compared. One is not a
+	// comparison: a round that closed on a single rank (the others not yet
+	// started) matched only itself and reported duplicated work (V3 53).
+	fingerprinted int
+
+	// opening is the run's first round, the opening weight broadcast, which
+	// is also the start barrier: it waits up to the start wait for every
+	// rank, and a rank still missing when it closes is dropped.
+	opening bool
 }
 
 type ddpBoard struct {
@@ -330,6 +339,10 @@ type ddpSyncRequest struct {
 	// Sharded says this rank trains from a DataLoader the shim reshards by
 	// hash. Only such a ring can take a new rank mid-run.
 	Sharded bool `json:"sharded,omitempty"`
+	// StartWait is how long, in seconds, the opening round waits for every
+	// rank before the ring starts without the missing ones
+	// (PIPEDPEER_DDP_START_WAIT). Zero: ddpStartWait.
+	StartWait float64 `json:"start_wait,omitempty"`
 }
 
 // ddpMode is how a request wants its payload handled.
@@ -389,9 +402,24 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 
 	key := req.Group + "/" + jsonInt(req.Seq)
 
+	opening := req.Kind == "weights" && req.Seq == 1
+
 	s.ddp.mu.Lock()
+	if r := s.ddp.runs[req.Group]; opening && r != nil && r.dropped[req.Rank] {
+		// Missed the start barrier: the ring is training without this rank,
+		// and its model is the untrained one. The shim exits on this (status
+		// ddpMissedStartExit) so the submitter can start it again as a joiner.
+		s.ddp.mu.Unlock()
+		writeJSON(w, http.StatusGone, map[string]any{"missed_start": true,
+			"error": "this rank was not ready when the ring started; the ring went on without it"})
+		return
+	}
 	e, ok := s.ddp.entries[key]
 	if !ok {
+		wait := ddpPartialAfter
+		if opening {
+			wait = startWait(req.StartWait)
+		}
 		e = &ddpEntry{
 			blobs:     make(map[int][]byte),
 			fetched:   make(map[int]bool),
@@ -399,7 +427,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			done:      make(chan struct{}),
 			world:     req.World,
 			created:   time.Now(),
-			partialAt: time.Now().Add(ddpPartialAfter),
+			partialAt: time.Now().Add(wait),
+			opening:   opening,
 		}
 		if mode == ddpModeReduce {
 			if req.Count <= 0 || req.DType.size() == 0 {
@@ -502,6 +531,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			// pass over the model into every sync.
 			if req.Kind == "grads" && req.Seq <= ddpFingerprintSeqs {
 				h := fnv1a(blob)
+				e.fingerprinted++
 				if len(e.seen) == 0 {
 					e.fingerprint, e.sameWork, e.checked = h, true, true
 				} else if h != e.fingerprint {
@@ -545,7 +575,11 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 
 	if !complete {
 		partialC := time.After(time.Until(partialAt))
-		hardC := time.After(ddpHardTimeout)
+		hard := ddpHardTimeout
+		if d := time.Until(partialAt) + time.Minute; d > hard {
+			hard = d // the start barrier outlasts the usual bound
+		}
+		hardC := time.After(hard)
 	wait:
 		for {
 			select {
@@ -566,7 +600,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				// turned up: averaging over fewer ranks is a smaller step in the
 				// same direction, and every rank still receives the identical
 				// result, so nobody drifts.
-				if !s.completePartial(key) {
+				if !s.completePartial(req.Group, key) {
 					writeJSON(w, http.StatusGatewayTimeout, map[string]string{
 						"error": "ddp sync timed out and too few ranks had arrived to " +
 							"average anything"})
@@ -589,7 +623,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	if e.acc != nil || e.result != nil || e.err != nil {
 		result, rerr, agreedEvery, rscale := e.result, e.err, e.syncEvery, e.resultScale
 		rscales, _ := json.Marshal(e.resultScales)
-		sameWork := e.checked && e.sameWork && e.world > 1
+		sameWork := e.checked && e.sameWork && e.fingerprinted > 1
 		// How many ranks the result actually averages. Equal to the world
 		// size unless the round completed short-handed, and the shim says so
 		// when it is not - a run quietly training on half its machines is
@@ -738,7 +772,7 @@ const ddpHardTimeout = 3 * time.Minute
 // Under the lock and idempotent: several ranks reach their deadline at about
 // the same moment, and only the first should compute the result - the others
 // must find it already there rather than averaging a second time.
-func (s *Server) completePartial(key string) bool {
+func (s *Server) completePartial(group, key string) bool {
 	s.ddp.mu.Lock()
 	defer s.ddp.mu.Unlock()
 
@@ -760,7 +794,60 @@ func (s *Server) completePartial(key string) bool {
 	default:
 		close(e.done)
 	}
+	if e.opening && e.err == nil {
+		s.ddp.dropMissedStart(group, e)
+	}
 	return e.err == nil
+}
+
+// ddpStartWait is how long the opening round waits for every rank. A rank's
+// first sync comes once its closure is imported and its script has reached
+// the first optimizer step, so on a cold node this covers the closure's
+// transfer. Bounded because a rank still receiving a multi-GB closure over a
+// relay took the friend's 2-laptop run to 792 s of training at 45 s a step
+// (V3 53); the ring starts without it and it can join later.
+var ddpStartWait = 5 * time.Minute
+
+// ddpStartWaitMax caps what a rank may ask for.
+const ddpStartWaitMax = time.Hour
+
+// startWait is the opening round's wait, given a rank's request in seconds.
+func startWait(secs float64) time.Duration {
+	if secs <= 0 {
+		return ddpStartWait
+	}
+	return min(time.Duration(secs*float64(time.Second)), ddpStartWaitMax)
+}
+
+// dropMissedStart drops every rank that never reached the opening round, so
+// no later round waits for it and its data moves to the ranks that came.
+// Caller holds the board lock.
+func (b *ddpBoard) dropMissedStart(group string, e *ddpEntry) {
+	r := b.run(group)
+	var missed []string
+	first := -1
+	for rank := 0; rank < e.world; rank++ {
+		if e.seen[rank] || r.dropped[rank] {
+			continue
+		}
+		b.markRankDownLocked(group, rank, e.world, "not ready when training started")
+		if first < 0 {
+			first = rank
+		}
+		missed = append(missed, strconv.Itoa(rank))
+	}
+	if first < 0 {
+		return
+	}
+	left := e.world - b.dropsBelow(group, e.world)
+	why := fmt.Sprintf("rank %s not ready after %s (closure still on its way, or the "+
+		"script not started); training started on the %d rank(s) that were, and their "+
+		"data moves to them at the next epoch. A late rank can join once it is ready "+
+		"if the script trains from a DataLoader",
+		strings.Join(missed, ", "), time.Since(e.created).Round(time.Second), left)
+	b.publish(r, r.lastSeq+1, ringFragment(r)+fmt.Sprintf(`, "down": %d, "why": %q`, first, why))
+	log.Warn().Str("group", group).Strs("ranks", missed).Int("left", left).
+		Msg("ddp start barrier: ranks not ready, the ring starts without them")
 }
 
 // pacedBy reports whether one rank is setting the pace for the whole ring, in

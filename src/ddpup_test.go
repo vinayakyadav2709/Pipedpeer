@@ -152,7 +152,7 @@ func TestAJoinedRankCountsAndALateOneIsStopped(t *testing.T) {
 	var out bytes.Buffer
 	done := make(chan error, 1)
 	go func() {
-		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, added, func(int, error) {})
+		done <- ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, added, func(int, error) {})
 	}()
 	added <- ddpAdded{rank: 2, host: "pc-2", cancel: func() {}}
 	results <- ddpRankResult{rank: 2} // joined and finished
