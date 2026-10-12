@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,6 +37,14 @@ const probeEnv = "PIPEDPEER_USERNS_PROBE"
 // second unshare and report by exit status; it must not start a daemon or
 // print a usage message on the way.
 func Install() {
+	if os.Getenv(recheckEnv) != "" && os.Getenv(probeEnv) == "" {
+		os.Unsetenv(recheckEnv)
+		if ok, why := available(); !ok {
+			fmt.Fprint(os.Stderr, why)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv(probeEnv) == "" {
 		return
 	}
@@ -47,6 +54,31 @@ func Install() {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// recheckEnv marks a re-exec whose only job is to run the whole probe and
+// report by exit status, the reason on stderr.
+const recheckEnv = "PIPEDPEER_USERNS_RECHECK"
+
+// ProbeFresh runs the probe in a new process. Available is computed once per
+// process, and AppArmor attaches a profile only at exec: after setup loads the
+// pipedpeer profile, only a freshly exec'd binary shows whether it worked.
+func ProbeFresh() (bool, string) {
+	self, err := os.Executable()
+	if err != nil {
+		return false, "cannot locate this executable to probe with: " + err.Error()
+	}
+	cmd := exec.Command(self)
+	cmd.Env = append(os.Environ(), recheckEnv+"=1")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() == 0 {
+			return false, "the namespace probe failed: " + err.Error()
+		}
+		return false, stderr.String()
+	}
+	return true, ""
 }
 
 func available() (bool, string) {
@@ -95,7 +127,7 @@ func diagnose() string {
 			"      sudo sysctl -w kernel.unprivileged_userns_clone=1\n" +
 			"      echo 'kernel.unprivileged_userns_clone=1' | sudo tee /etc/sysctl.d/99-pipedpeer.conf"
 	}
-	if v := sysctl("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); v == "1" {
+	if AppArmorRestricted() {
 		// Reached even though creating the namespace succeeded: what is
 		// denied is the privilege inside it.
 		//
@@ -113,31 +145,19 @@ func diagnose() string {
 		if exe == "" {
 			exe = "/usr/local/bin/pipedpeer"
 		}
+		cmds := ProfileCommands(exe)
 		return fmt.Sprintf("this system restricts unprivileged user namespaces via AppArmor "+
 			"(Ubuntu 24.04+; kernel.apparmor_restrict_unprivileged_userns = 1).\n"+
 			"    One root action is needed, once. Either grant it to pipedpeer alone:\n"+
-			"      printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile pipedpeer %s flags=(unconfined) {\\n  userns,\\n}\\n' | sudo tee /etc/apparmor.d/pipedpeer\n"+
-			"      sudo apparmor_parser -r /etc/apparmor.d/pipedpeer\n"+
+			"      %s\n"+
+			"      %s\n"+
 			"    or lift it machine-wide (weaker; affects every program):\n"+
-			"      sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0", exe)
+			"      sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"+
+			"    `pipedpeer setup` installs the profile itself.",
+			cmds[0], cmds[1])
 	}
 	return "the kernel refused to create a user namespace, and none of the " +
 		"usual switches (user.max_user_namespaces, unprivileged_userns_clone, " +
 		"apparmor_restrict_unprivileged_userns) explain it. Check your " +
 		"container/seccomp policy."
-}
-
-// sysctlRoot is "/" except under test. The diagnosis is the whole reason this
-// package exists, and it is produced only on a machine that refuses namespaces
-// - so on every machine we develop on, the test for it skipped. A test that
-// cannot run is not a test, and the AppArmor branch is the one that matters
-// most and is hardest to reach: it needs Ubuntu 24.04+.
-var sysctlRoot = "/"
-
-func sysctl(path string) string {
-	b, err := os.ReadFile(filepath.Join(sysctlRoot, path))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
 }

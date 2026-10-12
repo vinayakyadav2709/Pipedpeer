@@ -11,3 +11,6 @@ func Install() {}
 var Available = func() (bool, string) {
 	return false, "user namespaces are Linux-only; the job sandbox needs a Linux machine"
 }
+
+// ProbeFresh is Available off Linux.
+func ProbeFresh() (bool, string) { return Available() }

@@ -124,3 +124,20 @@ func TestDiagnosisNamesAFix(t *testing.T) {
 		}
 	})
 }
+
+// TestProbeFreshAgreesWithAvailable: setup trusts the fresh-process probe to
+// say whether the profile it just loaded works, so on an unchanged machine it
+// must give the same answer as the in-process one.
+func TestProbeFreshAgreesWithAvailable(t *testing.T) {
+	ok, why := Available()
+	if fresh, freshWhy := ProbeFresh(); fresh != ok {
+		t.Fatalf("ProbeFresh = %v (%q), Available = %v (%q)", fresh, freshWhy, ok, why)
+	}
+}
+
+func TestDiagnosisAndSetupShareTheProfile(t *testing.T) {
+	cmds := ProfileCommands("/x/pipedpeer")
+	if !strings.Contains(cmds[0], strings.ReplaceAll(Profile("/x/pipedpeer"), "\n", `\n`)) {
+		t.Errorf("manual command does not write Profile(): %s", cmds[0])
+	}
+}
