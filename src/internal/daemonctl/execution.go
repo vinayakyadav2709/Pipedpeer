@@ -636,7 +636,7 @@ func appendShim(destPath, content string) error {
 	}
 
 	cmd := exec.Command("tar", "--append", "--file="+destPath,
-		"--transform=s,.*,.pipedpeer/shim/sitecustomize.py,", stage)
+		"--transform=s,.*,.pipedpeer/shim/sitecustomize.py,", "-C", stageDir, "sitecustomize.py")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
