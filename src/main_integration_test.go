@@ -453,7 +453,7 @@ echo "hidden" > secret.txt
 	// exactly that, and the run failed four steps later with "target_id does
 	// not match this node", which names the symptom and not the cause.
 	answering := strings.TrimSpace(dockerExec(t, ctx, labDir, fmt.Sprintf(
-		"/pipedpeer nodes --port %d 2>/dev/null | grep ' self$' | cut -d' ' -f1", worker1Port)))
+		"/pipedpeer nodes --port %d 2>/dev/null | grep ' self$' | cut -d' ' -f1 | tr -d '*'", worker1Port)))
 	if answering == "" || !strings.HasPrefix(nodeIDOut, answering) {
 		t.Fatalf("the daemon on port %d reports node %q, but worker1's identity is %q.\n"+
 			"Something else on this machine is holding that port - the lab runs with\n"+

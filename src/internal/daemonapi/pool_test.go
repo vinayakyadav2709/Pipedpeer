@@ -1496,3 +1496,58 @@ func TestRelabelForwardedReceipt(t *testing.T) {
 		t.Error("result frames were altered")
 	}
 }
+
+// TestSlowPeerEndsThePeerWalk. A part whose peer runs out of time goes local;
+// it is not handed to the next peer to start over. A one-item svd part tried
+// four peers at 300 s each and hung for over 15 minutes.
+func TestSlowPeerEndsThePeerWalk(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
+	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	old := remotePartBudget
+	remotePartBudget = 300 * time.Millisecond
+	t.Cleanup(func() { remotePartBudget = old })
+
+	var mu sync.Mutex
+	asked := 0
+	release := make(chan struct{})
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		select { // never answers in time
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}
+	p1 := httptest.NewServer(http.HandlerFunc(slow))
+	p2 := httptest.NewServer(http.HandlerFunc(slow))
+	defer p1.Close()
+	defer p2.Close()
+	defer close(release)
+
+	s := New("slowpeer-node-xxxxxxxx")
+	defer s.StopWarmWorkers()
+	peers := []string{p1.Listener.Addr().String(), p2.Listener.Addr().String()}
+	s.pool.SetPeerFn(func(_, _ string) []string { return peers })
+
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", items: []json.RawMessage{json.RawMessage(`21`)}, force: true}
+	results, err := s.pool.runChunk(runPath, storePath, ch, "")
+	if err != nil {
+		t.Fatalf("chunk failed: %v", err)
+	}
+	if got := unpickleInts(t, results); len(got) != 1 || got[0] != 42 {
+		t.Fatalf("results = %v, want [42] from the local fallback", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if asked != 1 {
+		t.Errorf("%d peers were tried for one slow item; a timeout must end the walk", asked)
+	}
+}

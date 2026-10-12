@@ -19,6 +19,9 @@ import (
 // low addresses so a first-slice cap always covers them), probed 64 at a
 // time, and the scan stops as soon as any daemon answers.
 func DiscoverTCP(daemonPort int, timeout time.Duration) []DiscoveredNode {
+	if Off() {
+		return nil
+	}
 	if timeout <= 0 {
 		timeout = 2 * time.Second
 	}
