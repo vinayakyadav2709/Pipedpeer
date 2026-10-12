@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -73,14 +74,41 @@ func Attach(ctx context.Context, id string) error {
 
 // replaySaved prints a collected job's saved output as it was printed live.
 func replaySaved(dir string) error {
+	return replayRest(dir, "", "")
+}
+
+// replayRest prints a collected job's saved output minus what this machine
+// already printed live (shownOut, shownErr): after a lost connection the
+// stream stops mid-job and the rest exists only in the collected file.
+func replayRest(dir, shownOut, shownErr string) error {
 	f, err := os.Open(filepath.Join(dir, jobhistory.CollectedOutput))
 	if err != nil {
 		return fmt.Errorf("saved output unreadable: %w", err)
 	}
 	defer f.Close()
 	// The job's own outcome is in the record and the summary.
-	_, _, err = daemonctl.ReplayOutput(f, os.Stdout, os.Stderr)
+	_, _, err = daemonctl.ReplayOutput(f,
+		&skipWriter{w: os.Stdout, skip: len(shownOut)}, &skipWriter{w: os.Stderr, skip: len(shownErr)})
 	return err
+}
+
+// skipWriter drops the first skip bytes written to it.
+type skipWriter struct {
+	w    io.Writer
+	skip int
+}
+
+func (s *skipWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if s.skip >= n {
+		s.skip -= n
+		return n, nil
+	}
+	p, s.skip = p[s.skip:], 0
+	if _, err := s.w.Write(p); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // recordSummary is the run summary of a finalized record.

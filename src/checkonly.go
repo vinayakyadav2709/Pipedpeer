@@ -15,6 +15,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/app"
 	"github.com/pipedpeer/pipedpeer/internal/coordinator"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
@@ -283,7 +284,10 @@ func runCheckOnly(o checkOnlyOptions) error {
 	// Placement. targetHost/targetPort are where the closure would go.
 	var targetHost, targetName string
 	var targetPort int
-	if o.Remote {
+	// Run places a --gpu force job like --remote when this machine has no
+	// GPU (main.go, gpuPlace); the check must name the same node.
+	gpuPlace := o.RequireGPU && !o.Remote && o.DaemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
+	if o.Remote || gpuPlace {
 		coord := coordinator.New(coordinator.Config{
 			RegistryURL:      o.RegistryURL,
 			SelfIdentity:     o.NodeID,
@@ -294,20 +298,27 @@ func runCheckOnly(o checkOnlyOptions) error {
 			RequiredMemBytes: o.EstMemBytes,
 			RequiredCores:    o.RequiredCores,
 			RequiredGPUMem:   o.RequiredGPUMem,
-			NoSelf:           true,
+			NoSelf:           o.Remote,
 			RequireGPU:       o.RequireGPU,
 			PreferGPU:        o.PreferGPU,
 			Strategy:         o.Strategy,
 			RoundRobinFn:     checkRoundRobin(o.DaemonPort),
 		})
 		d := coord.FindNode()
-		if d.ChosenNode.NodeID == "" {
+		switch {
+		case d.ChosenNode.NodeID == "" && gpuPlace:
+			c.block("placement", "this machine has no GPU and no GPU node can take this run")
+		case d.ChosenNode.NodeID == "":
 			c.block("placement", "no eligible node other than this machine")
-		} else {
+		default:
 			targetHost = checkHost(d.ChosenNode.SSHEndpoint)
 			targetPort = d.ChosenNode.DaemonPort
 			targetName = nameOf(d.ChosenNode.NodeID)
-			c.line("placement", fmt.Sprintf("%s (%s)", targetName, d.Reason))
+			why := d.Reason
+			if gpuPlace {
+				why = "--gpu force, this machine has no GPU; " + why
+			}
+			c.line("placement", fmt.Sprintf("%s (%s)", targetName, why))
 		}
 	} else {
 		host, port, targetID := "127.0.0.1", o.DaemonPort, o.NodeID.NodeID

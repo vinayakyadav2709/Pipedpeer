@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 )
 
 func TestSummaryRendering(t *testing.T) {
@@ -96,5 +97,37 @@ func TestMemLimitAlwaysCaps(t *testing.T) {
 	}
 	if got := memLimitFor(1 << 30); got != 2<<30 {
 		t.Fatalf("1 GiB estimate: got %d, want double", got)
+	}
+}
+
+// V3: attach rebuilt the summary from the saved receipt through a struct
+// without by_where and printed "169 on 1 other (other machines 169)" for
+// work four peers did.
+func TestAttachSummaryKeepsPeers(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"remote_items":8,"local_items":4,"by_where":{"local":4,"peer:10.88.0.11:38080":5,"peer:10.88.0.12:38080":3}}`
+	if err := jobhistory.SaveReceipt(dir, []byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	s := recordSummary(dir, jobhistory.Record{}, "h", 1)
+	names := map[string]string{"10.88.0.11:38080": "pc1", "10.88.0.12:38080": "pc2"}
+	lines, _ := summaryLines(s, "yeet", names)
+	if got := strings.Join(lines, "\n"); !strings.Contains(got, "12 items: 4 on yeet, 8 on 2 others (pc1 5, pc2 3)") {
+		t.Fatalf("got\n%s", got)
+	}
+}
+
+// After a lost connection the collected output is replayed minus what was
+// already printed live.
+func TestSkipWriter(t *testing.T) {
+	var b strings.Builder
+	w := &skipWriter{w: &b, skip: 5}
+	for _, p := range []string{"abc", "defg", "hij"} {
+		if n, err := w.Write([]byte(p)); err != nil || n != len(p) {
+			t.Fatalf("write %q: n=%d err=%v", p, n, err)
+		}
+	}
+	if b.String() != "fghij" {
+		t.Fatalf("got %q", b.String())
 	}
 }

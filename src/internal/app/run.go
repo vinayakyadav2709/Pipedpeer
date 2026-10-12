@@ -375,6 +375,9 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		if endedOnNode {
 			got, _, done, jobErr, cerr := collect(context.WithoutCancel(ctx), historyDir, note)
 			if cerr == nil && done {
+				if rerr := replayRest(historyDir, res.Stdout, res.Stderr); rerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: job %s: the output printed after the connection was lost is missing here: %v; pipedpeer attach %s shows what was saved\n", short, rerr, short)
+				}
 				printSummary(os.Stdout, recordSummary(historyDir, got, opts.DaemonHost, opts.DaemonPort))
 				return jobErr
 			}
