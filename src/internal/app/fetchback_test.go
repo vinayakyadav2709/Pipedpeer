@@ -4,9 +4,11 @@ import (
 	"archive/tar"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
+	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 	"github.com/rs/zerolog"
 )
 
@@ -130,6 +133,7 @@ func TestWatcherCollectsFinishedDetachedJob(t *testing.T) {
 }
 
 func TestWatcherRetriesUnreachableNode(t *testing.T) {
+	noNetwork(t)
 	dir, _ := detachedRecord(t, "j2", deadAddr(t))
 	warned := map[string]bool{}
 	for i := 0; i < 2; i++ {
@@ -198,6 +202,63 @@ func fastProbes(t *testing.T) {
 	tries, gap := lostProbeTries, lostProbeGap
 	lostProbeTries, lostProbeGap = 2, 10*time.Millisecond
 	t.Cleanup(func() { lostProbeTries, lostProbeGap = tries, gap })
+	noNetwork(t)
+}
+
+// noNetwork stands in for a machine with no default route and no
+// introducer, so only peers can show it is online.
+func noNetwork(t *testing.T) {
+	gw, ports, intro := gatewayAddr, gatewayPorts, introducerAddr
+	gatewayAddr = func() (netip.Addr, error) { return netip.Addr{}, errors.New("no default route") }
+	introducerAddr = func() string { return "" }
+	t.Cleanup(func() { gatewayAddr, gatewayPorts, introducerAddr = gw, ports, intro })
+}
+
+// gatewayUp makes 127.0.0.1 the default gateway, answering by refusing a
+// connect, as most routers do on a closed port.
+func gatewayUp(t *testing.T) {
+	gatewayAddr = func() (netip.Addr, error) { return netip.MustParseAddr("127.0.0.1"), nil }
+	gatewayPorts = []string{strconv.Itoa(deadPort(t))}
+}
+
+// fakeIntroducer runs a rendezvous server on a local UDP port.
+func fakeIntroducer(t *testing.T) string {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	go rendezvous.NewServer(time.Minute).Serve(pc, stop)
+	t.Cleanup(func() { close(stop) })
+	return pc.LocalAddr().String()
+}
+
+// Two machines: the only other one is the node, so no peer can show this
+// machine is online; the gateway or the introducer must.
+func TestJudgeLostConnectionTwoMachines(t *testing.T) {
+	fastProbes(t)
+	dh, dp, _ := net.SplitHostPort(deadAddr(t))
+	deadNodePort, _ := strconv.Atoi(dp)
+	self := localDaemon(t, net.JoinHostPort(dh, dp)) // the node is the only peer
+
+	if v, why := judgeLostConnection(dh, deadNodePort, "j", self); v != lostDetach {
+		t.Fatalf("no route: verdict %d (%s), want detach", v, why)
+	}
+	gatewayUp(t)
+	if v, why := judgeLostConnection(dh, deadNodePort, "j", self); v != lostRerun || !strings.Contains(why, "gateway") {
+		t.Fatalf("gateway up: verdict %d (%s), want rerun", v, why)
+	}
+	// An internet node (loopback forwarder) with an introducer set: only
+	// the introducer speaks for the uplink.
+	introducerAddr = func() string { return deadAddr(t) }
+	if v, why := judgeLostConnection(dh, deadNodePort, "j", self); v != lostDetach {
+		t.Fatalf("introducer silent: verdict %d (%s), want detach", v, why)
+	}
+	intro := fakeIntroducer(t)
+	introducerAddr = func() string { return intro }
+	if v, why := judgeLostConnection(dh, deadNodePort, "j", self); v != lostRerun || !strings.Contains(why, "introducer") {
+		t.Fatalf("introducer answers: verdict %d (%s), want rerun", v, why)
+	}
 }
 
 func TestJudgeLostConnection(t *testing.T) {
@@ -237,6 +298,7 @@ func TestWatcherFailsJobWhoseNodeIsGone(t *testing.T) {
 	saved := goneAfter
 	goneAfter = 0
 	t.Cleanup(func() { goneAfter = saved })
+	noNetwork(t)
 	dir, _ := detachedRecord(t, "j4", deadAddr(t))
 	self := localDaemon(t, livePeer(t))
 	warned := map[string]bool{}
@@ -253,5 +315,29 @@ func TestWatcherFailsJobWhoseNodeIsGone(t *testing.T) {
 	}
 	if err := Attach(context.Background(), r.ID); err == nil || !strings.Contains(err.Error(), "gone") {
 		t.Fatalf("attach of a lost job: %v", err)
+	}
+}
+
+// Two machines: the node is the only peer, so the gateway shows this
+// machine is online and the job fails rather than waiting forever.
+func TestWatcherFailsJobWhoseNodeIsGoneTwoMachines(t *testing.T) {
+	saved := goneAfter
+	goneAfter = 0
+	t.Cleanup(func() { goneAfter = saved })
+	noNetwork(t)
+	node := deadAddr(t)
+	dir, _ := detachedRecord(t, "j5", node)
+	self := localDaemon(t, node)
+	warned := map[string]bool{}
+
+	collectDetached(context.Background(), zerolog.Nop(), warned, self)
+	if r, _ := jobhistory.ReadRecordAt(dir); r.UnreachableSince != "" {
+		t.Fatalf("offline machine started the gone clock: %+v", r)
+	}
+	gatewayUp(t)
+	collectDetached(context.Background(), zerolog.Nop(), warned, self)
+	collectDetached(context.Background(), zerolog.Nop(), warned, self)
+	if r, _ := jobhistory.ReadRecordAt(dir); r.Status != jobhistory.StateFailed || !strings.Contains(r.Error, "gone") {
+		t.Fatalf("node gone, gateway up: %+v", r)
 	}
 }

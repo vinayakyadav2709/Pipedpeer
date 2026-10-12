@@ -27,8 +27,8 @@ const collectTimeout = 10 * time.Minute
 // node reports it ended, exactly as a foreground run finishes (see collect),
 // so detaching only changes whether the output is watched live. A node that
 // cannot be reached is retried on the next tick; each job warns once. A node
-// that stays unreachable for goneAfter while this machine reaches other
-// peers (selfPort is the local daemon's port), or that no longer knows the
+// that stays unreachable for goneAfter while this machine is online
+// (networkUp; selfPort is the local daemon's port), or that no longer knows the
 // job, fails the record with the reason and the command to run it again.
 func WatchDetached(ctx context.Context, log zerolog.Logger, selfPort int) {
 	warned := map[string]bool{}
@@ -106,12 +106,12 @@ func collectDetached(ctx context.Context, log zerolog.Logger, warned map[string]
 }
 
 // goneAfter is how long a detached job's node may stay unreachable, while
-// this machine reaches other peers, before the job counts as lost.
+// this machine is online, before the job counts as lost.
 var goneAfter = 24 * time.Hour
 
 // nodeGone decides whether collecting failed because the job is lost for
 // good: its node no longer knows it (HTTP 404), or the node has not answered
-// for goneAfter while other peers did. It starts and keeps that clock on the
+// for goneAfter while this machine was online (networkUp). It starts and keeps that clock on the
 // record, so a daemon restart does not reset it.
 func nodeGone(dir string, rec jobhistory.Record, err error, selfPort int) (string, bool) {
 	rerun := fmt.Sprintf("rerun with: pipedpeer run %s --remote", rec.ScriptPath)
@@ -121,7 +121,7 @@ func nodeGone(dir string, rec jobhistory.Record, err error, selfPort int) (strin
 	if !nodeUnreachable(err) {
 		return "", false
 	}
-	if _, online := anyPeerAnswers(selfPort, rec.DaemonEndpoint); !online {
+	if _, online := networkUp(selfPort, rec.DaemonEndpoint); !online {
 		return "", false // this machine may be the one offline: no verdict
 	}
 	since, perr := time.Parse(time.RFC3339, rec.UnreachableSince)
@@ -132,7 +132,7 @@ func nodeGone(dir string, rec jobhistory.Record, err error, selfPort int) (strin
 	if time.Since(since) < goneAfter {
 		return "", false
 	}
-	return fmt.Sprintf("node %s gone (unreachable since %s while other peers answer); %s",
+	return fmt.Sprintf("node %s gone (unreachable since %s while this machine is online); %s",
 		rec.DaemonEndpoint, rec.UnreachableSince, rerun), true
 }
 
