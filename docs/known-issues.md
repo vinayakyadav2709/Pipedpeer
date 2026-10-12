@@ -18,7 +18,7 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Observed 6: a job's output stream closes early | a7bb9a5 waits for both output readers before reaping the job |
 | Pool: `items_zlib` is dropped when the daemon splits work | 049a1aa |
 | Internet: unreachable reasons never reach `pipedpeer nodes` | They are kept by the daemon, served by `/v1/peers/unreachable`, and listed under `nodes` |
-| `--remote` gives up after one look (demo run sheet) | It waits up to 15 s for a node (`PIPEDPEER_REMOTE_WAIT`), and says why each node was turned down |
+| `--remote` gives up after one look (demo run sheet) | It waits up to 10 min for a node (`PIPEDPEER_REMOTE_WAIT`), says every 30 s why each node is busy, and fails at once when no node could ever hold the job |
 | Observed 2: three tests fail, not skip, without torch | The shim test gate counts the weighted sampler as needing torch |
 | Pool: `runMicroChunks` answers in JSON; the shim reads frames | Micro-chunked requests answer in the format they were asked in, with a receipt |
 | Pool: forwarded work is recorded as `local` | The forwarding node relabels the peer's `local` parts as `peer:<addr>` before passing the answer on |
@@ -38,7 +38,7 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Found on the rig (Phase 4): a memory-bound pool shrinks itself between maps | The pool's own workers count as reclaimable when it re-sizes |
 | Found on the rig (Phase 4): more workers do not make a pool map faster | Local and cluster pull from one queue instead of splitting the items in half up front |
 | Found on the rig (Phase 4): sklearn ships the training set once per tree | Arrays the tasks in a chunk share travel once per chunk |
-| Found on the rig (Phase 4): a run straight after another is refused for memory | A run on this machine waits out a memory refusal for up to 15 s |
+| Found on the rig (Phase 4): a run straight after another is refused for memory | A run on this machine waits out a memory refusal for up to the placement window (10 min) |
 
 ## Not bugs, recorded so they are not reported again
 

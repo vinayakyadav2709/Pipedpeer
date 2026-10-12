@@ -75,7 +75,7 @@ mkdir -p /tmp/pptest && cd /tmp/pptest && touch .pipedpeerignore
 | A script that crashed, or an environment that failed to build, was rescheduled forever, rebuilding each time | Both would fail the same way on any node, so the run stops and reports the error. A job killed by a signal (exit code above 128, such as a node shutting down or running out of memory) is still retried elsewhere |
 | Daemon start-up deleted job history. The history and the daemon's job directories share `jobs/`, and each pruner removed the other's entries | The daemon removes only UUID-named job directories. The history removes only directories holding a record |
 | The cluster's signing keys sometimes could not be recorded: two writers renamed each other's temporary file away | Each write uses its own uniquely named temporary file |
-| `--remote` looked for a node once, and could report "no eligible node found" spuriously | It waits up to 15 s for a node, and lists why each one was turned down. `PIPEDPEER_REMOTE_WAIT` changes the wait (`0s` takes one look) |
+| `--remote` looked for a node once, and could report "no eligible node found" spuriously | It waits up to 10 min for a node (15 s before 1e07d56), says every 30 s why each one is busy. `PIPEDPEER_REMOTE_WAIT` changes the wait (`0s` takes one look) |
 | A peer with no direct path was only logged, never shown | `pipedpeer nodes` lists it under "No direct path", with the reason |
 
 **Pool, shim and resolver fixes** (`fad3ce4`)
@@ -160,7 +160,7 @@ ls -d ~/.local/share/pipedpeer/jobs/$ID && echo "history kept"
 pp stop && pp start && pp run ok.py --remote --check-only
 ```
 
-Expect either "waiting up to 15s…" followed by `Would place on node …`, or a
+Expect either "waiting up to 10m0s…" followed by `Would place on node …`, or a
 list of why each node was turned down.
 
 **6. Discovery doesn't send the secret.** Every machine needs the new binary
@@ -554,7 +554,7 @@ neither is a Pipedpeer bug:
 |---|---|---|
 | Adding workers changed nothing: 00_pool took 23 s on one, two and three workers | The race dealt chunks alternately before anything ran, so the origin always owned half the items, and its half took as long as the whole job did elsewhere | Both sides pull from one queue, so shares follow speed. Once the queue is empty, a chunk a peer still holds is re-run here only when that beats the peer's measured round trip, or the peer is overdue. Before any round trip has been measured, it waits at most twice the chunk's local time plus 0.7 s |
 | `RandomForest` got no faster with more workers | sklearn passes the whole training set to every tree, so a chunk of three trees shipped X (25 MB) three times | Arrays the tasks in a chunk share travel once, in the globals frame the pool protocol already has; each task carries a reference |
-| Every second back-to-back run of 02_numpy_heavy was refused in under 0.1 s ("insufficient memory") | Admission ran while the previous job's memory was still being handed back | A run on this machine waits out a memory refusal for up to the placement window (`PIPEDPEER_REMOTE_WAIT`, 15 s). Other refusals still fail at once |
+| Every second back-to-back run of 02_numpy_heavy was refused in under 0.1 s ("insufficient memory") | Admission ran while the previous job's memory was still being handed back | A run on this machine waits out a memory refusal for up to the placement window (`PIPEDPEER_REMOTE_WAIT`, 10 min since 1e07d56). Other refusals still fail at once |
 
 **The capstone, `pipedpeer-demo/07_capstone/`.** One plain script, five
 stages, each timing itself:
