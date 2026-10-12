@@ -151,7 +151,7 @@ func Publish(ctx context.Context, cacheDir string, roots []string) error {
 		return err
 	}
 	argv := append([]string{"nix", "copy", "--to", cacheURI(cacheDir)}, roots...)
-	cmd, done, err := nixstore.Cmd("", argv...)
+	cmd, done, err := nixstore.CmdContext(ctx, "", argv...)
 	if err != nil {
 		return err
 	}
@@ -413,7 +413,7 @@ func Import(ctx context.Context, cacheDir string, roots []string, extraKeys ...s
 		return fmt.Errorf("nothing to import")
 	}
 	keys := strings.Join(strings.Fields(clusterKeys()+" "+strings.Join(extraKeys, " ")), " ")
-	cmd, done, err := nixstore.Cmd("", importArgv(cacheDir, roots, keys)...)
+	cmd, done, err := nixstore.CmdContext(ctx, "", importArgv(cacheDir, roots, keys)...)
 	if err != nil {
 		return err
 	}

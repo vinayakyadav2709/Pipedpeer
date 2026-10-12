@@ -175,7 +175,7 @@ func SignPaths(ctx context.Context, k identity.KeyPair, paths []string) error {
 	defer cleanup()
 
 	argv := append([]string{"nix", "store", "sign", "--key-file", file}, paths...)
-	cmd, done, err := nixstore.Cmd("", argv...)
+	cmd, done, err := nixstore.CmdContext(ctx, "", argv...)
 	if err != nil {
 		return err
 	}
