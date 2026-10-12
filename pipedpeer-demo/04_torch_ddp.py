@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tiny distributed MLP training loop.
+"""Distributed MLP training loop, sized to keep one GPU busy for ~15 s.
 
 Plain PyTorch. No distributed.init_process_group, no DistributedDataParallel
 import — `pipedpeer run --ddp 3` makes this transparently a 3-rank DDP run
@@ -14,6 +14,11 @@ own tensors gets neither.
 
 Optional argument: the number of epochs (default 3). Use more to have time
 to unplug a machine and plug it back in: `pipedpeer run --ddp 2 04_torch_ddp.py 30`.
+
+Size: on a GPU, 600k samples through a 2048-wide MLP in batches of 8192 -
+about 4.5 s an epoch on an RTX 3060 laptop GPU at ~100% utilisation, in
+about 650 MB of VRAM. Without CUDA the same run would take minutes, so the
+CPU run is scaled down (60k samples, 512 wide) to finish in seconds.
 """
 import sys
 import time
@@ -32,7 +37,12 @@ if device == "cuda":
 else:
     print("using CPU")
 
-n, d = 60_000, 512
+# Wide layers and big batches give the GPU real work per step, while the
+# gradients each DDP step syncs stay ~34 MB.
+if device == "cuda":
+    n, d, width, BATCH = 600_000, 64, 2048, 8192
+else:
+    n, d, width, BATCH = 60_000, 64, 512, 2048
 X = torch.randn(n, d)
 y = (X[:, 0] * 2 + X[:, 1] - X[:, 2] > 0.5).float().unsqueeze(1)
 
@@ -41,13 +51,13 @@ class MLP(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(d, 512),
+            nn.Linear(d, width),
             nn.ReLU(),
-            nn.Linear(512, 512),
+            nn.Linear(width, width),
             nn.ReLU(),
-            nn.Linear(512, 512),
+            nn.Linear(width, width),
             nn.ReLU(),
-            nn.Linear(512, 1),
+            nn.Linear(width, 1),
         )
 
     def forward(self, x):
@@ -58,9 +68,10 @@ model = MLP().to(device)
 opt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
 loss_fn = nn.MSELoss()
 
-BATCH = 2048
 EPOCHS = int(sys.argv[1]) if len(sys.argv) > 1 else 3
-loader = DataLoader(TensorDataset(X, y), batch_size=BATCH, shuffle=True)
+# Pinned batches copy to the GPU while it is still busy with the last step.
+loader = DataLoader(TensorDataset(X, y), batch_size=BATCH, shuffle=True,
+                    pin_memory=device == "cuda")
 
 print("training ...")
 t0 = time.monotonic()
@@ -68,7 +79,7 @@ for epoch in range(EPOCHS):
     steps = 0
     loss = None
     for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
+        xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
         opt.zero_grad()
         loss = loss_fn(model(xb), yb)
         loss.backward()
