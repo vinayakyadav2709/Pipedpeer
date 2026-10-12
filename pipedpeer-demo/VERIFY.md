@@ -6,9 +6,11 @@ you see. Nothing is listed here that Claude did not actually run.
 
 - `<!-- V1 8e14b9b: <file> -->`: output from rehearsal pass 1. The full
   output is in `~/Downloads/pipedpeer-work/evidence/v1/<file>`.
-- `<!-- refresh from V2 -->`: the check changed after V1, or V1 did not run it.
-  The expected output stays a placeholder until rehearsal pass 2 fills it in.
-  Run the check anyway and note what you see.
+- `<!-- V2 31b5364: <file> -->` / `<!-- V2 cc56753: <file> -->`: output from
+  rehearsal pass 2, in `~/Downloads/pipedpeer-work/evidence/v2/<file>`.
+- `<!-- confirm in final re-check -->`: the line shown is the expected one,
+  either because no rehearsal ran that exact command or because the code
+  changed after V2 ran it. Run the check anyway and note what you see.
 - **Pass if** lists the lines that must appear exactly. Times, ids, hashes and
   CPU percentages vary from run to run. Names like `yeet` (this laptop) and
   pc1–pc4 (the containers) are what the lab uses.
@@ -20,13 +22,18 @@ and the rendezvous. pc1–pc3 are single-user Nix; pc4 stands in for Ubuntu
 
 **What this does not prove:** speedup (the containers share this laptop's CPU),
 two real GPUs, real Wi-Fi, or the college firewall and Ubuntu's AppArmor rules.
-The lab visit covers those.
+The lab visit covers those. The containers also have no `python3`, so the demo
+scripts that call it (`demo/7-gpu.sh`, `demo/prep-3-gpu.sh`) skip there; the
+venue machines have it. The friend's real 2-GPU ring (this laptop's RTX 3060 +
+their RTX 3050) was never run: their laptop went offline during V2. Check it
+in your own run (check 7c).
 
 **Before you start:**
 - Have at least 4 GB of memory free (`free -g`).
 - Make sure no other lab is up (`docker ps`).
-- Plan about 1.5 hours. The CUDA build in check 7 takes about 21 minutes and
-  runs in the background.
+- Plan about 2.5 hours (V2's lab and GPU-lab passes took about 2 h 20 min,
+  06:52–09:14). The CUDA build in check 7 takes about 21 minutes and runs in
+  the background.
 
 ---
 
@@ -37,9 +44,24 @@ The lab visit covers those.
 cd src && go build -o ../bin/pipedpeer . && go vet ./... && gofmt -l . ; cd ..
 ```
 Pass if: no output from vet, and none from gofmt. <!-- V1 8e14b9b: 00-static.txt (VET-OK, gofmt empty) -->
-The full test run is `cd src && go test -count=1 -p 2 ./...`. V1 had 36
-packages `ok` and `internal/daemonapi` FAIL in two memory tests, which FX-SMALL
-fixed (01-gotest.txt). <!-- refresh from V2: expect every package ok -->
+The full test run is `cd src && go test -count=1 -p 1 ./...`. Pass if every
+package says `ok` (or `[no test files]`): at cc56753 that was 38 `ok` lines and
+no FAIL (<!-- fix5/go-test-full-2.txt -->). V1 had `internal/daemonapi` FAIL in
+two memory tests, fixed since (01-gotest.txt).
+
+The integration tests (need docker or podman, about 3 minutes):
+```bash
+cd src && PIPEDPEER_INTEGRATION=1 go test -v -run "TestConcurrentJobsAndSharedNumpyCache|TestIntegrationFullSyncAndExecute" -timeout 15m . ; cd ..
+```
+Pass if (<!-- V2 31b5364: 12-integration.txt, 12b-integration-fullsync.txt -->):
+```
+--- PASS: TestConcurrentJobsAndSharedNumpyCache (83.86s)
+…
+PASS
+ok  	github.com/pipedpeer/pipedpeer	82.777s
+```
+V2's first run failed `TestIntegrationFullSyncAndExecute` on a test bug; the
+second excerpt is the rerun after the test fix.
 
 **2. Start the containers:**
 ```bash
@@ -98,23 +120,46 @@ terminal. Then:
 ```bash
 scripts/lab-lan.sh x pc3 ./demo/0-join.sh 10.88.0.1 "$(bin/pipedpeer auth show)"
 ```
-Pass if (<!-- V1 8e14b9b: 20-join-pc3.txt -->, 5.2 s):
+Pass if (<!-- V2 31b5364: 56-join-pc3.txt -->, 1.8 s; V1 took 5.2 s):
 ```
+$ pipedpeer join 10.88.0.1
+restarting the daemon to join through 10.88.0.1:38445
+this node is b7b73c2d
   waiting for peers · 90 s left · 0 found
-connected (4 peer(s))
-a88718a2*  pc3   healthy  0     16c 37%  9.1 GiB   -                     self  self
+connected (3 peer(s))
+…
+b7b73c2d*  pc3            healthy  0     16c 12%  9.3 GiB   -    self  self
 ```
-The events terminal shows a `JOIN … is up (10.88.0.13:38080)` line for pc3.
-<!-- refresh from V2: FX-EVENTS 5a5e5a5 names every peer; V1 showed `06b9a112-9739-…` as a raw uuid and printed `("no)` in NOPATH lines -->
-`pipedpeer dashboard` gets a pc3 row. <!-- refresh from V2: not captured in V1 -->
+The other pcs show `healthy` with PATH `lan`. A `192.168.0.200  unknown` row
+is this laptop's other address; ignore it.
+The events terminal shows a JOIN line for pc3. In V2 it still named pc3 by
+its node id (`JOIN   b7b73c2d-aad0-41e5-b9c5-49a46da18d08 is up (10.88.0.13:38080)`,
+56-join-host-events.txt); dad7e42 names peers by hostname, so expect:
+```
+JOIN   pc3 is up (10.88.0.13:38080)
+```
+<!-- confirm in final re-check -->
+`pipedpeer dashboard` gets a pc3 row. <!-- confirm in final re-check: the dashboard needs a TTY and was not captured in V1 or V2 -->
 
 **6. The cluster (step 2).** On the laptop: `PAUSE=0 ./demo/1-cluster.sh`.
-Pass if pc1–pc4 and `yeet` are all `healthy`, and the `yeet*` row shows the GPU
-(<!-- V1 8e14b9b: 16-1-cluster.txt -->):
+Pass if pc1–pc4 and `yeet` are all `healthy`, the `yeet*` row shows the GPU,
+there are no `unreachable` rows, and the script ends with the `/ui` addresses
+(<!-- V2 31b5364: 71-step-1-cluster.txt -->):
 ```
-06b9a112*  yeet           healthy      0     15c 13%  10 GiB    RTX 3060 0% 41M/6.0G  self  self
+$ pipedpeer nodes
+NODE       HOST  STATE    JOBS  CPU     MEM FREE  GPU                   PATH  SOURCE
+06b9a112*  yeet  healthy  0     15c 5%  8.5 GiB   RTX 3060 0% 41M/6.0G  self  self
+0b591fdc   pc2   healthy  0     16c 5%  721 MiB   -                     lan   manual
+28197ccf   pc4   healthy  0     16c 5%  6.5 GiB   -                     lan   manual
+b7b73c2d   pc3   healthy  0     16c 5%  1.0 GiB   -                     lan   manual
+e3ec139a   pc1   healthy  0     16c 5%  874 MiB   -                     lan   manual
+…
+$ pipedpeer ui --print
+This machine:    http://127.0.0.1:38080/ui
+From elsewhere:  http://192.168.0.200:38080/ui
 ```
-<!-- refresh from V2: FX-NODES aca41d1. V1 also listed ten stale `manual-1 127.0.0.1 unreachable` rows; there should be none now. The script now ends with `pipedpeer ui --print` (s2) -->
+pc4's 6.5 GiB came from the host; since 9ca58a9 and da6a8ef it shows its
+container limit (V2 re-check: about 1.1 GiB). <!-- V2 cc56753 -->
 
 **7. GPU from a PC with no GPU (step 6).** First the CUDA environment on pc1.
 This is a 21-minute build; start it and carry on with checks 8–11 in another
@@ -133,16 +178,128 @@ Then the run itself:
 ```bash
 scripts/lab-lan.sh x pc1 pipedpeer run 04_torch_ddp.py --remote --gpu force
 ```
-Pass if (<!-- V1 8e14b9b: 13-gpu-step.txt -->):
+Pass if (<!-- V2 31b5364: 74b-gpu-pc1-direct.txt -->, 7.8 s):
 ```
 [coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node 06b9a112 (lease=8d3d595b)
+…
+      Closure already on the node; nothing to send
+…
 using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+training ...
+epoch 0: 30 steps, loss 0.2452
+epoch 1: 30 steps, loss 0.1147
+epoch 2: 30 steps, loss 0.0592
+training done in 1.3s
+…
+=== Summary ===
   ran on       yeet (192.168.0.200)
+  environment  built in 1.2 s
+  closure      already on the node
+  script       5.9 s · peak memory 1.3 GB
+  files back   none
+  total        7.6 s
 [coordinator] Task completed successfully on node 06b9a112
 ```
-<!-- refresh from V2: V1 took 264.8 s, almost all of it spent broadcasting the CUDA closure to CPU-only pcs, which ran out of memory (`Warning: peer … did not take this environment`). FX-NAR 29acd9b fixed that, so the warnings should be gone and the total close to the script's 4.5 s. 04_torch_ddp.py now uses a DataLoader (DDP-UP). -->
-The two-GPU `--ddp 2 --gpu force` run is in V2's GPU lab and on the friend's
-laptop. <!-- refresh from V2 -->
+No `Warning: peer … did not take this environment` lines (V1 spent 264.8 s on
+that broadcast). In the lab, run `pipedpeer run` directly as above:
+`./demo/7-gpu.sh` needs `python3`, which the containers lack, so there it only
+prints `No GPU machine among the peers - skipping` (74-step-7-gpu-pc1.txt).
+
+**7b. `--gpu force` without `--remote`, from the GPU-less pc1:**
+```bash
+scripts/lab-lan.sh x pc1 pipedpeer run 04_torch_ddp.py --gpu force
+```
+Pass if (<!-- V2 cc56753: 95-c-gpuforce-from-gpuless-pc1.txt -->):
+```
+[coordinator] --gpu force: this machine has no GPU; placing the run on a GPU node...
+[coordinator] Placed on node 06b9a112 (lease=977b0522)
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+…
+  ran on       yeet (192.168.0.200)
+```
+V2's total was 212.0 s, of which about 3 min 24 s was packing the 3.6 GB GPU
+closure for peers that would not get it. f182b0f decides who gets a closure
+before packing it, so expect a total close to check 7's 7.6 s.
+<!-- confirm in final re-check -->
+
+**7c. Two GPU ranks (`--ddp 2`), DDP-DOWN and DDP-UP.** These ran in the GPU
+lab: two containers (gpu1, gpu2) sharing this laptop's one RTX 3060 and a
+GPU-less submitter (sub1). Take the lab-lan down first (only one lab at a time).
+```bash
+PIPEDPEER=$PWD/bin/pipedpeer scripts/lab-gpu.sh up
+PIPEDPEER=$PWD/bin/pipedpeer scripts/lab-gpu.sh join all
+scripts/lab-gpu.sh x sub1 pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
+```
+Pass if (<!-- V2 cc56753: 113-c-ddp-ring-cached.txt -->, 9.5 s cached; the
+first run took 635 s, packing and sending 3.1 GB to each rank, 112-c-ddp-ring-cold.txt):
+```
+=== Distributed training: 2 ranks ===
+rank 0: a43e931b (10.89.0.12:38080)
+rank 1: 29ffe602 (10.89.0.11:38080)
+sync: daemon channel via 10.89.0.12:38080 (no extra ports)
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+[pipedpeer] ddp: sharding 60000 samples across 2 ranks
+…
+[pipedpeer] ddp daemon-channel sync ready (rank 0/2, every 1 step)
+[pipedpeer] ddp daemon-channel sync ready (rank 1/2, every 1 step)
+…
+final loss: 0.18032728135585785
+TOTAL 5.5s
+[pipedpeer] ddp: 43 sync(s), 1.6s total (36 ms each), 66.2 MiB sent, 66.2 MiB received
+[pipedpeer] ddp: the ring did NOT pay for itself — 2 ranks on 1 machine(s), …
+```
+"did NOT pay for itself" is right here: both ranks share one GPU.
+
+DDP-DOWN and DDP-UP: run 60 epochs, and once `epoch 3:` appears, stop the
+daemon of the rank that is NOT named in the `sync: daemon channel via` line,
+wait about 25 s, then start it again:
+```bash
+scripts/lab-gpu.sh x sub1 pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force 60
+scripts/lab-gpu.sh x gpu1 pipedpeer stop      # the non-lead rank in V2
+scripts/lab-gpu.sh x gpu1 pipedpeer start
+```
+Pass if (<!-- V2 cc56753: 114-c-ddp-down-up.txt -->):
+```
+[ddp] rank 1 on gpu1 died; continuing on 1
+[ddp]   cause: execution failed: connection lost: websocket: close 1006 (abnormal closure): unexpected EOF
+[pipedpeer] ddp: rank 1 stopped (…); its share of the data moves to the 1 rank(s) left at the next epoch
+[pipedpeer] ddp: rank 0 of 2 now takes 57344 samples, batch 4096
+…
+[ddp] rank 2: starting on gpu1 (10.89.0.11:38080); it joins at the ring's next epoch
+[pipedpeer] ddp: rank 2 is ready; waiting for the ring's next epoch to join
+[pipedpeer] ddp: handed the model and optimizer to joining rank 2 (6.0 MiB)
+[pipedpeer] ddp: rank 2 joins the ring of 3 with rank 0's model and optimizer, skipping the 28 epoch(s) the ring already did
+…
+[ddp] finished on 2 of 3 ranks (lost: [1])
+```
+V2 also printed `the ring grows from 2 to 3 ranks at this epoch`, counting the
+dead rank. FX-SHIM counts live ranks only, so expect:
+```
+[pipedpeer] ddp: the ring grows from 1 to 2 ranks at this epoch
+```
+<!-- confirm in final re-check -->
+
+The lead dying: same run, but stop the lead (the rank named in the `sync:` line).
+Pass if (<!-- V2 cc56753: 115-c-ddp-lead-dies.txt -->) it ends, exit 1, with:
+```
+[ddp] rank 0 on gpu1 died: its machine leads the ring (rendezvous and sync), so the run can't continue without it; the other ranks will stop
+…
+Error: rank 0 on gpu1 failed: execution failed: connection lost: websocket: close 1006 (abnormal closure): unexpected EOF
+```
+The surviving rank also prints a Python traceback ending in
+`http.client.RemoteDisconnected`; that is the expected stop.
+
+Finish with `scripts/lab-gpu.sh down`.
+
+**The real 2-GPU ring** (this laptop + the friend's RTX 3050, a third machine
+submitting) was never rehearsed. Check it in your own run: from a GPU-less
+machine, `pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force`; expect the two
+`rank N:` lines to name the two laptops, two `using GPU:` lines with
+different GPU names, and both `nvidia-smi` screens busy. <!-- confirm in final re-check -->
 
 **8. Dry run (step 3):**
 ```bash
@@ -157,7 +314,10 @@ CHECK 00_pool.py — nothing will run
 checks complete
 ```
 The `warning: ignoring the client-specified setting 'build-users-group'`
-lines are normal on pc4's multi-user Nix. <!-- refresh from V2: FX-CLI touched check-only; the lines above should not change -->
+lines are normal on pc4's multi-user Nix. V2 did not rerun this exact
+command; its check-only runs through `11-teacher.sh` (check 10b) print the
+same layout (`CHECK … — nothing will run`, `spreads`, `closure already on …
+(26 paths)`, `checks complete`) (<!-- V2 cc56753: 100-c-teacher-cached-primes.txt -->).
 
 **9. Cold vs cached (step 5).** pc3 must not have run anything yet besides the
 join.
@@ -176,8 +336,35 @@ Pass if (<!-- V1 8e14b9b: 14-pc3-truecold-2b.txt -->, 175 s with netem on):
   first run (cold): 169 s     every run after: 6 s
 ```
 Both runs print `checksum 191999840`. V1 had Wi-Fi-like delay and 0.5 % loss
-on each pc (`tc qdisc … netem delay 4ms 3ms loss 0.5%`, 80-netem.txt). Without
-it the cold half is faster. <!-- refresh from V2: record the exact netem command -->
+on each pc. The evidence records the resulting qdisc on every pc, not the
+command (<!-- V2 31b5364: 57-netem.txt -->):
+```
+pc1: qdisc netem 8007: root refcnt 17 limit 1000 delay 4ms  3ms loss 0.5% seed 16053757782790428889
+```
+The command that sets it, per pc, and the one that removes it:
+```bash
+for pc in pc1 pc2 pc3 pc4; do sudo nsenter -t "$(docker inspect -f '{{.State.Pid}}' pp-lan-$pc)" -n tc qdisc add dev eth0 root netem delay 4ms 3ms loss 0.5%; done
+for pc in pc1 pc2 pc3 pc4; do sudo nsenter -t "$(docker inspect -f '{{.State.Pid}}' pp-lan-$pc)" -n tc qdisc del dev eth0 root; done
+```
+<!-- confirm in final re-check: command written from the recorded qdisc, not copied from a run -->
+
+V2 ran this step on pc2, whose store already had the environment, so only the
+send was cold (<!-- V2 31b5364: 73-step-2b-cold-pc2.txt -->, 25.8 s):
+```
+      Cold run: sending the whole closure even if the node has it
+      Packed closure: 96 MB in 6.9 s
+      Sent closure: 96 MB in 8.6 s (11 MB/s)
+…
+  closure      sent 96 MB in 8.6 s (cold)
+  total        20.5 s
+…
+      Closure already on the node; nothing to send
+…
+  closure      already on the node
+  total        4.8 s
+  first run (cold): 21 s     every run after: 5 s
+```
+Since cc56753 the script exits non-zero when either run fails.
 
 **10. Packages a script never named (step 8).** On the laptop, in a new
 folder, create `teacher.py`:
@@ -200,14 +387,49 @@ checks complete
       Not packaged (the job will fail to import it): notarealpkg_xyz — add it with --pkg <nixpkgs name>
 ModuleNotFoundError: No module named 'notarealpkg_xyz'
 ```
-<!-- refresh from V2: V1's check-only ALSO said `not packaged humanize (add --pkg)`; FX-CLI 1ef1058 makes check-only ask nixpkgs, so that line should be gone -->
+V1's check-only also said `not packaged humanize (add --pkg)`. FX-CLI 1ef1058
+makes check-only ask nixpkgs, so that line should be gone and only
+`notarealpkg_xyz` is listed. <!-- confirm in final re-check: the humanize script was not rerun in V2 -->
 Now delete the `import notarealpkg_xyz` line and run `pipedpeer run teacher.py`
 again. Pass if (<!-- V1 8e14b9b: 42-teacher-humanize-run.txt -->, 1.4 s):
 ```
 332,833,500
-  spread       1476 items: 1000 on yeet, 476 on 4 others (pc3 137, pc4 124, pc1 109, pc2 106)
 ```
-<!-- refresh from V2: spread counts (FX-CLI) -->
+V1's `spread` line counted 1476 items for this 1000-item job. Since FX-CLI and
+da6a8ef it counts each item once, as it ran, so expect
+`spread       1000 items: …` with the parts adding up to 1000.
+<!-- confirm in final re-check -->
+
+**10b. Student scripts through `11-teacher.sh` (step 8).**
+```bash
+scripts/lab-lan.sh x pc3 env PAUSE=0 ./demo/11-teacher.sh students/primes.py
+```
+Pass if (<!-- V2 cc56753: 100-c-teacher-cached-primes.txt -->, 40 s):
+```
+CHECK primes.py — nothing will run
+  imports      standard library only
+  spreads      ProcessPoolExecutor (line 36)
+               split decided at run time by measured cost
+…
+  closure      already on this machine (26 paths)
+checks complete
+…
+$ pipedpeer run primes.py
+…
+primes below 16000000 : 1031130
+TOTAL 38.6s
+…
+  ran on       pc3 (127.0.0.1)
+  spread       100 items: 26 on pc3, 74 on 4 others (yeet 35, pc2 17, pc4 12, pc1 10)
+  total        39.3 s
+```
+The other four, same command, cached totals in V2: `monte_carlo_pi.py` 35.9 s,
+`word_count.py` 42.5 s, `grid_search.py` 69.5 s, `image_blur.py` 19.6 s
+(100-c-teacher-cached-*.txt). If a node's free memory dips (V2 saw ~240 MB
+right after a big run), the script prints
+`Error: … insufficient memory: need 536870912 bytes, available …` and
+`the run failed (exit 1)` (100-c-teacher-refused-*.txt): wait a few seconds and
+rerun.
 
 **11. A run on the laptop that spreads (steps 4 and 10).** On the laptop:
 `pipedpeer run 00_pool.py`. Pass if (<!-- V1 8e14b9b: 30-host-00pool-first.txt -->):
@@ -217,9 +439,41 @@ checksum 4319999744
   ran on       yeet (127.0.0.1)
   closure      already on the node
 ```
-The summary's `spread` line names pc1–pc4. <!-- refresh from V2: V1 said 120 items for a 96-item job (FX-CLI fixed the count) -->
-The full headline, `PAUSE=0 ./demo/2-headline.sh` (python3 against
-pipedpeer), was not run in V1. <!-- refresh from V2 -->
+The summary's `spread` line counts 96 items and names the pcs that took some
+(V1 said 120 items for this 96-item job; FX-CLI fixed the count).
+
+The full headline: on the laptop, `PAUSE=0 ./demo/2-headline.sh` (python3,
+then pipedpeer, same file). Pass if (<!-- V2 31b5364: 71-step-2-headline.txt -->, 27 s):
+```
+ 00_pool.py - this machine only (plain python3)
+…
+checksum 4319999744
+TOTAL 9.5s
+…
+ 00_pool.py - across the cluster (pipedpeer run)
+…
+[pipedpeer] local 13 items
+[pipedpeer] remote ok: 13 items in 8178 ms on 10.88.0.13:38080, 10.88.0.14:38080
+checksum 4319999744
+TOTAL 16.4s
+…
+=== Summary ===
+  ran on       yeet (127.0.0.1)
+  environment  built in 0.4 s
+  closure      already on the node
+  script       16.5 s · peak memory 352 MB
+  spread       96 items: 83 on yeet, 13 on 2 others (pc4 8, pc3 5)
+  files back   none
+  total        17.0 s
+
+============================================================
+ this machine only:           9.5s
+ across the cluster:          16.4s
+ speedup:                     0.58x
+============================================================
+```
+The same checksum both times is the pass. 0.58× is what containers sharing
+one CPU give; the real speedup comes from the lab visit.
 
 **12. Failover (step 10).** On the laptop: `PAUSE=0 ./demo/9-failover.sh`.
 After the first `remote ok` line, in another terminal:
@@ -246,7 +500,31 @@ cancelled — remote work stopped
 ```
 and in poolwatch, every pc's `ex=` stops growing within about 2 s (V1:
 `pc1 ex=18 can=1 …` stayed there from the ^C onward).
-<!-- refresh from V2: V1 printed a ~45-line Python traceback (ConnectionRefusedError) after ^C; FX-CLI 1ef1058 should leave only the lines above -->
+V1 also printed a ~45-line Python traceback (ConnectionRefusedError) after ^C.
+FX-CLI 1ef1058 should leave only the lines above.
+<!-- confirm in final re-check: Ctrl+C mid-run was not rerun in V2 -->
+
+**13b. Ctrl+C while the environment uploads.** Send a GPU job to pc3, which
+lacks the 6.4 GB torch closure, and press Ctrl+C during `[6/7] Uploading`:
+```bash
+pipedpeer run 04_torch_ddp.py --host 10.88.0.13:38080 --mem 900M
+```
+Pass if (<!-- V2 cc56753: 94-c-ctrlc-mid-upload.txt -->; the CLI exited
+0.06 s after the signal):
+```
+[6/7] Uploading to daemon...
+…
+      Upload stopped: cancelled
+…
+=== Summary ===
+  ran on       pc3 (10.88.0.13)
+  environment  built in 0.8 s
+  total        cancelled after 8.9 s
+cancelled — remote work stopped
+```
+Right after, `pipedpeer tasks` says `no tasks running`, and
+`pipedpeer run 00_pool.py --host 10.88.0.13:38080` is accepted at once and
+prints `checksum 4319999744` (the lease was freed).
 
 **14. Closing the terminal stops the job too.** Same run. Instead of Ctrl+C,
 close the terminal window. Pass if, in `pipedpeer jobs` from another terminal,
@@ -267,7 +545,44 @@ attaching to job 20896323 (00_pool.py) on 127.0.0.1:38080
 checksum 4319999744
 === Summary ===
 ```
-<!-- refresh from V2: FETCH 7f20314 now syncs a finished background job's files without attach; check `files back` and that a second attach doesn't apply them again -->
+
+**15b. A background job's results come back without attach.** A detached
+`--host` job from pc3 to the laptop, then the laptop's daemon goes away:
+```bash
+scripts/lab-lan.sh x pc3 pipedpeer run students/word_count.py --host 10.88.0.1:38080 --detach
+# wait ~60 s for it to finish, then on the laptop:
+pipedpeer stop
+scripts/lab-lan.sh x pc3 pipedpeer attach <id>
+```
+Pass if `run` ends with (<!-- V2 31b5364: 60-fetch-detach.txt -->):
+```
+detached — job 71581038 keeps running
+  reattach: pipedpeer attach 71581038
+```
+`pipedpeer jobs` on pc3 then shows it `succeeded	bg`, pc3's daemon.log has
+`job collected bytes=5481 … files=1 from=10.88.0.1:38080 job=…1581038 status=succeeded`
+(65-senderdeath-collected.txt), and `attach`, with the laptop's daemon
+stopped, still prints the saved output (<!-- V2 31b5364: 62-fetch-attach-node-gone.txt -->):
+```
+job 71581038 (word_count.py) finished on 10.88.0.1:38080; its output, saved on this machine:
+
+counting words in 400 documents
+…
+wrote counts.txt
+TOTAL 29.0s
+…
+=== Summary ===
+  ran on       10.88.0.1
+  script       peak memory 940 MB
+  spread       400 items: 244 on 10.88.0.1, 156 on 1 other (other machines 156)
+  files back   1 (1 new, 0 updated)
+  total        50.7 s
+```
+V2 also printed one raw JSON line (`{"level":"warn",…"message":"withholding the
+cluster token"}`) before the summary; since 3664049 that warning is plain
+text. <!-- confirm in final re-check --> That a second `attach` does not apply
+the files again was not checked. <!-- confirm in final re-check -->
+Start the laptop's daemon again: `pipedpeer start`.
 
 **16. --detach.** On the laptop: `pipedpeer run 00_pool.py --detach`. It
 returns in about 0.5 s. Then run `pipedpeer attach <id>`. Pass if
@@ -294,7 +609,44 @@ checksum 4319999744
 The second command's `spread` line names the other machines.
 
 **18. Receipts (step 13).** On the laptop, run `PAUSE=0 ./demo/10-proof.sh`.
-<!-- refresh from V2: s2's version (job --last --timeline / --receipt) not run in V1 -->
+Pass if, after the `pipedpeer jobs` table, it prints the last run's timeline,
+receipt and recent events (<!-- V2 31b5364: 77-step-10-proof.txt -->):
+```
+$ pipedpeer job --last --timeline
+job 1791770005089791190  00_pool.py  succeeded
+
+== Timeline ==
+STAGE             WHERE        START      TIME
+detect imports    local         +0ms       0ms  █
+…
+nix build         local         +0ms     386ms  █
+export closure    local       +386ms       7ms  █
+upload            06b9a112    +394ms       5ms  █
+seed peers        06b9a112    +400ms      70ms  █
+sandbox setup     06b9a112    +470ms      23ms   █
+script            06b9a112    +493ms     16.0s   ██████████████████████████████████████
+sync results      local       +16.5s       1ms                                         █
+total                                    16.5s
+
+$ pipedpeer job --last --receipt
+…
+== Receipt ==
+Items: 96 total
+  on other machines       12  ███
+  on the running node     84  ██████████████████████████
+
+By peer:
+  10.88.0.14:38080            9  ██
+  10.88.0.11:38080            3  █
+
+Cost model decisions:
+  shipped     pool.map             84 items x 1.626s = 136.61s of work, over the 0.50s worth a round trip
+
+$ pipedpeer events --limit 15
+07:26:30  POOL   received pool/map: 6 items
+…
+07:30:10  WORK   lease granted: job  from pc2
+```
 Then run `scripts/lab-lan.sh x pc2 pipedpeer traffic`. Pass if
 (<!-- V1 8e14b9b: 60-proof-receipts.txt -->) its lines read:
 ```
@@ -306,30 +658,226 @@ Each line is work pc2 did for the laptop (10.88.0.1).
 laptop's side of the bridge, `scripts/lab-lan.sh x pc3 pipedpeer join 10.88.0.1`
 still printed `connected (4 peer(s))`, because LAN discovery found the peers
 (<!-- V1 8e14b9b: 70-firewall-join.txt; rule in 70-firewall-rule.txt -->).
-<!-- refresh from V2: record the exact nft commands that add and remove the drill rule, so this check can be repeated -->
+The rule V1 used (70-firewall-rule.txt) and commands that add and remove it:
+```bash
+sudo nft add table inet ppdrill
+sudo nft add chain inet ppdrill input '{ type filter hook input priority filter - 10; policy accept; }'
+sudo nft add rule inet ppdrill input iifname "pp-venue" udp dport 38445 drop
+scripts/lab-lan.sh x pc3 pipedpeer join 10.88.0.1      # expect: connected (4 peer(s))
+sudo nft delete table inet ppdrill
+```
+<!-- confirm in final re-check: commands written from the recorded rule, not copied from a run; V2 did not repeat this drill -->
 
-## Not run in V1 (V2 will add expected output)
+## Added in V2
 
-Each of these is marked `<!-- refresh from V2 -->`:
-- the headline (`2-headline.sh`).
-- pandas (`6-pandas.sh`).
-- the teacher script through `11-teacher.sh`.
-- `12-everything.sh` and `07_everything.py`.
-- `13-finale.sh`, `14-capstone.sh`, and the `students/` scripts.
-- the `prep-2-rehearse.sh` table and `prep-1-check.sh`.
-- `pipedpeer dashboard`, `/ui` and `pipedpeer stats`.
-- `--ddp 2`, plus DDP-DOWN and DDP-UP on two GPUs.
-- the sender losing its network (step 11b).
-- the integration tests.
-- the PKG-PREP before/after on a fresh pc. V1 measured 54 s → 4 s, but the
-  common build then failed its memory check in the 1.2 GB containers
-  (15-pc3-pkgprep-before-after.txt).
+**20. pandas out-of-core (step 7).** On the laptop: `PAUSE=0 ./demo/6-pandas.sh`.
+Pass if (<!-- V2 31b5364: 71-step-6-pandas.txt -->, 12.8 s):
+```
+$ pipedpeer run 03_pandas_ooc.py -e PIPEDPEER_OOC_MIN=1e8
+[pipedpeer] read_csv: streaming 329 MB out-of-core
+read data.csv: 3,000,000 rows x 7 cols in 8.0s
+[pipedpeer] groupby: combining 5 chunk partials from the cluster
+groupby('cat').mean(): 1.0s
+…
+alpha  1.498151e+06  0.499574  0.500078  0.500743  0.500440  0.500033
+…
+TOTAL 9.0s
+```
 
-**V1 failed these; they were fixed since, and V2 checks them again:**
-- `02_numpy_heavy.py` was killed at the 600M default memory cap, and its SVD
-  offload hung for over 15 minutes (17-, 18-*.txt).
-- A sender that lost its network got its job run twice
-  (90-senderdeath-*.txt).
+**21. Everything in one script (step 9).**
+```bash
+scripts/lab-lan.sh x pc3 pipedpeer run 07_everything.py --remote
+```
+The first run on pc3 built the whole environment, CUDA torch included
+(`environment  built in 470.0 s`), and took 700.6 s. Pass if
+(<!-- V2 cc56753: 98-c-everything-pc3-cold.txt -->):
+```
+--- pool
+[pipedpeer] remote ok: 16 items in 3268 ms on 10.88.0.12:38080, 10.88.0.13:38080
+checksum 1151999856
+section pool 7.5s
+--- lambda
+…
+checksum 143999880
+section lambda 2.7s
+--- sklearn
+[pipedpeer] joblib: 44 tasks, 0.165s each; racing this machine against the cluster
+accuracy 0.9599
+section sklearn 1.5s
+--- numpy
+…
+largest singular value 1152.7576
+section numpy 8.9s
+--- pandas
+…
+section pandas 0.5s
+--- torch
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+…
+final loss 0.0282
+section torch 1.9s
+wrote results/everything.txt
+TOTAL 23.0s
+…
+  ran on       yeet (192.168.0.200)
+  environment  built in 470.0 s
+…
+  total        700.6 s
+```
+In V2 the second (cached) run then failed: the recorded peak memory (7.6 GB,
+summed over forked workers) became an 8.5 GiB estimate and every node turned
+it down (`Error: no eligible node found`, 99-c-everything-pc3-cached.txt).
+FX-PEAK fixes the estimate, so expect the same output as above with
+`closure already on the node` and a total near the script's 27 s.
+<!-- confirm in final re-check -->
+`./demo/12-everything.sh` on pc2 (no `--remote`) hit the same estimate and now
+exits 1 with `the run failed (exit 1): read the Error line above`
+(97-c-12-everything-pc2.txt); after FX-PEAK it should run.
+<!-- confirm in final re-check -->
+
+**22. Finale (step 12).** On the laptop: `PAUSE=0 ./demo/13-finale.sh`.
+V2 printed (<!-- V2 cc56753: 101-c-13-finale.txt -->, 534 s with all eight
+jobs crowding the containers):
+```
+ Finale - 8 jobs at once
+…
+  started pool  (log: demo/finale-logs/pool.log)
+…
+  started everything  (log: demo/finale-logs/everything.log)
+…
+ Finale results
+================================================================
+  JOB          RAN ON                 TOTAL      RESULT
+  pool         pc1                    428.8s     ok
+  sklearn      pc3                    42.5s      ok
+  numpy        pc1                    514.0s     ok
+  pandas       pc4                    ?          fail (exit 1)
+  torch        yeet                   2.7s       ok
+  files        pc4                    0.0s       ok
+  lambda       pc2                    6.1s       ok
+  everything   ?                      ?          fail (exit 1)
+```
+torch now runs on the GPU machine (`run --gpu force`, 91a393a) and the script
+exits 1 when a job fails. pandas failed on a pool HTTP 500 (FX-SHIM now
+combines locally) and everything on the 8.5 GiB estimate (FX-PEAK). Pass if
+all eight say `ok`. <!-- confirm in final re-check -->
+
+**23. Capstone (step 14).** On the laptop: `PAUSE=0 ./demo/14-capstone.sh`.
+Pass if (<!-- V2 31b5364: 78-step-14-capstone.txt -->, 288 s):
+```
+[1/5] pandas: read data.csv and average each category ...
+[pipedpeer] read_csv: streaming 196 MB out-of-core
+[pipedpeer] groupby: combining 3 chunk partials from the cluster
+  pandas: 216.5s
+[2/5] numpy: features and target ...
+  numpy: 58.3s
+[3/5] sklearn: RandomForest(n_estimators=80, n_jobs=-1) ...
+…
+  accuracy 0.8962
+  sklearn: 2.9s
+[4/5] Pool: bootstrap the accuracy (48 tasks x 100 resamples) ...
+  95% of resamples between 0.8929 and 0.8997
+  pool: 4.5s
+[5/5] files: write results/ ...
+  files: 0.8s
+TOTAL 283.0s
+      Synced 3 file(s) to …/07_capstone (3 new, 0 updated, 0 deleted)
+…
+$ ls results/
+by_category.csv
+feature_importance.csv
+summary.json
+```
+
+**24. `pipedpeer stats`.** On the laptop. Pass if (<!-- V2 31b5364: 79-stats.txt -->):
+```
+Cluster: 5 node(s), 5 healthy · 79 cores · 4.3 GiB free memory · 1 GPU node(s) · 1 task(s) running
+
+NODE       HOST           STATE       CORES  CPU%   MEM FREE JOBS     CHUNKS FROM PEER ITEMS RUN TO PEERS FAILED
+06b9a112   yeet           healthy*       15    40    1.1 GiB    1        153       32       447      209      0
+e3ec139a   pc1            healthy        16    49    506 MiB    0        145      104       442        0      0
+…
+Recent runs from this machine:
+ID                   SCRIPT             STATUS     NODE          TOTAL  SLOWEST STAGE          DISTRIBUTED
+1791771026451497843  07_capstone.py     succeeded  06b9a112    4m47.3s  script 4m44.3s         0/288 items remote
+1791770005089791190  00_pool.py         succeeded  06b9a112      16.5s  script 16s             12/96 items remote
+…
+```
+
+**25. The `/ui` page.** On the laptop: `pipedpeer ui --print`, open the first
+address in a browser window about 1366×768. Pass if the page reads
+(<!-- V2 31b5364: 68-ui-text.txt, page text from headless Chromium; no console errors -->):
+```
+Pipedpeer
+127.0.0.1:38080
+live · updated 7:09:49 AM
+…
+Nodes healthy
+5of 5
+Cores
+79
+…
+GPU nodes
+1
+…
+Node	Host	State	Cores	CPU	Free memory	Tasks	Items run	From peers	Sent to peers	Failed
+06b9a112	yeet	healthy · this machine	15
+…
+Recent runs from this machine
+```
+
+**26. The sender loses its network (step 11b).** Start a job from pc3 on the
+laptop, then cut pc3 off for 200 s:
+```bash
+scripts/lab-lan.sh x pc3 pipedpeer run students/word_count.py --host 10.88.0.1:38080
+# right after the first "remote ok" line, in another terminal:
+docker network disconnect pipedpeer-lan_venue pp-lan-pc3; sleep 200; docker network connect --ip 10.88.0.13 pipedpeer-lan_venue pp-lan-pc3
+```
+Pass if the run ends with (<!-- V2 31b5364: 64-senderdeath-long-run.txt -->):
+```
+lost the connection to 10.88.0.1:38080 (connection lost: read tcp 10.88.0.13:57302->10.88.0.1:38080: read: connection timed out); checking whether the node or this machine went away...
+…
+neither the node (…) nor any other peer answers, so this machine is the one offline; the job keeps running there
+
+detached — job 53517360 keeps running
+  reattach: pipedpeer attach 53517360
+```
+and, about 15 s after pc3 reconnects, pc3 has the result file and its job
+history says it ran once (<!-- V2 31b5364: 65-senderdeath-collected.txt -->):
+```
+53517360	succeeded	bg	job-1791768757453515387	…
+01:36:17 INF job collected bytes=2664 component=daemon files=1 from=10.88.0.1:38080 job=1791768757453517360 status=succeeded
+```
+V2 also printed four raw JSON `withholding the cluster token` lines while pc3
+was offline; since 3664049 they are plain text. <!-- confirm in final re-check -->
+<!-- confirm in final re-check: the network commands are written from lab/lan/compose.yml (project pipedpeer-lan, network venue); V2's log records only "disconnect pc3 for 200 s" -->
+
+**27. A node killed mid-job.** Run a `--remote` job from pc3 that lands on pc4,
+then `scripts/lab-lan.sh x pc4 pipedpeer stop` mid-run. Pass if
+(<!-- V2 31b5364: 67-node-killed-reschedule.txt -->):
+```
+lost the connection to 10.88.0.14:38080 (connection lost: websocket: close 1006 (abnormal closure): unexpected EOF); checking whether the node or this machine went away...
+…
+[coordinator] Execution failed on 28197ccf: … — retrying in 2s
+[coordinator] Rescheduling (attempt 2)...
+[coordinator] Placed on node 06b9a112 (lease=9d0f6157)
+…
+distinct words: 133  total words: 400000000
+…
+  total        32.7 s
+[coordinator] Task completed successfully on node 06b9a112
+```
+
+**Still not run in any rehearsal:** `prep-1-check.sh`, the `prep-2-rehearse.sh`
+table, `prep-0-install.sh`, `setup-machine.sh`, `pipedpeer dashboard` (needs a
+TTY), Ctrl+Z on `07_everything.py`, and the friend's real 2-GPU ring.
+<!-- confirm in final re-check -->
+
+**V1 failed these; V2 passed them:**
+- `02_numpy_heavy.py` was killed at the 600M default memory cap. In V2 it ran
+  in 37.2 s (70-setup-firstpass.txt).
+- A sender that lost its network got its job run twice. In V2 it detached and
+  collected the result once (check 26).
 
 ## Afterwards
 
