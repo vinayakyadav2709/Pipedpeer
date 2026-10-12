@@ -27,13 +27,21 @@ rows() { awk 'NR>1 && NF>=4 && $NF != "self"' <<<"$table"; }
 peers=$(peer_count)
 if [[ "$peers" -ge 2 ]]; then ok "$peers healthy peers besides this machine"
 elif [[ "$peers" -eq 1 ]]; then warn "only 1 peer - the demo works, but say 'two machines'"
-else bad "no peers - check the rendezvous terminal on LAPTOP-A, then pipedpeer join <LAPTOP-A IP> on each machine"; fi
+else bad "no peers - on LAPTOP-A check 'systemctl --user status pipedpeer-rendezvous', then pipedpeer join <LAPTOP-A IP> on each machine"; fi
 
 # A '-' in PATH means the machines know of each other but have no direct link.
 nopath=$(rows | awk '$(NF-1) == "-"' | wc -l)
 if [[ "$peers" -eq 0 ]]; then :
 elif [[ "$nopath" -eq 0 ]]; then ok "every peer has a direct path (punched / punched-in / lan)"
 else bad "$nopath peer(s) with no path - run 'pipedpeer net-check' on them"; fi
+
+# Each peer's daemon port must take a TCP connection from here: Wi-Fi client
+# isolation lets machines see each other in the table yet blocks the jobs.
+source "$DEMO_DIR/demo/_checks.sh"
+while read -r name host port; do
+	if [[ "$host" != "-" ]] && reach "$host" "$port"; then ok "$name reachable at $host:$port"
+	else bad "$name unreachable at $host:$port"; reach_fail "$name" "$host" "$port"; fi
+done < <(peer_addrs)
 
 gpus=$(gpu_nodes)
 case "$gpus" in

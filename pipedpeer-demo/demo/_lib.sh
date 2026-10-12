@@ -79,7 +79,19 @@ try:
         nodes = json.load(r)
 except Exception as e:
     print(f"  (counting nodes: daemon on port {port} not answering: {e}; counted 0)", file=sys.stderr)
-    print(0)
+    if what != "addrs":
+        print(0)
+    sys.exit(0)
+if what == "addrs":
+    # One "name host port" line per peer, healthy or not. The host is in
+    # ssh_endpoint ("root@HOST:22", server.go toNodeResp); an internet peer's
+    # is 127.0.0.1 and its port the local forwarder's.
+    for n in nodes or []:
+        if n.get("source") == "self":
+            continue
+        host = (n.get("ssh_endpoint") or "").split("@", 1)[-1].rsplit(":", 1)[0].strip("[]")
+        name = (n.get("capabilities") or {}).get("hostname") or (n.get("node_id") or "?")[:8]
+        print(name, host or "-", n.get("daemon_port") or port)
     sys.exit(0)
 def gpu(n):
     c, l = n.get("capabilities") or {}, n.get("load") or {}
@@ -98,3 +110,5 @@ PY
 
 gpu_nodes() { node_count gpu-all; }
 peer_count() { node_count peers; }
+# "name host port" per peer (not this machine), for reachability checks.
+peer_addrs() { node_count addrs; }

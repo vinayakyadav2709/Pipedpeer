@@ -29,3 +29,6 @@ prompt.md
 plan-transfer.md
 pipedpeer-demo/demo/finale-logs/
 /src/pipedpeer
+
+# first machine writes it; holds the cluster secret
+pipedpeer-demo/join-command.txt

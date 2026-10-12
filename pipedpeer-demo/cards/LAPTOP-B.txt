@@ -1,0 +1,37 @@
+# LAPTOP-B: commands only, in order. What to expect at each: https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/cards/LAPTOP-B.md
+# Get this file:  curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cards/LAPTOP-B.txt
+# Replace <secret> and <LAPTOP-A IP> before pasting. Every command runs in Pipedpeer-dev/pipedpeer-demo.
+# Old rehearsal setup still on this laptop? Undo it first: TODO-BEFORE-DEMO.md, section 2.
+
+######## The day before, after LAPTOP-A has set up
+
+# Get the demo folder (no git needed)
+curl -L https://github.com/vinayakyadav2709/Pipedpeer/archive/refs/heads/dev.tar.gz | tar xz
+cd Pipedpeer-dev/pipedpeer-demo
+
+# Install the nightly and run setup (sudo password when asked); the sha256 line must match LAPTOP-A's
+./demo/prep-0-install.sh
+
+# Join LAPTOP-A and build the environments (slow the first time). The exact line is in
+# join-command.txt from LAPTOP-A (pen drive); or type the values. Checks LAPTOP-A is reachable first.
+./setup-machine.sh gpu-laptop --token <secret> --introducer <LAPTOP-A IP> --prep
+
+######## On the day
+
+# T-30 min: daemon up? (pipedpeer start only if status says not running; it rejoins by itself)
+pipedpeer status
+pipedpeer start
+
+# T-10 min: second terminal, keep it up the whole demo
+pipedpeer events -f
+
+# Step 5 GPU: in a spare terminal before it starts; Ctrl+C after step 5
+watch -n1 nvidia-smi
+
+# Step 8 failover: type nothing here; never pipedpeer stop on this laptop
+
+# Step 9 receipts (layout 1 only; in a lab PC-2 runs it)
+pipedpeer traffic
+
+# Backup, only if asked: B6 pandas out-of-core
+./demo/6-pandas.sh

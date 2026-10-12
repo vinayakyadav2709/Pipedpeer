@@ -2,6 +2,9 @@
 
 Card URL: https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/cards/PC.md
 
+Commands only, ready to copy: [PC.txt](PC.txt)
+(`./demo/card.sh --commands PC`, or `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cards/PC.txt`).
+
 Only this machine's actions, in order. The say/expect detail for each step is in
 [DEMO-SCRIPT.md](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/DEMO-SCRIPT.md#the-flow).
 Layout 2 (a college lab, PCs on ethernet, our laptops on Wi-Fi).
@@ -25,19 +28,21 @@ By hand: the sudo password when setup asks (Nix, crun, firewall, key helper).
    then `cd Pipedpeer-dev/pipedpeer-demo`
 2. `./demo/prep-0-install.sh` (installs the nightly, runs `setup -y`).
    Its `sha256:` line must match LAPTOP-A's.
-   If it says `NOTE: add ~/.local/bin to PATH`, run `export PATH="$HOME/.local/bin:$PATH"`.
-3. After LAPTOP-A has set up: get the secret (`pipedpeer auth show` there) and
-   its IP, check `ping <LAPTOP-A IP>`, then:
+3. After LAPTOP-A has set up: copy its `join-command.txt` here by pen drive and
+   run the `ubuntu-pc` line from it, or type the values:
    `./setup-machine.sh ubuntu-pc --token <secret> --introducer <LAPTOP-A IP> --prep`
-   It joins (expect `connected (N peer(s))`), then runs prep-4 (slow the first
+   It first connects to LAPTOP-A; if it can't, it says how to fix it and stops
+   without joining. Then it joins (expect `connected (N peer(s))`), then runs prep-4 (slow the first
    time: 1150–1261 s per machine in rehearsal). Join by IP: Wi-Fi and ethernet
    are different subnets, which discovery never crosses.
 4. `./demo/prep-3-gpu.sh` (this PC sends the GPU or "everything" step).
    On a PC with 8–16 GB expect `ok` for both halves and no `GPU PREP FAILED`.
-5. **Ubuntu 24.04 and later (AppArmor):** if a job prints
-   `this node cannot create a user namespace, so jobs run unisolated`, apply the
-   fix it prints next (the one-file AppArmor profile, preferred). See
-   [SETUP.md, "AppArmor"](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/SETUP.md).
+5. **Ubuntu 24.04 and later (AppArmor):** `pipedpeer setup` applies the AppArmor
+   fix itself. Check: `pipedpeer run 00_pool.py 2>&1 | grep unisolated || echo "sandboxed: ok"`.
+   If a job still prints `this node cannot create a user namespace, so jobs run unisolated`,
+   run the fallback block in [PC.txt](PC.txt) (the one-file AppArmor profile, then
+   `pipedpeer stop; pipedpeer start`; the machine-wide sysctl only if that fails). See
+   [SETUP.md, "AppArmor"](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/SETUP.md#apparmor-ubuntu-2404-and-later).
 6. Peers missing: `sudo ufw status` should list 38080/tcp, 38099/udp, 38447/udp
    (SETUP.md, "Firewall").
 
@@ -51,7 +56,11 @@ By hand: the sudo password when setup asks.
 4. **Do not** run `setup-machine.sh` or `pipedpeer join` (either joins, and step 1
    loses its first join), and not `prep-3-gpu.sh`. Do not join and then `stop`:
    a stopped machine rejoins with no countdown.
-5. AppArmor and firewall as in 1a steps 5–6. Check `ping <LAPTOP-A IP>` works.
+5. AppArmor and firewall as in 1a steps 5–6. Check this PC reaches LAPTOP-A:
+   `timeout 2 bash -c ': </dev/tcp/<LAPTOP-A IP>/38080' && echo reachable`. No
+   `reachable`: [SETUP.md, "Can't reach LAPTOP-A"](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/SETUP.md#cant-reach-laptop-a).
+6. Keep LAPTOP-A's `join-command.txt` (pen drive) at hand: its `0-join.sh` line is your step 1
+   command, token included. Or type the values.
 
 ## 2. On the day
 
@@ -65,7 +74,7 @@ Do only the rows for your role(s):
 
 | Step | Role | You type | Expect (one line) | Then |
 |---|---|---|---|---|
-| 1 live join | PC-3 | `./demo/0-join.sh <LAPTOP-A IP> <token>` (token from `pipedpeer auth show` on LAPTOP-A) | `waiting for peers · 90 s left · 0 found`, then `connected (N peer(s))` and a node table | hand back to LAPTOP-A |
+| 1 live join | PC-3 | `./demo/0-join.sh <LAPTOP-A IP> <token>` (the last line of LAPTOP-A's `join-command.txt`; or the token from `pipedpeer auth show` there) | `waiting for peers · 90 s left · 0 found`, then `connected (N peer(s))` and a node table | hand back to LAPTOP-A |
 | 4 cold vs cached | PC-2 | `./demo/2b-cold.sh` | second half: `Closure already on the node; nothing to send`; last line `first run (cold): … every run after: …` | hand back |
 | 5 GPU from no GPU | PC-1 | `./demo/7-gpu.sh` | `using GPU: NVIDIA …`, and `ran on` names a GPU laptop | point at the two usage lines: `this machine` stays near idle |
 | 6 everything | PC-2 | `./demo/12-everything.sh` (MEM FREE under 3.1 GiB: `pipedpeer run 07_everything.py --remote`) | `section pool …` through `section torch …`, then `wrote results/everything.txt` | hand back |
