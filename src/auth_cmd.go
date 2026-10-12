@@ -124,6 +124,7 @@ func restartForToken() error {
 		fmt.Fprintf(os.Stderr, "the running daemon's port is not recorded; restarting it on %d\n", 38080)
 		port = 38080
 	}
+	maxConc := daemonctl.RunningMaxConcurrent(port)
 	fmt.Fprintln(os.Stderr, "restarting the daemon so it uses the new secret")
 	if err := daemonctl.Stop(); err != nil {
 		return fmt.Errorf("token stored, but stopping the daemon failed (restart it yourself): %w", err)
@@ -131,7 +132,7 @@ func restartForToken() error {
 	if addr, _ := clustercfg.Effective(""); addr != "" {
 		os.Setenv(clustercfg.EnvVar, addr)
 	}
-	if err := daemonctl.Start(nodeID.NodeID, port, 0); err != nil {
+	if err := daemonctl.Start(nodeID.NodeID, port, maxConc); err != nil {
 		return fmt.Errorf("token stored, but the daemon did not come back (run pipedpeer start): %w", err)
 	}
 	return nil
