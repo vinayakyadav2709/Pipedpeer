@@ -84,8 +84,8 @@ func (t *peakMemTracker) treeMem(rootPID int32) int64 {
 		if err != nil {
 			continue // exited between the walk and the read
 		}
-		if maps, err := p.MemoryMaps(true); err == nil && maps != nil && len(*maps) > 0 {
-			total += int64((*maps)[0].Pss) * 1024
+		if pss, err := processPSS(p); err == nil {
+			total += pss
 		} else if mi, rerr := p.MemoryInfo(); rerr == nil {
 			total += int64(mi.RSS)
 			if !t.warned {
