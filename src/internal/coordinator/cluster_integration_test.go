@@ -895,8 +895,9 @@ func TestExecuteWithRetryCancelStopsLoop(t *testing.T) {
 	}
 }
 
-// Task is never auto-cancelled: executor keeps failing, loop keeps going until context done
-func TestExecuteWithRetryNeverAutoCancel(t *testing.T) {
+// A task that keeps failing stops after MaxExecAttempts with the last error;
+// it used to retry forever.
+func TestExecuteWithRetryGivesUpAfterThreeAttempts(t *testing.T) {
 	daemon := daemonapi.NewWithConfig("worker-persist", 5*time.Second, 2*time.Second, 100*time.Millisecond)
 	daemonSrv := httptest.NewServer(daemon.Handler())
 	defer daemonSrv.Close()
@@ -928,21 +929,19 @@ func TestExecuteWithRetryNeverAutoCancel(t *testing.T) {
 		return fmt.Errorf("connection refused")
 	}
 
-	// Let it run for 300ms — should keep retrying, never auto-cancel
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	_, err := coord.ExecuteWithRetry(ctx, executor, nil)
-	if err == nil {
-		t.Fatal("expected error after context timeout")
+	if err == nil || !strings.Contains(err.Error(), "gave up after 3 failed attempts") || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("got %v, want a give-up naming the last error", err)
 	}
-
-	// Should have retried MANY times (not just once), proving it never auto-cancelled
-	finalCount := atomic.LoadInt32(&execCount)
-	if finalCount < 3 {
-		t.Fatalf("expected at least 3 retry attempts in 300ms, got %d (auto-cancelled too early?)", finalCount)
+	if ctx.Err() != nil {
+		t.Fatal("ran until the context ended instead of giving up")
 	}
-	t.Logf("retried %d times in 300ms before context cancelled — never auto-cancelled", finalCount)
+	if n := atomic.LoadInt32(&execCount); n != MaxExecAttempts {
+		t.Fatalf("executed %d times, want %d", n, MaxExecAttempts)
+	}
 }
 
 // Helper to split host:port from a test server address
@@ -1201,7 +1200,7 @@ func TestFindNodeWithinWaitsForALateNode(t *testing.T) {
 	})
 
 	waited := 0
-	d := coord.FindNodeWithin(context.Background(), 5*time.Second, 10*time.Millisecond, func() { waited++ })
+	d := coord.FindNodeWithin(context.Background(), 5*time.Second, 10*time.Millisecond, func(PlacementDecision, time.Duration) { waited++ })
 	if d.ChosenNode.NodeID != "late-worker" {
 		t.Fatalf("chose %q, want the node that appeared on the third look (reason: %s)", d.ChosenNode.NodeID, d.Reason)
 	}

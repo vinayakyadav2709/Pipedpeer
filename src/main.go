@@ -173,12 +173,26 @@ func main() {
 }
 
 // placementWait is how long a run waits for a node to become able to take
-// it. PIPEDPEER_REMOTE_WAIT overrides it; 0 takes one look.
+// it. PIPEDPEER_REMOTE_WAIT overrides it; 0 takes one look. Ten minutes: a
+// class's runs queue behind each other, and 15 s failed them while the
+// previous job still held the memory (13-finale needed 10m).
 func placementWait() time.Duration {
 	if v, err := time.ParseDuration(os.Getenv("PIPEDPEER_REMOTE_WAIT")); err == nil && v >= 0 {
 		return v
 	}
-	return 15 * time.Second
+	return 10 * time.Minute
+}
+
+// placementProgress prints why no node can take the run yet: once when the
+// wait starts, then every 30 s while it lasts.
+func placementProgress(what string, window time.Duration) func(coordinator.PlacementDecision, time.Duration) {
+	return func(d coordinator.PlacementDecision, waited time.Duration) {
+		if waited == 0 {
+			fmt.Printf("[coordinator] no eligible node %syet; waiting up to %s (%s)\n", what, window, d.RejectionLine())
+			return
+		}
+		fmt.Printf("[coordinator] still waiting for a node %s(%s of %s): %s\n", what, waited, window, d.RejectionLine())
+	}
 }
 
 // acceptWithin asks for admission until it is granted, the refusal is not
@@ -190,16 +204,20 @@ func placementWait() time.Duration {
 // rig, every second back-to-back run of 02_numpy_heavy was refused in under
 // a tenth of a second while the first one, with the same estimate, ran.
 func acceptWithin(ctx context.Context, window time.Duration, accept func() (*daemonctl.AcceptResponse, error)) (*daemonctl.AcceptResponse, error) {
-	deadline := time.Now().Add(window)
-	told := false
+	start := time.Now()
+	deadline := start.Add(window)
+	var nextReport time.Time
 	for {
 		resp, err := accept()
 		if err == nil || !strings.Contains(err.Error(), "insufficient memory") || time.Now().After(deadline) {
 			return resp, err
 		}
-		if !told {
+		if nextReport.IsZero() {
 			fmt.Printf("[coordinator] %v; waiting up to %s for memory to free...\n", err, window)
-			told = true
+			nextReport = time.Now().Add(coordinator.WaitProgressEvery)
+		} else if time.Now().After(nextReport) {
+			fmt.Printf("[coordinator] still waiting (%s of %s): %v\n", time.Since(start).Truncate(time.Second), window, err)
+			nextReport = time.Now().Add(coordinator.WaitProgressEvery)
 		}
 		select {
 		case <-ctx.Done():
@@ -701,9 +719,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				// instead of queuing forever: the user can just drop --remote.
 				// PIPEDPEER_REMOTE_WAIT overrides the window; 0 takes one look.
 				wait := placementWait()
-				decision := coord.FindNodeWithin(ctx, wait, time.Second, func() {
-					fmt.Printf("[coordinator] no eligible node yet; waiting up to %s for peers to report in...\n", wait)
-				})
+				decision := coord.FindNodeWithin(ctx, wait, time.Second, placementProgress("", wait))
 				if decision.ChosenNode.NodeID == "" {
 					if why := decision.RejectionSummary(); why != "" {
 						fmt.Print("[coordinator] nodes turned down:\n" + why)
@@ -985,9 +1001,7 @@ func runDDP(o ddpRunOptions) error {
 		ctx = context.Background()
 	}
 	wait := placementWait()
-	decision := coord.FindNodeWithin(ctx, wait, time.Second, func() {
-		fmt.Printf("[coordinator] no eligible node for rank 0 yet; waiting up to %s for peers to report in...\n", wait)
-	})
+	decision := coord.FindNodeWithin(ctx, wait, time.Second, placementProgress("for rank 0 ", wait))
 	rank0 := decision.ChosenNode
 	if rank0.NodeID == "" {
 		if why := decision.RejectionSummary(); why != "" {
