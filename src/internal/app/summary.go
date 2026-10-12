@@ -35,6 +35,8 @@ type summary struct {
 	ScriptTime time.Duration // 0 when unknown (attach)
 	Peak       int64
 	Receipt    json.RawMessage // the shim's receipt from the done frame; nil without one
+	SelfUse    string          // this machine's usage during the run, "" to skip
+	NodeUse    string          // the executing node's usage during the run, "" to skip
 	Files      *daemonctl.ResultManifest
 	Total      time.Duration
 	Err        error
@@ -183,6 +185,12 @@ func summaryLines(s summary, ranOn string, names map[string]string) (lines []str
 		if len(v) > 0 {
 			add("script", strings.Join(v, " · "))
 		}
+	}
+	if s.SelfUse != "" {
+		add("this machine", s.SelfUse)
+	}
+	if s.NodeUse != "" {
+		add("on "+ranOn, s.NodeUse)
 	}
 	if rc, ok := parseReceipt(s.Receipt); ok {
 		var line string

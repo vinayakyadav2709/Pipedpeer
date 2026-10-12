@@ -326,8 +326,10 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	}
 
 	execStart := time.Now()
+	usage := startUsage(opts.DaemonHost, opts.DaemonPort)
 	res, err := daemonctl.StreamExecute(ctx, opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, execCfg, detach)
 	execDur := time.Since(execStart)
+	sum.SelfUse, sum.NodeUse = usage.finish()
 	addExecStages(timeline, node, execStart, execDur, res.Timing)
 	sum.ScriptRan, sum.ScriptTime, sum.Peak, sum.Receipt = true, execDur, res.PeakBytes, res.Receipt
 	historyRecord.PeakMemBytes = res.PeakBytes
