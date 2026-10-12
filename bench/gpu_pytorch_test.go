@@ -163,7 +163,7 @@ except ImportError:
 			},
 			"cwd": "/",
 		},
-		"root": map[string]interface{}{"path": "rootfs", "readonly": true},
+		"root":     map[string]interface{}{"path": "rootfs", "readonly": true},
 		"hostname": "gpu-pytorch-test",
 		"mounts": []map[string]interface{}{
 			{"destination": "/usr", "type": "bind", "source": "/usr", "options": []string{"rbind", "ro"}},
@@ -171,6 +171,9 @@ except ImportError:
 			{"destination": "/lib", "type": "bind", "source": "/lib", "options": []string{"rbind", "ro"}},
 			{"destination": "/lib64", "type": "bind", "source": "/lib64", "options": []string{"rbind", "ro"}},
 			{"destination": "/proc", "type": "proc", "source": "proc"},
+			// libcuda and NVML read /sys/module/nvidia*; without it cuInit returns 304
+			// and nvidia-smi exits 17 ("GPU access blocked by the operating system").
+			{"destination": "/sys/module", "type": "bind", "source": "/sys/module", "options": []string{"rbind", "ro"}},
 			{"destination": "/dev", "type": "tmpfs", "source": "tmpfs"},
 			{"destination": "/tmp", "type": "tmpfs", "source": "tmpfs"},
 			{"destination": "/etc/ssl", "type": "bind", "source": "/etc/ssl", "options": []string{"rbind", "ro"}},
@@ -179,13 +182,7 @@ except ImportError:
 			"namespaces": []map[string]string{
 				{"type": "pid"}, {"type": "ipc"}, {"type": "uts"}, {"type": "mount"},
 			},
-			"devices": []map[string]interface{}{
-				{"path": "/dev/nvidia0", "type": "c", "major": 195, "minor": 0, "permissions": "rwm"},
-				{"path": "/dev/nvidiactl", "type": "c", "major": 195, "minor": 255, "permissions": "rwm"},
-				{"path": "/dev/nvidia-modeset", "type": "c", "major": 195, "minor": 254, "permissions": "rwm"},
-				{"path": "/dev/nvidia-uvm", "type": "c", "major": 234, "minor": 0, "permissions": "rwm"},
-				{"path": "/dev/nvidia-uvm-tools", "type": "c", "major": 234, "minor": 1, "permissions": "rwm"},
-			},
+			"devices": nvidiaDevices(t),
 		},
 	}
 
@@ -272,7 +269,7 @@ nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheade
 			},
 			"cwd": "/",
 		},
-		"root": map[string]interface{}{"path": "rootfs", "readonly": true},
+		"root":     map[string]interface{}{"path": "rootfs", "readonly": true},
 		"hostname": "gpu-check",
 		"mounts": []map[string]interface{}{
 			{"destination": "/usr", "type": "bind", "source": "/usr", "options": []string{"rbind", "ro"}},
@@ -280,6 +277,9 @@ nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheade
 			{"destination": "/lib", "type": "bind", "source": "/lib", "options": []string{"rbind", "ro"}},
 			{"destination": "/lib64", "type": "bind", "source": "/lib64", "options": []string{"rbind", "ro"}},
 			{"destination": "/proc", "type": "proc", "source": "proc"},
+			// libcuda and NVML read /sys/module/nvidia*; without it cuInit returns 304
+			// and nvidia-smi exits 17 ("GPU access blocked by the operating system").
+			{"destination": "/sys/module", "type": "bind", "source": "/sys/module", "options": []string{"rbind", "ro"}},
 			{"destination": "/dev", "type": "tmpfs", "source": "tmpfs"},
 			{"destination": "/tmp", "type": "tmpfs", "source": "tmpfs"},
 		},
@@ -287,11 +287,7 @@ nvidia-smi --query-gpu=memory.total,memory.used,memory.free --format=csv,noheade
 			"namespaces": []map[string]string{
 				{"type": "pid"}, {"type": "mount"}, {"type": "uts"},
 			},
-			"devices": []map[string]interface{}{
-				{"path": "/dev/nvidia0", "type": "c", "major": 195, "minor": 0, "permissions": "rwm"},
-				{"path": "/dev/nvidiactl", "type": "c", "major": 195, "minor": 255, "permissions": "rwm"},
-				{"path": "/dev/nvidia-uvm", "type": "c", "major": 234, "minor": 0, "permissions": "rwm"},
-			},
+			"devices": nvidiaDevices(t),
 		},
 	}
 

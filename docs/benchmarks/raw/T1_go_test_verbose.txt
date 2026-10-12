@@ -1,0 +1,1556 @@
+# go test -v -count=1 ./...   (src/)
+# commit 4c91ef3, 2026-10-02T20:44:11+05:30, Linux 6.19.13-200.fc43.x86_64, 12 cores, go1.25.9, Python 3.14.4, torch 2.14.1+cpu (CPU wheel, as CI installs)
+# summary: top-level --- PASS 615, --- FAIL 0, --- SKIP 2; 36 packages ok, 2 without tests
+=== RUN   TestPreferGPUKeepsCPUsOutOfTheRing
+--- PASS: TestPreferGPUKeepsCPUsOutOfTheRing (0.00s)
+=== RUN   TestCPUsAreUsedWhenThereIsNoGPU
+--- PASS: TestCPUsAreUsedWhenThereIsNoGPU (0.00s)
+=== RUN   TestWithoutAPreferenceNothingIsFiltered
+--- PASS: TestWithoutAPreferenceNothingIsFiltered (0.00s)
+=== RUN   TestASingleGPUBeatsAMixedRing
+--- PASS: TestASingleGPUBeatsAMixedRing (0.00s)
+=== RUN   TestTheRingCountsMachinesNotRanks
+=== RUN   TestTheRingCountsMachinesNotRanks/two_daemons_on_one_laptop_are_one_machine
+=== RUN   TestTheRingCountsMachinesNotRanks/two_machines_are_two
+=== RUN   TestTheRingCountsMachinesNotRanks/three_ranks_across_two_machines
+=== RUN   TestTheRingCountsMachinesNotRanks/an_unknown_machine_counts_as_its_own
+=== RUN   TestTheRingCountsMachinesNotRanks/nothing_reports_a_machine
+--- PASS: TestTheRingCountsMachinesNotRanks (0.00s)
+    --- PASS: TestTheRingCountsMachinesNotRanks/two_daemons_on_one_laptop_are_one_machine (0.00s)
+    --- PASS: TestTheRingCountsMachinesNotRanks/two_machines_are_two (0.00s)
+    --- PASS: TestTheRingCountsMachinesNotRanks/three_ranks_across_two_machines (0.00s)
+    --- PASS: TestTheRingCountsMachinesNotRanks/an_unknown_machine_counts_as_its_own (0.00s)
+    --- PASS: TestTheRingCountsMachinesNotRanks/nothing_reports_a_machine (0.00s)
+=== RUN   TestAForwardedPeerCannotLeadTheRing
+=== RUN   TestAForwardedPeerCannotLeadTheRing/this_machine,_at_loopback
+=== RUN   TestAForwardedPeerCannotLeadTheRing/an_internet_peer_behind_a_local_forwarder
+=== RUN   TestAForwardedPeerCannotLeadTheRing/a_LAN_peer
+=== RUN   TestAForwardedPeerCannotLeadTheRing/localhost_by_name
+=== RUN   TestAForwardedPeerCannotLeadTheRing/loopback_with_no_machine_key
+--- PASS: TestAForwardedPeerCannotLeadTheRing (0.00s)
+    --- PASS: TestAForwardedPeerCannotLeadTheRing/this_machine,_at_loopback (0.00s)
+    --- PASS: TestAForwardedPeerCannotLeadTheRing/an_internet_peer_behind_a_local_forwarder (0.00s)
+    --- PASS: TestAForwardedPeerCannotLeadTheRing/a_LAN_peer (0.00s)
+    --- PASS: TestAForwardedPeerCannotLeadTheRing/localhost_by_name (0.00s)
+    --- PASS: TestAForwardedPeerCannotLeadTheRing/loopback_with_no_machine_key (0.00s)
+=== RUN   TestTheRingPutsAReachableLeadFirst
+--- PASS: TestTheRingPutsAReachableLeadFirst (0.00s)
+=== RUN   TestARingWithNoReachableLeadIsRefused
+--- PASS: TestARingWithNoReachableLeadIsRefused (0.00s)
+=== RUN   TestTruncatedRingSharesStillSumToOne
+--- PASS: TestTruncatedRingSharesStillSumToOne (0.00s)
+=== RUN   TestUnusableSharesFallBackToEqual
+--- PASS: TestUnusableSharesFallBackToEqual (0.00s)
+=== RUN   TestUnevenAgreesWithTheShimsThreshold
+--- PASS: TestUnevenAgreesWithTheShimsThreshold (0.00s)
+=== RUN   TestWeightListIsPreciseEnoughToPartition
+--- PASS: TestWeightListIsPreciseEnoughToPartition (0.00s)
+=== RUN   TestDetectLocalIPIsPeerReachable
+--- PASS: TestDetectLocalIPIsPeerReachable (0.00s)
+=== RUN   TestTheRouteDecidesTheAddress
+--- PASS: TestTheRouteDecidesTheAddress (0.00s)
+=== RUN   TestLoopbackIsNeverAdvertised
+--- PASS: TestLoopbackIsNeverAdvertised (0.00s)
+=== RUN   TestNoPeerFallsBackToTheOldBehaviour
+--- PASS: TestNoPeerFallsBackToTheOldBehaviour (0.00s)
+=== RUN   TestAnUnroutablePeerStillYieldsAnAddress
+--- PASS: TestAnUnroutablePeerStillYieldsAnAddress (4.00s)
+=== RUN   TestHostPortAndBareHostAgree
+--- PASS: TestHostPortAndBareHostAgree (0.00s)
+=== RUN   TestReachingOurselfDoesNotAdvertiseLoopback
+--- PASS: TestReachingOurselfDoesNotAdvertiseLoopback (0.00s)
+=== RUN   TestStartStopStatusLifecycle
+--- PASS: TestStartStopStatusLifecycle (1.50s)
+=== RUN   TestRunCheckOnlyAutoStartsDaemon
+--- PASS: TestRunCheckOnlyAutoStartsDaemon (2.31s)
+=== RUN   TestRemoteRunFailsWhenNoEligibleNode
+--- PASS: TestRemoteRunFailsWhenNoEligibleNode (1.42s)
+=== RUN   TestBinaryBuildsAndRuns
+--- PASS: TestBinaryBuildsAndRuns (0.87s)
+=== RUN   TestInitCreatesIgnoreFile
+--- PASS: TestInitCreatesIgnoreFile (0.81s)
+=== RUN   TestJobsListAndJobDetail
+--- PASS: TestJobsListAndJobDetail (0.16s)
+=== RUN   TestRegistryCLIStartsAndAcceptsConnections
+--- PASS: TestRegistryCLIStartsAndAcceptsConnections (0.99s)
+=== RUN   TestNodesCLIShowsSelf
+--- PASS: TestNodesCLIShowsSelf (2.55s)
+=== RUN   TestAutoPlacementSelectsSelf
+--- PASS: TestAutoPlacementSelectsSelf (1.30s)
+=== RUN   TestConcurrentJobsAndSharedNumpyCache
+    main_integration_test.go:51: set PIPEDPEER_INTEGRATION=1 to run integration tests
+--- SKIP: TestConcurrentJobsAndSharedNumpyCache (0.00s)
+=== RUN   TestIntegrationFullSyncAndExecute
+    main_integration_test.go:349: set PIPEDPEER_INTEGRATION=1 to run integration tests
+--- SKIP: TestIntegrationFullSyncAndExecute (0.00s)
+=== RUN   TestNoTempDirInSource
+--- PASS: TestNoTempDirInSource (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer	15.927s
+=== RUN   TestResolveMapTasksInputs
+--- PASS: TestResolveMapTasksInputs (0.00s)
+=== RUN   TestResolveMapTasksArgsFile
+--- PASS: TestResolveMapTasksArgsFile (0.00s)
+=== RUN   TestSplitCSVPreservesHeader
+--- PASS: TestSplitCSVPreservesHeader (0.00s)
+=== RUN   TestSplitLines
+--- PASS: TestSplitLines (0.00s)
+=== RUN   TestParseSplit
+--- PASS: TestParseSplit (0.00s)
+=== RUN   TestSplitRefusesUnknownFormat
+--- PASS: TestSplitRefusesUnknownFormat (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/app	0.004s
+=== RUN   TestMiddlewareOpenWhenNoTokenSet
+--- PASS: TestMiddlewareOpenWhenNoTokenSet (0.00s)
+=== RUN   TestMiddlewareRejectsWithoutToken
+=== RUN   TestMiddlewareRejectsWithoutToken/no_header
+=== RUN   TestMiddlewareRejectsWithoutToken/wrong_token
+=== RUN   TestMiddlewareRejectsWithoutToken/right_token
+=== RUN   TestMiddlewareRejectsWithoutToken/bearer_form
+=== RUN   TestMiddlewareRejectsWithoutToken/wrong_bearer
+--- PASS: TestMiddlewareRejectsWithoutToken (0.00s)
+    --- PASS: TestMiddlewareRejectsWithoutToken/no_header (0.00s)
+    --- PASS: TestMiddlewareRejectsWithoutToken/wrong_token (0.00s)
+    --- PASS: TestMiddlewareRejectsWithoutToken/right_token (0.00s)
+    --- PASS: TestMiddlewareRejectsWithoutToken/bearer_form (0.00s)
+    --- PASS: TestMiddlewareRejectsWithoutToken/wrong_bearer (0.00s)
+=== RUN   TestTransportOnlySendsTokenToDaemons
+--- PASS: TestTransportOnlySendsTokenToDaemons (0.00s)
+=== RUN   TestSetAndClearRoundTrip
+--- PASS: TestSetAndClearRoundTrip (0.00s)
+=== RUN   TestTestBinaryIgnoresConfiguredToken
+--- PASS: TestTestBinaryIgnoresConfiguredToken (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/authtoken	0.004s
+=== RUN   TestAnUnenforcedNodeStillHasABudget
+--- PASS: TestAnUnenforcedNodeStillHasABudget (0.00s)
+=== RUN   TestABudgetIsNeverMoreThanTheMachine
+--- PASS: TestABudgetIsNeverMoreThanTheMachine (0.00s)
+=== RUN   TestSpentBudgetPromisesNothing
+--- PASS: TestSpentBudgetPromisesNothing (0.00s)
+=== RUN   TestUnknownBudgetOffersNothing
+--- PASS: TestUnknownBudgetOffersNothing (0.00s)
+=== RUN   TestMaxIsNotALimit
+--- PASS: TestMaxIsNotALimit (0.00s)
+=== RUN   TestTheUnenforcedShareMatchesTheEnforcedOne
+--- PASS: TestTheUnenforcedShareMatchesTheEnforcedOne (0.00s)
+=== RUN   TestPageCacheIsNotSpentBudget
+--- PASS: TestPageCacheIsNotSpentBudget (0.00s)
+=== RUN   TestAllCacheReadsAsNothingSpent
+--- PASS: TestAllCacheReadsAsNothingSpent (0.00s)
+=== RUN   TestMissingStatFallsBackToTheRawFigure
+--- PASS: TestMissingStatFallsBackToTheRawFigure (0.00s)
+=== RUN   TestPrepareEnforcesMemoryLimit
+    enforce_test.go:81: job cgroups at /user.slice/user-1000.slice/user@1000.service/app.slice/pipedpeer-cgroup-test.scope/pipedpeer
+    enforce_test.go:132: kernel killed a 512 MiB allocation under a 64 MiB cap
+--- PASS: TestPrepareEnforcesMemoryLimit (0.03s)
+=== RUN   TestScopePrefixCarriesAMemoryCeiling
+--- PASS: TestScopePrefixCarriesAMemoryCeiling (0.01s)
+=== RUN   TestNoMemoryHighThrottle
+--- PASS: TestNoMemoryHighThrottle (0.00s)
+=== RUN   TestMemoryCeilingLeavesTheMachineRoom
+--- PASS: TestMemoryCeilingLeavesTheMachineRoom (0.00s)
+=== RUN   TestMemoryCeilingCanBeLifted
+--- PASS: TestMemoryCeilingCanBeLifted (0.00s)
+=== RUN   TestStaleScopeIsClearedBeforeStarting
+--- PASS: TestStaleScopeIsClearedBeforeStarting (0.08s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/cgroups	0.149s
+=== RUN   TestAJoinedClusterSurvivesARestart
+--- PASS: TestAJoinedClusterSurvivesARestart (0.00s)
+=== RUN   TestWhatWasTypedBeatsWhatWasRemembered
+--- PASS: TestWhatWasTypedBeatsWhatWasRemembered (0.00s)
+=== RUN   TestABareHostGetsTheDefaultPort
+--- PASS: TestABareHostGetsTheDefaultPort (0.00s)
+=== RUN   TestAnUnusableAddressIsRefused
+--- PASS: TestAnUnusableAddressIsRefused (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/clustercfg	0.004s
+=== RUN   TestNodeDisconnectReconnectLifecycle
+--- PASS: TestNodeDisconnectReconnectLifecycle (0.38s)
+=== RUN   TestSingleNodeSelfOnly
+--- PASS: TestSingleNodeSelfOnly (0.00s)
+=== RUN   TestRegistryDownFallbackToCacheAndLAN
+--- PASS: TestRegistryDownFallbackToCacheAndLAN (0.00s)
+=== RUN   TestLoadReportingAccuracy
+--- PASS: TestLoadReportingAccuracy (0.05s)
+=== RUN   TestActiveJobsReportedViaHeartbeat
+--- PASS: TestActiveJobsReportedViaHeartbeat (0.00s)
+=== RUN   TestLeaseExpiryRedirectsTask
+--- PASS: TestLeaseExpiryRedirectsTask (1.42s)
+=== RUN   TestRegistryRestartClientReRegisters
+[90m8:42PM[0m [33mWRN[0m [1mheartbeat failed[0m [36merror=[0m[31m[1m"Post \"http://127.0.0.1:38579/v1/heartbeat\": dial tcp 127.0.0.1:38579: connect: connection refused"[0m[0m [36mcomponent=[0mheartbeat [36mnode_id=[0mpersistent-node
+[90m8:42PM[0m [33mWRN[0m [1mheartbeat failed[0m [36merror=[0m[31m[1m"Post \"http://127.0.0.1:38579/v1/heartbeat\": dial tcp 127.0.0.1:38579: connect: connection refused"[0m[0m [36mcomponent=[0mheartbeat [36mnode_id=[0mpersistent-node
+[90m8:42PM[0m [33mWRN[0m [1mheartbeat failed[0m [36merror=[0m[31m[1m"Post \"http://127.0.0.1:38579/v1/heartbeat\": dial tcp 127.0.0.1:38579: connect: connection refused"[0m[0m [36mcomponent=[0mheartbeat [36mnode_id=[0mpersistent-node
+--- PASS: TestRegistryRestartClientReRegisters (0.13s)
+=== RUN   TestCoordinatorPerTaskFreshData
+--- PASS: TestCoordinatorPerTaskFreshData (0.00s)
+=== RUN   TestHealthScoreComputation
+--- PASS: TestHealthScoreComputation (0.00s)
+=== RUN   TestStatsReflectLiveState
+--- PASS: TestStatsReflectLiveState (0.10s)
+=== RUN   TestLeaseLifecycleAgainstARealDaemon
+--- PASS: TestLeaseLifecycleAgainstARealDaemon (0.00s)
+=== RUN   TestLeaseIsRefusedWhileTheWorkerIsFullAndGrantedAfter
+--- PASS: TestLeaseIsRefusedWhileTheWorkerIsFullAndGrantedAfter (0.09s)
+=== RUN   TestExecuteWithRetrySuccessFirstTry
+--- PASS: TestExecuteWithRetrySuccessFirstTry (0.00s)
+=== RUN   TestExecuteWithRetryReschedulesOnFailure
+--- PASS: TestExecuteWithRetryReschedulesOnFailure (6.09s)
+=== RUN   TestExecuteWithRetryCancelStopsLoop
+--- PASS: TestExecuteWithRetryCancelStopsLoop (0.20s)
+=== RUN   TestExecuteWithRetryNeverAutoCancel
+    cluster_integration_test.go:945: retried 6 times in 300ms before context cancelled — never auto-cancelled
+--- PASS: TestExecuteWithRetryNeverAutoCancel (0.30s)
+=== RUN   TestPlaceWithRetryChoosesANodeAndReserves
+--- PASS: TestPlaceWithRetryChoosesANodeAndReserves (0.00s)
+=== RUN   TestExecuteWithRetryHandsTheExecutorAReachableDaemon
+--- PASS: TestExecuteWithRetryHandsTheExecutorAReachableDaemon (0.00s)
+=== RUN   TestPlaceWithRetryNATSTransport
+--- PASS: TestPlaceWithRetryNATSTransport (5.12s)
+=== RUN   TestExecuteWithRetryNATSFullLifecycle
+--- PASS: TestExecuteWithRetryNATSFullLifecycle (5.11s)
+=== RUN   TestCoordinatorNATSCommitAndComplete
+write tcp 127.0.0.1:34186->127.0.0.1:46131: write: connection reset by peer on connection [5]
+--- PASS: TestCoordinatorNATSCommitAndComplete (0.03s)
+=== RUN   TestSelectsLeastLoadedNode
+--- PASS: TestSelectsLeastLoadedNode (0.00s)
+=== RUN   TestFallsBackToSelfWhenNoOtherNodes
+--- PASS: TestFallsBackToSelfWhenNoOtherNodes (0.00s)
+=== RUN   TestSelfNodeUsesLoopback
+--- PASS: TestSelfNodeUsesLoopback (0.00s)
+=== RUN   TestRegistryIntegrationAndCacheFallback
+--- PASS: TestRegistryIntegrationAndCacheFallback (0.00s)
+=== RUN   TestMergeNodeDeduplication
+--- PASS: TestMergeNodeDeduplication (0.00s)
+=== RUN   TestDiagnosticsRecordAllCandidates
+--- PASS: TestDiagnosticsRecordAllCandidates (0.00s)
+=== RUN   TestStaleCacheReturnsSelf
+--- PASS: TestStaleCacheReturnsSelf (0.01s)
+=== RUN   TestDiscoveryAndRegistryOverlapDedup
+--- PASS: TestDiscoveryAndRegistryOverlapDedup (0.00s)
+=== RUN   TestRegistryDownNoCacheFallsToSelf
+--- PASS: TestRegistryDownNoCacheFallsToSelf (0.00s)
+=== RUN   TestExplicitRemoteBypassesCoordinator
+--- PASS: TestExplicitRemoteBypassesCoordinator (0.00s)
+=== RUN   TestCoordinatorRejectsInsufficientMemory
+--- PASS: TestCoordinatorRejectsInsufficientMemory (0.00s)
+=== RUN   TestCoordinatorNoMemReqSkipsFilter
+--- PASS: TestCoordinatorNoMemReqSkipsFilter (0.00s)
+=== RUN   TestCoordinatorAllNodesRejectedNoneChosen
+--- PASS: TestCoordinatorAllNodesRejectedNoneChosen (0.00s)
+=== RUN   TestGPUNodeChosenFirstWhenPreferGPU
+--- PASS: TestGPUNodeChosenFirstWhenPreferGPU (0.00s)
+=== RUN   TestRequireGPURejectsCPUNodes
+--- PASS: TestRequireGPURejectsCPUNodes (0.00s)
+=== RUN   TestRequireGPUWithNoGPUNodeFails
+--- PASS: TestRequireGPUWithNoGPUNodeFails (0.00s)
+=== RUN   TestPreferGPUFallsBackToCPU
+--- PASS: TestPreferGPUFallsBackToCPU (0.00s)
+=== RUN   TestGPUPreferenceDoesNotAffectNoGPUScenario
+--- PASS: TestGPUPreferenceDoesNotAffectNoGPUScenario (0.00s)
+=== RUN   TestNoSelfExcludesLocalNodeFromAnySource
+--- PASS: TestNoSelfExcludesLocalNodeFromAnySource (0.00s)
+=== RUN   TestDaemonNodesRejectedUnlessHealthy
+--- PASS: TestDaemonNodesRejectedUnlessHealthy (0.00s)
+=== RUN   TestScoreNodePrefersMoreCores
+--- PASS: TestScoreNodePrefersMoreCores (0.00s)
+=== RUN   TestScoreNodePrefersFasterClockSpeed
+--- PASS: TestScoreNodePrefersFasterClockSpeed (0.00s)
+=== RUN   TestScoreNodeLoadOutweighsCapability
+--- PASS: TestScoreNodeLoadOutweighsCapability (0.00s)
+=== RUN   TestScoreNodeUnknownCapabilityIsNeutral
+--- PASS: TestScoreNodeUnknownCapabilityIsNeutral (0.00s)
+=== RUN   TestScoreNodeHealthScoreScales
+--- PASS: TestScoreNodeHealthScoreScales (0.00s)
+=== RUN   TestScoreGPUNodeZeroWithoutGPU
+--- PASS: TestScoreGPUNodeZeroWithoutGPU (0.00s)
+=== RUN   TestScoreGPUNodePrefersMoreVRAM
+--- PASS: TestScoreGPUNodePrefersMoreVRAM (0.00s)
+=== RUN   TestScoreGPUNodePrefersHigherComputeCapability
+--- PASS: TestScoreGPUNodePrefersHigherComputeCapability (0.00s)
+=== RUN   TestScoreGPUNodePenalisesUtilisation
+--- PASS: TestScoreGPUNodePenalisesUtilisation (0.00s)
+=== RUN   TestFreeCoresTracksUtilisation
+--- PASS: TestFreeCoresTracksUtilisation (0.00s)
+=== RUN   TestFreeCoresNeverNegative
+--- PASS: TestFreeCoresNeverNegative (0.00s)
+=== RUN   TestBestFreeVRAMPicksLargestDevice
+--- PASS: TestBestFreeVRAMPicksLargestDevice (0.00s)
+=== RUN   TestBestFreeVRAMFallsBackToAggregate
+--- PASS: TestBestFreeVRAMFallsBackToAggregate (0.00s)
+=== RUN   TestHasGPUDetection
+=== RUN   TestHasGPUDetection/capability
+=== RUN   TestHasGPUDetection/load_model
+=== RUN   TestHasGPUDetection/per-device
+=== RUN   TestHasGPUDetection/cpu_only
+=== RUN   TestHasGPUDetection/empty
+--- PASS: TestHasGPUDetection (0.00s)
+    --- PASS: TestHasGPUDetection/capability (0.00s)
+    --- PASS: TestHasGPUDetection/load_model (0.00s)
+    --- PASS: TestHasGPUDetection/per-device (0.00s)
+    --- PASS: TestHasGPUDetection/cpu_only (0.00s)
+    --- PASS: TestHasGPUDetection/empty (0.00s)
+=== RUN   TestExecRetryBackoffGrowsAndCaps
+--- PASS: TestExecRetryBackoffGrowsAndCaps (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/coordinator	19.068s
+=== RUN   TestMeasureThroughputReportsAPositiveScore
+--- PASS: TestMeasureThroughputReportsAPositiveScore (0.08s)
+=== RUN   TestMeasureThroughputScalesWithTime
+--- PASS: TestMeasureThroughputScalesWithTime (0.30s)
+=== RUN   TestAPeerSharingThisMachineIsSubtracted
+--- PASS: TestAPeerSharingThisMachineIsSubtracted (0.00s)
+=== RUN   TestARoommatesReservationReachesAdmission
+--- PASS: TestARoommatesReservationReachesAdmission (0.09s)
+=== RUN   TestAPeerOnAnotherMachineIsNotSubtracted
+--- PASS: TestAPeerOnAnotherMachineIsNotSubtracted (0.00s)
+=== RUN   TestUnknownMachineIsNotAssumedToBeThisOne
+--- PASS: TestUnknownMachineIsNotAssumedToBeThisOne (0.00s)
+=== RUN   TestAnUnreachablePeerIsNotHoldingMemory
+--- PASS: TestAnUnreachablePeerIsNotHoldingMemory (0.00s)
+=== RUN   TestSameMachineNeedsBothSidesKnown
+--- PASS: TestSameMachineNeedsBothSidesKnown (0.00s)
+=== RUN   TestTheLiveFigureBeatsTheCachedOne
+--- PASS: TestTheLiveFigureBeatsTheCachedOne (0.00s)
+=== RUN   TestARoommateThatStopsAnsweringKeepsItsLastFigure
+--- PASS: TestARoommateThatStopsAnsweringKeepsItsLastFigure (0.00s)
+=== RUN   TestPoolBodyLimitFitsTheDaemonsBudget
+--- PASS: TestPoolBodyLimitFitsTheDaemonsBudget (0.00s)
+=== RUN   TestReservationsCountAgainstTheBudgetToo
+--- PASS: TestReservationsCountAgainstTheBudgetToo (0.00s)
+=== RUN   TestLeaseAdmissionHonoursTheSameBoundsAsEverythingElse
+--- PASS: TestLeaseAdmissionHonoursTheSameBoundsAsEverythingElse (0.00s)
+=== RUN   TestOneSlowRankIsNamed
+--- PASS: TestOneSlowRankIsNamed (0.00s)
+=== RUN   TestABalancedRingIsNotComplainedAbout
+--- PASS: TestABalancedRingIsNotComplainedAbout (0.00s)
+=== RUN   TestSilentUntilEveryRankHasReported
+--- PASS: TestSilentUntilEveryRankHasReported (0.00s)
+=== RUN   TestASingleRankRingHasNoPace
+--- PASS: TestASingleRankRingHasNoPace (0.00s)
+=== RUN   TestNonsenseTimingsAreIgnored
+--- PASS: TestNonsenseTimingsAreIgnored (0.00s)
+=== RUN   TestTheVerdictSaysWhatDroppingItWouldSave
+--- PASS: TestTheVerdictSaysWhatDroppingItWouldSave (0.00s)
+=== RUN   TestRankTimesAreOrderedByRank
+--- PASS: TestRankTimesAreOrderedByRank (0.00s)
+=== RUN   TestTheRingIsReportedOncePerRun
+--- PASS: TestTheRingIsReportedOncePerRun (0.00s)
+=== RUN   TestReportedGroupsAreForgotten
+--- PASS: TestReportedGroupsAreForgotten (0.00s)
+=== RUN   TestSharesFollowWhatTheRingActuallyDid
+--- PASS: TestSharesFollowWhatTheRingActuallyDid (0.00s)
+=== RUN   TestSmallDriftIsLeftAlone
+--- PASS: TestSmallDriftIsLeftAlone (0.00s)
+=== RUN   TestNoVerdictUntilEveryRankHasReported
+--- PASS: TestNoVerdictUntilEveryRankHasReported (0.00s)
+=== RUN   TestARankThatHasNotMeasuredItselfStopsTheVerdict
+--- PASS: TestARankThatHasNotMeasuredItselfStopsTheVerdict (0.00s)
+=== RUN   TestAFreeloaderIsDropped
+--- PASS: TestAFreeloaderIsDropped (0.00s)
+=== RUN   TestARankThatEarnsItsPlaceIsKept
+--- PASS: TestARankThatEarnsItsPlaceIsKept (0.00s)
+=== RUN   TestARingOfTwoIsNeverCutToOne
+--- PASS: TestARingOfTwoIsNeverCutToOne (0.00s)
+=== RUN   TestRankZeroIsNeverDropped
+--- PASS: TestRankZeroIsNeverDropped (0.00s)
+=== RUN   TestSharesSumToOne
+--- PASS: TestSharesSumToOne (0.00s)
+=== RUN   TestTheRingIsRefittedOnACadence
+{"level":"info","group":"g","shares":"rank 0 75%, rank 1 25%","time":"2026-10-02T20:42:54+05:30","message":"ring reshared from measured throughput"}
+--- PASS: TestTheRingIsRefittedOnACadence (0.00s)
+=== RUN   TestADroppedRankIsToldOnlyOnce
+{"level":"warn","group":"g","rank":2,"time":"2026-10-02T20:42:54+05:30","message":"rank 2 contributes 0% of the ring's throughput but costs a gradient exchange every step. Dropping it adds 0 ms of compute per step and saves 50 ms of sync, so the ring is faster without it"}
+--- PASS: TestADroppedRankIsToldOnlyOnce (0.00s)
+=== RUN   TestADroppedRankIsNotWaitedFor
+--- PASS: TestADroppedRankIsNotWaitedFor (0.00s)
+=== RUN   TestRunStateOutlivesASyncRound
+--- PASS: TestRunStateOutlivesASyncRound (0.00s)
+=== RUN   TestFinishedRunsAreForgotten
+--- PASS: TestFinishedRunsAreForgotten (0.00s)
+=== RUN   TestFloat16MatchesNumpy
+    ddpreduce_numpy_test.go:345: checked 314 values against numpy
+--- PASS: TestFloat16MatchesNumpy (0.00s)
+=== RUN   TestAccumulatorAveragesRanks
+--- PASS: TestAccumulatorAveragesRanks (0.00s)
+=== RUN   TestAccumulatorSumsInFloat64
+--- PASS: TestAccumulatorSumsInFloat64 (0.00s)
+=== RUN   TestWrongSizedPayloadIsRejected
+--- PASS: TestWrongSizedPayloadIsRejected (0.00s)
+=== RUN   TestEmptyAccumulatorHasNoMean
+--- PASS: TestEmptyAccumulatorHasNoMean (0.00s)
+=== RUN   TestFloat16RoundTrip
+--- PASS: TestFloat16RoundTrip (0.00s)
+=== RUN   TestFloat16SaturatesRatherThanWraps
+--- PASS: TestFloat16SaturatesRatherThanWraps (0.00s)
+=== RUN   TestFloat16KeepsNaN
+--- PASS: TestFloat16KeepsNaN (0.00s)
+=== RUN   TestFloat16RoundsToNearestEven
+--- PASS: TestFloat16RoundsToNearestEven (0.00s)
+=== RUN   TestInt8AveragesAcrossRanksWithDifferentScales
+--- PASS: TestInt8AveragesAcrossRanksWithDifferentScales (0.00s)
+=== RUN   TestInt8NeedsAScale
+--- PASS: TestInt8NeedsAScale (0.00s)
+=== RUN   TestInt8ClampsRatherThanWraps
+--- PASS: TestInt8ClampsRatherThanWraps (0.00s)
+=== RUN   TestPerTensorScalesPreservePrecision
+--- PASS: TestPerTensorScalesPreservePrecision (0.00s)
+=== RUN   TestSegmentsMustCoverThePayload
+--- PASS: TestSegmentsMustCoverThePayload (0.00s)
+=== RUN   TestDDPSyncExchangesAllRanks
+--- PASS: TestDDPSyncExchangesAllRanks (0.10s)
+=== RUN   TestDDPSyncSequencesAreIndependent
+--- PASS: TestDDPSyncSequencesAreIndependent (0.00s)
+=== RUN   TestDDPSyncRejectsBadRequests
+--- PASS: TestDDPSyncRejectsBadRequests (0.00s)
+=== RUN   TestDDPSyncSweepDropsStaleEntries
+--- PASS: TestDDPSyncSweepDropsStaleEntries (0.00s)
+=== RUN   TestDDPSyncBinaryFramesRoundTrip
+--- PASS: TestDDPSyncBinaryFramesRoundTrip (0.00s)
+=== RUN   TestDDPSyncNeedsATokenWhenOneIsSet
+--- PASS: TestDDPSyncNeedsATokenWhenOneIsSet (0.00s)
+=== RUN   TestDDPReduceReturnsOneAveragedModel
+--- PASS: TestDDPReduceReturnsOneAveragedModel (0.00s)
+=== RUN   TestDDPReduceRejectsAShapeMismatchWithoutHangingTheRing
+--- PASS: TestDDPReduceRejectsAShapeMismatchWithoutHangingTheRing (0.05s)
+=== RUN   TestDDPReduceAgreesOnOneSyncInterval
+--- PASS: TestDDPReduceAgreesOnOneSyncInterval (0.00s)
+=== RUN   TestDDPDetectsRanksDoingIdenticalWork
+--- PASS: TestDDPDetectsRanksDoingIdenticalWork (0.00s)
+=== RUN   TestDDPDoesNotCryWolfOnDifferentGradients
+--- PASS: TestDDPDoesNotCryWolfOnDifferentGradients (0.00s)
+=== RUN   TestDDPWeightSyncIsNotDuplicatedWork
+--- PASS: TestDDPWeightSyncIsNotDuplicatedWork (0.00s)
+=== RUN   TestARoundCompletesWhenARankNeverArrives
+--- PASS: TestARoundCompletesWhenARankNeverArrives (0.30s)
+=== RUN   TestALateRankGetsTheSameResult
+--- PASS: TestALateRankGetsTheSameResult (0.30s)
+=== RUN   TestAFullRoundReportsEveryRank
+--- PASS: TestAFullRoundReportsEveryRank (0.00s)
+=== RUN   TestUnequalBatchesAverageBySampleCount
+--- PASS: TestUnequalBatchesAverageBySampleCount (0.00s)
+=== RUN   TestEqualWeightsReproduceThePlainAverage
+--- PASS: TestEqualWeightsReproduceThePlainAverage (0.00s)
+=== RUN   TestASilentRankWeighsOne
+--- PASS: TestASilentRankWeighsOne (0.00s)
+=== RUN   TestWeightedInt8KeepsPerTensorScales
+--- PASS: TestWeightedInt8KeepsPerTensorScales (0.00s)
+=== RUN   TestNoRanksIsAnError
+--- PASS: TestNoRanksIsAnError (0.00s)
+=== RUN   TestQueueDepthCountsPromisedWork
+--- PASS: TestQueueDepthCountsPromisedWork (0.00s)
+=== RUN   TestRecentFailuresCountsRecentOnes
+--- PASS: TestRecentFailuresCountsRecentOnes (0.00s)
+=== RUN   TestHealthReportsBothFields
+--- PASS: TestHealthReportsBothFields (0.00s)
+=== RUN   TestApplyMemLimit
+=== RUN   TestApplyMemLimit/applied_when_a_limit_is_set_and_cgroups_allow_it
+=== RUN   TestApplyMemLimit/declined_rather_than_failing_when_cgroups_are_unavailable
+=== RUN   TestApplyMemLimit/no_limit_means_no_resources_block
+=== RUN   TestApplyMemLimit/serialises_to_what_the_OCI_runtime_expects
+--- PASS: TestApplyMemLimit (0.00s)
+    --- PASS: TestApplyMemLimit/applied_when_a_limit_is_set_and_cgroups_allow_it (0.00s)
+    --- PASS: TestApplyMemLimit/declined_rather_than_failing_when_cgroups_are_unavailable (0.00s)
+    --- PASS: TestApplyMemLimit/no_limit_means_no_resources_block (0.00s)
+    --- PASS: TestApplyMemLimit/serialises_to_what_the_OCI_runtime_expects (0.00s)
+=== RUN   TestPoolMapMicroChunks
+2026/10/02 20:42:54 [pool] received pool/map from 127.0.0.1:44032: items=60 b64=false cache_keys=0 required_mem=6306422784 forwarded=""
+2026/10/02 20:42:54 [pool] chunk: 30 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:42:54 [pool] spawning warm worker for store /tmp/TestPoolMapMicroChunks3271031931/001/nix/store/fake
+2026/10/02 20:42:54 [pool] chunk: 30 items -> 1 part(s), 0 remote, 1 local
+--- PASS: TestPoolMapMicroChunks (0.07s)
+=== RUN   TestWarmWorkerCacheStaysUnderBudget
+2026/10/02 20:42:54 [pool] received pool/map from 127.0.0.1:48396: items=30 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/10/02 20:42:54 [pool] chunk: 30 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:42:54 [pool] spawning warm worker for store /tmp/TestWarmWorkerCacheStaysUnderBudget4179331862/001/nix/store/fake
+--- PASS: TestWarmWorkerCacheStaysUnderBudget (0.05s)
+=== RUN   TestPoolMapForwardToPeer
+2026/10/02 20:42:54 [pool] received pool/map from 127.0.0.1:52610: items=40 b64=false cache_keys=0 required_mem=314572800 forwarded=""
+2026/10/02 20:42:54 [pool] forwarding 40 items (required_mem=314572800) to peer 127.0.0.1:44193
+2026/10/02 20:42:54 [pool] received pool/map from 127.0.0.1:58762: items=40 b64=false cache_keys=0 required_mem=314572800 forwarded="1"
+2026/10/02 20:42:54 [pool] chunk: 40 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:42:54 [pool] spawning warm worker for store /tmp/TestPoolMapForwardToPeer2382467244/001/nix/store/fake
+--- PASS: TestPoolMapForwardToPeer (0.05s)
+=== RUN   TestNarCacheContentAddressed
+--- PASS: TestNarCacheContentAddressed (0.00s)
+=== RUN   TestEnsureLocalExportsWhenNothingWasUploaded
+--- PASS: TestEnsureLocalExportsWhenNothingWasUploaded (0.00s)
+=== RUN   TestStoreMissingReportsOnlyAbsentPaths
+--- PASS: TestStoreMissingReportsOnlyAbsentPaths (0.00s)
+=== RUN   TestPartialImportIsNotCachedAsTheClosure
+--- PASS: TestPartialImportIsNotCachedAsTheClosure (0.03s)
+=== RUN   TestTheNarCacheStaysUnderItsCap
+--- PASS: TestTheNarCacheStaysUnderItsCap (0.00s)
+=== RUN   TestAnEvictedArchiveIsNotStillClaimedAsCached
+--- PASS: TestAnEvictedArchiveIsNotStillClaimedAsCached (0.00s)
+=== RUN   TestTheNarCacheUnderItsCapIsLeftAlone
+--- PASS: TestTheNarCacheUnderItsCapIsLeftAlone (0.00s)
+=== RUN   TestToNodeRespDowngradesStaleHealthy
+=== RUN   TestToNodeRespDowngradesStaleHealthy/fresh_healthy_stays_healthy
+=== RUN   TestToNodeRespDowngradesStaleHealthy/healthy_just_inside_cutoff
+=== RUN   TestToNodeRespDowngradesStaleHealthy/healthy_past_cutoff_goes_stale
+=== RUN   TestToNodeRespDowngradesStaleHealthy/long_dead_goes_stale
+=== RUN   TestToNodeRespDowngradesStaleHealthy/unreachable_is_left_alone
+=== RUN   TestToNodeRespDowngradesStaleHealthy/unknown_is_left_alone
+--- PASS: TestToNodeRespDowngradesStaleHealthy (0.00s)
+    --- PASS: TestToNodeRespDowngradesStaleHealthy/fresh_healthy_stays_healthy (0.00s)
+    --- PASS: TestToNodeRespDowngradesStaleHealthy/healthy_just_inside_cutoff (0.00s)
+    --- PASS: TestToNodeRespDowngradesStaleHealthy/healthy_past_cutoff_goes_stale (0.00s)
+    --- PASS: TestToNodeRespDowngradesStaleHealthy/long_dead_goes_stale (0.00s)
+    --- PASS: TestToNodeRespDowngradesStaleHealthy/unreachable_is_left_alone (0.00s)
+    --- PASS: TestToNodeRespDowngradesStaleHealthy/unknown_is_left_alone (0.00s)
+=== RUN   TestHowAPeerIsReachedIsVisible
+=== RUN   TestHowAPeerIsReachedIsVisible/a_punched_internet_peer
+=== RUN   TestHowAPeerIsReachedIsVisible/a_peer_on_a_mapped_port
+=== RUN   TestHowAPeerIsReachedIsVisible/this_machine
+=== RUN   TestHowAPeerIsReachedIsVisible/a_LAN_peer
+=== RUN   TestHowAPeerIsReachedIsVisible/a_forwarder_whose_link_has_gone
+--- PASS: TestHowAPeerIsReachedIsVisible (0.00s)
+    --- PASS: TestHowAPeerIsReachedIsVisible/a_punched_internet_peer (0.00s)
+    --- PASS: TestHowAPeerIsReachedIsVisible/a_peer_on_a_mapped_port (0.00s)
+    --- PASS: TestHowAPeerIsReachedIsVisible/this_machine (0.00s)
+    --- PASS: TestHowAPeerIsReachedIsVisible/a_LAN_peer (0.00s)
+    --- PASS: TestHowAPeerIsReachedIsVisible/a_forwarder_whose_link_has_gone (0.00s)
+=== RUN   TestPathsWithoutInternetMode
+--- PASS: TestPathsWithoutInternetMode (0.00s)
+=== RUN   TestPeakMemTracker
+--- PASS: TestPeakMemTracker (2.00s)
+=== RUN   TestTreeRSS
+--- PASS: TestTreeRSS (0.12s)
+=== RUN   TestPersistUnderConcurrentUploads
+--- PASS: TestPersistUnderConcurrentUploads (0.30s)
+=== RUN   TestSweepExpiredPersistsWithoutDeadlocking
+--- PASS: TestSweepExpiredPersistsWithoutDeadlocking (0.00s)
+=== RUN   TestRunPoolChunkLegacyPickledFunc
+--- PASS: TestRunPoolChunkLegacyPickledFunc (0.12s)
+=== RUN   TestWarmWorkerReuse
+2026/10/02 20:42:57 [pool] chunk: 2 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:42:57 [pool] spawning warm worker for store /tmp/TestWarmWorkerReuse860145415/001
+2026/10/02 20:42:57 [pool] chunk: 2 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:42:57 [pool] chunk: 2 items -> 1 part(s), 0 remote, 1 local
+--- PASS: TestWarmWorkerReuse (0.10s)
+=== RUN   TestMultiNodeSpill
+2026/10/02 20:42:57 [pool] plan: local=9, 127.0.0.1:45463=7 (predicted 0.75s, best single device 1.33s)
+2026/10/02 20:42:57 [pool] chunk: 16 items -> 2 part(s), 1 remote, 1 local
+2026/10/02 20:42:57 [pool] spawning warm worker for store /tmp/TestMultiNodeSpill2929229432/001/nix/store/fake
+2026/10/02 20:42:57 [pool] received pool/map from 127.0.0.1:55814: items=7 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/10/02 20:42:57 [pool] spawning warm worker for store /tmp/TestMultiNodeSpill2929229432/001/nix/store/fake
+--- PASS: TestMultiNodeSpill (0.33s)
+=== RUN   TestPoolSpillDeadPeerFallsBackToLocal
+2026/10/02 20:42:58 [pool] plan: local=9, 127.0.0.1:1=7 (predicted 0.75s, best single device 1.33s)
+2026/10/02 20:42:58 [pool] chunk: 16 items -> 2 part(s), 1 remote, 1 local
+2026/10/02 20:42:58 [pool] spawning warm worker for store /tmp/TestPoolSpillDeadPeerFallsBackToLocal1153144010/001/nix/store/fake
+--- PASS: TestPoolSpillDeadPeerFallsBackToLocal (0.31s)
+=== RUN   TestPoolMapRejectsMissingStore
+--- PASS: TestPoolMapRejectsMissingStore (0.00s)
+=== RUN   TestPoolMapAdmissionRefusesOverMemory
+2026/10/02 20:42:58 [pool] received pool/map from 127.0.0.1:50998: items=2 b64=false cache_keys=0 required_mem=4611686018427387904 forwarded=""
+2026/10/02 20:42:58 [pool] received pool/map from 127.0.0.1:51002: items=2 b64=false cache_keys=0 required_mem=1 forwarded=""
+2026/10/02 20:42:58 [pool] chunk: 2 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:42:58 [pool] spawning warm worker for store /tmp/TestPoolMapAdmissionRefusesOverMemory2513118568/001
+2026/10/02 20:42:58 [pool] warm worker submit failed for store /tmp/TestPoolMapAdmissionRefusesOverMemory2513118568/001: worker: invalid load key, 'x'.
+Traceback (most recent call last):
+  File "/home/rs/.cache/pipedpeer/scratch/warm-2537037906/warm_worker.py", line 198, in <module>
+    func = pickle.loads(base64.b64decode(req["func"]))
+_pickle.UnpicklingError: invalid load key, 'x'.
+Traceback (most recent call last):
+  File "/home/rs/.cache/pipedpeer/scratch/pool-3812244980/pool_runner.py", line 129, in <module>
+    func = pickle.loads(base64.b64decode(req["func"]))
+_pickle.UnpicklingError: invalid load key, 'x'.
+2026/10/02 20:42:58 [pool] part 0 failed: pool run failed: exit status 1
+--- PASS: TestPoolMapAdmissionRefusesOverMemory (0.12s)
+=== RUN   TestRunPoolChunkItemsB64
+--- PASS: TestRunPoolChunkItemsB64 (0.23s)
+=== RUN   TestClosureBroadcastEnablesSpill
+{"level":"info","peers":1,"store":"/tmp/TestClosureBroadcastEnablesSpill1819473383/004/nix/store/fake","time":"2026-10-02T20:42:58+05:30","message":"broadcasting closure to peers"}
+{"level":"info","store":"/tmp/TestClosureBroadcastEnablesSpill1819473383/004/nix/store/fake","time":"2026-10-02T20:42:58+05:30","message":"cannot list closure paths; sending the whole archive"}
+2026/10/02 20:42:58 [pool] plan: local=9, 127.0.0.1:41917=7 (predicted 0.75s, best single device 1.33s)
+2026/10/02 20:42:58 [pool] chunk: 16 items -> 2 part(s), 1 remote, 1 local
+2026/10/02 20:42:58 [pool] spawning warm worker for store /tmp/TestClosureBroadcastEnablesSpill1819473383/004/nix/store/fake
+2026/10/02 20:42:58 [pool] received pool/map from 127.0.0.1:33994: items=7 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/10/02 20:42:58 [pool] spawning warm worker for store /tmp/TestClosureBroadcastEnablesSpill1819473383/004/nix/store/fake
+--- PASS: TestClosureBroadcastEnablesSpill (0.36s)
+=== RUN   TestClosureBroadcastPushesToLackingPeer
+{"level":"info","peers":1,"store":"/tmp/TestClosureBroadcastPushesToLackingPeer1508086765/004/nix/store/absent-on-s2","time":"2026-10-02T20:42:59+05:30","message":"broadcasting closure to peers"}
+{"level":"info","store":"/tmp/TestClosureBroadcastPushesToLackingPeer1508086765/004/nix/store/absent-on-s2","time":"2026-10-02T20:42:59+05:30","message":"cannot list closure paths; sending the whole archive"}
+{"level":"info","peers":1,"store":"/tmp/TestClosureBroadcastPushesToLackingPeer1508086765/004/nix/store/absent-on-s2","time":"2026-10-02T20:42:59+05:30","message":"broadcasting closure to peers"}
+--- PASS: TestClosureBroadcastPushesToLackingPeer (0.01s)
+=== RUN   TestPoolMapMergesInInputOrder
+2026/10/02 20:42:59 [pool] plan: local=7, 127.0.0.1:40599=5 (predicted 0.58s, best single device 1.00s)
+2026/10/02 20:42:59 [pool] chunk: 12 items -> 2 part(s), 1 remote, 1 local
+2026/10/02 20:42:59 [pool] spawning warm worker for store /tmp/TestPoolMapMergesInInputOrder4035075496/001/nix/store/fake
+--- PASS: TestPoolMapMergesInInputOrder (2.21s)
+=== RUN   TestPoolStatsRecordsChunkOrigin
+2026/10/02 20:43:01 [pool] received pool/map from 127.0.0.1:5555: items=3 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/10/02 20:43:01 [pool] chunk: 3 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:43:01 [pool] spawning warm worker for store /tmp/TestPoolStatsRecordsChunkOrigin873113386/001
+--- PASS: TestPoolStatsRecordsChunkOrigin (0.05s)
+=== RUN   TestPoolMapNoSplitRoutesPerPeer
+2026/10/02 20:43:01 [pool] chunk: 4 items -> 4 part(s), 4 remote, 0 local
+2026/10/02 20:43:01 [pool] chunk: 4 items -> 4 part(s), 4 remote, 0 local
+2026/10/02 20:43:01 [pool] chunk: 4 items -> 4 part(s), 4 remote, 0 local
+--- PASS: TestPoolMapNoSplitRoutesPerPeer (0.07s)
+=== RUN   TestPoolSpillNextBestOnFailure
+2026/10/02 20:43:01 [pool] plan: local=6, 127.0.0.1:1=5, 127.0.0.1:34519=5 (predicted 0.50s, best single device 1.33s)
+2026/10/02 20:43:01 [pool] chunk: 16 items -> 3 part(s), 2 remote, 1 local
+2026/10/02 20:43:01 [pool] spawning warm worker for store /tmp/TestPoolSpillNextBestOnFailure630631336/001/nix/store/fake
+2026/10/02 20:43:01 [pool] received pool/map from 127.0.0.1:36008: items=5 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/10/02 20:43:01 [pool] spawning warm worker for store /tmp/TestPoolSpillNextBestOnFailure630631336/001/nix/store/fake
+2026/10/02 20:43:01 [pool] received pool/map from 127.0.0.1:36020: items=5 b64=false cache_keys=0 required_mem=0 forwarded=""
+--- PASS: TestPoolSpillNextBestOnFailure (0.35s)
+=== RUN   TestPoolMapFramesRoundTrip
+2026/10/02 20:43:01 [pool] received pool/map from 127.0.0.1:36600: items=2 b64=false cache_keys=0 required_mem=0 forwarded=""
+2026/10/02 20:43:01 [pool] chunk: 2 items -> 1 part(s), 0 remote, 1 local
+2026/10/02 20:43:01 [pool] spawning warm worker for store /tmp/TestPoolMapFramesRoundTrip1526446843/001
+--- PASS: TestPoolMapFramesRoundTrip (0.08s)
+=== RUN   TestSinkPeerLast
+--- PASS: TestSinkPeerLast (0.00s)
+=== RUN   TestFanWidthRespectsFreeMemory
+--- PASS: TestFanWidthRespectsFreeMemory (0.01s)
+=== RUN   TestFitSeparatesRoundTripFromPerItemCost
+--- PASS: TestFitSeparatesRoundTripFromPerItemCost (0.00s)
+=== RUN   TestFitFallsBackWhenObservationsCannotSeparateTheTwo
+--- PASS: TestFitFallsBackWhenObservationsCannotSeparateTheTwo (0.00s)
+=== RUN   TestFitIgnoresAnImpossibleIntercept
+--- PASS: TestFitIgnoresAnImpossibleIntercept (0.00s)
+=== RUN   TestObservationsExpire
+--- PASS: TestObservationsExpire (0.00s)
+=== RUN   TestUnmeasuredPeerStillGetsAChance
+--- PASS: TestUnmeasuredPeerStillGetsAChance (0.00s)
+=== RUN   TestMeasurementOverridesThePrior
+--- PASS: TestMeasurementOverridesThePrior (0.00s)
+=== RUN   TestResultsSkipUntouchedUploads
+--- PASS: TestResultsSkipUntouchedUploads (0.00s)
+=== RUN   TestResultsIncludeNewAndModifiedFiles
+--- PASS: TestResultsIncludeNewAndModifiedFiles (0.00s)
+=== RUN   TestResultsDetectSameSizeRewrite
+--- PASS: TestResultsDetectSameSizeRewrite (0.00s)
+=== RUN   TestResultsWithoutUploadRecordReturnsEverything
+--- PASS: TestResultsWithoutUploadRecordReturnsEverything (0.00s)
+=== RUN   TestGPUDriverLibsFindsVersionedSonames
+--- PASS: TestGPUDriverLibsFindsVersionedSonames (0.00s)
+=== RUN   TestGPUDriverLibsEmptyWhenNoDriver
+--- PASS: TestGPUDriverLibsEmptyWhenNoDriver (0.00s)
+=== RUN   TestNATSAcceptCommitComplete
+--- PASS: TestNATSAcceptCommitComplete (0.11s)
+=== RUN   TestNATSAcceptRejectsWrongTarget
+--- PASS: TestNATSAcceptRejectsWrongTarget (0.03s)
+=== RUN   TestNATSAcceptWithMemoryCheck
+--- PASS: TestNATSAcceptWithMemoryCheck (0.03s)
+=== RUN   TestNATSCancelBySubmitter
+--- PASS: TestNATSCancelBySubmitter (0.03s)
+=== RUN   TestNATSHealth
+--- PASS: TestNATSHealth (0.03s)
+=== RUN   TestNATSAndHTTPDualTransport
+--- PASS: TestNATSAndHTTPDualTransport (0.03s)
+=== RUN   TestLeaseLifecycleAcceptCommitComplete
+--- PASS: TestLeaseLifecycleAcceptCommitComplete (0.00s)
+=== RUN   TestLeaseExpiryAutoReleasesReservation
+--- PASS: TestLeaseExpiryAutoReleasesReservation (0.10s)
+=== RUN   TestCommitAfterExpiryRejected
+--- PASS: TestCommitAfterExpiryRejected (0.06s)
+=== RUN   TestEarlyCommitWithinGracePeriod
+--- PASS: TestEarlyCommitWithinGracePeriod (0.08s)
+=== RUN   TestEarlyCommitBeforeExpiry
+--- PASS: TestEarlyCommitBeforeExpiry (0.00s)
+=== RUN   TestCancelReleasesReservation
+--- PASS: TestCancelReleasesReservation (0.00s)
+=== RUN   TestCancelByNonSubmitterRejected
+--- PASS: TestCancelByNonSubmitterRejected (0.00s)
+=== RUN   TestRunningLeaseNotSwept
+--- PASS: TestRunningLeaseNotSwept (0.08s)
+=== RUN   TestAdmissionRejectsInsufficientMemory
+--- PASS: TestAdmissionRejectsInsufficientMemory (0.00s)
+=== RUN   TestStackedReservationsExhaust
+--- PASS: TestStackedReservationsExhaust (0.01s)
+=== RUN   TestAcceptRejectsWrongTargetID
+--- PASS: TestAcceptRejectsWrongTargetID (0.00s)
+=== RUN   TestAcceptRequiresTargetID
+--- PASS: TestAcceptRequiresTargetID (0.00s)
+=== RUN   TestDoubleCommitRejected
+--- PASS: TestDoubleCommitRejected (0.01s)
+=== RUN   TestConcurrentAcceptRace
+--- PASS: TestConcurrentAcceptRace (0.02s)
+=== RUN   TestHealthReportsLeaseInfo
+--- PASS: TestHealthReportsLeaseInfo (0.00s)
+=== RUN   TestAcceptWithoutResourceReqAlwaysAccepted
+--- PASS: TestAcceptWithoutResourceReqAlwaysAccepted (0.00s)
+=== RUN   TestCompleteByJobNameBackwardsCompat
+--- PASS: TestCompleteByJobNameBackwardsCompat (0.00s)
+=== RUN   TestCommitWithUnknownLeaseID
+--- PASS: TestCommitWithUnknownLeaseID (0.00s)
+=== RUN   TestCommitWithEmptyLeaseID
+--- PASS: TestCommitWithEmptyLeaseID (0.00s)
+=== RUN   TestCommitWithInvalidJSON
+--- PASS: TestCommitWithInvalidJSON (0.00s)
+=== RUN   TestCancelNonExistentLease
+--- PASS: TestCancelNonExistentLease (0.00s)
+=== RUN   TestAcceptWithInvalidJSON
+--- PASS: TestAcceptWithInvalidJSON (0.00s)
+=== RUN   TestAcceptWithGetMethodRejected
+--- PASS: TestAcceptWithGetMethodRejected (0.00s)
+=== RUN   TestCompleteNonExistentLeaseIsNoOp
+--- PASS: TestCompleteNonExistentLeaseIsNoOp (0.00s)
+=== RUN   TestCompleteOnReservedLeaseReleasesIt
+--- PASS: TestCompleteOnReservedLeaseReleasesIt (0.00s)
+=== RUN   TestCancelWithInvalidJSON
+--- PASS: TestCancelWithInvalidJSON (0.00s)
+=== RUN   TestRewriteHostKeepsUserAndPort
+--- PASS: TestRewriteHostKeepsUserAndPort (0.00s)
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_has_never_heard_of_the_question
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_lists_it
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_lists_it_among_others
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_lists_it_with_spaces
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_listing_only_something_else
+=== RUN   TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_whose_format_merely_contains_the_name
+--- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat (0.00s)
+    --- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_has_never_heard_of_the_question (0.00s)
+    --- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_lists_it (0.00s)
+    --- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_lists_it_among_others (0.00s)
+    --- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_that_lists_it_with_spaces (0.00s)
+    --- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_listing_only_something_else (0.00s)
+    --- PASS: TestOnlyAPeerThatSaysSoIsSentTheSignedFormat/a_peer_whose_format_merely_contains_the_name (0.00s)
+=== RUN   TestTheFormatIsDecidedByTheBytesNotTheClaim
+=== RUN   TestTheFormatIsDecidedByTheBytesNotTheClaim/something_far_too_short_to_be_either
+=== RUN   TestTheFormatIsDecidedByTheBytesNotTheClaim/a_tar_that_is_not_one_of_ours
+=== RUN   TestTheFormatIsDecidedByTheBytesNotTheClaim/a_signed_archive
+=== RUN   TestTheFormatIsDecidedByTheBytesNotTheClaim/a_gzipped_export_stream
+--- PASS: TestTheFormatIsDecidedByTheBytesNotTheClaim (0.00s)
+    --- PASS: TestTheFormatIsDecidedByTheBytesNotTheClaim/something_far_too_short_to_be_either (0.00s)
+    --- PASS: TestTheFormatIsDecidedByTheBytesNotTheClaim/a_tar_that_is_not_one_of_ours (0.00s)
+    --- PASS: TestTheFormatIsDecidedByTheBytesNotTheClaim/a_signed_archive (0.00s)
+    --- PASS: TestTheFormatIsDecidedByTheBytesNotTheClaim/a_gzipped_export_stream (0.00s)
+=== RUN   TestASignedClosureIsNeverCachedAsTheClosure
+{"level":"info","store":"/nix/store/aaaa-root","roots":1,"time":"2026-10-02T20:43:02+05:30","message":"imported a closure whose signatures this machine checked"}
+--- PASS: TestASignedClosureIsNeverCachedAsTheClosure (0.00s)
+=== RUN   TestASenderCannotMaterialiseSomethingElse
+{"level":"info","store":"/nix/store/aaaa-what-was-asked-for","roots":1,"time":"2026-10-02T20:43:02+05:30","message":"imported a closure whose signatures this machine checked"}
+--- PASS: TestASenderCannotMaterialiseSomethingElse (0.00s)
+=== RUN   TestTheSendPathHonoursWhatThePeerSaidItTakes
+=== RUN   TestTheSendPathHonoursWhatThePeerSaidItTakes/a_peer_that_has_not_been_upgraded
+{"level":"info","error":"exit status 1: error: 'aaaa-root' is too short to be a valid store path","store":"/nix/store/aaaa-root","time":"2026-10-02T20:43:02+05:30","message":"cannot list closure paths; sending the whole archive"}
+=== RUN   TestTheSendPathHonoursWhatThePeerSaidItTakes/a_peer_that_takes_signed_closures
+--- PASS: TestTheSendPathHonoursWhatThePeerSaidItTakes (0.03s)
+    --- PASS: TestTheSendPathHonoursWhatThePeerSaidItTakes/a_peer_that_has_not_been_upgraded (0.03s)
+    --- PASS: TestTheSendPathHonoursWhatThePeerSaidItTakes/a_peer_that_takes_signed_closures (0.00s)
+=== RUN   TestStateRoundTrip
+--- PASS: TestStateRoundTrip (0.00s)
+=== RUN   TestStateLoadMissingFile
+--- PASS: TestStateLoadMissingFile (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/daemonapi	8.914s
+=== RUN   TestNodeThatCannotAnswerGetsTheWholeArchive
+--- PASS: TestNodeThatCannotAnswerGetsTheWholeArchive (0.00s)
+=== RUN   TestNothingInCommonIsNotWorthADiff
+--- PASS: TestNothingInCommonIsNotWorthADiff (0.00s)
+=== RUN   TestFragmentIsMarkedPartial
+--- PASS: TestFragmentIsMarkedPartial (0.00s)
+=== RUN   TestRejectedImportIsReported
+--- PASS: TestRejectedImportIsReported (0.00s)
+=== RUN   TestExtractResultsClassifiesNewAndUpdated
+--- PASS: TestExtractResultsClassifiesNewAndUpdated (0.00s)
+=== RUN   TestExtractResultsAppliesDeletions
+--- PASS: TestExtractResultsAppliesDeletions (0.00s)
+=== RUN   TestExtractResultsRejectsDeletionEscape
+--- PASS: TestExtractResultsRejectsDeletionEscape (0.00s)
+=== RUN   TestExtractResultsRejectsPathTraversal
+--- PASS: TestExtractResultsRejectsPathTraversal (0.00s)
+=== RUN   TestExtractResultsEmptyArchive
+--- PASS: TestExtractResultsEmptyArchive (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/daemonctl	0.008s
+=== RUN   TestMeasurementBeatsAdvertisedCores
+--- PASS: TestMeasurementBeatsAdvertisedCores (0.00s)
+=== RUN   TestHopelessNodeIsRefused
+--- PASS: TestHopelessNodeIsRefused (0.00s)
+=== RUN   TestUnreachableNodeIsAssumedAverage
+--- PASS: TestUnreachableNodeIsAssumedAverage (0.00s)
+=== RUN   TestNoMeasurementSaysSo
+--- PASS: TestNoMeasurementSaysSo (0.00s)
+=== RUN   TestWeightsSumToOne
+--- PASS: TestWeightsSumToOne (0.00s)
+=== RUN   TestRingCapIsExplained
+--- PASS: TestRingCapIsExplained (0.00s)
+=== RUN   TestMemoryIsAHardGate
+--- PASS: TestMemoryIsAHardGate (0.00s)
+=== RUN   TestEqualBatchesRejectTheStragglers
+--- PASS: TestEqualBatchesRejectTheStragglers (0.00s)
+=== RUN   TestProportionalBatchesChangeSharesNotMembership
+--- PASS: TestProportionalBatchesChangeSharesNotMembership (0.00s)
+=== RUN   TestSecondGPUOnANodeGetsARank
+--- PASS: TestSecondGPUOnANodeGetsARank (3.92s)
+=== RUN   TestOneSlotIsUnchangedBehaviour
+--- PASS: TestOneSlotIsUnchangedBehaviour (7.75s)
+=== RUN   TestRanksOnOneNodeShareItsMemory
+--- PASS: TestRanksOnOneNodeShareItsMemory (8.00s)
+=== RUN   TestCappedRingLeavesTheSpareDeviceIdle
+--- PASS: TestCappedRingLeavesTheSpareDeviceIdle (4.00s)
+=== RUN   TestZeroSlotsMeansOne
+--- PASS: TestZeroSlotsMeansOne (8.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/ddpplace	31.678s
+=== RUN   TestCandidatesAreTriedBestFirst
+--- PASS: TestCandidatesAreTriedBestFirst (0.00s)
+=== RUN   TestAnUnknownCandidateKindIsSkippedNotFatal
+--- PASS: TestAnUnknownCandidateKindIsSkippedNotFatal (0.00s)
+=== RUN   TestGatherFindsTheLANAddresses
+--- PASS: TestGatherFindsTheLANAddresses (0.00s)
+=== RUN   TestTheRaceReturnsTheAddressThatAnswered
+--- PASS: TestTheRaceReturnsTheAddressThatAnswered (0.00s)
+=== RUN   TestTheRaceGivesUpWhenNothingAnswers
+--- PASS: TestTheRaceGivesUpWhenNothingAnswers (0.40s)
+=== RUN   TestARaceNeedsSomewhereToTry
+--- PASS: TestARaceNeedsSomewhereToTry (0.00s)
+=== RUN   TestSomebodyElsesReplyIsIgnored
+--- PASS: TestSomebodyElsesReplyIsIgnored (0.50s)
+=== RUN   TestTheBirthdayOddsAreWorthTheBurst
+--- PASS: TestTheBirthdayOddsAreWorthTheBurst (0.00s)
+=== RUN   TestTheBirthdayPunchConnectsThroughASymmetricNAT
+--- PASS: TestTheBirthdayPunchConnectsThroughASymmetricNAT (0.39s)
+=== RUN   TestAProbeIsNotMistakenForQUIC
+--- PASS: TestAProbeIsNotMistakenForQUIC (0.00s)
+=== RUN   TestUnreachableCarriesTheReason
+--- PASS: TestUnreachableCarriesTheReason (0.00s)
+=== RUN   TestOneSocketCarriesBothProbesAndQUIC
+2026/10/02 20:42:55 connection doesn't allow setting of receive buffer size. Not a *net.UDPConn?. See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+--- PASS: TestOneSocketCarriesBothProbesAndQUIC (0.09s)
+=== RUN   TestTheWrongMachineCannotWinTheRace
+--- PASS: TestTheWrongMachineCannotWinTheRace (0.00s)
+=== RUN   TestAPeerFromAnotherClusterIsRefused
+--- PASS: TestAPeerFromAnotherClusterIsRefused (0.00s)
+=== RUN   TestAnEndpointNeedsAKeyToBeAddressable
+--- PASS: TestAnEndpointNeedsAKeyToBeAddressable (0.00s)
+=== RUN   TestTheDirectALPNIsNotTheRelayALPN
+--- PASS: TestTheDirectALPNIsNotTheRelayALPN (0.00s)
+=== RUN   TestAnInboundConnectionIsHandedUp
+--- PASS: TestAnInboundConnectionIsHandedUp (0.00s)
+=== RUN   TestAnUnverifiedInboundConnectionIsNotHandedUp
+--- PASS: TestAnUnverifiedInboundConnectionIsNotHandedUp (1.50s)
+=== RUN   TestBothEndsCanOpenStreams
+--- PASS: TestBothEndsCanOpenStreams (0.17s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/direct	3.053s
+=== RUN   TestExtractHost
+--- PASS: TestExtractHost (0.00s)
+=== RUN   TestLocalBroadcastsReturnsAddresses
+--- PASS: TestLocalBroadcastsReturnsAddresses (0.00s)
+=== RUN   TestServiceInfoRoundTrip
+--- PASS: TestServiceInfoRoundTrip (0.00s)
+=== RUN   TestAdvertiserStartStop
+--- PASS: TestAdvertiserStartStop (0.60s)
+=== RUN   TestProbeHost
+--- PASS: TestProbeHost (0.00s)
+=== RUN   TestProbeHostRejectsForeign
+--- PASS: TestProbeHostRejectsForeign (0.00s)
+=== RUN   TestLocalSubnetsExcludesLoopback
+--- PASS: TestLocalSubnetsExcludesLoopback (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/discovery	0.609s
+=== RUN   TestDetect
+    detect_test.go:9: Detected GPU: vendor=nvidia name=NVIDIA GeForce RTX 3050 6GB Laptop GPU devices=5 mem=6442450944
+    detect_test.go:20:   device: /dev/nvidia0 (major=195, minor=0)
+    detect_test.go:20:   device: /dev/nvidiactl (major=195, minor=255)
+    detect_test.go:20:   device: /dev/nvidia-modeset (major=195, minor=254)
+    detect_test.go:20:   device: /dev/nvidia-uvm (major=507, minor=0)
+    detect_test.go:20:   device: /dev/nvidia-uvm-tools (major=507, minor=1)
+--- PASS: TestDetect (0.10s)
+=== RUN   TestDetectNVIDIA
+    detect_test.go:36: NVIDIA GPU: NVIDIA GeForce RTX 3050 6GB Laptop GPU, memory: 6442450944 bytes, compute_cap=8.6
+--- PASS: TestDetectNVIDIA (0.09s)
+=== RUN   TestRefreshOtherVendorsAreSafe
+--- PASS: TestRefreshOtherVendorsAreSafe (0.02s)
+=== RUN   TestStatDevice
+    detect_test.go:66: /dev/null: major=1 minor=3
+--- PASS: TestStatDevice (0.00s)
+=== RUN   TestScanDevices
+--- PASS: TestScanDevices (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/gpu	0.208s
+=== RUN   TestHeartbeatLifecycle
+--- PASS: TestHeartbeatLifecycle (0.25s)
+=== RUN   TestHeartbeatReRegistersOn404
+--- PASS: TestHeartbeatReRegistersOn404 (0.23s)
+=== RUN   TestCollectLoadReturnsValues
+--- PASS: TestCollectLoadReturnsValues (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/heartbeat	0.487s
+=== RUN   TestGetOrCreateGeneratesUUID
+--- PASS: TestGetOrCreateGeneratesUUID (0.08s)
+=== RUN   TestIdentityStableAcrossCalls
+--- PASS: TestIdentityStableAcrossCalls (0.00s)
+=== RUN   TestShortIDAndMatchesID
+--- PASS: TestShortIDAndMatchesID (0.00s)
+=== RUN   TestKeyIsStableAcrossCalls
+--- PASS: TestKeyIsStableAcrossCalls (0.00s)
+=== RUN   TestKeyIsWrittenPrivately
+--- PASS: TestKeyIsWrittenPrivately (0.00s)
+=== RUN   TestCorruptKeyIsNotSilentlyReplaced
+--- PASS: TestCorruptKeyIsNotSilentlyReplaced (0.00s)
+=== RUN   TestSignatureVerifies
+--- PASS: TestSignatureVerifies (0.00s)
+=== RUN   TestContextStopsReplayAcrossPurposes
+--- PASS: TestContextStopsReplayAcrossPurposes (0.00s)
+=== RUN   TestForeignKeyDoesNotVerify
+--- PASS: TestForeignKeyDoesNotVerify (0.00s)
+=== RUN   TestFingerprintDependsOnlyOnTheKey
+--- PASS: TestFingerprintDependsOnlyOnTheKey (0.00s)
+=== RUN   TestPublicKeyRoundTrips
+--- PASS: TestPublicKeyRoundTrips (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/identity	0.084s
+=== RUN   TestOneMissedRegistrationDoesNotDropAPeer
+--- PASS: TestOneMissedRegistrationDoesNotDropAPeer (0.00s)
+=== RUN   TestAPeerThatStopsAnsweringIsEventuallyDropped
+--- PASS: TestAPeerThatStopsAnsweringIsEventuallyDropped (0.00s)
+=== RUN   TestALivePeerIsNeverDropped
+--- PASS: TestALivePeerIsNeverDropped (0.00s)
+=== RUN   TestThePollKeepsTheMappingAlive
+--- PASS: TestThePollKeepsTheMappingAlive (0.00s)
+=== RUN   TestTheDirectPortIsFixedByDefault
+--- PASS: TestTheDirectPortIsFixedByDefault (0.00s)
+=== RUN   TestAMappingThatIsNotOursIsNotPublished
+=== RUN   TestAMappingThatIsNotOursIsNotPublished/the_router_and_the_world_agree
+=== RUN   TestAMappingThatIsNotOursIsNotPublished/the_phone_tether_case
+=== RUN   TestAMappingThatIsNotOursIsNotPublished/no_reflexive_address_yet
+--- PASS: TestAMappingThatIsNotOursIsNotPublished (0.00s)
+    --- PASS: TestAMappingThatIsNotOursIsNotPublished/the_router_and_the_world_agree (0.00s)
+    --- PASS: TestAMappingThatIsNotOursIsNotPublished/the_phone_tether_case (0.00s)
+    --- PASS: TestAMappingThatIsNotOursIsNotPublished/no_reflexive_address_yet (0.00s)
+=== RUN   TestALiveLinkSurvivesTheIntroducerGoingAway
+--- PASS: TestALiveLinkSurvivesTheIntroducerGoingAway (0.00s)
+=== RUN   TestAClosedConnectionIsNotAlive
+--- PASS: TestAClosedConnectionIsNotAlive (0.00s)
+=== RUN   TestAPeerWithNoPathIsNeverHandedToTheDaemon
+--- PASS: TestAPeerWithNoPathIsNeverHandedToTheDaemon (0.00s)
+=== RUN   TestARestartedPeerDoesNotServeTheOldPenalty
+--- PASS: TestARestartedPeerDoesNotServeTheOldPenalty (0.00s)
+=== RUN   TestAForwarderThatStopsAcceptingReleasesItsPeer
+--- PASS: TestAForwarderThatStopsAcceptingReleasesItsPeer (0.00s)
+=== RUN   TestTheForwarderOutlivesTheAttemptThatMadeIt
+--- PASS: TestTheForwarderOutlivesTheAttemptThatMadeIt (0.31s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/internet	0.319s
+=== RUN   TestPrune
+--- PASS: TestPrune (0.00s)
+=== RUN   TestValidTransitions
+--- PASS: TestValidTransitions (0.00s)
+=== RUN   TestRecordTransition
+--- PASS: TestRecordTransition (0.00s)
+=== RUN   TestIsTerminal
+--- PASS: TestIsTerminal (0.00s)
+=== RUN   TestInvalidFromState
+--- PASS: TestInvalidFromState (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/jobhistory	0.002s
+?   	github.com/pipedpeer/pipedpeer/internal/logging	[no test files]
+=== RUN   TestNarinfoIsReadNotGuessed
+--- PASS: TestNarinfoIsReadNotGuessed (0.00s)
+=== RUN   TestNarinfoWithAHugeReferencesLineStillParses
+--- PASS: TestNarinfoWithAHugeReferencesLineStillParses (0.00s)
+=== RUN   TestNarinfoWithoutTheFieldsWeNeedIsRejected
+--- PASS: TestNarinfoWithoutTheFieldsWeNeedIsRejected (0.00s)
+=== RUN   TestOnlyTheArchivesThePeerLacksTravel
+--- PASS: TestOnlyTheArchivesThePeerLacksTravel (0.00s)
+=== RUN   TestAPeerThatCannotAnswerIsSentEverything
+--- PASS: TestAPeerThatCannotAnswerIsSentEverything (0.00s)
+=== RUN   TestAnArchiveCannotWriteOutsideItsDirectory
+--- PASS: TestAnArchiveCannotWriteOutsideItsDirectory (0.00s)
+=== RUN   TestAnArchiveWithoutAManifestIsRejected
+--- PASS: TestAnArchiveWithoutAManifestIsRejected (0.00s)
+=== RUN   TestAnArchiveFromAFutureFormatIsRejected
+--- PASS: TestAnArchiveFromAFutureFormatIsRejected (0.00s)
+=== RUN   TestPackedArchiveUnpacksIntoAUsableCache
+--- PASS: TestPackedArchiveUnpacksIntoAUsableCache (0.00s)
+=== RUN   TestPackingAnUnpublishedPathFails
+--- PASS: TestPackingAnUnpublishedPathFails (0.00s)
+=== RUN   TestPruneEvictsTheLeastRecentlyUsedFirst
+--- PASS: TestPruneEvictsTheLeastRecentlyUsedFirst (0.00s)
+=== RUN   TestPruneRemovesTheArchiveNotJustTheMetadata
+--- PASS: TestPruneRemovesTheArchiveNotJustTheMetadata (0.00s)
+=== RUN   TestPruneLeavesACacheUnderTheCapAlone
+--- PASS: TestPruneLeavesACacheUnderTheCapAlone (0.00s)
+=== RUN   TestTouchSavesWhatIsStillBeingSent
+--- PASS: TestTouchSavesWhatIsStillBeingSent (0.00s)
+=== RUN   TestACorruptEntryIsStillEvictable
+--- PASS: TestACorruptEntryIsStillEvictable (0.00s)
+=== RUN   TestMaxBytesIsOverridable
+--- PASS: TestMaxBytesIsOverridable (0.00s)
+=== RUN   TestASignedClosureSurvivesTheTransfer
+--- PASS: TestASignedClosureSurvivesTheTransfer (0.31s)
+=== RUN   TestAClosureSignedByATrustedKeyIsAccepted
+--- PASS: TestAClosureSignedByATrustedKeyIsAccepted (0.30s)
+=== RUN   TestAClosureFromAnUntrustedSenderIsRefused
+--- PASS: TestAClosureFromAnUntrustedSenderIsRefused (0.26s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/narpack	0.876s
+=== RUN   TestEmbeddedServerStartsAndConnects
+--- PASS: TestEmbeddedServerStartsAndConnects (0.03s)
+=== RUN   TestPubSub
+--- PASS: TestPubSub (0.03s)
+=== RUN   TestRequestReply
+--- PASS: TestRequestReply (0.03s)
+=== RUN   TestRequestJSON
+--- PASS: TestRequestJSON (0.03s)
+=== RUN   TestPublishJSON
+--- PASS: TestPublishJSON (0.03s)
+=== RUN   TestQueueSubscribe
+--- PASS: TestQueueSubscribe (0.53s)
+=== RUN   TestJetStreamKVBasic
+--- PASS: TestJetStreamKVBasic (0.03s)
+=== RUN   TestMultipleBusesShareServer
+--- PASS: TestMultipleBusesShareServer (0.03s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/natsbus	0.725s
+=== RUN   TestEndpointIndependentMappingIsPunchable
+--- PASS: TestEndpointIndependentMappingIsPunchable (1.00s)
+=== RUN   TestAddressDependentMappingNeedsARelay
+--- PASS: TestAddressDependentMappingNeedsARelay (1.00s)
+=== RUN   TestNoAnswerIsBlockedNotSymmetric
+--- PASS: TestNoAnswerIsBlockedNotSymmetric (1.00s)
+=== RUN   TestOneServerIsNotEnough
+--- PASS: TestOneServerIsNotEnough (0.00s)
+=== RUN   TestProbeUsesOneLocalPort
+--- PASS: TestProbeUsesOneLocalPort (1.00s)
+=== RUN   TestReflectAnswersWithTheSourceAddress
+--- PASS: TestReflectAnswersWithTheSourceAddress (0.00s)
+=== RUN   TestPunchKeepsSendingAfterItSucceeds
+--- PASS: TestPunchKeepsSendingAfterItSucceeds (3.11s)
+=== RUN   TestFilteringIsMeasuredSeparatelyFromMapping
+--- PASS: TestFilteringIsMeasuredSeparatelyFromMapping (0.00s)
+=== RUN   TestFilteringUnknownAgainstAPlainReflector
+--- PASS: TestFilteringUnknownAgainstAPlainReflector (1.00s)
+=== RUN   TestFilterTestRunsBeforeTheMappingProbes
+--- PASS: TestFilterTestRunsBeforeTheMappingProbes (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/nattype	8.122s
+=== RUN   TestSourceForGivesARoutableLocalAddress
+--- PASS: TestSourceForGivesARoutableLocalAddress (0.00s)
+=== RUN   TestSourceForRejectsNonsense
+--- PASS: TestSourceForRejectsNonsense (7.95s)
+=== RUN   TestAdvertiseFallsBackWithoutPeers
+--- PASS: TestAdvertiseFallsBackWithoutPeers (0.00s)
+=== RUN   TestAdvertisePrefersTheAddressMostPeersReachUsOn
+--- PASS: TestAdvertisePrefersTheAddressMostPeersReachUsOn (0.00s)
+=== RUN   TestAdvertiseIgnoresSelfReferencingPeers
+--- PASS: TestAdvertiseIgnoresSelfReferencingPeers (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/netaddr	7.949s
+=== RUN   TestKernelsWithoutSourceStillReachAPeer
+=== RUN   TestKernelsWithoutSourceStillReachAPeer/lambda
+=== RUN   TestKernelsWithoutSourceStillReachAPeer/closure_over_a_local
+=== RUN   TestKernelsWithoutSourceStillReachAPeer/bound_method
+=== RUN   TestKernelsWithoutSourceStillReachAPeer/decorated_function
+=== RUN   TestKernelsWithoutSourceStillReachAPeer/partial
+--- PASS: TestKernelsWithoutSourceStillReachAPeer (4.62s)
+    --- PASS: TestKernelsWithoutSourceStillReachAPeer/lambda (0.75s)
+    --- PASS: TestKernelsWithoutSourceStillReachAPeer/closure_over_a_local (0.69s)
+    --- PASS: TestKernelsWithoutSourceStillReachAPeer/bound_method (0.89s)
+    --- PASS: TestKernelsWithoutSourceStillReachAPeer/decorated_function (0.89s)
+    --- PASS: TestKernelsWithoutSourceStillReachAPeer/partial (0.93s)
+=== RUN   TestNamedFunctionStillShipsAsSource
+--- PASS: TestNamedFunctionStillShipsAsSource (0.88s)
+=== RUN   TestHeaderCarriesOneKernelFormNotBoth
+--- PASS: TestHeaderCarriesOneKernelFormNotBoth (0.71s)
+=== RUN   TestKernelThatCannotTravelAtAllStaysLocal
+--- PASS: TestKernelThatCannotTravelAtAllStaysLocal (0.50s)
+=== RUN   TestByValueKernelCarriesTheWorkspaceItReads
+--- PASS: TestByValueKernelCarriesTheWorkspaceItReads (0.72s)
+=== RUN   TestEveryPoolEntryPointTakesAKernelWithoutSource
+--- PASS: TestEveryPoolEntryPointTakesAKernelWithoutSource (0.35s)
+=== RUN   TestApplyWorksWithoutKeywordArguments
+--- PASS: TestApplyWorksWithoutKeywordArguments (0.27s)
+=== RUN   TestWorkThatDoesNotFitGoesToTheClusterWhateverItCosts
+--- PASS: TestWorkThatDoesNotFitGoesToTheClusterWhateverItCosts (0.07s)
+=== RUN   TestFitsLocallyReadsTheMachine
+--- PASS: TestFitsLocallyReadsTheMachine (0.03s)
+=== RUN   TestAGPUPeerIsNotPricedAsACPU
+--- PASS: TestAGPUPeerIsNotPricedAsACPU (0.06s)
+=== RUN   TestSingleWorkerOffloadIsNotARace
+--- PASS: TestSingleWorkerOffloadIsNotARace (0.06s)
+=== RUN   TestDDPGradientsShipAsFloat16
+    ddpfp16_test.go:86: [pipedpeer] numpy matmul/dot/tensordot/svd/eig interception installed
+        [pipedpeer] torch matmul/mm interception installed
+        FP16-OK raw=262287 half=131215
+--- PASS: TestDDPGradientsShipAsFloat16 (1.87s)
+=== RUN   TestDDPShardsDataAcrossRanks
+--- PASS: TestDDPShardsDataAcrossRanks (2.61s)
+=== RUN   TestEveryEnvVarTheShimNamesIsRead
+--- PASS: TestEveryEnvVarTheShimNamesIsRead (0.00s)
+=== RUN   TestGenerateFlakeWithoutPackages
+--- PASS: TestGenerateFlakeWithoutPackages (0.00s)
+=== RUN   TestEveryFlakeCarriesCloudpickle
+=== RUN   TestEveryFlakeCarriesCloudpickle/no_packages_at_all
+=== RUN   TestEveryFlakeCarriesCloudpickle/one_package
+=== RUN   TestEveryFlakeCarriesCloudpickle/a_pinned_package
+=== RUN   TestEveryFlakeCarriesCloudpickle/the_torch_cuda_branch
+=== RUN   TestEveryFlakeCarriesCloudpickle/another_arch
+--- PASS: TestEveryFlakeCarriesCloudpickle (0.00s)
+    --- PASS: TestEveryFlakeCarriesCloudpickle/no_packages_at_all (0.00s)
+    --- PASS: TestEveryFlakeCarriesCloudpickle/one_package (0.00s)
+    --- PASS: TestEveryFlakeCarriesCloudpickle/a_pinned_package (0.00s)
+    --- PASS: TestEveryFlakeCarriesCloudpickle/the_torch_cuda_branch (0.00s)
+    --- PASS: TestEveryFlakeCarriesCloudpickle/another_arch (0.00s)
+=== RUN   TestGenerateFlakeWithPackages
+--- PASS: TestGenerateFlakeWithPackages (0.00s)
+=== RUN   TestGenerateFlakePythonVersionDefault
+--- PASS: TestGenerateFlakePythonVersionDefault (0.00s)
+=== RUN   TestGenerateFlakePythonVersionExplicit
+--- PASS: TestGenerateFlakePythonVersionExplicit (0.00s)
+=== RUN   TestGenerateFlakeForArchAarch64
+--- PASS: TestGenerateFlakeForArchAarch64 (0.00s)
+=== RUN   TestGenerateFlakeSklearnPinnedOnX8664
+--- PASS: TestGenerateFlakeSklearnPinnedOnX8664 (0.00s)
+=== RUN   TestGenerateFlakeSklearnUnpinnedOnOtherArch
+--- PASS: TestGenerateFlakeSklearnUnpinnedOnOtherArch (0.00s)
+=== RUN   TestNixArchReturnsValidFormat
+--- PASS: TestNixArchReturnsValidFormat (0.00s)
+=== RUN   TestGeneratedFlakesPinNixpkgs
+=== RUN   TestGeneratedFlakesPinNixpkgs/no_packages
+=== RUN   TestGeneratedFlakesPinNixpkgs/with_numpy
+=== RUN   TestGeneratedFlakesPinNixpkgs/with_torch
+=== RUN   TestGeneratedFlakesPinNixpkgs/non-x86_arch
+--- PASS: TestGeneratedFlakesPinNixpkgs (0.00s)
+    --- PASS: TestGeneratedFlakesPinNixpkgs/no_packages (0.00s)
+    --- PASS: TestGeneratedFlakesPinNixpkgs/with_numpy (0.00s)
+    --- PASS: TestGeneratedFlakesPinNixpkgs/with_torch (0.00s)
+    --- PASS: TestGeneratedFlakesPinNixpkgs/non-x86_arch (0.00s)
+=== RUN   TestTorchFlakeAlwaysIncludesNumpy
+=== RUN   TestTorchFlakeAlwaysIncludesNumpy/torch_alone
+=== RUN   TestTorchFlakeAlwaysIncludesNumpy/torch_with_numpy_already_asked_for
+=== RUN   TestTorchFlakeAlwaysIncludesNumpy/torch_beside_something_else
+--- PASS: TestTorchFlakeAlwaysIncludesNumpy (0.00s)
+    --- PASS: TestTorchFlakeAlwaysIncludesNumpy/torch_alone (0.00s)
+    --- PASS: TestTorchFlakeAlwaysIncludesNumpy/torch_with_numpy_already_asked_for (0.00s)
+    --- PASS: TestTorchFlakeAlwaysIncludesNumpy/torch_beside_something_else (0.00s)
+=== RUN   TestTorchFlakeUsesFixedOutputWheelDownload
+--- PASS: TestTorchFlakeUsesFixedOutputWheelDownload (0.00s)
+=== RUN   TestTorchWithoutGPUSkipsCUDAClosure
+--- PASS: TestTorchWithoutGPUSkipsCUDAClosure (0.00s)
+=== RUN   TestShimPoolDistributesMainModuleFunc
+--- PASS: TestShimPoolDistributesMainModuleFunc (0.71s)
+=== RUN   TestShimPoolDistributesAdjacentModuleFunc
+--- PASS: TestShimPoolDistributesAdjacentModuleFunc (0.73s)
+=== RUN   TestShimPoolStarmapDistributes
+--- PASS: TestShimPoolStarmapDistributes (0.71s)
+=== RUN   TestShimPoolUnshippableStaysLocalQuietly
+--- PASS: TestShimPoolUnshippableStaysLocalQuietly (0.37s)
+=== RUN   TestShimExecutorAPISurvivesInterception
+--- PASS: TestShimExecutorAPISurvivesInterception (0.74s)
+=== RUN   TestShimPoolSingleNodeDoesNotDialItself
+--- PASS: TestShimPoolSingleNodeDoesNotDialItself (0.33s)
+=== RUN   TestShimPoolSizesItselfNotAsAsked
+--- PASS: TestShimPoolSizesItselfNotAsAsked (0.25s)
+=== RUN   TestShimPoolRespectsSizeWhenAsked
+--- PASS: TestShimPoolRespectsSizeWhenAsked (0.12s)
+=== RUN   TestShimImapStaysLazy
+--- PASS: TestShimImapStaysLazy (0.14s)
+=== RUN   TestShimCompressesCompressiblePayloadsOnly
+--- PASS: TestShimCompressesCompressiblePayloadsOnly (0.11s)
+=== RUN   TestShimRaceCorrectWithRemote
+--- PASS: TestShimRaceCorrectWithRemote (0.15s)
+=== RUN   TestShimRaceCorrectWithDeadRemote
+--- PASS: TestShimRaceCorrectWithDeadRemote (0.18s)
+=== RUN   TestShimRaceAdaptiveChunk
+--- PASS: TestShimRaceAdaptiveChunk (0.03s)
+=== RUN   TestShimSyntax
+--- PASS: TestShimSyntax (0.06s)
+=== RUN   TestShimInstallSafe
+--- PASS: TestShimInstallSafe (0.12s)
+=== RUN   TestShimEnabledStillLocal
+--- PASS: TestShimEnabledStillLocal (0.13s)
+=== RUN   TestShimTorchFallbackLocal
+--- PASS: TestShimTorchFallbackLocal (1.74s)
+=== RUN   TestShimHashShuffleMatchesLocal
+--- PASS: TestShimHashShuffleMatchesLocal (1.53s)
+=== RUN   TestShimOutOfCoreIntegrity
+--- PASS: TestShimOutOfCoreIntegrity (1.65s)
+=== RUN   TestShimCostModelDecisions
+--- PASS: TestShimCostModelDecisions (1.27s)
+=== RUN   TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer
+--- PASS: TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer (1.36s)
+=== RUN   TestShimJoblibBackendDistributes
+--- PASS: TestShimJoblibBackendDistributes (1.70s)
+=== RUN   TestShimNumPyInterception
+--- PASS: TestShimNumPyInterception (16.18s)
+=== RUN   TestShimNumPyRespectsTheCostModelsNo
+--- PASS: TestShimNumPyRespectsTheCostModelsNo (0.50s)
+=== RUN   TestShimDDPSync
+--- PASS: TestShimDDPSync (6.66s)
+=== RUN   TestShimForceDistributeBypassesCostModel
+--- PASS: TestShimForceDistributeBypassesCostModel (0.10s)
+=== RUN   TestShimDoesNotImportHeavyLibsAtStartup
+--- PASS: TestShimDoesNotImportHeavyLibsAtStartup (0.06s)
+=== RUN   TestShimPatchesOnFirstImport
+--- PASS: TestShimPatchesOnFirstImport (0.15s)
+=== RUN   TestWeightedShardsPartitionTheDataset
+--- PASS: TestWeightedShardsPartitionTheDataset (0.89s)
+=== RUN   TestEqualStepsAcrossUnevenShares
+--- PASS: TestEqualStepsAcrossUnevenShares (0.93s)
+=== RUN   TestShuffledShardsStayDisjoint
+--- PASS: TestShuffledShardsStayDisjoint (0.92s)
+=== RUN   TestEqualSharesAreTreatedAsNoShares
+--- PASS: TestEqualSharesAreTreatedAsNoShares (0.03s)
+=== RUN   TestAShareTooSmallForOneSampleIsRefused
+--- PASS: TestAShareTooSmallForOneSampleIsRefused (0.03s)
+=== RUN   TestTheBatchSizeIsActuallyObserved
+--- PASS: TestTheBatchSizeIsActuallyObserved (1.76s)
+=== RUN   TestTheReportedStepTimeTracksRecentSteps
+--- PASS: TestTheReportedStepTimeTracksRecentSteps (0.03s)
+=== RUN   TestPinnedPackageReachesTheFlake
+--- PASS: TestPinnedPackageReachesTheFlake (0.00s)
+=== RUN   TestPinIsPlatformSpecific
+--- PASS: TestPinIsPlatformSpecific (0.00s)
+=== RUN   TestUnpinnedPackagesAreLeftAlone
+--- PASS: TestUnpinnedPackagesAreLeftAlone (0.00s)
+=== RUN   TestEveryPinIsUsable
+--- PASS: TestEveryPinIsUsable (0.00s)
+=== RUN   TestHyphenatedNamesAreQuoted
+--- PASS: TestHyphenatedNamesAreQuoted (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/nixgen	55.129s
+=== RUN   TestTheSigningKeyIsTheNodeIdentity
+--- PASS: TestTheSigningKeyIsTheNodeIdentity (0.00s)
+=== RUN   TestAKeyCannotBeOfferedForSomebodyElse
+--- PASS: TestAKeyCannotBeOfferedForSomebodyElse (0.00s)
+=== RUN   TestDerivedAndPublishedKeysAgree
+--- PASS: TestDerivedAndPublishedKeysAgree (0.00s)
+=== RUN   TestTrustedKeysAreRewrittenNotAppended
+--- PASS: TestTrustedKeysAreRewrittenNotAppended (0.00s)
+=== RUN   TestTrustedKeysAreDeduplicated
+--- PASS: TestTrustedKeysAreDeduplicated (0.00s)
+=== RUN   TestTheSecretKeyIsNotWorldReadable
+--- PASS: TestTheSecretKeyIsNotWorldReadable (0.00s)
+=== RUN   TestNixItselfAcceptsThisKey
+--- PASS: TestNixItselfAcceptsThisKey (0.02s)
+=== RUN   TestOnlyKeysThatProveThemselvesAreTrusted
+--- PASS: TestOnlyKeysThatProveThemselvesAreTrusted (0.00s)
+=== RUN   TestAKeyCarriesItsOwnFingerprint
+--- PASS: TestAKeyCarriesItsOwnFingerprint (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/nixsign	0.019s
+=== RUN   TestCmdNamesTheMultiCallLink
+--- PASS: TestCmdNamesTheMultiCallLink (0.00s)
+=== RUN   TestNixBinDirRefusesAnAmbiguousStore
+--- PASS: TestNixBinDirRefusesAnAmbiguousStore (0.00s)
+=== RUN   TestHostNixDirFollowsTheStore
+--- PASS: TestHostNixDirFollowsTheStore (0.00s)
+=== RUN   TestNixBuildCarriesTheExperimentalFlags
+--- PASS: TestNixBuildCarriesTheExperimentalFlags (0.00s)
+=== RUN   TestNixStoreIsLeftAlone
+--- PASS: TestNixStoreIsLeftAlone (0.00s)
+=== RUN   TestAnExplicitSettingWins
+--- PASS: TestAnExplicitSettingWins (0.00s)
+=== RUN   TestTheInstallerLocationsAreSearched
+--- PASS: TestTheInstallerLocationsAreSearched (0.00s)
+=== RUN   TestTheMultiUserPathIsOneOfThem
+--- PASS: TestTheMultiUserPathIsOneOfThem (0.00s)
+=== RUN   TestSystemNixIsFoundOffPath
+--- PASS: TestSystemNixIsFoundOffPath (0.00s)
+=== RUN   TestPathStillWins
+--- PASS: TestPathStillWins (0.00s)
+=== RUN   TestMissingNixSaysWhereItLooked
+--- PASS: TestMissingNixSaysWhereItLooked (0.00s)
+=== RUN   TestSystemNixDirsAreAbsolute
+--- PASS: TestSystemNixDirsAreAbsolute (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/nixstore	0.004s
+=== RUN   TestUpsertAndList
+--- PASS: TestUpsertAndList (0.00s)
+=== RUN   TestCapabilitiesAndLoadRoundTrip
+--- PASS: TestCapabilitiesAndLoadRoundTrip (0.00s)
+=== RUN   TestUpsertDoesNotClobberCapabilitiesWithEmpty
+--- PASS: TestUpsertDoesNotClobberCapabilitiesWithEmpty (0.00s)
+=== RUN   TestManualFlagSurvivesRediscovery
+--- PASS: TestManualFlagSurvivesRediscovery (0.00s)
+=== RUN   TestListHealthyExcludesStaleNodes
+--- PASS: TestListHealthyExcludesStaleNodes (0.00s)
+=== RUN   TestPruneStaleKeepsManualNodes
+--- PASS: TestPruneStaleKeepsManualNodes (0.00s)
+=== RUN   TestMarkUnreachableClearsLiveCounters
+--- PASS: TestMarkUnreachableClearsLiveCounters (0.00s)
+=== RUN   TestDeleteNode
+--- PASS: TestDeleteNode (0.00s)
+=== RUN   TestRemoveReportsCountsAndResolvesPrefixes
+--- PASS: TestRemoveReportsCountsAndResolvesPrefixes (0.00s)
+=== RUN   TestMigrationFromPreviousSchema
+--- PASS: TestMigrationFromPreviousSchema (0.00s)
+=== RUN   TestMigrationIsIdempotent
+--- PASS: TestMigrationIsIdempotent (0.00s)
+=== RUN   TestReaddingAnAddressReplacesTheOldIdentity
+--- PASS: TestReaddingAnAddressReplacesTheOldIdentity (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/nodestore	0.018s
+?   	github.com/pipedpeer/pipedpeer/internal/ping	[no test files]
+=== RUN   TestGatewayIsReadFromTheRoutingTable
+--- PASS: TestGatewayIsReadFromTheRoutingTable (0.00s)
+=== RUN   TestAPointToPointLinkHasNoGatewayToAsk
+--- PASS: TestAPointToPointLinkHasNoGatewayToAsk (0.00s)
+=== RUN   TestADoubleNATMappingIsNotAdvertised
+--- PASS: TestADoubleNATMappingIsNotAdvertised (0.00s)
+=== RUN   TestPCPMappingIsUsedWhenTheRouterSpeaksIt
+--- PASS: TestPCPMappingIsUsedWhenTheRouterSpeaksIt (0.00s)
+=== RUN   TestNATPMPIsTriedWhenPCPIsRefused
+--- PASS: TestNATPMPIsTriedWhenPCPIsRefused (0.00s)
+=== RUN   TestAMappingIsGivenBackOnClose
+--- PASS: TestAMappingIsGivenBackOnClose (0.00s)
+=== RUN   TestAWrongNonceIsRefused
+--- PASS: TestAWrongNonceIsRefused (0.00s)
+=== RUN   TestRenewalHappensBeforeTheLeaseLapses
+--- PASS: TestRenewalHappensBeforeTheLeaseLapses (0.00s)
+=== RUN   TestNoMappingIsNotAFailure
+--- PASS: TestNoMappingIsNotAFailure (4.00s)
+=== RUN   TestTheGrantedLeaseIsWhatGetsRenewed
+--- PASS: TestTheGrantedLeaseIsWhatGetsRenewed (0.00s)
+=== RUN   TestAZeroGrantFallsBackToWhatWasAsked
+--- PASS: TestAZeroGrantFallsBackToWhatWasAsked (0.00s)
+=== RUN   TestUPnPAddsTheMappingItWasAskedFor
+--- PASS: TestUPnPAddsTheMappingItWasAskedFor (2.00s)
+=== RUN   TestUPnPRefusalIsReportedWithItsCode
+--- PASS: TestUPnPRefusalIsReportedWithItsCode (2.00s)
+=== RUN   TestUPnPGivesThePortBack
+--- PASS: TestUPnPGivesThePortBack (2.00s)
+=== RUN   TestADeviceWithoutTheWANServiceIsSkipped
+--- PASS: TestADeviceWithoutTheWANServiceIsSkipped (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/portmap	10.013s
+=== RUN   TestExtractImportsUniqueAndOrdered
+--- PASS: TestExtractImportsUniqueAndOrdered (0.00s)
+=== RUN   TestResolveNixPackage
+--- PASS: TestResolveNixPackage (0.00s)
+=== RUN   TestExtractImportScanSeparatesExternalAndLocal
+--- PASS: TestExtractImportScanSeparatesExternalAndLocal (0.00s)
+=== RUN   TestResolvePackages
+--- PASS: TestResolvePackages (0.00s)
+=== RUN   TestStdlibModulesFilteredFromExternalDeps
+--- PASS: TestStdlibModulesFilteredFromExternalDeps (0.00s)
+=== RUN   TestCommaSeparatedImportsAreAllDetected
+--- PASS: TestCommaSeparatedImportsAreAllDetected (0.00s)
+=== RUN   TestTrailingCommentDoesNotHideAnImport
+--- PASS: TestTrailingCommentDoesNotHideAnImport (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/pythondeps	0.002s
+=== RUN   TestNATSKVBackendType
+--- PASS: TestNATSKVBackendType (0.03s)
+=== RUN   TestMemoryBackendType
+--- PASS: TestMemoryBackendType (0.00s)
+=== RUN   TestNATSKVRegisterAndQuery
+--- PASS: TestNATSKVRegisterAndQuery (0.03s)
+=== RUN   TestNATSKVHeartbeat
+--- PASS: TestNATSKVHeartbeat (0.03s)
+=== RUN   TestNATSKVHeartbeatUnknownNode
+--- PASS: TestNATSKVHeartbeatUnknownNode (0.03s)
+=== RUN   TestNATSKVDeregister
+--- PASS: TestNATSKVDeregister (0.03s)
+=== RUN   TestNATSKVStats
+--- PASS: TestNATSKVStats (0.03s)
+=== RUN   TestNATSKVReRegisterUpdatesEndpoint
+--- PASS: TestNATSKVReRegisterUpdatesEndpoint (0.03s)
+=== RUN   TestNATSKVLeaseExpiry
+--- PASS: TestNATSKVLeaseExpiry (0.15s)
+=== RUN   TestNATSKVHealthScoreCalculation
+--- PASS: TestNATSKVHealthScoreCalculation (0.03s)
+=== RUN   TestNATSKVPersistenceAcrossLookups
+--- PASS: TestNATSKVPersistenceAcrossLookups (0.03s)
+=== RUN   TestRegisterAndQuery
+--- PASS: TestRegisterAndQuery (0.00s)
+=== RUN   TestHeartbeatRenewsLease
+--- PASS: TestHeartbeatRenewsLease (0.01s)
+=== RUN   TestHeartbeatUnknownNodeFails
+--- PASS: TestHeartbeatUnknownNodeFails (0.00s)
+=== RUN   TestLeaseExpiry
+--- PASS: TestLeaseExpiry (0.12s)
+=== RUN   TestDeregister
+--- PASS: TestDeregister (0.00s)
+=== RUN   TestStats
+--- PASS: TestStats (0.00s)
+=== RUN   TestListNodesFilterByState
+--- PASS: TestListNodesFilterByState (0.02s)
+=== RUN   TestHTTPRegisterAndNodes
+--- PASS: TestHTTPRegisterAndNodes (0.00s)
+=== RUN   TestHTTPHeartbeatAndDeregister
+--- PASS: TestHTTPHeartbeatAndDeregister (0.00s)
+=== RUN   TestEmptyNodeListReturnsEmptySlice
+--- PASS: TestEmptyNodeListReturnsEmptySlice (0.00s)
+=== RUN   TestReRegisterUpdatesEndpoint
+--- PASS: TestReRegisterUpdatesEndpoint (0.00s)
+=== RUN   TestHeartbeatUnknownNodeHTTPReturns404
+--- PASS: TestHeartbeatUnknownNodeHTTPReturns404 (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/registry	0.560s
+=== RUN   TestHTTPSurvivesTheRelayUnchanged
+--- PASS: TestHTTPSurvivesTheRelayUnchanged (0.00s)
+=== RUN   TestUnknownPeerIsRefusedNotHung
+--- PASS: TestUnknownPeerIsRefusedNotHung (0.00s)
+=== RUN   TestClustersCannotReachEachOther
+--- PASS: TestClustersCannotReachEachOther (0.00s)
+=== RUN   TestReconnectDoesNotUnregisterTheLiveConnection
+--- PASS: TestReconnectDoesNotUnregisterTheLiveConnection (0.00s)
+=== RUN   TestRawBytesSurviveTheRelay
+--- PASS: TestRawBytesSurviveTheRelay (0.00s)
+=== RUN   TestIdentityCannotBeClaimedWithoutTheKey
+--- PASS: TestIdentityCannotBeClaimedWithoutTheKey (0.00s)
+=== RUN   TestForgedHelloIsRefused
+--- PASS: TestForgedHelloIsRefused (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/relay	0.018s
+=== RUN   TestPeersLearnEachOthersAddresses
+--- PASS: TestPeersLearnEachOthersAddresses (0.00s)
+=== RUN   TestClustersAreIsolated
+--- PASS: TestClustersAreIsolated (0.00s)
+=== RUN   TestStaleRegistrationsExpire
+--- PASS: TestStaleRegistrationsExpire (0.08s)
+=== RUN   TestAgeTravelsWithTheAddress
+--- PASS: TestAgeTravelsWithTheAddress (1.10s)
+=== RUN   TestANodeIsNotIntroducedToItself
+--- PASS: TestANodeIsNotIntroducedToItself (0.00s)
+=== RUN   TestJunkIsIgnoredSilently
+--- PASS: TestJunkIsIgnoredSilently (0.00s)
+=== RUN   TestClusterIDHidesTheToken
+--- PASS: TestClusterIDHidesTheToken (0.00s)
+=== RUN   TestRegisterRoundTripsOverUDP
+--- PASS: TestRegisterRoundTripsOverUDP (0.00s)
+=== RUN   TestCandidatesReachTheOtherPeer
+--- PASS: TestCandidatesReachTheOtherPeer (0.00s)
+=== RUN   TestConnectForwardsToThePeerAndNobodyElse
+--- PASS: TestConnectForwardsToThePeerAndNobodyElse (0.00s)
+=== RUN   TestConnectUsesRegisteredCandidatesNotClaimedOnes
+--- PASS: TestConnectUsesRegisteredCandidatesNotClaimedOnes (0.00s)
+=== RUN   TestConnectCannotCrossClusters
+--- PASS: TestConnectCannotCrossClusters (0.00s)
+=== RUN   TestConnectIsRateLimited
+--- PASS: TestConnectIsRateLimited (0.00s)
+=== RUN   TestConnectToAnAbsentPeerIsSilent
+--- PASS: TestConnectToAnAbsentPeerIsSilent (0.00s)
+=== RUN   TestAPunchIsNotMistakenForARegistration
+--- PASS: TestAPunchIsNotMistakenForARegistration (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/rendezvous	1.184s
+=== RUN   TestTier3ImportBaseline
+--- PASS: TestTier3ImportBaseline (0.00s)
+=== RUN   TestTier2FileSizeEstimate
+--- PASS: TestTier2FileSizeEstimate (0.00s)
+=== RUN   TestTier0UserOverride
+--- PASS: TestTier0UserOverride (0.00s)
+=== RUN   TestFallbackDefault
+--- PASS: TestFallbackDefault (0.00s)
+=== RUN   TestParseMemString
+--- PASS: TestParseMemString (0.00s)
+=== RUN   TestFormatBytes
+--- PASS: TestFormatBytes (0.00s)
+=== RUN   TestDirSizeCalculation
+--- PASS: TestDirSizeCalculation (0.00s)
+=== RUN   TestTier1HistoricalEstimation
+--- PASS: TestTier1HistoricalEstimation (0.00s)
+=== RUN   TestReadSelfVmPeakNonZero
+--- PASS: TestReadSelfVmPeakNonZero (0.00s)
+=== RUN   TestQueryPeakMemNoMatch
+--- PASS: TestQueryPeakMemNoMatch (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/resourceest	0.003s
+=== RUN   TestSharesFollowSpeedNotHeadcount
+--- PASS: TestSharesFollowSpeedNotHeadcount (0.00s)
+=== RUN   TestSlowLinkDeviceIsRefused
+--- PASS: TestSlowLinkDeviceIsRefused (0.00s)
+=== RUN   TestAddingDevicesNeverSlowsTheJobDown
+--- PASS: TestAddingDevicesNeverSlowsTheJobDown (0.00s)
+=== RUN   TestFastLinkBeatsFastDeviceWhenTheLinkIsTheLimit
+--- PASS: TestFastLinkBeatsFastDeviceWhenTheLinkIsTheLimit (0.00s)
+=== RUN   TestDeviceTooSmallForTheModelIsNotUsed
+--- PASS: TestDeviceTooSmallForTheModelIsNotUsed (0.00s)
+=== RUN   TestCPUsAreUsedAlongsideGPUs
+--- PASS: TestCPUsAreUsedAlongsideGPUs (0.00s)
+=== RUN   TestTinySharesAreGivenBack
+--- PASS: TestTinySharesAreGivenBack (0.00s)
+=== RUN   TestEveryItemIsAssigned
+--- PASS: TestEveryItemIsAssigned (0.00s)
+=== RUN   TestNoDevicesIsNotACrash
+--- PASS: TestNoDevicesIsNotACrash (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/schedule	0.001s
+=== RUN   TestAnActiveFirewallIsOpenedForTheDirectPort
+--- PASS: TestAnActiveFirewallIsOpenedForTheDirectPort (0.00s)
+=== RUN   TestAPortThatIsAlreadyOpenIsLeftAlone
+--- PASS: TestAPortThatIsAlreadyOpenIsLeftAlone (0.00s)
+=== RUN   TestNothingIsChangedWithoutConsent
+--- PASS: TestNothingIsChangedWithoutConsent (0.00s)
+=== RUN   TestUFWIsHandledToo
+--- PASS: TestUFWIsHandledToo (0.00s)
+=== RUN   TestAnInactiveFirewallIsNotTouched
+--- PASS: TestAnInactiveFirewallIsNotTouched (0.00s)
+=== RUN   TestAFailureToOpenIsReportedNotSwallowed
+--- PASS: TestAFailureToOpenIsReportedNotSwallowed (0.00s)
+=== RUN   TestTheReportedPortIsTheOneUsed
+--- PASS: TestTheReportedPortIsTheOneUsed (0.00s)
+=== RUN   TestNixUsableRequiresTheStore
+=== RUN   TestNixUsableRequiresTheStore/store_present
+=== RUN   TestNixUsableRequiresTheStore/store_missing
+=== RUN   TestNixUsableRequiresTheStore/store_path_is_a_file
+--- PASS: TestNixUsableRequiresTheStore (0.00s)
+    --- PASS: TestNixUsableRequiresTheStore/store_present (0.00s)
+    --- PASS: TestNixUsableRequiresTheStore/store_missing (0.00s)
+    --- PASS: TestNixUsableRequiresTheStore/store_path_is_a_file (0.00s)
+=== RUN   TestStoreDirHonoursOverride
+--- PASS: TestStoreDirHonoursOverride (0.00s)
+=== RUN   TestCreateNixStoreSatisfiesTheCheck
+    → Creating the nix store at /tmp/TestCreateNixStoreSatisfiesTheCheck1443330280/001/nix/store...
+--- PASS: TestCreateNixStoreSatisfiesTheCheck (0.00s)
+=== RUN   TestSetupFindsNixOffPath
+--- PASS: TestSetupFindsNixOffPath (0.00s)
+=== RUN   TestSetupNeverDisablesSignatureCheckingSystemWide
+--- PASS: TestSetupNeverDisablesSignatureCheckingSystemWide (0.00s)
+=== RUN   TestSetupWithNoKeysYetChangesNothing
+    → Trusting this cluster's signing keys...
+--- PASS: TestSetupWithNoKeysYetChangesNothing (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/setup	0.004s
+=== RUN   TestEveryEncodingIsReadable
+--- PASS: TestEveryEncodingIsReadable (0.00s)
+=== RUN   TestSniffNamesTheEncoding
+--- PASS: TestSniffNamesTheEncoding (0.00s)
+=== RUN   TestASmallArchiveIsLeftAlone
+--- PASS: TestASmallArchiveIsLeftAlone (0.00s)
+=== RUN   TestALargeArchiveIsCompressedAndStillReadable
+--- PASS: TestALargeArchiveIsCompressedAndStillReadable (0.03s)
+=== RUN   TestAMissingFileIsAnError
+--- PASS: TestAMissingFileIsAnError (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/tarcodec	0.043s
+=== RUN   TestEnsureCertIsStableAcrossCalls
+--- PASS: TestEnsureCertIsStableAcrossCalls (0.00s)
+=== RUN   TestPinningAcceptsFirstContactAndRejectsChange
+--- PASS: TestPinningAcceptsFirstContactAndRejectsChange (0.00s)
+=== RUN   TestListenerServesBothProtocols
+--- PASS: TestListenerServesBothProtocols (0.00s)
+=== RUN   TestClientConfigRejectsASwappedCertificate
+2026/10/02 20:43:06 http: TLS handshake error from 127.0.0.1:45198: remote error: tls: bad certificate
+--- PASS: TestClientConfigRejectsASwappedCertificate (0.00s)
+=== RUN   TestForgetTakesEffectWithoutARestart
+--- PASS: TestForgetTakesEffectWithoutARestart (0.01s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/tlsid	0.018s
+=== RUN   TestHonoursXDGVars
+--- PASS: TestHonoursXDGVars (0.00s)
+=== RUN   TestFallsBackToHomeNotTemp
+--- PASS: TestFallsBackToHomeNotTemp (0.00s)
+=== RUN   TestScratchIsOnDisk
+--- PASS: TestScratchIsOnDisk (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/userdir	0.001s
+=== RUN   TestAvailableMatchesTheKernel
+    userns_test.go:39: user namespaces available: jobs run sandboxed
+--- PASS: TestAvailableMatchesTheKernel (0.01s)
+=== RUN   TestDiagnosisNamesAFix
+=== RUN   TestDiagnosisNamesAFix/namespaces_switched_off_entirely
+=== RUN   TestDiagnosisNamesAFix/unprivileged_clone_denied
+=== RUN   TestDiagnosisNamesAFix/AppArmor_confines_the_new_namespace
+=== RUN   TestDiagnosisNamesAFix/no_known_cause
+--- PASS: TestDiagnosisNamesAFix (0.00s)
+    --- PASS: TestDiagnosisNamesAFix/namespaces_switched_off_entirely (0.00s)
+    --- PASS: TestDiagnosisNamesAFix/unprivileged_clone_denied (0.00s)
+    --- PASS: TestDiagnosisNamesAFix/AppArmor_confines_the_new_namespace (0.00s)
+    --- PASS: TestDiagnosisNamesAFix/no_known_cause (0.00s)
+PASS
+ok  	github.com/pipedpeer/pipedpeer/internal/userns	0.008s

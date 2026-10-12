@@ -1,0 +1,62 @@
+# The 2-GPU DDP rehearsal, in containers: gpu1 and gpu2 share this laptop's one
+# GPU through CDI (docker, spec in /var/run/cdi/nvidia.yaml); sub1 has no GPU
+# and plays the college PC that submits. Driven by scripts/lab-gpu.sh.
+#
+#   gpu 10.89.0.0/24   gpu1 .11 (also the rendezvous), gpu2 .12, sub1 .13
+#
+# The node image is lab/nat's (nix, root). It has no glibc loader at /lib64, so
+# the host's nvidia-smi cannot start; the command below links nix's loader and
+# wraps nvidia-smi with the CDI-injected driver libs (/usr/lib64) so the daemon
+# detects the GPU. Total memory 3 x 1500m = 4.5 GB.
+name: pipedpeer-gpulab
+
+x-node: &node
+  privileged: true
+  cpus: 3
+  mem_limit: 1500m
+  build: { context: ../nat, dockerfile: Dockerfile.node }
+  image: localhost/pipedpeer-nat-node
+  volumes:
+    - ../pipedpeer:/usr/local/bin/pipedpeer:ro
+  environment:
+    XDG_DATA_HOME: /var/lib/pipedpeer
+    XDG_STATE_HOME: /var/lib/pipedpeer-state
+
+x-gpu: &gpu
+  <<: *node
+  devices:
+    - nvidia.com/gpu=all
+  # Stays up when setup fails, so the failure can be read inside.
+  command:
+    - sh
+    - -c
+    - |
+      mkdir -p /lib64 /usr/local/sbin
+      ln -sf $$(ls /nix/store/*glibc-2*/lib/ld-linux-x86-64.so.2 | head -1) /lib64/ld-linux-x86-64.so.2
+      printf '#!/bin/sh\nLD_LIBRARY_PATH=/usr/lib64 exec /usr/bin/nvidia-smi "$$@"\n' > /usr/local/bin/nvidia-smi
+      chmod +x /usr/local/bin/nvidia-smi
+      pipedpeer setup -y || echo 'lab: pipedpeer setup -y failed' >&2
+      exec sleep infinity
+
+services:
+  gpu1:
+    <<: *gpu
+    container_name: pp-gpu-gpu1
+    hostname: gpu1
+    networks: { gpulab: { ipv4_address: 10.89.0.11 } }
+  gpu2:
+    <<: *gpu
+    container_name: pp-gpu-gpu2
+    hostname: gpu2
+    networks: { gpulab: { ipv4_address: 10.89.0.12 } }
+  sub1:
+    <<: *node
+    container_name: pp-gpu-sub1
+    hostname: sub1
+    command: ["sh", "-c", "pipedpeer setup -y || echo 'lab: pipedpeer setup -y failed' >&2; exec sleep infinity"]
+    networks: { gpulab: { ipv4_address: 10.89.0.13 } }
+
+networks:
+  gpulab:
+    driver_opts: { com.docker.network.bridge.name: pp-gpulab }
+    ipam: { config: [{ subnet: 10.89.0.0/24 }] }

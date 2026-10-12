@@ -76,58 +76,33 @@ typing-extensions==4.16.0
 // torchWheelsHash is the recursive sha256 of the torchRequirements wheel set.
 const torchWheelsHash = "sha256-0C73Ki7qj6q3wK78ocYCu0AhcSsBtZvidwS4pG33zS8="
 
-func GenerateFlake(nixPkgs []string, pythonVersion string) string {
-	return GenerateFlakeForArch(nixPkgs, pythonVersion, NixArch())
+// GenerateFlake builds the environment. gpu selects torch's build: the CUDA
+// wheel set costs several gigabytes, so a script that imports torch without
+// wanting a GPU should not pay for it.
+func GenerateFlake(nixPkgs []string, pythonVersion string, gpu bool) string {
+	return GenerateFlakeForArch(nixPkgs, pythonVersion, NixArch(), gpu)
 }
 
-func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem string) string {
+func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem string, gpu bool) string {
 	if pythonVersion == "" {
 		pythonVersion = "python3"
 	}
-	if len(nixPkgs) == 0 {
-		return fmt.Sprintf(`{
-  inputs.nixpkgs.url = "`+nixpkgsRef+`";
-
-  outputs = { self, nixpkgs }: {
-    packages.%s.default =
-      let
-        pkgs = nixpkgs.legacyPackages.%s;
-      in
-      pkgs.writeShellScriptBin "run" ''
-        exec ${pkgs.%s}/bin/python3 "$@"
-      '';
-  };
-}
-`, nixSystem, nixSystem, pythonVersion)
-	}
-
 	var psPkgs []string
 	torchCUDA := false
+	hasTorch := false
 	for _, pkg := range nixPkgs {
-		if pkg == "scikit-learn" && nixSystem == "x86_64-linux" {
-			// nixpkgs-unstable still ships scikit-learn 1.8.x; pin the cp314
-			// manylinux wheel to match the host dev environment (1.9.0) so the
-			// built closure behaves identically on this machine and in docker.
-			// 1.9.0 hard-imports narwhals, so pull nixpkgs' narwhals in too.
-			psPkgs = append(psPkgs, "ps.narwhals")
-			psPkgs = append(psPkgs, `(ps.scikit-learn.overridePythonAttrs (old: {
-  version = "1.9.0";
-  format = "wheel";
-  pyproject = null;
-  dontPatch = true;
-  patches = [];
-  doCheck = false;
-  dontBuild = true;
-  dontCheckRuntimeDeps = true;
-  pythonImportsCheck = [];
-  src = pkgs.fetchurl {
-    url = "https://files.pythonhosted.org/packages/f0/af/4d72d9e475ac83719160c662619e4bf7b95c19507cd582e7d0167a3c3dae/scikit_learn-1.9.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl";
-    sha256 = "1fea2cc5677ab49d6f5bade978c866da44957b712d92e9635e8b4f723013c3cb";
-  };
-}))`)
+		if pkg == "torch" {
+			hasTorch = true
+		}
+		// Packages pinned to a specific wheel, from the table in wheelpin.go.
+		// A pin used to be a hardcoded branch here with its Nix expression,
+		// URL and hash inline; a second one meant copying all of it.
+		if pin, ok := pinFor(pkg, nixSystem); ok {
+			psPkgs = append(psPkgs, pin.Deps...)
+			psPkgs = append(psPkgs, pin.expr())
 			continue
 		}
-		if pkg == "torch" && nixSystem == "x86_64-linux" {
+		if pkg == "torch" && nixSystem == "x86_64-linux" && gpu {
 			// nixpkgs' ps.torch builds from source (nvcc + triton-llvm: hours).
 			// Instead fetch the official CUDA wheels (cu126) in a fixed-output
 			// derivation — FODs are allowed network even under nix's default
@@ -135,17 +110,32 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 			// then pip-install them offline into a site dir. The run wrapper
 			// prepends the site to PYTHONPATH. Requires the host NVIDIA
 			// driver; the daemon bind-mounts it into sandboxed jobs.
+			//
+			// Only when a GPU was actually asked for. This used to fire on
+			// the mere presence of the import, so a script that never touched
+			// a device still shipped the whole CUDA wheel set - cuBLAS, cuDNN,
+			// NCCL, triton, the toolkit - to every node that ran it.
+			//
+			// Without a GPU the closure falls through to nixpkgs' ps.torch.
+			// The warning above about building from source is about the
+			// CUDA-enabled variant; the default CPU build substitutes: a
+			// dry-run against this pinned revision fetches 208 MiB for 940
+			// MiB unpacked and builds only the env derivation, against 6.6 GB
+			// unpacked for the wheel set.
 			torchCUDA = true
 			continue
 		}
 		psPkgs = append(psPkgs, "ps."+pkg)
 	}
-	if torchCUDA {
-		// torch imports numpy at runtime for array interop. pip installs only
-		// torch's own tree into the site dir, so numpy has to come from the
-		// nix env — and when torch is a script's only import that env would
-		// otherwise be empty, leaving torch to warn "Failed to initialize
-		// NumPy" and quietly drop .numpy()/from_numpy().
+	if hasTorch {
+		// torch needs numpy for array interop, and pipedpeer needs it more
+		// than most torch users do: the shim's gradient exchange moves
+		// tensors through .numpy(). Without it a DDP run dies at the first
+		// sync with "Numpy is not available", having already trained a step.
+		//
+		// The CUDA wheels do not carry numpy (pip installs only torch's own
+		// tree), and neither does nixpkgs' CPU torch, so both builds need it
+		// added here - it was previously added only for CUDA.
 		hasNumpy := false
 		for _, p := range psPkgs {
 			if p == "ps.numpy" {
@@ -157,6 +147,23 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 			psPkgs = append(psPkgs, "ps.numpy")
 		}
 	}
+
+	// cloudpickle in every environment, including one that asked for no
+	// packages at all.
+	//
+	// It is how a lambda, a closure or a method reaches a worker. The shim
+	// ships a kernel as source where it can, but source only exists for a
+	// plain named function; everything else used to be counted
+	// "unshippable" and run locally forever. cloudpickle serialises those
+	// by value, and the worker needs it importable to load one - so it has
+	// to be in the environment that TRAVELS, not merely in the submitter's.
+	//
+	// Unconditional because the callable's shape is not knowable when the
+	// environment is built: the same env runs whatever the script does
+	// next. It is pure Python and small, and the transfer diffs per store
+	// path, so an existing peer receives cloudpickle and the rebuilt
+	// wrapper rather than the whole environment again.
+	psPkgs = append(psPkgs, "ps.cloudpickle")
 
 	pkgsList := strings.Join(psPkgs, "\n          ")
 	if torchCUDA {

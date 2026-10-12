@@ -155,7 +155,6 @@ print("torch-ok")
 	cmd.Env = append(os.Environ(),
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
-		"PIPEDPEER_TORCH=1",
 		"PIPEDPEER_DAEMON_URL=",
 		"PIPEDPEER_NUM_SHARDS=0",
 	)
@@ -180,11 +179,16 @@ import struct
 import sys
 import tempfile
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CACHE = {}
 PROBES = [0]
 MAX_CHUNK = [0]
+# How many pool requests arrived. MAX_CHUNK alone cannot separate two phases of
+# a test: it is a running maximum, so a phase that distributed nothing leaves it
+# untouched and the assertion still passes on the earlier phase's work.
+POOL_CALLS = [0]
+COUNT_LOCK = threading.Lock()
 TMP = tempfile.mkdtemp(prefix="pp-shim-")
 
 class Handler(BaseHTTPRequestHandler):
@@ -211,10 +215,26 @@ class Handler(BaseHTTPRequestHandler):
             for _ in range(req["items_frames"]):
                 f, rest = rf(rest)
                 raw.append(f)
+            with COUNT_LOCK:
+                POOL_CALLS[0] += 1
+            # Sizes are measured on the wire, before decompression: the point
+            # of MAX_CHUNK is what actually crossed.
             b = [len(f) for f in raw]
             if b:
                 MAX_CHUNK[0] = max(MAX_CHUNK[0], max(b))
+            # The shim compresses a payload when it measures it as
+            # compressible and says so in the header. This fake daemon did not
+            # honour that flag, so every compressed chunk arrived here as a
+            # zlib stream and pickle.loads failed with "invalid load key, 'x'"
+            # - 0x78 being a zlib header. It went unnoticed because the tests
+            # that send compressible payloads skip wherever pandas is missing,
+            # which is most machines.
+            if req.get("items_zlib"):
+                import zlib
+                raw = [zlib.decompress(r) for r in raw]
         else:
+            with COUNT_LOCK:
+                POOL_CALLS[0] += 1
             g = b""
             if req.get("items_b64"):
                 b = [len(i) for i in req["items"]]
@@ -255,7 +275,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-srv = HTTPServer(("127.0.0.1", 0), Handler)
+# Threaded: one request at a time made a call's
+# requests wait behind the previous call's lost-race chunks, so on a loaded
+# machine they were counted during the next call instead of their own.
+srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+srv.daemon_threads = True
 PORT = srv.server_address[1]
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
@@ -263,12 +287,14 @@ os.environ["PIPEDPEER_SHIM"] = "1"
 os.environ["PIPEDPEER_DAEMON_URL"] = "http://127.0.0.1:%d" % PORT
 os.environ["PIPEDPEER_NUM_SHARDS"] = "3"
 os.environ["PIPEDPEER_STORE_PATH"] = ""
-os.environ["PIPEDPEER_PANDAS"] = "1"
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
 import sitecustomize as shim
-import pandas as pd
-import numpy as np
+# pandas and numpy are imported by the scripts that use them, not here. This
+# preamble is shared by every test that needs a fake daemon, and importing them
+# unconditionally made the cost-model and numpy tests skip for want of pandas
+# they never touch - a skip for the wrong reason, which hides that the machine
+# could have run the test.
 # sitecustomize is imported at interpreter startup, before this preamble runs,
 # so the env vars it read then are stale; point the module at the fake daemon.
 shim._ENABLED = True
@@ -287,14 +313,48 @@ func runShimPython(t *testing.T, name, src string, wantSentinel string) {
 // runShimPythonEnv is runShimPython with extra process env vars, needed when
 // the shim's install-time decisions (joblib backend, numpy patching) must see
 // a cluster before the preamble overrides the module attributes.
+// requiredPython reports which third-party modules a shim test script needs,
+// by looking at what it uses. Deliberately conservative on both sides: a
+// module named here that is not needed causes a skip that could have run, and
+// one missed causes an import error inside the script that reads as a test
+// failure.
+func requiredPython(src string) []string {
+	var deps []string
+	add := func(mod string, markers ...string) {
+		for _, m := range markers {
+			if strings.Contains(src, m) {
+				deps = append(deps, mod)
+				return
+			}
+		}
+	}
+	add("pandas", "import pandas", "pd.")
+	add("numpy", "import numpy", "np.")
+	add("sklearn", "import sklearn", "from sklearn")
+	add("joblib", "import joblib", "joblib.")
+	// The weighted sampler imports torch inside __iter__, so a script that
+	// only names the sampler needs torch too.
+	add("torch", "import torch", "torch.", "_WeightedShardSampler", "_weighted_batches")
+	return deps
+}
+
 func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...string) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
 	}
-	if _, err := exec.Command(python, "-c", "import pandas").CombinedOutput(); err != nil {
-		t.Skipf("pandas not available: %v", err)
+	// Gate on what this particular script actually imports.
+	//
+	// The gate used to fire on the fake daemon being present at all, which
+	// meant the numpy tests and the cost-model test skipped for want of
+	// pandas that they never touch. A skip is coverage that is not running,
+	// and skipping for the wrong reason hides that a machine could have run
+	// it: three of the six skips here needed nothing that was missing.
+	for _, dep := range requiredPython(src) {
+		if _, err := exec.Command(python, "-c", "import "+dep).CombinedOutput(); err != nil {
+			t.Skipf("%s not available, which this script imports: %v", dep, err)
+		}
 	}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
@@ -321,6 +381,8 @@ func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...stri
 // requires exact equality with local pandas.
 func TestShimHashShuffleMatchesLocal(t *testing.T) {
 	runShimPython(t, "t3", shimFakeDaemon+`
+import pandas as pd
+import numpy as np
 n = 4000
 df = pd.DataFrame({"k": np.random.randint(0, 13, n), "a": np.random.randn(n), "b": np.random.randint(0, 100, n)})
 gb = df.groupby("k")
@@ -378,11 +440,50 @@ print("SHUFFLE-OK")
 `, "SHUFFLE-OK")
 }
 
+// TestShimPartitionedFrameFallsBackWhenTheClusterLosesItsChunks: the finale's
+// pandas job died on "daemon HTTP 500: pool run failed" when the node asked for
+// a chunk had no copy of it. Every partitioned op must then re-parse the
+// chunks here, say so, and give the local answer.
+func TestShimPartitionedFrameFallsBackWhenTheClusterLosesItsChunks(t *testing.T) {
+	runShimPython(t, "oocfallback", shimFakeDaemon+`
+import io, contextlib
+import pandas as pd
+import numpy as np
+big = pd.DataFrame({"k": np.random.randint(0, 9, 20000), "v": np.random.randn(20000), "s": np.random.randint(0, 50, 20000)})
+csv = os.path.join(TMP, "lost.csv")
+big.to_csv(csv, index=False)
+pf = shim._partitioned_read_csv(csv, {})
+assert len(pf._keys) > 3
+local_df = pd.read_csv(csv)
+class _Lost(dict):
+    def get(self, k, d=None):
+        raise KeyError("chunk cache miss: %s" % k)
+CACHE = _Lost()  # every node lost its chunks: each map now fails, as the real daemon's does
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    pd.testing.assert_frame_equal(pf.groupby("k").mean(), local_df.groupby("k").mean())
+    pd.testing.assert_frame_equal(pf.groupby("k").agg({"v": ["sum", "mean"], "s": "count"}),
+                                  local_df.groupby("k").agg({"v": ["sum", "mean"], "s": "count"}))
+    pd.testing.assert_frame_equal(pf._materialize(), local_df)
+    pd.testing.assert_frame_equal(pf.head(7).reset_index(drop=True), local_df.head(7).reset_index(drop=True))
+    right = pd.DataFrame({"k": list(range(9)), "tag": list("abcdefghi")})
+    pd.testing.assert_frame_equal(pf.merge(right, on="k", how="left", sort=True),
+                                  local_df.merge(right, on="k", how="left", sort=True))
+out = err.getvalue()
+for what in ("groupby", "materialize", "chunk fetch", "merge"):
+    assert ("WARNING: %s on the cluster failed" % what) in out, (what, out)
+assert shim._STATS["remote_failures"] >= 5, shim._STATS["remote_failures"]
+print("OOC-FALLBACK-OK")
+`, "OOC-FALLBACK-OK")
+}
+
 // TestShimOutOfCoreIntegrity (T5) checks the chunked read guarantees: line
 // boundaries, per-node working set bounded by one chunk (RAM flat), and the
 // plain-DataFrame fallback when the daemon is unreachable.
 func TestShimOutOfCoreIntegrity(t *testing.T) {
 	runShimPython(t, "t5", shimFakeDaemon+`
+import pandas as pd
+import numpy as np
 csv = os.path.join(TMP, "lines.csv")
 with open(csv, "wb") as f:
     f.write(b"k,v\n" + b"".join(b"k%d,%d\n" % (i % 5, i) for i in range(1000)))
@@ -437,17 +538,54 @@ shim._measure_bandwidth = _real_bw
 assert PROBES[0] == 0
 bw1 = shim._measure_bandwidth()
 bw2 = shim._measure_bandwidth()
-# bw1 may be None when the probe fails under load (documented "stay local" fallback).
-# Core cache invariant: both calls must return the same value regardless of outcome.
+# Both calls must return the same value: that is the TTL cache doing its job.
 assert bw1 == bw2, "cache broken: two calls returned different values"
-# PROBES counts server-side arrivals: 1 when the request succeeded, 0 when it
-# threw before the server accepted it.  Either is valid; what must never happen
-# is PROBES > 1 (which would mean the second call bypassed the TTL cache).
-assert PROBES[0] in (0, 1), "unexpected probe count %d" % PROBES[0]
+# Exactly one probe reached the server. This used to accept 0 or 1, on the
+# grounds that the probe might fail under load - which also accepted a
+# _measure_bandwidth that never contacted anything at all, and the cost model
+# is built entirely on what it returns. The daemon here is a local fake that
+# answers every time; measured stable over repeated runs, so the tolerance was
+# caution rather than a real failure mode. If this ever does flake, the fix is
+# to make the fake answer reliably, not to widen the assertion back out.
+assert PROBES[0] == 1, "expected exactly one probe, got %d" % PROBES[0]
+assert bw1 is not None, "the probe reached the server but produced no bandwidth"
 if bw1 is not None:
     assert PROBES[0] == 1, "probe returned data but server never received it"
 print("COST-OK")
 `, "COST-OK")
+}
+
+// TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer.
+//
+// The bandwidth probe ships 64 MB. A script doing one 33 MB matmul spent 2.5 s
+// on a LAN measuring the link only to conclude it should not use it, and over
+// the phone-tethered link this also runs on, 64 MB is half a minute - the
+// probe costing far more than the work it was declining.
+//
+// Bandwidth only ever divides est_transfer, so measuring can only make
+// shipping look worse. If an offload loses at a speed no real link reaches, it
+// loses at the real speed, and there is nothing to find out.
+func TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer(t *testing.T) {
+	runShimPython(t, "t6b", shimFakeDaemon+`
+import numpy as np
+A = np.zeros((2048, 2048))
+
+assert PROBES[0] == 0, "something probed before the test started"
+
+# matmul at real BLAS speed: local wins by a wide margin at any bandwidth.
+assert not shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
+assert PROBES[0] == 0, (
+    "the link was measured to answer a question the measurement could not "
+    "change: %d probe(s), 64 MB each" % PROBES[0])
+
+# svd at LAPACK speed is the other way round - shipping plausibly wins, so the
+# real bandwidth genuinely decides and the probe is worth its cost.
+shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
+assert PROBES[0] == 1, (
+    "expected the probe when the answer actually depends on it, got %d"
+    % PROBES[0])
+print("NOPROBE-OK")
+`, "NOPROBE-OK")
 }
 
 // TestShimJoblibBackendDistributes (T7) runs an UNMODIFIED sklearn
@@ -468,16 +606,96 @@ shim._STORE = ""
 rng = np.random.RandomState(0)
 X = rng.rand(200, 8)
 y = (X[:, 0] * 2 + X[:, 1] > 1).astype(int)
+# Two phases, asserted separately. They used to share one "MAX_CHUNK > 0" at
+# the end, which is a running maximum - so the sklearn phase satisfied it and
+# the lambda phase's result was never examined at all.
 rf = RandomForestClassifier(n_estimators=16, n_jobs=-1, random_state=0)
 rf.fit(X, y)
 p = rf.predict(X[:5])
 assert p.shape == (5,)
+sklearn_calls = POOL_CALLS[0]
+assert sklearn_calls > 0, "sklearn's joblib batches never reached the cluster"
+
+# A lambda cannot be shipped - it has no importable definition and no source
+# the shim can send - so this phase is expected to stay local. What matters is
+# that it stays *correct*, and that the shim does not claim to have distributed
+# it. The fake daemon ran the forest's tasks in this process, leaving the
+# runner's nesting marker set, which would skip interception and pass this
+# phase without testing it.
+import os
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+before = POOL_CALLS[0]
 res = joblib.Parallel(n_jobs=-1)(joblib.delayed(lambda a, b: a + b)(i, i) for i in range(12))
 assert res == [2 * i for i in range(12)], res
+lambda_calls = POOL_CALLS[0] - before
+assert lambda_calls == 0, (
+    "a lambda was shipped to the cluster (%d call(s)); it has no definition the "
+    "worker could resolve, so this would have failed remotely and fallen back "
+    "silently" % lambda_calls)
+assert any(d["op"] == "joblib" and not d["shipped"] and "pickled" in d["why"]
+           for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+
 assert MAX_CHUNK[0] > 0, "no joblib batch reached the cluster"
 print("JOBLIB-OK")
 `, "JOBLIB-OK",
-		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+		// Sixteen trees on 200 rows is milliseconds of work, which the cost
+		// model rightly keeps local; a zero floor makes it ship anyway.
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
+		"PIPEDPEER_POOL_MIN_WORK=0")
+}
+
+// TestShimJoblibRacesInChunks pins the fix for a seven-fold slowdown: the
+// old joblib backend sent one task per round trip and waited for each before
+// the next, so RandomForest(n_jobs=-1) fitted one tree at a time across the
+// whole cluster. A call with real work must now go out as multi-task chunks,
+// come back in order, and leave a decision in the receipt; a trivial one must
+// stay local.
+func TestShimJoblibRacesInChunks(t *testing.T) {
+	runShimPythonEnv(t, "t7b", shimFakeDaemon+`
+import time
+import joblib
+
+def slow(i):
+    time.sleep(0.05)
+    return i * 3
+
+before = POOL_CALLS[0]
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(slow)(i) for i in range(60))
+assert res == [i * 3 for i in range(60)], res
+calls = POOL_CALLS[0] - before
+assert calls > 0, "60 x 50ms of joblib work never reached the cluster"
+assert calls < 30, "%d round trips for 60 tasks: still dispatching one at a time" % calls
+assert any(d["op"] == "joblib" and d["shipped"] for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+
+# A large array every task shares travels once per chunk, in the globals
+# frame, not inside each task.
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+import numpy as np
+big = np.arange(512 * 1024, dtype=np.float64)          # 4 MB
+def slow_sum(arr, i):
+    time.sleep(0.05)
+    return float(arr[i])
+MAX_CHUNK[0] = 0
+before = POOL_CALLS[0]
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(slow_sum)(big, i) for i in range(60))
+assert res == [float(i) for i in range(60)], res
+assert POOL_CALLS[0] > before, "the shared-array call never reached the cluster"
+assert 0 < MAX_CHUNK[0] < big.nbytes // 4, "a task carried the array itself: %d bytes" % MAX_CHUNK[0]
+
+# The fake daemon runs tasks in this process, so the remote runner's nesting
+# marker lands here; on a real peer it lands in that peer's worker.
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+# Judged by this call's own decisions, not POOL_CALLS: this fake daemon serves
+# one request at a time, so chunks the previous call sent and then lost the
+# race to are still being counted here, seconds later, on a loaded machine.
+before = len(shim._STATS["decisions"])
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(abs)(-i) for i in range(24))
+assert res == list(range(24)), res
+mine = shim._STATS["decisions"][before:]
+assert mine and all(d["op"] == "joblib" and not d["shipped"] for d in mine), \
+    "microseconds of work were shipped: %r" % mine
+print("JOBLIB-RACE-OK")
+`, "JOBLIB-RACE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // TestShimNumPyInterception (T8) runs unmodified np.matmul/np.tensordot and
@@ -527,6 +745,50 @@ W, V = np.linalg.eig(A)
 assert np.allclose(A @ V, V * W, rtol=1e-4)
 print("NUMPY-OK")
 `, "NUMPY-OK",
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+}
+
+// TestShimNumPyRespectsTheCostModelsNo is the other half of T8.
+//
+// That test checks the cost model's arithmetic, and then overrides it to
+// always-true so the slicing and framing mechanics get exercised. What neither
+// covered is whether the interception actually consults the model: an
+// implementation that ignored it and shipped everything would satisfy both,
+// and would send a matrix across the wire to do work that is faster locally.
+func TestShimNumPyRespectsTheCostModelsNo(t *testing.T) {
+	runShimPythonEnv(t, "t8b", shimFakeDaemon+`
+import time
+import sitecustomize as shim
+import numpy as np
+
+shim._ENABLED = True
+shim._URL = "http://127.0.0.1:%d" % PORT
+shim._STORE = ""
+shim._BW_CACHE["bw"] = 1e9
+shim._BW_CACHE["t"] = time.monotonic()
+
+rng = np.random.RandomState(1)
+A = rng.rand(512, 512)
+B = rng.rand(512, 512)
+
+# The model says no to everything. Nothing may cross the wire, and the answers
+# must still be right - "stayed local" is only acceptable if it also computed.
+shim._numpy_should_offload = lambda *a, **k: False
+
+before = POOL_CALLS[0]
+C = np.matmul(A, B)
+U, S, Vh = np.linalg.svd(A)
+W, V = np.linalg.eig(A)
+after = POOL_CALLS[0]
+
+assert after == before, (
+    "%d pool call(s) were made while the cost model refused every offload; the "
+    "interception is not consulting it" % (after - before))
+assert np.allclose(C, A @ B), "matmul returned the wrong answer while local"
+assert np.allclose(U @ np.diag(S) @ Vh, A, rtol=1e-4, atol=1e-4), "svd wrong while local"
+assert np.allclose(A @ V, V * W, rtol=1e-4), "eig wrong while local"
+print("NUMPY-LOCAL-OK")
+`, "NUMPY-LOCAL-OK",
 		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
@@ -606,7 +868,6 @@ print("RANK-%d-OK" % rank)
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=",
 		"PIPEDPEER_NUM_SHARDS=0",
-		"PIPEDPEER_TORCH=0",
 	}
 	runOnce := func(env ...string) {
 		cmd := exec.Command(python, rankScript)
@@ -763,4 +1024,16 @@ print("PATCH-OK")
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
 		"PIPEDPEER_NUM_SHARDS=3")
+}
+
+func TestRequiredPythonSeesTheShimsTorchHelpers(t *testing.T) {
+	for _, src := range []string{"shim._WeightedShardSampler(x)", "shim._weighted_batches(x)"} {
+		found := false
+		for _, d := range requiredPython(src) {
+			found = found || d == "torch"
+		}
+		if !found {
+			t.Errorf("requiredPython(%q) misses torch", src)
+		}
+	}
 }

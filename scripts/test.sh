@@ -23,10 +23,21 @@ if [ "$RUNTIME" = "podman" ]; then
     # Integration tests auto-skip when PIPEDPEER_INTEGRATION is not set
     echo "Running tests directly (runtime: $RUNTIME)..."
     cd src
-    # Clear any PIPEDPEER_INTEGRATION env var to skip integration tests
-    unset PIPEDPEER_INTEGRATION
+    # Integration tests used to be unset here unconditionally, so `make test`
+    # could never run them and a green result hid whatever they covered. They
+    # are opt-in, not opt-out: export PIPEDPEER_INTEGRATION=1 to include them.
     go test -v -count=1 ./... > "$repo_root/test_results/unit_and_integration_tests.log" 2>&1
     test_exit=$?
+
+    # A skip is not a pass. Print them, because a suite that quietly skipped
+    # the tests carrying its central claim still prints ok.
+    skipped="$(grep -cE '^\s*--- SKIP' "$repo_root/test_results/unit_and_integration_tests.log" || true)"
+    if [[ "${skipped:-0}" -gt 0 ]]; then
+        echo "Skipped $skipped test(s):"
+        grep -E '^\s*--- SKIP' "$repo_root/test_results/unit_and_integration_tests.log" |
+            sed -E 's/.*SKIP: ([^ ]+).*/  \1/' | sort -u
+        echo "Run scripts/check-skips.sh to fail on a skipped distribution test."
+    fi
     
     if [ $test_exit -ne 0 ]; then
         cat "$repo_root/test_results/unit_and_integration_tests.log"
@@ -65,6 +76,22 @@ else
       exit \$test_exit
     "
     test_exit=$?
+fi
+
+# A test that starts a server and does not stop it leaves it holding a port
+# until somebody notices. Measured: 54 registry processes, the oldest running
+# for over a day, from `go run` subprocesses whose wrapper was killed while
+# the binary it spawned carried on. Counting them here is what turns that from
+# something discovered by accident into something the suite reports.
+leaked="$(ps -eo cmd= | grep -c '[p]ipedpeer registry --port' || true)"
+if [[ "${leaked:-0}" -gt 0 ]]; then
+	echo
+	echo "LEAK: $leaked registry process(es) are still running after the suite."
+	echo "      A test started one and did not stop it. Killing the wrapper of a"
+	echo "      \`go run\` does not stop the binary it spawned - build it and run"
+	echo "      that instead, so the process killed is the one serving."
+	ps -eo pid=,etime=,cmd= | grep '[p]ipedpeer registry --port' | head -5
+	test_exit=1
 fi
 
 echo

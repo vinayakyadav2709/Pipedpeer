@@ -1,9 +1,13 @@
 package daemonctl
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -31,7 +35,9 @@ type Paths struct {
 func DefaultPaths() Paths {
 	base := os.Getenv("PIPEDPEER_DAEMON_STATE_DIR")
 	if base == "" {
-		base = filepath.Join(os.TempDir(), "pipedpeer")
+		// Not $TMPDIR: this is where the pid, port and log live, and a tmpfs
+		// loses them on reboot while charging RAM for them meanwhile.
+		base = userdir.State()
 	}
 	return Paths{
 		PIDFile:  filepath.Join(base, "daemon.pid"),
@@ -82,7 +88,16 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	if maxConcurrent > 0 {
 		args = append(args, "--max-concurrent", strconv.Itoa(maxConcurrent))
 	}
-	cmd := exec.Command(exe, args...)
+	// Start inside a delegated user scope when this process is not already in
+	// one. Without it the daemon inherits an ssh session scope that systemd
+	// owns as root, no job cgroup can be created, and every job runs with an
+	// unenforced memory limit. `systemd-run --user` needs no privilege - it
+	// talks to the caller's own systemd manager - and returns nil on machines
+	// with no systemd, where the daemon starts exactly as it did before.
+	argv := append([]string{exe}, args...)
+	argv = append(cgroups.ScopePrefix("pipedpeer-daemon-"+strconv.Itoa(port)), argv...)
+
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
@@ -176,8 +191,17 @@ func processRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	// A zombie still answers signal 0 but is dead. State is the field after
+	// the ")" that closes the command name.
+	if data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+		if i := bytes.LastIndexByte(data, ')'); i >= 0 && i+2 < len(data) && data[i+2] == 'Z' {
+			return false
+		}
+	}
+	return true
 }
 
 func readInt(path string) (int, error) {
@@ -223,19 +247,53 @@ func CheckRemoteAcceptance(host string, port int, targetID, jobName, submitterNo
 	}
 	defer resp.Body.Close()
 
+	// The status code, before the body. Every refusal this daemon makes
+	// carries a reason, so a refusal without one did not come from admission
+	// at all - it is a 401 from the token middleware, a 404 from a daemon too
+	// old to have this route, or a proxy in between. All three decode cleanly
+	// into an AcceptResponse full of zero values, and the caller printed
+	// "remote daemon rejected job" for each of them. That sentence sent a
+	// reader looking at scheduling for an hour when the answer was a missing
+	// header.
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if readErr != nil {
+		return nil, fmt.Errorf("remote daemon at %s: reading the answer failed: %w", url, readErr)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("remote daemon at %s refused the request: HTTP %d. "+
+			"This node's token does not match that daemon's; set the same one on "+
+			"both with `pipedpeer auth set`", url, resp.StatusCode)
+	}
+
 	var out AcceptResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("remote daemon returned invalid response: %w", err)
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("remote daemon at %s returned HTTP %d and a body that is "+
+			"not an accept response: %w: %s", url, resp.StatusCode, err, snippet(body))
 	}
 
 	if !out.Accepted {
-		reason := out.Reason
-		if reason == "" {
-			reason = "remote daemon rejected job"
+		if out.Reason != "" {
+			return nil, fmt.Errorf("job rejected by remote daemon: %s", out.Reason)
 		}
-		return nil, fmt.Errorf("job rejected by remote daemon: %s", reason)
+		// No reason and no recognised status: say what actually came back
+		// rather than inventing a scheduling decision that was never made.
+		return nil, fmt.Errorf("remote daemon at %s did not accept the job and gave no "+
+			"reason: HTTP %d %s", url, resp.StatusCode, snippet(body))
 	}
 	return &out, nil
+}
+
+// snippet keeps a response body short enough to print and long enough to
+// identify.
+func snippet(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "(empty body)"
+	}
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
 }
 
 // CommitLease commits a lease, transitioning it from reserved to running.

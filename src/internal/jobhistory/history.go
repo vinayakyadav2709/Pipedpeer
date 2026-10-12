@@ -1,12 +1,16 @@
 package jobhistory
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -40,12 +44,32 @@ type Record struct {
 	DegradedMode    bool   `json:"degraded_mode,omitempty"`
 	CandidateCount  int    `json:"candidate_count,omitempty"`
 	PlacementReason string `json:"placement_reason,omitempty"`
+	// Strategy and Candidates are the coordinator's whole decision: every
+	// node it considered and what it saw, for `pipedpeer job --explain`.
+	Strategy   string      `json:"strategy,omitempty"`
+	Candidates []Candidate `json:"candidates,omitempty"`
 	// Resource estimation and tracking
 	PeakMemBytes      int64  `json:"peak_mem_bytes,omitempty"`
 	EstimatedMemBytes int64  `json:"estimated_mem_bytes,omitempty"`
 	EstimationTier    string `json:"estimation_tier,omitempty"` // "user", "historical", "filesize", "import"
 	// Live stage tracking
 	Stage string `json:"stage,omitempty"` // "building", "exporting", "uploading", "executing"
+	// Background runs: where the job keeps running after the submitter
+	// detached, so attach can find it again.
+	RemoteJobID    string `json:"remote_job_id,omitempty"`
+	DaemonEndpoint string `json:"daemon_endpoint,omitempty"` // host:port
+	// Collected: the job's end was brought back here (output log, results
+	// in LocalSyncRoot, record finalized) by whoever saw it end first: the
+	// daemon's watcher or attach.
+	Collected bool `json:"collected,omitempty"`
+	// UnreachableSince (RFC3339): when a detached job's node stopped
+	// answering while other peers did; empty while it answers.
+	UnreachableSince string `json:"unreachable_since,omitempty"`
+	// ExitCode is the script's exit code as its node reported it.
+	ExitCode int `json:"exit_code,omitempty"`
+	// Stages is the run's timeline: every step, where it ran, and how long
+	// it took, the environment build included.
+	Stages []Stage `json:"stages,omitempty"`
 }
 
 type JobSummary struct {
@@ -68,7 +92,7 @@ func BaseDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "jobs")
+		return filepath.Join(userdir.Data(), "jobs")
 	}
 	return filepath.Join(home, ".local", "share", "pipedpeer", "jobs")
 }
@@ -114,14 +138,22 @@ func UpdateStage(dir, stage string) {
 }
 
 func Finalize(dir string, r Record, runErr error) error {
-	finished := time.Now().UTC()
+	return FinalizeAt(dir, r, runErr, time.Now())
+}
+
+// FinalizeAt is Finalize for a run that ended at finished rather than now: a
+// detached job collected after it ended.
+func FinalizeAt(dir string, r Record, runErr error, finished time.Time) error {
+	finished = finished.UTC()
 	r.FinishedAt = finished.Format(time.RFC3339Nano)
 	start, err := time.Parse(time.RFC3339Nano, r.StartedAt)
 	if err == nil {
 		r.DurationMs = finished.Sub(start).Milliseconds()
 	}
-	prevStatus := r.Status
-	if runErr != nil {
+	if errors.Is(runErr, context.Canceled) {
+		r.Status = StateCancelled
+		r.Error = runErr.Error()
+	} else if runErr != nil {
 		r.Status = StateFailed
 		r.Error = runErr.Error()
 	} else {
@@ -131,7 +163,6 @@ func Finalize(dir string, r Record, runErr error) error {
 	if existing, err := ReadRecordAt(dir); err == nil && existing.Stage != "" {
 		r.Stage = existing.Stage
 	}
-	PublishEvent(r.ID, r.Status, prevStatus, r.Error)
 	return SaveRecord(dir, r)
 }
 
@@ -147,6 +178,25 @@ func WriteManifest(dir string, manifest any) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// CollectedOutput is the file, in a record's directory, holding a detached
+// job's whole output as its node sent it, one frame per line.
+const CollectedOutput = "output.jsonl"
+
+// Lock takes an exclusive lock on a record's directory, waiting for it, so
+// two processes never finish the same detached job twice. Call unlock when
+// done.
+func Lock(dir string) (unlock func(), err error) {
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock %s: %w", dir, err)
+	}
+	return func() { f.Close() }, nil // closing the file drops the lock
 }
 
 func SaveText(dir, name, content string) error {
@@ -168,6 +218,45 @@ func ReadRecord(id string) (Record, string, error) {
 		return Record{}, "", err
 	}
 	return r, dir, nil
+}
+
+// ShortID is the id a person types: the last 8 digits of the nanosecond id.
+// Not the first 8 — those are the same for every job started within the same
+// 100 seconds, which is every job of a finale.
+func ShortID(id string) string {
+	if len(id) > 8 {
+		return id[len(id)-8:]
+	}
+	return id
+}
+
+// Resolve finds a record by its full id, or by a prefix or suffix (ShortID)
+// that matches exactly one record.
+func Resolve(id string) (Record, string, error) {
+	if id == "" {
+		return Record{}, "", fmt.Errorf("job id is required")
+	}
+	if r, dir, err := ReadRecord(id); err == nil {
+		return r, dir, nil
+	}
+	entries, err := os.ReadDir(BaseDir())
+	if err != nil && !os.IsNotExist(err) {
+		return Record{}, "", err
+	}
+	var matches []string
+	for _, e := range entries {
+		if e.IsDir() && (strings.HasPrefix(e.Name(), id) || strings.HasSuffix(e.Name(), id)) {
+			matches = append(matches, e.Name())
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return Record{}, "", fmt.Errorf("job %s not found in this machine's history (%s); attach works only on the machine that started the job", id, BaseDir())
+	case 1:
+		return ReadRecord(matches[0])
+	default:
+		return Record{}, "", fmt.Errorf("job id %s matches %d jobs; give more digits", id, len(matches))
+	}
 }
 
 func ReadRecordAt(dir string) (Record, error) {
@@ -262,9 +351,19 @@ func QueryPeakMem(scriptPath string, limit int) []int64 {
 	return peaks
 }
 
+// IsRecordDir reports whether dir holds a history record. The history shares
+// its directory with the daemon's own job directories, NAR cache and state
+// file, so a pruner that removed every old directory there deleted whatever
+// the daemon kept beside it.
+func IsRecordDir(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "metadata.json"))
+	return err == nil
+}
+
 // Prune removes history entries whose directory has not been modified within
 // olderThan (dir mtime ≈ when the run finished and its artifacts were
-// written). Returns the number of entries removed.
+// written). Only directories holding a record are considered. Returns the
+// number of entries removed.
 func Prune(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(BaseDir())
 	if err != nil {
@@ -279,12 +378,16 @@ func Prune(olderThan time.Duration) (int, error) {
 		if !e.IsDir() {
 			continue
 		}
+		dir := filepath.Join(BaseDir(), e.Name())
+		if !IsRecordDir(dir) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			if err := os.RemoveAll(filepath.Join(BaseDir(), e.Name())); err != nil {
+			if err := os.RemoveAll(dir); err != nil {
 				return removed, err
 			}
 			removed++

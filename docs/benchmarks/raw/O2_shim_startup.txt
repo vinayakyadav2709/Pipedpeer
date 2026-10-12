@@ -1,0 +1,21 @@
+# scripts/bench-shim-d2.sh
+# commit 4c91ef3, run 2026-10-02, Fedora 43 / Linux 6.19.13, i5-13420H 12 threads, 15 GiB. XDG_CACHE_HOME=/var/tmp/pipedpeer-docs-cache (see README: $HOME is a git repo on this host, which breaks the default build dir).
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 200 items
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 200 items
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 200 items
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 200 items
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 2 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 200 items
+local-only best: 0.0944s
+shim-on   best: 0.1168s
+ratio: 1.23729x
+PASS: shim overhead within budget.

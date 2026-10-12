@@ -1,20 +1,24 @@
 # Paper and report source
 
 Everything needed to produce the major project report and the conference paper.
+The documents are written against commit `4c91ef3` (2026-09-01) and were
+re-measured and checked against the code on 2026-10-02.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `system-report.md` | The content document. Chaptered to match `report/main.tex` one to one, with file references for every non-obvious claim. Start here. |
-| `report/main.tex` | Major project report, `report` class. Compiles to a 51 page PDF. |
+| `system-report.md` | The content document. Its chapters match `report/main.tex` one to one, with file references for every non-obvious claim. Start here. |
+| `report/main.tex` | Major project report, `report` class. |
 | `report/be_title.tex`, `report/be_certificate2.tex` | Title page and approval certificate. |
-| `paper/paper.tex` | Conference paper, IEEEtran two-column. Compiles to 4 pages. |
-| `diagrams/*.png` | 19 figures at 300 dpi. |
+| `paper/paper.tex` | Conference paper, IEEEtran two-column. |
+| `diagrams/*.png` | 21 figures at 300 dpi, numbered in order of appearance. |
 | `diagrams/src/` | The Graphviz and matplotlib sources that generate them. |
-| `benchmarks/RESULTS.md` | Measured results, with the test bed and its limits stated. |
-| `benchmarks/bench.py` | The harness. Runs against whatever cluster is up. |
-| `benchmarks/raw/` | Raw output behind every number quoted. |
+| `benchmarks/RESULTS.md` | Measured results. Each one is tagged with its source (October run, August run, or commit message), and the test bed and its limits are stated. |
+| `benchmarks/bench.py` | The lab harness. It runs against whatever cluster is up. |
+| `benchmarks/raw/` | Raw output behind every number quoted. `C_commit_measurements.md` quotes the multi-machine measurements verbatim from their commits. |
+| `known-issues.md` | Defects found while documenting, each marked when resolved. |
+| `fixes-and-roadmap.md` | What was fixed after the report, how to check each fix, and the phases that come next. |
 
 ## Rebuilding
 
@@ -35,34 +39,62 @@ cd report && pdflatex main.tex && pdflatex main.tex && pdflatex main.tex
 cd ../paper && pdflatex paper.tex && pdflatex paper.tex
 ```
 
-`report/main.tex` needs `enumitem`, `multirow` and `tocloft`; `paper/paper.tex`
-needs the Times fonts that IEEEtran expects (`psnfss` plus the URW base35 Type 1
-outlines). Neither is unusual in a full TeX Live installation.
+You need a full TeX Live. `report/main.tex` uses `enumitem`, `multirow` and
+`tocloft`, and the paper needs IEEEtran's Times fonts. Without a full
+installation, prefix the commands with
+`nix shell nixpkgs#texliveFull nixpkgs#graphviz -c`.
 
 ## Re-running the measurements
 
 ```sh
-bash scripts/lab-up.sh              # 3 worker containers
-./bin/pipedpeer nodes add 127.0.0.1 38081   # and 38082, 38083
+cd src && go build -o ../bin/pipedpeer . && cd ..   # bench.py uses bin/pipedpeer
+(cd src && go test -v -count=1 ./...)               # needs pandas, joblib, sklearn and torch
+scripts/check-skips.sh
+scripts/audit-tests.sh                              # edits src/ temporarily; run nothing else meanwhile
+bash scripts/lab-up.sh                              # 3 worker containers
+for p in 38081 38082 38083; do ./bin/pipedpeer nodes add 127.0.0.1 $p; done
 python3 docs/benchmarks/bench.py --repeat 5
-python3 docs/diagrams/src/plots_results.py  # redraw the results figures
-bash scripts/lab-down.sh
+scripts/bench-shim-d2.sh
+BENCH_ITEMS=48 scripts/bench-pool.sh
+scripts/lab-fail.sh                                 # rebuilds and then tears down the lab
+python3 docs/diagrams/src/plots_results.py          # redraw the results figures
 ```
 
-The harness is unchanged when pointed at real machines instead of containers,
-which is what the results chapter says is needed to obtain speedup figures.
+If your home directory is a git repository, set
+`XDG_CACHE_HOME=/var/tmp/pipedpeer-cache` first (`known-issues.md` item 1).
+With podman, `lab-up.sh` needs the base image under its full name: run
+`podman pull docker.io/nixos/nix:2.31.3` once.
 
-## Two things to know before reading
+The harnesses run unchanged against real machines. Real machines are what the
+results chapter says is needed for speedup figures.
 
-**The previous report describes a system that no longer exists.** It documents
-bubblewrap sandboxing, dispatch over a message bus, and a task queue package
-that has been deleted, and it lists the interception layer as an unimplemented
-limitation. Appendix B of `system-report.md` tabulates the differences. Its
-results chapter was entirely unfilled placeholders.
+## Three things to know before reading
 
-**No speedup figure is claimed anywhere.** The measurements were taken with all
-three workers as containers on one host, which cannot demonstrate multi-machine
-speedup. What that bed does measure honestly, it measures: the environment cache
-(12.00 s cold against 0.65 s warm), interception overhead, and correct
-completion after a worker is killed mid-run. What is missing is listed rather
-than estimated.
+**There are two earlier descriptions, and both are now wrong in places.**
+- The May 2026 report describes a system that no longer exists.
+- The August 2026 version of these documents predates:
+  - the shared secret, TLS and node keys;
+  - joining across networks;
+  - signed closure transfer;
+  - cloudpickle shipping;
+  - measured work sharing;
+  - daemon-side gradient averaging;
+  - memory ceilings.
+
+  It also described a trusted-LAN, no-authentication design.
+
+`system-report.md` Appendix B tabulates both sets of differences.
+
+**No speedup is claimed from the lab.** The lab is three containers on one host.
+What it measures honestly:
+- the environment cache (23.41 s first, 0.83 s once the closure is present);
+- interception start-up (1.24×);
+- that work crosses nodes;
+- the test suite (615/617 pass, 0 fail, and 95/95 mutations caught).
+
+The multi-machine figures are hand measurements quoted from their commits, and
+are labelled that way everywhere.
+
+**One experiment failed and is reported as failed.** The fault-injection
+harness did not distribute work on a fresh lab, so it tested nothing. See
+`benchmarks/RESULTS.md` R5.

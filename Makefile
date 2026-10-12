@@ -1,4 +1,4 @@
-.PHONY: build install test test-integration fmt lint lab-up lab-down lab-fail bootstrap
+.PHONY: build install test test-integration fmt lint lab-up lab-down lab-fail lab-nat
 
 build:
 	./scripts/build.sh
@@ -11,9 +11,6 @@ test:
 
 test-integration:
 	./scripts/test-integration.sh
-
-bootstrap:
-	sudo ./scripts/bootstrap/all.sh
 
 fmt:
 	./scripts/fmt.sh
@@ -29,3 +26,6 @@ lab-down:
 
 lab-fail:
 	./scripts/lab-fail.sh
+
+lab-nat:
+	./scripts/lab-nat.sh

@@ -1,0 +1,46 @@
+// Figure 4.7 - crun sandbox: what the job can and cannot see.
+digraph Sandbox {
+  rankdir=LR; bgcolor="white"; nodesep=0.20; ranksep=1.3;
+  node [fontname="Helvetica", fontsize=17, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
+  edge [fontname="Helvetica", fontsize=16, color="#555555"];
+
+  subgraph cluster_host {
+    label="Host"; labeljust=l; fontsize=16; fontname="Helvetica";
+    style="rounded"; color="#8a6d1f"; penwidth=1.8; bgcolor="#fdfaf0"; fontcolor="#8a6d1f";
+    margin="26,22";
+    node [fillcolor="#faf3dd", color="#8a6d1f"];
+    nix  [label="Nix store\n(system or private)"];
+    work [label="job workspace"];
+    gpu  [label="GPU devices\nand drivers"];
+    cg   [label="cgroup v2\ndaemon scope: half of RAM"];
+    net  [label="host network"];
+    { rank=same; nix; work; gpu; cg; net; }
+  }
+
+  subgraph cluster_ct {
+    label="crun container"; labeljust=l; fontsize=16; fontname="Helvetica";
+    style="rounded"; color="#a33333"; penwidth=1.8; bgcolor="#fdf6f6"; fontcolor="#a33333";
+    margin="26,22";
+    node [fillcolor="#fbe9e9", color="#a33333"];
+    m1 [label="/nix           read only"];
+    m2 [label="/work          read write"];
+    m3 [label="/dev/shm      mode 1777"];
+    m4 [label="/tmp           scratch"];
+    m5 [label="/dev/nvidia*   devices"];
+    m6 [label="/run/opengl-driver/lib\nbound file by file"];
+    m8 [label="memory.max     per job\n2x estimate, swap equal"];
+    m7 [label="network       not isolated"];
+    ns [label="Namespaces\npid, ipc, mount, uts\n(+ user, when rootless)", fillcolor="#ffffff"];
+    no [label="Not provided\nno network namespace,\nno seccomp filter,\nno capability list,\nuid 0 inside",
+        fillcolor="#ffffff", style="rounded,filled,dashed"];
+    { rank=same; m1; m2; m3; m4; m5; m6; m8; m7; ns; no; }
+  }
+
+  nix  -> m1 [label=" bind "];
+  work -> m2 [label=" bind "];
+  gpu  -> m5 [label=" device nodes "];
+  gpu  -> m6 [label=" driver libraries "];
+  cg   -> m8 [label=" child cgroup "];
+  net  -> m7 [label=" shared ", style=dashed, color="#a33333", fontcolor="#a33333"];
+}

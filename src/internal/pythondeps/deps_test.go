@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -76,7 +78,7 @@ func TestResolvePackages(t *testing.T) {
 	explicit := []string{"pillow", reqFile, "boto3"}
 
 	got := ResolvePackages(astImports, explicit)
-	want := []string{"flask", "scipy", "Pillow", "numpy", "pandas", "pytest", "unknown-pkg", "boto3"}
+	want := []string{"flask", "scipy", "pillow", "numpy", "pandas", "pytest", "boto3"}
 
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("resolved packages mismatch\nwant: %#v\n got: %#v", want, got)
@@ -96,5 +98,155 @@ func TestStdlibModulesFilteredFromExternalDeps(t *testing.T) {
 	want := []string{"numpy"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("stdlib filtering failed\nwant: %#v\n got: %#v", want, got)
+	}
+}
+
+// TestCommaSeparatedImportsAreAllDetected covers a bug that produced a closure
+// missing a package and an error blaming the user's script.
+//
+// The detector matched the first name on an import line, so "import numpy,
+// pandas" put numpy in the closure and left pandas out. The job then failed on
+// the worker with ModuleNotFoundError, which points at the script rather than
+// at the dependency detection that caused it. Found by a benchmark whose
+// fixture happened to use that form.
+func TestCommaSeparatedImportsAreAllDetected(t *testing.T) {
+	cases := []struct {
+		line string
+		want []string
+	}{
+		{"import numpy, pandas", []string{"numpy", "pandas"}},
+		{"import numpy,pandas,scipy", []string{"numpy", "pandas", "scipy"}},
+		{"import numpy as np, pandas as pd", []string{"numpy", "pandas"}},
+		{"import os.path, sys", []string{"os", "sys"}},
+
+		// Unchanged behaviour, asserted so the rewrite did not quietly alter it.
+		{"import numpy", []string{"numpy"}},
+		{"import numpy as np", []string{"numpy"}},
+		{"from pandas import DataFrame", []string{"pandas"}},
+		{"from sklearn.ensemble import RandomForestClassifier", []string{"sklearn"}},
+
+		// A relative import names no top-level module.
+		{"from . import helper", nil},
+		{"from .util import thing", nil},
+
+		// Not imports at all.
+		{"# import numpy, pandas", nil},
+		{"important = 1", nil},
+		{"print('import numpy')", nil},
+		{"", nil},
+	}
+	for _, c := range cases {
+		got := importedModules(c.line)
+		if len(got) != len(c.want) {
+			t.Errorf("%q gave %v, want %v", c.line, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%q gave %v, want %v", c.line, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestTrailingCommentDoesNotHideAnImport. Stripping the comment must not take
+// the import with it.
+func TestTrailingCommentDoesNotHideAnImport(t *testing.T) {
+	got := importedModules("import numpy, pandas  # both needed")
+	if len(got) != 2 || got[0] != "numpy" || got[1] != "pandas" {
+		t.Errorf("got %v, want numpy and pandas", got)
+	}
+}
+
+func TestUnresolvedImports(t *testing.T) {
+	got := UnresolvedImports([]string{"numpy", "os", "foo", "tqdm", "seaborn", "bar"})
+	if len(got) != 2 || got[0] != "foo" || got[1] != "bar" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestSplitByExistence(t *testing.T) {
+	exists := func(names []string) (map[string]bool, error) {
+		return map[string]bool{"rich": true}, nil
+	}
+	found, missing, err := SplitByExistence([]string{"Rich", "nopkg_xyz"}, exists)
+	if err != nil || len(found) != 1 || found[0] != "rich" || len(missing) != 1 || missing[0] != "nopkg_xyz" {
+		t.Fatalf("found=%v missing=%v err=%v", found, missing, err)
+	}
+}
+
+func TestRequirementsBeside(t *testing.T) {
+	d := t.TempDir()
+	if RequirementsBeside(d) != "" {
+		t.Fatal("no file, want empty")
+	}
+	p := filepath.Join(d, "requirements.txt")
+	if err := os.WriteFile(p, []byte("nomappedpkg==13\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := RequirementsBeside(d); got != p {
+		t.Fatalf("got %q", got)
+	}
+	if got := ResolvePackages(nil, []string{p}); len(got) != 0 {
+		t.Fatalf("requirements not read: %v", got)
+	}
+}
+
+func TestExtractImportScanRecursesIntoLocalModules(t *testing.T) {
+	d := t.TempDir()
+	w := func(name, body string) {
+		p := filepath.Join(d, name)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w("main.py", "import helper\nimport pkg\nimport numpy\n")
+	w("helper.py", "import seaborn\nimport main\nimport helper\n")
+	w("pkg/__init__.py", "")
+	w("pkg/sub.py", "import tqdm\nfrom .. import helper\n")
+	got := ExtractImportScan(filepath.Join(d, "main.py"))
+	want := []string{"numpy", "seaborn", "tqdm"}
+	sort.Strings(got.ExternalDeps)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got.ExternalDeps, want) {
+		t.Fatalf("deps %v want %v", got.ExternalDeps, want)
+	}
+}
+
+func TestParseRequirementsForms(t *testing.T) {
+	in := "# c\n\n-r other.txt\n-e .\n--index-url https://x\nNumPy[extra]>=1.2 ; python_version<'3.12'\nscikit_learn==1.0\npkg @ https://h/p.whl\n./local\nfoo; sys_platform=='linux'\nbar  # note\n"
+	got := ParseRequirements(in)
+	want := []string{"numpy", "scikit-learn", "foo", "bar"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("want %v got %v", want, got)
+	}
+}
+
+func TestUnresolvedImportsKnowsImportAliases(t *testing.T) {
+	got := UnresolvedImports([]string{"numpy", "cv2", "PIL", "somethingobscure"})
+	if !reflect.DeepEqual(got, []string{"somethingobscure"}) {
+		t.Fatalf("unresolved = %#v, want only the unknown import", got)
+	}
+}
+
+// Every mapped name must be a nixpkgs python attribute: "Pillow" was not, and
+// any script importing PIL failed to build. Checked against the attribute
+// spelling rules nixpkgs uses (lowercase, hyphens), not a live evaluation.
+func TestMappedNamesAreLowercase(t *testing.T) {
+	for imp, pkg := range nixpkgsMapping {
+		if pkg != strings.ToLower(pkg) {
+			t.Errorf("%s maps to %q; nixpkgs python attributes are lowercase", imp, pkg)
+		}
+	}
+}
+
+func TestParseRequirementsHashContinuations(t *testing.T) {
+	in := "numpy==1.26.4 \\\n    --hash=sha256:aa \\\n    --hash=sha256:bb\nrequests==2.31.0 \\\n    --hash=sha256:cc  # via x\n"
+	got := ParseRequirements(in)
+	want := []string{"numpy", "requests"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("want %v got %v", want, got)
 	}
 }

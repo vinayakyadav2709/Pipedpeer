@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
+	"github.com/pipedpeer/pipedpeer/internal/ddpplace"
 	"io"
 	"net"
 	"net/http"
@@ -14,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -24,32 +29,75 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/coordinator"
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/discovery"
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/internet"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/ping"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/pipedpeer/pipedpeer/internal/userns"
 )
 
 func main() {
+	// First of all: run from the root-owned key helper (sudo lets the user
+	// run that file as root with any arguments), this binary does nothing
+	// but add or remove nix keys (ADR-0018).
+	if nixtrust.IsHelper() {
+		os.Exit(nixtrust.Main(os.Args[1:]))
+	}
+
+	// Before anything dials out. The daemon path returns just below, so
+	// installing these later left the daemon itself - the process that does
+	// nearly all the peer traffic - neither authenticating nor encrypting
+	// its own calls, which reads as every peer being unreachable.
+	//
+	// TLS first, then the token: the token wrapper delegates to whatever it
+	// wraps, so this order puts the secret inside the encrypted connection
+	// rather than beside it.
+	// Before anything else: a userns probe re-executes this binary, and that
+	// child must do its one syscall and exit rather than parse arguments.
+	userns.Install()
+
+	tlsid.Install()
+	authtoken.Install()
+
+	// crun may have been installed into the user's own bin directory, which
+	// setup does instead of asking for root. That directory is on PATH for a
+	// login shell but not necessarily for a daemon, and a daemon that cannot
+	// find crun falls back to running jobs unsandboxed.
+	ensureUserBinOnPath()
+
 	if len(os.Args) > 1 && os.Args[1] == "__daemon__" {
 		runDaemon(os.Args[2:])
 		return
 	}
+	// Everything below is the CLI: human log lines, not the daemon's JSON.
+	logging.SetupCLI()
 
 	rootCmd := &cobra.Command{
-		Use:   "pipedpeer",
-		Short: "Decentralized compute orchestrator",
-		Long:  "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
+		// A command that fails at run time should say why, not print its
+		// flags: the flags were fine, the network was not.
+		SilenceUsage: true,
+		// main prints the error, so a cancel already reported stays one line.
+		SilenceErrors: true,
+		Use:           "pipedpeer",
+		Short:         "Decentralized compute orchestrator",
+		Long:          "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
 	}
 
 	viper.SetEnvPrefix("PIPEDPEER")
@@ -61,6 +109,7 @@ func main() {
 		newStopCmd(),
 		newStatusCmd(),
 		newSetupCmd(),
+		newTrustCmd(),
 		newRunCmd(),
 		newDashboardCmd(),
 		newJobsCmd(),
@@ -69,9 +118,21 @@ func main() {
 		newRegistryCmd(),
 		newNodesCmd(),
 		newPingCmd(),
+		newNetCheckCmd(),
+		newNetPunchCmd(),
+		newJoinCmd(),
+		newNetJoinCmd(),
+		newRelayTestCmd(),
+		newRelayConnectCmd(),
+		newRendezvousCmd(),
 		newTrafficCmd(),
 		newTasksCmd(),
 		newMapCmd(),
+		newAuthCmd(),
+		newEventsCmd(),
+		newAttachCmd(),
+		newStatsCmd(),
+		newUICmd(),
 	)
 
 	rootCmd.RunE = newRunCmd().RunE
@@ -104,7 +165,65 @@ func main() {
 	rootCmd.SetArgs(args)
 
 	if err := rootCmd.Execute(); err != nil {
+		if !errors.Is(err, errCancelReported) {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
 		os.Exit(1)
+	}
+}
+
+// placementWait is how long a run waits for a node to become able to take
+// it. PIPEDPEER_REMOTE_WAIT overrides it; 0 takes one look. Ten minutes: a
+// class's runs queue behind each other, and 15 s failed them while the
+// previous job still held the memory (13-finale needed 10m).
+func placementWait() time.Duration {
+	if v, err := time.ParseDuration(os.Getenv("PIPEDPEER_REMOTE_WAIT")); err == nil && v >= 0 {
+		return v
+	}
+	return 10 * time.Minute
+}
+
+// placementProgress prints why no node can take the run yet: once when the
+// wait starts, then every 30 s while it lasts.
+func placementProgress(what string, window time.Duration) func(coordinator.PlacementDecision, time.Duration) {
+	return func(d coordinator.PlacementDecision, waited time.Duration) {
+		if waited == 0 {
+			fmt.Printf("[coordinator] no eligible node %syet; waiting up to %s (%s)\n", what, window, d.RejectionLine())
+			return
+		}
+		fmt.Printf("[coordinator] still waiting for a node %s(%s of %s): %s\n", what, waited, window, d.RejectionLine())
+	}
+}
+
+// acceptWithin asks for admission until it is granted, the refusal is not
+// about memory, or the window runs out.
+//
+// Memory is the one refusal that clears on its own. A run started straight
+// after another one finds the previous job's memory still being handed back,
+// and its admission check fails by a few hundred megabytes: on the bench
+// rig, every second back-to-back run of 02_numpy_heavy was refused in under
+// a tenth of a second while the first one, with the same estimate, ran.
+func acceptWithin(ctx context.Context, window time.Duration, accept func() (*daemonctl.AcceptResponse, error)) (*daemonctl.AcceptResponse, error) {
+	start := time.Now()
+	deadline := start.Add(window)
+	var nextReport time.Time
+	for {
+		resp, err := accept()
+		if err == nil || !strings.Contains(err.Error(), "insufficient memory") || time.Now().After(deadline) {
+			return resp, err
+		}
+		if nextReport.IsZero() {
+			fmt.Printf("[coordinator] %v; waiting up to %s for memory to free...\n", err, window)
+			nextReport = time.Now().Add(coordinator.WaitProgressEvery)
+		} else if time.Now().After(nextReport) {
+			fmt.Printf("[coordinator] still waiting (%s of %s): %v\n", time.Since(start).Truncate(time.Second), window, err)
+			nextReport = time.Now().Add(coordinator.WaitProgressEvery)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(time.Second):
+		}
 	}
 }
 
@@ -144,6 +263,29 @@ func newStartCmd() *cobra.Command {
 				fmt.Printf("daemon already running\n")
 				return nil
 			}
+			// Passed through the environment rather than as another argument,
+			// because that is how the daemon reads it - and remembered, so a
+			// machine that has joined a cluster is still in it after a
+			// restart. Before this, a daemon restarted by anything that did
+			// not know to repeat the flag came back alone and quietly stopped
+			// taking work.
+			flagRV, _ := cmd.Flags().GetString("rendezvous")
+			if flagRV != "" {
+				norm, err := clustercfg.Normalize(flagRV)
+				if err != nil {
+					return fmt.Errorf("--rendezvous %s: %w", flagRV, err)
+				}
+				flagRV = norm
+				if err := clustercfg.SetRendezvous(norm); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not remember the cluster address: %v\n", err)
+				}
+			}
+			if addr, source := clustercfg.Effective(flagRV); addr != "" {
+				os.Setenv(clustercfg.EnvVar, addr)
+				if source == "saved" {
+					fmt.Printf("joining cluster through %s\n", addr)
+				}
+			}
 			if err := daemonctl.Start(nodeID.NodeID, port, maxConcurrent); err != nil {
 				return err
 			}
@@ -157,9 +299,141 @@ func newStartCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().Int("port", 38080, "Local daemon port")
+	cmd.Flags().String("rendezvous", "",
+		"join a cluster over the internet through this address book, host[:port] "+
+			"(also PIPEDPEER_RENDEZVOUS). Remembered, so later starts need no flag. "+
+			"Peers are discovered and connected automatically.")
 	cmd.Flags().Int("max-concurrent", 0,
 		"Maximum tasks this node accepts at once (0 = unlimited; also settable via PIPEDPEER_MAX_CONCURRENT)")
 	return cmd
+}
+
+// newJoinCmd is the one command a machine runs to become part of a cluster.
+//
+// Everything it does could be typed by hand - remember the address, start the
+// daemon, wait, look at the node table - and every demo and every set of
+// instructions did exactly that, in four steps, with a flag that had to be
+// repeated on every later start. Machines were left half-joined often enough
+// that it is worth being one command with no flags.
+//
+// It also waits for a peer before returning, because "did it work" is the
+// only question anybody has at this point, and a daemon that has started is
+// not yet an answer to it.
+func newJoinCmd() *cobra.Command {
+	var wait time.Duration
+	cmd := &cobra.Command{
+		Use:   "join <address>",
+		Short: "Join a cluster through an introducer, and wait until peers appear",
+		Long: "Join the cluster whose introducer is at <address> (host, or host:port; " +
+			"the port defaults to " + strconv.Itoa(clustercfg.DefaultPort) + ").\n\n" +
+			"The address is remembered, so afterwards `pipedpeer start` rejoins the " +
+			"same cluster with no arguments. Peers on other networks are connected " +
+			"to directly; the introducer only makes the introduction.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			addr, err := clustercfg.Normalize(args[0])
+			if err != nil {
+				return err
+			}
+			if err := clustercfg.SetRendezvous(addr); err != nil {
+				return fmt.Errorf("could not remember the cluster address: %w", err)
+			}
+			nodeID, err := identity.GetOrCreate()
+			if err != nil {
+				return err
+			}
+
+			// A daemon that is already up was started without this address,
+			// or with a different one, so it is in the wrong cluster or in
+			// none. Restarting is what makes the join take effect, and doing
+			// it here is better than printing an instruction to do it.
+			maxConc := 0
+			if daemonctl.Status().Running {
+				maxConc = daemonctl.RunningMaxConcurrent(38080)
+				fmt.Println("restarting the daemon to join through " + addr)
+				if err := daemonctl.Stop(); err != nil {
+					return err
+				}
+			} else {
+				fmt.Println("joining through " + addr)
+			}
+			os.Setenv(clustercfg.EnvVar, addr)
+			if err := daemonctl.Start(nodeID.NodeID, 38080, maxConc); err != nil {
+				return err
+			}
+			fmt.Printf("this node is %s\n", nodeID.ShortID())
+
+			if n := waitForPeers(38080, wait); n > 0 {
+				fmt.Println()
+				if err := printNodes(38080); err != nil {
+					return err
+				}
+				trustAfterJoin()
+				return nil
+			}
+
+			// Not an error. A first machine has nobody to meet yet, and
+			// saying so is more useful than a non-zero exit that reads like
+			// the join failed.
+			fmt.Printf("\nThis is normal for the first machine in a\n" +
+				"cluster - run the same command on the others and they will find\n" +
+				"each other. Check with: pipedpeer nodes\n")
+			trustAfterJoin()
+			return nil
+		},
+	}
+	cmd.Flags().DurationVar(&wait, "wait", 90*time.Second, "how long to wait for peers before returning")
+	return cmd
+}
+
+// trustAfterJoin lets a multi-user nix accept the peers just met and those
+// that join later. A failure does not undo the join, so it is reported, not
+// returned.
+func trustAfterJoin() {
+	if err := setup.TrustAfterJoin(); err != nil {
+		fmt.Fprintf(os.Stderr, "could not make system nix trust the cluster's keys: %v\n"+
+			"peers' closures will be refused here until `pipedpeer trust` succeeds\n", err)
+	}
+}
+
+func newTrustCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "trust",
+		Short: "Let system nix accept closures signed by this cluster's nodes",
+		Long: "A multi-user nix (nix-daemon) accepts only signing keys listed in nix.conf. " +
+			"This adds the keys the daemon has collected from the cluster's peers through " +
+			"pipedpeer's root-owned key helper, installing it first if setup did not (one sudo); " +
+			"after that the daemon adds new peers' keys itself, with no prompt. " +
+			"It does nothing on a private store or a single-user nix, which take the keys " +
+			"with each import.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			msg, err := setup.Trust()
+			if err != nil {
+				return err
+			}
+			fmt.Println(msg)
+			return nil
+		},
+	}
+}
+
+// healthyPeerCount counts peers other than this node that are usable now.
+func healthyPeerCount() int {
+	nodes, err := fetchClusterNodes(38080)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, nd := range nodes {
+		// "self" is this machine, which is never the answer to "did anyone
+		// else turn up".
+		if nd.Source == "self" || nd.State != "healthy" {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 func newStopCmd() *cobra.Command {
@@ -205,6 +479,9 @@ Use -y to skip the install confirmation prompt.`,
 			autoYes, _ := cmd.Flags().GetBool("yes")
 			noInstall, _ := cmd.Flags().GetBool("no-install")
 			port, _ := cmd.Flags().GetInt("port")
+			if uninstall, _ := cmd.Flags().GetBool("uninstall"); uninstall {
+				return setup.Uninstall()
+			}
 
 			_, err := setup.Run(autoYes, noInstall, port)
 			return err
@@ -212,6 +489,7 @@ Use -y to skip the install confirmation prompt.`,
 	}
 	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation, auto-install")
 	cmd.Flags().Bool("no-install", false, "Check only, don't install anything")
+	cmd.Flags().Bool("uninstall", false, "Remove the nix key helper, its sudoers rule and the keys it made system nix trust")
 	cmd.Flags().Int("port", 38080, "Daemon port")
 	return cmd
 }
@@ -234,12 +512,15 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
+			cold, _ := cmd.Flags().GetBool("cold")
+			detach, _ := cmd.Flags().GetBool("detach")
 			pythonVersion, _ := cmd.Flags().GetString("python")
 			registryURL, _ := cmd.Flags().GetString("registry")
 			memOverride, _ := cmd.Flags().GetString("mem")
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
 			remote, _ := cmd.Flags().GetBool("remote")
+			offload, _ := cmd.Flags().GetBool("offload")
 			strategy, _ := cmd.Flags().GetString("strategy")
 			distribute, _ := cmd.Flags().GetString("distribute")
 			switch distribute {
@@ -301,10 +582,54 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				fmt.Println("started daemon")
 			}
 
+			// --offload: distributed pieces (pool/joblib chunks, pandas and
+			// numpy offloads, DDP ranks) keep off this machine, decided by its
+			// machine key - never its address, since an internet peer is
+			// 127.0.0.1:<port>. The script itself still runs here (or on the
+			// --remote node, whose spreading then skips this machine).
+			offloadKey := ""
+			if offload {
+				offloadKey = heartbeat.Machine()
+				if offloadKey == "" {
+					fmt.Fprintln(os.Stderr, "warning: --offload: cannot read this machine's key; distributed work may still run here")
+				} else {
+					envs = append(envs, "PIPEDPEER_OFFLOAD="+offloadKey)
+				}
+			}
+
 			userMem := resourceest.ParseMemString(memOverride)
 			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
 			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
+
+			if checkOnly {
+				return runCheckOnly(checkOnlyOptions{
+					ScriptPath:     scriptPath,
+					DaemonHost:     daemonHost,
+					DaemonPort:     daemonPort,
+					Remote:         remote,
+					RequireGPU:     requireGPU,
+					PreferGPU:      preferGPU,
+					RequiredGPUMem: requiredGPUMem,
+					RequiredCores:  requiredCores,
+					DDPNodes:       ddpNodes,
+					Pkgs:           pkgs,
+					PythonVersion:  pythonVersion,
+					RegistryURL:    registryURL,
+					Strategy:       strategy,
+					JobName:        jobName,
+					NodeID:         nodeID,
+					EstMemBytes:    resReq.MemBytes,
+					EstTier:        resReq.Tier,
+				})
+			}
+
+			// Ctrl+C, a kill or a closed terminal stops the job everywhere
+			// (local script, pool chunks on peers, --remote job, every DDP
+			// rank). A second Ctrl+C exits at once.
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer stop()
+			go exitOnSecondSignal(ctx, stop)
 
 			// DDP: --ddp N caps the rank count; without it, DDP auto-activates
 			// when the script uses torch.distributed and every eligible node
@@ -312,14 +637,30 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			// ponytail: no redundancy margin yet — on a large cluster with
 			// flaky nodes, all-in means one death kills the run. If that ever
 			// bites, add a heuristic here (spare ranks, or eligible-N).
+			// ddpOffload: a DDP script under --offload trains on other
+			// machines only, as a ring or, with one of them, placed there
+			// like --remote.
+			ddpOffload := false
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
-				eligible := ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
+				exclude := offloadKey
+				eligible := ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
+				if exclude != "" && eligible == 0 {
+					fmt.Println("[coordinator] warning: --offload: no other machine can take a rank, so this machine trains")
+					exclude = ""
+					eligible = ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
+				}
+				ddpOffload = exclude != ""
 				worldSize := eligible
 				if ddpNodes > 1 {
 					worldSize = min(ddpNodes, eligible)
 				}
 				if worldSize >= 2 {
-					return runDDP(ddpRunOptions{
+					if detach {
+						fmt.Println("detach is not supported for DDP/map runs; Ctrl+C stops it")
+					}
+					_, stopSuspend := watchSuspend(ctx, false)
+					err := runDDP(ddpRunOptions{
+						Ctx:            ctx,
 						Nodes:          worldSize,
 						DaemonPort:     daemonPort,
 						MasterPort:     ddpPort,
@@ -336,12 +677,20 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						PreferGPU:      preferGPU,
 						RequiredGPUMem: requiredGPUMem,
 						RequiredCores:  requiredCores,
-						NoSelf:         remote,
+						NoSelf:         remote || ddpOffload,
+						ExcludeMachine: exclude,
 						Strategy:       strategy,
 						MemOverride:    memOverride,
+						MaxRanks:       max(ddpNodes, 0),
 					})
-				}
-				if ddpNodes > 1 {
+					stopSuspend()
+					// A ring that measures slower than one machine falls
+					// through to the ordinary single-node path below.
+					if !errors.Is(err, errRingNotWorthIt) {
+						return runOutcome(err)
+					}
+					fmt.Printf("[coordinator] running on one node: every ring available measures slower\n")
+				} else if ddpNodes > 1 {
 					fmt.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
 				}
 			}
@@ -352,8 +701,20 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			var placementDegraded bool
 			var placementCandidates int
 
-			if remote {
-				fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
+			// --gpu force never runs on a machine without a GPU. The
+			// single-node default is this machine, and a GPU-less one (a lab
+			// PC submitting to the GPU laptop, or a DDP ring that fell back to
+			// one node) got "insufficient memory" or ran on its CPU. Such a
+			// run is placed like --remote instead, on GPU nodes only.
+			gpuPlace := requireGPU && !remote && !ddpOffload && daemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
+			if remote || ddpOffload || gpuPlace {
+				if remote {
+					fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
+				} else if ddpOffload {
+					fmt.Println("[coordinator] --offload: placing the training on a node other than this machine...")
+				} else {
+					fmt.Println("[coordinator] --gpu force: this machine has no GPU; placing the run on a GPU node...")
+				}
 
 				rrFn := func(count int) int {
 					url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", daemonPort, count)
@@ -377,7 +738,8 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					RequiredMemBytes: resReq.MemBytes,
 					RequiredCores:    requiredCores,
 					RequiredGPUMem:   requiredGPUMem,
-					NoSelf:           true,
+					NoSelf:           remote || ddpOffload,
+					ExcludeMachine:   offloadKey,
 					RequireGPU:       requireGPU,
 					PreferGPU:        preferGPU,
 					Strategy:         strategy,
@@ -386,20 +748,21 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				// A remote run must fail loudly when there is no node at all
 				// instead of queuing forever: the user can just drop --remote.
-				decision := coord.FindNode()
+				// PIPEDPEER_REMOTE_WAIT overrides the window; 0 takes one look.
+				wait := placementWait()
+				decision := coord.FindNodeWithin(ctx, wait, time.Second, placementProgress("", wait))
 				if decision.ChosenNode.NodeID == "" {
+					if why := decision.RejectionSummary(); why != "" {
+						fmt.Print("[coordinator] nodes turned down:\n" + why)
+					}
+					if ddpOffload {
+						return fmt.Errorf("no other node can take this training — run without --offload to train on this machine")
+					}
+					if !remote {
+						return fmt.Errorf("no GPU node can take this run — drop --gpu force to run it on a CPU")
+					}
 					return fmt.Errorf("no eligible node found — run without --remote to execute on this machine")
 				}
-
-				if checkOnly {
-					fmt.Printf("[coordinator] Would place on node %s (%s)\n",
-						decision.ChosenNode.NodeID[:min(8, len(decision.ChosenNode.NodeID))], decision.Reason)
-					fmt.Println("checks complete")
-					return nil
-				}
-
-				ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-				defer cancel()
 
 				scriptArgs := args
 
@@ -407,18 +770,33 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				// the user pinned devices explicitly with --gpu-id.
 				var reservedGPU atomic.Int64
 				reservedGPU.Store(-1)
+				queuedAt := time.Now()
+				// The placement behind the current attempt: its lease keeps
+				// the job alive, and its decision goes in the run's record so
+				// `job --explain` can show it.
+				var placed atomic.Pointer[coordinator.LeaseResult]
+
+				detachCh, stopSuspend := watchSuspend(ctx, true)
+				defer stopSuspend()
 
 				executor := func(host string, port int, targetNodeID string) error {
+					var decision coordinator.PlacementDecision
+					var leaseID string
+					if r := placed.Load(); r != nil {
+						decision = r.Decision
+						leaseID = r.LeaseID
+					}
 					devices := gpuID
 					if devices == "" {
 						if idx := reservedGPU.Load(); idx >= 0 {
 							devices = strconv.FormatInt(idx, 10)
 						}
 					}
-					return app.Run(app.Options{
+					err := app.Run(ctx, app.Options{
 						ScriptPath:        scriptPath,
 						DaemonHost:        host,
 						DaemonPort:        port,
+						SelfDaemonPort:    daemonPort,
 						Submitter:         submitter,
 						TargetID:          targetNodeID,
 						JobName:           jobName,
@@ -430,10 +808,24 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						Envs:              envs,
 						Pkgs:              pkgs,
 						ScriptArgs:        scriptArgs,
-						PlacementSource:   "coordinator",
+						PlacementSource:   string(decision.Source),
+						DegradedMode:      decision.DegradedMode,
+						CandidateCount:    len(decision.Candidates),
+						PlacementReason:   decision.Reason,
+						Strategy:          strategy,
+						Candidates:        coordinator.ExplainCandidates(decision),
 						EstimatedMemBytes: estimatedMemBytes,
 						EstimationTier:    estimationTier,
+						Cold:              cold,
+						Detach:            detach,
+						DetachCh:          detachCh,
+						LeaseID:           leaseID,
+						QueuedAt:          queuedAt,
 					})
+					if app.IsPermanent(err) {
+						return coordinator.Permanent(err)
+					}
+					return err
 				}
 
 				statusFn := func(msg string) {
@@ -442,11 +834,12 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 				coord.SetOnPlacement(func(r *coordinator.LeaseResult) {
 					reservedGPU.Store(int64(r.GPUIndex))
+					placed.Store(r)
 				})
 
 				result, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
 				if err != nil {
-					return err
+					return runOutcome(err)
 				}
 
 				fmt.Printf("[coordinator] Task completed successfully on node %s\n",
@@ -469,7 +862,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				placementSource = "explicit"
 			}
 
-			acceptResp, err := daemonctl.CheckRemoteAcceptance(daemonHost, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
+			acceptResp, err := acceptWithin(ctx, placementWait(), func() (*daemonctl.AcceptResponse, error) {
+				return daemonctl.CheckRemoteAcceptance(daemonHost, daemonPort, targetID, jobName, nodeID.NodeID, estimatedMemBytes)
+			})
 			if err != nil {
 				return err
 			}
@@ -481,13 +876,10 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			}
 			fmt.Println("lease committed — starting execution")
 
-			if checkOnly {
-				fmt.Println("checks complete")
-				_ = daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, "cancelled")
-				return nil
-			}
+			detachCh, stopSuspend := watchSuspend(ctx, true)
+			defer stopSuspend()
 
-			runErr := app.Run(app.Options{
+			runErr := app.Run(ctx, app.Options{
 				ScriptPath:        scriptPath,
 				DaemonHost:        daemonHost,
 				DaemonPort:        daemonPort,
@@ -508,15 +900,28 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				PlacementReason:   placementReason,
 				EstimatedMemBytes: estimatedMemBytes,
 				EstimationTier:    estimationTier,
+				Cold:              cold,
+				Detach:            detach,
+				DetachCh:          detachCh,
+				LeaseID:           acceptResp.LeaseID,
 			})
 
-			completeStatus := jobhistory.StateSucceeded
-			if runErr != nil {
-				completeStatus = jobhistory.StateFailed
+			// A detached job still holds its lease; the node releases it
+			// when the job ends.
+			if !errors.Is(runErr, daemonctl.ErrDetached) {
+				completeStatus := jobhistory.StateSucceeded
+				switch {
+				case errors.Is(runErr, context.Canceled):
+					completeStatus = jobhistory.StateCancelled
+				case runErr != nil:
+					completeStatus = jobhistory.StateFailed
+				}
+				if err := daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, completeStatus); err != nil {
+					fmt.Fprintf(os.Stderr, "could not complete lease %s: %v\n", acceptResp.LeaseID, err)
+				}
 			}
-			_ = daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, completeStatus)
 
-			return runErr
+			return runOutcome(runErr)
 		},
 	}
 	cmd.Flags().String("host", "", "Daemon host:port, or a registered node ID")
@@ -527,8 +932,11 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
 	cmd.Flags().Int("cores", 0, "Minimum free CPU cores required on the target node")
-	cmd.Flags().Bool("check-only", false, "Only check acceptance, don't execute")
+	cmd.Flags().Bool("check-only", false, "Check imports, environment, placement and closure without running the script")
+	cmd.Flags().Bool("cold", false, "Send the environment as if the node had none, to time a first run")
+	cmd.Flags().Bool("detach", false, "Start the job, print its id and return; reattach with pipedpeer attach <id>")
 	cmd.Flags().Bool("remote", false, "Run on another machine in the cluster (any node except this one); without this the script runs on this machine")
+	cmd.Flags().Bool("offload", false, "Keep distributed work off this machine; the script itself still runs here. Pool/joblib/executor chunks, pandas and numpy offloads and DDP ranks go to other machines (this machine only when none can take them, with a warning). With --remote, the chosen node's spreading skips this machine too")
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
@@ -543,6 +951,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 }
 
 type ddpRunOptions struct {
+	Ctx            context.Context // cancelling it stops every rank
 	Nodes          int
 	DaemonPort     int
 	MasterPort     int
@@ -560,8 +969,15 @@ type ddpRunOptions struct {
 	RequiredGPUMem int64
 	RequiredCores  int
 	NoSelf         bool
+	// ExcludeMachine keeps every rank off the machine with this key (run
+	// --offload); SelfNodeID is this node, for NoSelf. runDDP fills it.
+	ExcludeMachine string
+	SelfNodeID     string
 	Strategy       string
 	MemOverride    string
+	// MaxRanks caps the ring when ranks join mid-run (--ddp N); 0 lets every
+	// eligible machine that comes back or turns up join.
+	MaxRanks int
 }
 
 // runDDP launches a transparent multi-rank training run: rank 0 is placed by
@@ -609,62 +1025,85 @@ func runDDP(o ddpRunOptions) error {
 		RequiredCores:    o.RequiredCores,
 		RequiredGPUMem:   o.RequiredGPUMem,
 		NoSelf:           o.NoSelf,
+		ExcludeMachine:   o.ExcludeMachine,
 		RequireGPU:       o.RequireGPU,
 		PreferGPU:        o.PreferGPU,
 		Strategy:         o.Strategy,
 		RoundRobinFn:     rrFn,
 	})
 
-	decision := coord.FindNode()
+	// Waits like a single-node run does: a ring started straight after
+	// another one (a rejoin run, say) sees the last run's memory and VRAM
+	// still in the nodes' reported load for a few seconds, and one look
+	// failed with a bare "no candidates available".
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wait := placementWait()
+	decision := coord.FindNodeWithin(ctx, wait, time.Second, placementProgress("for rank 0 ", wait))
 	rank0 := decision.ChosenNode
 	if rank0.NodeID == "" {
+		if why := decision.RejectionSummary(); why != "" {
+			fmt.Print("[coordinator] nodes turned down:\n" + why)
+		}
 		return fmt.Errorf("no node eligible for rank 0: %s", decision.Reason)
 	}
 	if rank0.DaemonPort == 0 {
 		rank0.DaemonPort = o.DaemonPort
 	}
 
-	peers := make([]registry.NodeRecord, 0, o.Nodes-1)
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
-	if err == nil {
-		var all []registry.NodeRecord
-		if jerr := json.NewDecoder(resp.Body).Decode(&all); jerr == nil {
-			var gpuPeers, cpuPeers []registry.NodeRecord
-			for _, n := range all {
-				if n.State != "healthy" || n.NodeID == rank0.NodeID {
-					continue
-				}
-				if o.RequireGPU && !ddpHasGPU(n) {
-					continue
-				}
-				if o.PreferGPU && ddpHasGPU(n) {
-					gpuPeers = append(gpuPeers, n)
-				} else {
-					cpuPeers = append(cpuPeers, n)
-				}
-			}
-			// Prefer GPU peers when GPU work is wanted (force or inferred),
-			// falling back to CPU peers only if there aren't enough GPU ones —
-			// a DDP all-reduce must not mix devices silently.
-			sort.Slice(gpuPeers, func(i, j int) bool {
-				return gpuPeers[i].Load.CPUPercent < gpuPeers[j].Load.CPUPercent
-			})
-			sort.Slice(cpuPeers, func(i, j int) bool {
-				return cpuPeers[i].Load.CPUPercent < cpuPeers[j].Load.CPUPercent
-			})
-			peers = append(gpuPeers, cpuPeers...)
-		}
-		resp.Body.Close()
+	// Rank 0 is a candidate like any other. The coordinator picks it for
+	// availability rather than speed, and on an uneven cluster that put the
+	// slowest machine in the ring's most important seat: every rank waits for
+	// it, and it also serves as the rendezvous master.
+	o.SelfNodeID = nodeID.NodeID
+	ring, ringSlots, ringWeights := ddpChooseRing(o, rank0)
+	if len(ring) < 2 {
+		// Measurement says one machine beats any ring available. That is an
+		// answer, not a failure: erroring out here left the user with nothing
+		// to show for a perfectly runnable job, on the grounds that the
+		// cluster was not worth using. The caller runs it on one node.
+		return errRingNotWorthIt
 	}
-	if len(peers) < o.Nodes-1 {
-		return fmt.Errorf("need %d healthy peers for ranks 1..%d (found %d) — join more nodes or lower --ddp",
-			o.Nodes-1, o.Nodes-1, len(peers))
+	if len(ring) < o.Nodes {
+		// Fewer ranks than asked for, because more would be slower. Said out
+		// loud: silently running a smaller ring than requested is the kind of
+		// thing that should never be discovered from a log file.
+		fmt.Printf("      Using %d rank(s) rather than %d: the rest would slow the ring down\n",
+			len(ring), o.Nodes)
+		o.Nodes = len(ring)
 	}
-	peers = peers[:o.Nodes-1]
+	// The lead has to be a node every other rank can reach, and a peer
+	// reached over the internet is registered at 127.0.0.1 on a port only
+	// this daemon forwards. Reordering rather than dropping: such a node is
+	// still a good rank, it just cannot be the one everybody syncs to.
+	if reordered, ok := ddpLeadFirst(ring, ddpSelfMachine(o.DaemonPort)); ok {
+		ring = reordered
+	} else {
+		return fmt.Errorf("no rank in this ring can lead it: every candidate is " +
+			"reached through a local forwarder, so the address they would all " +
+			"sync to points at themselves. A ring needs at least one node with " +
+			"an address the others can use - this machine, or a peer on a " +
+			"network they share")
+	}
+
+	rank0, peers := ring[0], ring[1:o.Nodes]
+	ringSlots = ringSlots[:o.Nodes]
+	ringWeights = ddpNormaliseWeights(ringWeights[:o.Nodes])
 
 	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
 	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
-		masterAddr = detectLocalIP()
+		// Rank 0 is this machine, and every other rank has to reach it. Which
+		// of our addresses that is depends on where they are: asking the
+		// route to a peer beats picking one address for everybody, which on a
+		// machine that is on both a LAN and a Tailscale network picks the LAN
+		// one and hangs the run.
+		peerHost := ""
+		if len(peers) > 0 {
+			peerHost = ddpExtractHost(peers[0].SSHEndpoint)
+		}
+		masterAddr = localIPFor(peerHost)
 	}
 	masterPort := o.MasterPort
 	if masterPort == 0 {
@@ -683,8 +1122,18 @@ func runDDP(o ddpRunOptions) error {
 	fmt.Printf("=== Distributed training: %d ranks ===\n", o.Nodes)
 	fmt.Printf("rank 0: %s (%s:%d)\n", rank0.NodeID[:min(8, len(rank0.NodeID))], masterAddr, rank0.DaemonPort)
 	for i, n := range peers {
-		fmt.Printf("rank %d: %s (%s:%d)\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
-			ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
+		where := ""
+		if ddpSharesNode(ring[:o.Nodes], i+1) {
+			// Two ranks on one machine is unusual enough that not saying so
+			// would read as a mistake in the node list.
+			where = fmt.Sprintf(" device %d", ringSlots[i+1])
+		}
+		fmt.Printf("rank %d: %s (%s:%d)%s\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
+			ddpExtractHost(n.SSHEndpoint), n.DaemonPort, where)
+	}
+	if uneven := ddpUneven(ringWeights); uneven {
+		fmt.Printf("shares: %s — measured, so a slower rank takes less rather "+
+			"than setting the pace for everyone\n", ddpSharePercents(ringWeights))
 	}
 	if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 		fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=%s\n\n", masterAddr, masterPort, os.Getenv("PIPEDPEER_DDP_BACKEND"))
@@ -696,6 +1145,7 @@ func runDDP(o ddpRunOptions) error {
 		PythonVersion: o.PythonVersion,
 		Pkgs:          o.Pkgs,
 		Intercept:     true, // DDP transparency lives in the sitecustomize shim
+		GPU:           o.RequireGPU || o.PreferGPU,
 	}, func(step int, title string) {
 		if step == 1 {
 			fmt.Printf("[%d/7] %s\n", step, title)
@@ -708,28 +1158,50 @@ func runDDP(o ddpRunOptions) error {
 	}
 	defer env.Close()
 
-	jobSet := "ddp-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	if o.JobName != "" {
-		jobSet = "ddp-" + o.JobName
-	}
+	jobSet := ddpGroupName(o.JobName, time.Now())
 
 	ranks := make([]registry.NodeRecord, 0, o.Nodes)
 	ranks = append(ranks, rank0)
 	ranks = append(ranks, peers...)
+	nodesAtStart, err := ddpFetchNodes(o.DaemonPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ddp] cannot read the node list (%v); every machine that turns up later counts as new\n", err)
+	}
+	up := newDDPUpState(nodesAtStart)
+	var ranksMu sync.Mutex
 
-	errs := make(chan error, o.Nodes)
-	for i, n := range ranks {
-		go func(i int, n registry.NodeRecord) {
+	errs := make(chan ddpRankResult)
+	// launch starts rank i on n. A joining rank takes the ring's size and
+	// shares from the lead daemon when it gets in, not from here.
+	launch := func(ctx context.Context, i int, n registry.NodeRecord, join bool) {
+		ranksMu.Lock()
+		ring := append([]registry.NodeRecord(nil), ranks...)
+		ranksMu.Unlock()
+		world := len(ring)
+		up.started(n.NodeID)
+		go func() {
+			// Ranks sharing a machine must not share its accelerator: both
+			// taking device 0 is not two ranks of work, it is two ranks
+			// queueing on one GPU. An explicit --gpu-id is the user overriding
+			// that on purpose and is left alone.
+			rankGPUDevices := o.GPUDevices
+			if rankGPUDevices == "" && !join && ddpSharesNode(ring, i) {
+				rankGPUDevices = strconv.Itoa(ringSlots[i])
+			}
 			rankEnvs := append([]string(nil), o.Envs...)
 			rankEnvs = append(rankEnvs,
 				"PIPEDPEER_DDP=1",
 				fmt.Sprintf("PIPEDPEER_RANK=%d", i),
-				fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", o.Nodes),
+				fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", world),
 				fmt.Sprintf("RANK=%d", i),
-				fmt.Sprintf("WORLD_SIZE=%d", o.Nodes),
+				fmt.Sprintf("WORLD_SIZE=%d", world),
 				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
 				fmt.Sprintf("MASTER_PORT=%d", masterPort),
-				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s", net.JoinHostPort(detectLocalIP(), strconv.Itoa(o.DaemonPort))),
+				// The address THIS rank would reach us at, which is not
+				// necessarily the one another rank would use.
+				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s",
+					net.JoinHostPort(localIPFor(ddpExtractHost(n.SSHEndpoint)),
+						strconv.Itoa(o.DaemonPort))),
 				// Sync rides the lead rank's daemon on the one port that
 				// already works between every pair of nodes; ranks never
 				// open sockets of their own (MASTER_* stays only for the
@@ -737,7 +1209,34 @@ func runDDP(o ddpRunOptions) error {
 				fmt.Sprintf("PIPEDPEER_DDP_SYNC=http://%s/v1/ddp/sync",
 					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
 				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
+				// How many machines, not how many ranks. The ring's
+				// worth-it verdict compares against "this machine doing
+				// every shard", and ranks that share a machine do not
+				// multiply what it can do.
+				fmt.Sprintf("PIPEDPEER_DDP_MACHINES=%d", ddpDistinctMachines(ring)),
+				// Names for the start barrier's "waiting for rank 1 on gpu1".
+				"PIPEDPEER_DDP_HOSTS="+ddpHostList(ring),
 			)
+			if join {
+				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_JOIN=1")
+			} else if len(ringWeights) == len(ring) {
+				// Every rank gets the whole set of shares, not just its own:
+				// a contiguous shard needs the offsets of everything before
+				// it, and a rank that knew only its own size could not tell
+				// where its slice began.
+				rankEnvs = append(rankEnvs,
+					"PIPEDPEER_DDP_WEIGHTS="+ddpWeightList(ringWeights))
+			}
+			// Every rank posts its gradients to the lead rank's daemon, so
+			// every rank needs the credential that daemon requires. Without
+			// this the sync is refused with 401 - and because the refusal
+			// arrives before the request body has finished uploading, what
+			// the user sees is a BrokenPipeError from deep inside urllib,
+			// which names neither authentication nor the daemon. DDP was
+			// simply broken on any cluster with a token set.
+			if tok := authtoken.Current(); tok != "" {
+				rankEnvs = append(rankEnvs, "PIPEDPEER_TOKEN="+tok)
+			}
 			opts := app.Options{
 				ScriptPath:        absScript,
 				DaemonHost:        ddpExtractHost(n.SSHEndpoint),
@@ -749,7 +1248,7 @@ func runDDP(o ddpRunOptions) error {
 				Intercept:         true,
 				SkipBroadcast:     true,
 				GPU:               o.PreferGPU || o.RequireGPU,
-				GPUDevices:        o.GPUDevices,
+				GPUDevices:        rankGPUDevices,
 				Mode:              "script",
 				PythonVersion:     o.PythonVersion,
 				Envs:              rankEnvs,
@@ -760,16 +1259,108 @@ func runDDP(o ddpRunOptions) error {
 				EstimatedMemBytes: resReq.MemBytes,
 				EstimationTier:    resReq.Tier,
 			}
-			errs <- app.RunTask(env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
-		}(i, n)
+			err := app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+			up.ended(n.NodeID, err != nil && ctx.Err() == nil, time.Now())
+			errs <- ddpRankResult{rank: i, err: err}
+		}()
+	}
+	// Each starting rank can be stopped on its own: one that missed the start
+	// barrier may still be receiving its closure when the ring has finished.
+	stopRank := make([]context.CancelFunc, len(ranks))
+	for i, n := range ranks {
+		ctx, cancel := context.WithCancel(o.Ctx)
+		defer cancel()
+		stopRank[i] = cancel
+		launch(ctx, i, n, false)
 	}
 
-	var firstErr error
-	for i := 0; i < o.Nodes; i++ {
-		if err := <-errs; err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("rank %d failed: %w", i, err)
-		}
+	hosts := make([]string, len(ranks))
+	usageNodes := make([]app.UsageNode, len(ranks))
+	for i, n := range ranks {
+		hosts[i] = ddpHostName(n)
+		usageNodes[i] = app.UsageNode{Name: hosts[i], Host: ddpExtractHost(n.SSHEndpoint), Port: n.DaemonPort}
 	}
+	// ponytail: ranks that join later are not sampled; add them in start() if the demo needs it.
+	usage := app.StartUsage(usageNodes)
+	leadHost := ddpExtractHost(rank0.SSHEndpoint)
+	backend := os.Getenv("PIPEDPEER_DDP_BACKEND")
+	daemonSync := backend != "gloo" && backend != "nccl"
+
+	// Machines that come back, or turn up, join the ring. Only the daemon
+	// sync can grow: torch's own mesh is fixed at init.
+	added := make(chan ddpAdded)
+	startRanks := len(ranks) // ranks from here on are joiners
+	watchCtx, stopWatch := context.WithCancel(o.Ctx)
+	defer stopWatch()
+	if daemonSync {
+		gpuKind := o.RequireGPU || o.PreferGPU
+		gpuRing := gpuKind && ddpHasGPU(rank0)
+		g := &ddpGrower{
+			st:         up,
+			daemonPort: o.DaemonPort,
+			leadHost:   leadHost,
+			leadPort:   rank0.DaemonPort,
+			group:      jobSet,
+			maxRanks:   o.MaxRanks,
+			out:        os.Stdout,
+			fetch:      ddpFetchNodes,
+			check:      ddpJoinCheck,
+			want: func(n registry.NodeRecord) bool {
+				if ddpExcluded(o, n) {
+					return false
+				}
+				// One kind of device per ring, as at the start.
+				return !gpuKind || ddpHasGPU(n) == gpuRing
+			},
+			nextRank: func() int {
+				ranksMu.Lock()
+				defer ranksMu.Unlock()
+				return len(ranks)
+			},
+			start: func(rank int, n registry.NodeRecord) bool {
+				if n.DaemonPort == 0 {
+					n.DaemonPort = o.DaemonPort
+				}
+				ctx, cancel := context.WithCancel(o.Ctx)
+				select {
+				case added <- ddpAdded{rank: rank, host: ddpHostName(n), cancel: cancel}:
+				case <-watchCtx.Done():
+					cancel()
+					return false
+				}
+				ranksMu.Lock()
+				ranks = append(ranks, n)
+				ranksMu.Unlock()
+				fmt.Printf("[ddp] rank %d: starting on %s (%s:%d); it joins at the ring's next epoch\n",
+					rank, ddpHostName(n), ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
+				launch(ctx, rank, n, true)
+				return true
+			},
+		}
+		go g.run(watchCtx)
+	}
+
+	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, stopRank, added, func(rank int, err error) {
+		// The script failed, so the run is lost: stop looking for machines
+		// to add (ddpAwaitRanks stops any that slip through). A joiner's
+		// crash is the join failing, as in ddpAwaitRanks.
+		if rank < startRanks && app.IsPermanent(err) && !ddpMissedStart(err) {
+			stopWatch()
+		}
+		// torch's own mesh (gloo/nccl) cannot lose a member; only the
+		// daemon-backed sync can be told to carry on.
+		if !daemonSync {
+			return
+		}
+		ranksMu.Lock()
+		world := len(ranks)
+		ranksMu.Unlock()
+		if err := ddpReportDown(leadHost, rank0.DaemonPort, jobSet, rank, world, err); err != nil {
+			fmt.Fprintf(os.Stderr, "[ddp] could not tell the lead daemon rank %d is gone (%v); the ring waits 45 s per sync for it instead\n", rank, err)
+		}
+	})
+	stopWatch()
+	usage.Print(os.Stdout)
 	if firstErr != nil {
 		if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 			fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n", masterAddr, masterPort)
@@ -797,6 +1388,248 @@ func ddpPickMasterPort(host string, base, span int) int {
 	return base
 }
 
+// ddpOneDeviceKind keeps the ring to a single kind of device.
+//
+// --gpu force already excluded CPU nodes, but --gpu prefer filtered nothing:
+// every node went into admission ranked by a probe that measures CPU
+// throughput, so a GPU box with a modest CPU was rejected as "too slow to
+// contribute" while a CPU box with a fast one was admitted, and the ring came
+// out mixed - which the code two lines below says the shim cannot balance.
+// The preference was applied afterwards, as a sort of the survivors, which
+// cannot put back a node admission had already dropped.
+//
+// Mixed is the wrong answer anyway at the sizes measured here: the same model
+// and batch takes 1.5s on this GPU and 56.2s on this CPU, and with equal
+// batches every rank waits for the slowest. So the choice is which kind, not
+// how to blend them - GPUs when there are any, CPUs when there are not.
+//
+// This is what makes the ring "only the good GPUs, then only the good CPUs":
+// the kind is decided here, and which of that kind are worth having is decided
+// by the marginal-gain rule in ddpplace.
+func ddpOneDeviceKind(cands []ddpplace.Candidate, preferGPU bool) []ddpplace.Candidate {
+	if !preferGPU {
+		return cands
+	}
+	var gpu []ddpplace.Candidate
+	for _, c := range cands {
+		if c.HasGPU {
+			gpu = append(gpu, c)
+		}
+	}
+	if len(gpu) > 0 {
+		return gpu
+	}
+	// No accelerator anywhere. CPU is what is left, and a CPU ring beats no
+	// ring - "prefer" is not "require".
+	return cands
+}
+
+// ddpUneven reports whether the shares differ enough to be worth mentioning.
+// Placement measures live machines, so identical hardware still returns
+// slightly different numbers; the shim uses the same threshold before it
+// reshards, and the two must agree or the run says one thing and does
+// another.
+func ddpUneven(w []float64) bool {
+	if len(w) < 2 {
+		return false
+	}
+	lo, hi := w[0], w[0]
+	for _, x := range w {
+		if x < lo {
+			lo = x
+		}
+		if x > hi {
+			hi = x
+		}
+	}
+	return hi-lo >= ddpEvenTolerance
+}
+
+// ddpEvenTolerance is the spread below which shares count as equal. Shared
+// with the shim through PIPEDPEER_DDP_WEIGHTS: change one and change both.
+const ddpEvenTolerance = 0.02
+
+// ddpSharePercents renders shares for a person.
+func ddpSharePercents(w []float64) string {
+	parts := make([]string, len(w))
+	for i, x := range w {
+		parts[i] = fmt.Sprintf("rank %d %.0f%%", i, 100*x)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// ddpWeightList renders the ring's shares for the shim.
+func ddpWeightList(w []float64) string {
+	parts := make([]string, len(w))
+	for i, x := range w {
+		parts[i] = strconv.FormatFloat(x, 'f', 6, 64)
+	}
+	return strings.Join(parts, ",")
+}
+
+// ddpNormaliseWeights makes the ring's shares sum to one.
+//
+// Placement normalises over everything it admitted, but the ring is then
+// truncated to --ddp N, and shares that sum to less than one would hand out
+// less than the whole dataset - every epoch would silently train on a
+// fraction of it. Anything unusable falls back to equal shares, which is what
+// the ring did before shares existed.
+func ddpNormaliseWeights(w []float64) []float64 {
+	var total float64
+	for _, x := range w {
+		if x <= 0 {
+			return nil
+		}
+		total += x
+	}
+	if total <= 0 {
+		return nil
+	}
+	out := make([]float64, len(w))
+	for i, x := range w {
+		out[i] = x / total
+	}
+	return out
+}
+
+// ddpSharesNode reports whether ring member i is on a machine that is also
+// hosting another rank.
+// ddpDistinctMachines counts the physical machines a ring spans.
+//
+// Not the same as the number of ranks. Two daemons on one laptop are two
+// nodes with two identities and one set of cores, and the ring's own verdict
+// on whether it was worth forming divides the work by the number of ranks -
+// which on a co-located ring says the machine is twice as fast as itself.
+// Measured: a two-rank ring on one machine reported "the ring paid for
+// itself" on a run that took 191s against 92.8s for the same machine alone.
+//
+// The machine key is the one the roommate memory accounting already uses, so
+// a ring learns nothing new here - it just stops ignoring what the daemon
+// knew. Nodes that do not report one are counted separately: an unknown
+// machine is not evidence of sharing.
+// ddpSelfMachine is this machine's key, as the daemon reports it.
+//
+// Empty when the daemon cannot be asked, which makes ddpForwardedLead treat
+// every loopback node as forwarded. That is the safe direction: it refuses a
+// ring rather than building one whose ranks all sync to themselves.
+func ddpSelfMachine(daemonPort int) string {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", daemonPort))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Capabilities map[string]string `json:"capabilities"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&h) != nil {
+		return ""
+	}
+	return h.Capabilities[heartbeat.MachineCapability]
+}
+
+// ddpForwardedLead reports whether a node is only reachable through a local
+// forwarder, and so cannot be the rank everybody else syncs to.
+//
+// A peer reached over the internet is registered at 127.0.0.1 on a port this
+// daemon forwards, which is what keeps health polling, closure upload and
+// gradient sync from having to know how the bytes travel. It also means its
+// recorded address is meaningless anywhere else: 127.0.0.1 on another rank is
+// that rank.
+//
+// The star sync has every rank post gradients to the lead's daemon, so the
+// lead's address has to mean the same thing to all of them. A loopback
+// address qualifies only when it really is this machine, which is decided by
+// the machine key the roommate accounting already collects - by host alone
+// the two cases are identical, and reading a forwarded peer as "this machine"
+// hands every rank an address pointing at itself.
+func ddpForwardedLead(n registry.NodeRecord, selfMachine string) bool {
+	host := ddpExtractHost(n.SSHEndpoint)
+	if host != "" && host != "127.0.0.1" && host != "localhost" && host != "::1" {
+		return false
+	}
+	// Loopback. Safe only if this is the machine we are running on. A node
+	// too old to report a key counts as forwarded: assuming otherwise is the
+	// failure this exists to prevent.
+	key := n.Capabilities[heartbeat.MachineCapability]
+	return key == "" || key != selfMachine
+}
+
+// ddpLeadFirst reorders a ring so its lead is a node every rank can reach.
+//
+// Reordered rather than filtered: a node that cannot lead is still a
+// perfectly good rank, and dropping it would shrink a ring for no reason.
+// Returns false when nothing in the ring can lead, which has to be said
+// rather than papered over - picking one anyway hangs every rank at the
+// first barrier with no indication why.
+func ddpLeadFirst(ring []registry.NodeRecord, selfMachine string) ([]registry.NodeRecord, bool) {
+	for i, n := range ring {
+		if ddpForwardedLead(n, selfMachine) {
+			continue
+		}
+		if i == 0 {
+			return ring, true
+		}
+		out := make([]registry.NodeRecord, 0, len(ring))
+		out = append(out, ring[i])
+		out = append(out, ring[:i]...)
+		out = append(out, ring[i+1:]...)
+		return out, true
+	}
+	return ring, false
+}
+
+func ddpDistinctMachines(ring []registry.NodeRecord) int {
+	seen := map[string]bool{}
+	unknown := 0
+	for _, n := range ring {
+		key := n.Capabilities[heartbeat.MachineCapability]
+		if key == "" {
+			unknown++
+			continue
+		}
+		seen[key] = true
+	}
+	n := len(seen) + unknown
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+func ddpSharesNode(ring []registry.NodeRecord, i int) bool {
+	for j, n := range ring {
+		if j != i && n.NodeID == ring[i].NodeID {
+			return true
+		}
+	}
+	return false
+}
+
+// ddpSlots is how many ranks a node can host at once.
+//
+// One per accelerator: a two-GPU machine given one rank trains on one GPU and
+// leaves the other idle for the whole run. On a CPU node it stays at one -
+// two ranks there would divide the same cores between them and pay the
+// gradient sync on top, which is slower than one rank using all of them.
+//
+// PIPEDPEER_DDP_RANKS_PER_NODE overrides it. That exists to exercise the
+// mechanism on hardware with a single GPU, where the multi-accelerator case
+// cannot otherwise be run at all; it is not a tuning knob.
+func ddpSlots(n registry.NodeRecord) int {
+	if v := os.Getenv("PIPEDPEER_DDP_RANKS_PER_NODE"); v != "" {
+		if k, err := strconv.Atoi(v); err == nil && k > 0 {
+			return k
+		}
+	}
+	if len(n.Load.GPUs) > 1 {
+		return len(n.Load.GPUs)
+	}
+	if c, err := strconv.Atoi(n.Capabilities["gpu_count"]); err == nil && c > 1 {
+		return c
+	}
+	return 1
+}
+
 func ddpHasGPU(n registry.NodeRecord) bool {
 	if n.Capabilities["gpu"] != "" && n.Capabilities["gpu"] != "none" {
 		return true
@@ -804,11 +1637,32 @@ func ddpHasGPU(n registry.NodeRecord) bool {
 	return n.Load.GPUModel != "" || len(n.Load.GPUs) > 0
 }
 
-// ddpEligibleCount returns how many healthy nodes could host a DDP rank.
+// ddpEligibleCount returns how many DDP ranks this cluster could host.
 // GPU nodes count when they fit the VRAM requirement; CPU nodes count as a
 // fallback when they fit the job's memory (plan C1: GPU preferred, CPU only
 // when it fits). requireGPU (--gpu force) hard-excludes CPU nodes.
+//
+// Ranks, not nodes. This gate runs before placement and gives up on the whole
+// idea when it sees fewer than two, so counting nodes made a single machine
+// with two accelerators ineligible for the ring it is perfectly able to host -
+// and the multi-rank placement below it could never be reached.
 func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64) int {
+	return ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, requiredMem, "")
+}
+
+// ddpExcluded reports whether n may not take a rank: this node under NoSelf
+// (--remote), and any node on the machine --offload keeps work off, by its
+// machine key.
+func ddpExcluded(o ddpRunOptions, n registry.NodeRecord) bool {
+	if o.NoSelf && o.SelfNodeID != "" && n.NodeID == o.SelfNodeID {
+		return true
+	}
+	return heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], o.ExcludeMachine)
+}
+
+// ddpEligibleCountExcept is ddpEligibleCount without the nodes on the machine
+// whose key is exclude ("" excludes nothing).
+func ddpEligibleCountExcept(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) int {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
 	if err != nil {
 		return 0
@@ -823,12 +1677,15 @@ func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredM
 		if n.State != "healthy" {
 			continue
 		}
+		if heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], exclude) {
+			continue
+		}
 		gpuOK := ddpHasGPU(n) &&
 			(requiredGPUMem <= 0 || n.Load.GPUMemBytes-n.Load.GPUMemUsedBytes >= requiredGPUMem)
 		cpuOK := !requireGPU &&
 			(requiredMem <= 0 || n.Load.AvailableMemBytes >= requiredMem)
 		if gpuOK || cpuOK {
-			count++
+			count += ddpSlots(n)
 		}
 	}
 	return count
@@ -1008,8 +1865,11 @@ func newMapCmd() *cobra.Command {
 			}
 			defer env.Close()
 
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer cancel()
+			go func() { <-ctx.Done(); cancel() }()
+			_, stopSuspend := watchSuspend(ctx, false)
+			defer stopSuspend()
 
 			base := app.Options{
 				DaemonHost:        "",
@@ -1031,7 +1891,11 @@ func newMapCmd() *cobra.Command {
 					o.DaemonHost = host
 					o.DaemonPort = port
 					o.TargetID = targetNodeID
-					return app.RunTask(env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					err := app.RunTask(ctx, env, app.Task{Options: o, Script: scriptPath, Label: fmt.Sprintf("task-%d", task.ShardID)})
+					if app.IsPermanent(err) {
+						return coordinator.Permanent(err)
+					}
+					return err
 				}
 				statusFn := func(msg string) {}
 				res, err := coord.ExecuteWithRetry(ctx, executor, statusFn)
@@ -1041,7 +1905,7 @@ func newMapCmd() *cobra.Command {
 				return res.NodeID, nil
 			}
 
-			return app.RunMap(tasks, base, concurrency, resultsDir, env, run, reduce)
+			return runOutcome(app.RunMap(tasks, base, concurrency, resultsDir, env, run, reduce))
 		},
 	}
 	cmd.Flags().String("script", "", "Path to Python script (required)")
@@ -1102,9 +1966,7 @@ func newDashboardCmd() *cobra.Command {
 			}
 			m.refresh()
 
-			p := tea.NewProgram(m, tea.WithAltScreen())
-			_, err = p.Run()
-			return err
+			return runDashboard(tea.NewProgram(m, tea.WithAltScreen()))
 		},
 	}
 	cmd.Flags().Int("port", 38080, "Daemon API port")
@@ -1132,12 +1994,19 @@ func newJobsCmd() *cobra.Command {
 			}
 			fmt.Printf("history path: %s\n", historyPath)
 			fmt.Println("ID\tSTATUS\tMODE\tJOB\tJOB_SET\tTARGET\tHOST\tDURATION_MS\tSTARTED")
+			warned := false
 			for _, it := range items {
 				mode := "fg"
+				status := it.Status
 				if it.Detached {
 					mode = "bg"
+					// History only knows what the submitter last saw; a
+					// detached job's daemon knows whether it has finished.
+					if status == jobhistory.StateRunning {
+						status = detachedJobStatus(it.ID, &warned)
+					}
 				}
-				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", it.ID, it.Status, mode, it.JobName, it.JobSet, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
+				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", jobhistory.ShortID(it.ID), status, mode, it.JobName, it.JobSet, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
 			}
 			return nil
 		},
@@ -1162,6 +2031,101 @@ func newJobsCmd() *cobra.Command {
 	return cmd
 }
 
+// detachedJobStatus asks the daemon running a detached job how it is doing.
+// On any failure it shows "?" and warns once per listing.
+func detachedJobStatus(id string, warned *bool) string {
+	r, _, err := jobhistory.ReadRecord(id)
+	if err == nil && (r.RemoteJobID == "" || r.DaemonEndpoint == "") {
+		err = errors.New("no daemon recorded for it")
+	}
+	var st daemonctl.JobState
+	if err == nil {
+		var host, portStr string
+		var port int
+		if host, portStr, err = net.SplitHostPort(r.DaemonEndpoint); err == nil {
+			if port, err = strconv.Atoi(portStr); err == nil {
+				st, err = daemonctl.JobStatus(host, port, r.RemoteJobID)
+			}
+		}
+	}
+	if err != nil {
+		if !*warned {
+			*warned = true
+			fmt.Fprintf(os.Stderr, "could not ask the daemon about detached job %s: %v\n", jobhistory.ShortID(id), err)
+		}
+		return "?"
+	}
+	return st.Status
+}
+
+func newAttachCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "attach <id>",
+		Short: "Follow a detached job again: replay its output, follow it live, fetch its results",
+		Long: "Reattach to a job started with --detach or Ctrl+Z on this machine. <id> is the " +
+			"id `pipedpeer jobs` shows. Ctrl+C while attached stops the job.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer stop()
+			go exitOnSecondSignal(ctx, stop)
+			return runOutcome(app.Attach(ctx, args[0]))
+		},
+	}
+}
+
+// runOutcome turns a run's error into the command's result: a detach is
+// success (the job keeps running), a cancel says so in one line.
+func runOutcome(err error) error {
+	switch {
+	case errors.Is(err, daemonctl.ErrDetached):
+		return nil
+	case errors.Is(err, context.Canceled):
+		fmt.Println("cancelled — remote work stopped")
+		return errCancelReported
+	}
+	return err
+}
+
+// errCancelReported fails the command (exit 1) without a second error line.
+var errCancelReported = errors.New("cancelled")
+
+// watchSuspend turns Ctrl+Z (SIGTSTP) into a detach for a single run: the
+// returned channel closes on the first one. Where detach is not offered
+// (DDP, map) Ctrl+Z says so and the run carries on. stop gives Ctrl+Z back
+// to the shell.
+func watchSuspend(ctx context.Context, detachable bool) (<-chan struct{}, func()) {
+	detach := make(chan struct{})
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTSTP)
+	done := make(chan struct{})
+	go func() {
+		closed := false
+		for {
+			select {
+			case <-sig:
+				if !detachable {
+					fmt.Println("detach is not supported for DDP/map runs; Ctrl+C stops it")
+				} else if !closed {
+					closed = true
+					close(detach)
+				}
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			}
+		}
+	}()
+	var once sync.Once
+	return detach, func() {
+		once.Do(func() {
+			signal.Stop(sig)
+			close(done)
+		})
+	}
+}
+
 func newJobCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "job",
@@ -1169,12 +2133,49 @@ func newJobCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id, _ := cmd.Flags().GetString("id")
 			withOutput, _ := cmd.Flags().GetBool("output")
-			if id == "" {
-				return fmt.Errorf("--id is required")
+			timeline, _ := cmd.Flags().GetBool("timeline")
+			explain, _ := cmd.Flags().GetBool("explain")
+			showReceipt, _ := cmd.Flags().GetBool("receipt")
+			if last, _ := cmd.Flags().GetBool("last"); last && id == "" {
+				recent, err := jobhistory.List(1)
+				if err != nil {
+					return err
+				}
+				if len(recent) == 0 {
+					return fmt.Errorf("no jobs recorded yet")
+				}
+				id = recent[0].ID
 			}
-			r, dir, err := jobhistory.ReadRecord(id)
+			if id == "" {
+				return fmt.Errorf("--id is required (or --last for the most recent job)")
+			}
+			r, dir, err := jobhistory.Resolve(id)
 			if err != nil {
 				return err
+			}
+			if timeline || explain || showReceipt {
+				fmt.Printf("job %s  %s  %s\n", r.ID, filepath.Base(r.ScriptPath), r.Status)
+				if explain {
+					fmt.Println("\n== Placement ==")
+					jobhistory.WriteExplanation(os.Stdout, r)
+				}
+				if timeline {
+					fmt.Println("\n== Timeline ==")
+					jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
+				}
+				if showReceipt {
+					fmt.Println("\n== Receipt ==")
+					rc, ok, err := jobhistory.ReadReceipt(dir)
+					switch {
+					case err != nil:
+						return err
+					case !ok:
+						fmt.Println("No receipt for this run (interception off, or run before receipts were kept).")
+					default:
+						jobhistory.WriteReceipt(os.Stdout, rc)
+					}
+				}
+				return nil
 			}
 			fmt.Printf("id: %s\n", r.ID)
 			fmt.Printf("status: %s\n", r.Status)
@@ -1199,6 +2200,9 @@ func newJobCmd() *cobra.Command {
 			fmt.Printf("unchanged_files: %d\n", r.UnchangedFiles)
 			fmt.Printf("manifest_path: %s\n", r.ManifestPath)
 			fmt.Printf("history_dir: %s\n", dir)
+			if len(r.Stages) > 0 {
+				fmt.Printf("timeline: %s\n", jobhistory.Summary(r.Stages))
+			}
 			if withOutput {
 				stdout, _ := jobhistory.ReadOptionalText(dir, "stdout.log")
 				stderr, _ := jobhistory.ReadOptionalText(dir, "stderr.log")
@@ -1225,7 +2229,11 @@ func newJobCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().String("id", "", "Job ID")
+	cmd.Flags().Bool("last", false, "Show the most recent job")
 	cmd.Flags().Bool("output", false, "Print stdout/stderr")
+	cmd.Flags().Bool("timeline", false, "Show where the run's time went, stage by stage")
+	cmd.Flags().Bool("explain", false, "Show every node considered for the run and why the chosen one won")
+	cmd.Flags().Bool("receipt", false, "Show what the shim sent to other machines, kept local, and why")
 	return cmd
 }
 
@@ -1354,29 +2362,29 @@ func printNodes(daemonPort int) error {
 	}
 	if len(nodes) == 0 {
 		fmt.Println("No nodes found")
+		printUnreachable(os.Stdout, daemonPort)
 		return nil
 	}
 
-	fmt.Printf("%-10s %-12s %-10s %-6s %-6s %-10s %-14s %s\n",
-		"NODE_ID", "HOST", "STATE", "JOBS", "CORES", "MEM AVAIL", "GPU", "SOURCE")
-	for _, n := range nodes {
-		gpuDesc := "-"
-		if name := n.Capabilities["gpu_name"]; name != "" {
-			gpuDesc = truncate(name, 14)
-		}
-		host := n.Capabilities["hostname"]
-		if host == "" {
-			host = hostFromEndpoint(n.SSHEndpoint)
-		}
-		cores := n.Capabilities["cpu_cores"]
-		if cores == "" {
-			cores = "-"
-		}
-		fmt.Printf("%-10s %-12s %-10s %-6d %-6s %-10s %-14s %s\n",
-			shortID(n.NodeID), truncate(host, 12), n.State, n.Load.ActiveJobs, cores,
-			resourceest.FormatBytes(n.Load.AvailableMemBytes), gpuDesc, n.Source)
-	}
+	printNodeTable(os.Stdout, nodes)
+	printUnreachable(os.Stdout, daemonPort)
 	return nil
+}
+
+// printUnreachable lists peers with no direct path; a fetch error goes to stderr.
+func printUnreachable(w io.Writer, daemonPort int) {
+	bad, err := fetchUnreachable(daemonPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "could not list peers with no direct path: %v\n", err)
+		return
+	}
+	if len(bad) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "\nPeers with no direct path (not offered work):")
+	for _, p := range bad {
+		fmt.Fprintf(w, "  %-10s %s\n", shortID(p.Peer), p.Reason)
+	}
 }
 
 func newTasksCmd() *cobra.Command {
@@ -1542,7 +2550,7 @@ func runDaemon(args []string) {
 
 	var port int
 	var maxConcurrent = -1
-	var registryURL, sshEndpoint, natsURL string
+	var registryURL, sshEndpoint, natsURL, rendezvousAddr string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--port":
@@ -1565,6 +2573,11 @@ func runDaemon(args []string) {
 				sshEndpoint = args[i+1]
 				i++
 			}
+		case "--rendezvous":
+			if i+1 < len(args) {
+				rendezvousAddr = args[i+1]
+				i++
+			}
 		case "--nats-url":
 			if i+1 < len(args) {
 				natsURL = args[i+1]
@@ -1580,6 +2593,9 @@ func runDaemon(args []string) {
 	}
 	if natsURL == "" {
 		natsURL = os.Getenv("PIPEDPEER_NATS_URL")
+	}
+	if rendezvousAddr == "" {
+		rendezvousAddr = os.Getenv("PIPEDPEER_RENDEZVOUS")
 	}
 	if maxConcurrent < 0 {
 		maxConcurrent = 0 // unlimited unless configured
@@ -1599,6 +2615,10 @@ func runDaemon(args []string) {
 
 	server := daemonapi.New(nodeID.NodeID)
 	server.EnablePersistence()
+	// Both closure caches are bounded here rather than only when something is
+	// transferred, so a node that has gone quiet still gives the disk back
+	// and a lowered cap takes effect without waiting for the next job.
+	server.BoundCaches()
 	server.SetMaxConcurrentJobs(maxConcurrent)
 	if v := os.Getenv("PIPEDPEER_SERIAL_CLOSURE_IMPORTS"); v == "1" {
 		server.SetSerialClosureImports(true)
@@ -1685,10 +2705,88 @@ func runDaemon(args []string) {
 	// node adds capacity but never slows a run down.
 	server.EnablePoolSpill()
 
+	// Internet mode: one address instead of four steps. The daemon registers
+	// with a rendezvous, learns who else is in the cluster, opens a path to
+	// each of them and registers that path as an ordinary node - so nothing
+	// downstream has to know a peer is remote.
+	//
+	// Entirely optional and never fatal: a machine with no internet, or a
+	// rendezvous that is down, still runs local jobs and still uses its LAN
+	// peers.
+	internetCtx, stopInternet := context.WithCancel(context.Background())
+	defer stopInternet()
+	if rendezvousAddr != "" {
+		key, kerr := identity.Key()
+		if kerr != nil {
+			log.Warn().Err(kerr).Msg("no signing key: internet mode disabled")
+		} else {
+			cert, certErr := tlsid.EnsureCert()
+			if certErr != nil {
+				log.Warn().Err(certErr).Msg("internet mode needs a certificate for direct connections")
+			}
+			mgr := internet.New(internet.Config{
+				Rendezvous: rendezvousAddr,
+				Cluster:    rendezvous.ClusterID(authtoken.Current()),
+				Secret:     authtoken.Current(),
+				Key:        key,
+				Cert:       &cert,
+				DaemonPort: port,
+				OnPeer: func(node, addr string) {
+					host, portStr, err := net.SplitHostPort(addr)
+					if err != nil {
+						return
+					}
+					p, err := strconv.Atoi(portStr)
+					if err != nil {
+						return
+					}
+					if err := server.AddPeer(host, p); err != nil {
+						log.Warn().Err(err).Str("peer", node).Msg("could not register relayed peer")
+						return
+					}
+					log.Info().Str("peer", node).Str("at", addr).Msg("peer joined over the internet")
+				},
+				OnUnreachable: func(node, reason string) {
+					// Recorded rather than relayed around. A peer with no
+					// direct path is not offered work - the scheduler routes
+					// around it - and the reason travels so a machine that
+					// quietly stopped serving is visible instead of missing.
+					log.Info().Str("peer", node).Str("reason", reason).
+						Msg("peer has no direct path; not offering it work")
+				},
+				OnPeerGone: func(node, addr string) {
+					host, portStr, err := net.SplitHostPort(addr)
+					if err != nil {
+						return
+					}
+					p, err := strconv.Atoi(portStr)
+					if err != nil {
+						log.Warn().Err(err).Str("peer", node).Str("addr", addr).Msg("could not parse departed peer address")
+						return
+					}
+					if err := server.RemovePeer(host, p); err != nil {
+						log.Warn().Err(err).Str("peer", node).Str("addr", addr).Msg("could not remove departed peer")
+					}
+					log.Info().Str("peer", node).Msg("peer left")
+				},
+				Log: func(format string, args ...any) {
+					log.Info().Msgf("internet: "+format, args...)
+				},
+			})
+			// So `pipedpeer nodes` can show how each peer is reached, and
+			// a machine being routed around is visible rather than absent.
+			server.SetPathReporter(mgr.Paths)
+			server.SetUnreachableReporter(mgr.Unreachable)
+			go mgr.Run(internetCtx)
+			log.Info().Str("rendezvous", rendezvousAddr).Msg("internet mode enabled")
+		}
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		<-sig
+		stopInternet()
 		server.StopWarmWorkers()
 		if hbClient != nil {
 			hbClient.Stop()
@@ -1699,6 +2797,14 @@ func runDaemon(args []string) {
 		}
 		os.Exit(0)
 	}()
+
+	// The daemon lives until os.Exit, so the watchdog needs no cancel.
+	cgroups.StartCeilingWatchdog(context.Background(), func(format string, args ...any) {
+		log.Warn().Msgf(format, args...)
+	})
+
+	// Detached jobs started here finish here (results, record) when they end.
+	go app.WatchDetached(context.Background(), log, port)
 
 	log.Info().Int("port", port).Str("node_id", nodeID.ShortID()).
 		Int("max_concurrent", maxConcurrent).Msg("daemon starting")
@@ -1720,6 +2826,71 @@ func runDaemon(args []string) {
 // Preference order is by how widely routable an address is: a LAN address
 // beats a VPN one, because peers that can reach both should take the direct
 // path.
+// localIPFor is the address a given peer would see us at.
+//
+// detectLocalIP picks one address for everybody, preferring a private one -
+// and a machine on both a home LAN and a Tailscale network has two, of which
+// only one reaches the peer. Measured: a node advertised its stale LAN
+// address, 192.168.0.201, to a peer that could only be reached over Tailscale.
+// DDP worked anyway because the lead rank happened to be the reachable node;
+// with the roles reversed the sync URL is an address the other rank cannot
+// open, and the run hangs at the first barrier.
+//
+// The kernel already knows the answer. Connecting a UDP socket sends nothing
+// - it only fixes the route - and the local address it picks is the source
+// address a packet to that peer would carry.
+//
+// Falls back to detectLocalIP when there is no peer in question (plain
+// self-advertisement) or the route cannot be resolved.
+func localIPFor(target string) string {
+	if target == "" {
+		return detectLocalIP()
+	}
+	host := target
+	if h, _, err := net.SplitHostPort(target); err == nil {
+		host = h
+	}
+	if host == "" {
+		return detectLocalIP()
+	}
+	ip, ok := routeSourceIP(host)
+	if !ok {
+		return detectLocalIP()
+	}
+	// Reaching a peer over loopback says nothing about how anybody else
+	// reaches us, and advertising 127.0.0.1 to a second machine is the one
+	// answer guaranteed to be wrong.
+	if ip.IsLoopback() {
+		return detectLocalIP()
+	}
+	return ip.String()
+}
+
+// routeSourceIP asks the kernel which of our addresses a packet to host would
+// carry. This is the part that is per-peer; localIPFor is the policy around
+// it, and separating them is what lets the mechanism be tested: asserting
+// only that the result is a non-loopback address passes with the whole thing
+// removed, because detectLocalIP returns one too.
+//
+// Bounded, because a hostname that does not resolve blocks in DNS for several
+// seconds and this runs while a job is being placed. Falling back to the old
+// answer quickly beats holding up the run to be exact.
+func routeSourceIP(host string) (net.IP, bool) {
+	// The port is immaterial: no packet is sent, and the route is chosen by
+	// the destination address alone.
+	d := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := d.Dial("udp", net.JoinHostPort(host, "9"))
+	if err != nil {
+		return nil, false
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || addr.IP == nil || addr.IP.IsUnspecified() {
+		return nil, false
+	}
+	return addr.IP, true
+}
+
 func detectLocalIP() string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -1771,4 +2942,159 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ensureUserBinOnPath puts the per-user bin directory on PATH if it is
+// missing, so a crun installed there without root is found by every later
+// exec.LookPath.
+func ensureUserBinOnPath() {
+	dir := userdir.Bin()
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		if p == dir {
+			return
+		}
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return
+	}
+	os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// errRingNotWorthIt says every ring available measures slower than a single
+// machine, so the caller should run the job normally rather than fail.
+var errRingNotWorthIt = errors.New("a single node is faster than any ring available")
+
+// ddpChoosePeers picks the nodes that will take ranks 1..N-1.
+//
+// This used to be a gate followed by a sort: keep GPU nodes if the job wants a
+// GPU, otherwise CPU nodes, order by reported CPU load, take the first N. Both
+// halves are wrong on a real cluster. Reported load and advertised cores say
+// nothing about a cap the peer's daemon is under - the local test cluster's
+// workers all advertise 16 cores while held to 8, 2 and 1, a 13x spread that
+// no advertisement reveals. And in synchronous training every rank waits for
+// the slowest, so a node a fraction of the ring's speed does not add capacity,
+// it sets the pace: including it can leave the run slower than leaving it out.
+//
+// Peers are now measured and admitted only while admitting them helps.
+// The second return is each ring member's accelerator index on its node, so a
+// machine hosting two ranks pins a different device for each. The third is
+// each member's measured share of a step, which the shim turns into a shard
+// and a batch size.
+func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeRecord, []int, []float64) {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", o.DaemonPort))
+	if err != nil {
+		return nil, nil, nil
+	}
+	defer resp.Body.Close()
+	var all []registry.NodeRecord
+	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
+		return nil, nil, nil
+	}
+
+	byID := map[string]registry.NodeRecord{}
+	var cands []ddpplace.Candidate
+	for _, n := range all {
+		if n.State != "healthy" {
+			continue
+		}
+		// GPU remains a hard requirement rather than something to trade off:
+		// an all-reduce must not silently mix devices, and the probe measures
+		// CPU throughput, so it cannot rank a GPU against a CPU anyway.
+		if o.RequireGPU && !ddpHasGPU(n) {
+			continue
+		}
+		if ddpExcluded(o, n) {
+			continue
+		}
+		byID[n.NodeID] = n
+		cands = append(cands, ddpplace.Candidate{
+			NodeID:   n.NodeID,
+			Host:     ddpExtractHost(n.SSHEndpoint),
+			Port:     n.DaemonPort,
+			Cores:    n.Load.TotalCPUs,
+			MemBytes: n.Load.AvailableMemBytes,
+			HasGPU:   ddpHasGPU(n),
+			Slots:    ddpSlots(n),
+		})
+	}
+	cands = ddpOneDeviceKind(cands, o.RequireGPU || o.PreferGPU)
+	if len(cands) == 0 {
+		return nil, nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	// PIPEDPEER_DDP_EQUAL_BATCHES=1 gives every rank the same batch whatever
+	// placement measured. It exists so the two can be compared on one rig -
+	// "shares made this faster" is a claim that needs the other run to stand
+	// against - and as an escape hatch if weighting ever misbehaves.
+	proportional := os.Getenv("PIPEDPEER_DDP_EQUAL_BATCHES") != "1"
+
+	plan := ddpplace.Select(ctx, cands, ddpplace.Options{
+		Max:         o.Nodes,
+		Token:       authtoken.Current(),
+		ProbeMillis: 250,
+		// The shim sizes each rank's shard and batch by its share, so a
+		// slower device takes proportionally less and the ring stops running
+		// at the slowest rank's pace. Without it the admission rule has to
+		// exclude anything materially slower, because with equal batches it
+		// would set the pace for everyone.
+		ProportionalBatches: proportional,
+		// An explicit --ddp N is the user's call: every rank they asked for
+		// runs, the slower ones on a smaller share. Only the auto ring prunes.
+		KeepAll: o.MaxRanks > 0,
+		// No working-set size is threaded through here yet, so a node too
+		// small for the model is still admitted and fails at run time rather
+		// than being declined. ddpplace supports the gate; the estimate lives
+		// in the caller and has not been plumbed down.
+	})
+
+	if !plan.Measured {
+		fmt.Printf("      Note: no peer answered the throughput probe; placement is " +
+			"using advertised core counts, which ignore load and any cap on the peer\n")
+	}
+	for _, r := range plan.Rejected {
+		fmt.Printf("      Not using %s: %s\n", shortID(r.Candidate.NodeID), r.Reason)
+	}
+
+	// GPU peers first among the admitted, for the same reason the gate kept
+	// them: a mixed ring is not something the shim can currently balance.
+	sort.SliceStable(plan.Chosen, func(i, j int) bool {
+		return plan.Chosen[i].Candidate.HasGPU && !plan.Chosen[j].Candidate.HasGPU
+	})
+
+	out := make([]registry.NodeRecord, 0, len(plan.Chosen))
+	slots := make([]int, 0, len(plan.Chosen))
+	weights := make([]float64, 0, len(plan.Chosen))
+	for _, c := range plan.Chosen {
+		n := byID[c.Candidate.NodeID]
+		if n.NodeID == "" {
+			continue
+		}
+		if n.DaemonPort == 0 {
+			n.DaemonPort = o.DaemonPort
+		}
+		out = append(out, n)
+		slots = append(slots, c.Slot)
+		if proportional {
+			weights = append(weights, c.Weight)
+		}
+	}
+	// The coordinator's pick is kept only if measurement agrees it belongs.
+	if len(out) == 0 && rank0.NodeID != "" {
+		return []registry.NodeRecord{rank0}, []int{0}, []float64{1}
+	}
+	return out, slots, weights
+}
+
+// exitOnSecondSignal waits for the first Ctrl+C (which cancels ctx and lets
+// the command clean up), then exits at once with a line on the second.
+func exitOnSecondSignal(ctx context.Context, stop context.CancelFunc) {
+	<-ctx.Done()
+	stop()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	<-sig
+	fmt.Fprintln(os.Stderr, "\nsecond interrupt: exiting now")
+	os.Exit(130)
 }

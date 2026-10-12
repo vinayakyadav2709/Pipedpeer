@@ -1,10 +1,20 @@
 package daemonapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"math"
 	"net/http"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // DDP sync over the daemon's own channel. Ranks never open ports of their
@@ -17,21 +27,228 @@ import (
 // rank-to-rank TCP on its own ports — a requirement that holds on a
 // datacenter LAN and on nothing pipedpeer actually targets.
 
+// DDPFramesContentType marks the binary form of a sync: a JSON header line
+// followed by one length-prefixed payload frame. Base64 inflates a gradient
+// by a third both on the wire and in this daemon's memory, and it buys
+// nothing here — the daemon never looks inside the payload.
+const DDPFramesContentType = "application/vnd.pipedpeer.ddp"
+
+// DDPReduceContentType marks a sync the daemon averages itself. The reply is
+// one model rather than one per rank, which is the whole point: on two
+// machines the old reply was already twice the model per step, and it grows
+// with the ring. See ddpreduce.go for why that mattered enough to give up the
+// daemon's ignorance of the payload.
+const DDPReduceContentType = "application/vnd.pipedpeer.ddp.reduce"
+
 type ddpEntry struct {
-	blobs   map[int]string // rank -> b64 payload
-	fetched map[int]bool   // ranks that have taken the full set home
-	done    chan struct{}  // closed when all world blobs are present
+	blobs   map[int][]byte // rank -> opaque payload (blackboard mode)
+	fetched map[int]bool   // ranks that have taken the result home
+	done    chan struct{}  // closed when all world contributions are present
 	world   int
 	created time.Time
+
+	// Reduce mode: contributions are folded into acc as they arrive and the
+	// individual payloads are dropped, so the lead daemon holds one buffer
+	// instead of one model per rank. result is computed once, when the last
+	// rank arrives, and served to every waiter.
+	acc          *ddpAccumulator
+	result       []byte
+	resultScale  float64
+	resultScales []float64
+	// seen tracks which ranks have contributed, since acc keeps only a count
+	// and a rank that retried must not be folded in twice.
+	seen map[int]bool
+	// stepMillis is each rank's mean compute time for a step, as reported by
+	// the rank. The spread across ranks is what says whether the ring is
+	// balanced - and with equal batches the slowest of them is the step time
+	// for everybody.
+	stepMillis map[int]float64
+
+	// err is set when a contribution could not be folded in - a rank that
+	// disagrees about the model's shape, say. Held rather than returned to
+	// that one rank, because the others are blocked waiting for a result that
+	// is never coming.
+	err error
+	// partialAt is when this round gives up waiting for everybody. A rank
+	// that has died is indistinguishable from one that is merely slow, and
+	// waiting three minutes to find out means one lost machine takes the
+	// whole run with it.
+	partialAt time.Time
+
+	// syncEvery is the agreed averaging interval: the largest any rank
+	// proposed. Largest rather than smallest because the proposal is a rank's
+	// estimate of how much of its run sync is eating, and the rank suffering
+	// most is the one setting the pace for everybody.
+	syncEvery int
+
+	// expected is how many contributions this round waits for: the world size
+	// less any rank the ring has been told to continue without.
+	expected int
+	// partial is how many ranks actually contributed when a round completed
+	// short-handed; zero when everybody arrived.
+	partial int
+	// holdExpired: this round was held for a join handover past
+	// ddpHandoverHold, and said so.
+	holdExpired bool
+
+	// fingerprint detects ranks doing identical work. Sharding only happens
+	// automatically for DataLoader-based code; a script that slices its
+	// tensors by hand - which both bundled training demos do - leaves every
+	// rank computing the same batch. The gradients are then identical, the
+	// average equals the single-process gradient exactly, and the run is
+	// correct, slower, and silent about it. This is the only place holding
+	// every rank's contribution, so it is the only place that can notice.
+	fingerprint uint64
+	sameWork    bool
+	checked     bool
+	// fingerprinted counts the contributions compared. One is not a
+	// comparison: a round that closed on a single rank (the others not yet
+	// started) matched only itself and reported duplicated work (V3 53).
+	fingerprinted int
+
+	// opening is the run's first round, the opening weight broadcast, which
+	// is also the start barrier: it waits up to the start wait for every
+	// rank, and a rank still missing when it closes is dropped.
+	opening bool
 }
 
 type ddpBoard struct {
 	mu      sync.Mutex
 	entries map[string]*ddpEntry // key: group + "/" + seq
+	// measured records which groups have already had their ring reported.
+	// Keyed by group rather than by entry: an entry is one sync round, and a
+	// flag there says it once per step, which at one sync per step is
+	// thousands of identical lines. Measured 41 for a 90-step run before this
+	// was keyed properly.
+	measured map[string]time.Time // key: group -> when it was reported
+	// runs holds what belongs to a training run rather than to one sync
+	// round. An entry is one round, so anything kept there is forgotten
+	// between steps - which is how the ring's measurement came to be logged
+	// 41 times for a 90-step run.
+	runs map[string]*ddpRun // key: group
+}
+
+// expectedCount is how many ranks this round waits for. Falls back to the
+// world size for entries created before any drop was known.
+func (e *ddpEntry) expectedCount() int {
+	if e.expected > 0 && e.expected <= e.world {
+		return e.expected
+	}
+	return e.world
+}
+
+// dropCount is how many ranks a run has been told to continue without.
+// Caller holds the board lock.
+func (b *ddpBoard) dropCount(group string) int {
+	r := b.runs[group]
+	if r == nil {
+		return 0
+	}
+	return len(r.dropped)
+}
+
+// dropsBelow counts the dropped ranks a round of the given world size would
+// otherwise wait for. A rank that died before it joined has an index past the
+// ring's old size and must not shrink the rounds it was never part of.
+// Caller holds the board lock.
+func (b *ddpBoard) dropsBelow(group string, world int) int {
+	r := b.runs[group]
+	if r == nil {
+		return 0
+	}
+	n := 0
+	for rank := range r.dropped {
+		if rank < world {
+			n++
+		}
+	}
+	return n
+}
+
+// ddpRun is a training run's state across its sync rounds.
+type ddpRun struct {
+	// reports is what each rank last said about its own throughput, which is
+	// what the shares are refitted from.
+	reports map[int]rankReport
+	// weights is the share set currently in force.
+	weights []float64
+	// round counts syncs, so the refit happens on a cadence rather than on
+	// every step.
+	round int
+	// dropped names ranks the ring has been told to continue without.
+	dropped map[int]bool
+	// seen is when this run last synced, so it can be forgotten.
+	seen time.Time
+
+	// A change to the ring (a rank died, one is joining, the shares were
+	// refitted): every rank must take it at the SAME epoch boundary, or two
+	// ranks slice the data differently for an epoch and their step counts
+	// part. So the notice rides the reply to one agreed sync (noteSeq), which
+	// every live rank fetches. One note at a time, always carrying the whole
+	// ring (shares and size), so a newer note can replace an older one.
+	lastSeq  int64
+	note     string       // reply fragment carrying the ring as it now is
+	noteSeq  int64        // first sync whose reply carries it
+	noteTold map[int]bool // ranks that already have it
+
+	// world is the ring's size as this daemon knows it; it grows when a
+	// rank joins mid-run (ddpup.go).
+	world int
+	// sharded says a rank reported training from a DataLoader the shim
+	// reshards by hash, which is what lets a rank join mid-run.
+	sharded bool
+	// join is the rank joining now, if any.
+	join *ddpJoin
+	// loading is a joiner that has its snapshot and is loading it: rounds
+	// still wait for it until its first sync (handoverHolds).
+	loading *ddpJoin
+}
+
+// run returns a group's run state, creating it. Caller holds the board lock.
+func (b *ddpBoard) run(group string) *ddpRun {
+	r := b.runs[group]
+	if r == nil {
+		// seen from birth: a run first created by a rank going down (before
+		// any sync) would otherwise look ancient to sweep and lose its drops.
+		r = &ddpRun{reports: map[int]rankReport{}, dropped: map[int]bool{}, noteTold: map[int]bool{}, seen: time.Now()}
+		b.runs[group] = r
+	}
+	return r
+}
+
+// liveIn counts the ranks in m the ring has not dropped. A dropped rank's
+// contribution stays in a round it reached before dying (reduce mode keeps
+// only the sum, and its batch is real data nobody else trains this epoch),
+// but it must not count toward closing the round: that would let a round
+// close on the dead rank alone and hand the live ranks a result without
+// their own gradients. Caller holds the board lock.
+func liveIn[V any](b *ddpBoard, group string, m map[int]V) int {
+	r := b.runs[group]
+	n := 0
+	for rank := range m {
+		if r == nil || !r.dropped[rank] {
+			n++
+		}
+	}
+	return n
 }
 
 func newDDPBoard() *ddpBoard {
-	return &ddpBoard{entries: make(map[string]*ddpEntry)}
+	return &ddpBoard{
+		entries:  make(map[string]*ddpEntry),
+		measured: make(map[string]time.Time),
+		runs:     make(map[string]*ddpRun),
+	}
+}
+
+// observe records what a rank reported. Caller holds the board lock.
+func (b *ddpBoard) observe(group string, rank int, rep rankReport) {
+	r := b.run(group)
+	if r.dropped[rank] {
+		return // a dead rank's last report must not win it a share back
+	}
+	r.reports[rank] = rep
+	r.seen = time.Now()
 }
 
 // sweep drops entries older than maxAge: a rank that died mid-run must not
@@ -44,6 +261,19 @@ func (b *ddpBoard) sweep(maxAge time.Duration) {
 			delete(b.entries, k)
 		}
 	}
+	// One key per training run, kept only to say the ring's measurement once.
+	// A daemon that has served a thousand runs should not still be holding a
+	// thousand group names.
+	for group, when := range b.measured {
+		if time.Since(when) > maxAge {
+			delete(b.measured, group)
+		}
+	}
+	for group, r := range b.runs {
+		if time.Since(r.seen) > maxAge {
+			delete(b.runs, group)
+		}
+	}
 }
 
 type ddpSyncRequest struct {
@@ -52,13 +282,116 @@ type ddpSyncRequest struct {
 	Rank  int    `json:"rank"`
 	World int    `json:"world"`
 	Data  string `json:"data"` // b64, opaque to the daemon
+
+	// Reduce mode only.
+	DType ddpDType `json:"dtype,omitempty"`
+	Count int      `json:"count,omitempty"`
+	// Scale is the int8 quantisation step this rank used. Each rank picks its
+	// own from its own values, so it travels with the payload.
+	Scale float64 `json:"scale,omitempty"`
+	// Scales and Counts give each tensor its own quantisation step. One scale
+	// for a whole model lets the largest layer set the step size for every
+	// other, which costs most of the precision - see ddpreduce.go.
+	Scales []float64 `json:"scales,omitempty"`
+	Counts []int     `json:"counts,omitempty"`
+	// Kind is "grads" or "weights". Only gradients are checked for ranks
+	// duplicating work: the run opens by broadcasting the initial weights,
+	// and those are identical by construction whenever the script seeds its
+	// generator - which every sane training script does. Fingerprinting that
+	// sync reported duplicated work on a correctly sharded run.
+	Kind string `json:"kind,omitempty"`
+	// SyncEvery is this rank's proposal for how often to average. Ranks
+	// measure their own link and compute independently and so arrive at
+	// different numbers; averaging at different points in each rank's step
+	// sequence is not local SGD, it is nonsense, and it showed up as a
+	// measurably worse final loss. The daemon hands everyone one answer.
+	SyncEvery int `json:"sync_every,omitempty"`
+	// StepMillis is this rank's mean compute time for one step, which every
+	// rank already measures for its own sync tuning and which nothing has
+	// ever collected.
+	//
+	// Gathered here it becomes the one measurement the scheduler has never
+	// had: what a device is worth for this job, in units that compare across
+	// devices. The throughput probe used for placement is an integer loop on
+	// the CPU, so a GPU node's score is its CPU's score and a GPU cannot be
+	// ranked against a CPU at all. This is the same model, the same batch,
+	// on whatever hardware the rank actually has - comparable by
+	// construction, and free, because the work is being done anyway.
+	StepMillis float64 `json:"step_ms,omitempty"`
+	// Samples is how many samples produced this gradient.
+	//
+	// With equal batches it is the same on every rank and changes nothing.
+	// With proportional batches it is the whole correctness argument: a rank
+	// training on twice the data computed its mean gradient over twice the
+	// samples, and averaging the per-rank means as equals would give the
+	// smaller shard twice the influence per sample it earned. The combined
+	// gradient is sum(n_i * g_i) / sum(n_i).
+	//
+	// Absent (0) from a rank running the equal-batch code, which the
+	// accumulator reads as a weight of 1 - reproducing the plain average
+	// exactly, so a mixed-version ring is wrong in no new way.
+	Samples int `json:"samples,omitempty"`
+	// SyncMillis is what one gradient exchange has cost this rank on average.
+	// The daemon needs it to decide whether a rank pays for itself: every
+	// rank costs an exchange per step, and one contributing less compute than
+	// it adds in sync is making the run slower.
+	SyncMillis float64 `json:"sync_ms,omitempty"`
+	// Sharded says this rank trains from a DataLoader the shim reshards by
+	// hash. Only such a ring can take a new rank mid-run.
+	Sharded bool `json:"sharded,omitempty"`
+	// StartWait is how long, in seconds, the opening round waits for every
+	// rank before the ring starts without the missing ones
+	// (PIPEDPEER_DDP_START_WAIT). Zero: ddpStartWait.
+	StartWait float64 `json:"start_wait,omitempty"`
+}
+
+// ddpMode is how a request wants its payload handled.
+type ddpMode int
+
+const (
+	ddpModeJSON   ddpMode = iota // base64 envelope, blackboard
+	ddpModeFrames                // binary frames, blackboard
+	ddpModeReduce                // binary frames, averaged here
+)
+
+// readDDPRequest accepts all three forms.
+func readDDPRequest(r *http.Request) (ddpSyncRequest, []byte, ddpMode, error) {
+	ct := r.Header.Get("Content-Type")
+	if ct != DDPFramesContentType && ct != DDPReduceContentType {
+		var req ddpSyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return req, nil, ddpModeJSON, err
+		}
+		// Deliberately not decoded. In blackboard mode whatever a rank
+		// deposits is what its peers take home, and validating the encoding
+		// would reject payloads the daemon has no business reading.
+		return req, []byte(req.Data), ddpModeJSON, nil
+	}
+	mode := ddpModeFrames
+	if ct == DDPReduceContentType {
+		mode = ddpModeReduce
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return ddpSyncRequest{}, nil, mode, err
+	}
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		return ddpSyncRequest{}, nil, mode, fmt.Errorf("ddp frames body has no header line")
+	}
+	var req ddpSyncRequest
+	if err := json.Unmarshal(body[:nl], &req); err != nil {
+		return req, nil, mode, err
+	}
+	blob, _, err := readFrame(body[nl+1:])
+	return req, blob, mode, err
 }
 
 // handleDDPSync is one round trip per rank per sync: deposit our blob, block
 // until the set is complete, take every rank's blob home.
 func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
-	var req ddpSyncRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req, blob, mode, err := readDDPRequest(r)
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -69,15 +402,50 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 
 	key := req.Group + "/" + jsonInt(req.Seq)
 
+	opening := req.Kind == "weights" && req.Seq == 1
+
 	s.ddp.mu.Lock()
+	if r := s.ddp.runs[req.Group]; opening && r != nil && r.dropped[req.Rank] {
+		// Missed the start barrier: the ring is training without this rank,
+		// and its model is the untrained one. The shim exits on this (status
+		// ddpMissedStartExit) so the submitter can start it again as a joiner.
+		s.ddp.mu.Unlock()
+		writeJSON(w, http.StatusGone, map[string]any{"missed_start": true,
+			"error": "this rank was not ready when the ring started; the ring went on without it"})
+		return
+	}
 	e, ok := s.ddp.entries[key]
 	if !ok {
+		wait := ddpPartialAfter
+		if opening {
+			wait = startWait(req.StartWait)
+		}
 		e = &ddpEntry{
-			blobs:   make(map[int]string),
-			fetched: make(map[int]bool),
-			done:    make(chan struct{}),
-			world:   req.World,
-			created: time.Now(),
+			blobs:     make(map[int][]byte),
+			fetched:   make(map[int]bool),
+			seen:      make(map[int]bool),
+			done:      make(chan struct{}),
+			world:     req.World,
+			created:   time.Now(),
+			partialAt: time.Now().Add(wait),
+			opening:   opening,
+		}
+		if mode == ddpModeReduce {
+			if req.Count <= 0 || req.DType.size() == 0 {
+				s.ddp.mu.Unlock()
+				writeJSON(w, http.StatusBadRequest,
+					map[string]string{"error": "reduce mode needs a positive count and a known dtype"})
+				return
+			}
+			e.acc = newDDPAccumulator(req.DType, req.Count)
+			if len(req.Counts) > 1 {
+				if err := e.acc.withSegments(req.Counts); err != nil {
+					s.ddp.mu.Unlock()
+					writeJSON(w, http.StatusBadRequest,
+						map[string]string{"error": "segment lengths: " + err.Error()})
+					return
+				}
+			}
 		}
 		s.ddp.entries[key] = e
 	}
@@ -86,8 +454,115 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "world size mismatch within group"})
 		return
 	}
-	e.blobs[req.Rank] = req.Data
-	complete := len(e.blobs) == e.world
+	// A rank the ring has been told to continue without is not a rank that is
+	// merely late. Counting it as expected would have every remaining step
+	// wait out the full partial timeout - 45 seconds each - for a gradient
+	// that is never coming, which would make dropping a freeloader far worse
+	// than keeping it.
+	e.expected = e.world - s.ddp.dropsBelow(req.Group, e.world)
+	if e.expected < 1 {
+		e.expected = 1
+	}
+	{
+		run := s.ddp.run(req.Group)
+		if req.World > run.world {
+			run.world = req.World
+		}
+		if req.Sharded {
+			run.sharded = true
+		}
+		if run.loading != nil && run.loading.rank == req.Rank {
+			run.loading = nil // the joiner loaded the model and is syncing
+		}
+		if req.Seq > run.lastSeq {
+			run.lastSeq = req.Seq
+			run.seen = time.Now()
+			// Decided once per sync and told to every rank at this one: a
+			// refit decided per reply reached only the rank whose reply hit
+			// the cadence, and that rank alone resliced its data.
+			// Not while a rank is joining: a refit note would replace the
+			// join note before every rank had it.
+			if frag := s.ddp.rebalanceFor(req.Group, run.world); frag != "" && run.join == nil {
+				s.ddp.publish(run, req.Seq, frag)
+			}
+		}
+	}
+	if req.SyncEvery > e.syncEvery {
+		e.syncEvery = req.SyncEvery
+	}
+	if req.StepMillis > 0 {
+		if e.stepMillis == nil {
+			e.stepMillis = map[int]float64{}
+		}
+		e.stepMillis[req.Rank] = req.StepMillis
+		s.ddp.observe(req.Group, req.Rank, rankReport{
+			StepMillis: req.StepMillis,
+			SyncMillis: req.SyncMillis,
+			Samples:    req.Samples,
+		})
+		if _, said := s.ddp.measured[req.Group]; !said && len(e.stepMillis) >= e.world {
+			s.ddp.measured[req.Group] = time.Now()
+			// Said once, whatever the verdict. What each device is worth for
+			// this job is the measurement the scheduler has never had, and
+			// printing it only when something is wrong would leave a balanced
+			// ring looking like one nobody measured.
+			log.Info().Str("group", req.Group).Str("ranks", rankTimes(e.stepMillis)).
+				Str("samples", rankSamples(s.ddp.runs[req.Group])).
+				Msg("ring measured: time for one step, on each rank's own hardware")
+			if msg, ok := pacedBy(e.stepMillis, e.world); ok {
+				log.Warn().Str("group", req.Group).Msg(msg)
+			}
+		}
+	}
+	var complete bool
+	if e.result != nil || e.err != nil {
+		// The round finished without us - either everyone else arrived and
+		// this rank was slow, or it completed short-handed. Either way the
+		// answer exists and is the same one every other rank applied, so
+		// taking it home keeps this rank in step rather than diverging.
+		complete = true
+	} else if e.acc != nil {
+		// Folded in on arrival and the payload dropped: holding every rank's
+		// model until the last one shows up is what made the lead daemon's
+		// memory scale with the ring.
+		if !e.seen[req.Rank] {
+			// Only worth doing early: ranks that duplicate work do it from
+			// the first step, and hashing every payload forever would put a
+			// pass over the model into every sync.
+			if req.Kind == "grads" && req.Seq <= ddpFingerprintSeqs {
+				h := fnv1a(blob)
+				e.fingerprinted++
+				if len(e.seen) == 0 {
+					e.fingerprint, e.sameWork, e.checked = h, true, true
+				} else if h != e.fingerprint {
+					e.sameWork = false
+				}
+			}
+			scales := req.Scales
+			if len(scales) == 0 {
+				scales = []float64{req.Scale}
+			}
+			if addErr := e.acc.addSegmented(blob, scales, float64(req.Samples)); addErr != nil {
+				// Recorded rather than returned to this rank alone: the
+				// others are blocked on a result that is now never coming,
+				// and a timeout three minutes later would name nothing.
+				e.err = fmt.Errorf("rank %d: %w", req.Rank, addErr)
+			} else {
+				e.seen[req.Rank] = true
+			}
+		}
+		complete = e.err != nil || liveIn(s.ddp, req.Group, e.seen) >= e.expectedCount()
+		if complete && e.err == nil && e.result == nil {
+			e.result, e.resultScales, e.err = e.acc.meanSegmented()
+			if len(e.resultScales) > 0 {
+				e.resultScale = e.resultScales[0]
+			}
+			e.acc = nil // the sum is no longer needed; let it go now
+		}
+	} else {
+		e.blobs[req.Rank] = blob
+		complete = liveIn(s.ddp, req.Group, e.blobs) >= e.expectedCount()
+	}
 	if complete {
 		select {
 		case <-e.done:
@@ -95,35 +570,442 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			close(e.done)
 		}
 	}
+	partialAt := e.partialAt
 	s.ddp.mu.Unlock()
 
 	if !complete {
-		select {
-		case <-e.done:
-		case <-r.Context().Done():
-			return
-		case <-time.After(3 * time.Minute):
-			writeJSON(w, http.StatusGatewayTimeout,
-				map[string]string{"error": "ddp sync timed out waiting for peer ranks"})
-			return
+		partialC := time.After(time.Until(partialAt))
+		hard := ddpHardTimeout
+		if d := time.Until(partialAt) + time.Minute; d > hard {
+			hard = d // the start barrier outlasts the usual bound
+		}
+		hardC := time.After(hard)
+	wait:
+		for {
+			select {
+			case <-e.done:
+				break wait
+			case <-r.Context().Done():
+				return
+			case <-partialC:
+				// A rank handing over or loading the model at a join is busy,
+				// not dead: hold the round for it (bounded) rather than
+				// average without it.
+				if s.handoverHolds(req.Group, key) {
+					partialC = time.After(ddpHandoverPoll)
+					continue
+				}
+				// Long enough to rule out an ordinary slow step, short enough
+				// that a dead rank does not cost the run. Complete with whoever
+				// turned up: averaging over fewer ranks is a smaller step in the
+				// same direction, and every rank still receives the identical
+				// result, so nobody drifts.
+				if !s.completePartial(req.Group, key) {
+					writeJSON(w, http.StatusGatewayTimeout, map[string]string{
+						"error": "ddp sync timed out and too few ranks had arrived to " +
+							"average anything"})
+					return
+				}
+				break wait
+			case <-hardC:
+				if s.handoverHolds(req.Group, key) {
+					hardC = nil // the hold has its own bound; partialC ends it
+					continue
+				}
+				writeJSON(w, http.StatusGatewayTimeout,
+					map[string]string{"error": "ddp sync timed out waiting for peer ranks"})
+				return
+			}
 		}
 	}
 
 	s.ddp.mu.Lock()
-	blobs := make([]string, e.world)
-	for rank, blob := range e.blobs {
-		blobs[rank] = blob
+	if e.acc != nil || e.result != nil || e.err != nil {
+		result, rerr, agreedEvery, rscale := e.result, e.err, e.syncEvery, e.resultScale
+		rscales, _ := json.Marshal(e.resultScales)
+		sameWork := e.checked && e.sameWork && e.fingerprinted > 1
+		// How many ranks the result actually averages. Equal to the world
+		// size unless the round completed short-handed, and the shim says so
+		// when it is not - a run quietly training on half its machines is
+		// exactly the kind of thing that should never be discovered later.
+		ranks := e.world
+		if e.partial > 0 {
+			ranks = e.partial
+		}
+		e.fetched[req.Rank] = true
+		rebalanceJSON := s.ddp.noteFor(req.Group, req.Rank, req.Seq)
+		if len(e.fetched) >= e.expectedCount() || rerr != nil {
+			delete(s.ddp.entries, key)
+		}
+		s.ddp.mu.Unlock()
+		if rerr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": rerr.Error()})
+			return
+		}
+		body := []byte(fmt.Sprintf(
+			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"scales\": %s, "+
+				"\"same_work\": %t, \"ranks\": %d%s}\n",
+			agreedEvery, rscale, rscales, sameWork, ranks, rebalanceJSON))
+		body = putFrame(body, result)
+		w.Header().Set("Content-Type", DDPReduceContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+		return
+	}
+	ordered := make([][]byte, e.world)
+	for rank, b := range e.blobs {
+		ordered[rank] = b
 	}
 	e.fetched[req.Rank] = true
-	if len(e.fetched) == e.world {
+	if len(e.fetched) >= e.expectedCount() {
 		delete(s.ddp.entries, key)
 	}
 	s.ddp.mu.Unlock()
 
-	writeJSON(w, http.StatusOK, map[string]any{"blobs": blobs})
+	if mode == ddpModeFrames {
+		body := []byte(fmt.Sprintf("{\"blob_frames\": %d}\n", len(ordered)))
+		for _, b := range ordered {
+			body = putFrame(body, b)
+		}
+		w.Header().Set("Content-Type", DDPFramesContentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+		return
+	}
+	asStrings := make([]string, len(ordered))
+	for i, b := range ordered {
+		asStrings[i] = string(b)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"blobs": asStrings})
+}
+
+// handleDDPSyncStatus says which ranks have reached a round, so a rank held
+// at the start barrier can say whom it is waiting for.
+func (s *Server) handleDDPSyncStatus(w http.ResponseWriter, r *http.Request) {
+	seq, err := strconv.ParseInt(r.URL.Query().Get("seq"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "seq: " + err.Error()})
+		return
+	}
+	arrived := []int{}
+	world := 0
+	s.ddp.mu.Lock()
+	if e := s.ddp.entries[r.URL.Query().Get("group")+"/"+jsonInt(seq)]; e != nil {
+		world = e.world
+		for rank := range e.seen {
+			arrived = append(arrived, rank)
+		}
+		for rank := range e.blobs {
+			arrived = append(arrived, rank)
+		}
+	}
+	s.ddp.mu.Unlock()
+	sort.Ints(arrived)
+	writeJSON(w, http.StatusOK, map[string]any{"world": world, "arrived": arrived})
 }
 
 func jsonInt(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// ddpFingerprintSeqs is how many early syncs are checked for ranks doing
+// identical work.
+const ddpFingerprintSeqs = 3
+
+// fnv1a is FNV-1a 64. Enough to tell "these two models are the same" from
+// "these two models differ", which is the only question being asked, and fast
+// enough to run over a model without showing up beside a network round trip.
+func fnv1a(b []byte) uint64 {
+	const (
+		offset = 14695981039346656037
+		prime  = 1099511628211
+	)
+	h := uint64(offset)
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= prime
+	}
+	return h
+}
+
+// ddpPartialAfter is how long a sync waits for every rank before going ahead
+// with the ones present. A dead rank and a slow one look identical from here,
+// and the old three-minute wait meant one lost machine stalled the run and
+// then failed it.
+var ddpPartialAfter = 45 * time.Second
+
+// ddpHandoverHold bounds how long a round is held open, from its creation,
+// for the ranks busy with a join handover. Under the shim's 240 s sync
+// timeout, so the held ranks are still waiting when the round closes.
+// ponytail: a model too big to hand over in this time joins late (the round
+// goes partial once); raise it together with the shim's timeout if that bites.
+var ddpHandoverHold = 200 * time.Second
+
+// ddpHandoverPoll is how often a held round looks again.
+var ddpHandoverPoll = time.Second
+
+// handoverHolds reports whether the round at key should keep waiting because
+// a join handover is in flight and the ranks it occupies (the one handing
+// over, and the joiner once the round counts it) have not posted yet.
+func (s *Server) handoverHolds(group, key string) bool {
+	s.ddp.mu.Lock()
+	defer s.ddp.mu.Unlock()
+	e := s.ddp.entries[key]
+	run := s.ddp.runs[group]
+	if e == nil || run == nil || e.result != nil || e.err != nil {
+		return false
+	}
+	j, handingOver := run.join, true
+	if j == nil {
+		j, handingOver = run.loading, false
+	}
+	if j == nil {
+		return false
+	}
+	arrived := func(rank int) bool {
+		if e.seen[rank] {
+			return true
+		}
+		_, ok := e.blobs[rank]
+		return ok
+	}
+	busy := (handingOver && !arrived(j.from) && !run.dropped[j.from]) ||
+		(j.rank < e.world && !arrived(j.rank) && !run.dropped[j.rank])
+	if !busy {
+		return false
+	}
+	if time.Since(e.created) > ddpHandoverHold {
+		if !e.holdExpired {
+			e.holdExpired = true
+			log.Warn().Str("group", group).Int("join", j.rank).Int("from", j.from).
+				Dur("held", time.Since(e.created).Round(time.Second)).
+				Msg("ddp join handover still in flight; closing the round without the ranks busy with it")
+		}
+		return false
+	}
+	return true
+}
+
+// ddpHardTimeout bounds the whole wait, for the case where partial completion
+// is not possible either.
+const ddpHardTimeout = 3 * time.Minute
+
+// completePartial finishes a round with whoever has contributed, and reports
+// whether there was enough to average.
+//
+// Under the lock and idempotent: several ranks reach their deadline at about
+// the same moment, and only the first should compute the result - the others
+// must find it already there rather than averaging a second time.
+func (s *Server) completePartial(group, key string) bool {
+	s.ddp.mu.Lock()
+	defer s.ddp.mu.Unlock()
+
+	e := s.ddp.entries[key]
+	if e == nil {
+		return false
+	}
+	if e.result != nil || e.err != nil {
+		return true // somebody else already finished it
+	}
+	if e.acc == nil || e.acc.count == 0 {
+		return false
+	}
+	e.result, e.resultScale, e.err = e.acc.mean()
+	e.partial = e.acc.count
+	e.acc = nil
+	select {
+	case <-e.done:
+	default:
+		close(e.done)
+	}
+	if e.opening && e.err == nil {
+		s.ddp.dropMissedStart(group, e)
+	}
+	return e.err == nil
+}
+
+// ddpStartWait is how long the opening round waits for every rank. A rank's
+// first sync comes once its closure is imported and its script has reached
+// the first optimizer step, so on a cold node this covers the closure's
+// transfer. Bounded because a rank still receiving a multi-GB closure over a
+// relay took the friend's 2-laptop run to 792 s of training at 45 s a step
+// (V3 53); the ring starts without it and it can join later.
+var ddpStartWait = 5 * time.Minute
+
+// ddpStartWaitMax caps what a rank may ask for.
+const ddpStartWaitMax = time.Hour
+
+// startWait is the opening round's wait, given a rank's request in seconds.
+func startWait(secs float64) time.Duration {
+	if secs <= 0 {
+		return ddpStartWait
+	}
+	return min(time.Duration(secs*float64(time.Second)), ddpStartWaitMax)
+}
+
+// dropMissedStart drops every rank that never reached the opening round, so
+// no later round waits for it and its data moves to the ranks that came.
+// Caller holds the board lock.
+func (b *ddpBoard) dropMissedStart(group string, e *ddpEntry) {
+	r := b.run(group)
+	var missed []string
+	first := -1
+	for rank := 0; rank < e.world; rank++ {
+		if e.seen[rank] || r.dropped[rank] {
+			continue
+		}
+		b.markRankDownLocked(group, rank, e.world, "not ready when training started")
+		if first < 0 {
+			first = rank
+		}
+		missed = append(missed, strconv.Itoa(rank))
+	}
+	if first < 0 {
+		return
+	}
+	left := e.world - b.dropsBelow(group, e.world)
+	why := fmt.Sprintf("rank %s not ready after %s (closure still on its way, or the "+
+		"script not started); training started on the %d rank(s) that were, and their "+
+		"data moves to them at the next epoch. A late rank can join once it is ready "+
+		"if the script trains from a DataLoader",
+		strings.Join(missed, ", "), time.Since(e.created).Round(time.Second), left)
+	b.publish(r, r.lastSeq+1, ringFragment(r)+fmt.Sprintf(`, "down": %d, "why": %q`, first, why))
+	log.Warn().Str("group", group).Strs("ranks", missed).Int("left", left).
+		Msg("ddp start barrier: ranks not ready, the ring starts without them")
+}
+
+// pacedBy reports whether one rank is setting the pace for the whole ring, in
+// the words the user needs to hear.
+//
+// With equal batches - which is what runs today - a step costs what the
+// slowest rank costs, so a rank several times slower than the rest is not
+// contributing a share of the work, it is deciding how long every step takes.
+// Nothing said so before: the loss came out right and the run was simply
+// slow, which is the failure mode this whole project exists to make visible.
+//
+// Silent until every rank has reported, because the fastest rank arriving
+// first would otherwise look like a ring of one.
+func pacedBy(steps map[int]float64, world int) (string, bool) {
+	if world < 2 || len(steps) < world {
+		return "", false
+	}
+	slowRank, slow := -1, 0.0
+	fast := math.MaxFloat64
+	var total float64
+	for rank, ms := range steps {
+		if ms > slow {
+			slowRank, slow = rank, ms
+		}
+		if ms < fast {
+			fast = ms
+		}
+		total += ms
+	}
+	if slow <= 0 || fast <= 0 || slow/fast < pacedRatio {
+		return "", false
+	}
+	// What the ring costs per step now, against what it would cost without
+	// the straggler. Equal batches: the step is the slowest rank, and dropping
+	// it leaves the next slowest - approximated here by the mean of the rest,
+	// which is enough to say whether the difference is worth acting on.
+	rest := (total - slow) / float64(len(steps)-1)
+	return fmt.Sprintf(
+		"rank %d takes %.0f ms a step against %.0f ms for the fastest, and with "+
+			"equal batches every rank waits for the slowest - so this one rank is "+
+			"setting the pace for the whole ring. Without it a step would cost "+
+			"about %.0f ms.", slowRank, slow, fast, rest), true
+}
+
+// pacedRatio is how much slower one rank must be before it is worth saying so.
+// Ranks on identical hardware vary by a few percent from load alone; a factor
+// of two is a different device, or a machine doing something else.
+const pacedRatio = 2.0
+
+// rankSamples renders how many samples each rank's step covered.
+//
+// Reported because its absence hid a real fault: the sample count arrived as
+// zero for every rank, which made the weighted average fall back to treating
+// them as equals and left the refit with no rates. Nothing failed - the
+// number was simply never looked at.
+func rankSamples(r *ddpRun) string {
+	if r == nil || len(r.reports) == 0 {
+		return "none reported"
+	}
+	ranks := make([]int, 0, len(r.reports))
+	for rank := range r.reports {
+		ranks = append(ranks, rank)
+	}
+	sort.Ints(ranks)
+	parts := make([]string, 0, len(ranks))
+	for _, rank := range ranks {
+		parts = append(parts, fmt.Sprintf("rank %d %d", rank, r.reports[rank].Samples))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// rankTimes renders the ring's measured step times in rank order.
+func rankTimes(steps map[int]float64) string {
+	ranks := make([]int, 0, len(steps))
+	for r := range steps {
+		ranks = append(ranks, r)
+	}
+	sort.Ints(ranks)
+	parts := make([]string, 0, len(ranks))
+	for _, r := range ranks {
+		parts = append(parts, fmt.Sprintf("rank %d %.0f ms", r, steps[r]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// rebalanceEvery is how many syncs pass between refits.
+//
+// Often enough that a machine which slows down mid-run is noticed within
+// seconds, rare enough that the ranks are not re-slicing their data
+// constantly - a reshare costs an epoch boundary, which is the only place it
+// can safely happen.
+var rebalanceEvery = envInt("PIPEDPEER_DDP_REBALANCE_EVERY", 20)
+
+// rebalanceFor decides whether to tell the ring something, and returns the
+// JSON fragment to append to the reply (empty when there is nothing to say).
+//
+// Caller holds the board lock.
+func (b *ddpBoard) rebalanceFor(group string, world int) string {
+	r := b.runs[group]
+	if r == nil {
+		return ""
+	}
+	r.round++
+	if rebalanceEvery <= 0 || r.round%rebalanceEvery != 0 {
+		return ""
+	}
+
+	plan := planRebalance(r.reports, r.weights, world)
+	if plan.Drop >= 0 && !r.dropped[plan.Drop] {
+		r.dropped[plan.Drop] = true
+		log.Warn().Str("group", group).Int("rank", plan.Drop).Msg(plan.Why)
+		return fmt.Sprintf(`, "drop": %d, "why": %q`, plan.Drop, plan.Why)
+	}
+	if plan.Weights == nil {
+		return ""
+	}
+	r.weights = plan.Weights
+	log.Info().Str("group", group).Str("shares", sharePercents(plan.Weights)).
+		Msg("ring reshared from measured throughput")
+	parts := make([]string, len(plan.Weights))
+	for i, w := range plan.Weights {
+		parts[i] = strconv.FormatFloat(w, 'f', 6, 64)
+	}
+	return fmt.Sprintf(`, "weights": [%s], "why": %q`,
+		strings.Join(parts, ","), plan.Why)
+}
+
+// envInt reads a positive integer from the environment, or returns def.
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return def
 }

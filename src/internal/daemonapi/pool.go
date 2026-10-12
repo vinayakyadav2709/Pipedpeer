@@ -3,14 +3,20 @@ package daemonapi
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +26,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -97,13 +104,45 @@ type chunk struct {
 	frames                                   bool
 	starmap                                  bool
 	itemsB64                                 bool
+	itemsZlib                                bool
 	noSplit                                  bool
 	noFanout                                 bool
 	force                                    bool
+	originLocal                              bool
+	prov                                     *provenance
 	requiredMem                              int64
 	cacheKeys                                []string
 	itemKeys                                 []string
 	chunkDir                                 string
+	// offload is the machine key `run --offload` keeps distributed work off
+	// (X-Pipedpeer-Offload; "" when the run did not ask). See offloadPeers.
+	offload string
+	// ctx is the request this chunk serves. It ends when the requester goes
+	// away (its job was killed, or the origin dropped a forward), and that
+	// kills the local workers and drops the peer forwards started for it.
+	ctx context.Context
+}
+
+// context returns the chunk's request context; Background when the chunk was
+// built outside a request (tests, direct calls).
+func (c *chunk) context() context.Context {
+	if c.ctx == nil {
+		return context.Background()
+	}
+	return c.ctx
+}
+
+// killProcessGroup SIGKILLs the process group a worker leads (it was started
+// with Setpgid), so whatever the user's function forked dies with it. Falls
+// back to the process alone when the group is already gone.
+func killProcessGroup(p *os.Process) error {
+	if p == nil {
+		return nil
+	}
+	if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+		return p.Kill()
+	}
+	return nil
 }
 
 // chunkDirFor returns the on-disk chunk cache dir for a store path. Chunks
@@ -114,10 +153,118 @@ type chunk struct {
 // it every sub-minSplit chunk would land on the first peer in spill order.
 var forceRotate atomic.Int64
 
+// isLoopback reports whether a request came from this machine, which is how
+// the daemon tells a job's own shim apart from a peer forwarding work in.
+func isLoopback(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func chunkDirFor(storePath string) string {
 	sum := sha256.Sum256([]byte(storePath))
-	return filepath.Join(os.TempDir(), "pipedpeer", "chunkcache", hex.EncodeToString(sum[:8]))
+	// Parsed chunks are worth keeping across a warm-worker respawn and can be
+	// large; a tmpfs charges RAM for them and drops them on reboot.
+	return filepath.Join(userdir.Cache(), "chunkcache", hex.EncodeToString(sum[:8]))
 }
+
+// chunkFanOut is shared by both worker scripts: it spreads one chunk's items
+// across the node's cores instead of walking them one at a time.
+//
+// A chunk used to run in a single process, so a 16-core peer contributed
+// exactly one core to a job. Spilling to it could therefore be slower than
+// keeping the work at home — distribution that measurably lost to doing
+// nothing, which is the opposite of the point. The kernel arrives as exec'd
+// source and is not importable, so it cannot be pickled out to workers; a
+// fork context inherits it through module globals instead, which is also why
+// this must never use spawn or forkserver.
+const chunkFanOut = `
+_FUNC = None
+_STARMAP = False
+
+
+def _call_one(item):
+    if _STARMAP:
+        return _FUNC(*(item if isinstance(item, (list, tuple)) else (item,)))
+    return _FUNC(item)
+
+
+def _mute_stdout():
+    # stdout is the warm worker's ack channel; a print() in user code would
+    # otherwise land in the middle of the protocol.
+    sys.stdout = sys.stderr
+
+
+def _free_bytes():
+    """Memory this node could actually give a new process.
+
+    Not SC_AVPHYS_PAGES: that counts only wholly free pages and ignores the
+    page cache, which the kernel reclaims on demand, so on a box with a warm
+    cache it reads several times too low and every limit built on it
+    collapses. MemAvailable is the kernel's own answer."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError):
+        return 0
+
+
+def _fan_width(n_items, required_mem):
+    """How many processes to spread a chunk over: bounded by cores, by the
+    item count, and by the same 40%-of-free-RAM rule the daemon admits chunks
+    against, since running items side by side multiplies the working set.
+
+    The memory bound applies even when the caller sent no estimate. Trusting
+    cores alone in that case is how a node with plenty of cores and little
+    free RAM gets pushed over: nothing below this enforces a limit, because
+    the sandbox carries no cgroup at all, so this arithmetic is the only thing
+    standing between a wide chunk and the OOM killer. Unknown per-item cost is
+    assumed to be a conservative 256MB rather than zero."""
+    if n_items <= 1:
+        return 1
+    n = os.cpu_count() or 1
+    override = os.environ.get("PIPEDPEER_WORKER_PROCS", "").strip()
+    if override:
+        try:
+            return max(1, min(int(override), n_items))
+        except ValueError:
+            pass
+    avail = _free_bytes()
+    if avail > 0:
+        if required_mem > 0:
+            per_item = max(1, required_mem // n_items)
+        else:
+            per_item = 256 << 20
+        n = min(n, max(1, int(avail * 0.4) // per_item))
+    return max(1, min(n, n_items))
+
+
+def run_items(func, items, starmap, req):
+    global _FUNC, _STARMAP
+    _FUNC, _STARMAP = func, starmap
+    # The cache-backed reads keep parsed chunks in this process's _CACHE.
+    # Forked children would populate their own copy and the parent would miss
+    # on the next fetch, so those paths stay single-process.
+    stateful = bool(req.get("cache_keys") or req.get("item_keys"))
+    width = 1 if stateful else _fan_width(len(items), int(req.get("required_mem") or 0))
+    if width > 1:
+        try:
+            import multiprocessing
+            with multiprocessing.get_context("fork").Pool(width, _mute_stdout) as pool:
+                return pool.map(_call_one, items, chunksize=1)
+        except Exception:
+            pass
+    return [_call_one(item) for item in items]
+`
 
 // poolRunner is the Python helper executed inside the closure to run a
 // pickled function over a batch of items. It is written to a temp file and
@@ -128,6 +275,8 @@ func chunkDirFor(storePath string) string {
 // pickle frames) and the legacy base64-in-JSON batch.
 const poolRunner = `# Runs a pickled callable over a batch, for pipedpeer's cluster pool.
 import base64, hashlib, json, os, pickle, struct, sys
+
+` + chunkFanOut + `
 
 with open(sys.argv[1], "rb") as f:
     data = f.read()
@@ -148,6 +297,11 @@ if frames:
     for _ in range(req["items_frames"]):
         f, rest = read_frame(rest)
         raw.append(f)
+    # items_zlib: the submitter found this payload compressible and said so,
+    # rather than either side guessing. Dense float arrays are sent raw.
+    if req.get("items_zlib"):
+        import zlib
+        raw = [zlib.decompress(r) for r in raw]
     items = [pickle.loads(r) for r in raw]
 else:
     req = json.loads(data)
@@ -184,13 +338,7 @@ if req.get("cache_keys"):
         missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
         raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, ns["_CHUNK_DIR"]))
 
-results = []
-for item in items:
-    if starmap:
-        args = item if isinstance(item, list) else (item,)
-        results.append(func(*args))
-    else:
-        results.append(func(item))
+results = run_items(func, items, starmap, req)
 
 if frames:
     out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
@@ -220,6 +368,8 @@ const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per
 # in_file/out_file use the frames wire format (header line + length-prefixed
 # raw pickle frames) for heavy chunks and legacy base64 JSON for small ones.
 import base64, gc, hashlib, json, os, pickle, struct, sys, traceback
+
+` + chunkFanOut + `
 
 # ponytail: FIFO-eviction byte budget instead of a true LRU — the point is to
 # never OOM the worker from accumulating parsed chunks, and a dict preserves
@@ -295,6 +445,11 @@ def load_req(path):
     for _ in range(req["items_frames"]):
         f, rest = read_frame(rest)
         raw.append(f)
+    # items_zlib: the submitter found this payload compressible and said so,
+    # rather than either side guessing. Dense float arrays are sent raw.
+    if req.get("items_zlib"):
+        import zlib
+        raw = [zlib.decompress(r) for r in raw]
     return req, frames, [pickle.loads(r) for r in raw], g
 
 for line in sys.stdin:
@@ -338,13 +493,7 @@ for line in sys.stdin:
             if any(i is None for i in items):
                 missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
                 raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, _CHUNK_DIR))
-        results = []
-        for item in items:
-            if starmap:
-                args = item if isinstance(item, list) else (item,)
-                results.append(func(*args))
-            else:
-                results.append(func(item))
+        results = run_items(func, items, starmap, req)
         if frames:
             out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
             with open(msg["out_file"], "wb") as f:
@@ -381,6 +530,11 @@ type poolRequest struct {
 	// ItemsB64 marks Items as base64-pickled objects (numpy arrays etc.) rather
 	// than plain JSON scalars, so block-partitioned numeric work can ship.
 	ItemsB64 bool `json:"items_b64,omitempty"`
+	// ItemsZlib marks frame items as zlib-compressed by the shim. The worker
+	// decompresses them, so every header the daemon rebuilds for a part has
+	// to carry it on; dropped, the worker unpickles compressed bytes and
+	// fails with "invalid load key, 'x'".
+	ItemsZlib bool `json:"items_zlib,omitempty"`
 	// CacheKeys resolves items from the worker's persistent chunk cache (warm
 	// worker only) instead of the payload: item i is the content hash under
 	// which the chunk was previously stored. A miss fails the request; the
@@ -428,6 +582,9 @@ type poolWorker struct {
 	stdin  *bufio.Writer
 	stdout *bufio.Scanner
 	id     int64
+	// killed is set once the worker was stopped (its request was cancelled,
+	// or the server shut down); a killed worker is never reused.
+	killed atomic.Bool
 	// mu serialises submits on this worker: stdin writes and stdout reads must
 	// not interleave when several fan-out goroutines hit the same store.
 	mu sync.Mutex
@@ -453,10 +610,139 @@ type poolManager struct {
 	// that recovers mid-run is tried again.
 	deadMu    sync.Mutex
 	deadPeers map[string]bool
+
+	// rates is what every peer has actually managed, measured from the parts
+	// already sent to it. Sizing shares from advertised core counts alone
+	// ignores how loaded a peer is and how slow the link to it is, which are
+	// usually the things that decide whether sending it work helps at all.
+	rates *rateModel
+
+	// coresFn reports a peer's advertised core count, used only as a prior
+	// until that peer has been measured once.
+	coresFn func(peer string) int
+
+	// machineFn reports a peer's machine key ("" when unknown), so --offload
+	// can drop a machine's peers by key rather than by address.
+	machineFn func(peer string) string
+
+	stats poolStats
+}
+
+// selfMachine is this daemon's machine key; a variable so tests can move it.
+var selfMachine = heartbeat.Machine
+
+// offloadPeers applies `run --offload`: it drops every peer on the machine
+// whose key is machine, and reports whether this node runs on that machine
+// itself, in which case it takes no share either. The machine is matched by
+// key, never by address - an internet peer is 127.0.0.1:<forwarder port>. A
+// peer that reports no key is kept: unknown is not the same machine.
+func (pm *poolManager) offloadPeers(peers []string, machine string) ([]string, bool) {
+	if machine == "" {
+		return peers, false
+	}
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if pm.machineFn != nil && heartbeat.SameMachine(pm.machineFn(p), machine) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, heartbeat.SameMachine(selfMachine(), machine)
+}
+
+// peerCores is the prior for an unmeasured peer.
+func (pm *poolManager) peerCores(peer string) int {
+	if pm.coresFn == nil {
+		return 0
+	}
+	return pm.coresFn(peer)
+}
+
+// provenance records where each part of a chunk actually ran, so the answer
+// travels home with the results.
+//
+// Without it the shim can only say it handed work to a daemon, which is not
+// the same claim: a daemon with no eligible peers runs the chunk itself, and
+// counting that as distributed work is exactly the sort of comfortable
+// half-truth that let a broken dispatch path look healthy. A receipt that
+// cannot tell "ran on another machine" from "posted to a socket" is not
+// evidence.
+type provenance struct {
+	mu    sync.Mutex
+	parts []provPart
+}
+
+// provPart.Where is "local" for work this node ran, or "peer:<host:port>".
+type provPart struct {
+	Where string `json:"where"`
+	Items int    `json:"items"`
+	Ms    int64  `json:"ms"`
+}
+
+func (p *provenance) record(where string, items int, ms int64) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.parts = append(p.parts, provPart{Where: where, Items: items, Ms: ms})
+}
+
+func (p *provenance) snapshot() []provPart {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]provPart(nil), p.parts...)
+}
+
+// poolStats is this node's tally of pool work, served at /v1/pool/stats.
+//
+// Until it existed there was no way to ask a node what it had actually done:
+// a run that distributed everything and one that distributed nothing left the
+// same job history, and the only trace of a chunk arriving was a log line, so
+// anything wanting to check had to shell into the machine and grep. That is
+// how a completely broken dispatch path stayed invisible for months, and why
+// the chaos test could not tell a surviving cluster from an idle one.
+type poolStats struct {
+	mu             sync.Mutex
+	ChunksReceived int64 `json:"chunks_received"`
+	ChunksLocal    int64 `json:"chunks_from_local_shim"`
+	ChunksPeer     int64 `json:"chunks_from_peers"`
+	ItemsExecuted  int64 `json:"items_executed_here"`
+	PartsToPeers   int64 `json:"parts_sent_to_peers"`
+	PartsFailed    int64 `json:"parts_failed"`
+	// ChunksCancelled counts requests whose requester went away mid-work.
+	ChunksCancelled int64 `json:"chunks_cancelled"`
+}
+
+func (p *poolStats) snapshot() map[string]int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return map[string]int64{
+		"chunks_received":        p.ChunksReceived,
+		"chunks_from_local_shim": p.ChunksLocal,
+		"chunks_from_peers":      p.ChunksPeer,
+		"items_executed_here":    p.ItemsExecuted,
+		"parts_sent_to_peers":    p.PartsToPeers,
+		"parts_failed":           p.PartsFailed,
+		"chunks_cancelled":       p.ChunksCancelled,
+	}
+}
+
+func (p *poolStats) add(f func(*poolStats)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f(p)
 }
 
 func newPoolManager() *poolManager {
-	return &poolManager{workers: make(map[string]*poolWorker), deadPeers: make(map[string]bool)}
+	return &poolManager{
+		workers:   make(map[string]*poolWorker),
+		deadPeers: make(map[string]bool),
+		rates:     newRateModel(),
+	}
 }
 
 // releaseHeapAfterWork forces Go to return freed heap to the OS after heavy
@@ -507,8 +793,59 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 // It runs in a subprocess of <storePath>/bin/run so it executes in exactly the
 // environment the user's script runs in — no SDK, no shared state. Requests to
 // a store that already has a warm worker reuse it instead of re-spawning.
+// handlePoolStats reports what pool work this node has actually done, so a
+// test or a demo can check where the work went without shelling in to grep a
+// log file.
+func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.pool.stats.snapshot())
+}
+
+// maxPoolBody bounds a single /v1/pool/map request. The body is read whole
+// into memory before anything looks at it, so without a ceiling a peer -
+// or a bug in chunk sizing - can push this daemon into the OOM killer with
+// one request, taking every other job on the node with it. The shim's own
+// chunks are bounded by the 40%-of-free-RAM rule long before this; the
+// ceiling is here for everything that is not the shim behaving.
+const maxPoolBody = 2 << 30 // 2 GiB
+
+// poolBodyLimit is the ceiling for this daemon, which is not the same number
+// on every node. A fixed 2 GiB is most of a small worker's entire allowance -
+// the container beside its host in the lab is capped at exactly that - so one
+// request sized to the constant would consume everything the daemon is
+// allowed before a single item had been looked at. Half the budget, so there
+// is room left to do something with what arrives.
+func (s *Server) poolBodyLimit() int64 {
+	limit := int64(maxPoolBody)
+	if b := cgroups.SelfBudget(); b.Total > 0 && b.Total/2 < limit {
+		limit = b.Total / 2
+	}
+	return limit
+}
+
+// poolCancelled reports whether the requester of a pool request went away: the
+// shim's job was killed, or the origin dropped the forward it sent here. The
+// workers and forwards tied to the request have already been stopped through
+// its context by then; this logs it once and counts it.
+func (s *Server) poolCancelled(r *http.Request, items int, started time.Time) bool {
+	if r.Context().Err() == nil {
+		return false
+	}
+	log.Printf("[pool] cancelled: %d items from %s after %.1fs; requester went away, local workers stopped, peer forwards dropped",
+		items, r.RemoteAddr, time.Since(started).Seconds())
+	s.pool.stats.add(func(p *poolStats) { p.ChunksCancelled++ })
+	return true
+}
+
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
-	rawBody, _ := io.ReadAll(r.Body)
+	started := time.Now()
+	limit := s.poolBodyLimit()
+	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+			"error": fmt.Sprintf("pool request body exceeds %d bytes", limit),
+		})
+		return
+	}
 	defer releaseHeapAfterWork()
 	var req poolRequest
 	// Frames bodies: the header is the first line and the frames follow it.
@@ -553,6 +890,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	// Where the requesting job was submitted from ("host:port"); sunk to the
 	// tail of spill order so an idle orchestrator never outranks workers.
 	submitter := r.Header.Get("X-Pipedpeer-Submitter")
+	offload := r.Header.Get("X-Pipedpeer-Offload")
 	runPath := filepath.Join(storePath, "bin", "run")
 	if storePath == "" || !pathExists(runPath) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-Pipedpeer-Store header (or invalid store path)"})
@@ -565,6 +903,15 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[pool] received pool/map from %s: items=%d b64=%v cache_keys=%d required_mem=%d forwarded=%q",
 		r.RemoteAddr, len(items), req.ItemsB64, len(req.CacheKeys), req.RequiredMemBytes,
 		r.Header.Get("X-Pipedpeer-Forwarded"))
+	fromLocalShim := isLoopback(r.RemoteAddr) && r.Header.Get("X-Pipedpeer-Forwarded") == ""
+	s.pool.stats.add(func(p *poolStats) {
+		p.ChunksReceived++
+		if fromLocalShim {
+			p.ChunksLocal++
+		} else {
+			p.ChunksPeer++
+		}
+	})
 
 	// Memory bounding for horizontal scaling on constrained nodes. The safe
 	// working set is 40% of free RAM (max_safe_chunk_size); anything larger
@@ -577,9 +924,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		available := s.AvailableForJob()
 		if available < req.RequiredMemBytes {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
-				if peer := s.pool.bestPeer(storePath, submitter); peer != "" {
+				if peer := s.pool.bestPeer(storePath, submitter, offload); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
-					if s.forwardPoolMap(w, rawBody, peer, storePath) {
+					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload) {
+						return
+					}
+					if s.poolCancelled(r, len(items), started) {
 						return
 					}
 				}
@@ -594,25 +944,41 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 			ch := &chunk{
 				pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 				extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
-				starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
+				starmap: req.Starmap, itemsB64: req.ItemsB64, itemsZlib: req.ItemsZlib, noSplit: req.NoSplit,
 				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
+				offload:  offload,
+				// originLocal stays unset: setting it here would change
+				// placement, which is out of this path's remit.
+				prov: &provenance{},
+				ctx:  r.Context(),
 			}
-			s.runMicroChunks(w, runPath, storePath, ch, safe, submitter)
+			results, err := s.runMicroChunks(runPath, storePath, ch, safe, submitter)
+			if err != nil {
+				if s.poolCancelled(r, len(items), started) {
+					return
+				}
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			s.writePoolReply(w, ch.frames, results, ch.prov)
 			return
 		}
 	}
 
 	var results []any
-	var err error
 	ch := &chunk{
 		pickledFunc: req.Func, funcSrc: req.FuncSrc, funcName: req.FuncName,
 		extraB64: req.ExtraB64, items: items, globals: globals, frames: frames,
-		starmap: req.Starmap, itemsB64: req.ItemsB64, noSplit: req.NoSplit,
+		starmap: req.Starmap, itemsB64: req.ItemsB64, itemsZlib: req.ItemsZlib, noSplit: req.NoSplit,
 		noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
-		chunkDir: chunkDirFor(storePath),
+		chunkDir:    chunkDirFor(storePath),
+		offload:     offload,
+		originLocal: fromLocalShim,
+		prov:        &provenance{},
+		ctx:         r.Context(),
 	}
 	if err := os.MkdirAll(ch.chunkDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -627,28 +993,51 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	case req.NoFanout:
 		// One-hop fan-out: the origin already split; this chunk is terminal.
 		results, err = s.pool.runLocal(runPath, storePath, ch)
+		if err == nil {
+			ch.prov.record("local", len(ch.items), 0)
+		}
 	default:
 		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
 	}
 	if err != nil {
+		if s.poolCancelled(r, len(items), started) {
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if frames {
-		// Frames response: small header line + raw pickle result frames.
-		hdr := fmt.Sprintf("{\"results_frames\": %d}\n", len(results))
-		w.Header().Set("Content-Type", "application/vnd.pipedpeer.frames")
-		w.WriteHeader(http.StatusOK)
-		body := make([]byte, 0, 1024)
-		body = append(body, hdr...)
-		for _, r := range results {
-			body = putFrame(body, resultPickle(r))
-		}
-		w.Write(body)
+	s.writePoolReply(w, frames, results, ch.prov)
+}
+
+// writePoolReply answers a pool request in the shape it was asked in: frames
+// for a frames request (the shim reads only results_frames and the frames that
+// follow, so a JSON reply to it would look like zero results), JSON otherwise.
+func (s *Server) writePoolReply(w http.ResponseWriter, frames bool, results []any, prov *provenance) {
+	if !frames {
+		writeJSON(w, http.StatusOK, map[string]any{"results": results})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	// Frames response: small header line + raw pickle result frames. The
+	// receipt rides in the header so the submitter learns where the work
+	// ran, not merely that it was accepted.
+	w.Header().Set("Content-Type", framesContentType)
+	w.WriteHeader(http.StatusOK)
+	body := make([]byte, 0, 1024)
+	body = append(body, poolFramesHeader(len(results), s.nodeID, prov.snapshot())...)
+	for _, r := range results {
+		body = putFrame(body, resultPickle(r))
+	}
+	w.Write(body)
 }
+
+// poolFramesHeader is the first line of a frames reply.
+func poolFramesHeader(n int, node string, parts []provPart) []byte {
+	recJSON, _ := json.Marshal(parts) // []provPart always marshals
+	return fmt.Appendf(nil, "{\"results_frames\": %d, \"receipt\": {\"node\": %q, \"parts\": %s}}\n",
+		n, node, recJSON)
+}
+
+const framesContentType = "application/vnd.pipedpeer.frames"
 
 // resultPickle extracts the raw pickle bytes a result carries. Results are
 // standardised on raw pickle bytes internally; only the wire edges base64.
@@ -665,7 +1054,7 @@ func resultPickle(r any) []byte {
 // order. Each sub-batch still fans out to peers; only the orchestrator's own
 // memory share is bounded, and the worker's explicit GC keeps RSS flat across
 // the pipeline.
-func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string, ch *chunk, safe int64, submitter string) {
+func (s *Server) runMicroChunks(runPath, storePath string, ch *chunk, safe int64, submitter string) ([]any, error) {
 	n := int((ch.requiredMem + safe - 1) / safe)
 	if n > len(ch.items) {
 		n = len(ch.items)
@@ -677,6 +1066,9 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 		hi := total * int64(i+1) / int64(n)
 		if lo == hi {
 			continue
+		}
+		if err := ch.context().Err(); err != nil {
+			return nil, err
 		}
 		sub := *ch
 		sub.items = ch.items[lo:hi]
@@ -697,39 +1089,97 @@ func (s *Server) runMicroChunks(w http.ResponseWriter, runPath, storePath string
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		case sub.noFanout:
 			part, err = s.pool.runLocal(runPath, storePath, &sub)
+			if err == nil {
+				ch.prov.record("local", len(sub.items), 0)
+			}
 		default:
 			part, err = s.pool.runChunk(runPath, storePath, &sub, submitter)
 		}
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return nil, err
 		}
 		results = append(results, part...)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	return results, nil
 }
 
 // forwardPoolMap relays the raw request to a peer (one hop) so a weak
 // orchestrator forwards heavy work instead of refusing it. Returns true when
-// the peer answered; the status and body are copied verbatim.
-func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, storePath string) bool {
-	fwd, err := http.NewRequest("POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
+// the peer answered. The status and body are copied, except that a frames
+// receipt is relabelled so the work the peer ran itself reads as "peer:<peer>":
+// to the submitter it ran on another machine, not on this one.
+//
+// ctx is the incoming request's: when its requester goes away the forward is
+// dropped, and the peer stops the work through its own request context.
+func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawBody []byte, peer, storePath, offload string) bool {
+	fwd, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
 	if err != nil {
+		log.Printf("[pool] forward to %s: building request: %v", peer, err)
 		return false
 	}
 	fwd.Header.Set("Content-Type", "application/json")
 	fwd.Header.Set("X-Pipedpeer-Store", storePath)
 	fwd.Header.Set("X-Pipedpeer-Forwarded", "1")
+	if offload != "" {
+		// The peer may split it again; it must keep off that machine too.
+		fwd.Header.Set("X-Pipedpeer-Offload", offload)
+	}
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(fwd)
 	if err != nil {
+		if ctx.Err() == nil { // a cancel is logged once by the caller
+			log.Printf("[pool] forward to %s failed: %v", peer, err)
+		}
 		return false
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("[pool] forward to %s: reading reply: %v", peer, err)
+		}
+		return false
+	}
+	if resp.StatusCode == http.StatusOK {
+		body = relabelForwardedReceipt(body, peer)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(body)
 	return true
+}
+
+// relabelForwardedReceipt rewrites a frames reply's receipt so every part the
+// peer ran itself ("local") reads "peer:<peer>". The node and the frames are
+// kept. A JSON reply carries no receipt and passes through untouched.
+func relabelForwardedReceipt(body []byte, peer string) []byte {
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		return body
+	}
+	var hdr struct {
+		ResultsFrames *int `json:"results_frames"`
+		Receipt       struct {
+			Node  string     `json:"node"`
+			Parts []provPart `json:"parts"`
+		} `json:"receipt"`
+	}
+	if err := json.Unmarshal(body[:nl], &hdr); err != nil {
+		log.Printf("[pool] forwarded reply from %s has an unreadable first line; receipt left as sent: %v", peer, err)
+		return body
+	}
+	if hdr.ResultsFrames == nil {
+		return body // JSON reply
+	}
+	for i := range hdr.Receipt.Parts {
+		if hdr.Receipt.Parts[i].Where == "local" {
+			hdr.Receipt.Parts[i].Where = "peer:" + peer
+		}
+	}
+	out := poolFramesHeader(*hdr.ResultsFrames, hdr.Receipt.Node, hdr.Receipt.Parts)
+	return append(out, body[nl+1:]...)
 }
 
 // runChunk dispatches one chunk, preferring a warm worker and falling back to
@@ -745,6 +1195,10 @@ func (s *Server) forwardPoolMap(w http.ResponseWriter, rawBody []byte, peer, sto
 // local), so a pre-partitioned payload (hash-shuffle buckets) lands one item
 // per node. Results are still returned in input order.
 func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter string) ([]any, error) {
+	ctx := ch.context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Peel off peers before taking the local worker lock so each local submit
 	// serialises only its own sub-chunk.
 	var peers []string
@@ -753,6 +1207,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		peers = pm.peerFn(storePath, submitter)
 	}
 	pm.mu.Unlock()
+	// --offload: none of the parts below may land on the kept-off machine,
+	// and when that is this node, it takes no share of its own.
+	peers, offHere := pm.offloadPeers(peers, ch.offload)
+	if offHere && len(peers) == 0 {
+		log.Printf("[pool] --offload: no other machine shares this closure; running %d items on this machine", len(ch.items))
+	}
 
 	pm.deadMu.Lock()
 	pm.deadPeers = make(map[string]bool)
@@ -842,7 +1302,13 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			minSplit = 2
 		}
 		if len(items) < minSplit {
-			if ch.force {
+			// Too small to divide. Send it whole to a peer anyway when it came
+			// from a shim on this machine: that shim already kept its own half
+			// and handed us this one to place elsewhere, so running it here
+			// competes with the pool that is mid-race, and the round trip
+			// bought nothing. Rotated so successive small dispatches spread
+			// instead of pinning the first peer.
+			if ch.force || ch.originLocal || offHere {
 				j := int(forceRotate.Add(1)) % len(peers)
 				ordered := append(append([]string{}, peers[j:]...), peers[:j]...)
 				parts = []part{{c: ch, peers: ordered}}
@@ -850,29 +1316,57 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				parts = []part{{c: ch, runPath: runPath}}
 			}
 		} else {
-			workers := len(peers) + 1
-			base := len(items) / workers
-			extra := len(items) % workers
+			// Keep a share for this node only when the work came from
+			// somewhere else. A chunk posted by a shim on this machine is the
+			// half of a race the local pool already declined to run: taking a
+			// share of it here would put the daemon's own worker processes on
+			// the same cores that pool is saturating, so the machine does the
+			// work twice over, oversubscribed, and spilling measures slower
+			// than never spilling at all. Every part still falls back to local
+			// if its peers fail, so nothing is stranded.
+			// Sizes follow measured speed, not headcount. An equal split
+			// across a 20-core box and a 4-core box makes the fast one finish
+			// and wait, so the chunk takes as long as the slowest
+			// participant - which is how adding a machine used to make a job
+			// slower. The scheduler equalises finish times instead, and
+			// declines any peer that cannot start before the rest are done.
+			shares := pm.planShares(items, peers, !ch.originLocal && !offHere)
 			idx := 0
-			for i := 0; i < workers; i++ {
-				size := base
-				if i < extra {
-					size++
-				}
-				if size == 0 {
+			for _, sh := range shares {
+				if sh.Items == 0 || idx >= len(items) {
 					continue
 				}
+				end := min(idx+sh.Items, len(items))
 				sub := *ch
-				sub.items = items[idx : idx+size]
-				idx += size
-				if i == workers-1 {
-					parts = append(parts, part{c: &sub, runPath: runPath}) // local
-				} else {
-					// Fan out to distinct peers: part i prefers peers[i], so
-					// every healthy peer gets work, not just the best one.
-					ordered := append(append([]string{}, peers[i:]...), peers[:i]...)
-					parts = append(parts, part{c: &sub, peers: ordered})
+				sub.items = items[idx:end]
+				idx = end
+				if sh.Device.ID == localDeviceID {
+					parts = append(parts, part{c: &sub, runPath: runPath})
+					continue
 				}
+				// Preferred peer first, then the rest as fallbacks: a part
+				// whose peer dies still runs somewhere rather than failing.
+				ordered := []string{sh.Device.ID}
+				for _, p := range peers {
+					if p != sh.Device.ID {
+						ordered = append(ordered, p)
+					}
+				}
+				parts = append(parts, part{c: &sub, peers: ordered})
+			}
+			// The plan can refuse every peer; under --offload there is then no
+			// local share to carry the items, so they go to a peer whole.
+			if len(parts) == 0 && offHere {
+				parts = []part{{c: ch, peers: peers}}
+				idx = len(items)
+			}
+			// Anything rounding left over goes to the first part rather than
+			// being dropped; losing items here is silent and corrupts results.
+			if idx < len(items) && len(parts) > 0 {
+				last := parts[len(parts)-1]
+				extra := *last.c
+				extra.items = append(append([]json.RawMessage{}, last.c.items...), items[idx:]...)
+				parts[len(parts)-1].c = &extra
 			}
 		}
 	}
@@ -884,6 +1378,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		}
 	}
 	log.Printf("[pool] chunk: %d items -> %d part(s), %d remote, %d local", len(items), len(parts), remote, len(parts)-remote)
+	pm.stats.add(func(p *poolStats) { p.PartsToPeers += int64(remote) })
 
 	// Results are stored per part and concatenated in part order after the
 	// wait, so the response is always in input order regardless of which part
@@ -899,28 +1394,91 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			defer wg.Done()
 			var r []any
 			var e error
+			started := time.Now()
 			if p.runPath != "" {
 				r, e = pm.runLocal(runPath, storePath, p.c)
+				if e == nil {
+					d := time.Since(started)
+					ch.prov.record("local", len(p.c.items), d.Milliseconds())
+					pm.rates.observe(localDeviceID, len(p.c.items), d)
+				}
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
+				//
+				// One time budget for the whole walk. A peer that runs out of
+				// it is slow, not broken: its copy keeps running, a second copy
+				// starts here, and the first to finish wins. Handing the part
+				// to the next peer would only start it again from scratch (a
+				// one-item svd part tried four peers at 300 s each and hung for
+				// over 15 minutes), and dropping the peer's copy threw away
+				// minutes of nearly finished work.
+				deadline := started.Add(remotePartBudget)
+				raced := false
 				for _, peer := range p.peers {
+					if ctx.Err() != nil {
+						break
+					}
 					if pm.peerDead(peer) {
 						continue
 					}
-					r, e = pm.runRemote(peer, storePath, p.c)
-					if e == nil {
+					left := time.Until(deadline)
+					if left <= 0 {
+						log.Printf("[pool] part %d: no time left of %s for another peer; running its %d items here", i, remotePartBudget, len(p.c.items))
 						break
+					}
+					var where string
+					if offHere {
+						// No local copy races a slow peer: this machine is
+						// kept off. A peer that fails hands on to the next.
+						where = "peer:" + peer
+						r, e = pm.runRemote(peer, storePath, p.c, 0)
+					} else {
+						r, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left)
+					}
+					if e == nil {
+						d := time.Since(started)
+						ch.prov.record(where, len(p.c.items), d.Milliseconds())
+						if where != "local" {
+							// Timed end to end, so the round trip and the closure
+							// transfer are in the number rather than assumed away.
+							// A local win is not measured: it started late, after
+							// the peer's budget ran out.
+							pm.rates.observe(peer, len(p.c.items), d)
+						}
+						break
+					}
+					if ctx.Err() != nil {
+						break // the requester left; the peer did nothing wrong
+					}
+					if raced {
+						break // both copies failed; the local one was the fallback
 					}
 					pm.markPeerDead(peer)
 				}
-				if e != nil {
+				if e != nil && ctx.Err() == nil && !raced {
 					// D2/D3 — a remote node adds capacity, never subtracts.
+					if offHere {
+						log.Printf("[pool] --offload: every peer failed part %d (%v); running its %d items on this machine", i, e, len(p.c.items))
+					}
 					r, e = pm.runLocal(runPath, storePath, p.c)
+					if e == nil {
+						// Deliberately not measured: this ran locally after a
+						// peer failed, so the elapsed time includes the failed
+						// attempt and would libel this node's own speed.
+						ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
+					}
 				}
+			}
+			if err := ctx.Err(); err != nil {
+				// Cancelled: no local fallback, no "part failed" noise. The
+				// request logs the cancel once.
+				errs[i] = err
+				return
 			}
 			if e != nil {
 				errs[i] = e
+				pm.stats.add(func(p *poolStats) { p.PartsFailed++ })
 				log.Printf("[pool] part %d failed: %v", i, e)
 				return
 			}
@@ -985,13 +1543,13 @@ func sinkPeerLast(peers []string, submitter string) []string {
 // bestPeer returns the top-ranked healthy peer sharing a store ("" when none),
 // used to forward requests the local node cannot admit (asymmetric
 // orchestrator: 0% heavy compute runs locally when peers exist).
-func (pm *poolManager) bestPeer(storePath, submitter string) string {
+func (pm *poolManager) bestPeer(storePath, submitter, offload string) string {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.peerFn == nil {
 		return ""
 	}
-	ps := pm.peerFn(storePath, submitter)
+	ps, _ := pm.offloadPeers(pm.peerFn(storePath, submitter), offload)
 	for _, p := range ps {
 		if p != submitter {
 			return p
@@ -1019,6 +1577,11 @@ func (pm *poolManager) markPeerDead(peer string) {
 
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
 func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, error) {
+	ctx := ch.context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pm.stats.add(func(p *poolStats) { p.ItemsExecuted += int64(len(ch.items)) })
 	pm.mu.Lock()
 	worker, ok := pm.workers[storePath]
 	if !ok || worker.dead() {
@@ -1029,6 +1592,7 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 		log.Printf("[pool] spawning warm worker for store %s", storePath)
 		w, err := pm.spawn(runPath, storePath)
 		if err != nil {
+			pm.mu.Unlock()
 			log.Printf("[pool] warm worker spawn failed: %v", err)
 			// Cold fallback: one-off spawn keeps the node functional even when
 			// persistent workers are unavailable.
@@ -1040,22 +1604,49 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 	pm.mu.Unlock()
 
 	results, err := worker.submit(ch)
+	if err != nil && ctx.Err() != nil {
+		// The request was cancelled and submit killed the worker mid-chunk:
+		// forget it (the next request re-warms) and run nothing in its place.
+		pm.dropWorker(storePath, worker)
+		return nil, ctx.Err()
+	}
 	if err != nil {
-		// Worker died mid-flight — drop it and fall back to a cold run for
-		// this chunk; the next request will re-warm.
+		// Worker died mid-flight (or could not take the task) — drop it, stop
+		// it if it still runs, and fall back to a cold run for this chunk; the
+		// next request will re-warm.
 		log.Printf("[pool] warm worker submit failed for store %s: %v", storePath, err)
-		pm.mu.Lock()
-		delete(pm.workers, storePath)
-		pm.mu.Unlock()
+		pm.dropWorker(storePath, worker)
+		if worker.killOnce() {
+			go func() {
+				err := worker.cmd.Wait()
+				log.Printf("[pool] warm worker pid %d stopped after a failed submit: %v", worker.cmd.Process.Pid, err)
+			}()
+		}
 		return runPoolChunk(runPath, ch)
 	}
 	return results, nil
 }
 
+// dropWorker forgets a failed warm worker, but only while the map still holds
+// that worker: a concurrent request may already have spawned a fresh one for
+// the store, and dropping it would leak its process past stopAll.
+func (pm *poolManager) dropWorker(storePath string, w *poolWorker) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if pm.workers[storePath] == w {
+		delete(pm.workers, storePath)
+	}
+}
+
 // runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
 // have the same closure already (peerFn filters for that). Failures are fatal
 // for the chunk: the caller returns them rather than silently dropping work.
-func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, error) {
+// remotePartBudget is how long one part may spend on peers, across every peer
+// it tries, before it runs locally. A variable so tests can shorten it.
+var remotePartBudget = 5 * time.Minute
+
+// runRemote posts a part to one peer and waits up to timeout for its results.
+func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time.Duration) ([]any, error) {
 	// no_fanout: the origin splits exactly once; a peer must never re-split and
 	// forward again (one-hop tree, results flow straight back to the origin).
 	var body []byte
@@ -1067,6 +1658,7 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "no_fanout": true,
 			"cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys, "chunk_dir": ch.chunkDir,
+			"items_zlib": ch.itemsZlib,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
@@ -1080,7 +1672,9 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 		body, _ = json.Marshal(payload)
 	}
 	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	// Tied to the request this chunk serves: a cancel closes the connection,
+	// and the peer stops its work when its own request context ends.
+	req, err := http.NewRequestWithContext(ch.context(), "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -1091,10 +1685,10 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 	}
 	req.Header.Set("X-Pipedpeer-Store", storePath)
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("peer %s: %v", peer, err)
+		return nil, fmt.Errorf("peer %s: %w", peer, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1148,10 +1742,70 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 	return results, nil
 }
 
+// runRemoteRacing posts part i to peer. If the peer has not answered within
+// budget, the part also starts here and the first copy to finish wins; the
+// other is cancelled (a cancelled local copy kills its warm worker, a
+// cancelled remote copy closes the connection and the peer stops). where is
+// "peer:<id>" or "local"; raced reports that the local copy was started, so
+// the caller must not run the part locally again.
+func (pm *poolManager) runRemoteRacing(i int, peer, runPath, storePath string, ch *chunk, budget time.Duration) (results []any, where string, raced bool, err error) {
+	type outcome struct {
+		r     []any
+		err   error
+		where string
+	}
+	out := make(chan outcome, 2) // both senders finish even after a winner returns
+	parent := ch.context()
+
+	rctx, rcancel := context.WithCancel(parent)
+	defer rcancel()
+	rc := *ch
+	rc.ctx = rctx
+	go func() {
+		r, e := pm.runRemote(peer, storePath, &rc, 0)
+		out <- outcome{r, e, "peer:" + peer}
+	}()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case o := <-out:
+		return o.r, o.where, false, o.err
+	case <-parent.Done():
+		return nil, "", false, parent.Err()
+	case <-timer.C:
+	}
+
+	log.Printf("[pool] part %d: peer %s has not finished %d items in %s; starting them here too, first to finish wins", i, peer, len(ch.items), budget.Round(100*time.Millisecond))
+	lctx, lcancel := context.WithCancel(parent)
+	defer lcancel()
+	lc := *ch
+	lc.ctx = lctx
+	go func() {
+		r, e := pm.runLocal(runPath, storePath, &lc)
+		out <- outcome{r, e, "local"}
+	}()
+
+	var errs []error
+	for range 2 {
+		o := <-out
+		if o.err == nil {
+			log.Printf("[pool] part %d: %s finished first; cancelling the other copy", i, o.where)
+			return o.r, o.where, true, nil // the deferred cancels stop the loser
+		}
+		if parent.Err() != nil {
+			return nil, "", true, parent.Err()
+		}
+		log.Printf("[pool] part %d: %s copy failed: %v; waiting for the other", i, o.where, o.err)
+		errs = append(errs, o.err)
+	}
+	return nil, "", true, errors.Join(errs...)
+}
+
 // spawn starts a warm worker for a store path. bin/run warm_worker.py reads
 // JSON-lines from stdin and writes results to stdout.
 func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
-	dir, err := os.MkdirTemp("", "pipedpeer-warm-*")
+	dir, err := userdir.Scratch("warm-*")
 	if err != nil {
 		return nil, err
 	}
@@ -1162,6 +1816,8 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 	}
 
 	cmd := exec.Command(runPath, workerScript)
+	// Own process group, so a cancel kills whatever the user's function forked.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		os.RemoveAll(dir)
@@ -1188,7 +1844,22 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 }
 
 func (w *poolWorker) dead() bool {
-	return w == nil || w.cmd == nil || w.cmd.ProcessState != nil
+	return w == nil || w.cmd == nil || w.killed.Load()
+}
+
+// kill stops the worker and its process group once; later calls do nothing.
+func (w *poolWorker) kill() { w.killOnce() }
+
+// killOnce is kill reporting whether this call stopped the worker, so exactly
+// one caller reaps it.
+func (w *poolWorker) killOnce() bool {
+	if w.killed.Swap(true) || w.cmd == nil || w.cmd.Process == nil {
+		return false
+	}
+	if err := killProcessGroup(w.cmd.Process); err != nil {
+		log.Printf("[pool] stopping warm worker pid %d: %v", w.cmd.Process.Pid, err)
+	}
+	return true
 }
 
 // submit sends one task over the pipes and waits for its result file. The
@@ -1199,9 +1870,18 @@ func (w *poolWorker) dead() bool {
 func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	ctx := ch.context()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if w.killed.Load() {
+		return nil, fmt.Errorf("warm worker was stopped")
+	}
 	w.id++
 
-	dir, err := os.MkdirTemp("", "pipedpeer-warm-task-*")
+	// Holds the chunk payload: hundreds of megabytes is normal, and a
+	// tmpfs would charge the job's own memory for it.
+	dir, err := userdir.Scratch("warm-task-*")
 	if err != nil {
 		return nil, err
 	}
@@ -1215,7 +1895,7 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 			"id": w.id, "func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName,
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys,
-			"chunk_dir": ch.chunkDir,
+			"chunk_dir": ch.chunkDir, "items_zlib": ch.itemsZlib,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
@@ -1234,6 +1914,16 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	if err := os.WriteFile(inPath, body, 0644); err != nil {
 		return nil, err
 	}
+
+	// A cancel while this chunk runs kills the worker; the read below then
+	// fails and the caller sees the cancel. Reap it so it leaves no zombie.
+	stop := context.AfterFunc(ctx, w.kill)
+	defer func() {
+		if !stop() {
+			err := w.cmd.Wait()
+			log.Printf("[pool] warm worker pid %d stopped for a cancelled request: %v", w.cmd.Process.Pid, err)
+		}
+	}()
 
 	msg := map[string]any{"id": w.id, "in_file": inPath, "out_file": outPath}
 	line, _ := json.Marshal(msg)
@@ -1317,8 +2007,8 @@ func (pm *poolManager) stopAll() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	for _, w := range pm.workers {
-		if w != nil && w.cmd != nil && w.cmd.Process != nil {
-			_ = w.cmd.Process.Kill()
+		if w != nil {
+			w.kill()
 		}
 	}
 	pm.workers = map[string]*poolWorker{}
@@ -1332,7 +2022,7 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 			return nil, err
 		}
 	}
-	dir, err := os.MkdirTemp("", "pipedpeer-pool-*")
+	dir, err := userdir.Scratch("pool-*")
 	if err != nil {
 		return nil, err
 	}
@@ -1351,7 +2041,7 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 			"func": ch.pickledFunc, "func_src": ch.funcSrc, "func_name": ch.funcName,
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys,
-			"chunk_dir": ch.chunkDir,
+			"chunk_dir": ch.chunkDir, "items_zlib": ch.itemsZlib,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
@@ -1368,9 +2058,16 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command(runPath, runnerPath, inPath, outPath)
+	ctx := ch.context()
+	cmd := exec.CommandContext(ctx, runPath, runnerPath, inPath, outPath)
+	// Own process group, killed whole on cancel (see killProcessGroup).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("pool run failed: %v", err)
 	}
 

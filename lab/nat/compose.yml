@@ -1,0 +1,128 @@
+# Four sites behind their own NATs, and an introducer on a "public" net.
+# Driven by scripts/lab-nat.sh, which names the services it starts; a bare
+# `compose up` would also start `mu`, the multi-user machine for `trust` mode.
+#
+#   public 198.51.100.0/24   introducer .10, routers .11-.14
+#   site-a 10.77.1.0/24      cone       node-a .10, mu .20
+#   site-b 10.77.2.0/24      cone       node-b .10
+#   site-c 10.77.3.0/24      symmetric  node-c .10
+#   site-d 10.77.4.0/24      symmetric  node-d .10
+#
+# The public range is TEST-NET-2, not RFC 1918: the daemon never aims a
+# collision at a private address (internet.go raceOrCollide), so a 10.x
+# "internet" would skip the very path the symmetric sites are here to test.
+name: pipedpeer-nat
+
+x-router: &router
+  build: { context: ., dockerfile: Dockerfile.router }
+  image: localhost/pipedpeer-nat-router
+  privileged: true
+
+x-node: &node
+  build: { context: ., dockerfile: Dockerfile.node }
+  image: localhost/pipedpeer-nat-node
+  privileged: true
+  volumes:
+    - ../pipedpeer:/usr/local/bin/pipedpeer:ro
+  # $$: compose would otherwise substitute LAB_ROUTER from the host.
+  command: ["sh", "-c", "ip route replace default via $$LAB_ROUTER && pipedpeer setup -y && exec sleep infinity"]
+
+x-node-env: &node-env
+  PIPEDPEER_TOKEN: ${LAB_TOKEN:?scripts/lab-nat.sh sets LAB_TOKEN}
+  PIPEDPEER_RENDEZVOUS: 198.51.100.10:38445
+  XDG_DATA_HOME: /var/lib/pipedpeer
+  XDG_STATE_HOME: /var/lib/pipedpeer-state
+
+services:
+  rendezvous:
+    <<: *router
+    container_name: pp-nat-rendezvous
+    volumes:
+      - ../pipedpeer:/usr/local/bin/pipedpeer:ro
+    # No relay: a pair the lab claims is direct cannot be carried by one.
+    command: ["pipedpeer", "rendezvous", "--relay", ""]
+    networks:
+      public: { ipv4_address: 198.51.100.10 }
+
+  router-a:
+    <<: *router
+    container_name: pp-nat-router-a
+    command: ["router.sh", "10.77.1.0/24", "198.51.100.1", "cone"]
+    networks:
+      public: { ipv4_address: 198.51.100.11 }
+      site-a: { ipv4_address: 10.77.1.254 }
+  router-b:
+    <<: *router
+    container_name: pp-nat-router-b
+    command: ["router.sh", "10.77.2.0/24", "198.51.100.1", "cone"]
+    networks:
+      public: { ipv4_address: 198.51.100.12 }
+      site-b: { ipv4_address: 10.77.2.254 }
+  router-c:
+    <<: *router
+    container_name: pp-nat-router-c
+    command: ["router.sh", "10.77.3.0/24", "198.51.100.1", "symmetric"]
+    networks:
+      public: { ipv4_address: 198.51.100.13 }
+      site-c: { ipv4_address: 10.77.3.254 }
+  router-d:
+    <<: *router
+    container_name: pp-nat-router-d
+    command: ["router.sh", "10.77.4.0/24", "198.51.100.1", "symmetric"]
+    networks:
+      public: { ipv4_address: 198.51.100.14 }
+      site-d: { ipv4_address: 10.77.4.254 }
+
+  node-a:
+    <<: *node
+    container_name: pp-nat-node-a
+    depends_on: [router-a]
+    environment: { <<: *node-env, LAB_ROUTER: 10.77.1.254 }
+    networks:
+      site-a: { ipv4_address: 10.77.1.10 }
+  node-b:
+    <<: *node
+    container_name: pp-nat-node-b
+    depends_on: [router-b]
+    environment: { <<: *node-env, LAB_ROUTER: 10.77.2.254 }
+    networks:
+      site-b: { ipv4_address: 10.77.2.10 }
+  node-c:
+    <<: *node
+    container_name: pp-nat-node-c
+    depends_on: [router-c]
+    environment: { <<: *node-env, LAB_ROUTER: 10.77.3.254 }
+    networks:
+      site-c: { ipv4_address: 10.77.3.10 }
+  node-d:
+    <<: *node
+    container_name: pp-nat-node-d
+    depends_on: [router-d]
+    environment: { <<: *node-env, LAB_ROUTER: 10.77.4.254 }
+    networks:
+      site-d: { ipv4_address: 10.77.4.10 }
+
+  # Multi-user nix behind site a's cone NAT; `trust` mode only. The script
+  # sets its route, installs nix and runs setup as `pp` once systemd is up.
+  mu:
+    build: { context: ., dockerfile: Dockerfile.multiuser }
+    image: localhost/pipedpeer-nat-multiuser
+    container_name: pp-nat-mu
+    privileged: true
+    depends_on: [router-a]
+    volumes:
+      - ../pipedpeer:/usr/local/bin/pipedpeer:ro
+    networks:
+      site-a: { ipv4_address: 10.77.1.20 }
+
+networks:
+  public:
+    ipam: { config: [{ subnet: 198.51.100.0/24, gateway: 198.51.100.1 }] }
+  site-a:
+    ipam: { config: [{ subnet: 10.77.1.0/24, gateway: 10.77.1.1 }] }
+  site-b:
+    ipam: { config: [{ subnet: 10.77.2.0/24, gateway: 10.77.2.1 }] }
+  site-c:
+    ipam: { config: [{ subnet: 10.77.3.0/24, gateway: 10.77.3.1 }] }
+  site-d:
+    ipam: { config: [{ subnet: 10.77.4.0/24, gateway: 10.77.4.1 }] }

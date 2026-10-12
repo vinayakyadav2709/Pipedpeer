@@ -1,151 +1,180 @@
-# Measured results
+# Results
 
-Everything below was measured on this machine on 2026-08-25 against the commit
-recorded in `results.json`. Nothing is estimated. Where a figure could not be
-measured honestly, that is said plainly rather than filled in.
+Every number here traces to a file in `raw/`. There are three sources, and each
+result says which one it comes from.
 
-## Test bed
-
-| | |
-|---|---|
-| Host | Linux 7.1.8 (Fedora 44), x86_64, 20 logical cores, 16 GiB free |
-| Cluster | 3 worker daemons in podman containers, host networking, ports 38081-38083 |
-| Submitting node | the same host, daemon on port 38080 |
-| Python | 3.14.6, with numpy, pandas, scikit-learn, joblib and CPU torch available |
-
-**The single most important caveat.** All three workers are containers on this
-one machine. They therefore share one CPU, one memory system and the loopback
-interface. This test bed can measure correctness, overhead, cache behaviour and
-fault tolerance honestly. It **cannot** measure multi-machine speedup, because
-moving CPU-bound work between containers on one host cannot make that host
-faster. No speedup figure is claimed anywhere below. The same harness
-(`bench.py`) runs unchanged against real machines.
-
-## R1  Test suite
-
-`cd src && go test ./... -count=1` with every optional Python library installed.
-
-| | |
-|---|---|
-| Test cases passed | 246 |
-| Failed | 0 |
-| Skipped | 3 |
-
-The three skips are `TestConcurrentJobsAndSharedNumpyCache` and
-`TestIntegrationFullSyncAndExecute` (both need `PIPEDPEER_INTEGRATION=1`) and
-`TestDetectNVIDIA` (no NVIDIA GPU on this host).
-
-Five interception tests skip on any machine without pandas, torch and
-scikit-learn. CI does install those, so they run there; they had been skipping
-silently for anyone running the suite on a bare machine. With the libraries
-present they pass:
-`TestShimHashShuffleMatchesLocal`, `TestShimOutOfCoreIntegrity`,
-`TestShimCostModelDecisions`, `TestShimJoblibBackendDistributes`,
-`TestShimNumPyInterception`.
-
-Raw: `raw/B1_go_test_verbose.txt`.
-
-## R2  Environment cache
-
-The strongest measured result. The same trivial job submitted five times.
-
-| Submission | Seconds, end to end |
-|---|---|
-| 1st (closure built and shipped) | 12.00 |
-| 2nd | 0.68 |
-| 3rd | 0.64 |
-| 4th | 0.64 |
-| 5th | 0.66 |
-
-Median once warm: **0.65 s, against 12.00 s cold, an 18x reduction.** This is
-the payoff from keying the cache on the Nix store path: the second submission
-finds the closure already present on the worker and ships nothing but the
-workspace. Figure `fig_5.1_closure_cache.png`.
-
-## R3  Cost of leaving interception switched on
-
-Same job, same cluster, interception on versus off.
-
-| | Median seconds |
-|---|---|
-| `PIPEDPEER_SHIM=0` | 0.85 |
-| interception on | 0.93 |
-
-**+9%** on a whole remote job whose workload the cost model declines to
-distribute. Raw: `raw/N7_*.log`.
-
-Separately, `scripts/bench-shim-d2.sh` measures interpreter startup for a job
-that never imports a heavy library:
-
-| | Slowdown against no shim |
-|---|---|
-| Before the fix in this branch | 21.60x |
-| After | 1.20x |
-
-The shim used to import torch while installing itself, about 1.7 s on this
-host, charged to every job whether or not it mentioned torch. The project's own
-3x budget was being exceeded sevenfold and no workflow ran the check that
-detects it. That check is now a step in CI.
-Figure `fig_5.2_shim_overhead.png`.
-
-## R4  Work really does cross node boundaries
-
-With `--distribute force`, all three workers logged `received pool/map`:
-
-| Worker | pool/map requests received |
-|---|---|
-| lab-1 | 3 |
-| lab-2 | 3 |
-| lab-3 | 4 |
-
-So interception, chunking and dispatch work end to end. Raw:
-`raw/N3_pool_map_receipts.txt`. No speedup is claimed from this, for the reason
-in the test bed note above.
-
-## R5  Fault tolerance
-
-`scripts/lab-fail.sh` fans a 20-item `Pool.map` across the cluster, kills a
-worker container mid-flight, and checks the answer.
-
-```
-killing worker on :38082 mid-flight
-POOL-OK sum=2470
-PASS: pool.map completed correctly despite a dead worker
-```
-
-2470 is the correct sum of squares for 0..19. The run completed with correct
-results despite losing a node mid-computation. Raw: `raw/B5_lab_fail.txt`.
-
-## R6  Sandbox start cost
-
-`bench/`, 20 measured iterations after 5 warmups, median.
-
-| Task | bwrap | crun (in use) |
+| Tag | What | Where |
 |---|---|---|
-| trivial (echo) | 5.1 ms | 21.7 ms |
-| medium (shell loop) | 8.0 ms | 23.7 ms |
-| python (interpreter start) | 16.9 ms | 36.8 ms |
+| **[Oct]** | Run for the report on 2026-10-02 at commit `4c91ef3` | `raw/T*`, `raw/O*`, `raw/N*_run*.log`, `results.json` |
+| **[Aug]** | The previous pass, 2026-08-25, on a different host | `raw/B*`, `raw/N3_pool_map_receipts.txt`, `results-2026-08-25.json` |
+| **[Oct-12]** | N7 re-run on 2026-10-12 at commit `08ce1d4`, on a second host (Fedora 44, 16 threads, Python 3.14.8, docker lab) | `raw/N7_*`, the `n7_*` entries of `results.json` (each carries its own `host`) |
+| **[commit]** | Multi-machine measurements recorded in commit messages, 2026-08-26 to 08-29 | `raw/C_commit_measurements.md` (verbatim quotes) |
 
-crun costs 15 to 20 ms more per job than bwrap. Against a 0.65 s warm job,
-let alone a 12 s cold one, that is not a number worth optimising, and crun buys
-the OCI device model that GPU passthrough needs. Figure
-`fig_5.3_sandbox_overhead.png`.
+## Test bed [Oct]
 
-These are the first valid numbers this benchmark has produced: it previously
-gave neither sandbox a root filesystem, so `/bin/sh` was missing and all 60
-measured runs exited non-zero. The published timings were the cost of failing
-to start. Fixed in this branch, along with a check that refuses to write a
-report when any measured run exits non-zero.
+- **Host:** Fedora 43, Linux 6.19.13, Intel i5-13420H with 12 threads, 15 GiB
+  of RAM, and an NVIDIA GPU that is unused by the lab.
+- **Toolchain:** Go 1.25.9 and Python 3.14.4. torch 2.14.1+cpu is installed in
+  a virtualenv, matching what CI installs.
+- **Lab:** three podman containers with host networking, as daemons on
+  38081–38083, built by `scripts/lab-up.sh`. The submitting daemon is on 38080.
+  The binary was built from `4c91ef3`.
+- **Workaround:** on this host `$HOME` is a git repository, which breaks the
+  default build directory (`../known-issues.md` item 1). Every run therefore
+  used `XDG_CACHE_HOME=/var/tmp/pipedpeer-docs-cache`.
+- **Limit:** all workers share one CPU, so the lab **cannot** show speedup. The
+  only speedup figures in this file are [commit] measurements between real
+  machines.
+
+## R1 Tests [Oct]
+
+| | Passed | Failed | Skipped | Raw |
+|---|---|---|---|---|
+| `go test -v -count=1 ./...` with torch | 615 | 0 | 2 | `raw/T1_go_test_verbose.txt` |
+| same, without torch | 607 | 3 | 7 | `raw/T1b_go_test_without_torch.txt` |
+
+- **The two skips:** `TestConcurrentJobsAndSharedNumpyCache` and
+  `TestIntegrationFullSyncAndExecute`. Both need `PIPEDPEER_INTEGRATION=1`.
+- **Skip check:** `scripts/check-skips.sh` passed: "all 15 distribution tests
+  ran". Raw: `raw/T2_check_skips.txt`.
+- **Mutation audit:** `scripts/audit-tests.sh` caught all 95 cases, with 0 not
+  failing. Raw: `raw/T3_audit_tests.txt`.
+- **CI** (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull
+  requests into `main` and `dev`. Steps:
+  1. installs torch (CPU), pandas, joblib and scikit-learn;
+  2. runs `gofmt`, `go vet` and `go test -race`;
+  3. runs `bench-shim-d2.sh`;
+  4. runs `check-skips.sh`;
+  5. runs `bench-pool.sh` with `BENCH_ITEMS=32 BENCH_SPIN=200000`.
+
+## R2 Environment cache [Oct]
+
+`python3 docs/benchmarks/bench.py --repeat 5`, N1, a trivial job with `--remote`:
+
+| Run | s | Node | Sent |
+|---|---|---|---|
+| 0 | 23.41 | aaaac1c7 | whole closure |
+| 1 | 8.08 | ea8a95c6 | whole closure (this worker did not hold it yet) |
+| 2 | 0.86 | aaaac1c7 | nothing |
+| 3 | 0.83 | aaaac1c7 | nothing |
+| 4 | 0.82 | aaaac1c7 | nothing |
+
+- **Warm cost:** the median of the runs that sent nothing is **0.83 s**,
+  against 23.41 s for the first run.
+- **Sources:** per-run details are in `raw/O1_bench_py.txt` and
+  `raw/N1_trivial_run*.log`.
+- **August, on the other host:** 12.00 s cold, 0.65 s warm.
+
+## R3 Interception cost [Oct]
+
+**Whole job** [Oct-12] (N7, `workloads/pool_idle.py`: a 16-item `Pool.map`
+of ~0.1 ms items, which the cost model must decline; `--remote`, five runs
+each, `python3 docs/benchmarks/bench.py --only n7`):
+
+| | Median | Range | Notes |
+|---|---|---|---|
+| `PIPEDPEER_SHIM=0` | 0.678 s | 0.671–0.852 s | |
+| shim on | 0.796 s | 0.747–0.797 s, plus one cold 7.03 s first run | every receipt: `dispatched_items 0`; every log: `tail is 0.01s of work, below the 0.50s dispatch floor; staying local` |
+
+This measures idle interception: about **0.12 s** per job, the measurement
+head plus the decision. `bench.py` now runs N7 with `PIPEDPEER_RECEIPT` and
+fails any run whose receipt shows a dispatched item. The earlier [Oct] N7 used
+`pool_map.py`, which the shim distributes (18 of 48 items in every run), so it
+measured distribution, not idle cost. The same workload with
+`--distribute force` did dispatch (4 items), so the cluster was able to take
+work and the decline is the cost model's. The first shim-on run includes a
+cold start on its worker.
+
+Lab note: fresh lab workers refuse the submitter's closure ("lacks a signature
+by a trusted key", `../known-issues.md` Observed #3), so before these runs each
+worker's `/etc/nix/nix.conf` got `extra-trusted-public-keys` from its own
+`trusted-public-keys` file, which is what `pipedpeer setup` writes once a
+daemon knows its peers.
+
+**Start-up** (`scripts/bench-shim-d2.sh`, raw `raw/O2_shim_startup.txt`):
+local-only 0.0944 s against shim-on 0.1168 s, a ratio of **1.24×**. That passes
+the 3× budget. August, before patching was deferred, measured 20.0×
+(`raw/B3_shim_overhead.txt`).
+
+## R4 Work crosses nodes [Oct]
+
+- **Forced `Pool.map`** (N3, `--distribute force`). All five receipts read
+  "remote ok: 18 items … on 192.168.0.107:38080, :38081, :38082", with 12
+  items local and the same checksum each time.
+- **numpy** (N5). The log shows `svd: offloading 34 MB matrix to one worker`.
+  The workload's `a @ b` is not intercepted.
+- **`BENCH_ITEMS=48 scripts/bench-pool.sh`** against the lab
+  (`raw/O3_bench_pool_lab.txt`):
+
+  | | s |
+  |---|---|
+  | plain | 0.17 |
+  | tuned | 0.17 |
+  | pipedpeer | 0.24 |
+
+  The receipt shows 12 items on the cluster and 12 local. It passed the 3×
+  never-slower budget. One host cannot be faster.
+
+## R5 Fault tolerance [Oct]: FAILED
+
+`scripts/lab-fail.sh` (`raw/O4_lab_fail.txt`) printed:
+
+```
+FAIL: no worker ever received a pool chunk, so there was nothing to lose.
+```
+
+What happened:
+- The job ran on the submitting host, and its log says "Closure already on the
+  node; nothing to send".
+- The receipt reads `remote_items 0, local_items 80, dispatched_items 0`.
+- The workers were freshly created and never received the closure, so no peer
+  was eligible for spilled work. That reading is inferred, not verified
+  (`../known-issues.md` item 3).
+
+The August `lab-fail.sh` output (`raw/B5_lab_fail.txt`, `POOL-OK sum=2470`) came
+from the earlier harness, which commit `fca0107` showed had never distributed
+anything. It is therefore not evidence of recovery either.
+
+## R6 Sandbox start cost [Aug]
+
+Not repeated. Median of 20, with the first 5 iterations as warm-up
+(`raw/B2_sandbox_bench.*`):
+
+| Task | bwrap | crun |
+|---|---|---|
+| trivial | 5.1 ms | 21.7 ms |
+| medium | 8.0 ms | 23.7 ms |
+| python | 16.9 ms | 36.8 ms |
+
+## R7 Between real machines [commit]
+
+These are verbatim in `raw/C_commit_measurements.md`, with the hash, date and
+machine as each message describes them. None was repeated for the report. The
+commits that matter most:
+- **Pool map:**
+  - fca0107: 20-core + 16-core peer over Tailscale, 4.9–5.4 s against
+    5.8–6.4 s plain.
+  - 8c9284c: 8:2:1 lab, 2.87 s by measured throughput against 3.61 s by
+    headcount.
+- **Training:**
+  - 364b3d9: 54.9 / 69.4 / 56.1 s for one machine / two ranks fp16 / two ranks
+    int8.
+  - 2fc3914: 23.6 s against 25.4 s, measured against equal batches.
+  - 2da0857: GPU 1.5 s against CPU 55.0 s.
+- **Closure transfer:**
+  - 193e1bf: 7 of 43 paths, 206.0 MB down to 28.6 MB.
+  - 837f9c2: 3 of 39 paths, 0.43 MiB.
+- **Network:**
+  - 42c2426: 0.03 s with the introducer suspended; introducer traffic 0.2 MB.
+  - fe43933 / e06c534: symmetric NAT on a phone tether.
+- **Security:** cf2e3ae, signed closure under `require-sigs = true`.
 
 ## Not measured
 
-Stated explicitly rather than left as a blank in a table.
-
-| Wanted | Why it is absent | How to get it |
-|---|---|---|
-| Multi-machine speedup for `Pool.map` | every worker shares this one host's CPU | run `bench.py` against two or more real machines |
-| Speedup for pandas hash shuffle | as above | as above |
-| DDP scaling across ranks | as above; correctness is covered by `TestShimDDPSync` | as above with `--ddp N` |
-| Peer discovery latency | discovery is by UDP broadcast on a LAN; containers here share the host's loopback, so the number would not mean anything | measure on a real LAN |
-| GPU placement and VRAM-aware scoring | no GPU on this host | run `bench/gpu_test.go` with `PIPEDPEER_GPU_INTEGRATION=1` |
-| The five demo workloads (`docker/demo-test.sh`) | pulls multi-GB CUDA closures; not attempted here | run on a machine with the disk and a GPU |
+| Wanted | How to get it |
+|---|---|
+| Repeated multi-machine benchmark | `scripts/bench-pool.sh`, `bench-split.sh` and `bench-ddp.sh` on real machines |
+| Fault injection that distributes | `scripts/lab-fail.sh` once the seeding issue is resolved, or on a lab whose workers already hold the closure |
+| Cross-network acceptance | `scripts/net-verify.sh` on three networks (`pipedpeer-demo/DEMO.md`) |
+| Two GPUs on one node | `scripts/bench-multigpu.sh` (exits 3, "NOT VERIFIED", without the hardware) |
+| Demo workloads end to end | `docker/demo-test.sh` |

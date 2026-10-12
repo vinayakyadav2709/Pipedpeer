@@ -1,0 +1,59 @@
+# python3 docs/benchmarks/bench.py --repeat 5   (per-run logs: N1_*, N7_*, N3_*, N5_* in this directory; summary in ../results.json)
+# commit 4c91ef3, run 2026-10-02, Fedora 43 / Linux 6.19.13, i5-13420H 12 threads, 15 GiB. XDG_CACHE_HOME=/var/tmp/pipedpeer-docs-cache (see README: $HOME is a git repo on this host, which breaks the default build dir).
+lab workers up: [38081, 38082, 38083]
+
+N1 end-to-end latency, trivial job
+  N1_trivial [0]  23.410s rc=0 ok=True
+  N1_trivial [1]   8.078s rc=0 ok=True
+  N1_trivial [2]   0.863s rc=0 ok=True
+  N1_trivial [3]   0.830s rc=0 ok=True
+  N1_trivial [4]   0.817s rc=0 ok=True
+
+N7 interception overhead when the cost model declines
+  N7_shim_on [0]   1.101s rc=0 ok=True
+  N7_shim_on [1]   0.966s rc=0 ok=True
+  N7_shim_on [2]   0.982s rc=0 ok=True
+  N7_shim_on [3]   0.975s rc=0 ok=True
+  N7_shim_on [4]   1.012s rc=0 ok=True
+  N7_shim_off [0]   0.939s rc=0 ok=True
+  N7_shim_off [1]   9.656s rc=0 ok=True
+  N7_shim_off [2]   0.664s rc=0 ok=True
+  N7_shim_off [3]   0.651s rc=0 ok=True
+  N7_shim_off [4]   3.254s rc=0 ok=True
+
+N3 Pool.map with the cluster forced on
+  N3_forced [0]   0.802s rc=0 ok=True
+  N3_forced [1]   0.735s rc=0 ok=True
+  N3_forced [2]   0.736s rc=0 ok=True
+  N3_forced [3]   0.745s rc=0 ok=True
+  N3_forced [4]   0.746s rc=0 ok=True
+
+N5 numpy: matmul should stay local, SVD may move
+  N5_numpy [0]  46.862s rc=0 ok=True
+  N5_numpy [1]  30.045s rc=0 ok=True
+
+wrote /home/rs/Projects/Pipedpeer/docs/benchmarks/results.json
+
+# per-run placement and transfer (extracted from the run logs):
+N1_trivial[0] node=aaaac1c7 | Sending the whole closure (the node shares none of it) | 
+N1_trivial[1] node=ea8a95c6 | Sending the whole closure (the node shares none of it) | 
+N1_trivial[2] node=aaaac1c7 | Closure already on the node; nothing to send | 
+N1_trivial[3] node=aaaac1c7 | Closure already on the node; nothing to send | 
+N1_trivial[4] node=aaaac1c7 | Closure already on the node; nothing to send | 
+N7_shim_on[0] node=aaaac1c7 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 186 ms on 192.168.0.107:38080, 192.168.0.107:38083
+N7_shim_on[1] node=aaaac1c7 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 60 ms on 192.168.0.107:38080, 192.168.0.107:38083
+N7_shim_on[2] node=aaaac1c7 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 61 ms on 192.168.0.107:38080, 192.168.0.107:38083
+N7_shim_on[3] node=aaaac1c7 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 65 ms on 192.168.0.107:38080, 192.168.0.107:38083
+N7_shim_on[4] node=aaaac1c7 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 70 ms on 192.168.0.107:38080, 192.168.0.107:38083
+N7_shim_off[0] node=aaaac1c7 | Closure already on the node; nothing to send | 
+N7_shim_off[1] node=b143fb22 | Closure already on the node; nothing to send | 
+N7_shim_off[2] node=ea8a95c6 | Closure already on the node; nothing to send | 
+N7_shim_off[3] node=ea8a95c6 | Closure already on the node; nothing to send | 
+N7_shim_off[4] node=ea8a95c6 | Closure already on the node; nothing to send | 
+N3_forced[0] node=ea8a95c6 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 138 ms on 192.168.0.107:38080, 192.168.0.107:38081, 192.168.0.107:38082
+N3_forced[1] node=ea8a95c6 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 68 ms on 192.168.0.107:38080, 192.168.0.107:38081, 192.168.0.107:38082
+N3_forced[2] node=ea8a95c6 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 77 ms on 192.168.0.107:38080, 192.168.0.107:38081, 192.168.0.107:38082
+N3_forced[3] node=ea8a95c6 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 66 ms on 192.168.0.107:38080, 192.168.0.107:38081, 192.168.0.107:38082
+N3_forced[4] node=ea8a95c6 | Closure already on the node; nothing to send | [pipedpeer] remote ok: 18 items in 66 ms on 192.168.0.107:38080, 192.168.0.107:38081, 192.168.0.107:38082
+N5_numpy[0] node=ea8a95c6 |  | [pipedpeer] svd: offloading 34 MB matrix to one worker
+N5_numpy[1] node=aaaac1c7 |  | [pipedpeer] svd: offloading 34 MB matrix to one worker

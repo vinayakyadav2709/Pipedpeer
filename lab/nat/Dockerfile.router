@@ -1,0 +1,6 @@
+# Routers and the introducer. The pipedpeer binary is static (CGO_ENABLED=0)
+# and bind-mounted, so alpine runs it.
+FROM docker.io/library/alpine:3.20
+RUN apk add --no-cache nftables iproute2
+COPY router.sh /usr/local/sbin/router.sh
+RUN chmod 0755 /usr/local/sbin/router.sh

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,11 +24,20 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
+	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // Default lease configuration
@@ -64,6 +74,10 @@ type Lease struct {
 	// is held for RunningLeaseTTL past this, so a long job that keeps
 	// renewing is never reaped while a submitter that died releases its slot.
 	RenewedAt time.Time `json:"renewed_at"`
+	// JobID is the job running under this lease (set by bindLease when the
+	// job starts). While that job lives the sweeper keeps the lease without
+	// renewals, so a detached or crashed submitter cannot free a busy slot.
+	JobID string `json:"job_id,omitempty"`
 }
 
 // Server is the daemon API server that manages job leases and resource reservations.
@@ -77,6 +91,14 @@ type Server struct {
 
 	mu     sync.Mutex
 	leases map[string]*Lease // lease_id → Lease
+	// pathReporter says how each peer is reached, keyed by local address.
+	// Set by internet mode; nil when nothing is joined over the internet.
+	pathReporter func() map[string]string
+	// unreachableReporter names the internet peers with no direct path, and
+	// why (fingerprint → reason). Set by internet mode.
+	unreachableReporter func() map[string]string
+	// stats caches the /v1/stats snapshot briefly.
+	stats statsCache
 
 	stopSweep chan struct{}
 
@@ -118,7 +140,14 @@ type Server struct {
 	// Peer health cache (populated by background poller)
 	peersMu     sync.RWMutex
 	peerHealths map[string]*PeerHealth // key: "host:port"
-	stopPoller  chan struct{}
+
+	// What daemons sharing this machine have reserved, and when that was
+	// last asked. Guarded separately from peerHealths because it is read on
+	// the admission path and refreshed by an HTTP call.
+	coResMu    sync.Mutex
+	coResBytes int64
+	coResAt    time.Time
+	stopPoller chan struct{}
 
 	// Discovery function for mDNS scanning (set before StartPeerPoller)
 	discoverFn func() []NodeDiscovered
@@ -128,6 +157,11 @@ type Server struct {
 	selfSSH  string
 	selfPort int
 	selfCaps map[string]string
+
+	// When each cluster key is next checked against system nix (see
+	// warnUntrustedKeys).
+	trustMu   sync.Mutex
+	trustNext map[string]time.Time
 }
 
 // healthResponse is the payload of GET /health. It carries the node's full
@@ -163,6 +197,34 @@ type PeerHealth struct {
 	ActiveJobs   int    `json:"active_jobs"`
 	AvailableMem int64  `json:"available_mem"`
 	Source       string `json:"source"` // "manual", "discovery", "registry"
+	// TotalCPUs is the peer's core count, used only as the prior for how much
+	// pool work to give it before anything has actually been measured there.
+	TotalCPUs int `json:"total_cpus"`
+	// ReservedMem is what the peer has already promised to jobs of its own.
+	// Only meaningful alongside Machine: it is what this daemon must also
+	// subtract when the peer turns out to be sharing this machine's RAM.
+	ReservedMem int64 `json:"reserved_mem"`
+	// Machine identifies the physical machine the peer runs on, so a peer
+	// that shares this one can be recognised.
+	Machine string `json:"machine"`
+	// ClosureFormats is what this peer can receive a closure as. Empty for a
+	// peer old enough to predate the question, which is exactly the peer
+	// that must keep being sent the old format.
+	ClosureFormats string `json:"closure_formats"`
+	// GPU is the peer's GPU vendor ("" when it has none), so a CUDA closure
+	// is not pushed to a node that cannot use it.
+	GPU string `json:"gpu,omitempty"`
+}
+
+// TakesSignedClosures reports whether this peer can receive a closure in the
+// form that keeps its signatures.
+func (ph *PeerHealth) TakesSignedClosures() bool {
+	for _, f := range strings.Split(ph.ClosureFormats, ",") {
+		if strings.TrimSpace(f) == narpack.FormatName {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Request/Response types ---
@@ -272,7 +334,23 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) ListenAndServe(port int) error {
 	addr := fmt.Sprintf(":%d", port)
-	return http.ListenAndServe(addr, s.Handler())
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	// Serve TLS and plain HTTP on the same port. The token says who may talk
+	// to this daemon but nothing about who may listen, and it travels in the
+	// request itself - so on any network the operator does not own, which is
+	// the point of running beyond a LAN at all, an observer collects it and
+	// becomes a member. Accepting both means a cluster encrypts itself as its
+	// nodes are updated, instead of every daemon having to switch at the same
+	// moment with anything missed simply going silent.
+	cert, certErr := tlsid.EnsureCert()
+	if certErr != nil {
+		log.Warn().Err(certErr).Msg("no TLS certificate; serving plain HTTP only")
+		return (&http.Server{Handler: s.Handler()}).Serve(ln)
+	}
+	return (&http.Server{Handler: s.Handler()}).Serve(tlsid.NewListener(ln, &cert))
 }
 
 // BindNATS subscribes to NATS subjects for this node's lease operations.
@@ -352,9 +430,18 @@ func (s *Server) StartSweeper() {
 // before the sweeper removes them.
 const JobRetention = 7 * 24 * time.Hour
 
+// DetachedJobRetention is how long a job that was detached from keeps its
+// dir (output log + results for `pipedpeer attach`) after it finished.
+const DetachedJobRetention = 24 * time.Hour
+
 // PruneCompletedJobDirs removes job directories (and their in-memory records)
 // not touched within olderThan. Dir names are job IDs, so the jobs map can be
-// reconciled by name.
+// reconciled by name. A finished detached job goes DetachedJobRetention after
+// it finished instead, whatever its dir's mtime.
+//
+// The directory is shared with the submitter's job history and holds the NAR
+// cache, so only entries named like a daemon job ID (a UUID) are candidates;
+// anything else belongs to someone else.
 func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 	entries, err := os.ReadDir(s.jobDir)
 	if err != nil {
@@ -369,12 +456,30 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 		if !e.IsDir() {
 			continue
 		}
-		info, err := e.Info()
-		if err != nil {
+		if _, err := uuid.Parse(e.Name()); err != nil {
 			continue
 		}
-		if !info.ModTime().Before(cutoff) {
-			continue
+		s.jobsMu.Lock()
+		job := s.jobs[e.Name()]
+		detachedDone := job != nil && job.Detached && !job.FinishedAt.IsZero()
+		var finished time.Time
+		if detachedDone {
+			finished = job.FinishedAt
+		}
+		s.jobsMu.Unlock()
+		if detachedDone {
+			if time.Since(finished) < DetachedJobRetention {
+				continue
+			}
+		} else {
+			info, err := e.Info()
+			if err != nil {
+				log.Warn().Err(err).Str("dir", e.Name()).Msg("cannot stat job dir; not pruning it")
+				continue
+			}
+			if !info.ModTime().Before(cutoff) {
+				continue
+			}
 		}
 		if err := os.RemoveAll(filepath.Join(s.jobDir, e.Name())); err != nil {
 			return removed, err
@@ -382,6 +487,7 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 		s.jobsMu.Lock()
 		delete(s.jobs, e.Name())
 		s.jobsMu.Unlock()
+		jobLogs.Delete(filepath.Join(s.jobDir, e.Name(), jobOutputFile))
 		removed++
 	}
 	return removed, nil
@@ -411,6 +517,30 @@ func (s *Server) StopWarmWorkers() {
 // available memory. runChunk fans out to the best nodes first and falls
 // through to the next best on failure, so the k best nodes carry the work.
 func (s *Server) EnablePoolSpill() {
+	// The prior for a peer nobody has measured yet. Replaced by an actual
+	// measurement as soon as one part comes back from it, which is why a
+	// rough answer here is enough: it only has to be good enough to justify
+	// a first dispatch.
+	s.pool.coresFn = func(peer string) int {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		for addr, ph := range s.peerHealths {
+			if addr == peer {
+				return ph.TotalCPUs
+			}
+		}
+		return 0
+	}
+	s.pool.machineFn = func(peer string) string {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		for _, ph := range s.peerHealths {
+			if fmt.Sprintf("%s:%d", ph.Host, ph.Port) == peer {
+				return ph.Machine
+			}
+		}
+		return ""
+	}
 	s.pool.SetPeerFn(func(storePath, submitter string) []string {
 		s.peersMu.RLock()
 		defer s.peersMu.RUnlock()
@@ -469,62 +599,181 @@ func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
 	return r.Cached
 }
 
-// broadcastClosure pushes a cached closure NAR to every healthy peer that does
-// not have it yet, so pool spill can fan a single task out to multiple nodes.
-// Best-effort and parallel: a peer that fails to import is simply not offered
-// spill work (runChunk always keeps the local part, so nothing is lost).
-func (s *Server) broadcastClosure(storePath string) {
-	narPath, ok := s.narCache.narFileFor(storePath)
-	if !ok {
-		return
-	}
+// healthyPeers returns the peers currently known to be up, and how many peers
+// the poller has any opinion about at all. The second number distinguishes
+// "everyone is down" from "we have not looked yet".
+func (s *Server) healthyPeers() ([]PeerHealth, int) {
 	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
 	var targets []PeerHealth
 	for _, ph := range s.peerHealths {
 		if ph.Status == "healthy" && ph.Host != "" && ph.Port != 0 {
 			targets = append(targets, *ph)
 		}
 	}
-	s.peersMu.RUnlock()
+	return targets, len(s.peerHealths)
+}
+
+// broadcastClosure pushes a cached closure NAR to every healthy peer that does
+// not have it yet, so pool spill can fan a single task out to multiple nodes.
+// Best-effort and parallel: a peer that fails to import is simply not offered
+// spill work (runChunk always keeps the local part, so nothing is lost).
+//
+// It returns one line per peer that refused the closure, for the submitter.
+// Logged here alone, a refusal left the user with "local 80 items" and no
+// reason: the shim only sees that no peer holds the closure.
+func (s *Server) broadcastClosure(storePath string) []string {
+	targets, known := s.healthyPeers()
+	if len(targets) == 0 && known == 0 {
+		// The poller has not finished its first cycle. A daemon that has just
+		// started still answers uploads, and /v1/nodes serves peer states
+		// persisted from a previous run, so both the submitter and the
+		// operator can see a healthy cluster while this map is still empty —
+		// and the closure then reaches nobody. Poll once, synchronously,
+		// rather than silently declining to broadcast.
+		s.pollAllNodes()
+		targets, known = s.healthyPeers()
+	}
 	if len(targets) == 0 {
-		return
+		// Usually a timing problem: the health poller has not run since the
+		// peers were added, so they are known but not yet marked healthy.
+		log.Warn().Int("known_peers", known).
+			Msg("no healthy peers to broadcast the closure to; pool work will stay local")
+		return nil
+	}
+	// A CUDA closure is several GB and only a GPU node can use it. The
+	// broadcast is a warm-up for pool spill, and the node a GPU job is placed
+	// on gets the closure with the upload, so pushing it to CPU-only peers
+	// only costs minutes of transfer and their memory (rehearsal: 260 s and
+	// three OOM-killed receivers for a 4 s GPU script).
+	if paths, err := closurePaths(storePath); err != nil {
+		log.Warn().Err(err).Str("store", storePath).
+			Msg("cannot list the closure to tell whether it needs a GPU; broadcasting to every peer")
+	} else if closureNeedsGPU(paths) {
+		var skipped int
+		targets, skipped = gpuPeersOnly(targets)
+		if skipped > 0 {
+			log.Info().Int("skipped", skipped).Str("store", storePath).
+				Msg("not broadcasting a GPU closure to peers without a GPU")
+		}
+		if len(targets) == 0 {
+			return nil
+		}
+	}
+	// Who gets it is settled before anything is packed. Packing first cost
+	// every GPU run 3m24s (V2 95): the whole CUDA closure was exported and
+	// then sent to nobody, because no peer had a GPU.
+	var need []PeerHealth
+	for i := range targets {
+		if !s.peerHasStore(&targets[i], storePath) {
+			need = append(need, targets[i])
+		}
+	}
+	if len(need) == 0 {
+		log.Info().Int("peers", len(targets)).Str("store", storePath).
+			Msg("every peer already holds the closure; nothing to broadcast")
+		return nil
+	}
+	targets = need
+	log.Info().Int("peers", len(targets)).Str("store", storePath).
+		Msg("broadcasting closure to peers")
+
+	// The old-format archive, exported from our own store when no upload
+	// filled the cache (a job on the machine that built its closure uploads
+	// none). Only a peer that cannot take the signed format needs it, so it
+	// is made at most once and only when such a peer asks.
+	legacy := sync.OnceValues(func() (string, bool) { return localArchive(s.narCache, storePath) })
+
+	var refusedMu sync.Mutex
+	var refused []string
+	refuse := func(ph *PeerHealth, err error) {
+		peer := fmt.Sprintf("%s:%d", ph.Host, ph.Port)
+		log.Warn().Err(err).Str("peer", peer).Msg("closure broadcast failed")
+		refusedMu.Lock()
+		refused = append(refused, fmt.Sprintf("peer %s did not take this environment, so it gets no pool work: %v", peer, err))
+		refusedMu.Unlock()
 	}
 
 	// Serial mode imports one peer at a time (shared-RAM rig); default parallel.
 	if s.serialImports.Load() {
 		for i := range targets {
 			ph := targets[i]
-			if s.peerHasStore(&ph, storePath) {
-				continue
-			}
-			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
-				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
-					Msg("closure broadcast failed")
+			if err := s.importStoreOnPeer(&ph, storePath, legacy); err != nil {
+				refuse(&ph, err)
 			}
 		}
-		return
+		sort.Strings(refused)
+		return refused
 	}
 
 	var wg sync.WaitGroup
 	for i := range targets {
 		ph := targets[i]
-		if s.peerHasStore(&ph, storePath) {
-			continue
-		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := importStoreOnPeer(&ph, storePath, narPath); err != nil {
-				log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
-					Msg("closure broadcast failed")
+			if err := s.importStoreOnPeer(&ph, storePath, legacy); err != nil {
+				refuse(&ph, err)
 			}
 		}()
 	}
 	wg.Wait()
+	sort.Strings(refused)
+	return refused
 }
 
-// importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
-func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
+// gpuPeersOnly keeps the peers that report a GPU, and says how many it dropped.
+func gpuPeersOnly(peers []PeerHealth) ([]PeerHealth, int) {
+	var keep []PeerHealth
+	for _, ph := range peers {
+		if ph.GPU != "" {
+			keep = append(keep, ph)
+		}
+	}
+	return keep, len(peers) - len(keep)
+}
+
+// localArchive is narCache.ensureLocal, as a variable so a test can see
+// whether a broadcast packed anything.
+var localArchive = (*narCache).ensureLocal
+
+// importStoreOnPeer sends a closure NAR to a peer's /v1/store/import. legacy
+// yields the whole old-format archive, made only if this peer needs it.
+func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath string, legacy func() (string, bool)) error {
+	// Send only what this peer lacks. The whole-closure archive is keyed on
+	// the top-level store path, so two environments differing by one package
+	// share none of it and every byte of python, numpy and the interpreter
+	// tree crosses the wire again. Store paths are content-addressed, which
+	// makes them exactly the units it is safe to skip.
+	//
+	// Best-effort throughout: any failure here falls back to the whole
+	// archive, which is correct, just larger.
+	partial := false
+	signed := false
+	var narPath string
+	if ph.TakesSignedClosures() {
+		// The form that keeps signatures, so the peer can require them
+		// instead of being configured to stop asking. It carries its own
+		// per-path metadata, so there is no "partial" flag to set: the
+		// archive says what it contains.
+		if pack, cleanup, ok := buildSignedClosure(srv, ph, storePath); ok {
+			defer cleanup()
+			narPath, signed = pack, true
+		}
+	}
+	if !signed {
+		if diff, ok := srv.diffNARFor(ph, storePath); ok {
+			defer os.RemoveAll(filepath.Dir(diff))
+			narPath, partial = diff, true
+		} else if whole, ok := legacy(); ok {
+			narPath = whole
+		} else {
+			// Nothing to send means this peer can never be offered spill
+			// work, and the run would look healthy while staying local.
+			return fmt.Errorf("no closure archive for %s: it is in neither this node's store nor its cache", storePath)
+		}
+	}
+
 	f, err := os.Open(narPath)
 	if err != nil {
 		return err
@@ -537,6 +786,22 @@ func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 		defer pw.Close()
 		if err := mp.WriteField("store_path", storePath); err != nil {
 			return
+		}
+		if partial {
+			// The receiver must import this without caching it as the
+			// closure, or it would forward a fragment to the next node.
+			if err := mp.WriteField("partial", "1"); err != nil {
+				return
+			}
+		}
+		if signed {
+			// Said as well as sniffed. The receiver decides by looking at
+			// the bytes, because that is what stays right when the two ends
+			// are different versions; this field is what makes a mismatch
+			// legible in a log rather than mysterious.
+			if err := mp.WriteField("format", narpack.FormatName); err != nil {
+				return
+			}
 		}
 		w, err := mp.CreateFormFile("nar", "closure.nar")
 		if err != nil {
@@ -560,6 +825,14 @@ func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		// The peer answers {"error": ...}; the bare text reads better on the
+		// submitter's terminal than escaped JSON.
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			return fmt.Errorf("import returned %d: %s", resp.StatusCode, e.Error)
+		}
 		return fmt.Errorf("import %s returned %d: %s", url, resp.StatusCode, string(body))
 	}
 	return nil
@@ -571,14 +844,47 @@ func importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
 func (s *Server) EnablePersistence() {
 	s.state = newState()
 	s.state.load(s.leases, s.jobs)
+	s.failOrphanedJobs()
 }
 
 // persist snapshots the current leases and jobs to disk. Call after any
 // mutation so a crash or restart starts from the latest state.
+// persist writes the daemon's leases and jobs to disk.
+//
+// The maps are copied under the locks that guard them before being handed to
+// save, which marshals them. Passing the live maps meant JSON iterating one
+// while another request wrote to it, and Go does not treat that as a race to
+// be detected later - it kills the process on the spot with "concurrent map
+// iteration and map write".
+//
+// It took two uploads arriving at one daemon at the same moment, which never
+// happened while each node hosted a single rank. Giving a node one rank per
+// accelerator made it ordinary, and the daemon died mid-run.
 func (s *Server) persist() {
-	if s.state != nil {
-		s.state.save(s.leases, s.jobs)
+	if s.state == nil {
+		return
 	}
+	s.mu.Lock()
+	leases := make(map[string]*Lease, len(s.leases))
+	for k, v := range s.leases {
+		if v != nil {
+			copy := *v
+			leases[k] = &copy
+		}
+	}
+	s.mu.Unlock()
+
+	s.jobsMu.Lock()
+	jobs := make(map[string]*JobRecord, len(s.jobs))
+	for k, v := range s.jobs {
+		if v != nil {
+			copy := *v
+			jobs[k] = &copy
+		}
+	}
+	s.jobsMu.Unlock()
+
+	s.state.save(leases, jobs)
 }
 
 // sweepExpired removes leases in "reserved" state past expiry + grace.
@@ -590,25 +896,103 @@ func (s *Server) persist() {
 // stopped renewing, so a genuinely long job is never cut off mid-run.
 func (s *Server) sweepExpired() {
 	now := time.Now()
+	// Which bound jobs are still alive, read before s.mu so the two locks are
+	// never held together.
+	alive := s.liveJobIDs()
+	type expired struct{ id, state string }
+	var gone []expired
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for id, lease := range s.leases {
 		switch lease.State {
 		case LeaseReserved:
 			if now.After(lease.ExpiresAt.Add(s.gracePeriod)) {
 				delete(s.leases, id)
+				gone = append(gone, expired{id, string(lease.State)})
 			}
 		case LeaseRunning:
+			// A lease follows its job: while the job runs, no renewal is
+			// needed (the submitter may have detached or died).
+			if lease.JobID != "" && alive[lease.JobID] {
+				continue
+			}
 			last := lease.RenewedAt
 			if last.IsZero() {
 				last = lease.CreatedAt
 			}
 			if s.runningLeaseTTL > 0 && now.Sub(last) > s.runningLeaseTTL {
 				delete(s.leases, id)
+				gone = append(gone, expired{id, string(lease.State)})
 			}
 		}
 	}
+	// Released before persisting: persist takes this lock to copy the maps
+	// before marshalling them, and holding it here would deadlock against
+	// itself.
+	s.mu.Unlock()
 	s.persist()
+	for _, g := range gone {
+		log.Warn().Str("lease", g.id).Str("state", g.state).Msg("lease expired")
+	}
+}
+
+// liveJobIDs is the set of jobs that have not finished yet (uploaded,
+// importing or running).
+func (s *Server) liveJobIDs() map[string]bool {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	alive := make(map[string]bool)
+	for id, j := range s.jobs {
+		switch j.Status {
+		case "done", "failed", "cancelled":
+		default:
+			alive[id] = true
+		}
+	}
+	return alive
+}
+
+// bindLease ties a lease to the job running under it, so the lease lives
+// as long as the job (see sweepExpired) and ends with it (releaseJobLease).
+// An unknown lease is logged and ignored: the job still runs.
+func (s *Server) bindLease(leaseID, jobID string) {
+	if leaseID == "" {
+		return
+	}
+	s.mu.Lock()
+	lease, ok := s.leases[leaseID]
+	if ok {
+		lease.JobID = jobID
+	}
+	s.mu.Unlock()
+	if !ok {
+		log.Warn().Str("lease", leaseID).Str("job", jobID).Msg("job names a lease this node does not hold; running it unbound")
+		return
+	}
+	s.persist()
+}
+
+// releaseJobLease frees the lease bound to jobID when the job ends. A lease
+// the submitter already completed is simply gone; nothing is logged then.
+func (s *Server) releaseJobLease(jobID, status string) {
+	if jobID == "" {
+		return
+	}
+	var released []string
+	s.mu.Lock()
+	for id, l := range s.leases {
+		if l.JobID == jobID {
+			delete(s.leases, id)
+			released = append(released, id)
+		}
+	}
+	s.mu.Unlock()
+	if len(released) == 0 {
+		return
+	}
+	s.persist()
+	for _, id := range released {
+		log.Info().Str("lease", id).Str("status", status).Msg("lease released")
+	}
 }
 
 // SetRunningLeaseTTL overrides how long a running lease survives without a
@@ -674,6 +1058,48 @@ func (s *Server) ActiveLeases() int {
 	return len(s.leases)
 }
 
+// QueueDepth is how many leases are reserved but not yet running: work this
+// node has promised to do and has not started.
+//
+// It has been in the wire format since the registry was written and populated
+// nowhere, so every node reported zero and the number told a reader nothing.
+// A node with three jobs queued behind the one it is running is a worse
+// choice than an idle one with the same core count, and this is what says so.
+func (s *Server) QueueDepth() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, l := range s.leases {
+		if l.State == LeaseReserved {
+			n++
+		}
+	}
+	return n
+}
+
+// RecentFailures is how many jobs have failed here lately.
+//
+// The registry's health score has subtracted 0.1 per recent failure since it
+// was written, against a field nothing ever set - so the term was always
+// zero and a node that failed every job scored the same as one that failed
+// none. Counted over a window, because a node that failed an hour ago and has
+// been fine since is not a node to avoid.
+func (s *Server) RecentFailures() int {
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
+	cutoff := time.Now().Add(-recentFailureWindow)
+	n := 0
+	for _, j := range s.jobs {
+		if j != nil && j.Status == "failed" && j.CreatedAt.After(cutoff) {
+			n++
+		}
+	}
+	return n
+}
+
+// recentFailureWindow is how far back a failure still counts against a node.
+const recentFailureWindow = 10 * time.Minute
+
 // ReservedMem returns the total memory reserved by all active leases.
 func (s *Server) ReservedMem() int64 {
 	s.mu.Lock()
@@ -686,9 +1112,146 @@ func (s *Server) ReservedMem() int64 {
 }
 
 // AvailableForJob returns real OS available memory minus pipedpeer reservations.
+// AvailableForJob is how much memory this daemon may promise to a new job.
+//
+// Free memory is a property of the machine, not of the daemon, so anything
+// else on this machine that has already promised memory has to be subtracted
+// too. Two daemons on one host each reading the host's free memory and each
+// subtracting only their own reservations both conclude they have all of it,
+// and both admit work that between them it cannot hold - measured: a forced
+// spill drove a 14 GB machine to 194 MB free and the kernel killed its
+// desktop shell. A container worker beside its host's daemon is an ordinary
+// arrangement, and the lab scripts here build exactly it.
+//
+// Peers on other machines are not subtracted: their memory is their own.
 func (s *Server) AvailableForJob() int64 {
-	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
-	return load.AvailableMemBytes
+	reserved := s.ReservedMem()
+	return s.grantableFrom(heartbeat.CollectLoad(s.ActiveJobs(), reserved), reserved)
+}
+
+// grantableFrom is AvailableForJob for a load already collected with the
+// given reservations, so a caller that needs the load too reads it once.
+func (s *Server) grantableFrom(load registry.LoadInfo, reserved int64) int64 {
+	avail := load.AvailableMemBytes - s.reservedOnThisMachine()
+	if avail < 0 {
+		avail = 0
+	}
+
+	// Never promise more than this daemon's own share of the machine, even
+	// when more happens to be free. Free memory is what the machine has;
+	// the budget is what this daemon may take of it, and the difference is
+	// the room left for everything that is not pipedpeer.
+	//
+	// This matters most where the kernel is not enforcing anything. A daemon
+	// in a container has no systemd to place it in a scope, and no memory
+	// limit at all unless docker was given one - so it ran unbounded beside a
+	// host daemon that was correctly capped at half the machine, and the
+	// kernel went looking for a victim outside either cgroup. Honouring the
+	// budget at admission makes the unpoliced node behave like the policed
+	// one.
+	if b := cgroups.SelfBudget(); b.Total > 0 {
+		// Reservations are promises against this budget too. The free-memory
+		// reading above already has them subtracted; leaving them in here
+		// mixed two accounting systems, so a daemon whose budget was the
+		// tighter bound reported the same headroom however much it had
+		// already promised - and admitted work twice over. Caught by a
+		// stacked-reservation test that passed on one machine and failed on
+		// the other, which is the difference between the two bounds binding.
+		r := b.Remaining() - reserved
+		if r < 0 {
+			r = 0
+		}
+		if r < avail {
+			avail = r
+		}
+	}
+	return avail
+}
+
+// reservedOnThisMachine sums what daemons sharing this machine have promised.
+//
+// Asked directly rather than read from the health poller's cache. The poller
+// runs every ten seconds or so, and a chunk that arrives inside that window is
+// admitted against a figure from before the reservation it needs to see - the
+// two daemons then admit in the same window and the machine goes over anyway.
+// Measured with the cached figure: a forced spill still drove the host out of
+// memory, though the kernel took a pipedpeer worker rather than the desktop.
+// A daemon sharing this machine is reachable over the loopback, so asking is
+// cheap; the answer is held briefly so a burst of admissions is one question.
+func (s *Server) reservedOnThisMachine() int64 {
+	me := heartbeat.Machine()
+	if me == "" {
+		// Cannot tell which machine this is, so cannot tell who shares it.
+		// Claiming co-location on a guess would shrink every node's usable
+		// memory for no reason.
+		return 0
+	}
+
+	s.coResMu.Lock()
+	if time.Since(s.coResAt) < coResidentTTL {
+		total := s.coResBytes
+		s.coResMu.Unlock()
+		return total
+	}
+	s.coResMu.Unlock()
+
+	s.peersMu.RLock()
+	var roommates []PeerHealth
+	for _, ph := range s.peerHealths {
+		if ph.Status == "healthy" && heartbeat.SameMachine(ph.Machine, me) {
+			roommates = append(roommates, *ph)
+		}
+	}
+	s.peersMu.RUnlock()
+
+	var total int64
+	for _, ph := range roommates {
+		if live, ok := peerReservedNow(ph); ok {
+			total += live
+			continue
+		}
+		// Unreachable right now: the last known figure is a better guess than
+		// zero, which would read as "it has promised nothing".
+		total += ph.ReservedMem
+	}
+
+	s.coResMu.Lock()
+	s.coResBytes, s.coResAt = total, time.Now()
+	s.coResMu.Unlock()
+	return total
+}
+
+// coResidentTTL bounds how often a daemon asks its roommates what they have
+// promised. Short enough that a reservation made moments ago is seen, long
+// enough that a burst of admissions asks once.
+const coResidentTTL = 300 * time.Millisecond
+
+// peerReservedNow asks a co-located daemon what it currently has reserved.
+func peerReservedNow(ph PeerHealth) (int64, bool) {
+	req, err := http.NewRequest("GET",
+		fmt.Sprintf("http://%s/v1/reserved", net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))), nil)
+	if err != nil {
+		return 0, false
+	}
+	if tok := authtoken.Current(); tok != "" {
+		req.Header.Set("X-Pipedpeer-Token", tok)
+	}
+	// Loopback, and on the admission path: a daemon that has stopped
+	// answering must not hold up work here.
+	client := &http.Client{Timeout: 400 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var h reservedResponse
+	if json.NewDecoder(resp.Body).Decode(&h) != nil {
+		return 0, false
+	}
+	return h.ReservedMem, true
 }
 
 // GetLease returns a copy of a lease by ID.
@@ -707,7 +1270,13 @@ func (s *Server) GetLease(leaseID string) (Lease, bool) {
 func (s *Server) buildRouter() {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+	// No-op until a token is configured, so an existing cluster keeps working
+	// until its operator opts in. Once one is set, every endpoint here is
+	// behind it — including /health, which is how peers decide who exists.
+	r.Use(exceptUIPage(authtoken.Middleware))
 
+	r.Get("/ui", s.handleUI)
+	r.Get("/v1/stats", s.handleStats)
 	r.Get("/health", s.handleHealth)
 	r.Post("/v1/accept", s.handleAccept)
 	r.Post("/v1/commit", s.handleCommit)
@@ -717,17 +1286,47 @@ func (s *Server) buildRouter() {
 	r.Post("/v1/jobs/upload", s.handleJobUpload)
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
+	r.Get("/v1/jobs/{id}/attach", s.handleJobAttach)
+	r.Get("/v1/jobs/{id}/status", s.handleJobStatus)
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
+	r.Get("/v1/peers/unreachable", s.handleUnreachable)
+	r.Get("/v1/reserved", s.handleReserved)
 	r.Get("/v1/store", s.handleStoreCheck)
+	r.Post("/v1/store/missing", s.handleStoreMissing)
 	r.Post("/v1/store/import", s.handleStoreImport)
 	r.Post("/v1/pool/map", s.handlePoolMap)
+	r.Get("/v1/pool/stats", s.handlePoolStats)
+	r.Get("/v1/bench", s.handleBench)
 	r.Post("/v1/ddp/sync", s.handleDDPSync)
+	r.Get("/v1/ddp/sync", s.handleDDPSyncStatus)
+	r.Post("/v1/ddp/down", s.handleDDPDown)
+	r.Post("/v1/ddp/join", s.handleDDPJoin)
+	r.Post("/v1/ddp/snapshot", s.handleDDPSnapshotPut)
+	r.Get("/v1/ddp/snapshot", s.handleDDPSnapshotGet)
 	r.Post("/v1/nodes", s.handleNodesAdd)
 	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
 
 	s.router = r
+}
+
+// handleReserved answers what this daemon has promised, and nothing else.
+//
+// Separate from /health deliberately. A daemon computing what it can grant
+// asks its roommates what they have promised; if that question were answered
+// by /health, and /health reported grantable memory, two daemons on one
+// machine would each be waiting on the other to answer the same question.
+func (s *Server) handleReserved(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, reservedResponse{
+		ReservedMem: s.ReservedMem(),
+		Machine:     heartbeat.Machine(),
+	})
+}
+
+type reservedResponse struct {
+	ReservedMem int64  `json:"reserved_mem"`
+	Machine     string `json:"machine"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -746,13 +1345,21 @@ func (s *Server) healthSnapshot() healthResponse {
 	}
 
 	load := heartbeat.CollectLoad(activeJobs, reserved)
+	load.QueueDepth = s.QueueDepth()
+	load.RecentFailures = s.RecentFailures()
+	// What a peer may actually be given, not what the machine happens to have
+	// free. A container worker capped at 2 GiB advertising the host's 10.7 GiB
+	// is inviting work it will be killed for accepting, and every scheduler
+	// that reads this - ring placement, pool peer choice - believes it.
+	grantable := s.grantableFrom(load, reserved)
+	load.AvailableMemBytes = grantable
 	return healthResponse{
 		Status:        "ok",
 		NodeID:        s.nodeID,
 		ActiveJobs:    activeJobs,
 		ActiveLeases:  s.ActiveLeases(),
 		ReservedMem:   reserved,
-		AvailableMem:  load.AvailableMemBytes,
+		AvailableMem:  grantable,
 		MaxConcurrent: s.MaxConcurrentJobs(),
 		Capabilities:  caps,
 		Load:          load,
@@ -789,21 +1396,174 @@ func (s *Server) handleRoundRobin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
-		return
-	}
-	dbNodes, err := s.store.ListAll()
+	nodes, err := s.nodeList()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+// nodeList is the cluster as /v1/nodes serves it.
+func (s *Server) nodeList() ([]nodeResp, error) {
+	if s.store == nil {
+		return []nodeResp{}, nil
+	}
+	dbNodes, err := s.store.ListAll()
+	if err != nil {
+		return nil, err
+	}
+
+	// How each peer is reached, when anything knows. Carried in the
+	// capabilities map rather than as a new field, so an older orchestrator
+	// decoding this into a registry.NodeRecord keeps working and simply
+	// ignores it.
+	paths := s.reportedPaths()
 
 	nodes := make([]nodeResp, 0, len(dbNodes))
 	for _, n := range dbNodes {
-		nodes = append(nodes, toNodeResp(n))
+		resp := toNodeResp(n)
+		if p := pathFor(n, paths); p != "" {
+			if resp.Capabilities == nil {
+				resp.Capabilities = map[string]string{}
+			}
+			resp.Capabilities[PathCapability] = p
+		}
+		nodes = append(nodes, resp)
 	}
-	writeJSON(w, http.StatusOK, nodes)
+	return nodes, nil
+}
+
+// ReasonCapability carries why a peer cannot be reached.
+const ReasonCapability = "unreachable_reason"
+
+// withUnreachable marks the rows the unreachable reporter names (State
+// "unreachable", the reason under ReasonCapability) and appends a row for each
+// such peer the store never held. Only /v1/stats uses it: `pipedpeer nodes`
+// prints /v1/peers/unreachable itself.
+func (s *Server) withUnreachable(nodes []nodeResp) []nodeResp {
+	s.mu.Lock()
+	f := s.unreachableReporter
+	s.mu.Unlock()
+	if f == nil {
+		return nodes
+	}
+	marks := f()
+	if len(marks) == 0 {
+		return nodes
+	}
+	left := make(map[string]string, len(marks))
+	for id, reason := range marks {
+		left[id] = reason
+	}
+	for i := range nodes {
+		reason, ok := left[nodes[i].NodeID]
+		if !ok {
+			continue
+		}
+		delete(left, nodes[i].NodeID)
+		caps := make(map[string]string, len(nodes[i].Capabilities)+1)
+		for k, v := range nodes[i].Capabilities {
+			caps[k] = v
+		}
+		caps[ReasonCapability] = reason
+		nodes[i].Capabilities = caps
+		nodes[i].State = "unreachable"
+	}
+	ids := make([]string, 0, len(left))
+	for id := range left {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		nodes = append(nodes, nodeResp{
+			NodeID:       id,
+			Capabilities: map[string]string{ReasonCapability: left[id]},
+			State:        "unreachable",
+			Source:       "internet",
+		})
+	}
+	return nodes
+}
+
+// PathCapability is where the route to a peer travels.
+const PathCapability = "path"
+
+// SetPathReporter tells the daemon how peers are being reached.
+//
+// Set by internet mode, which is the only thing that knows: a peer there is
+// behind a local forwarder and could be reached by a punched connection, a
+// mapped port, or nothing at all. Without this a machine that has quietly
+// stopped serving looks the same as one that was never there, which is the
+// failure this exists to prevent.
+func (s *Server) SetPathReporter(f func() map[string]string) {
+	s.mu.Lock()
+	s.pathReporter = f
+	s.mu.Unlock()
+}
+
+func (s *Server) reportedPaths() map[string]string {
+	s.mu.Lock()
+	f := s.pathReporter
+	s.mu.Unlock()
+	if f == nil {
+		return nil
+	}
+	return f()
+}
+
+// SetUnreachableReporter tells the daemon which internet peers it cannot
+// reach and why. Such a peer has no forwarder, so it never shows up in
+// /v1/nodes; without this it would vanish without a word.
+func (s *Server) SetUnreachableReporter(f func() map[string]string) {
+	s.mu.Lock()
+	s.unreachableReporter = f
+	s.mu.Unlock()
+}
+
+type unreachablePeer struct {
+	Peer   string `json:"peer"`
+	Reason string `json:"reason"`
+}
+
+// handleUnreachable serves GET /v1/peers/unreachable, sorted by peer. A
+// separate route because /v1/nodes rows decode into registry.NodeRecord
+// across many consumers.
+func (s *Server) handleUnreachable(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	f := s.unreachableReporter
+	s.mu.Unlock()
+	out := []unreachablePeer{}
+	if f != nil {
+		for peer, reason := range f() {
+			out = append(out, unreachablePeer{Peer: peer, Reason: reason})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Peer < out[j].Peer })
+	writeJSON(w, http.StatusOK, out)
+}
+
+// pathFor is how a node is reached, or "" when nothing can say.
+//
+// A peer behind a local forwarder is only knowable from the manager that made
+// it. Anything else with a routable address is reached by talking straight to
+// it, which is a direct path by construction - no relay is involved and never
+// was - so that much can be stated without asking anyone.
+func pathFor(n nodestore.Node, paths map[string]string) string {
+	if n.Source == "self" {
+		return "self"
+	}
+	addr := net.JoinHostPort(n.Host, strconv.Itoa(n.Port))
+	if p, ok := paths[addr]; ok && p != "" {
+		return p
+	}
+	if ip := net.ParseIP(n.Host); ip != nil && ip.IsLoopback() {
+		// A loopback address that no manager claims is a forwarder whose
+		// link has gone, or a second daemon on this machine. Saying "lan"
+		// here would be inventing a route.
+		return ""
+	}
+	return "lan"
 }
 
 // nodeResp is a registry.NodeRecord as served by /v1/nodes. The orchestrator
@@ -900,7 +1660,36 @@ func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Poll it now rather than waiting for the next sweep. A peer that is
+	// known but not yet marked healthy is invisible to closure broadcast and
+	// to spill, so a job submitted in the seconds after `nodes add` runs
+	// entirely local and nothing explains why.
+	go s.pollAllNodes()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
+}
+
+// AddPeer registers a peer at host:port and polls it immediately, the same way
+// `pipedpeer nodes add` does. Exported so internet mode can register the local
+// ports it puts in front of remote peers, without going back out through HTTP
+// to reach its own daemon.
+func (s *Server) AddPeer(host string, port int) error {
+	if s.store == nil {
+		return fmt.Errorf("node store unavailable")
+	}
+	if err := s.store.AddManual(host, port); err != nil {
+		return err
+	}
+	go s.pollAllNodes()
+	return nil
+}
+
+// RemovePeer forgets a peer, for when internet mode's local port goes away.
+func (s *Server) RemovePeer(host string, port int) error {
+	if s.store == nil {
+		return fmt.Errorf("node store unavailable")
+	}
+	_, err := s.store.RemoveManualAt(host, port)
+	return err
 }
 
 func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) {
@@ -1070,12 +1859,167 @@ func (s *Server) pollAllNodes() {
 	wg.Wait()
 
 	s.peersMu.Lock()
+	prev := s.peerHealths
 	s.peerHealths = finalHealths
 	s.peersMu.Unlock()
+	hostnames := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		hostnames[n.NodeID] = n.Hostname
+	}
+	logPeerChanges(prev, finalHealths, hostnames)
 
 	// 4. Forget auto-discovered nodes that have been gone a while. Manual
 	//    entries survive — see nodestore.PruneStale.
 	s.store.PruneStale(staleNodeTTL)
+
+	// 5. Keep the list of signing keys this cluster uses current, so nix can
+	//    require a signature and still accept peer closures.
+	s.refreshTrustedKeys()
+}
+
+// logPeerChanges writes "peer up" for a peer healthy now and not before, and
+// "peer down" for one healthy before and not now (or gone from the table), so
+// `pipedpeer events` can show joins and leaves on the discovery path too.
+func logPeerChanges(prev, next map[string]*PeerHealth, hostnames map[string]string) {
+	healthy := func(m map[string]*PeerHealth, at string) bool {
+		ph := m[at]
+		return ph != nil && ph.Status == "healthy"
+	}
+	emit := func(msg, at string, ph *PeerHealth) {
+		log.Info().Str("peer", ph.NodeID).Str("host", hostnames[ph.NodeID]).
+			Str("at", at).Str("source", ph.Source).Msg(msg)
+	}
+	for at, ph := range next {
+		if ph != nil && healthy(next, at) && !healthy(prev, at) {
+			emit("peer up", at, ph)
+		}
+	}
+	for at, ph := range prev {
+		if ph != nil && healthy(prev, at) && !healthy(next, at) {
+			emit("peer down", at, ph)
+		}
+	}
+}
+
+// refreshTrustedKeys records which keys this cluster signs store paths with.
+//
+// Written after every poll rather than once at startup, because membership
+// changes: a peer that joins must have its closures accepted, and one that
+// leaves must stop being trusted. The file is rewritten whole, so leaving is
+// as effective as joining.
+//
+// A key is only recorded if it proves it belongs to the node publishing it -
+// the material has to hash to that node's fingerprint. Anything else is
+// logged and dropped, because a key trusted under the wrong name would let
+// its holder sign as somebody else.
+func (s *Server) refreshTrustedKeys() {
+	self, err := identity.Key()
+	if err != nil {
+		return
+	}
+	nodes, err := s.store.ListAll()
+	if err != nil {
+		return
+	}
+
+	offered := map[string]string{}
+	for _, n := range nodes {
+		caps := map[string]string{}
+		if n.CapsJSON != "" {
+			_ = json.Unmarshal([]byte(n.CapsJSON), &caps)
+		}
+		key := caps[heartbeat.NixKeyCapability]
+		if key == "" {
+			continue
+		}
+		// Keyed by the fingerprint the key claims, which Collect then checks
+		// against the key material itself. The node's UUID is a different
+		// namespace and cannot be compared with it.
+		fp, ok := nixsign.FingerprintOf(key)
+		if !ok {
+			continue
+		}
+		offered[fp] = key
+	}
+
+	trusted, rejected := nixsign.Collect(self, offered)
+	for _, r := range rejected {
+		log.Warn().Str("peer", r).Msg("ignoring a signing key that does not belong to the node offering it")
+	}
+	if err := nixsign.WriteTrustedKeys(trusted); err != nil {
+		log.Warn().Err(err).Msg("could not record the cluster's signing keys")
+	}
+	s.warnUntrustedKeys(trusted)
+}
+
+// Seams for tests: what system nix trusts, and the root-owned key helper.
+var (
+	systemUntrusted = nixsign.SystemUntrusted
+	helperInstalled = nixtrust.Installed
+	helperAdd       = nixtrust.Add
+)
+
+// trustRetry is how long a key system nix refused waits before the daemon
+// tries it again, so a missing helper or a broken sudo rule costs one nix
+// command and one warning per key per interval, not per poll.
+const trustRetry = 15 * time.Minute
+
+// trustSettled marks a key system nix trusts: never checked again.
+var trustSettled = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// warnUntrustedKeys makes system nix trust the cluster keys it would refuse:
+// a multi-user nix-daemon ignores the keys narpack.Import passes, so closures
+// signed by a key fail here until nix.conf lists it. Where setup installed the
+// root-owned key helper (ADR-0018) the daemon adds the key through it with
+// `sudo -n`, no prompt; otherwise, or if that fails, it warns and names
+// `pipedpeer trust`, and tries again after trustRetry. Only keys due a check
+// are looked at, so a steady cluster runs no nix command per poll. Returns the
+// keys it warned about.
+func (s *Server) warnUntrustedKeys(keys []string) []string {
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	if s.trustNext == nil {
+		s.trustNext = map[string]time.Time{}
+	}
+	now := time.Now()
+	var due []string
+	for _, k := range keys {
+		if next, seen := s.trustNext[k]; !seen || !now.Before(next) {
+			due = append(due, k)
+		}
+	}
+	if len(due) == 0 {
+		return nil
+	}
+	missing, _, err := systemUntrusted(due)
+	if err != nil {
+		log.Warn().Err(err).Int("keys", len(due)).
+			Msg("could not check which cluster keys system nix trusts; peer closures may be refused here (fix: pipedpeer trust)")
+		for _, k := range due {
+			s.trustNext[k] = now.Add(trustRetry)
+		}
+		return nil
+	}
+	for _, k := range due {
+		s.trustNext[k] = trustSettled
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if helperInstalled() {
+		err := helperAdd(missing)
+		if err == nil {
+			log.Info().Strs("keys", missing).Msg("system nix now trusts these cluster keys (added through the pipedpeer key helper)")
+			return nil
+		}
+		log.Warn().Err(err).Strs("keys", missing).Msg("the pipedpeer key helper could not add these cluster keys")
+	}
+	for _, k := range missing {
+		s.trustNext[k] = now.Add(trustRetry)
+		log.Warn().Str("key", k).
+			Msg("system nix does not trust this cluster key, so closures it signed are refused here; run `pipedpeer trust` on this machine")
+	}
+	return missing
 }
 
 // staleNodeTTL is how long a discovered node may go unseen before it is
@@ -1093,6 +2037,15 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", node.Host, node.Port))
 	if err != nil {
+		// A pin mismatch is not the same as a machine being down, and
+		// reporting it as "unreachable" sends the operator to check cables
+		// for a node that is answering. It means the peer's certificate
+		// changed - a reinstall, or someone in the middle - and only they
+		// can tell which.
+		if strings.Contains(err.Error(), "certificate for") {
+			log.Warn().Str("peer", fmt.Sprintf("%s:%d", node.Host, node.Port)).Err(err).
+				Msg("peer certificate changed; run `pipedpeer auth forget <host:port>` if it was reinstalled")
+		}
 		ph.Status = "unreachable"
 		s.store.MarkUnreachable(node.NodeID)
 		return ph
@@ -1110,6 +2063,11 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.Status = "healthy"
 	ph.ActiveJobs = h.ActiveJobs
 	ph.AvailableMem = h.AvailableMem
+	ph.TotalCPUs = h.Load.TotalCPUs
+	ph.ReservedMem = h.ReservedMem
+	ph.Machine = h.Capabilities[heartbeat.MachineCapability]
+	ph.ClosureFormats = h.Capabilities[heartbeat.ClosureFormatCapability]
+	ph.GPU = h.Capabilities["gpu"]
 
 	capsJSON, _ := json.Marshal(h.Capabilities)
 	loadJSON, _ := json.Marshal(h.Load)
@@ -1153,13 +2111,25 @@ func (s *Server) upsertSelf() {
 		return // SetSelfInfo not called (tests, or daemon not fully started)
 	}
 
-	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	reserved := s.ReservedMem()
+	load := heartbeat.CollectLoad(s.ActiveJobs(), reserved)
+	load.QueueDepth = s.QueueDepth()
+	load.RecentFailures = s.RecentFailures()
+	// The same grantable figure /health gives peers. The raw free memory is
+	// the host's: a daemon in a 1.5 GiB container showed 9.8 GiB on its own
+	// `nodes` row, and local placement read that row.
+	load.AvailableMemBytes = s.grantableFrom(load, reserved)
 	capsJSON, _ := json.Marshal(caps)
 	loadJSON, _ := json.Marshal(load)
 
+	// Both fields, not just Host: peers read the endpoint, and publishing a
+	// routable Host beside an unroutable endpoint fixes nothing.
+	host := s.advertisedHost(extractHost(ssh))
+	ssh = rewriteHost(ssh, host)
+
 	_ = s.store.MarkHealthy(nodestore.Node{
 		NodeID:       s.nodeID,
-		Host:         extractHost(ssh),
+		Host:         host,
 		Port:         port,
 		SSHEndpoint:  ssh,
 		Arch:         caps["arch"],
@@ -1190,6 +2160,11 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	// Memory is read with zero reservations so the reserved total can be
 	// recomputed from the lease table inside the critical section.
 	hostLoad := heartbeat.CollectLoad(0, 0)
+	// Read outside the lock for the same reason as hostLoad: one asks the
+	// kernel about this daemon's cgroup, the other asks a roommate over the
+	// loopback, and neither should happen while admission is held.
+	roommates := s.reservedOnThisMachine()
+	budget := cgroups.SelfBudget()
 	devices := gpu.PerDevice()
 	gpuPresent := gpu.Detect().Vendor != gpu.VendorNone
 
@@ -1223,7 +2198,22 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		for _, l := range s.leases {
 			reserved += l.MemBytes
 		}
-		available := hostLoad.AvailableMemBytes - reserved
+		// The same figure AvailableForJob reports, computed here because the
+		// reserved total has to come from the lease table inside this lock.
+		//
+		// This path had its own arithmetic and used neither bound - so a
+		// daemon admitted leases past its own share of the machine and past
+		// what a roommate had already promised, which is every gap the budget
+		// work closed, still open on the path every job is actually admitted
+		// through. A stacked-reservation test caught it by failing on the
+		// machine where the budget binds and passing on the one where free
+		// memory does.
+		available := hostLoad.AvailableMemBytes - reserved - roommates
+		if budget.Total > 0 {
+			if r := budget.Remaining() - reserved; r < available {
+				available = r
+			}
+		}
 		if available < 0 {
 			available = 0
 		}
@@ -1263,6 +2253,8 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	s.leases[leaseID] = lease
 	s.mu.Unlock()
 	s.persist()
+	log.Info().Str("lease", leaseID).Str("job", req.JobName).Str("submitter", req.SubmitterNode).
+		Int64("mem", req.RequiredMemBytes).Msg("lease granted")
 
 	return acceptResponse{
 		Accepted:  true,
@@ -1346,6 +2338,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 		delete(s.leases, req.LeaseID)
 		s.mu.Unlock()
 		s.persist()
+		log.Warn().Str("lease", req.LeaseID).Str("state", string(LeaseReserved)).Msg("lease expired")
 		return commitResponse{Committed: false, NodeID: s.nodeID, Reason: "lease expired"}, http.StatusGone
 	}
 
@@ -1397,11 +2390,15 @@ func (s *Server) processComplete(req completeRequest) {
 			}
 		}
 	}
+	_, found := s.leases[leaseID]
 	if leaseID != "" {
 		delete(s.leases, leaseID)
 	}
 	s.mu.Unlock()
 	s.persist()
+	if found {
+		log.Info().Str("lease", leaseID).Str("status", req.Status).Msg("lease released")
+	}
 }
 
 func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
@@ -1421,6 +2418,7 @@ func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
 	delete(s.leases, req.LeaseID)
 	s.mu.Unlock()
 	s.persist()
+	log.Info().Str("lease", req.LeaseID).Str("status", "cancelled").Msg("lease released")
 
 	return map[string]string{"status": "cancelled"}, http.StatusOK
 }
@@ -1547,4 +2545,108 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// advertisedHost is the address this node publishes to its peers.
+//
+// The interface-list guess is only right when a machine has one route to the
+// world. A laptop holding a stale 192.168.x lease published that while its
+// peers were reachable only over an overlay, and nothing complained: the node
+// simply advertised an address no peer could dial. DDP appeared to work
+// because the reachable machine happened to draw rank 0; with the roles
+// reversed the sync endpoint would have been unreachable for the other rank.
+//
+// So ask the kernel which of our addresses it would use to reach the peers we
+// already know about, and publish that.
+func (s *Server) advertisedHost(fallback string) string {
+	if s.store == nil {
+		return fallback
+	}
+	nodes, err := s.store.ListAll()
+	if err != nil {
+		return fallback
+	}
+	var peers []string
+	for _, n := range nodes {
+		if n.NodeID == s.nodeID || n.Host == "" || n.Port == 0 {
+			continue
+		}
+		// Only peers we can currently reach get a vote. Unreachable rows
+		// outlive whatever they described - manual entries never expire at
+		// all - and letting a machine that is long gone decide how we
+		// describe ourselves is how the stale answer survives.
+		if n.State != "healthy" {
+			continue
+		}
+		peers = append(peers, net.JoinHostPort(n.Host, strconv.Itoa(n.Port)))
+	}
+	return netaddr.Advertise(peers, fallback)
+}
+
+// rewriteHost swaps the host in a "user@host:port" endpoint, leaving the user
+// and port alone.
+func rewriteHost(endpoint, host string) string {
+	if endpoint == "" || host == "" {
+		return endpoint
+	}
+	user, rest := "", endpoint
+	if i := strings.LastIndex(endpoint, "@"); i >= 0 {
+		user, rest = endpoint[:i+1], endpoint[i+1:]
+	}
+	if _, port, err := net.SplitHostPort(rest); err == nil {
+		return user + net.JoinHostPort(host, port)
+	}
+	return user + host
+}
+
+// diffNARFor builds an archive holding only the closure paths a peer is
+// missing, and reports whether it is worth using. The caller keeps the whole
+// archive when this declines, so every failure mode here is a slower
+// transfer rather than a broken one.
+func (s *Server) diffNARFor(ph *PeerHealth, storePath string) (string, bool) {
+	// Register the closure in the local store first. It arrives as a cached
+	// archive and is otherwise only imported at exec time, so until then this
+	// node cannot answer questions about its own contents - nix says "path is
+	// not valid" - and every transfer falls back to the whole archive. Doing
+	// it here rather than before the peer loop keeps the "peer already has
+	// it" check answering about the peer.
+	_ = s.materializeClosure(storePath)
+
+	// Each decline is logged: a transfer that quietly sends everything looks
+	// exactly like one that sent only what was needed, and the whole point of
+	// this path is the difference between those two.
+	paths, err := closurePaths(storePath)
+	if err != nil || len(paths) == 0 {
+		log.Info().Err(err).Str("store", storePath).
+			Msg("cannot list closure paths; sending the whole archive")
+		return "", false
+	}
+	missing, ok := peerMissingPaths(ph.Host, ph.Port, paths)
+	if !ok {
+		log.Info().Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+			Msg("peer did not answer which paths it lacks; sending the whole archive")
+		return "", false
+	}
+	if len(missing) == 0 {
+		log.Info().Msg("peer already has every path; nothing to send")
+		return "", false
+	}
+	if len(missing) == len(paths) {
+		log.Info().Int("paths", len(paths)).
+			Msg("peer shares no paths with this closure; a diff would save nothing")
+		return "", false
+	}
+	dir, err := userdir.Scratch("nardiff-*")
+	if err != nil {
+		return "", false
+	}
+	out := filepath.Join(dir, "diff.nar")
+	if err := exportPaths(missing, out); err != nil {
+		os.RemoveAll(dir)
+		return "", false
+	}
+	log.Info().Int("missing", len(missing)).Int("closure", len(paths)).
+		Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+		Msg("sending only the store paths this peer lacks")
+	return out, true
 }

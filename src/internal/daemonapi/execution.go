@@ -5,7 +5,16 @@ import (
 	"bufio"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/dustin/go-humanize"
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/pipedpeer/pipedpeer/internal/userns"
+	"github.com/rs/zerolog/log"
 	"io"
 	"io/fs"
 	"net/http"
@@ -15,7 +24,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -35,6 +48,13 @@ type ExecConfig struct {
 	// Intercept enables the sitecustomize shim: PYTHONPATH gains the workspace's
 	// .pipedpeer/shim dir and the shim's envs are injected.
 	Intercept bool `json:"intercept,omitempty"`
+	// MemLimitBytes caps the sandbox via cgroups; 0 leaves it uncapped.
+	// Everything else about memory here is an estimate checked at admission;
+	// this is the only part the kernel enforces.
+	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
+	// LeaseID binds the submitter's lease to this job: the node keeps it while
+	// the job runs and releases it when the job ends, renewals or not.
+	LeaseID string `json:"lease_id,omitempty"`
 }
 
 // OCI config structures for crun bundle generation.
@@ -42,7 +62,7 @@ type ociConfig struct {
 	OciVersion string     `json:"ociVersion"`
 	Process    ociProcess `json:"process"`
 	Root       ociRoot    `json:"root"`
-	Hostname   string     `json:"hostname"`
+	Hostname   string     `json:"hostname,omitempty"`
 	Mounts     []ociMount `json:"mounts"`
 	Linux      *ociLinux  `json:"linux,omitempty"`
 }
@@ -68,8 +88,26 @@ type ociMount struct {
 	Options     []string `json:"options,omitempty"`
 }
 type ociLinux struct {
-	Namespaces []ociNamespace `json:"namespaces"`
-	Devices    []ociDevice    `json:"devices,omitempty"`
+	Namespaces  []ociNamespace `json:"namespaces"`
+	Devices     []ociDevice    `json:"devices,omitempty"`
+	Resources   *ociResources  `json:"resources,omitempty"`
+	CgroupsPath string         `json:"cgroupsPath,omitempty"`
+}
+
+// ociResources carries the only memory bound the kernel actually enforces.
+// Admission control and the 40%-of-free-RAM chunk rule are both estimates
+// made before the fact; a job that outgrows its estimate used to take the
+// machine down with it, because nothing below those estimates said no.
+type ociResources struct {
+	Memory *ociMemory `json:"memory,omitempty"`
+}
+
+type ociMemory struct {
+	Limit int64 `json:"limit,omitempty"`
+	// Swap is pinned to Limit so the job cannot escape the cap by swapping,
+	// which on a machine with swap turns an OOM into thrashing that takes
+	// every other job on the node down with it.
+	Swap int64 `json:"swap,omitempty"`
 }
 type ociNamespace struct {
 	Type string `json:"type"`
@@ -90,10 +128,36 @@ type OutputMessage struct {
 	Error    string `json:"error,omitempty"`
 	Done     bool   `json:"done,omitempty"`
 	ExitCode int    `json:"exit_code"`
-	// PeakMemBytes is the largest RSS (process tree, bytes) seen while running.
+	// OOMKilled says the kernel killed the job for exceeding MemLimitBytes,
+	// so the client can say that instead of reporting a signal number.
+	OOMKilled     bool  `json:"oom_killed,omitempty"`
+	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
+	// PeakMemBytes is the largest PSS (process tree, bytes) seen while running.
 	// It is set on the Done frame so the submitter can learn a job's real
 	// footprint and feed the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
+	// Cancelled is set on the Done frame when the client's cancel frame
+	// stopped the job; ExitCode is still whatever the process returned.
+	Cancelled bool `json:"cancelled,omitempty"`
+	// Timing splits the node's share of the run into its parts. Set on the
+	// Done frame, so the submitter can tell a slow script from a slow
+	// sandbox or a closure import.
+	Timing *ExecTiming `json:"timing,omitempty"`
+	// Receipt is the shim's account of the run - what it shipped, what it
+	// kept, and why - when the job was intercepted and wrote one.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
+}
+
+// ExecTiming is how a node spent one execution, in milliseconds.
+type ExecTiming struct {
+	// ImportMs is importing the closure into this node's store; zero when it
+	// was already there.
+	ImportMs int64 `json:"import_ms"`
+	// SetupMs is everything between the request and the script starting,
+	// the import excluded: the sandbox, the memory cap, the environment.
+	SetupMs int64 `json:"setup_ms"`
+	// RunMs is the script itself, from its start to its exit.
+	RunMs int64 `json:"run_ms"`
 }
 
 // JobRecord tracks a single uploaded job on the daemon.
@@ -109,6 +173,16 @@ type JobRecord struct {
 	// WorkDir. Results are diffed against it so only what the job actually
 	// produced or changed travels back.
 	Uploaded map[string]FileStamp
+	// Detached: the client left without cancelling and the job ran on.
+	Detached bool
+	// Cancelled: the client's cancel frame stopped the job.
+	Cancelled  bool
+	FinishedAt time.Time
+	// Pgid and PgidStart (its leader's start, ms since the epoch): an
+	// unisolated job's process group, so a restarted daemon can stop a job
+	// that outlived the old one, and nothing else (pids get reused).
+	Pgid      int   `json:",omitempty"`
+	PgidStart int64 `json:",omitempty"`
 }
 
 // FileStamp identifies a file version well enough to tell whether a job
@@ -131,21 +205,25 @@ func (f FileStamp) changed(other FileStamp) bool {
 type UploadResponse struct {
 	JobID     string `json:"job_id"`
 	StorePath string `json:"store_path"`
+	// Warnings are for the submitter's terminal: peers that refused the
+	// closure, and why, so a run that stays local says what kept it there.
+	Warnings []string `json:"warnings,omitempty"`
+	// SeedMs is how long the upload spent giving the closure to this node's
+	// peers before answering, so the submitter's timeline can show it apart
+	// from the transfer itself.
+	SeedMs int64 `json:"seed_ms,omitempty"`
 }
 
 var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// defaultJobDir holds the daemon's own working state: per-job work dirs,
+// daemon-state.json and the NAR cache. It is deliberately not
+// jobhistory.BaseDir() (<data>/pipedpeer/jobs): the daemon prunes this dir
+// hourly by mtime, and sharing it would delete the CLI's job history.
 func defaultJobDir() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "pipedpeer", "jobs")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "jobs")
-	}
-	return filepath.Join(home, ".local", "share", "pipedpeer", "jobs")
+	return filepath.Join(userdir.Data(), "work")
 }
 
 func shellQuote(s string) string {
@@ -155,6 +233,12 @@ func shellQuote(s string) string {
 // pathExists reports whether a path exists on disk. Used to short-circuit NAR
 // re-imports when a prior task already materialised the closure.
 func pathExists(p string) bool {
+	if host := nixstore.HostPath(p); host != p {
+		// Lstat: links inside the store point at other /nix paths, which
+		// resolve only inside the namespace.
+		_, err := os.Lstat(host)
+		return err == nil
+	}
 	_, err := os.Stat(p)
 	return err == nil
 }
@@ -210,6 +294,21 @@ func gpuDriverLibs(dir string) []string {
 // looks there finds them without help.
 const gpuDriverMountDir = "/run/opengl-driver/lib"
 
+// addGPUSysModule exposes /sys/module read-only to a GPU job. libcuda and
+// NVML read /sys/module/nvidia*; without it cuInit returns 304 and torch
+// quietly falls back to the CPU (bench/gpu_test.go found this).
+func addGPUSysModule(c *ociConfig, rootfsDir, jobID string) {
+	const dir = "/sys/module"
+	if _, err := os.Stat(dir); err != nil {
+		log.Warn().Err(err).Str("job", jobID).Msg("GPU job without /sys/module: CUDA will not initialise in the sandbox")
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(rootfsDir, "sys", "module"), 0755); err != nil {
+		log.Warn().Err(err).Str("job", jobID).Msg("creating the /sys/module mount point")
+	}
+	c.Mounts = append(c.Mounts, ociMount{Destination: dir, Type: "bind", Source: dir, Options: []string{"rbind", "ro"}})
+}
+
 func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	// Same reasoning as the sandbox env: stdout is a pipe, and python would
 	// otherwise sit on a full training run's prints until exit.
@@ -250,12 +349,20 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mkdir: " + err.Error()})
 		return
 	}
+	var storePath, scriptPath, narPath, skipBroadcast, leaseID string
 	fail := func(status int, msg string) {
 		os.RemoveAll(jobDir)
+		// No job will run under this lease: free the slot now. A submitter
+		// killed mid-transfer never sends /v1/complete, and the lease would
+		// otherwise block this node (a GPU node refuses "no GPU available")
+		// until the running-lease TTL.
+		if leaseID != "" {
+			log.Warn().Str("lease", leaseID).Str("error", msg).Msg("upload failed; releasing its lease")
+			s.processComplete(completeRequest{LeaseID: leaseID, Status: "upload failed"})
+		}
 		writeJSON(w, status, map[string]string{"error": msg})
 	}
 
-	var storePath, scriptPath, narPath, skipBroadcast string
 	var haveWorkspace bool
 	uploaded := make(map[string]FileStamp)
 
@@ -275,6 +382,8 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch part.FormName() {
+		case "lease_id":
+			leaseID = readField(part)
 		case "store_path":
 			storePath = readField(part)
 		case "script_path":
@@ -349,18 +458,32 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	// DDP ranks upload directly to their own node and every rank does the same,
 	// so the closure is already where it will run — skip the broadcast and keep
 	// it off the other (non-executing) peers.
+	var warnings []string
+	var seed time.Duration
 	if skipBroadcast != "1" {
-		s.broadcastClosure(storePath)
+		seedStart := time.Now()
+		warnings = s.broadcastClosure(storePath)
+		seed = time.Since(seedStart)
 	}
 
-	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath})
+	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath,
+		Warnings: warnings, SeedMs: seed.Milliseconds()})
 }
 
 // extractWorkspaceTar unpacks the workspace stream into workDir, refusing
 // entries that escape it, and records a stamp per extracted file so results
 // can later be limited to what the job actually changed.
 func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]FileStamp) error {
-	tr := tar.NewReader(src)
+	// Sniff rather than require: workspaces are zstd now, were gzip before,
+	// and a submitter on an older build still sends them plain. A cluster is
+	// rarely upgraded all at once and never in one direction, so reading all
+	// three removes the flag day.
+	in, closeIn, err := tarcodec.Reader(src)
+	if err != nil {
+		return err
+	}
+	defer closeIn()
+	tr := tar.NewReader(in)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -431,9 +554,113 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeWS := func(m OutputMessage) {
-		data, _ := json.Marshal(m)
-		conn.WriteMessage(websocket.TextMessage, data)
+	started := time.Now()
+	if cfg.LeaseID != "" {
+		// The lease now lives as long as the job, not as long as the
+		// submitter keeps renewing it: a detached submitter renews nothing.
+		s.bindLease(cfg.LeaseID, jobID)
+	}
+
+	// Every frame is recorded in the job's output log before the websocket
+	// sees it, so `pipedpeer attach` replays exactly what a live client got.
+	jobLog := s.jobOutput(jobID)
+
+	// Timing for the done frame: closure import, sandbox setup, the script.
+	execStart := time.Now()
+	var receiptPath string
+	var importDur, runDur time.Duration
+	var runStart time.Time
+
+	outCh := make(chan OutputMessage, 64)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		// Keep draining after the client goes away: the output readers block
+		// on outCh, and the job cannot finish until they do.
+		var lost bool
+		for m := range outCh {
+			if m.Done {
+				jobLog.Finish(m)
+			} else {
+				jobLog.Append(m)
+			}
+			if lost {
+				continue
+			}
+			data, _ := json.Marshal(m)
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				lost = true
+			}
+		}
+	}()
+
+	// The client may send one more frame, {"cancel":true}. A connection that
+	// ends without it (detach, crash, network loss) leaves the job running.
+	cancelCh := make(chan struct{})
+	var finished atomic.Bool
+	var cancelOnce sync.Once
+	requestCancel := func() {
+		if finished.Load() {
+			return
+		}
+		cancelOnce.Do(func() {
+			log.Info().Str("job", jobID).Msg("cancel requested by the submitter")
+			close(cancelCh)
+		})
+	}
+	// An attach client's cancel frame stops the job the same way.
+	jobLog.SetCancel(requestCancel)
+	go s.readExecClient(conn, job, jobID, cancelCh, requestCancel, &finished)
+	cancelled := func() bool {
+		select {
+		case <-cancelCh:
+			return true
+		default:
+			return false
+		}
+	}
+
+	// finish sends the done frame, records how the job ended and lets the
+	// lease go. Every path out of this handler past this point goes through it.
+	finish := func(done OutputMessage) {
+		wasCancelled := cancelled()
+		finished.Store(true)
+		done.Done = true
+		done.Cancelled = wasCancelled
+		outCh <- done
+		close(outCh)
+		<-writerDone
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+
+		status := "done"
+		switch {
+		case wasCancelled:
+			status = "cancelled"
+		case done.ExitCode != 0:
+			status = "failed"
+		}
+		s.jobsMu.Lock()
+		job.Status = status
+		job.Cancelled = wasCancelled
+		job.FinishedAt = time.Now()
+		s.jobsMu.Unlock()
+		if cfg.LeaseID != "" {
+			s.releaseJobLease(jobID, status)
+		}
+		s.persist()
+
+		secs := time.Since(started).Round(100 * time.Millisecond).Seconds()
+		if wasCancelled {
+			log.Info().Str("job", jobID).Float64("secs", secs).Msg("job cancelled")
+		} else {
+			log.Info().Str("job", jobID).Int("exit", done.ExitCode).Float64("secs", secs).
+				Str("peak", humanize.IBytes(uint64(max(done.PeakMemBytes, 0)))).Msg("job finished")
+		}
+	}
+	// fail ends a job that never got a process to run.
+	fail := func(msg string) {
+		outCh <- OutputMessage{Error: msg}
+		finish(OutputMessage{ExitCode: 1})
 	}
 
 	// If the closure's run entrypoint already exists in the local store, a
@@ -441,54 +668,37 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// skip the (expensive) NAR open + re-import entirely.
 	runEntry := filepath.Join(job.StorePath, "bin", "run")
 	if !pathExists(runEntry) {
+		importStart := time.Now()
 		narFile, err := os.Open(job.NarPath)
 		if err != nil {
-			writeWS(OutputMessage{Error: "open nar: " + err.Error()})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
+			fail("open nar: " + err.Error())
 			return
 		}
 		defer narFile.Close()
 
 		// Import NAR into local Nix store — uses nix multicall binary
 		// invoked as nix-store via argv[0].
-		nixPath, err := exec.LookPath("nix")
+		out, err := importNAR(narFile)
 		if err != nil {
-			writeWS(OutputMessage{Error: "nix not found"})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
+			fail(fmt.Sprintf("nix-store --import: %v: %s", err, string(out)))
 			return
 		}
+		importDur = time.Since(importStart)
+	}
 
-		out, err := importNAR(nixPath, narFile)
-		if err != nil {
-			writeWS(OutputMessage{Error: fmt.Sprintf("nix-store --import: %v: %s", err, string(out))})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
-			return
-		}
+	if cancelled() {
+		// Cancelled while the closure was importing: nothing to stop, so do
+		// not start it. 130 is what a shell reports for a job stopped by Ctrl+C.
+		finish(OutputMessage{ExitCode: 130})
+		return
 	}
 
 	s.jobsMu.Lock()
 	job.Status = "running"
 	s.jobsMu.Unlock()
+	log.Info().Str("job", jobID).Str("script", cfg.ScriptPath).Bool("gpu", cfg.GPU).Msg("job started")
 
 	runPath := filepath.Join(cfg.StorePath, "bin", "run")
-
-	outCh := make(chan OutputMessage, 64)
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		for m := range outCh {
-			data, _ := json.Marshal(m)
-			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-				return
-			}
-		}
-	}()
 
 	var exitCode int
 	var peakBytes int64
@@ -517,6 +727,21 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
 			"PIPEDPEER_NODE_ID="+s.nodeID,
 		)
+		// The shim writes its receipt here at exit and the Done frame carries
+		// it back, so every run's record says what was distributed and why.
+		if !envsContain(cfg.Envs, "PIPEDPEER_RECEIPT=") {
+			receiptPath = filepath.Join(job.WorkDir, ".pipedpeer", "receipt.json")
+			_ = os.Remove(receiptPath)
+			cfg.Envs = append(cfg.Envs, "PIPEDPEER_RECEIPT="+receiptPath)
+		}
+		// The job talks back to this daemon for every intercepted primitive,
+		// so it needs the token too. Without it interception would 401 and
+		// fall back to local work, which looks like a slow job rather than a
+		// misconfiguration.
+		if tok := authtoken.Current(); tok != "" && !envsContain(cfg.Envs, authtoken.EnvVar+"=") {
+			cfg.Envs = append(cfg.Envs, authtoken.EnvVar+"="+tok)
+		}
+
 		// The shim gates remote spill on PIPEDPEER_NUM_SHARDS != "0": the
 		// number of nodes that share this closure (1 at first exec, peers
 		// count once broadcastClosure has run). DDP runs set their own
@@ -531,47 +756,71 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// Isolation needs crun. If setup never managed to install it, degrade to
 	// unisolated execution with a loud warning instead of failing the job —
 	// the sandbox is a hardening layer, not a functional requirement.
+	// With a private nix store the sandbox is not a hardening layer, it is
+	// what puts the store at /nix: the closure's binaries all name
+	// /nix/store/... paths that do not exist on this machine outside the
+	// mount namespace. Degrading to unisolated there does not produce a less
+	// safe run, it produces a run that cannot start, so say so instead.
+	sandboxRequired := nixstore.Private()
+
 	if cfg.Isolate {
 		if _, err := exec.LookPath("crun"); err != nil {
+			if sandboxRequired {
+				fail("this node keeps its nix store in the user's " +
+					"data directory, which only the sandbox can mount at /nix — but crun is " +
+					"not installed, so nothing can run. Install it with `pipedpeer setup`.")
+				return
+			}
 			outCh <- OutputMessage{E: "[pipedpeer] crun not found on this node — running unisolated\n"}
+			cfg.Isolate = false
+		} else if ok, why := userns.Available(); !ok {
+			// crun's own message for this is "unshare: Operation not
+			// permitted", which names neither the cause nor the fix, and the
+			// three possible causes need three different fixes.
+			outCh <- OutputMessage{E: "[pipedpeer] this node cannot create a user namespace, " +
+				"so jobs run unisolated.\n    " + why + "\n"}
+			usernsOnce.Do(func() { log.Warn().Str("reason", why).Msg("no user namespace: jobs run unisolated") })
+			if sandboxRequired {
+				fail("this node keeps its nix store in the user's " +
+					"data directory, which only the sandbox can mount at /nix — but this " +
+					"machine refuses user namespaces, so nothing can run.\n" + why)
+				return
+			}
 			cfg.Isolate = false
 		}
 	}
 
+	// Tracked across the branch so a job killed by its own memory cap can be
+	// reported as that, rather than as a bare "exited with code 137" the user
+	// has no way to interpret.
+	var capBytes int64
+	var capParent string
+	var oomBefore int64
+
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
 		cmd := exec.Command("sh", "-c", runCmd)
+		// Its own process group, so a cancel reaches python and everything
+		// it started, not just the shell.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
+		runStart = time.Now()
 		if err := cmd.Start(); err != nil {
-			writeWS(OutputMessage{Error: "start command: " + err.Error()})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
+			fail("start command: " + err.Error())
 			return
 		}
+		s.recordJobGroup(job, cmd.Process.Pid)
 
-		go func() {
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				outCh <- OutputMessage{O: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stdout scanner: " + err.Error()}
-			}
-		}()
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				outCh <- OutputMessage{E: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stderr scanner: " + err.Error()}
-			}
-		}()
+		procDone := make(chan struct{})
+		go superviseCancel(jobID, cancelCh, procDone, signalGroup(jobID, cmd.Process.Pid))
+		readers := streamOutput(stdout, stderr, outCh)
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
+		readers.Wait()
 		cmd.Wait()
+		runDur = time.Since(runStart)
+		close(procDone)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	} else {
@@ -581,9 +830,20 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		os.MkdirAll(filepath.Join(rootfsDir, "proc"), 0755)
 		os.MkdirAll(filepath.Join(rootfsDir, "sys"), 0755)
 
+		// HOME has to exist, not just be named: torch resolves a cache
+		// directory under it during `import torch`.
+		os.MkdirAll(filepath.Join(rootfsDir, "home", "root"), 0755)
+
 		args := append([]string{runPath, cfg.ScriptPath}, cfg.Args...)
 		env := []string{
 			"HOME=/home/root",
+			// There is no /etc/passwd in this rootfs, so getpass.getuser()
+			// has nothing to fall back to and raises. torch calls it while
+			// importing, which turned every job here into "OSError: No
+			// username set in the environment" - an error about the sandbox
+			// wearing the costume of a problem with the user's code.
+			"USER=root",
+			"LOGNAME=root",
 			"PATH=/nix/var/nix/profiles/default/bin:/nix/var/nix/profiles/default/sbin:/root/.nix-profile/bin",
 			// stdout is a pipe in here, so python block-buffers and a whole
 			// training run prints nothing until exit; the audience needs it live.
@@ -607,6 +867,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		homeDir := filepath.Join(filepath.Dir(job.WorkDir), "home")
 		os.MkdirAll(homeDir, 0755)
 
+		q := sandboxQuirks()
 		ociCfg := ociConfig{
 			OciVersion: "1.0.2",
 			Process: ociProcess{
@@ -616,11 +877,17 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				Env:      env,
 				Cwd:      "/work",
 			},
-			Root:     ociRoot{Path: "rootfs", Readonly: true},
-			Hostname: "pipedpeer",
+			Root: ociRoot{Path: "rootfs", Readonly: true},
+			// Hostname only when the machine allows sethostname; inside an
+			// unprivileged container it does not, and crun fails the job.
+			Hostname: hostnameFor(q),
 			Mounts: []ociMount{
-				{Destination: "/nix", Type: "bind", Source: "/nix", Options: []string{"rbind", "ro"}},
-				{Destination: "/proc", Type: "proc", Source: "proc"},
+				// Source, not destination: with a private store the files
+				// live in the user's data directory, but the paths baked into
+				// every binary still say /nix, so that is where they must
+				// appear inside the sandbox.
+				{Destination: "/nix", Type: "bind", Source: nixstore.HostNixDir(), Options: []string{"rbind", "ro"}},
+				procMountFor(q),
 				{Destination: "/dev", Type: "tmpfs", Source: "tmpfs", Options: []string{"nosuid", "mode=755"}},
 				// Python multiprocessing creates its SemLock in /dev/shm and
 				// mmaps it (POSIX shm), which needs a writable, executable tmpfs
@@ -632,13 +899,39 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				{Destination: "/home/root", Type: "bind", Source: homeDir, Options: []string{"rbind", "rw"}},
 			},
 			Linux: &ociLinux{
-				Namespaces: []ociNamespace{
-					{Type: "pid"}, {Type: "ipc"}, {Type: "uts"}, {Type: "mount"},
-				},
+				Namespaces: namespacesFor(q),
 			},
 		}
 
+		// The one memory bound the kernel enforces. Everything else is an
+		// estimate made before the job ran: admission checks a forecast, and
+		// the 40%-of-free-RAM chunk rule bounds a payload, but neither can
+		// stop a job that simply allocates more than it said it would. Until
+		// now nothing did, so one job's runaway allocation was every other
+		// job on the node's problem too.
+		parent, canCap, why := cgroups.Prepare()
+		limit := s.grantableMemory(cfg.MemLimitBytes, cfg.LeaseID, jobID)
+		if applyMemLimit(&ociCfg, limit, parent, canCap, jobID) {
+			log.Info().Int64("bytes", limit).Str("job", jobID).
+				Str("cgroup", parent).Msg("job memory capped by cgroup")
+			capBytes, capParent = limit, parent
+			// memory.events is hierarchical, so the parent's counter covers
+			// every job cgroup beneath it. Snapshotting it here turns "some
+			// job was OOM-killed at some point" into "a kill happened while
+			// this job ran", which is what makes the attribution safe.
+			oomBefore = oomKills(parent)
+		} else if !canCap {
+			// One warning per daemon, not per job: the reason never changes
+			// within a process, and a silent unlimited sandbox is exactly the
+			// thing this whole path exists to stop.
+			noCapOnce.Do(func() {
+				log.Warn().Str("reason", why).Msg("jobs run without an enforced memory limit; " +
+					"start the daemon with `pipedpeer start` on a systemd machine to get one")
+			})
+		}
+
 		if cfg.GPU {
+			addGPUSysModule(&ociCfg, rootfsDir, jobID)
 			gpuInfo := gpu.Detect()
 			for _, d := range gpuInfo.Devices {
 				ociCfg.Linux.Devices = append(ociCfg.Linux.Devices, ociDevice{
@@ -716,54 +1009,54 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		defer os.RemoveAll(bundleDir)
 
 		cmd := exec.Command("crun", "run", "--bundle", bundleDir, containerID)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
+		runStart = time.Now()
 		if err := cmd.Start(); err != nil {
-			writeWS(OutputMessage{Error: "start crun: " + err.Error()})
-			s.jobsMu.Lock()
-			job.Status = "failed"
-			s.jobsMu.Unlock()
+			fail("start crun: " + err.Error())
 			return
 		}
 
-		go func() {
-			scanner := bufio.NewScanner(stdout)
-			for scanner.Scan() {
-				outCh <- OutputMessage{O: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stdout scanner: " + err.Error()}
-			}
-		}()
-		go func() {
-			scanner := bufio.NewScanner(stderr)
-			for scanner.Scan() {
-				outCh <- OutputMessage{E: scanner.Text() + "\n"}
-			}
-			if err := scanner.Err(); err != nil {
-				outCh <- OutputMessage{Error: "stderr scanner: " + err.Error()}
-			}
-		}()
+		procDone := make(chan struct{})
+		go superviseCancel(jobID, cancelCh, procDone, signalContainer(jobID, containerID, cmd.Process.Pid))
+		readers := streamOutput(stdout, stderr, outCh)
 		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
+		readers.Wait()
 		cmd.Wait()
+		runDur = time.Since(runStart)
+		close(procDone)
 		peakBytes = tracker.stop()
 		exitCode = cmd.ProcessState.ExitCode()
 	}
 
-	outCh <- OutputMessage{Done: true, ExitCode: exitCode, PeakMemBytes: peakBytes}
-	close(outCh)
-	<-writerDone
-	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-
-	s.jobsMu.Lock()
-	if exitCode == 0 {
-		job.Status = "done"
-	} else {
-		job.Status = "failed"
+	done := OutputMessage{ExitCode: exitCode, PeakMemBytes: peakBytes,
+		Timing: &ExecTiming{
+			ImportMs: importDur.Milliseconds(),
+			SetupMs:  (runStart.Sub(execStart) - importDur).Milliseconds(),
+			RunMs:    runDur.Milliseconds(),
+		}}
+	if receiptPath != "" {
+		switch b, err := os.ReadFile(receiptPath); {
+		case os.IsNotExist(err):
+			// The shim writes a receipt only when it intercepted something.
+		case err != nil:
+			log.Warn().Err(err).Str("job", jobID).Msg("cannot read the shim's receipt; the run has none")
+		case !json.Valid(b):
+			log.Warn().Str("job", jobID).Int("bytes", len(b)).Msg("shim receipt is not valid JSON; the run has none")
+		default:
+			done.Receipt = b
+		}
 	}
-	s.jobsMu.Unlock()
-	s.persist()
+	// 137 is SIGKILL. With a cap in force and a fresh kill recorded under our
+	// cgroup, the cause is the cap; without the counter moving it could just
+	// as well have been an operator's kill -9, so it is not claimed.
+	if exitCode == 137 && capBytes > 0 && !cancelled() && oomKills(capParent) > oomBefore {
+		done.OOMKilled = true
+		done.MemLimitBytes = capBytes
+	}
+	finish(done)
 	releaseHeapAfterWork()
 }
 
@@ -782,7 +1075,22 @@ func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-tar")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s-results.tar", jobID))
 
-	if err := writeResultsTar(w, job); err != nil {
+	// Results carry whatever the job produced - model checkpoints, CSVs,
+	// logs - and travel back over the same link the closure came in on.
+	//
+	// zstd rather than gzip: several times faster to write at a better ratio,
+	// which matters here because the machine doing the compressing is the one
+	// the user is waiting on. Content-Encoding says zstd, and the client
+	// sniffs anyway, so an older client reading this sees an encoding it does
+	// not know and falls through to the magic bytes.
+	w.Header().Set("Content-Encoding", "zstd")
+	zw, err := tarcodec.Writer(w)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "results tar for %s: %v\n", jobID, err)
+		return
+	}
+	defer zw.Close()
+	if err := writeResultsTar(zw, job); err != nil {
 		// Headers are already out, so the client sees a truncated archive and
 		// reports the read error. Log for the node operator.
 		fmt.Fprintf(os.Stderr, "results tar for %s failed: %v\n", jobID, err)
@@ -821,6 +1129,11 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		}
 		rel = filepath.ToSlash(rel)
 		present[rel] = true
+		// pipedpeer's own files - the shim, its bytecode, the receipt - are
+		// not the job's output and must not land in the user's project.
+		if strings.HasPrefix(rel, ".pipedpeer/") {
+			return nil
+		}
 
 		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
 			return nil
@@ -878,7 +1191,7 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 // classic `nix-store --import` only learned that flag in some versions and
 // errors out on others. Rather than pin one Nix version, try with the flag and
 // fall back when it is not recognised.
-func importNAR(nixPath string, nar *os.File) ([]byte, error) {
+func importNAR(nar *os.File) ([]byte, error) {
 	run := func(args ...string) ([]byte, error) {
 		if _, err := nar.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("rewind nar: %w", err)
@@ -898,11 +1211,12 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 		} else {
 			src = br
 		}
-		cmd := &exec.Cmd{
-			Path:  nixPath,
-			Args:  append([]string{"nix-store"}, args...),
-			Stdin: src,
+		cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store"}, args...)...)
+		if err != nil {
+			return nil, err
 		}
+		defer cleanup()
+		cmd.Stdin = src
 		return cmd.CombinedOutput()
 	}
 
@@ -914,4 +1228,255 @@ func importNAR(nixPath string, nar *os.File) ([]byte, error) {
 		return out, err
 	}
 	return run("--import")
+}
+
+// noCapOnce keeps the "no memory limit" warning to one line per daemon.
+var noCapOnce sync.Once
+
+// usernsOnce keeps the "no user namespace" warning to one line per daemon.
+var usernsOnce sync.Once
+
+// applyMemLimit puts a cgroup memory cap on the bundle, and reports whether
+// it did. parent comes from cgroups.Prepare, which has already proved that a
+// child of it gets a writable memory.max; split out from bundle assembly so
+// the decision can be tested on a machine with no delegated hierarchy.
+//
+// Swap is pinned to the same value deliberately. Left alone, a job that hits
+// its cap starts swapping instead of failing, and thrashing takes every other
+// job on the node down with it rather than just itself.
+// grantableMemory bounds a job's ceiling by what the machine can actually
+// spare, and reports when it had to.
+//
+// The ceiling arrives from the submitter as twice the estimate - deliberately
+// generous, because killing a job that would have finished is a worse failure
+// than the runaway it prevents. What was missing is that generosity has to
+// stop somewhere, and "twice the estimate" knows nothing about the machine it
+// lands on. A job admitted for 4 GB was then permitted 7.5 GB by the kernel,
+// and with a second daemon on the same host doing likewise, the two ceilings
+// added up to more memory than existed: the machine went out of memory and
+// the kernel picked a victim outside either cgroup.
+//
+// So the ceiling is clamped to what is free right now, counting what daemons
+// sharing this machine have promised. Never below the estimate that was
+// admitted, though - admission already decided that much would fit, and a
+// ceiling under it would kill the job on arrival for a shortage that appeared
+// after it was let in.
+//
+// The admitted figure is the lease's reservation. The ceiling is not always
+// twice it: with no estimate, or under the floor, the submitter sends a fixed
+// cap, so halving the request misjudged what admission approved.
+func (s *Server) grantableMemory(requested int64, leaseID, jobID string) int64 {
+	if requested <= 0 {
+		return requested
+	}
+	var admitted int64
+	if leaseID != "" {
+		s.mu.Lock()
+		if l, ok := s.leases[leaseID]; ok {
+			admitted = l.MemBytes
+		}
+		s.mu.Unlock()
+	}
+	if admitted <= 0 {
+		// No lease to read (a run placed without one) or it reserved no
+		// memory: half the ceiling, the usual doubling, is the best guess.
+		admitted = requested / 2
+		log.Debug().Str("job", jobID).Str("lease", leaseID).Int64("requested", requested).
+			Msg("no lease reservation for this job; taking half its ceiling as admitted")
+	}
+	spare := s.AvailableForJob()
+	if spare >= requested {
+		return requested
+	}
+	granted := spare
+	if granted < admitted {
+		granted = admitted
+	}
+	if granted >= requested {
+		return requested
+	}
+	log.Info().Int64("requested", requested).Int64("granted", granted).
+		Int64("machine_spare", spare).Str("job", jobID).
+		Msg("job ceiling lowered to what this machine can spare")
+	return granted
+}
+
+func applyMemLimit(cfg *ociConfig, limit int64, parent string, canCap bool, jobID string) bool {
+	if limit <= 0 || !canCap || cfg.Linux == nil {
+		return false
+	}
+	cfg.Linux.Resources = &ociResources{
+		Memory: &ociMemory{Limit: limit, Swap: limit},
+	}
+	cfg.Linux.CgroupsPath = filepath.Join(parent, jobID)
+	return true
+}
+
+// oomKills reads the cumulative oom_kill counter for a cgroup and everything
+// under it. Unreadable counts as zero: the caller only ever compares two
+// samples, and a missing file makes the comparison decline to attribute
+// rather than attribute wrongly.
+func oomKills(parent string) int64 {
+	if parent == "" {
+		return 0
+	}
+	data, err := os.ReadFile(filepath.Join("/sys/fs/cgroup", parent, "memory.events"))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && f[0] == "oom_kill" {
+			n, err := strconv.ParseInt(f[1], 10, 64)
+			if err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+// streamOutput forwards a job's stdout and stderr to outCh as raw chunks, so
+// a progress bar redrawing its line with \r reaches the submitter as it
+// happens, not at the next newline. A chunk never ends inside a UTF-8
+// character: the incomplete tail is carried into the next one. The caller
+// must wait on the returned group before cmd.Wait: Wait closes the pipes as
+// soon as the process exits, and a reader still draining the last bytes then
+// fails with "file already closed" — which the submitter reads as a failed
+// job and reschedules, even though the script exited 0.
+func streamOutput(stdout, stderr io.Reader, outCh chan<- OutputMessage) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	forward := func(r io.Reader, name string, msg func(string) OutputMessage) {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		carry := 0
+		for {
+			n, err := r.Read(buf[carry:])
+			n += carry
+			cut := completeUTF8(buf[:n])
+			if cut > 0 {
+				outCh <- msg(string(buf[:cut]))
+			}
+			carry = copy(buf, buf[cut:n])
+			if err != nil {
+				if carry > 0 {
+					outCh <- msg(string(buf[:carry]))
+				}
+				if !errors.Is(err, io.EOF) {
+					outCh <- OutputMessage{Error: name + " read: " + err.Error()}
+				}
+				return
+			}
+		}
+	}
+	wg.Add(2)
+	go forward(stdout, "stdout", func(l string) OutputMessage { return OutputMessage{O: l} })
+	go forward(stderr, "stderr", func(l string) OutputMessage { return OutputMessage{E: l} })
+	return &wg
+}
+
+// completeUTF8 returns how much of b can be sent without splitting a UTF-8
+// character: all of it, or up to the start of an incomplete trailing one.
+func completeUTF8(b []byte) int {
+	for i := len(b) - 1; i >= 0 && i >= len(b)-utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if utf8.FullRune(b[i:]) {
+				return len(b)
+			}
+			return i
+		}
+	}
+	return len(b)
+}
+
+// readExecClient reads the frames a client sends after the config frame.
+// {"cancel":true} calls requestCancel. A connection that ends without one while
+// the job still runs (close 4001 "detach", a crash, a lost network) marks the
+// job detached and leaves it running: only an explicit cancel kills a job.
+func (s *Server) readExecClient(conn *websocket.Conn, job *JobRecord, jobID string,
+	cancelCh <-chan struct{}, requestCancel func(), finished *atomic.Bool) {
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			if finished.Load() {
+				return
+			}
+			select {
+			case <-cancelCh:
+				return
+			default:
+			}
+			s.jobsMu.Lock()
+			job.Detached = true
+			s.jobsMu.Unlock()
+			s.persist()
+			log.Info().Str("job", jobID).Str("why", err.Error()).Msg("client left; job keeps running")
+			return
+		}
+		var f struct {
+			Cancel bool `json:"cancel"`
+		}
+		if err := json.Unmarshal(msg, &f); err != nil || !f.Cancel {
+			log.Warn().Str("job", jobID).Str("frame", string(msg)).Msg("ignoring unexpected frame from exec client")
+			continue
+		}
+		requestCancel()
+	}
+}
+
+// superviseCancel stops a running job once cancelCh closes: SIGTERM so the
+// script can clean up, SIGKILL if it is still there 2 s later.
+func superviseCancel(jobID string, cancelCh, procDone <-chan struct{}, signal func(syscall.Signal)) {
+	select {
+	case <-procDone:
+		return
+	case <-cancelCh:
+	}
+	signal(syscall.SIGTERM)
+	select {
+	case <-procDone:
+	case <-time.After(2 * time.Second):
+		log.Warn().Str("job", jobID).Msg("job ignored SIGTERM for 2 s; killing it")
+		signal(syscall.SIGKILL)
+	}
+}
+
+// signalGroup signals the process group led by pid (the job's shell).
+func signalGroup(jobID string, pid int) func(syscall.Signal) {
+	return func(sig syscall.Signal) {
+		if err := syscall.Kill(-pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			log.Warn().Err(err).Str("job", jobID).Int("pgid", pid).Str("signal", sig.String()).
+				Msg("could not signal the job's process group")
+		}
+	}
+}
+
+// signalContainer signals every process in the job's crun container. Inside
+// the container's pid namespace the script is pid 1, which ignores SIGTERM
+// unless it installs a handler, so --all (the whole cgroup) is tried first.
+// If crun cannot do it, SIGKILL falls back to `crun delete -f` and SIGTERM to
+// crun's own process group.
+func signalContainer(jobID, containerID string, crunPid int) func(syscall.Signal) {
+	group := signalGroup(jobID, crunPid)
+	return func(sig syscall.Signal) {
+		name := "TERM"
+		if sig == syscall.SIGKILL {
+			name = "KILL"
+		}
+		out, err := exec.Command("crun", "kill", "--all", containerID, name).CombinedOutput()
+		if err == nil {
+			return
+		}
+		log.Warn().Err(err).Str("job", jobID).Str("output", strings.TrimSpace(string(out))).
+			Msg("crun kill --all failed; falling back")
+		if sig == syscall.SIGKILL {
+			if out, err := exec.Command("crun", "delete", "-f", containerID).CombinedOutput(); err != nil {
+				log.Warn().Err(err).Str("job", jobID).Str("output", strings.TrimSpace(string(out))).
+					Msg("crun delete -f failed; killing crun's process group")
+				group(sig)
+			}
+			return
+		}
+		group(sig)
+	}
 }

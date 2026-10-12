@@ -1,0 +1,48 @@
+[coordinator] Resource estimate: 512 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node 53877fb8 (lease=ebfc7303)
+[coordinator] Lease committed — executing on 53877fb8
+=== Pipedpeer CLI ===
+Script: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle/pool_idle.py
+Daemon: 192.168.0.200:38082
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /home/yeet/.cache/pipedpeer/scratch/build-3146824283/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle
+      Script: pool_idle.py
+      Closure already on the node; nothing to send
+      Uploaded job e58315f0-08d3-4eb9-89a8-490f40dfd3c1
+
+[7/7] Executing on remote...
+POOLIDLE-OK items=16 seconds=0.1594 checksum=623749.555711
+      Synced 2 file(s) to /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle (1 new, 1 updated, 0 deleted)
+
+=== Done ===
+History: /home/yeet/.local/share/pipedpeer/jobs/1791747656482665075
+[coordinator] Task completed successfully on node 53877fb8
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/home/yeet/.cache/pipedpeer/scratch/build-3146824283/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
+[pipedpeer] using 16 workers, not the 8 requested (cores=16); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 15 workers, not the 8 requested (cores=16); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local pool resized to 15 workers
+[pipedpeer] local 8 items
+[pipedpeer] tail is 0.01s of work, below the 0.50s dispatch floor; staying local
+[pipedpeer] local 8 items
