@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -14,28 +15,45 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
-// usageSampler watches this machine and the executing node while a job runs,
-// for the summary's "this machine" and "on <node>" lines: the demo's point is
-// that the sender stays idle while the node works. It costs one /proc read
-// and one /health poll a second, and it never fails a run: a sample that
-// cannot be read leaves its line out with a warning.
-type usageSampler struct {
-	stop chan struct{}
-	cpu0 cpuTimes
-	mem0 int64
-	self bool // the start reads worked
+// Usage watches this machine and the executing nodes while a job runs, for
+// the summary's "this machine" and "on <node>" lines: the demo's point is
+// that the sender stays idle while the nodes work. It costs one /proc read
+// and one /health poll per node a second, and it never fails a run: a sample
+// that cannot be read leaves its line out with a warning.
+type Usage struct {
+	stop  chan struct{}
+	cpu0  cpuTimes
+	mem0  int64
+	self  bool // the start reads worked
+	nodes []*nodeSample
 
-	mu      sync.Mutex
+	mu      sync.Mutex // guards selfUse and every nodeSample
 	selfUse selfStats
-	node    nodeStats
-	nodeErr error
 }
+
+// UsageNode is a daemon to sample. Name labels its line; "" means the
+// summary's own "ran on" name.
+type UsageNode struct {
+	Name string
+	Host string
+	Port int
+}
+
+type nodeSample struct {
+	name, addr string
+	stats      nodeStats
+	err        error
+}
+
+// nodeUse is one node's summary value.
+type nodeUse struct{ Name, Line string }
 
 const sampleEvery = time.Second
 
-// startUsage begins sampling; host:port is the executing daemon.
-func startUsage(host string, port int) *usageSampler {
-	u := &usageSampler{stop: make(chan struct{})}
+// StartUsage begins sampling this machine and nodes. A node listed twice
+// (two ranks on one machine) is sampled once.
+func StartUsage(nodes []UsageNode) *Usage {
+	u := &Usage{stop: make(chan struct{})}
 	cpu, err := readCPUTimes()
 	if err == nil {
 		u.mem0, err = readMemUsed()
@@ -46,11 +64,21 @@ func startUsage(host string, port int) *usageSampler {
 		u.cpu0, u.self = cpu, true
 		go u.sampleSelf()
 	}
-	go u.sampleNode(fmt.Sprintf("http://%s/health", net.JoinHostPort(host, strconv.Itoa(port))))
+	seen := map[string]bool{}
+	for _, n := range nodes {
+		addr := net.JoinHostPort(n.Host, strconv.Itoa(n.Port))
+		if seen[addr] {
+			continue
+		}
+		seen[addr] = true
+		ns := &nodeSample{name: n.Name, addr: addr}
+		u.nodes = append(u.nodes, ns)
+		go u.sampleNode(ns)
+	}
 	return u
 }
 
-func (u *usageSampler) every(f func()) {
+func (u *Usage) every(f func()) {
 	t := time.NewTicker(sampleEvery)
 	defer t.Stop()
 	for {
@@ -63,7 +91,7 @@ func (u *usageSampler) every(f func()) {
 	}
 }
 
-func (u *usageSampler) sampleSelf() {
+func (u *Usage) sampleSelf() {
 	u.every(func() {
 		used, err := readMemUsed()
 		// The first call shells out to nvidia-smi (slow when cold); the gpu
@@ -87,7 +115,8 @@ func (u *usageSampler) sampleSelf() {
 	})
 }
 
-func (u *usageSampler) sampleNode(url string) {
+func (u *Usage) sampleNode(ns *nodeSample) {
+	url := "http://" + ns.addr + "/health"
 	first := true
 	u.every(func() {
 		var h struct {
@@ -97,21 +126,31 @@ func (u *usageSampler) sampleNode(url string) {
 		u.mu.Lock()
 		defer u.mu.Unlock()
 		if err != nil {
-			u.node.Failed++
-			u.nodeErr = err
+			ns.stats.Failed++
+			ns.err = err
 			return
 		}
-		u.node.add(h.Load, first)
+		ns.stats.add(h.Load, first)
 		first = false
 	})
 }
 
-// finish stops sampling and returns the two summary values ("" to leave a
-// line out). It does not wait for a sample in flight.
-func (u *usageSampler) finish() (self, node string) {
+// finish stops sampling and returns this machine's summary value ("" to
+// leave the line out) and one per node that has a sample. It does not wait
+// for a sample in flight.
+func (u *Usage) finish() (self string, nodes []nodeUse) {
 	close(u.stop)
 	u.mu.Lock()
-	s, n, nodeErr := u.selfUse, u.node, u.nodeErr
+	s := u.selfUse
+	for _, ns := range u.nodes {
+		if ns.stats.Failed > 0 {
+			fmt.Fprintf(os.Stderr, "warning: %d of %d usage polls of %s failed (last: %v)\n",
+				ns.stats.Failed, ns.stats.Failed+ns.stats.Polls, ns.addr, ns.err)
+		}
+		if line := nodeLine(ns.stats); line != "" {
+			nodes = append(nodes, nodeUse{ns.name, line})
+		}
+	}
 	u.mu.Unlock()
 	if u.self {
 		cpu, err := readCPUTimes()
@@ -127,10 +166,22 @@ func (u *usageSampler) finish() (self, node string) {
 			self = selfLine(s)
 		}
 	}
-	if n.Failed > 0 {
-		fmt.Fprintf(os.Stderr, "warning: %d of %d usage polls of the node failed (last: %v)\n", n.Failed, n.Failed+n.Polls, nodeErr)
+	return self, nodes
+}
+
+// Print stops sampling and prints the usage lines in the summary's layout.
+func (u *Usage) Print(w io.Writer) {
+	self, nodes := u.finish()
+	if self == "" && len(nodes) == 0 {
+		return
 	}
-	return self, nodeLine(n)
+	fmt.Fprintln(w, "\n=== Usage ===")
+	if self != "" {
+		fmt.Fprintf(w, "  %-12s %s\n", "this machine", self)
+	}
+	for _, n := range nodes {
+		fmt.Fprintf(w, "  %-12s %s\n", "on "+n.Name, n.Line)
+	}
 }
 
 // cpuTimes is the aggregate "cpu" line of /proc/stat, in jiffies.

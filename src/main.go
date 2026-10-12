@@ -1234,9 +1234,13 @@ func runDDP(o ddpRunOptions) error {
 	}
 
 	hosts := make([]string, len(ranks))
+	usageNodes := make([]app.UsageNode, len(ranks))
 	for i, n := range ranks {
 		hosts[i] = ddpHostName(n)
+		usageNodes[i] = app.UsageNode{Name: hosts[i], Host: ddpExtractHost(n.SSHEndpoint), Port: n.DaemonPort}
 	}
+	// ponytail: ranks that join later are not sampled; add them in start() if the demo needs it.
+	usage := app.StartUsage(usageNodes)
 	leadHost := ddpExtractHost(rank0.SSHEndpoint)
 	backend := os.Getenv("PIPEDPEER_DDP_BACKEND")
 	daemonSync := backend != "gloo" && backend != "nccl"
@@ -1315,6 +1319,7 @@ func runDDP(o ddpRunOptions) error {
 		}
 	})
 	stopWatch()
+	usage.Print(os.Stdout)
 	if firstErr != nil {
 		if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
 			fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n", masterAddr, masterPort)
