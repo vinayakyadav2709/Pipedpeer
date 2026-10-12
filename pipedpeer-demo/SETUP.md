@@ -38,7 +38,17 @@ In the terminal you ran them from, run that export once, or open a new terminal.
 writes `pipedpeer-demo/join-command.txt` (mode 600, git-ignored): the other machines'
 exact lines, with the real secret and `--introducer <this machine's LAN IP>` (the `src`
 of `ip -4 route get 1.1.1.1`), and the live-join `./demo/0-join.sh` line. It holds the
-cluster secret: send it to yourself (chat, email or a secret gist), never commit it. Or type the values.
+cluster secret: never commit it. To share it for the day:
+
+1. On LAPTOP-A, open `pipedpeer-demo/join-command.txt` and paste its contents into a new
+   **secret gist** at gist.github.com ("Create secret gist": unlisted, so only someone
+   with the link can open it; not password-protected). A chat or email to yourself works
+   too, or type the two values.
+2. On each other machine, open the gist link, or fetch it in the terminal with the
+   gist's **Raw** link: `curl -fsSL <raw link>`. Copy that machine's line.
+3. After the demo, delete the gist and run `pipedpeer auth clear` on LAPTOP-A so the
+   secret stops working. Each first-machine setup makes a new secret, so a gist is good
+   for one day only.
 
 **Every problem message has one shape:** what is wrong, numbered steps to fix it, how to
 check, then "re-run this same command".
