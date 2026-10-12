@@ -24,11 +24,23 @@ cd "$work"
 
 banner "Your script: $name"
 note "Nothing edited. First a dry run: what it imports, what it would spread, where it would go."
+failed=0
 show "$PIPE" run "$name" --check-only
+rc=$?
 echo
+if [[ $rc -ne 0 ]]; then
+	echo "${R}  the dry run failed (exit $rc): read the Error line above; running it anyway${N}" >&2
+	failed=1
+fi
 note "'not packaged: X' -> rerun with --pkg <nixpkgs name>, or pick a script from students/."
 note "No 'spreads:' line -> nothing parallel in it; it runs on one machine. Say so."
 pause
 show "$PIPE" run "$name"
+rc=$?
 echo
+if [[ $rc -ne 0 ]]; then
+	echo "${R}  the run failed (exit $rc): read the Error line above${N}" >&2
+	failed=1
+fi
 note "Files it wrote are in: $work"
+exit "$failed"
