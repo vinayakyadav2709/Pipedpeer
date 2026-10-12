@@ -1517,12 +1517,17 @@ func TestSlowPeerEndsThePeerWalk(t *testing.T) {
 	var mu sync.Mutex
 	asked := 0
 	release := make(chan struct{})
+	cancelled := make(chan struct{}, 2)
 	slow := func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		asked++
 		mu.Unlock()
+		// Read the body as the real handler does: only then does the server
+		// watch the connection and cancel r.Context() when the client leaves.
+		io.Copy(io.Discard, r.Body)
 		select { // never answers in time
 		case <-r.Context().Done():
+			cancelled <- struct{}{}
 		case <-release:
 		}
 	}
@@ -1549,5 +1554,58 @@ func TestSlowPeerEndsThePeerWalk(t *testing.T) {
 	defer mu.Unlock()
 	if asked != 1 {
 		t.Errorf("%d peers were tried for one slow item; a timeout must end the walk", asked)
+	}
+	select { // the local copy won, so the peer's copy must be cancelled
+	case <-cancelled:
+	case <-time.After(10 * time.Second):
+		t.Error("the slow peer's request was not cancelled after the local copy won")
+	}
+}
+
+// TestSlowPeerWinsTheRace. A peer past its budget keeps running while a local
+// copy starts; when the peer finishes first its result is taken instead of
+// being thrown away for a local re-run from scratch.
+func TestSlowPeerWinsTheRace(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not available")
+	}
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
+	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	old := remotePartBudget
+	remotePartBudget = 300 * time.Millisecond
+	t.Cleanup(func() { remotePartBudget = old })
+
+	// pickle.dumps(99, protocol=2): distinct from the local answer (42).
+	peerResult := base64.StdEncoding.EncodeToString([]byte("\x80\x02Kc."))
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select { // past the budget, but long before the local copy can finish
+		case <-time.After(1500 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"results": []map[string]string{{"pickle": peerResult}}})
+	}))
+	defer peer.Close()
+
+	s := New("racepeer-node-xxxxxxxx")
+	defer s.StopWarmWorkers()
+	s.pool.SetPeerFn(func(_, _ string) []string { return []string{peer.Listener.Addr().String()} })
+
+	const slowSrc = "import time\ndef slow(x):\n    time.sleep(30)\n    return x * 2\n"
+	ch := &chunk{funcSrc: slowSrc, funcName: "slow", items: []json.RawMessage{json.RawMessage(`21`)}, force: true}
+	started := time.Now()
+	results, err := s.pool.runChunk(runPath, storePath, ch, "")
+	if err != nil {
+		t.Fatalf("chunk failed: %v", err)
+	}
+	if got := unpickleInts(t, results); len(got) != 1 || got[0] != 99 {
+		t.Fatalf("results = %v, want [99] from the peer that finished first", got)
+	}
+	if d := time.Since(started); d > 20*time.Second {
+		t.Errorf("took %s: the chunk waited for the losing local copy", d)
 	}
 }
