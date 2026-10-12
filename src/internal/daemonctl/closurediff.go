@@ -49,18 +49,22 @@ import (
 // whole the old way. A node that understood the archive and refused it sets
 // r.err instead: resending unsigned cannot satisfy a node that checks
 // signatures, and would cost the whole closure again.
-func seedClosure(host string, port int, storePath string) (seedResult, bool) {
-	return seed(host, port, storePath, false)
+func seedClosure(ctx context.Context, host string, port int, storePath string) (seedResult, bool) {
+	return seed(ctx, host, port, storePath, false)
 }
 
 // seedWhole is seedClosure for a cold run: every path travels, whatever the
 // node already has.
-func seedWhole(host string, port int, storePath string) (seedResult, bool) {
-	return seed(host, port, storePath, true)
+func seedWhole(ctx context.Context, host string, port int, storePath string) (seedResult, bool) {
+	return seed(ctx, host, port, storePath, true)
 }
 
-func seed(host string, port int, storePath string, whole bool) (seedResult, bool) {
-	paths, err := closurePathsLocal(storePath)
+func seed(ctx context.Context, host string, port int, storePath string, whole bool) (seedResult, bool) {
+	paths, err := closurePathsLocal(ctx, storePath)
+	if ctx.Err() != nil {
+		// Cancelled (Ctrl+C): stop here, not fall back to the whole archive.
+		return seedResult{err: ctx.Err()}, false
+	}
 	if err != nil || len(paths) == 0 {
 		fmt.Fprintf(os.Stderr, "      warning: cannot list the closure of %s (%v); sending it whole\n", storePath, err)
 		return seedResult{}, false
@@ -95,7 +99,11 @@ func seed(host string, port int, storePath string, whole bool) (seedResult, bool
 	archive := filepath.Join(dir, "closure.tar")
 
 	t0 := time.Now()
-	if err := packSigned(storePath, paths, missing, archive); err != nil {
+	if err := packSigned(ctx, storePath, paths, missing, archive); err != nil {
+		if ctx.Err() != nil {
+			r.err = ctx.Err()
+			return r, false
+		}
 		fmt.Fprintf(os.Stderr, "      warning: packing the closure with its signatures failed (%v); sending it whole unsigned\n", err)
 		return r, false
 	}
@@ -159,7 +167,7 @@ func isRefusal(msg string) bool {
 // "none" or "unknown" (no local nix, or the node cannot say).
 func ClosureStatus(host string, port int, storePath string) (state string, missing, total int) {
 	cached := storeCached(host, port, storePath)
-	paths, err := closurePathsLocal(storePath)
+	paths, err := closurePathsLocal(context.Background(), storePath)
 	if err != nil {
 		if cached {
 			return "on-node", 0, 0
@@ -184,8 +192,8 @@ func ClosureStatus(host string, port int, storePath string) (state string, missi
 }
 
 // closurePathsLocal lists every store path the closure needs.
-func closurePathsLocal(storePath string) ([]string, error) {
-	cmd, cleanup, err := nixstore.Cmd("", "nix-store", "-qR", storePath)
+func closurePathsLocal(ctx context.Context, storePath string) ([]string, error) {
+	cmd, cleanup, err := nixstore.CmdContext(ctx, "", "nix-store", "-qR", storePath)
 	if err != nil {
 		return nil, err
 	}
@@ -205,8 +213,7 @@ func closurePathsLocal(storePath string) ([]string, error) {
 // node's key and published into the same cache directory the daemon sends
 // from (daemonapi closureCacheDir), so a closure both have sent is
 // compressed once.
-func packSigned(storePath string, paths, want []string, dest string) error {
-	ctx := context.Background()
+func packSigned(ctx context.Context, storePath string, paths, want []string, dest string) error {
 	// Signed before it is published: the signature is written into the
 	// cache's metadata at publish time.
 	if err := nixsign.EnsureSigned(ctx, paths); err != nil {

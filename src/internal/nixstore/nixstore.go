@@ -16,12 +16,16 @@
 package nixstore
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -202,7 +206,51 @@ func withExperimentalFeatures(argv []string) []string {
 	return append(out, argv[1:]...)
 }
 
+// Cmd is CmdContext without a context: the child is not tied to anything and
+// shares the caller's process group, so a terminal Ctrl+C still reaches it.
 func Cmd(dir string, argv ...string) (*exec.Cmd, func(), error) {
+	return CmdContext(context.Background(), dir, argv...)
+}
+
+// cancelGrace is how long a cancelled nix gets to exit after SIGTERM before
+// the direct child is killed outright.
+const cancelGrace = 5 * time.Second
+
+// CmdContext builds a nix command that dies with ctx. A cancellable ctx puts
+// the child in its own process group and, on cancel, sends SIGTERM to the
+// whole group, then SIGKILL to the child after cancelGrace.
+//
+// SIGTERM, not SIGKILL: for a private store the child is crun, and crun
+// setsid()s the container, so nix is not in crun's group. crun forwards
+// SIGTERM to it (checked with crun 1.28); a SIGKILLed crun would leave nix
+// running. A system nix is the child itself, and its group carries anything
+// it forked.
+func CmdContext(ctx context.Context, dir string, argv ...string) (*exec.Cmd, func(), error) {
+	cmd, cleanup, err := cmdFor(ctx, dir, argv)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ctx.Done() != nil {
+		dieWith(cmd)
+	}
+	return cmd, cleanup, nil
+}
+
+// dieWith makes a cancelled cmd (built with exec.CommandContext) SIGTERM its
+// whole process group, then SIGKILL the child after cancelGrace.
+func dieWith(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
+			log.Printf("nixstore: SIGTERM to the process group of %s (pid %d) failed: %v; signalling the child only", cmd.Args[0], cmd.Process.Pid, err)
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}
+		return nil
+	}
+	cmd.WaitDelay = cancelGrace
+}
+
+func cmdFor(ctx context.Context, dir string, argv []string) (*exec.Cmd, func(), error) {
 	if len(argv) == 0 {
 		return nil, nil, fmt.Errorf("no command given")
 	}
@@ -212,7 +260,10 @@ func Cmd(dir string, argv ...string) (*exec.Cmd, func(), error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return &exec.Cmd{Path: nixPath, Args: argv, Dir: dir}, func() {}, nil
+		// argv[0] stays nix's multi-call name ("nix-store"), not the path.
+		cmd := exec.CommandContext(ctx, nixPath)
+		cmd.Args, cmd.Dir = argv, dir
+		return cmd, func() {}, nil
 	}
 
 	binDir, err := NixBinDir()
@@ -251,7 +302,7 @@ func Cmd(dir string, argv ...string) (*exec.Cmd, func(), error) {
 	}
 
 	id := "pipedpeer-nix-" + filepath.Base(bundle)
-	cmd := exec.Command(crun, "run", "--bundle", bundle, id)
+	cmd := exec.CommandContext(ctx, crun, "run", "--bundle", bundle, id)
 	// crun needs somewhere to keep container state, and a daemon does not
 	// always have XDG_RUNTIME_DIR set.
 	if os.Getenv("XDG_RUNTIME_DIR") == "" {

@@ -186,7 +186,7 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 			fmt.Println("      Cold run: sending the whole closure even if the node has it")
 			seedFn = seedWhole
 		}
-		sr, ok := seedFn(host, port, storePath)
+		sr, ok := seedFn(ctx, host, port, storePath)
 		if sr.err != nil {
 			// The node read the signed closure and refused it: the unsigned
 			// whole archive would be refused too (FX-SIGN).
@@ -209,7 +209,7 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 	var narSize int64
 	if sendNAR {
 		t0 := time.Now()
-		if err := ExportNAR(storePath, narPath); err != nil {
+		if err := ExportNAR(ctx, storePath, narPath); err != nil {
 			return nil, fmt.Errorf("nix store export failed: %v", err)
 		}
 		narSize = fileSize(narPath)
@@ -575,8 +575,8 @@ func extractResults(body io.Reader, outDir string) (*ResultManifest, error) {
 
 // ExportNAR exports the full runtime closure of a store path to a NAR file.
 // Uses the nix multicall binary under the nix-store name (argv[0] set).
-func ExportNAR(storePath, destPath string) error {
-	query, qcleanup, err := nixstore.Cmd("", "nix-store", "-qR", storePath)
+func ExportNAR(ctx context.Context, storePath, destPath string) error {
+	query, qcleanup, err := nixstore.CmdContext(ctx, "", "nix-store", "-qR", storePath)
 	if err != nil {
 		return err
 	}
@@ -606,8 +606,10 @@ func ExportNAR(storePath, destPath string) error {
 
 	// Signed before it leaves, so the far side can require a signature
 	// instead of being configured to stop asking for one.
-	_ = nixsign.EnsureSigned(context.Background(), paths)
-	export, ecleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
+	if err := nixsign.EnsureSigned(ctx, paths); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: could not sign the closure (%v); the node may refuse it\n", err)
+	}
+	export, ecleanup, err := nixstore.CmdContext(ctx, "", append([]string{"nix-store", "--export"}, paths...)...)
 	if err != nil {
 		return err
 	}
