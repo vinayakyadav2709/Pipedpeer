@@ -12,22 +12,29 @@ four containers plus this laptop, with Wi-Fi-like delay and loss added. The
 evidence files are in `~/Downloads/pipedpeer-work/evidence/v1/`.
 `<!-- V2 31b5364: <file> -->` and `<!-- V2 cc56753: <file> -->` mark output
 from rehearsal pass 2 (same lab, evidence in
-`~/Downloads/pipedpeer-work/evidence/v2/`). `<!-- confirm in final re-check -->`
-marks an expected line: no rehearsal ran it, or the code changed after V2 ran
-it. `…` marks lines cut from an excerpt. In the excerpts, `yeet` is the
+`~/Downloads/pipedpeer-work/evidence/v2/`). `<!-- V3 9949ad0: <file> -->`
+marks output from the final re-check (same lab, evidence in
+`~/Downloads/pipedpeer-work/evidence/v3/`). `<!-- confirm in V4 -->` marks an
+expected line: a fix made after V3 changes it. `…` marks lines cut from an
+excerpt. In the excerpts, `yeet` is the
 rehearsal laptop (LAPTOP-A), and pc1–pc4 are the containers that stood in for
 the PCs.
 
 **What the container lab cannot show:**
 - **Speedup.** The "PCs" were slices of one laptop's CPU, so the speed numbers
   must come from the lab visit.
-- **Two physical GPUs.** The friend's real 2-GPU ring was never rehearsed (their
-  laptop went offline during V2); check it in your own run.
+- **Two physical GPUs.** The friend's real 2-GPU ring was never completed: in
+  V3 it was placed on both laptops, then the friend's laptop dropped off the
+  network while the closure was still shipping. Check it in your own run.
 - **The venue itself:** real Wi-Fi, Wi-Fi client isolation, the college
   firewall, and Ubuntu's AppArmor rules.
 - **The demo scripts that need `python3`** (`demo/7-gpu.sh`,
-  `demo/prep-3-gpu.sh`): the lab containers had no `python3`, so these skipped
-  there. The venue machines have it.
+  `demo/prep-3-gpu.sh`): the lab containers had no `python3`, so these skip
+  there (V3 ran prep-3 inside `nix shell …#python3`). The venue machines have
+  it.
+- **Memory.** The containers had about 1.2 GB each. `07_everything.py` needs
+  about 3.1 GiB on the machine that runs it, so step 9 could not run on a lab
+  "PC" itself (see step 9).
 
 ---
 
@@ -72,17 +79,30 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 4. PC-3 has run `pipedpeer setup -y` only, never `join`, so that step 1 shows
    a real first join. Do not join it and then `stop` it: a stopped machine
    rejoins with no countdown.
-5. `./demo/prep-1-check.sh` on LAPTOP-A ends in READY. <!-- confirm in final re-check: prep-1 was not run in V1 or V2 -->
-6. `./demo/prep-4-common.sh` has run on every machine and
+5. `./demo/prep-4-common.sh` has run on every machine and
    `./demo/prep-3-gpu.sh` on every machine that sends or runs GPU or
    "everything" work. The common environment, CUDA torch included, took
    **1150–1261 s per machine** in V2 (four building in parallel; 1269–1315 s
    in V1) and must never be built on stage.
    <!-- V2 31b5364: 55-prep4-pc1.txt, 55-prep4-pc4.txt -->
-7. `./demo/prep-2-rehearse.sh` on LAPTOP-A writes
+6. `./demo/prep-2-rehearse.sh` on LAPTOP-A writes
    `demo/rehearsal-results.txt`: the cold, warm and speedup columns. **A step
    under 1.2× goes to "if asked"**; don't present a slowdown as a feature.
-   <!-- confirm in final re-check: prep-2 was not run in V2; in V1 it stopped at 02_numpy (600M cap, fixed: 02_numpy ran in 37.2 s in V2's ./setup.sh pass, 70-setup-firstpass.txt) -->
+   V3 ran it in 1390 s; its table is in SETUP.md (lab visit, step 6)
+   <!-- V3 9949ad0: docs-SETUP-179-prep2-rehearse.txt -->.
+7. `./demo/prep-1-check.sh` on LAPTOP-A ends in READY. Run it **after**
+   prep-2: before, it fails on `FAIL  no data.csv - run ./demo/prep-2-rehearse.sh`.
+   V3 after prep-2 (<!-- V3 9949ad0: docs-SETUP-177-prep1-check-after-prep2.txt -->):
+   ```
+     ok    4 healthy peers besides this machine
+     ok    every peer has a direct path (punched / punched-in / lan)
+     warn  one GPU machine - the GPU step runs on one GPU, without --ddp 2
+     ok    03_pandas_ooc/data.csv present (1.1G)
+   …
+   this binary: 7d4f26f15865e20c  - compare with prep-0 output on every machine
+
+   READY
+   ```
 
 ## On the day
 
@@ -113,15 +133,15 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 | 3 | dry run (`--check-only`) | PC-1 | 0.8 s | 42 s for a new environment on an empty store |
 | 4 | headline: python3 vs pipedpeer | LAPTOP-A | 27 s (9.5 s python3 + 17.0 s pipedpeer) | — (prep builds it) |
 | 5 | cold vs cached | PC-2 | 4.8 s | 20.5 s send only; 169 s with build, empty store, 0.5 % loss (V1) |
-| 6 | GPU from a PC with no GPU | PC-1 | 7.6 s (`--remote`); `--ddp 2` 9.5 s | 1150–1261 s CUDA build, 635 s first `--ddp 2` ship: prep only |
+| 6 | GPU from a PC with no GPU | PC-1 | 7.6 s (`--remote`); 7.0 s (`--gpu force` alone, V3); `--ddp 2` 9.5 s | 1150–1261 s CUDA build, 635 s first `--ddp 2` ship: prep only |
 | 7 | pandas out-of-core (optional) | LAPTOP-B | 12.8 s | 34.0 s (first run after prep) |
 | 8 | the teacher's own script | any | 20–70 s for the students/ scripts | 39–54 s check without the common prep (V1) |
-| 9 | everything in one script | PC-2 | about 30 s expected <!-- confirm in final re-check --> | 700.6 s (470 s build): prep only |
+| 9 | everything in one script | PC-2 (`--remote` on a small PC) | 26.7 s (V3, `--remote` from pc3) | 664.6 s (637.7 s build, V3); 700.6 s (V2): prep only |
 | 10 | failover: stop a PC mid-job | LAPTOP-A + PC-3 | 16.7 s (V2), 19.5 s (V1) | — |
 | 11a | Ctrl+Z, then `attach` | LAPTOP-B | job length + about 1 s | — |
-| 11b | the sender loses its network | PC-1 | job length; result back ~15 s after reconnecting | — |
-| 11c | Ctrl+C stops everything | LAPTOP-A | about 10 s | — |
-| 12 | finale: every script at once | LAPTOP-A | 534 s in the containers (6 of 8 ok in V2) | — |
+| 11b | the sender loses its network | PC-1 | job length; result back 1–15 s after reconnecting | — |
+| 11c | Ctrl+C stops everything | LAPTOP-A | about 10 s (8.6 s in V3) | — |
+| 12 | finale: every script at once | LAPTOP-A | 412.0 s in the containers (8 of 8 ok in V3; 534 s, 6 of 8 in V2) | — |
 | 13 | receipts | LAPTOP-A, then PC-2 | instant | — |
 | 14 | capstone (optional) | LAPTOP-A | 288 s | — |
 
@@ -165,9 +185,32 @@ show any.
 Then turn LAPTOP-A round: its dashboard has a new row, and LAPTOP-B's events
 feed shows the join. In V2 that line still used the node id
 (`JOIN   b7b73c2d-aad0-41e5-b9c5-49a46da18d08 is up (10.88.0.13:38080)`,
-56-join-host-events.txt); dad7e42 names peers by hostname, so expect
-`JOIN   pc3 is up (10.88.0.13:38080)`. <!-- confirm in final re-check -->
-The dashboard needs a TTY and was not captured in V1 or V2. <!-- confirm in final re-check -->
+56-join-host-events.txt); dad7e42 names peers by hostname. V3's laptop
+events feed (<!-- V3 9949ad0: docs-VERIFY-141-events-f.txt -->):
+```
+09:38:16  JOIN   pc3 is up (10.88.0.13:38080)
+09:38:17  TRUST  system nix now trusts these cluster keys (added through the pipedpeer key helper)
+```
+and the dashboard's WORKERS table gained a `pc3  healthy … broadcast` row,
+with the same two lines under EVENTS
+(<!-- V3 9949ad0: docs-VERIFY-142-dashboard.txt -->):
+```
+WORKERS
+NODE                 STATUS      JOBS    CPU     MEM FREE      GPU                            SOURCE
+…
+yeet*                healthy     0       2%      6.7 GiB       3060 0%                        self
+pc3                  healthy     0       2%      1.2 GiB       -                              broadcast
+pc2                  healthy     0       2%      490 MiB       -                              broadcast
+pc4                  healthy     0       2%      1.1 GiB       -                              broadcast
+pc1                  healthy     0       2%      540 MiB       -                              broadcast
+…
+EVENTS
+…
+  09:38:16  JOIN   pc3 is up (10.88.0.13:38080)
+  09:38:17  TRUST  system nix now trusts these cluster keys (added through the pipedpeer key helper)
+```
+The rehearsal laptop's dashboard also listed many `yeet  unreachable … manual`
+rows: old test nodes from earlier runs. A fresh install shows none.
 
 **Say:** "It found the others by itself. The laptop only introduced them."
 
@@ -427,9 +470,25 @@ TOTAL 5.5s
 On the two real laptops, expect the two `rank N:` lines to name LAPTOP-A and
 LAPTOP-B and the two `using GPU:` lines to show different cards (RTX 3060 and
 RTX 3050). "did NOT pay for itself" was right in the lab (one GPU shared);
-on two laptops it may say so too, because the demo model is tiny. The real
-2-GPU ring was never rehearsed: check it in your own run.
-<!-- confirm in final re-check -->
+on two laptops it may say so too, because the demo model is tiny.
+V3 got as far as placing the ring on both laptops (this laptop's RTX 3060 and
+the friend's RTX 3050 over Tailscale), sent from a GPU-less container
+(<!-- V3 9949ad0: 53-friend-ring-cold.txt -->):
+```
+=== Distributed training: 2 ranks ===
+rank 0: 06b9a112 (192.168.0.200:38080)
+rank 1: 94bd5f98 (127.0.0.1:41293)
+shares: rank 0 56%, rank 1 44% — measured, so a slower rank takes less rather than setting the pace for everyone
+sync: daemon channel via 192.168.0.200:38080 (no extra ports)
+```
+Then the friend's laptop dropped off the network while its 1 GB closure was
+still arriving (~2.1 MB/s over a relay), rank 1 died
+(`[ddp] rank 1 on fedora died; continuing on 1`) and the run finished on one
+rank in 794.7 s. Rank 0 also started training before rank 1 had its closure,
+waiting ~45 s per sync, and printed `every rank produced the SAME gradients`;
+FX-DDPREADY makes rank 0 wait for every rank. On one LAN with prep done,
+expect both `using GPU:` lines (RTX 3060 and RTX 3050), no `SAME gradients`
+line and no `died` line. <!-- confirm in V4 -->
 
 **Say:** "This PC has no GPU. The job went to the laptop that has one, and the
 script didn't change. With `--ddp 2` it trains on both laptops' GPUs at once
@@ -443,7 +502,8 @@ sending 3.1 GB to each rank (112-c-ddp-ring-cold.txt). The CUDA build is
 PC (`--gpu force: this machine has no GPU; placing the run on a GPU node...`,
 95-c-gpuforce-from-gpuless-pc1.txt); V2's total there was 212.0 s, about
 3 min 24 s of it packing the GPU closure for peers that never got it. f182b0f
-fixes that, so expect about 8 s. <!-- confirm in final re-check -->
+fixed that: V3 took 7.0 s, `ran on  yeet (192.168.0.200)`
+(<!-- V3 9949ad0: docs-VERIFY-225-gpuforce-pc1.txt -->).
 
 **Watch out for:**
 - **No `using GPU:` line (it says `using CPU`):** `--gpu force` was left out, or
@@ -544,14 +604,18 @@ TOTAL 38.6s
 
 A script with a package outside the built-in table. From V1's stand-in, which
 imports `humanize` and a made-up package (<!-- V1 8e14b9b: 40-pkgauto-probe.txt, 41-teacher-unpackaged-run.txt, 42-teacher-humanize-run.txt -->).
-V1's check-only also listed `not packaged humanize (add --pkg)`; FX-CLI 1ef1058
-makes check-only ask nixpkgs, so expect only the made-up one there
-<!-- confirm in final re-check: not rerun in V2 -->:
+V1's check-only also listed `not packaged humanize (add --pkg)`; since FX-CLI
+1ef1058 check-only asks nixpkgs, and V3 listed only the made-up one
+(<!-- V3 9949ad0: docs-VERIFY-392-teacher-checkonly.txt, docs-VERIFY-392-teacher-run.txt -->):
 ```
 CHECK teacher.py — nothing will run
   imports      humanize, notarealpkg_xyz
-  not packaged notarealpkg_xyz (add --pkg)
+  packages     humanize
+  not packaged notarealpkg_xyz (not in nixpkgs; the job will fail to im…
   spreads      multiprocessing.Pool (line 6)
+…
+checks complete
+$ pipedpeer run teacher.py
 …
 [2/7] Parsing dependencies...
       Not in the built-in table, but nixpkgs has python3Packages.humanize: using it
@@ -559,15 +623,17 @@ CHECK teacher.py — nothing will run
 …
 ModuleNotFoundError: No module named 'notarealpkg_xyz'
 ```
-With the made-up import removed:
+With the made-up import removed (<!-- V3 9949ad0: docs-VERIFY-401-teacher-humanize-run.txt -->):
 ```
+[pipedpeer] remote ok: 219 items in 401 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.13:38080, 10.88.0.14:38080
 332,833,500
 …
-…
-  total        1.3 s
+  spread       1000 items: 269 on yeet, 731 on 4 others (pc3 185, pc1 182, pc2 182, pc4 182)
+  files back   none
+  total        1.5 s
 ```
-(V1's `spread` line said 1476 items for this 1000-item job; the count is fixed,
-so expect `spread       1000 items: …`. <!-- confirm in final re-check -->)
+(V1's `spread` line said 1476 items for this 1000-item job; since FX-CLI and
+da6a8ef each item counts once.)
 
 **Say:** "Hand us anything with a Pool, a ProcessPoolExecutor or `n_jobs`. It
 finds the packages by itself, even ones it has never seen."
@@ -647,21 +713,56 @@ TOTAL 23.0s
 
 In V2 the next runs failed before starting: the 7.6 GB peak, summed over
 forked workers, became an 8.5 GiB estimate that no node could take
-(`Error: no eligible node found`, 99-c-everything-pc3-cached.txt; and on
-PC-2 `insufficient memory: need 9111920640 bytes` then
-`the run failed (exit 1): read the Error line above`,
-97-c-12-everything-pc2.txt). FX-PEAK fixes the estimate, so expect the
-output above with `environment  built in` about 1 s, `closure  already on the
-node` and a total near the script's 27 s. <!-- confirm in final re-check -->
+(`Error: no eligible node found`, 99-c-everything-pc3-cached.txt). FX-PEAK
+fixed the estimate. V3, cold then cached from pc3 with `--remote`: cold
+664.6 s (`environment  built in 637.7 s`), then the cached run, placed with a
+1.9 GiB estimate from the recorded 1.7 GB peak
+(<!-- V3 9949ad0: 21-item2-everything-pc3-cold.txt, docs-VERIFY-732-everything-pc3-cached.txt -->):
+```
+$ pipedpeer run 07_everything.py --remote
+[coordinator] GPU-accelerated libraries detected — preferring GPU nodes
+[coordinator] Resource estimate: 1.9 GiB (tier=historical)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node 06b9a112 (lease=28683710)
+…
+TOTAL 21.0s
+…
+  ran on       yeet (192.168.0.200)
+  environment  built in 2.3 s
+  closure      already on the node
+  script       24.3 s · peak memory 1.7 GB
+  spread       192 items: 158 on yeet, 50 on 2 others (pc3 28, pc2 22) · 16 computed twice (local cores raced slow chunks)
+  files back   1 (0 new, 1 updated)
+  total        26.7 s
+```
+
+**A PC needs about 3.1 GiB free to run `./demo/12-everything.sh` itself**
+(it runs `pipedpeer run 07_everything.py` without `--remote`, and a machine
+that never ran the script estimates from its imports). V3's pc2 had about
+650 MB free and exited 1 after a 15 s wait
+(<!-- V3 9949ad0: docs-VERIFY-736-12-everything-pc2.txt -->):
+```
+$ pipedpeer run 07_everything.py
+[coordinator] GPU-accelerated libraries detected — preferring GPU nodes
+[coordinator] Resource estimate: 3.1 GiB (tier=import)
+[coordinator] job rejected by remote daemon: insufficient memory: need 3300917248 bytes, available 673480704 bytes; waiting up to 15s for memory to free...
+Error: job rejected by remote daemon: insufficient memory: need 3300917248 bytes, available 675500168 bytes
+
+  the run failed (exit 1): read the Error line above
+```
+Check PC-2's MEM FREE in `pipedpeer nodes` at prep. Under about 3.1 GiB, type
+`pipedpeer run 07_everything.py --remote` on PC-2 instead of the script.
 
 **Say:** "Every kind of work in one plain file."
 
-**Time:** cold 700.6 s (470 s of it building the environment, CUDA torch
-included): prep only. Cached: about 30 s expected. <!-- confirm in final re-check -->
+**Time:** cold 664.6 s in V3 (637.7 s of it building the environment, CUDA
+torch included; 700.6 s in V2): prep only. Cached: 26.7 s (V3, `--remote`).
 
 **Watch out for:**
-- **`insufficient memory` or `no eligible node` with an estimate of several
-  GiB:** V2's estimate bug (above) is back. Skip the step.
+- **`insufficient memory` with `Resource estimate: 3.1 GiB (tier=import)`:**
+  this PC has too little free memory (above); rerun with `--remote`.
+- **`insufficient memory` or `no eligible node` with an estimate over 3.1 GiB:**
+  V2's estimate bug (above) is back. Skip the step.
 - **It starts building torch:** prep-3-gpu was not run on PC-2. Skip the step.
 - **The tqdm bar prints many lines instead of redrawing:** the output is
   piped; run the script directly.
@@ -708,30 +809,45 @@ machine costs time, never correctness."
 Type `pipedpeer run 07_everything.py`, press **Ctrl+Z** after the first
 `remote ok` line, then run `pipedpeer jobs`, then `pipedpeer attach <id>`.
 
-**Screen** (<!-- V1 8e14b9b: 33-ctrlz.txt, 33-ctrlz-jobs.txt, 34-attach.txt, run on 00_pool.py --> <!-- confirm in final re-check: Ctrl+Z on 07_everything.py was not run in V1 or V2; expect the same lines with that script's name and output -->):
+**Screen** (<!-- V3 9949ad0: docs-DEMO-711-ctrlz-everything.txt, run on this laptop -->):
 ```
-[pipedpeer] remote ok: 12 items in 5193 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.13:38080, 10.88.0.14:38080
+[pipedpeer] remote ok: 16 items in 5616 ms on 10.88.0.12:38080, 10.88.0.13:38080
 ^Z
-detached — job 20896323 keeps running
-  reattach: pipedpeer attach 20896323
+detached — job 91683023 keeps running
+  reattach: pipedpeer attach 91683023
 
 $ pipedpeer jobs
-ID	STATUS	MODE	JOB	…
-20896323	running	bg	job-1791757565020894049	…
+history path: /home/yeet/.local/share/pipedpeer/jobs
+ID	STATUS	MODE	JOB	JOB_SET	TARGET	HOST	DURATION_MS	STARTED
+91683023	running	bg	job-1791779816591680609		06b9a112-9739-4e3d-9728-103872ac5f67		0	2026-10-12T04:36:56.592098906Z
 
-$ pipedpeer attach 20896323
-attaching to job 20896323 (00_pool.py) on 127.0.0.1:38080
+$ pipedpeer attach 91683023
+attaching to job 91683023 (07_everything.py) on 127.0.0.1:38080
 
-scoring 96 items (16 local cores) ...
 …
-checksum 4319999744
-TOTAL 14.9s
+everything: 16 local cores
+--- pool
 …
+checksum 1151999856
+section pool 7.8s
+…
+final loss 0.0282
+section torch 1.7s
+wrote results/everything.txt
+TOTAL 21.4s
+      Synced 1 file(s) to /home/yeet/Downloads/pipedpeer-work/tmp/v3src/pipedpeer-demo (1 new, 0 updated, 0 deleted)
+
 === Summary ===
   ran on       yeet (127.0.0.1)
-…
-  total        15.7 s
+  script       peak memory 1.7 GB
+  spread       192 items: 174 on yeet, 50 on 1 other (other machines 50) · 32 computed twice (local cores raced slow chunks)
+  files back   1 (1 new, 0 updated)
+  total        24.4 s
 ```
+`attach` replayed the output from the start, then followed it live. Its
+`spread` line said `50 on 1 other (other machines 50)` although pc2 and pc3
+both took work; FX-CLI2 makes it name them, so expect
+`50 on 2 others (pc2 …, pc3 …)`. <!-- confirm in V4 -->
 `pipedpeer run <script> --detach` does the same without the keypress: it
 returns in 0.5 s with the same two lines (35-detach.txt).
 
@@ -755,8 +871,15 @@ TOTAL 29.0s
   files back   1 (1 new, 0 updated)
   total        50.7 s
 ```
-That run also printed one raw JSON `withholding the cluster token` warning;
-since 3664049 warnings are plain text. <!-- confirm in final re-check -->
+V2 also printed one raw JSON `withholding the cluster token` warning there.
+In V3 (same check from pc4, VERIFY.md check 15b) it was plain text, followed
+by two more lines because the node that ran the job was stopped
+(<!-- V3 9949ad0: docs-VERIFY-583-attach-node-gone.txt -->):
+```
+04:14:14 WRN withholding the cluster token error="10.88.0.1:38080 could not prove it holds the cluster token; not sending it: dial tcp 10.88.0.1:38080: connect: connection refused" addr=10.88.0.1:38080
+warning: could not ask 10.88.0.1 for its hostname: …
+warning: could not list 10.88.0.1's peers for the summary: …
+```
 
 **Say:** "Like a shell job: put it in the background and close the lid if you
 like. The work keeps going on every machine, and the results come back."
@@ -801,15 +924,45 @@ ID	STATUS	MODE	JOB	…
 53517360	succeeded	bg	job-1791768757453515387	…
 ```
 V2 also printed four raw JSON lines (`{"level":"warn",…"message":"withholding
-the cluster token"}`) while offline; since 3664049 these are plain-text
-warnings. <!-- confirm in final re-check --> V2 did not repeat this with the
-GPU job named above. <!-- confirm in final re-check -->
+the cluster token"}`) while offline; in V3's rerun from pc4 they were plain
+text (`04:17:13 WRN withholding the cluster token error="…: connect: network is unreachable" addr=10.88.0.11:38080`,
+VERIFY.md check 26), and pc4 had the result 1 s after reconnecting.
+
+V3 also ran the GPU job named above from pc1, 60 epochs, and cut pc1 off for
+90 s once `epoch 1` showed
+(<!-- V3 9949ad0: docs-DEMO-806-senderdeath-gpu-pc1.txt, docs-DEMO-806-senderdeath-gpu-net.txt, docs-DEMO-806-senderdeath-gpu-attach.txt -->):
+```
+$ pipedpeer run 04_torch_ddp.py --remote --gpu force 60
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+training ...
+epoch 0: 30 steps, loss 0.2452
+…
+epoch 3: 30 steps, loss 0.0320
+
+lost the connection to 192.168.0.200:38080 (connection lost: read tcp 10.88.0.11:58404->192.168.0.200:38080: read: connection reset by peer); checking whether the node or this machine went away...
+the job ended on the node (done); collecting it
+      No files changed on the remote
+
+=== Summary ===
+  ran on       yeet (192.168.0.200)
+  script       peak memory 1.2 GB
+  files back   none
+  total        21.2 s
+[coordinator] Task completed successfully on node 06b9a112
+```
+The job (21.2 s) had finished while pc1 was offline; the CLI noticed when the
+network came back and collected it, but printed none of the epochs after
+`epoch 3`. `pipedpeer attach <id>` had all of them, up to `training done in
+18.3s` and `TOTAL 19.5s`. FX-CLI2 makes the collect print the rest of the
+output too: expect `epoch 4` … `TOTAL` before the summary. <!-- confirm in V4 -->
 
 **Say:** "The job lives where it runs. The sender can disappear and come back
 for the answer."
 
-**Time:** the job's length. The CLI noticed the loss after about 2 min 40 s
-(TCP timeout), and the result arrived about 15 s after reconnecting.
+**Time:** the job's length. With a job still running, the CLI noticed the loss
+after about 2 min 40 s (TCP timeout; 2 min 41 s in V3), and the result arrived
+1 s (V3) to 15 s (V2) after reconnecting.
 
 **Watch out for:**
 - **The job ran twice, or `attach` says "was not started in the background":**
@@ -824,20 +977,26 @@ for the answer."
 Type `pipedpeer run 00_pool.py` and press **Ctrl+C** after the first
 `remote ok` line.
 
-**Screen** (<!-- V1 8e14b9b: 31-ctrlc.txt, 32-sighup.txt; V1 then printed a ~45-line Python traceback, which FX-CLI 1ef1058 removes --> <!-- confirm in final re-check: Ctrl+C mid-run was not rerun in V2 -->):
+**Screen** (<!-- V3 9949ad0: docs-VERIFY-505-ctrlc.txt -->):
 ```
-[pipedpeer] remote ok: 13 items in 5492 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.13:38080, 10.88.0.14:38080
-^C
-…
+[pipedpeer] remote ok: 13 items in 6091 ms on 10.88.0.11:38080, 10.88.0.12:38080, 10.88.0.13:38080, 10.88.0.14:38080
+^C/nix/store/g9j1gfh2xp5c3r29saidh8m0xagvkxfr-python3-3.14.7-env/lib/python3.14/multiprocessing/resource_tracker.py:475: UserWarning: resource_tracker: There appear to be 6 leaked semaphore objects to clean up at shutdown: {…}
+  warnings.warn(
+History: /home/yeet/.local/share/pipedpeer/jobs/1791778845175987352  (pipedpeer job --id 75987352 --timeline)
+
 === Summary ===
   ran on       yeet (127.0.0.1)
-…
-  total        cancelled after 10.0 s
+  environment  built in 0.4 s
+  closure      already on the node
+  script       8.1 s · peak memory 162 MB
+  total        cancelled after 8.6 s
 cancelled — remote work stopped
-Error: execution failed: job cancelled (exit code 137): context canceled
 ```
-On the dashboard, every row's JOBS drops back to 0. In V1, each PC's pool
-counters stopped growing within about 2 s of the ^C (31-ctrlc-poolwatch.txt).
+V1's ~45-line Python traceback is gone (FX-CLI 1ef1058); the two
+`resource_tracker` lines are Python's own notice that the killed pool left
+semaphores behind, and harmless. On the dashboard, every row's JOBS drops back
+to 0. In V3 no PC's executed-items counter (`ex=`) grew after the ^C, and
+each PC's cancelled counter (`can=`) went up (docs-VERIFY-505-ctrlc-poolwatch.txt).
 
 Ctrl+C also works while the environment is still uploading. V2 pressed it
 during `[6/7] Uploading` of a GPU job to pc3; the CLI exited 0.06 s later, the
@@ -862,13 +1021,14 @@ cancelled — remote work stopped
 **Watch out for:**
 - **Rows still busy after 5 s:** a cancel regression. Note it and move on.
 - **A traceback after ^C:** V1's cosmetic bug, fixed since. If it shows,
-  ignore it; the job did stop.
+  ignore it; the job did stop. The two `resource_tracker … leaked semaphore`
+  lines are expected.
 
 ### 12 — Finale · LAPTOP-A · `./demo/13-finale.sh`
 
 You can also start one job by hand on each PC at the same time.
 
-**Screen** (<!-- V2 cc56753: 101-c-13-finale.txt -->):
+**Screen** (<!-- V3 9949ad0: docs-VERIFY-763-finale.txt -->, with 50bae3e's `demo/13-finale.sh`):
 ```
  Finale - 8 jobs at once
 ================================================================
@@ -879,38 +1039,46 @@ You can also start one job by hand on each PC at the same time.
   started everything  (log: demo/finale-logs/everything.log)
 
 LEASE      NODE             JOB                  STATE      SUBMITTER  GPU      AGE
-66ab22de   pc1              finale-pool          running    06b9a112   -        1s
-8e728430   pc1              finale-numpy         running    06b9a112   -        1s
-0f490736   pc4              finale-pandas        running    06b9a112   -        1s
-92e26f28   pc3              finale-sklearn       running    06b9a112   -        1s
-fad64406   yeet             finale-torch         running    06b9a112   -        1s
+cc3776d1   pc4              finale-pool          running    06b9a112   -        1s
+659965de   pc1              finale-numpy         running    06b9a112   -        1s
+4e97cbc6   pc2              finale-pandas        running    06b9a112   -        1s
+aee15ded   yeet             finale-torch         running    06b9a112   -        1s
 …
  Finale results
 ================================================================
   JOB          RAN ON                 TOTAL      RESULT
-  pool         pc1                    428.8s     ok
-  sklearn      pc3                    42.5s      ok
-  numpy        pc1                    514.0s     ok
-  pandas       pc4                    ?          fail (exit 1)
-  torch        yeet                   2.7s       ok
-  files        pc4                    0.0s       ok
-  lambda       pc2                    6.1s       ok
-  everything   ?                      ?          fail (exit 1)
+  pool         pc4                    40.3s      ok
+  sklearn      pc2                    21.9s      ok
+  numpy        pc1                    340.0s     ok
+  pandas       pc2                    57.3s      ok
+  torch        yeet                   3.3s       ok
+  files        pc3                    0.0s       ok
+  lambda       pc4                    4.2s       ok
+  everything   pc1                    43.1s      ok
 
-  > A failed job: read its log in demo/finale-logs/. 'no eligible node' = max-concurrent or memory; rerun that one alone.
+  > RAN ON '?' = that job printed no summary; its log says where it went.
 ```
-The middle part is `pipedpeer tasks --watch`, redrawn every second. Two jobs
-failed in V2: pandas on a pool HTTP 500 (FX-SHIM now combines locally) and
-everything on the 8.5 GiB estimate (FX-PEAK, see step 9). With both fixes,
-expect all eight `ok` and the script to exit 0 (it exits 1 if any job fails).
-<!-- confirm in final re-check -->
+The middle part is `pipedpeer tasks --watch`, redrawn every second. All eight
+`ok`, exit 0 (the script exits 1 if any job fails). Two settings made that
+possible in the lab:
+- `demo/13-finale.sh` now sets `PIPEDPEER_REMOTE_WAIT=10m` (50bae3e): eight
+  jobs fill every machine, so a job often fits only once another finishes,
+  and `--remote` gives up after 15 s by default. With the 15 s default V3's
+  first finale ran 6 of 8 (numpy and everything failed;
+  31-item3-finale-run1-15s-wait.txt). Override it with
+  `PIPEDPEER_REMOTE_WAIT=<duration> ./demo/13-finale.sh`.
+- The containers were resized to 6.0 GB in total (pc1 2600m, pc2 1900m, pc3
+  900m, pc4 600m; 30-finale-lab-resize.txt): the 1.9 GiB estimates of numpy
+  and everything never fit a 1.2 GB container. Venue PCs have far more.
+In V2 pandas also failed on a pool HTTP 500; FX-SHIM now combines locally.
 
 **Say:** "All of it at once."
 
-**Time:** 534 s in V2, because eight jobs shared containers that were slices
-of one laptop (pool 428.8 s and numpy 514.0 s, against 18.9 s and 37.2 s
-alone, 70-setup-firstpass.txt). Real PCs each have their own CPU; time it
-at the lab visit.
+**Time:** 412.0 s in V3 (534 s in V2), because eight jobs shared containers
+that were slices of one laptop (numpy 340.0 s against 30.8 s under plain
+`python3`; V2: pool 428.8 s and numpy 514.0 s, against 18.9 s and 37.2 s
+alone, 70-setup-firstpass.txt). Real PCs each have their own CPU; time it at
+the lab visit.
 
 **Watch out for:**
 - **A job says `fail` with "no eligible node":** that is the concurrency or
