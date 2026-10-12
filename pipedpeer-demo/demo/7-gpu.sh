@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# GPU highlight - a PC with no GPU trains on a laptop's GPU (run on a PC).
+# GPU highlight - a machine with no GPU trains on a laptop's GPU (run on PC-1:
+# LAPTOP-C in layout 1, a college PC in layout 2).
 #
 #   ./demo/7-gpu.sh
 #

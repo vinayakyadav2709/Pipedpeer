@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every kind of work in one file (run on PC-2).
+# Every kind of work in one file (run on PC-2: LAPTOP-C in layout 1).
 #
 #   ./demo/12-everything.sh
 #

@@ -1,10 +1,11 @@
 # Pipedpeer: lab demo run sheet
 
 What to type, on which machine, what the screen shows, what to say, how long it
-takes, and what to do when it goes wrong. It covers one college lab on one LAN:
-our laptops plus the college PCs. Set the machines up first with [SETUP.md](SETUP.md).
-[VERIFY.md](VERIFY.md) has the same commands as a check list you can run
-yourself.
+takes, and what to do when it goes wrong. It covers both venue layouts (three
+laptops on Wi-Fi, or a college lab; "Machines and screens"). Set the machines
+up first with [SETUP.md](SETUP.md).
+[VERIFY.md](VERIFY.md) runs the same steps 0–9, with the same commands, in
+Docker, for either layout.
 
 **Where the outputs come from.** Every screen excerpt below was copied from a
 real run. `<!-- V1 8e14b9b: <file> -->` marks output from rehearsal pass 1:
@@ -42,12 +43,48 @@ the PCs.
 
 ## Machines and screens
 
-| Name | What | Role on the day |
-|---|---|---|
-| **LAPTOP-A** | Your Fedora laptop, NVIDIA GPU, ethernet if possible | runs `pipedpeer rendezvous`, shows `pipedpeer dashboard`, does steps 2, 3, 8 and 9 (backup B3, B5, B7) |
-| **LAPTOP-B** | Teammate's Fedora laptop, NVIDIA GPU | shows `pipedpeer events -f`, can take step 5's run instead of LAPTOP-A, is the second GPU in backup B4a (backup B1, B6) |
-| **PC-1, PC-2** | College Ubuntu PCs, no GPU | do steps 4, 5, 6 and 7's dry run, and the end of 9 (a PC sending GPU work is the point; backup B2) |
-| **PC-3** | College Ubuntu PC | **left unjoined at prep**, joins live in step 1, gets stopped in step 8 |
+There are two possible venues (user, 2026-10-12). **Layout 1** (likely): no
+college lab, three laptops on Wi-Fi: LAPTOP-A and LAPTOP-B (Fedora, NVIDIA
+GPU) and LAPTOP-C (no GPU). **Layout 2**: a college lab, 1–3 Ubuntu PCs on
+ethernet, plus our laptops on Wi-Fi. This sheet and the demo scripts' notes
+name **roles**; this table says which machine plays each one:
+
+| Role | Does | Layout 1 | Layout 2 |
+|---|---|---|---|
+| **LAPTOP-A** | runs `pipedpeer rendezvous`, shows `pipedpeer dashboard`, does steps 2, 3, 8 and 9 (backup B3, B5, B7) | your laptop | your laptop (ethernet if possible) |
+| **LAPTOP-B** | shows `pipedpeer events -f`, can take step 5's run instead of LAPTOP-A, is the second GPU in backup B4a (backup B1, B6) | the friend's laptop | the friend's laptop |
+| **PC-1** | no GPU: sends step 5's GPU work (that is the point) and step 7's dry run (backup B2, B8) | LAPTOP-C | the first PC |
+| **PC-2** | no GPU: steps 4 and 6, and the `traffic` half of step 9 | LAPTOP-C (step 9's `traffic`: LAPTOP-B) | the second of three PCs; with fewer, the first |
+| **PC-3** | **left unjoined at prep**, joins live in step 1, gets stopped in step 8 | LAPTOP-C | the last PC (with one PC, that PC) |
+
+LAPTOP-C, or a lab with one PC, plays PC-1, PC-2 and PC-3 at once. If
+LAPTOP-C comes to a lab too, it counts as one more PC. The failover (step 8)
+stops the machine that is neither presenting nor the job's only other node:
+PC-3 is that machine in both layouts.
+
+**Layout 1, three laptops on Wi-Fi:**
+- **Join by IP.** Wi-Fi access points often drop broadcast (client
+  isolation), so LAN discovery may find nobody. Every laptop joins through
+  LAPTOP-A's rendezvous: `pipedpeer join <LAPTOP-A IP>` (SETUP.md, lab visit
+  step 4). If even `ping <LAPTOP-A IP>` fails between the laptops, that Wi-Fi
+  blocks them from each other outright; nothing is relayed, so move to a
+  network you control (a phone hotspot or your own router).
+- **LAPTOP-C's prep is prep-4 only.** It stays unjoined until step 1, and
+  prep-3 on a machine without a GPU needs the GPU laptops as peers. prep-3
+  runs on the two GPU laptops instead (SETUP.md, "Layout 1").
+- **Smaller speed-ups.** Three machines, one of them presenting, spread less
+  than a room of PCs, and prep-2 measures before LAPTOP-C joins, on two
+  machines. The 1.2× rule still decides which steps stay live; quote only
+  `rehearsal-results.txt`.
+
+**Layout 2, a lab:**
+- **Join by IP here too.** The laptops on Wi-Fi and the PCs on ethernet sit on
+  different subnets, and broadcast never crosses subnets, so every machine
+  joins LAPTOP-A's rendezvous by IP (`setup-machine.sh <role> --token <secret>
+  --introducer <LAPTOP-A IP>`, SETUP.md, lab visit step 4). Check
+  `ping <LAPTOP-A IP>` from a PC first.
+- **Fewer than three PCs:** the roles fold as in the table. A lone PC is
+  prepped like LAPTOP-C in layout 1 (prep-4 only, joins live).
 
 There is no projector. The graders look at laptop screens, so before you start:
 
@@ -83,7 +120,9 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
    rejoins with no countdown.
 5. `./demo/prep-4-common.sh` has run on every machine and
    `./demo/prep-3-gpu.sh` on every machine that sends or runs GPU or
-   "everything" work. The common environment, CUDA torch included, took
+   "everything" work, except PC-3: it is not joined, so it gets prep-4 only
+   (in layout 1 that is LAPTOP-C, the GPU sender too; VERIFY.md step 5
+   checks that prep-4 is enough). The common environment, CUDA torch included, took
    **1150–1261 s per machine** in V2 (four building in parallel; 1269–1315 s
    in V1) and must never be built on stage.
    <!-- V2 31b5364: 55-prep4-pc1.txt, 55-prep4-pc4.txt -->
@@ -91,7 +130,9 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
    `demo/rehearsal-results.txt`: the cold, warm and speedup columns. **A step
    under 1.2× goes to "if asked"**; don't present a slowdown as a feature.
    V3 ran it in 1390 s; its table is in SETUP.md (lab visit, step 6)
-   <!-- V3 9949ad0: docs-SETUP-179-prep2-rehearse.txt -->.
+   <!-- V3 9949ad0: docs-SETUP-179-prep2-rehearse.txt -->. PC-3 is not
+   joined yet, so the table measures the other machines: in layout 1, two
+   laptops.
 7. `./demo/prep-1-check.sh` on LAPTOP-A ends in READY. Run it **after**
    prep-2: before, it fails on `FAIL  no data.csv - run ./demo/prep-2-rehearse.sh`.
    V3 after prep-2 (<!-- V3 9949ad0: docs-SETUP-177-prep1-check-after-prep2.txt -->):
@@ -105,6 +146,11 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 
    READY
    ```
+   In layout 1 only LAPTOP-B is a peer at prep, so expect
+   `warn  only 1 peer - the demo works, but say 'two machines'` instead of the
+   first `ok` line; with both GPU laptops up, the GPU line reads
+   `ok    2 GPU machines - the GPU step also runs as 2-rank DDP` (the two-GPU
+   run is still backup only, B4a). <!-- not yet run in this layout -->
 
 ## On the day
 
@@ -134,11 +180,15 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 | 2 | the cluster | LAPTOP-A | instant | — |
 | 3 | headline: python3 vs pipedpeer | LAPTOP-A | 27 s (9.5 s python3 + 17.0 s pipedpeer) | — (prep builds it) |
 | 4 | cold vs cached | PC-2 | 4.8 s | 20.5 s send only; 169 s with build, empty store, 0.5 % loss (V1) |
-| 5 | GPU from a PC with no GPU (one GPU) | PC-1 | ~15 s script (13.4 s training) + overhead: 18.9 s total (V5, run locally on the laptop) | 1150–1261 s CUDA build: prep only |
+| 5 | GPU from a machine with no GPU (one GPU) | PC-1 | ~15 s script (13.4 s training) + overhead: 18.9 s total (V5, run locally on the laptop) | 1150–1261 s CUDA build: prep only |
 | 6 | everything in one script | PC-2 (`--remote` on a small PC) | 26.7 s (V3, `--remote` from pc3) | 664.6 s (637.7 s build, V3); 700.6 s (V2): prep only |
 | 7 | the teacher's own script: dry run, then their script | PC-1, then any | dry run 0.8 s; their script 19.6–69.5 s (second run, `students/` scripts, V2) | dry run 42 s on an empty store; their script 35.3–125.7 s on the first run after the common prep, of which the environment build is 0.4–7.1 s (V2) |
-| 8 | failover: stop a PC mid-job | LAPTOP-A + PC-3 | 16.7 s (V2), 19.5 s (V1) | — |
+| 8 | failover: stop a machine mid-job | LAPTOP-A + PC-3 | 16.7 s (V2), 19.5 s (V1) | — |
 | 9 | receipts | LAPTOP-A, then PC-2 | instant | — |
+
+"Where" names roles: "Machines and screens" says which machine plays each in
+your layout. In layout 1, LAPTOP-C does every PC step, and step 9's `traffic`
+runs on LAPTOP-B.
 
 **Total:** about 3 min of machine time with everything cached; with the
 talking, about 15 min. Plan for 15–20 min. **Shortest cut:** 1 join,
@@ -228,7 +278,8 @@ rows: old test nodes from earlier runs. A fresh install shows none.
   - `ping <LAPTOP-A IP>` from PC-3.
   - The firewall: `sudo ufw status` on Ubuntu, `sudo firewall-cmd --list-ports`
     on Fedora. See SETUP.md, "Firewall".
-  - Wi-Fi client isolation: move PC-3 to ethernet.
+  - Wi-Fi client isolation: in layout 2, move PC-3 to ethernet; in layout 1,
+    see "Layout 1" under "Machines and screens".
   - `pipedpeer net-check` for the details.
 - **`auth set failed`:** the token is wrong. Copy it again from
   `pipedpeer auth show` on LAPTOP-A.
@@ -406,7 +457,7 @@ run fails.
 - **`--cold` resends the environment but does not undo this machine's build**
   (DECIDED). A truly first run also builds; quote the 42 s.
 
-### 5 — GPU from a PC with no GPU · PC-1 · `./demo/7-gpu.sh`
+### 5 — GPU from a machine with no GPU · PC-1 · `./demo/7-gpu.sh`
 
 Before you start: run `watch -n1 nvidia-smi` on LAPTOP-A and LAPTOP-B, and
 turn those screens round.
@@ -765,6 +816,8 @@ common prep took 35.3–125.7 s, of which the environment build was 0.4–7.1 s
 ### 8 — Failover · LAPTOP-A `./demo/9-failover.sh`, then on PC-3 `pipedpeer stop`
 
 Type `pipedpeer stop` on PC-3 as soon as the first `remote ok` line appears.
+In layout 1 that is LAPTOP-C, and LAPTOP-B carries on; never stop LAPTOP-B
+there, it would leave only the presenter.
 
 **Screen** (<!-- V2 31b5364: 72-step-9-failover.txt, pc3 stopped at 07:23:25, about 1 s into the run, 72-failover-stop.txt -->):
 ```
@@ -800,6 +853,9 @@ machine costs time, never correctness."
 - **A different checksum:** this is a real bug. Stop and say so.
 
 ### 9 — Receipts · LAPTOP-A `./demo/10-proof.sh`, then on PC-2 `pipedpeer traffic`
+
+In layout 1, run `pipedpeer traffic` on LAPTOP-B: it took pool work in steps
+3 and 8, and LAPTOP-C was just restarted in step 8.
 
 **Screen on LAPTOP-A:**
 - `pipedpeer jobs`.
@@ -952,7 +1008,7 @@ TOTAL 29.0s
   total        50.7 s
 ```
 V2 also printed one raw JSON `withholding the cluster token` warning there.
-In V3 (same check from pc4, VERIFY.md check 15b) it was plain text, followed
+In V3 (same check from pc4, VERIFY.md B1) it was plain text, followed
 by two more lines because the node that ran the job was stopped
 (<!-- V3 9949ad0: docs-VERIFY-583-attach-node-gone.txt -->):
 ```
@@ -1006,7 +1062,7 @@ ID	STATUS	MODE	JOB	…
 V2 also printed four raw JSON lines (`{"level":"warn",…"message":"withholding
 the cluster token"}`) while offline; in V3's rerun from pc4 they were plain
 text (`04:17:13 WRN withholding the cluster token error="…: connect: network is unreachable" addr=10.88.0.11:38080`,
-VERIFY.md check 26), and pc4 had the result 1 s after reconnecting.
+VERIFY.md B2), and pc4 had the result 1 s after reconnecting.
 
 V3 also ran the GPU job named above from pc1, 60 epochs, and cut pc1 off for
 90 s once `epoch 1` showed
@@ -1448,6 +1504,6 @@ cluster manager.
 
 ## After the demo
 
-Run `pipedpeer stop` on each college PC. To leave the college cluster, run
+Run `pipedpeer stop` on each college PC (layout 2) or on LAPTOP-C (layout 1). To leave the college cluster, run
 `pipedpeer join <other address>` later; one join resets it. On LAPTOP-A, stop
 `pipedpeer rendezvous` with Ctrl+C.
