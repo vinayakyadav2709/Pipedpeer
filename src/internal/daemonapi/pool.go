@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"log"
@@ -113,6 +114,9 @@ type chunk struct {
 	cacheKeys                                []string
 	itemKeys                                 []string
 	chunkDir                                 string
+	// offload is the machine key `run --offload` keeps distributed work off
+	// (X-Pipedpeer-Offload; "" when the run did not ask). See offloadPeers.
+	offload string
 	// ctx is the request this chunk serves. It ends when the requester goes
 	// away (its job was killed, or the origin dropped a forward), and that
 	// kills the local workers and drops the peer forwards started for it.
@@ -617,7 +621,33 @@ type poolManager struct {
 	// until that peer has been measured once.
 	coresFn func(peer string) int
 
+	// machineFn reports a peer's machine key ("" when unknown), so --offload
+	// can drop a machine's peers by key rather than by address.
+	machineFn func(peer string) string
+
 	stats poolStats
+}
+
+// selfMachine is this daemon's machine key; a variable so tests can move it.
+var selfMachine = heartbeat.Machine
+
+// offloadPeers applies `run --offload`: it drops every peer on the machine
+// whose key is machine, and reports whether this node runs on that machine
+// itself, in which case it takes no share either. The machine is matched by
+// key, never by address - an internet peer is 127.0.0.1:<forwarder port>. A
+// peer that reports no key is kept: unknown is not the same machine.
+func (pm *poolManager) offloadPeers(peers []string, machine string) ([]string, bool) {
+	if machine == "" {
+		return peers, false
+	}
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if pm.machineFn != nil && heartbeat.SameMachine(pm.machineFn(p), machine) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, heartbeat.SameMachine(selfMachine(), machine)
 }
 
 // peerCores is the prior for an unmeasured peer.
@@ -860,6 +890,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	// Where the requesting job was submitted from ("host:port"); sunk to the
 	// tail of spill order so an idle orchestrator never outranks workers.
 	submitter := r.Header.Get("X-Pipedpeer-Submitter")
+	offload := r.Header.Get("X-Pipedpeer-Offload")
 	runPath := filepath.Join(storePath, "bin", "run")
 	if storePath == "" || !pathExists(runPath) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-Pipedpeer-Store header (or invalid store path)"})
@@ -893,9 +924,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		available := s.AvailableForJob()
 		if available < req.RequiredMemBytes {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
-				if peer := s.pool.bestPeer(storePath, submitter); peer != "" {
+				if peer := s.pool.bestPeer(storePath, submitter, offload); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
-					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath) {
+					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload) {
 						return
 					}
 					if s.poolCancelled(r, len(items), started) {
@@ -917,6 +948,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
+				offload:  offload,
 				// originLocal stays unset: setting it here would change
 				// placement, which is out of this path's remit.
 				prov: &provenance{},
@@ -943,6 +975,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 		chunkDir:    chunkDirFor(storePath),
+		offload:     offload,
 		originLocal: fromLocalShim,
 		prov:        &provenance{},
 		ctx:         r.Context(),
@@ -1078,7 +1111,7 @@ func (s *Server) runMicroChunks(runPath, storePath string, ch *chunk, safe int64
 //
 // ctx is the incoming request's: when its requester goes away the forward is
 // dropped, and the peer stops the work through its own request context.
-func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawBody []byte, peer, storePath string) bool {
+func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawBody []byte, peer, storePath, offload string) bool {
 	fwd, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
 	if err != nil {
 		log.Printf("[pool] forward to %s: building request: %v", peer, err)
@@ -1087,6 +1120,10 @@ func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawB
 	fwd.Header.Set("Content-Type", "application/json")
 	fwd.Header.Set("X-Pipedpeer-Store", storePath)
 	fwd.Header.Set("X-Pipedpeer-Forwarded", "1")
+	if offload != "" {
+		// The peer may split it again; it must keep off that machine too.
+		fwd.Header.Set("X-Pipedpeer-Offload", offload)
+	}
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(fwd)
 	if err != nil {
@@ -1170,6 +1207,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		peers = pm.peerFn(storePath, submitter)
 	}
 	pm.mu.Unlock()
+	// --offload: none of the parts below may land on the kept-off machine,
+	// and when that is this node, it takes no share of its own.
+	peers, offHere := pm.offloadPeers(peers, ch.offload)
+	if offHere && len(peers) == 0 {
+		log.Printf("[pool] --offload: no other machine shares this closure; running %d items on this machine", len(ch.items))
+	}
 
 	pm.deadMu.Lock()
 	pm.deadPeers = make(map[string]bool)
@@ -1265,7 +1308,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			// competes with the pool that is mid-race, and the round trip
 			// bought nothing. Rotated so successive small dispatches spread
 			// instead of pinning the first peer.
-			if ch.force || ch.originLocal {
+			if ch.force || ch.originLocal || offHere {
 				j := int(forceRotate.Add(1)) % len(peers)
 				ordered := append(append([]string{}, peers[j:]...), peers[:j]...)
 				parts = []part{{c: ch, peers: ordered}}
@@ -1287,7 +1330,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			// participant - which is how adding a machine used to make a job
 			// slower. The scheduler equalises finish times instead, and
 			// declines any peer that cannot start before the rest are done.
-			shares := pm.planShares(items, peers, !ch.originLocal)
+			shares := pm.planShares(items, peers, !ch.originLocal && !offHere)
 			idx := 0
 			for _, sh := range shares {
 				if sh.Items == 0 || idx >= len(items) {
@@ -1310,6 +1353,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					}
 				}
 				parts = append(parts, part{c: &sub, peers: ordered})
+			}
+			// The plan can refuse every peer; under --offload there is then no
+			// local share to carry the items, so they go to a peer whole.
+			if len(parts) == 0 && offHere {
+				parts = []part{{c: ch, peers: peers}}
+				idx = len(items)
 			}
 			// Anything rounding left over goes to the first part rather than
 			// being dropped; losing items here is silent and corrupts results.
@@ -1379,7 +1428,14 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 						break
 					}
 					var where string
-					r, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left)
+					if offHere {
+						// No local copy races a slow peer: this machine is
+						// kept off. A peer that fails hands on to the next.
+						where = "peer:" + peer
+						r, e = pm.runRemote(peer, storePath, p.c, 0)
+					} else {
+						r, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left)
+					}
 					if e == nil {
 						d := time.Since(started)
 						ch.prov.record(where, len(p.c.items), d.Milliseconds())
@@ -1402,6 +1458,9 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				}
 				if e != nil && ctx.Err() == nil && !raced {
 					// D2/D3 — a remote node adds capacity, never subtracts.
+					if offHere {
+						log.Printf("[pool] --offload: every peer failed part %d (%v); running its %d items on this machine", i, e, len(p.c.items))
+					}
 					r, e = pm.runLocal(runPath, storePath, p.c)
 					if e == nil {
 						// Deliberately not measured: this ran locally after a
@@ -1484,13 +1543,13 @@ func sinkPeerLast(peers []string, submitter string) []string {
 // bestPeer returns the top-ranked healthy peer sharing a store ("" when none),
 // used to forward requests the local node cannot admit (asymmetric
 // orchestrator: 0% heavy compute runs locally when peers exist).
-func (pm *poolManager) bestPeer(storePath, submitter string) string {
+func (pm *poolManager) bestPeer(storePath, submitter, offload string) string {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.peerFn == nil {
 		return ""
 	}
-	ps := pm.peerFn(storePath, submitter)
+	ps, _ := pm.offloadPeers(pm.peerFn(storePath, submitter), offload)
 	for _, p := range ps {
 		if p != submitter {
 			return p

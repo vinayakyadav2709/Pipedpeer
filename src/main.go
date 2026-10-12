@@ -520,6 +520,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
 			remote, _ := cmd.Flags().GetBool("remote")
+			offload, _ := cmd.Flags().GetBool("offload")
 			strategy, _ := cmd.Flags().GetString("strategy")
 			distribute, _ := cmd.Flags().GetString("distribute")
 			switch distribute {
@@ -581,6 +582,21 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				fmt.Println("started daemon")
 			}
 
+			// --offload: distributed pieces (pool/joblib chunks, pandas and
+			// numpy offloads, DDP ranks) keep off this machine, decided by its
+			// machine key - never its address, since an internet peer is
+			// 127.0.0.1:<port>. The script itself still runs here (or on the
+			// --remote node, whose spreading then skips this machine).
+			offloadKey := ""
+			if offload {
+				offloadKey = heartbeat.Machine()
+				if offloadKey == "" {
+					fmt.Fprintln(os.Stderr, "warning: --offload: cannot read this machine's key; distributed work may still run here")
+				} else {
+					envs = append(envs, "PIPEDPEER_OFFLOAD="+offloadKey)
+				}
+			}
+
 			userMem := resourceest.ParseMemString(memOverride)
 			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
 			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
@@ -621,8 +637,19 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			// ponytail: no redundancy margin yet — on a large cluster with
 			// flaky nodes, all-in means one death kills the run. If that ever
 			// bites, add a heuristic here (spare ranks, or eligible-N).
+			// ddpOffload: a DDP script under --offload trains on other
+			// machines only, as a ring or, with one of them, placed there
+			// like --remote.
+			ddpOffload := false
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
-				eligible := ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
+				exclude := offloadKey
+				eligible := ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
+				if exclude != "" && eligible == 0 {
+					fmt.Println("[coordinator] warning: --offload: no other machine can take a rank, so this machine trains")
+					exclude = ""
+					eligible = ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
+				}
+				ddpOffload = exclude != ""
 				worldSize := eligible
 				if ddpNodes > 1 {
 					worldSize = min(ddpNodes, eligible)
@@ -650,7 +677,8 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						PreferGPU:      preferGPU,
 						RequiredGPUMem: requiredGPUMem,
 						RequiredCores:  requiredCores,
-						NoSelf:         remote,
+						NoSelf:         remote || ddpOffload,
+						ExcludeMachine: exclude,
 						Strategy:       strategy,
 						MemOverride:    memOverride,
 						MaxRanks:       max(ddpNodes, 0),
@@ -678,10 +706,12 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			// PC submitting to the GPU laptop, or a DDP ring that fell back to
 			// one node) got "insufficient memory" or ran on its CPU. Such a
 			// run is placed like --remote instead, on GPU nodes only.
-			gpuPlace := requireGPU && !remote && daemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
-			if remote || gpuPlace {
+			gpuPlace := requireGPU && !remote && !ddpOffload && daemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
+			if remote || ddpOffload || gpuPlace {
 				if remote {
 					fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
+				} else if ddpOffload {
+					fmt.Println("[coordinator] --offload: placing the training on a node other than this machine...")
 				} else {
 					fmt.Println("[coordinator] --gpu force: this machine has no GPU; placing the run on a GPU node...")
 				}
@@ -708,7 +738,8 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					RequiredMemBytes: resReq.MemBytes,
 					RequiredCores:    requiredCores,
 					RequiredGPUMem:   requiredGPUMem,
-					NoSelf:           remote,
+					NoSelf:           remote || ddpOffload,
+					ExcludeMachine:   offloadKey,
 					RequireGPU:       requireGPU,
 					PreferGPU:        preferGPU,
 					Strategy:         strategy,
@@ -723,6 +754,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				if decision.ChosenNode.NodeID == "" {
 					if why := decision.RejectionSummary(); why != "" {
 						fmt.Print("[coordinator] nodes turned down:\n" + why)
+					}
+					if ddpOffload {
+						return fmt.Errorf("no other node can take this training — run without --offload to train on this machine")
 					}
 					if !remote {
 						return fmt.Errorf("no GPU node can take this run — drop --gpu force to run it on a CPU")
@@ -902,6 +936,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 	cmd.Flags().Bool("cold", false, "Send the environment as if the node had none, to time a first run")
 	cmd.Flags().Bool("detach", false, "Start the job, print its id and return; reattach with pipedpeer attach <id>")
 	cmd.Flags().Bool("remote", false, "Run on another machine in the cluster (any node except this one); without this the script runs on this machine")
+	cmd.Flags().Bool("offload", false, "Keep distributed work off this machine; the script itself still runs here. Pool/joblib/executor chunks, pandas and numpy offloads and DDP ranks go to other machines (this machine only when none can take them, with a warning). With --remote, the chosen node's spreading skips this machine too")
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
@@ -934,6 +969,10 @@ type ddpRunOptions struct {
 	RequiredGPUMem int64
 	RequiredCores  int
 	NoSelf         bool
+	// ExcludeMachine keeps every rank off the machine with this key (run
+	// --offload); SelfNodeID is this node, for NoSelf. runDDP fills it.
+	ExcludeMachine string
+	SelfNodeID     string
 	Strategy       string
 	MemOverride    string
 	// MaxRanks caps the ring when ranks join mid-run (--ddp N); 0 lets every
@@ -986,6 +1025,7 @@ func runDDP(o ddpRunOptions) error {
 		RequiredCores:    o.RequiredCores,
 		RequiredGPUMem:   o.RequiredGPUMem,
 		NoSelf:           o.NoSelf,
+		ExcludeMachine:   o.ExcludeMachine,
 		RequireGPU:       o.RequireGPU,
 		PreferGPU:        o.PreferGPU,
 		Strategy:         o.Strategy,
@@ -1017,6 +1057,7 @@ func runDDP(o ddpRunOptions) error {
 	// availability rather than speed, and on an uneven cluster that put the
 	// slowest machine in the ring's most important seat: every rank waits for
 	// it, and it also serves as the rendezvous master.
+	o.SelfNodeID = nodeID.NodeID
 	ring, ringSlots, ringWeights := ddpChooseRing(o, rank0)
 	if len(ring) < 2 {
 		// Measurement says one machine beats any ring available. That is an
@@ -1265,7 +1306,7 @@ func runDDP(o ddpRunOptions) error {
 			fetch:      ddpFetchNodes,
 			check:      ddpJoinCheck,
 			want: func(n registry.NodeRecord) bool {
-				if o.NoSelf && n.NodeID == nodeID.NodeID {
+				if ddpExcluded(o, n) {
 					return false
 				}
 				// One kind of device per ring, as at the start.
@@ -1606,6 +1647,22 @@ func ddpHasGPU(n registry.NodeRecord) bool {
 // with two accelerators ineligible for the ring it is perfectly able to host -
 // and the multi-rank placement below it could never be reached.
 func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64) int {
+	return ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, requiredMem, "")
+}
+
+// ddpExcluded reports whether n may not take a rank: this node under NoSelf
+// (--remote), and any node on the machine --offload keeps work off, by its
+// machine key.
+func ddpExcluded(o ddpRunOptions, n registry.NodeRecord) bool {
+	if o.NoSelf && o.SelfNodeID != "" && n.NodeID == o.SelfNodeID {
+		return true
+	}
+	return heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], o.ExcludeMachine)
+}
+
+// ddpEligibleCountExcept is ddpEligibleCount without the nodes on the machine
+// whose key is exclude ("" excludes nothing).
+func ddpEligibleCountExcept(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) int {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
 	if err != nil {
 		return 0
@@ -1618,6 +1675,9 @@ func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredM
 	count := 0
 	for _, n := range all {
 		if n.State != "healthy" {
+			continue
+		}
+		if heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], exclude) {
 			continue
 		}
 		gpuOK := ddpHasGPU(n) &&
@@ -2941,6 +3001,9 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 		// an all-reduce must not silently mix devices, and the probe measures
 		// CPU throughput, so it cannot rank a GPU against a CPU anyway.
 		if o.RequireGPU && !ddpHasGPU(n) {
+			continue
+		}
+		if ddpExcluded(o, n) {
 			continue
 		}
 		byID[n.NodeID] = n

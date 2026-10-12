@@ -40,6 +40,31 @@ _NUM_SHARDS = os.environ.get("PIPEDPEER_NUM_SHARDS", "0")
 # demonstrate distribution, not to be fast. "auto" (default) keeps the
 # cost models in charge.
 _FORCE = os.environ.get("PIPEDPEER_DISTRIBUTE", "auto") == "force"
+# run --offload: distributed work stays off the machine whose key
+# PIPEDPEER_OFFLOAD names (the submitter's). The key rides on every pool
+# request; the daemon drops that machine's peers, and takes no share itself
+# when it runs there. When this job runs on that machine itself (--offload
+# without --remote) the shim keeps no share either: every cost model ships,
+# and anything that still has to run here says why. The key is the kernel's
+# boot id, the daemon's machine key; a sandbox shares the host's kernel.
+_OFFLOAD = os.environ.get("PIPEDPEER_OFFLOAD", "")
+
+
+def _offload_here():
+    if not _OFFLOAD:
+        return False
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip() == _OFFLOAD
+    except OSError as e:
+        # Unknown: keep the promise rather than guess this is elsewhere.
+        sys.stderr.write("[pipedpeer] --offload: cannot read this machine's key (%s); "
+                         "treating it as the machine to keep work off\n" % e)
+        return True
+
+
+_OFFLOAD_HERE = _offload_here()
+_FORCE = _FORCE or _OFFLOAD_HERE
 
 
 def _spill_min(default=32 * 1024 * 1024):
@@ -72,6 +97,19 @@ _TOKEN = os.environ.get("PIPEDPEER_TOKEN", "")
 def _log(msg):
     if _ENABLED:
         sys.stderr.write("[pipedpeer] " + msg + "\n")
+
+
+_OFFLOAD_SAID = set()
+
+
+def _offload_warn(what, why):
+    """--offload promised this machine computes no distributed work; when
+    some has to run here anyway, say so once per reason, never fail the run."""
+    if not _OFFLOAD_HERE or why in _OFFLOAD_SAID:
+        return
+    _OFFLOAD_SAID.add(why)
+    sys.stderr.write("[pipedpeer] warning: --offload: %s ran on this machine: %s\n"
+                     % (what, why))
 
 
 # What interception actually did, as opposed to what it was supposed to do.
@@ -220,7 +258,10 @@ def _cluster_ready():
         shards = int(_NUM_SHARDS)
     except ValueError:
         shards = 0
-    return bool(_URL) and _ENABLED and shards >= 2
+    ready = bool(_URL) and _ENABLED and shards >= 2
+    if not ready:
+        _offload_warn("distributed work", "no other machine is in the cluster")
+    return ready
 
 
 # How long the submit queue must sit idle before it is sent as one batch. A
@@ -561,6 +602,13 @@ class _ClusterPool:
     def _run(self, func, items, starmap=False, catch=False):
         _add_stat("mapped_items", len(items))
         self._resize()
+        if _OFFLOAD_HERE and self._remote and items:
+            # --offload: no measuring head on this machine; all of it ships.
+            payload = _func_payload(func) or _func_pickle(func)
+            if payload is not None:
+                _decide("pool.map", True, "--offload keeps this machine's share at 0")
+                return self._race(func, items, starmap, 0, payload, catch)
+            _offload_warn("a pool.map", "its function cannot be sent, by source or by value")
         if not self._remote or len(items) <= self._measure_items:
             return self._local(func, items, starmap, catch)
         # Measure the first few locally, then decide whether to spill the rest.
@@ -770,6 +818,31 @@ class _RemotePairs(list):
     elsewhere = 0
 
 
+def _offload_items(items, per_item_cost, width, run_local, run_remote):
+    """_race_items under --offload: every chunk goes to the cluster and no
+    local core races it. A chunk the cluster could not take runs here, said
+    out loud, so the run still finishes."""
+    from concurrent.futures import ThreadPoolExecutor
+    size = max(1, min(max(_adaptive_chunk(per_item_cost), width), len(items)))
+    chunks = _chunk(list(enumerate(items)), size)
+    slots = [None] * len(items)
+    with ThreadPoolExecutor(max(1, min(_REMOTE_INFLIGHT, len(chunks)))) as ex:
+        answers = list(ex.map(run_remote, chunks))
+    for chunk, res in zip(chunks, answers):
+        if res is None:
+            _offload_warn("%d item(s)" % len(chunk), "the cluster could not take them")
+            vals = run_local([p[1] for p in chunk])
+            _record_local(len(chunk))
+            res = list(zip([p[0] for p in chunk], vals))
+        else:
+            used = min(len(res), getattr(res, "elsewhere", len(res)))
+            if used:
+                _add_stat("remote_used", used)
+        for i, v in res:
+            slots[i] = v
+    return slots
+
+
 def _race_items(items, per_item_cost, width, run_local, run_remote):
     """Run items on this machine and the cluster at once, first result wins.
 
@@ -784,6 +857,8 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
     # Worst case (remote dead/absent) local eventually does everything, so
     # this is never slower than a plain local Pool; a working remote halves
     # the tail's wall time.
+    if _OFFLOAD_HERE:
+        return _offload_items(items, per_item_cost, width, run_local, run_remote)
     n = len(items)
     # A sentinel, not None: a kernel that returns None would otherwise
     # leave its slot looking unfilled, and local_run would re-run it
@@ -1731,6 +1806,8 @@ def _should_spill_why(nbytes, flops_per_byte):
     if not (_URL and _ENABLED):
         return False
     K = int(_NUM_SHARDS)
+    if K < 2:
+        _offload_warn("distributed work", "no other machine is in the cluster")
     if K < 2 or nbytes < _spill_min():
         return False
     if _FORCE:
@@ -1825,11 +1902,22 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None, opener=N
     req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
                                  headers={"Content-Type": "application/vnd.pipedpeer.frames",
                                           "X-Pipedpeer-Store": _STORE,
-                                          "X-Pipedpeer-Submitter": _SUBMITTER})
-    with _daemon_open(req, timeout, opener) as resp:
-        data = resp.read()
+                                          "X-Pipedpeer-Submitter": _SUBMITTER,
+                                          "X-Pipedpeer-Offload": _OFFLOAD})
+    try:
+        with _daemon_open(req, timeout, opener) as resp:
+            data = resp.read()
+    except Exception as e:
+        # Every caller falls back to running the work here.
+        _offload_warn("work the cluster refused", "the cluster could not take it (%s)" % str(e)[:200])
+        raise
     nl = data.find(b"\n")
     hdr = json.loads(data[:nl])
+    here = sum(int(p.get("items", 0)) for p in (hdr.get("receipt") or {}).get("parts", [])
+               if not str(p.get("where", "")).startswith("peer:"))
+    if here:
+        _offload_warn("%d item(s)" % here, "no other machine could take them "
+                      "(none healthy with this environment, or each one failed)")
     if out_header is not None:
         out_header.update(hdr)
     rest = data[nl + 1:]
@@ -2223,6 +2311,8 @@ def _numpy_offload_why(nbytes, flops_per_byte, round_trip, split,
     if not (_URL and _ENABLED):
         return False
     K = int(_NUM_SHARDS)
+    if K < 2:
+        _offload_warn("distributed work", "no other machine is in the cluster")
     if K < 2 or nbytes < _spill_min():
         return False
     if _FORCE:
@@ -2398,11 +2488,13 @@ def _groupby_shuffle(gb, spec, args, kw):
         buckets = buckets[keep]
         df = df[keep]
     parts = []
+    # --offload ships bucket 0 too: this machine keeps no share.
+    first = 0 if _OFFLOAD_HERE else 1
     local = df[buckets == 0]
-    if len(local):
+    if first and len(local):
         parts.append(local.groupby(keys, as_index=as_index, sort=False,
                                    dropna=dropna, observed=True).agg(spec, *args, **kw))
-    remote = [df[buckets == b] for b in range(1, K) if (buckets == b).any()]
+    remote = [df[buckets == b] for b in range(first, K) if (buckets == b).any()]
     if remote:
         globals_pickle = pickle.dumps({
             "_by": keys, "_as_index": as_index, "_dropna": dropna,
@@ -2510,7 +2602,7 @@ def _merge_shuffle(left, right, kw):
             R = right.iloc[0:0]
         if not len(L):
             L = left.iloc[0:0]
-        if b == 0:
+        if b == 0 and not _OFFLOAD_HERE:   # --offload ships bucket 0 too
             local_part = (L, R)
         else:
             items.append((L, R))
@@ -2971,7 +3063,8 @@ class _PartitionedFrame:
         try:
             r = urllib.request.Request(_URL + "/v1/pool/map", data=json.dumps(req).encode(),
                                        headers={"Content-Type": "application/json",
-                                                "X-Pipedpeer-Store": _STORE})
+                                                "X-Pipedpeer-Store": _STORE,
+                                                "X-Pipedpeer-Offload": _OFFLOAD})
             with _daemon_open(r, 3600) as resp:
                 rs = json.loads(resp.read())["results"]
             if len(rs) != len(idx):
@@ -2981,6 +3074,7 @@ class _PartitionedFrame:
             if self._local is None:
                 raise
             _record("ooc-" + what, len(idx), False, str(e)[:300])
+            _offload_warn("%s of %s" % (what, self._path), "the cluster failed (%s)" % str(e)[:200])
             _log("WARNING: %s on the cluster failed (%s); re-reading %d chunk(s) "
                  "of %s on this machine instead - slower, same result"
                  % (what, str(e)[:300], len(idx), self._path))
@@ -5063,6 +5157,12 @@ def _install_joblib():
         _add_stat("mapped_items", n)
         width = _usable_cores()
         head_n = max(4, min(width, n // 2))
+        if _OFFLOAD_HERE and n:
+            # --offload: no measuring head here; every task ships.
+            head_n = 0
+            if _jb_has_shared_accumulator(tasks):
+                _offload_warn("a joblib call", "its tasks share an accumulator, "
+                              "so they must run in one process")
         if n <= head_n or _jb_has_shared_accumulator(tasks):
             _record_local(n)
             return run_local(tasks)
@@ -5070,7 +5170,7 @@ def _install_joblib():
         t0 = time.monotonic()
         head_results = run_local(head)
         _record_local(len(head))
-        cost = (time.monotonic() - t0) * max(1, min(len(head), width)) / len(head)
+        cost = (time.monotonic() - t0) * max(1, min(len(head), width)) / max(1, len(head))
 
         import pickle
         try:
@@ -5082,6 +5182,7 @@ def _install_joblib():
         except Exception:
             # A lambda or a closure: plain pickle has no name to send it by.
             _decide("joblib", False, "the task cannot be pickled to send")
+            _offload_warn("a joblib call", "its tasks cannot be pickled to send")
             _record_local(len(tail))
             return head_results + run_local(tail)
         if not _FORCE and len(tail) * cost < _POOL_MIN_WORK:

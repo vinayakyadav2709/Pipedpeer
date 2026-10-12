@@ -152,9 +152,7 @@ func spreadLine(rc receipt, ranOn string, names map[string]string) (line string,
 		others += "s"
 	}
 	others += " (" + strings.Join(parts, ", ") + ")"
-	if local == 0 {
-		return fmt.Sprintf("%d items: %s", total, others) + raced, unresolved
-	}
+	// "0 on <machine>" is said, not left out: it is what --offload promises.
 	return fmt.Sprintf("%d items: %d on %s, %s", total, local, ranOn, others) + raced, unresolved
 }
 

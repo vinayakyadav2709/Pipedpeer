@@ -16,6 +16,7 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
@@ -73,6 +74,7 @@ type Coordinator struct {
 	retryInterval    time.Duration
 	execBackoffBase  time.Duration
 	noSelf           bool
+	excludeMachine   string
 	requireGPU       bool
 	preferGPU        bool
 	strategy         string
@@ -111,6 +113,7 @@ type Config struct {
 	RetryInterval    time.Duration       // how long to wait between queue retries (default: 30s)
 	ExecBackoffBase  time.Duration       // first wait after a failed execution, doubling per failure (default: 2s)
 	NoSelf           bool                // exclude self-node from placement
+	ExcludeMachine   string              // run --offload: drop every node with this machine key, a second daemon here included
 	RequireGPU       bool                // only GPU-capable nodes are eligible
 	PreferGPU        bool                // try GPU nodes first, fall back to CPU nodes
 	Strategy         string              // "smart" (default) or "round-robin"
@@ -153,6 +156,7 @@ func New(cfg Config) *Coordinator {
 		retryInterval:    cfg.RetryInterval,
 		execBackoffBase:  cfg.ExecBackoffBase,
 		noSelf:           cfg.NoSelf,
+		excludeMachine:   cfg.ExcludeMachine,
 		requireGPU:       cfg.RequireGPU,
 		preferGPU:        cfg.PreferGPU,
 		strategy:         cfg.Strategy,
@@ -263,10 +267,13 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	// surfaced through. buildSelfNode is one path, but the local daemon also
 	// lists itself in /v1/nodes (queryDaemonNodes) and LAN discovery can return
 	// it; filter by node id so "distribute to OTHER devices" is honoured.
-	if c.noSelf && c.selfIdentity.NodeID != "" {
+	if (c.noSelf && c.selfIdentity.NodeID != "") || c.excludeMachine != "" {
 		filtered := candidates[:0]
 		for _, cnd := range candidates {
-			if cnd.Node.NodeID == c.selfIdentity.NodeID {
+			if c.noSelf && cnd.Node.NodeID == c.selfIdentity.NodeID {
+				continue
+			}
+			if heartbeat.SameMachine(cnd.Node.Capabilities[heartbeat.MachineCapability], c.excludeMachine) {
 				continue
 			}
 			filtered = append(filtered, cnd)
@@ -1432,6 +1439,7 @@ func (c *Coordinator) configSnapshot() Config {
 		RetryInterval:    c.retryInterval,
 		ExecBackoffBase:  c.execBackoffBase,
 		NoSelf:           c.noSelf,
+		ExcludeMachine:   c.excludeMachine,
 		RequireGPU:       c.requireGPU,
 		PreferGPU:        c.preferGPU,
 		Strategy:         c.strategy,
