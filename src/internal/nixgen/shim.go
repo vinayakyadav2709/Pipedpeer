@@ -3481,7 +3481,10 @@ def _install_ddp():
     # that distributed nothing and a run that distributed everything look
     # identical from the outside, and so do a fast ring and one that spent
     # 95% of its time waiting.
-    _DDP_STATS = {"syncs": 0, "sync_sec": 0.0, "sent_bytes": 0, "recv_bytes": 0}
+    # barrier_sec is the opening round's wait for every rank to start: not
+    # sync, and counted as sync it advised averaging every 32 steps (V4 80).
+    _DDP_STATS = {"syncs": 0, "sync_sec": 0.0, "sent_bytes": 0, "recv_bytes": 0,
+                  "barrier_sec": 0.0}
     # Server-side averaging. Off with PIPEDPEER_DDP_BLACKBOARD=1, which falls
     # back to every rank receiving every rank's payload - needed only against
     # a daemon too old to average.
@@ -3678,6 +3681,9 @@ def _install_ddp():
         20x - which is worth being told rather than discovering from a
         stopwatch.
         """
+        if _DDP_STATS["barrier_sec"] >= 1:
+            _log("ddp: waited %.0f s at the start for every rank to be ready "
+                 "(not counted as sync)" % _DDP_STATS["barrier_sec"])
         if not _DDP_STATS["syncs"]:
             return
         sync_total = _DDP_STATS["sync_sec"]
@@ -3742,6 +3748,59 @@ def _install_ddp():
     if _BACKEND == "daemon" and not _SYNC_URL:
         _BACKEND = "gloo"  # no sync endpoint handed down; old transport
 
+    def _count_sync(sec, sent, recv):
+        """Book one sync round trip. The first is the opening round, which is
+        also the start barrier: its time is mostly waiting for ranks to start,
+        so it is kept apart from sync time."""
+        if _SEQ[0] == 1:
+            _DDP_STATS["barrier_sec"] += sec
+        else:
+            _DDP_STATS["syncs"] += 1
+            _DDP_STATS["sync_sec"] += sec
+        _DDP_STATS["sent_bytes"] += sent
+        _DDP_STATS["recv_bytes"] += recv
+
+    def _barrier_progress():
+        """Say what this rank is waiting for while the start barrier holds it:
+        two and a half silent minutes read as a hang (V4 80). Returns an event
+        to set when the wait is over."""
+        import threading
+        import time as _tw
+        done = threading.Event()
+        hosts = os.environ.get("PIPEDPEER_DDP_HOSTS", "").split(",")
+
+        def missing():
+            import json
+            import urllib.parse
+            import urllib.request
+            try:
+                req = urllib.request.Request(
+                    "%s?group=%s&seq=1" % (_SYNC_URL, urllib.parse.quote(_GROUP)))
+                if _TOKEN:
+                    req.add_header("X-Pipedpeer-Token", _TOKEN)
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    arrived = set(json.loads(resp.read()).get("arrived") or [])
+            except Exception as e:
+                _log("ddp: could not ask the lead which ranks are ready (%s)" % e)
+                arrived = {_RANK}
+            names = ["rank %d%s" % (r, " on " + hosts[r] if r < len(hosts) and hosts[r] else "")
+                     for r in range(_WORLD) if r not in arrived]
+            return ", ".join(names) or "the other ranks"
+
+        def run():
+            t0 = _tw.monotonic()
+            if done.wait(2):
+                return
+            limit = ("%d min" % (_START_WAIT // 60) if _START_WAIT % 60 == 0
+                     else "%.0f s" % _START_WAIT)
+            _log("ddp: waiting for %s to be ready (closure still arriving, or the "
+                 "script not started yet), up to %s" % (missing(), limit))
+            while not done.wait(30):
+                _log("ddp: still waiting for %s (%.0f s of up to %s)"
+                     % (missing(), _tw.monotonic() - t0, limit))
+        threading.Thread(target=run, daemon=True).start()
+        return done
+
     def _daemon_exchange(payload):
         """One allreduce round trip through the lead rank's daemon.
 
@@ -3785,10 +3844,7 @@ def _install_ddp():
         # for where the step went there is nothing to act on. Measured on two
         # machines over a WAN-ish link: 87 steps at 0.69s of sync each, on a
         # model whose whole compute was 33ms a step.
-        _DDP_STATS["syncs"] += 1
-        _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
-        _DDP_STATS["sent_bytes"] += len(body)
-        _DDP_STATS["recv_bytes"] += len(data)
+        _count_sync(_t.monotonic() - _t0, len(body), len(data))
         return out
 
     def _pack(arrs):
@@ -3840,6 +3896,7 @@ def _install_ddp():
             headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
         if _TOKEN:
             req.add_header("X-Pipedpeer-Token", _TOKEN)
+        waiting = _barrier_progress() if opening else None
         try:
             # The opening round is the start barrier and may wait the whole
             # start wait for a rank whose closure is still arriving.
@@ -3855,6 +3912,9 @@ def _install_ddp():
             sys.stdout.flush()
             sys.stderr.flush()
             os._exit(75)
+        finally:
+            if waiting is not None:
+                waiting.set()
         nl = data.find(b"\n")
         if nl < 0:
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
@@ -3868,7 +3928,9 @@ def _install_ddp():
         if agreed and agreed != _SYNC_TUNED[0]:
             _SYNC_TUNED[0] = int(agreed)
         _ranks = int(_reply.get("ranks", 0) or 0)
-        if _ranks and _ranks < _WORLD and _LAST_RANKS[0] != _ranks:
+        # Not for the opening round: a rank missing there missed the start
+        # barrier, and the lead's note that follows says so in its own words.
+        if _ranks and _ranks < _WORLD and _LAST_RANKS[0] != _ranks and not opening:
             _LAST_RANKS[0] = _ranks
             _log("ddp: this step averaged %d of %d ranks — the others did not answer "
                  "in time. The run continues on the ranks that did; a smaller average "
@@ -3900,10 +3962,7 @@ def _install_ddp():
         rest = data[nl + 1:]
         n = struct.unpack(">I", rest[:4])[0]
         mean = _np_ddp.frombuffer(rest[4:4 + n], dtype=wire_dtype)
-        _DDP_STATS["syncs"] += 1
-        _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
-        _DDP_STATS["sent_bytes"] += len(body)
-        _DDP_STATS["recv_bytes"] += len(data)
+        _count_sync(_t.monotonic() - _t0, len(body), len(data))
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
     def _daemon_reduce_int8(arrs, key):
@@ -4010,10 +4069,7 @@ def _install_ddp():
                 off += seg_n
         else:
             mean = raw_mean * out_scales[0]
-        _DDP_STATS["syncs"] += 1
-        _DDP_STATS["sync_sec"] += _t.monotonic() - _t0
-        _DDP_STATS["sent_bytes"] += len(body)
-        _DDP_STATS["recv_bytes"] += len(data)
+        _count_sync(_t.monotonic() - _t0, len(body), len(data))
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
     def _daemon_allreduce(tensors, half=None, kind="grads"):

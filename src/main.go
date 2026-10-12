@@ -1157,6 +1157,8 @@ func runDDP(o ddpRunOptions) error {
 				// every shard", and ranks that share a machine do not
 				// multiply what it can do.
 				fmt.Sprintf("PIPEDPEER_DDP_MACHINES=%d", ddpDistinctMachines(ring)),
+				// Names for the start barrier's "waiting for rank 1 on gpu1".
+				"PIPEDPEER_DDP_HOSTS="+ddpHostList(ring),
 			)
 			if join {
 				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_JOIN=1")
