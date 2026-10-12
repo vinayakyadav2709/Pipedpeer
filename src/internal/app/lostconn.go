@@ -9,9 +9,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/portmap"
+	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 )
 
 // lostVerdict is what a run does after its connection to the node broke.
@@ -37,8 +41,8 @@ const defaultDaemonPort = 38080
 // judgeLostConnection decides, when the connection to a started job breaks,
 // whether the node died (rerun it elsewhere: the failover) or this machine
 // lost its network (the job runs on: detach). The node answering settles
-// it; a silent node is judged by whether any other peer the local daemon
-// knows still answers /health. selfPort is the local daemon's port.
+// it; a silent node is judged by whether this machine still has a network
+// (networkUp). selfPort is the local daemon's port.
 func judgeLostConnection(host string, port int, jobID string, selfPort int) (lostVerdict, string) {
 	var lastErr error
 	for i := 0; i < lostProbeTries; i++ {
@@ -58,10 +62,107 @@ func judgeLostConnection(host string, port int, jobID string, selfPort int) (los
 		lastErr = err
 	}
 	node := net.JoinHostPort(host, strconv.Itoa(port))
-	if peer, ok := anyPeerAnswers(selfPort, node); ok {
-		return lostRerun, fmt.Sprintf("the node does not answer (%v) while peer %s does", lastErr, peer)
+	if how, ok := networkUp(selfPort, node); ok {
+		return lostRerun, fmt.Sprintf("the node does not answer (%v) while %s", lastErr, how)
 	}
-	return lostDetach, fmt.Sprintf("neither the node (%v) nor any other peer answers, so this machine is the one offline", lastErr)
+	return lostDetach, fmt.Sprintf("the node does not answer (%v) and this machine looks offline: %s", lastErr, networkDownWhy)
+}
+
+// networkDownWhy names what networkUp tried when it found nothing answering.
+const networkDownWhy = "no other peer, no introducer and no default gateway answers"
+
+// Probe targets for networkUp; variables so tests can stand them in.
+var (
+	gatewayAddr    = portmap.DefaultGateway
+	gatewayPorts   = []string{"53", "80", "443"}
+	introducerAddr = clustercfg.Rendezvous
+)
+
+// networkUp reports whether this machine still has a network, so that a
+// silent node means the node is gone rather than us offline. With two
+// machines there is no other peer to ask, so it also asks the introducer
+// (if one is set) and the default gateway; how names what answered. All
+// probes run at once and take at most healthTimeout; none needs root.
+//
+// The gateway does not count for an internet node (reached through this
+// machine's loopback forwarder) when an introducer is set: the LAN being up
+// says nothing about the uplink, and the introducer does.
+func networkUp(selfPort int, node string) (how string, ok bool) {
+	h, _, _ := net.SplitHostPort(node)
+	ip := net.ParseIP(h)
+	internetNode := ip != nil && ip.IsLoopback()
+	intro := introducerAddr()
+
+	probes := []func() (string, bool){
+		func() (string, bool) {
+			if peer, ok := anyPeerAnswers(selfPort, node); ok {
+				return "peer " + peer + " answers", true
+			}
+			return "", false
+		},
+	}
+	if intro != "" {
+		probes = append(probes, func() (string, bool) {
+			if introducerAnswers(intro) {
+				return "the introducer " + intro + " answers", true
+			}
+			return "", false
+		})
+	}
+	if !(internetNode && intro != "") {
+		probes = append(probes, gatewayAnswers)
+	}
+	found := make(chan string, len(probes))
+	for _, p := range probes {
+		go func() {
+			how, _ := p()
+			found <- how
+		}()
+	}
+	for range probes {
+		if how := <-found; how != "" {
+			return how, true
+		}
+	}
+	return "", false
+}
+
+// introducerAnswers registers under a throwaway probe cluster (the
+// introducer only answers registrations) and reports whether a reply came.
+func introducerAnswers(server string) bool {
+	conn, err := net.ListenUDP("udp", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not open a socket to ask the introducer whether this machine is online: %v\n", err)
+		return false
+	}
+	defer conn.Close()
+	_, _, err = rendezvous.Register(conn, server, rendezvous.ClusterID("pipedpeer-network-probe"), "probe", healthTimeout)
+	return err == nil
+}
+
+// gatewayAnswers tries a TCP connect to the default gateway's usual ports. A
+// refused connection is an answer too: the router is there.
+func gatewayAnswers() (string, bool) {
+	gw, err := gatewayAddr()
+	if err != nil {
+		return "", false // no default route: no network
+	}
+	found := make(chan bool, len(gatewayPorts))
+	for _, port := range gatewayPorts {
+		go func() {
+			c, err := net.DialTimeout("tcp", net.JoinHostPort(gw.String(), port), healthTimeout)
+			if err == nil {
+				c.Close()
+			}
+			found <- err == nil || errors.Is(err, syscall.ECONNREFUSED)
+		}()
+	}
+	for range gatewayPorts {
+		if <-found {
+			return "the default gateway " + gw.String() + " answers", true
+		}
+	}
+	return "", false
 }
 
 // nodeUnreachable: err is a transport failure (no answer at all), not an
