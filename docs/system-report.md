@@ -1484,22 +1484,26 @@ one CPU, so no figure here is a speedup.
 | Headline `Pool` script (`00_pool.py`) | 43.5 s | 17.0 s |
 | `06_pool_lambda.py --remote --cold`, then without `--cold` | 20.5 s | 4.8 s |
 | GPU step from a GPU-less node, `04_torch_ddp.py --remote --gpu force` | 264.8 s | 7.6 s |
-| `--ddp 2 --gpu force` on two containers sharing one GPU | 635 s | 9.5 s |
-| `07_everything.py` | 700.6 s | TODO-NUM |
+| `--ddp 2 --gpu force` on two containers sharing one GPU | 630.3 s | 9.5 s |
+| `07_everything.py` | 664.6 s | 26.7 s |
 | Student scripts (five), first run after `prep-4-common` | 35–126 s each | 19.6–69.5 s each |
 | Teacher-style script's environment, without and with `prep-4-common` | 54 s | 4 s |
-| Finale, every script at once | TODO-NUM | TODO-NUM |
+| Finale, every script at once | 412.0 s, all 8 jobs ok | — |
 
 The first runs of the headline script and the GPU step are from the first
 pass (`8e14b9b`), since the second pass found those steps warm; every other
-figure is from the second pass (`31b5364`), and the DDP ring, `07_everything`
-and the cached student runs from a re-check at `cc56753` in the GPU lab and
-`lab/lan`. A join has no cached form. The `--cold` row without network
+figure is from the second pass (`31b5364`), the cached student runs and the
+ring's cached run from a re-check at `cc56753`, and the ring's first run,
+`07_everything` and the finale from a last pass at `9949ad0` (the ring's first
+run took 635 s and `07_everything`'s 700.6 s at `cc56753`). A join has no
+cached form, and the finale ran once, after the other steps. It ran with the
+demo's `PIPEDPEER_REMOTE_WAIT=10m` and with the lab's containers resized to
+6.0 GB of memory in total; at 1.2 GiB each, three of its eight jobs fitted no
+node. The `--cold` row without network
 loss; with 0.5 % emulated loss in the first pass it was 169.1 s / 5.8 s.
 
 <!-- evidence (~/Downloads/pipedpeer-work/evidence): v2/56-join-pc3.txt (V1 5.2 s: v1/20-join-pc3.txt); v1/30-host-00pool-first.txt; v2/71-step-2-headline.txt;
-v2/73-step-2b-cold-pc2.txt; v1/14-pc3-truecold-2b.txt; v1/13-gpu-step.txt; v2/74b-gpu-pc1-direct.txt; v2/112-c-ddp-ring-cold.txt; v2/113-c-ddp-ring-cached.txt; v2/98-c-everything-pc3-cold.txt; v2/75-teacher-*.txt; v2/100-c-teacher-cached-*.txt (primes 39.3, monte_carlo_pi 35.9, word_count 42.5, grid_search 69.5, image_blur 19.6 s); v1/15-pc3-pkgprep-before-after.txt.
-Still open (from rehearsal): 07_everything cached and the finale, measured by the final re-check -->
+v2/73-step-2b-cold-pc2.txt; v1/14-pc3-truecold-2b.txt; v1/13-gpu-step.txt; v2/74b-gpu-pc1-direct.txt; v2/112-c-ddp-ring-cold.txt; v2/113-c-ddp-ring-cached.txt; v2/98-c-everything-pc3-cold.txt; v3/43-ddp-ring-cold.txt; v3/21-item2-everything-pc3-cold.txt; v3/22-item2-everything-pc3-cached.txt; v3/33-item3-finale-run3.txt; v3/30-finale-lab-resize.txt; v2/75-teacher-*.txt; v2/100-c-teacher-cached-*.txt (primes 39.3, monte_carlo_pi 35.9, word_count 42.5, grid_search 69.5, image_blur 19.6 s); v1/15-pc3-pkgprep-before-after.txt. -->
 
 | Drill | Result |
 |---|---|
