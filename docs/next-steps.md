@@ -11,7 +11,7 @@ prep; the two-laptop GPU run is deferred) is not finished yet; do it, or delete 
 
 ## 1. Where it stands
 
-**Code.** The freeze is the head of `nightly-fixes` at the freeze. The latest
+**Code.** The freeze is the head of `dev` at the freeze (the demo-round branch `nightly-fixes` was merged into `dev` and deleted on 2026-10-12). The latest
 commit seen while writing this was `aa9f169` ("Describe this round's last
 features in the report, paper and system report"); the guide patches from the
 last rehearsal (V5) land on top of it. `dev` and `main` were not updated.
@@ -130,8 +130,9 @@ All by the user, 2026-10-12, unless marked.
 - The project is frozen after the demo round. All deferred work (section 4)
   was skipped on purpose; only the report/paper sync was done.
 - FIX-REQUEUE and FIX-BUILDINT are documented as known gaps, not fixed.
-- No merge into `dev` or `main` ("not rn"). `s` and `s2` were merged into
-  `nightly-fixes` only.
+- `s` and `s2` were merged into `nightly-fixes`, which was then merged into
+  `dev` (2026-10-12) so the nightly channel serves the demo build. `main` and
+  the stable releases were not touched.
 - The live demo shows only sensible, repeatable steps; Ctrl+C, network loss
   and the like are backup steps, shown only if asked.
 - DDP lead (rank 0) survival: after the demo. The demo drill kills a non-lead.
@@ -262,8 +263,8 @@ Never run two labs, or a lab and a full test, at once.
 
 ## 8. How to work on it
 
-1. Cut a new branch from `nightly-fixes` (for example `deferred-fixes`). Leave
-   `nightly-fixes`, `dev` and `main` alone; PRs normally target `dev`
+1. Cut a new branch from `dev` (for example `deferred-fixes`) and open a PR
+   back into `dev` when it is verified; `main` is for tagged releases
    ([CONTRIBUTING.md](../CONTRIBUTING.md)).
 2. Re-check the file:line references above, then pick from section 4 in order.
    Ask section 6's questions once, up front.

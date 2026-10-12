@@ -27,8 +27,9 @@ One script does each machine: `setup-machine.sh <role>` (install, `pipedpeer set
 `auth set`, join; it can be re-run). It reuses `demo/prep-*.sh` instead of copying them.
 
 **Same binary everywhere.** `setup-machine.sh` installs the nightly only when no
-`pipedpeer` is on PATH. The demo needs the `nightly-fixes` build, so first copy that
-binary to each machine and run `./demo/prep-0-install.sh <path-to-binary>` (installs to
+`pipedpeer` is on PATH. The demo needs the current `dev` build, which the nightly channel
+serves, so on each machine run `./demo/prep-0-install.sh` (no argument installs the
+nightly; give it a path to install a binary you copied instead) (installs to
 `~/.local/bin`, runs `setup -y`, prints a `sha256`; the hashes must match), then
 `setup-machine.sh`. V3 ran prep-0 on pc1 and pc2 and `setup-machine.sh` on pc1, pc2
 and pc4 (4–5 s each; Nix and crun were already there). prep-0 on pc1, then
