@@ -91,6 +91,18 @@ closure over a ~2 MB/s link and the run finished on one rank. The ring logic
 is proven only in the GPU lab (two containers sharing one GPU). Not to be
 done now; later, when both laptops are together (user, 2026-10-12).
 
+**Added after the freeze, never run on real machines** (unit tests or a local
+stand-in only):
+- `pipedpeer setup` applying the AppArmor profile on Ubuntu 24.04+ (00453ec):
+  tested with a fake root, parser and sudo; needs a real Ubuntu 24.04 machine.
+  Check that a job no longer prints "run unisolated".
+- `setup-machine.sh` (11e3455): `--rendezvous` as a systemd user service, the
+  reachability check before joining (and in prep-1), the NVIDIA driver
+  message, the PATH edit, and `join-command.txt`. Only the reach check and the
+  PATH edit were exercised, locally.
+- The macOS builds (3828dc8) only compile: the daemon targets Linux, and
+  nothing was run on macOS.
+
 ## 3. Known gaps, left by choice
 
 Both were found in V5. The user chose to document them, not fix them, because
