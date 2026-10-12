@@ -4,15 +4,18 @@ Draft. `<!-- V1 8e14b9b: <file> -->` marks output copied from rehearsal pass 1
 (containers on one laptop; evidence in `~/Downloads/pipedpeer-work/evidence/v1/`).
 `<!-- V2 31b5364: <file> -->` / `<!-- V2 cc56753: <file> -->` marks output from rehearsal
 pass 2 (evidence in `~/Downloads/pipedpeer-work/evidence/v2/`).
+`<!-- V3 9949ad0: <file> -->` marks output from the final re-check (same lab, evidence in
+`~/Downloads/pipedpeer-work/evidence/v3/`).
 `<!-- from rehearsal -->` marks a spot only the lab visit can fill.
-`<!-- confirm in final re-check -->` marks a line that was not run in V1 or V2, or whose
-behaviour changed after V2 ran: the line shown is the expected one.
+`<!-- confirm in V4 -->` marks a line whose behaviour a fix made after V3 changes: the line
+shown is the expected one.
 
 **The rehearsal lab is not the venue.** The lab "PCs" were containers with no `python3`,
-so the demo scripts that call `python3` (`demo/7-gpu.sh`, `demo/prep-3-gpu.sh`) skipped
-there; the college PCs and our laptops have `python3`. The friend's real 2-GPU ring
-(RTX 3060 + RTX 3050) is still to be checked in your own run: the friend's laptop went
-offline before V2 could run it.
+so the demo scripts that call `python3` (`demo/7-gpu.sh`, `demo/prep-3-gpu.sh`) skip
+there unless you give them one (V3 ran prep-3 inside `nix shell …#python3`); the college
+PCs and our laptops have `python3`. The friend's real 2-GPU ring (RTX 3060 + RTX 3050)
+is still to be checked in your own run: in V3 the ring was placed on both laptops, then
+the friend's laptop dropped off the network mid-ship and the run finished on one rank.
 
 One script does each machine: `setup-machine.sh <role>` (install, `pipedpeer setup -y`,
 `auth set`, join; it can be re-run). It reuses `demo/prep-*.sh` instead of copying them.
@@ -21,7 +24,49 @@ One script does each machine: `setup-machine.sh <role>` (install, `pipedpeer set
 `pipedpeer` is on PATH. The demo needs the `nightly-fixes` build, so first copy that
 binary to each machine and run `./demo/prep-0-install.sh <path-to-binary>` (installs to
 `~/.local/bin`, runs `setup -y`, prints a `sha256`; the hashes must match), then
-`setup-machine.sh`. <!-- confirm in final re-check: prep-0-install.sh and setup-machine.sh were not run in V1 or V2; both labs mounted the binary -->
+`setup-machine.sh`. V3 ran prep-0 on pc1 and pc2 and `setup-machine.sh` on pc1, pc2
+and pc4 (4–5 s each; Nix and crun were already there). prep-0 on pc1, then
+`setup-machine.sh` on pc4
+(<!-- V3 9949ad0: docs-SETUP-24-prep0-pc1.txt, docs-SETUP-24-setupmachine-pc4-fixed.txt -->):
+```
+$ ./demo/prep-0-install.sh /usr/local/bin/pipedpeer
+==> installing /usr/local/bin/pipedpeer -> /root/.local/bin/pipedpeer
+NOTE: add ~/.local/bin to PATH:  export PATH="$HOME/.local/bin:$PATH"
+==> setup (nix, crun, identity, firewall, daemon)
+…
+  Setup complete.
+
+binary: /root/.local/bin/pipedpeer
+sha256: 7d4f26f15865e20c   <- must be identical on every machine
+
+Next: ./join-machine.sh <introducer-ip> [token]   (box-a first, without a token)
+
+$ ./setup-machine.sh ubuntu-pc --token <token>
+==> [ubuntu-pc] install
+already installed: /usr/local/bin/pipedpeer
+==> [ubuntu-pc] setup (nix, crun, identity, firewall, daemon)
+…
+    firewall     ✓  none running; 38080/tcp, 38099/udp, 38447/udp, 38445/udp, 29500-29509/tcp reachable
+…
+  Setup complete.
+==> [ubuntu-pc] cluster secret
+<token>
+
+Stored in /home/pp/.local/share/pipedpeer/auth_token (mode 0600).
+Set the same token on every node:
+  pipedpeer auth set <token>
+Then restart each daemon. Until you do, this node still
+answers unauthenticated requests.
+==> [ubuntu-pc] restarting the daemon so it uses the secret
+started daemon (node-id=cf072c2b, port=38080)
+==> [ubuntu-pc] no --introducer: waiting on LAN auto-discovery (see 'pipedpeer nodes' in ~30 s)
+Done. Check: pipedpeer status; pipedpeer nodes
+```
+The `restarting the daemon so it uses the secret` line is from 50bae3e (pc4 above). On
+pc1 and pc2, run before that fix, the daemon kept the old secret and the laptop listed
+them `unreachable` until `pipedpeer stop; pipedpeer start` there. FX-CLI2 makes
+`pipedpeer auth set` restart the running daemon itself, as `join` does, so the
+`Then restart each daemon` advice should go. <!-- confirm in V4 -->
 
 ## Per machine
 
@@ -111,9 +156,21 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
 1. First machine (Fedora laptop): `./setup-machine.sh fedora-laptop`. Note the secret.
 2. Each other machine except PC-3 (it joins live on the day; give it `setup -y` only):
    `./setup-machine.sh <role> --token <secret>`.
-3. Wait ~30 s and run `pipedpeer nodes` on the laptop. LAN auto-discovery should list every machine.
-   <!-- confirm in final re-check: V1 and V2 always joined through the rendezvous; a discovery-only join was not run -->
-   Once joined, rows that came by broadcast say `discovery` in SOURCE.
+3. Wait ~30 s and run `pipedpeer nodes` on the laptop. LAN auto-discovery should list every
+   machine, `healthy`, with `discovery` in SOURCE. V3 joined pc1, pc2 and pc4 this way, with
+   no `--introducer` (<!-- V3 9949ad0: docs-SETUP-115-discovery-pc4-fixed.txt -->):
+   ```
+   NODE       HOST        STATE        JOBS  CPU       MEM FREE  GPU                   PATH  SOURCE
+   06b9a112*  yeet        healthy      0     15c 3%    6.7 GiB   RTX 3060 0% 41M/6.0G  self  self
+   77dd3fd6   10.88.0.13  unreachable  0     0%        0 B       -                     lan   discovery
+   8a64951e   pc2         healthy      0     16c 3%    1.2 GiB   -                     lan   discovery
+   cf072c2b   pc4         healthy      0     16c 3%    1.1 GiB   -                     lan   discovery
+   f657a7d0   pc1         healthy      0     16c 3%    1.2 GiB   -                     lan   discovery
+   ```
+   The `unreachable` row is PC-3 (only `setup -y`, not joined yet): expected until step 1 of
+   the demo. A machine that stays `unreachable` with `0 B` after setup holds an old secret:
+   run `pipedpeer stop; pipedpeer start` on it (V3's pc1 and pc2, before 50bae3e:
+   docs-SETUP-115-discovery-nodes.txt, docs-SETUP-115-discovery-after-restart.txt).
 4. Fallback if Wi-Fi and wired do not see each other: on the laptop run `pipedpeer rendezvous`
    (leave it open), then on each machine `./setup-machine.sh <role> --token <secret> --introducer <laptop-ip>`.
    Expected on each machine (<!-- V1 8e14b9b: 05-join-pcs.txt -->):
@@ -172,16 +229,88 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
    The environment is what counts; on an 8–16 GB PC expect `checks complete` as on pc4.
    `prep-3-gpu.sh` needs `python3` (the lab containers had none; the venue machines do). In V2's
    `./setup.sh` pass it printed `HTTP Error 401: Unauthorized; counted 0` and `no healthy GPU
-   machine among the peers` (70-setup-firstpass.txt); c6dc71a sends the token, so expect it to
-   count the GPU laptops and build. <!-- confirm in final re-check -->
-6. On the laptop: `./demo/prep-1-check.sh`. Expect READY. <!-- confirm in final re-check: not run in V1 or V2 -->
-7. On the laptop: `./demo/prep-2-rehearse.sh` → `demo/rehearsal-results.txt` (cold, warm, speedup;
-   the only speed numbers to quote). <!-- confirm in final re-check: not run in V1 or V2 -->
-   The nearest V2 run is `./setup.sh` (one pass over every script, 246 s), whose summaries
-   gave these cached totals on the laptop (<!-- V2 31b5364: 70-setup-firstpass.txt -->):
-   00_pool 18.9 s, 06_pool_lambda 4.2 s, 01_sklearn_rf 19.6 s, 02_numpy_heavy 37.2 s,
-   03_pandas_ooc 34.0 s, 05_file_sync 0.8 s, 07_capstone 101.7 s. Containers share one CPU,
-   so these are not speed numbers.
+   machine among the peers` (70-setup-firstpass.txt); c6dc71a sends the token. V3 ran it on
+   pc1 inside `nix shell …#python3` (21.5 s, exit 1)
+   (<!-- V3 9949ad0: docs-SETUP-176-prep3-gpu-pc1.txt -->):
+   ```
+    GPU prep on pc1
+   ================================================================
+     > No GPU here: this machine is a sender. Building here, shipping to the GPU laptops.
+
+   --- 04_torch_ddp.py --remote --gpu force
+   …
+     ran on       yeet (192.168.0.200)
+     environment  built in 0.8 s
+     closure      already on the node
+     script       4.5 s · peak memory 1.2 GB
+     files back   none
+     total        5.4 s
+   [coordinator] Task completed successfully on node 06b9a112
+     ok in 6 s
+     > 07_everything.py imports torch too: building its environment here.
+
+   --- 07_everything.py
+   [coordinator] GPU-accelerated libraries detected — preferring GPU nodes
+   [coordinator] Resource estimate: 3.1 GiB (tier=import)
+   [coordinator] job rejected by remote daemon: insufficient memory: need 3300917248 bytes, available 2093244552 bytes; waiting up to 15s for memory to free...
+   Error: job rejected by remote daemon: insufficient memory: need 3300917248 bytes, available 2093051888 bytes
+     FAILED after 15 s - read the lines above
+
+   GPU PREP FAILED - fix the FAILED lines above before the demo
+   ```
+   The GPU half passed. The `07_everything.py` half runs on the PC itself and needs about
+   3.1 GiB free; pc1 had 2.1 GiB. On an 8–16 GB PC expect `ok` for both and no
+   `GPU PREP FAILED`.
+6. On the laptop: `./demo/prep-2-rehearse.sh` → `demo/rehearsal-results.txt` (cold, warm, speedup;
+   the only speed numbers to quote). It generates `data.csv`, which prep-1 checks for, so run
+   it **before** prep-1. V3 took 1390 s for the whole script
+   (<!-- V3 9949ad0: docs-SETUP-179-prep2-rehearse.txt -->):
+   ```
+   Rehearsal on 2026-10-12 10:11, 4 peer(s), 1 GPU machine(s)
+
+   step               cold     warm     python3   cluster   speedup / note
+   00_pool.py         17s      18s      10.0s     18.5s     0.54x
+   06_pool_lambda.py  5s       4s       did not finish 3.5s      -
+   01_sklearn_rf.py   23s      18s      10.5s     16.8s     0.62x
+   02_numpy_heavy.py  240s     243s     30.8s     241.6s    0.13x
+   03_pandas_ooc.py   35s      35s      -         25.3s     out-of-core across cluster
+   07_capstone.py     -        -        5.9s      15.1s     0.39x
+   04_torch_ddp.py    19s      5s       -         2.3s      --gpu force using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+   07_everything.py   41s      28s      -         23.1s     
+   teacher check      2s       2s       /home/yeet/Downloads/pipedpeer-work/tmp/v3src/pipedpeer-demo/students/grid_search.py (before / after common prep, yeet)
+   finale (all)       -        38s      -         -         SOME FAILED - see demo/finale-logs/
+   ```
+   Containers share one CPU, so the speedups are not speed numbers; take those from the lab
+   visit. `06_pool_lambda.py` "did not finish" under plain `python3` is expected (a lambda
+   cannot be pickled; that is the point of the script). The finale inside prep-2 ran 5 of 8:
+   numpy, pandas and everything failed in the 1.2 GB containers. With the containers resized
+   to 6.0 GB in total and 50bae3e's `PIPEDPEER_REMOTE_WAIT=10m` in `demo/13-finale.sh`, the
+   finale on its own then passed 8 of 8 (VERIFY.md check 22).
+7. On the laptop: `./demo/prep-1-check.sh`. Expect READY. V3, after prep-2
+   (<!-- V3 9949ad0: docs-SETUP-177-prep1-check-after-prep2.txt -->, 2.0 s):
+   ```
+    Is the cluster ready for the demo?
+   ================================================================
+     ok    daemon running here
+   …
+     ok    4 healthy peers besides this machine
+     ok    every peer has a direct path (punched / punched-in / lan)
+     warn  one GPU machine - the GPU step runs on one GPU, without --ddp 2
+     ok    03_pandas_ooc/data.csv present (1.1G)
+     ok    07_everything.py present
+     ok    python3 here has numpy (needed for the local baseline only)
+     ok    python3 here has pandas (needed for the local baseline only)
+     ok    python3 here has sklearn (needed for the local baseline only)
+
+   this binary: 7d4f26f15865e20c  - compare with prep-0 output on every machine
+
+   READY
+   ```
+   Run before prep-2, the same check printed `FAIL  no data.csv - run ./demo/prep-2-rehearse.sh`
+   and `NOT READY - fix the FAIL lines above` (docs-SETUP-177-prep1-check.txt). With both
+   GPU laptops joined the `warn` line should go away. The node table it prints also lists old
+   `unreachable` rows of past test nodes (`manual` in SOURCE) if any are left; they do not
+   fail the check.
 
 ## Demo day
 
@@ -191,5 +320,5 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
    daemon running (pid=433799 node-id=06b9a112-9739-4e3d-9728-103872ac5f67 port=38080)
    ```
    Not running → `pipedpeer start` (rejoins by itself).
-2. On the laptop `./demo/prep-1-check.sh`, then follow `DEMO-SCRIPT.md` step by step (`demo/0-join.sh` onward).
+2. On the laptop `./demo/prep-1-check.sh` (READY; data.csv is there from prep-2), then follow `DEMO-SCRIPT.md` step by step (`demo/0-join.sh` onward).
 3. If a machine is missing: `pipedpeer join <laptop-ip>` on it, or re-run `setup-machine.sh` (safe).
