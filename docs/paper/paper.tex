@@ -4,6 +4,16 @@
 % ============================================================
 \documentclass[conference]{IEEEtran}
 \IEEEoverridecommandlockouts
+% IEEEtran asks for Times. pdflatex gets it from the class; XeTeX
+% (tectonic) has no Type 1 Times, so name the OpenType clones.
+\usepackage{iftex}
+\ifXeTeX
+  \usepackage{fontspec}
+  \setmainfont{texgyretermes}[Extension=.otf, UprightFont=*-regular,
+    BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+  \setmonofont{texgyrecursor}[Extension=.otf, UprightFont=*-regular,
+    BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+\fi
 
 \usepackage{cite}
 \usepackage{amsmath,amssymb,amsfonts}
