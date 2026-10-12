@@ -1357,12 +1357,15 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
 				//
-				// One time budget for the whole walk, and a peer that runs out
-				// of it ends the walk. A timeout says the work is slow, not
-				// that the peer is broken, so the next peer would only start
-				// the same work from scratch: a one-item svd part tried four
-				// peers at 300 s each and hung for over 15 minutes.
+				// One time budget for the whole walk. A peer that runs out of
+				// it is slow, not broken: its copy keeps running, a second copy
+				// starts here, and the first to finish wins. Handing the part
+				// to the next peer would only start it again from scratch (a
+				// one-item svd part tried four peers at 300 s each and hung for
+				// over 15 minutes), and dropping the peer's copy threw away
+				// minutes of nearly finished work.
 				deadline := started.Add(remotePartBudget)
+				raced := false
 				for _, peer := range p.peers {
 					if ctx.Err() != nil {
 						break
@@ -1375,25 +1378,29 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 						log.Printf("[pool] part %d: no time left of %s for another peer; running its %d items here", i, remotePartBudget, len(p.c.items))
 						break
 					}
-					r, e = pm.runRemote(peer, storePath, p.c, left)
+					var where string
+					r, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left)
 					if e == nil {
 						d := time.Since(started)
-						ch.prov.record("peer:"+peer, len(p.c.items), d.Milliseconds())
-						// Timed end to end, so the round trip and the closure
-						// transfer are in the number rather than assumed away.
-						pm.rates.observe(peer, len(p.c.items), d)
+						ch.prov.record(where, len(p.c.items), d.Milliseconds())
+						if where != "local" {
+							// Timed end to end, so the round trip and the closure
+							// transfer are in the number rather than assumed away.
+							// A local win is not measured: it started late, after
+							// the peer's budget ran out.
+							pm.rates.observe(peer, len(p.c.items), d)
+						}
 						break
 					}
 					if ctx.Err() != nil {
 						break // the requester left; the peer did nothing wrong
 					}
-					pm.markPeerDead(peer)
-					if ne := net.Error(nil); errors.As(e, &ne) && ne.Timeout() {
-						log.Printf("[pool] part %d: peer %s did not finish %d items in %s; running them here, not on another peer", i, peer, len(p.c.items), time.Since(started).Round(100*time.Millisecond))
-						break
+					if raced {
+						break // both copies failed; the local one was the fallback
 					}
+					pm.markPeerDead(peer)
 				}
-				if e != nil && ctx.Err() == nil {
+				if e != nil && ctx.Err() == nil && !raced {
 					// D2/D3 — a remote node adds capacity, never subtracts.
 					r, e = pm.runLocal(runPath, storePath, p.c)
 					if e == nil {
@@ -1674,6 +1681,66 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// runRemoteRacing posts part i to peer. If the peer has not answered within
+// budget, the part also starts here and the first copy to finish wins; the
+// other is cancelled (a cancelled local copy kills its warm worker, a
+// cancelled remote copy closes the connection and the peer stops). where is
+// "peer:<id>" or "local"; raced reports that the local copy was started, so
+// the caller must not run the part locally again.
+func (pm *poolManager) runRemoteRacing(i int, peer, runPath, storePath string, ch *chunk, budget time.Duration) (results []any, where string, raced bool, err error) {
+	type outcome struct {
+		r     []any
+		err   error
+		where string
+	}
+	out := make(chan outcome, 2) // both senders finish even after a winner returns
+	parent := ch.context()
+
+	rctx, rcancel := context.WithCancel(parent)
+	defer rcancel()
+	rc := *ch
+	rc.ctx = rctx
+	go func() {
+		r, e := pm.runRemote(peer, storePath, &rc, 0)
+		out <- outcome{r, e, "peer:" + peer}
+	}()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case o := <-out:
+		return o.r, o.where, false, o.err
+	case <-parent.Done():
+		return nil, "", false, parent.Err()
+	case <-timer.C:
+	}
+
+	log.Printf("[pool] part %d: peer %s has not finished %d items in %s; starting them here too, first to finish wins", i, peer, len(ch.items), budget.Round(100*time.Millisecond))
+	lctx, lcancel := context.WithCancel(parent)
+	defer lcancel()
+	lc := *ch
+	lc.ctx = lctx
+	go func() {
+		r, e := pm.runLocal(runPath, storePath, &lc)
+		out <- outcome{r, e, "local"}
+	}()
+
+	var errs []error
+	for range 2 {
+		o := <-out
+		if o.err == nil {
+			log.Printf("[pool] part %d: %s finished first; cancelling the other copy", i, o.where)
+			return o.r, o.where, true, nil // the deferred cancels stop the loser
+		}
+		if parent.Err() != nil {
+			return nil, "", true, parent.Err()
+		}
+		log.Printf("[pool] part %d: %s copy failed: %v; waiting for the other", i, o.where, o.err)
+		errs = append(errs, o.err)
+	}
+	return nil, "", true, errors.Join(errs...)
 }
 
 // spawn starts a warm worker for a store path. bin/run warm_worker.py reads
