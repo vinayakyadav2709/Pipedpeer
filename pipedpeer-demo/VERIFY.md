@@ -1147,6 +1147,33 @@ distinct words: 133  total words: 400000000
 - A sender that lost its network got its job run twice. In V2 it detached and
   collected the result once (check 26).
 
+## Not re-checked on real machines yet
+
+These were built after the last full re-check. Unit tests cover them, but no
+real run has. The demo does not depend on them; run them after the demo, or
+during your own run with the friend's laptop.
+
+1. A slow helper machine: its piece is raced on the sender, the first result
+   wins and the other is stopped (8541355). Slow one PC's link with
+   `docker exec pp-lan-pcN tc qdisc add dev eth0 root netem delay 400ms rate 1mbit`.
+2. A machine that refuses the environment is skipped with
+   `fix: run pipedpeer trust on <node>`, and the job lands on another (1e07d56).
+3. `--remote` with every machine busy prints a line every 30 s and places the
+   job when one frees up, within 10 min (1e07d56).
+4. A script killed by a signal on every machine fails after 3 attempts
+   (1e07d56).
+5. A machine rejoining two-GPU training, with a script that prints `loss`
+   after its loop: no `NameError`, catch-up lines start with
+   `[rank N catch-up, not trained]` (82596fe).
+6. `pipedpeer start --max-concurrent 2`, then `pipedpeer auth set <token>`:
+   `curl -s 127.0.0.1:38080/health` still shows `"max_concurrent":2` (76a0c3b).
+7. Two-GPU runs (`--ddp 2`) print one `on <node>` usage line per machine
+   (98e8684), and the start barrier names who it waits for (9b47502).
+8. `--offload` across two physical machines: the spread line shows
+   `0 on <this machine>` (ef68f02). The lab cannot show it, because every
+   container shares the laptop's identity.
+9. The real two-laptop GPU run with the friend's laptop.
+
 ## Afterwards
 
 ```bash
