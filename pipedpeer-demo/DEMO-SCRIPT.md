@@ -57,6 +57,11 @@ name **roles**; this table says which machine plays each one:
 | **PC-2** | no GPU: steps 4 and 6, and the `traffic` half of step 9 | LAPTOP-C (step 9's `traffic`: LAPTOP-B) | the second of three PCs; with fewer, the first |
 | **PC-3** | **left unjoined at prep**, joins live in step 1, gets stopped in step 8 | LAPTOP-C | the last PC (with one PC, that PC) |
 
+**One card per machine** lists only that machine's setup and on-the-day steps,
+to keep open on it: [LAPTOP-A](cards/LAPTOP-A.md), [LAPTOP-B](cards/LAPTOP-B.md),
+[LAPTOP-C](cards/LAPTOP-C.md) (layout 1), [PC](cards/PC.md) (layout 2). In a
+terminal: `./demo/card.sh <ROLE>`.
+
 LAPTOP-C, or a lab with one PC, plays PC-1, PC-2 and PC-3 at once. If
 LAPTOP-C comes to a lab too, it counts as one more PC. The failover (step 8)
 stops the machine that is neither presenting nor the job's only other node:

@@ -1,0 +1,59 @@
+# Card: LAPTOP-A (your laptop: presents, GPU, runs the rendezvous)
+
+Card URL: https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/cards/LAPTOP-A.md
+
+Only this machine's actions, in order. The say/expect detail for each step is in
+[DEMO-SCRIPT.md](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/DEMO-SCRIPT.md#the-flow).
+Same in both layouts (three laptops on Wi-Fi, or a lab).
+
+## 1. Install and prep (the day before)
+
+By hand: the sudo password when setup asks (Nix, firewall, key helper); the
+NVIDIA driver must already be installed (`nvidia-smi` works). This machine
+goes **first**, before every other.
+
+1. Get the demo folder (no git needed):
+   `curl -L https://github.com/vinayakyadav2709/Pipedpeer/archive/refs/heads/dev.tar.gz | tar xz`
+   then `cd Pipedpeer-dev/pipedpeer-demo`
+2. `./demo/prep-0-install.sh` (installs the nightly, runs `setup -y`).
+   Write down its `sha256:` line; every machine must print the same one.
+   If it says `NOTE: add ~/.local/bin to PATH`, run `export PATH="$HOME/.local/bin:$PATH"`.
+3. `./setup-machine.sh fedora-laptop` (no `--token`: this is the first machine).
+   Read the secret with `pipedpeer auth show`; the other machines need it.
+   Find your IP with `hostname -I`; the other machines need that too.
+4. New terminal: `pipedpeer rendezvous`. Leave it open until the demo is over.
+5. `pipedpeer join <your IP>`. Expect `no peers found` and "This is normal for
+   the first machine": the others join after you.
+6. `./demo/prep-4-common.sh`, then `./demo/prep-3-gpu.sh` (slow the first time:
+   the common environment took 1150–1261 s per machine in rehearsal).
+7. When LAPTOP-B (and in a lab, every PC except the last) has joined:
+   `./demo/prep-2-rehearse.sh`. It writes `demo/rehearsal-results.txt`: the
+   only speed numbers to quote. A step under 1.2× goes to "if asked".
+8. `./demo/prep-1-check.sh` (after prep-2, never before). Expect `READY`.
+   Layout 1 (only LAPTOP-B joined): expect
+   `warn  only 1 peer - the demo works, but say 'two machines'`.
+
+## 2. On the day
+
+- **T−30 min:** `pipedpeer status`, expect `daemon running (pid=… node-id=… port=38080)`.
+  Not running: `pipedpeer start`. Check `pipedpeer rendezvous` still runs in its terminal.
+- **T−30 min:** `./demo/prep-1-check.sh`, expect `READY` with the same hash as at prep.
+- **T−10 min:** second terminal: `pipedpeer dashboard`. **Keep it up the whole demo.**
+  Then `./demo/1-cluster.sh` once. Font large (Ctrl+Shift+=), ~100 columns.
+
+| Step | You type | Expect (one line) | Then |
+|---|---|---|---|
+| 0 the problem | nothing: talk | — | — |
+| 1 live join | `pipedpeer auth show`; read the token and your IP out to PC-3 | after PC-3 joins, the dashboard gets a new row and `JOIN   <PC-3> is up (…)` under EVENTS | turn the dashboard to the room |
+| 2 the cluster | `./demo/1-cluster.sh` | one row per machine, all `healthy`; the `*` row is this laptop | — |
+| 3 headline | `./demo/2-headline.sh` | `checksum 4319999744` in both halves, then the `this machine only / across the cluster / speedup` box | point at the dashboard: every CPU column rises |
+| 4 cold vs cached | nothing (PC-2 types) | — | keep the dashboard up |
+| 5 GPU | before it starts: `watch -n1 nvidia-smi` in a spare terminal | GPU-Util rises while the job trains, if the `ran on` line names this laptop | turn the screen round; close `watch` after step 5 |
+| 6 everything | nothing (PC-2 types) | — | — |
+| 7 teacher's script | nothing, or run `./demo/11-teacher.sh their.py [data files]` here if handed the script | `CHECK their.py — nothing will run` … `checks complete`, then the run | — |
+| 8 failover | `./demo/9-failover.sh` | when the first `[pipedpeer] remote ok:` line appears, tell PC-3 "stop now"; expect the same `checksum 4319999744` | PC-3 runs `pipedpeer start` afterwards |
+| 9 receipts | `./demo/10-proof.sh` | `== Timeline ==` with `script` the longest bar, then `== Receipt ==` | hand to PC-2 (layout 1: LAPTOP-B) for `pipedpeer traffic` |
+
+Backup, only if asked (all on this laptop): **B3** Ctrl+C stops everything,
+**B5** finale `./demo/13-finale.sh`, **B7** capstone `./demo/14-capstone.sh`.
+See DEMO-SCRIPT.md, "Backup".
