@@ -24,11 +24,16 @@ type Receipt struct {
 	// RemoteUsed how many of those had their kept result computed elsewhere.
 	// RemoteItems and LocalItems count work done, which exceeds MappedItems
 	// when local cores race a slow remote chunk and both finish.
-	MappedItems      int           `json:"mapped_items"`
-	RemoteUsed       int           `json:"remote_used"`
-	Parts            []ReceiptPart `json:"parts"`
-	Decisions        []Decision    `json:"decisions"`
-	DecisionsDropped int           `json:"decisions_dropped"`
+	MappedItems int           `json:"mapped_items"`
+	RemoteUsed  int           `json:"remote_used"`
+	Parts       []ReceiptPart `json:"parts"`
+	// ByWhere counts work done per place: "local" or "peer:<host:port>". It
+	// must survive a decode and re-encode: attach rebuilt its summary from
+	// this struct without it and printed "169 on 1 other (other machines
+	// 169)" for work four peers did.
+	ByWhere          map[string]int `json:"by_where,omitempty"`
+	Decisions        []Decision     `json:"decisions"`
+	DecisionsDropped int            `json:"decisions_dropped"`
 }
 
 // ReceiptPart is one dispatch to the cluster.

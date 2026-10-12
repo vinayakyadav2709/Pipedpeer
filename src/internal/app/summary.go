@@ -21,12 +21,8 @@ import (
 
 // receipt is the shim's account of where the script's parallel items ran.
 // ByWhere counts work done, which exceeds the items mapped when local cores
-// race slow remote chunks; jobhistory.Receipt's Total/FromElsewhere/Raced
-// count each item once.
-type receipt struct {
-	jobhistory.Receipt
-	ByWhere map[string]int `json:"by_where"`
-}
+// race slow remote chunks; Total/FromElsewhere/Raced count each item once.
+type receipt = jobhistory.Receipt
 
 // summary is what a single run measured, rendered at its end.
 type summary struct {

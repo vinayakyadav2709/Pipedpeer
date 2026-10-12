@@ -7,6 +7,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 )
 
@@ -25,7 +28,7 @@ func newAuthCmd() *cobra.Command {
 		Use:   "set [token]",
 		Short: "Set the shared secret (generates one when no token is given)",
 		Long: "Every node in a cluster must carry the same token, and jobs\n" +
-			"inherit it automatically. Restart the daemon for it to take effect.",
+			"inherit it automatically. A running daemon is restarted to use it.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tok := ""
@@ -44,9 +47,7 @@ func newAuthCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "\nStored in %s (mode 0600).\n", authtoken.Path())
 			fmt.Fprintln(os.Stderr, "Set the same token on every node:")
 			fmt.Fprintf(os.Stderr, "  pipedpeer auth set %s\n", tok)
-			fmt.Fprintln(os.Stderr, "Then restart each daemon. Until you do, this node still")
-			fmt.Fprintln(os.Stderr, "answers unauthenticated requests.")
-			return nil
+			return restartForToken()
 		},
 	}
 
@@ -72,7 +73,7 @@ func newAuthCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintln(os.Stderr, "token cleared; this node will accept any request that reaches it")
-			return nil
+			return restartForToken()
 		},
 	}
 
@@ -103,4 +104,35 @@ func newAuthCmd() *cobra.Command {
 
 	cmd.AddCommand(set, show, clear, forget)
 	return cmd
+}
+
+// restartForToken restarts a running daemon so it uses the token just
+// stored: the daemon reads it once at start (API gate, cluster id, peer
+// proofs), and one left on the old secret is refused by every peer. Like
+// join, on the same port and the remembered cluster address.
+func restartForToken() error {
+	st := daemonctl.Status()
+	if !st.Running {
+		return nil
+	}
+	nodeID, err := identity.GetOrCreate()
+	if err != nil {
+		return err
+	}
+	port := st.Port
+	if port <= 0 {
+		fmt.Fprintf(os.Stderr, "the running daemon's port is not recorded; restarting it on %d\n", 38080)
+		port = 38080
+	}
+	fmt.Fprintln(os.Stderr, "restarting the daemon so it uses the new secret")
+	if err := daemonctl.Stop(); err != nil {
+		return fmt.Errorf("token stored, but stopping the daemon failed (restart it yourself): %w", err)
+	}
+	if addr, _ := clustercfg.Effective(""); addr != "" {
+		os.Setenv(clustercfg.EnvVar, addr)
+	}
+	if err := daemonctl.Start(nodeID.NodeID, port, 0); err != nil {
+		return fmt.Errorf("token stored, but the daemon did not come back (run pipedpeer start): %w", err)
+	}
+	return nil
 }
