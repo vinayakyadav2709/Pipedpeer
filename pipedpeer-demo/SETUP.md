@@ -7,8 +7,8 @@ pass 2 (evidence in `~/Downloads/pipedpeer-work/evidence/v2/`).
 `<!-- V3 9949ad0: <file> -->` marks output from the final re-check (same lab, evidence in
 `~/Downloads/pipedpeer-work/evidence/v3/`).
 `<!-- from rehearsal -->` marks a spot only the lab visit can fill.
-`<!-- confirm in V4 -->` marks a line whose behaviour a fix made after V3 changes: the line
-shown is the expected one.
+Lines that a fix made after V3 changed were re-run in V4 (`<!-- V4 c567369: <file> -->`, in
+`~/Downloads/pipedpeer-work/evidence/v4/`).
 
 **The rehearsal lab is not the venue.** The lab "PCs" were containers with no `python3`,
 so the demo scripts that call `python3` (`demo/7-gpu.sh`, `demo/prep-3-gpu.sh`) skip
@@ -66,7 +66,20 @@ The `restarting the daemon so it uses the secret` line is from 50bae3e (pc4 abov
 pc1 and pc2, run before that fix, the daemon kept the old secret and the laptop listed
 them `unreachable` until `pipedpeer stop; pipedpeer start` there. FX-CLI2 makes
 `pipedpeer auth set` restart the running daemon itself, as `join` does, so the
-`Then restart each daemon` advice should go. <!-- confirm in V4 -->
+`Then restart each daemon` advice is gone. V4 ran it on pc2 and pc4 with no manual
+restart; the output ended (<!-- V4 c567369: docs-SETUP-69-auth-set-restart.txt -->):
+```
+$ (pc4) pipedpeer auth set <token>
+…
+Set the same token on every node:
+  pipedpeer auth set <token>
+restarting the daemon so it uses the new secret
+…
+$ (host) pipedpeer nodes   # 40 s later
+06b9a112*  yeet        healthy      0     15c 2%  6.7 GiB   RTX 3060 0% 41M/6.0G  self  self
+4dc474f4   pc2         healthy      0     16c 1%  1.2 GiB   -                     lan   discovery
+870179d7   pc4         healthy      0     16c 1%  1.1 GiB   -                     lan   discovery
+```
 
 ## Per machine
 
