@@ -69,8 +69,8 @@ three-worker container lab, a repeat submission took 0.83\,s against 23.4\,s for
 the first. Interception costs $1.24\times$ the start-up of a job that imports
 nothing heavy, and about 0.12\,s on a job it declines. A run can be stopped on
 every machine with one interrupt, or detached and reattached, and a training ring
-continues when a rank dies and grows when a machine returns. \textbf{TODO-NUM} of \textbf{TODO-NUM} tests pass
-with \textbf{TODO-NUM} failing, and a mutation audit
+continues when a rank dies and grows when a machine returns. \textbf{822} of \textbf{829} tests pass
+with \textbf{0} failing, and a mutation audit % evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
 breaking 95 features is caught in every case. Measurements recorded between real machines during development are
 reported with their provenance and are not claimed beyond it.
 \end{abstract}
@@ -370,11 +370,11 @@ it too measures function and cost, not speedup.
 
 \subsection{Lab results}
 
-\textbf{Tests.} \textbf{TODO-NUM} of \textbf{TODO-NUM} tests pass,
-\textbf{TODO-NUM} fail and \textbf{TODO-NUM} are skipped (opt-in integration
-tests); before the latest round it was 615 of 617 with none failing. All 95
+\textbf{Tests.} \textbf{822} of \textbf{829} tests pass,
+\textbf{0} fail and \textbf{7} are skipped (two opt-in integration tests and
+five that depend on how Nix is installed on the host); before the latest round it was 615 of 617 with none failing. All 95
 mutations are caught.
-% from rehearsal: verifier's final go test -v -count=1 ./... counts
+% evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
 
 \textbf{Environment cache.} The first submission of a job took 23.4\,s. The
 second landed on a worker that had not yet received the closure and took 8.1\,s;

@@ -146,7 +146,7 @@ We declare that the work titled \textbf{\projecttitle} is our own work carried o
 
 \noindent The program is distributed by \textbf{intercepting the parallel primitives it already uses}. A shim injected into the job's interpreter replaces \texttt{multiprocessing.Pool}, pandas \texttt{groupby} and \texttt{merge}, chunked file readers, NumPy linear algebra, \texttt{joblib} and torch data-parallel training. Pool kernels travel as source or, for lambdas and closures, by value through cloudpickle. Work is shared between machines in proportion to their measured throughput, and a cost model ships numerical work only when computing locally would cost more than moving it. Every remote path degrades to the local one, with one deliberate exception: a matrix product that fits neither locally nor on the cluster raises an error rather than exhausting the machine.
 
-\noindent Machines on different networks are joined with one command. A small introducer exchanges candidate addresses; the machines then ask their routers for a port mapping or punch through them, falling back to a birthday-collision search for the hardest pair of NATs, and carry all traffic over a direct, mutually authenticated QUIC link. No relay carries job data. Each daemon's API is protected by an optional shared secret and pinned TLS, closures are signed with each node's ed25519 key, and jobs run by default in a \texttt{crun} sandbox under their own memory ceiling where the node supports it. A run can be watched (a plain-language events feed, CPU and GPU load per node, a closing summary of where its work ran), checked beforehand by a dry run, stopped everywhere with one interrupt, or detached and reattached later; a training ring continues when a rank dies and takes back a machine that returns. Of \textbf{TODO-NUM} tests, \textbf{TODO-NUM} pass, \textbf{TODO-NUM} fail and \textbf{TODO-NUM} are skipped; % from rehearsal: verifier's final go test -v counts
+\noindent Machines on different networks are joined with one command. A small introducer exchanges candidate addresses; the machines then ask their routers for a port mapping or punch through them, falling back to a birthday-collision search for the hardest pair of NATs, and carry all traffic over a direct, mutually authenticated QUIC link. No relay carries job data. Each daemon's API is protected by an optional shared secret and pinned TLS, closures are signed with each node's ed25519 key, and jobs run by default in a \texttt{crun} sandbox under their own memory ceiling where the node supports it. A run can be watched (a plain-language events feed, CPU and GPU load per node, a closing summary of where its work ran), checked beforehand by a dry run, stopped everywhere with one interrupt, or detached and reattached later; a training ring continues when a rank dies and takes back a machine that returns. Of \textbf{829} tests, \textbf{822} pass, \textbf{0} fail and \textbf{7} are skipped; % evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
 a mutation audit that breaks 95 features one at a time is caught by the tests in every case. A fault-injection run on the container lab did not distribute work and so did not test recovery, and is reported as such. Speedups between real machines are reported only as recorded during development, with their provenance, and are not claimed beyond them.
 
 \vspace{1cm}
@@ -1788,10 +1788,10 @@ sampler that raise when torch is missing rather than skipping; this is recorded
 as a defect of the tests rather than of the code they test; they now skip.
 
 After the October rounds (the leftover fixes and the demonstration work), the
-same suite gave \textbf{TODO-NUM} passed, \textbf{TODO-NUM} failed and
-\textbf{TODO-NUM} skipped across \textbf{38} packages.
-% packages: rehearsal evidence fix5/go-test-full-2.txt (cc56753): 38 ok, 2 without test files; no -v run, so test counts are still open
-% from rehearsal: verifier's final go test -v -count=1 ./... at the verified commit
+same suite gave \textbf{822} passed, \textbf{0} failed and
+\textbf{7} skipped across \textbf{38} packages: two opt-in integration tests
+and five that depend on how Nix is installed on the host.
+% evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests); packages: fix5/go-test-full-2.txt (38 ok, 2 without test files)
 New tests cover, among others, the hello's binding to its session, the
 secret going only to hosts that prove it, a cancel frame ending a running job
 within three seconds, a detached job running to completion with every output
@@ -2103,7 +2103,8 @@ Mutations in the test audit & 95, all caught \\
 The August figure of 24,679 lines counted test files together with source; on
 that basis the October total is 55,149 lines. After the 12 October rounds the
 same counts are \textbf{42,424} lines of source in 114 files, \textbf{30,767}
-lines of tests in 154 files (at \texttt{cc56753}) and \textbf{TODO-NUM} tests run.
+lines of tests in 154 files (at \texttt{cc56753}) and \textbf{829} tests run.
+% tests: evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
 % lines: wc -l over the tracked src/**/*.go at cc56753 (same method reproduces 23,100 test lines at 5bcf140)
 % from rehearsal: line counts with the same command as the table, at the verified commit; tests from the verifier's final go test -v
 
