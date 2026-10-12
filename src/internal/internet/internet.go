@@ -579,6 +579,19 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 
 // linkUp gives a connected peer a local port and tells the daemon about it.
 func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path string) error {
+	// A link to ourselves. Two networks that both use 192.168.0.0/24 make a
+	// peer's LAN candidate one of this machine's own addresses; dialling it
+	// lands on our own endpoint, which authenticates as our own key. Linking
+	// that made a JOIN and a LEAVE of this machine every two seconds (V2,
+	// evidence 38-*). Decided by key, never by address: an internet peer
+	// is a 127.0.0.1 forwarder like any other.
+	if node == m.node() {
+		if conn != nil {
+			conn.CloseWithError(0, "this is ourselves")
+		}
+		m.cfg.Log("dropped a connection to ourselves (%s path); one of a peer's addresses is also ours", path)
+		return nil
+	}
 	// Port zero: the kernel picks. Fixed ports would collide as soon as a
 	// second peer appeared, and the number is never typed by anybody - it
 	// goes straight to the node store.
