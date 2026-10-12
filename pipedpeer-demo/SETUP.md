@@ -14,9 +14,14 @@ Lines that a fix made after V3 changed were re-run in V4 (`<!-- V4 c567369: <fil
 so the demo scripts that call `python3` (`demo/7-gpu.sh`, `demo/prep-3-gpu.sh`) skip
 there unless you give them one (V3 ran prep-3 inside `nix shell …#python3`); the college
 PCs and our laptops have `python3`. The friend's real 2-GPU ring (RTX 3060 + RTX 3050)
-is still to be checked in your own run: in V3 the ring was placed on both laptops, then
+is for later, when both laptops are together (user, 2026-10-12): in V3 the ring was placed on both laptops, then
 the friend's laptop dropped off the network mid-ship and the run finished on one rank.
 Until it is checked, the live GPU step is single-GPU and `--ddp 2` is backup only.
+
+**Two venue layouts** (user, 2026-10-12): layout 1, three laptops on Wi-Fi and no
+lab (likely; "Layout 1" below); layout 2, a college lab with 1–3 Ubuntu PCs on ethernet
+plus our laptops ("Lab visit"). Which machine plays which role in each is in
+DEMO-SCRIPT.md, "Machines and screens".
 
 One script does each machine: `setup-machine.sh <role>` (install, `pipedpeer setup -y`,
 `auth set`, join; it can be re-run). It reuses `demo/prep-*.sh` instead of copying them.
@@ -165,7 +170,43 @@ daemon log says `no user namespace: jobs run unisolated`. Only a private no-root
 (no sudo) makes this fatal; with sudo available that path is not used.
 Not reproducible in containers. <!-- from rehearsal: lab visit -->
 
-## Lab visit
+## Layout 1: three laptops on Wi-Fi
+
+LAPTOP-A and LAPTOP-B (Fedora, NVIDIA GPU) and LAPTOP-C (no GPU), on one Wi-Fi. Do this
+the day before, on the venue's Wi-Fi if you can. Nothing here was run in a rehearsal as a
+whole; VERIFY.md runs the same layout in Docker.
+
+1. Same binary on all three: `./demo/prep-0-install.sh <path-to-binary>` on each, and
+   compare the `sha256` lines.
+2. LAPTOP-A: `./setup-machine.sh fedora-laptop`; note the secret. Start `pipedpeer
+   rendezvous` in its own terminal, then `pipedpeer join <LAPTOP-A IP>` on LAPTOP-A
+   itself (it prints `no peers found`, as in "Lab visit" step 4: normal for the first
+   machine).
+3. LAPTOP-B: `./setup-machine.sh gpu-laptop --token <secret> --introducer <LAPTOP-A IP> --prep`
+   (joins, then runs prep-4 and prep-3 on its own GPU). Join by IP, never by discovery:
+   Wi-Fi access points often drop broadcast (client isolation).
+4. LAPTOP-A: `./demo/prep-4-common.sh`, then `./demo/prep-3-gpu.sh` (its own GPU).
+5. LAPTOP-C: `./demo/prep-4-common.sh` **only** (prep-0 already ran `setup -y`). It is
+   PC-3, the live join, so:
+   - not `setup-machine.sh`: with a token it joins, through discovery if no
+     `--introducer` is given, and step 1 loses its first join;
+   - not `prep-3-gpu.sh`: on a machine without a GPU it ships to the GPU laptops, so it
+     needs them as peers.
+
+   Steps 5 and 6 from LAPTOP-C then rely on prep-4's environment (CUDA torch included)
+   and on what prep-3 left on the GPU laptops. VERIFY.md, step 5, layout 1, checks that
+   in Docker. <!-- not yet run in this layout -->
+6. LAPTOP-A: `./demo/prep-2-rehearse.sh`, as in "Lab visit" step 6. These are the real
+   speed-ups for this layout, measured on two machines (LAPTOP-C joins only on stage).
+   Drop any live step under 1.2×.
+7. LAPTOP-A: `./demo/prep-1-check.sh`. Expect READY, with
+   `warn  only 1 peer - the demo works, but say 'two machines'` (only LAPTOP-B is joined).
+   <!-- not yet run in this layout -->
+8. If `ping <LAPTOP-A IP>` fails from another laptop, that Wi-Fi blocks laptops from each
+   other outright. Nothing is relayed, so move to a network you control (a phone hotspot
+   or your own router) and join again by IP.
+
+## Lab visit (layout 2: only if we get a lab, 1–3 PCs)
 
 1. First machine (Fedora laptop): `./setup-machine.sh fedora-laptop`. Note the secret.
 2. Each other machine except PC-3 (it joins live on the day; give it `setup -y` only):
@@ -185,9 +226,10 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
    the demo. A machine that stays `unreachable` with `0 B` after setup holds an old secret:
    run `pipedpeer stop; pipedpeer start` on it (V3's pc1 and pc2, before 50bae3e:
    docs-SETUP-115-discovery-nodes.txt, docs-SETUP-115-discovery-after-restart.txt).
-4. Fallback if Wi-Fi and wired do not see each other: on the laptop run `pipedpeer rendezvous`
+4. If Wi-Fi and wired do not see each other: on the laptop run `pipedpeer rendezvous`
    (leave it open), then on each machine `./setup-machine.sh <role> --token <secret> --introducer <laptop-ip>`.
-   Expected on each machine (<!-- V1 8e14b9b: 05-join-pcs.txt -->):
+   Our laptops on Wi-Fi and the PCs on ethernet are different subnets, which broadcast
+   discovery never crosses, so in this layout expect to need it. Expected on each machine (<!-- V1 8e14b9b: 05-join-pcs.txt -->):
    ```
    restarting the daemon to join through 10.88.0.1:38445
    this node is aa6e1138
@@ -309,7 +351,7 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
    cannot be pickled; that is the point of the script). The finale inside prep-2 ran 5 of 8:
    numpy, pandas and everything failed in the 1.2 GB containers. With the containers resized
    to 6.0 GB in total and 50bae3e's `PIPEDPEER_REMOTE_WAIT=10m` in `demo/13-finale.sh`, the
-   finale on its own then passed 8 of 8 (VERIFY.md check 22).
+   finale on its own then passed 8 of 8 (VERIFY.md B5).
 7. On the laptop: `./demo/prep-1-check.sh`. Expect READY. V3, after prep-2
    (<!-- V3 9949ad0: docs-SETUP-177-prep1-check-after-prep2.txt -->, 2.0 s):
    ```

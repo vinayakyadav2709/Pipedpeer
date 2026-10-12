@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pre-build the common packages on THIS machine, so a teacher's script starts
-# fast. Run on every machine at the setup visit (setup.sh runs it on LAPTOP-A).
+# fast. Run on every machine at the setup visit (setup.sh runs it on LAPTOP-A),
+# the live-join machine too: it needs no peers.
 #
 #   ./demo/prep-4-common.sh                     # build the common environment
 #   ./demo/prep-4-common.sh students/primes.py  # also time a teacher-style

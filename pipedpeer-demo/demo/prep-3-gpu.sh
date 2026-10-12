@@ -4,6 +4,8 @@
 #   - on each GPU laptop (LAPTOP-A, LAPTOP-B): runs the GPU script on its own GPU;
 #   - on every PC that will submit the GPU or everything step (the sender):
 #     builds the CUDA torch environment here and ships it to the GPU laptops.
+#     Not on the live-join machine (PC-3; LAPTOP-C in layout 1): it is not
+#     joined yet, so it gets prep-4-common.sh only.
 #
 #   ./demo/prep-3-gpu.sh
 #

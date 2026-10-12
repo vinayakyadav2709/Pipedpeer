@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# First run vs every run after it (run on PC-2).
+# First run vs every run after it (run on PC-2: LAPTOP-C in layout 1).
 #
 #   ./demo/2b-cold.sh
 #

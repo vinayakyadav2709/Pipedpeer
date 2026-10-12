@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run on LAPTOP-A once every machine (except the live-join PC) has joined. Read-only: it changes
+# Run on LAPTOP-A once every machine (except the live-join PC-3) has joined. Read-only: it changes
 # nothing, it only says whether the cluster is in the shape the demo needs.
 #
 #   ./demo/prep-1-check.sh

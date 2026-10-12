@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Live join - a machine left out at prep joins on stage (run on PC-3).
+# Live join - a machine left out at prep joins on stage (run on PC-3: LAPTOP-C
+# in layout 1; roles per layout in DEMO-SCRIPT.md, "Machines and screens").
 #
 #   ./demo/0-join.sh <LAPTOP-A LAN IP> [cluster-token]
 #

@@ -6,8 +6,8 @@ rehearsal evidence, no access to the second GPU laptop). File:line references
 are from the freeze; re-check them with `grep -n` before you edit.
 
 If `TODO-BEFORE-DEMO.md` still exists at the repo root, the demo-round
-checklist (second GPU laptop restore, the two-laptop GPU run, the lab visit)
-is not finished yet; do it, or delete the file if the demos are over.
+checklist (the Docker walkthrough, the second GPU laptop restore, the venue
+prep; the two-laptop GPU run is deferred) is not finished yet; do it, or delete the file if the demos are over.
 
 ## 1. Where it stands
 
@@ -50,6 +50,19 @@ raw evidence files were not kept in the repo.
 | [SETUP.md](../pipedpeer-demo/SETUP.md) | setting up each machine, the lab-visit steps and demo-day steps |
 | `DEMO.md` | the three-network walkthrough |
 
+**Venue** (user, 2026-10-12). Two layouts, both in the guides:
+
+| Layout | Machines | Notes |
+|---|---|---|
+| 1 (likely) | no college lab: LAPTOP-A and LAPTOP-B (Fedora, NVIDIA GPU) and LAPTOP-C (no GPU), all on Wi-Fi | LAPTOP-C is the live join, the GPU sender and the machine stopped in failover; everyone joins the rendezvous by IP (Wi-Fi client isolation); smaller speed-ups, the 1.2× rule decides what stays live |
+| 2 | a college lab: 1–3 Ubuntu PCs on ethernet, plus our laptops on Wi-Fi | mixed subnets, so everyone joins the rendezvous by IP; with fewer PCs the PC roles fold together |
+
+DEMO-SCRIPT.md, "Machines and screens", maps each role to a machine per
+layout; SETUP.md has a "Layout 1" prep; VERIFY.md runs both layouts in Docker
+(pc1 plays LAPTOP-C, pc2 plays LAPTOP-B without a GPU, pc3/pc4 are the
+college PCs). Before demo day the friend runs VERIFY.md in Docker
+(TODO-BEFORE-DEMO.md, section 1); the real two-laptop GPU run is later.
+
 Background: [known-issues.md](known-issues.md),
 [fixes-and-roadmap.md](fixes-and-roadmap.md),
 [capabilities.md](capabilities.md), [system-report.md](system-report.md).
@@ -75,7 +88,8 @@ V5's partial results:
 real GPU laptops (RTX 3060 + RTX 3050, a third machine submitting) placed on
 both, then the second GPU laptop dropped off its network after ~1 GB of
 closure over a ~2 MB/s link and the run finished on one rank. The ring logic
-is proven only in the GPU lab (two containers sharing one GPU).
+is proven only in the GPU lab (two containers sharing one GPU). Not to be
+done now; later, when both laptops are together (user, 2026-10-12).
 
 ## 3. Known gaps, left by choice
 
@@ -96,7 +110,7 @@ in VERIFY.md under "Known gaps found in V5".
 | 2 | FIX-BUILDINT | section 3 | app/env.go:66, :146 | S | Ctrl+C must always work; small |
 | 3 | AUDIT | whole-repo audit beyond the demo round: security, "errors are never silent", dead code, docs drift. Findings become fix units | everything; start with `CONTEXT-MAP.md` | M-L | the demo round reviewed only its own diff |
 | 4 | SKIPPED-CHECKS | run the VERIFY.md "Not re-checked" list on the labs or real machines, fix what fails | VERIFY.md; `scripts/lab-lan.sh`, `scripts/lab-gpu.sh` | M (mostly running) | features shipped without one real run |
-| 5 | FRIEND-RING | the real two-laptop GPU ring with a third machine submitting | DEMO-SCRIPT GPU backup step; SETUP.md | needs two people | the only proof of DDP across physical GPUs |
+| 5 | FRIEND-RING | the real two-laptop GPU ring with a third machine submitting. **Not to be done now; later, when both laptops are together** (user, 2026-10-12) | DEMO-SCRIPT GPU backup step; SETUP.md | needs two people | the only proof of DDP across physical GPUs |
 | 6 | DDP-LEAD | two-GPU training survives the loss of the lead (rank 0) machine. Today the lead's daemon runs the rendezvous and gradient sync, so its death ends the run | `src/main.go:1091` (`rank0 := ring[0]`), `src/internal/daemonapi/ddpsync.go`, `ddpup.go`, `src/ddpdown.go:161-170` (the "can't continue" message) | ~300-400 lines | the largest robustness gap; needs a design choice (who takes over the sync), so ask first |
 | 7 | PRUNE-EDGE | `PruneCompletedJobDirs` checks the job dir's mtime; appending to `output.jsonl` doesn't touch it, so a job running longer than `JobRetention` (7 d) can lose its dir mid-run | `src/internal/daemonapi/server.go:445-494`, mtime check :480, retention :431 | S | data loss, but only for week-long jobs |
 | 8 | DAEMON-IMPORT-CTX | the daemon runs nix imports/exports with `nixstore.Cmd` and no ctx; a cancelled upload's import runs to the end | `src/internal/daemonapi/narcache.go:210,235,278,316`; `execution.go:1194-1214` (`importNAR`) | S | wasted work after a cancel, no wrong results |
