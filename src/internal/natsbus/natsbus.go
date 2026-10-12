@@ -5,6 +5,7 @@ package natsbus
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"path/filepath"
 	"time"
@@ -185,7 +186,7 @@ func defaultStoreDir() string {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "pipedpeer", "nats")
+		return filepath.Join(userdir.State(), "nats")
 	}
 	return filepath.Join(home, ".local", "share", "pipedpeer", "nats")
 }

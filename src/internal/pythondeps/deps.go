@@ -2,6 +2,8 @@ package pythondeps
 
 import (
 	"bufio"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,7 +25,7 @@ var nixpkgsMapping = map[string]string{
 	"sklearn":        "scikit-learn",
 	"scikit-learn":   "scikit-learn",
 	"matplotlib":     "matplotlib",
-	"pillow":         "Pillow",
+	"pillow":         "pillow",
 	"pyyaml":         "pyyaml",
 	"yaml":           "pyyaml",
 	"pytest":         "pytest",
@@ -34,7 +36,7 @@ var nixpkgsMapping = map[string]string{
 	"opencv":         "opencv-python",
 	"beautifulsoup4": "beautifulsoup4",
 	"lxml":           "lxml",
-	"PIL":            "Pillow",
+	"PIL":            "pillow",
 	"cryptography":   "cryptography",
 	"jwt":            "pyjwt",
 	"sqlalchemy":     "sqlalchemy",
@@ -49,6 +51,25 @@ var nixpkgsMapping = map[string]string{
 	"uvicorn":        "uvicorn",
 	"pydantic":       "pydantic",
 	"click":          "click",
+	// Import names that differ from the package name. The keys above are a
+	// mix; what a script contains is the import name, so it has to be here.
+	"cv2":         "opencv-python",
+	"bs4":         "beautifulsoup4",
+	"skimage":     "scikit-image",
+	"tqdm":        "tqdm",
+	"seaborn":     "seaborn",
+	"statsmodels": "statsmodels",
+	"xgboost":     "xgboost",
+	"lightgbm":    "lightgbm",
+	"polars":      "polars",
+	"pyarrow":     "pyarrow",
+	"numba":       "numba",
+	"sympy":       "sympy",
+	"networkx":    "networkx",
+	"plotly":      "plotly",
+	"h5py":        "h5py",
+	"tabulate":    "tabulate",
+	"rich":        "rich",
 }
 
 // Python standard library modules — these are always available and should
@@ -142,61 +163,135 @@ func ExtractImports(scriptPath string) []string {
 	return scan.ExternalDeps
 }
 
-func ExtractImportScan(scriptPath string) ImportScan {
-	file, err := os.Open(scriptPath)
-	if err != nil {
-		return ImportScan{}
+// importedModules returns every top-level module an import line brings in.
+//
+// It used to be one regular expression capturing the first name on the line,
+// which silently drops everything after a comma: "import numpy, pandas" put
+// numpy in the closure and left pandas out, and the job then died on the
+// worker with ModuleNotFoundError - an error pointing at the user's script
+// rather than at the dependency detection that caused it. Found by a benchmark
+// whose fixture happened to use that form.
+//
+// "from x import a, b" is different and already handled: the dependency is x,
+// and what is taken from it does not matter here.
+func importedModules(line string) []string {
+	// A comment can contain anything that looks like an import.
+	if i := strings.Index(line, "#"); i >= 0 {
+		line = strings.TrimSpace(line[:i])
 	}
-	defer file.Close()
+	switch {
+	case strings.HasPrefix(line, "from "):
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "from "))
+		if name := topLevelModule(rest); name != "" {
+			return []string{name}
+		}
+	case strings.HasPrefix(line, "import "):
+		rest := strings.TrimSpace(strings.TrimPrefix(line, "import "))
+		var out []string
+		for _, part := range strings.Split(rest, ",") {
+			if name := topLevelModule(strings.TrimSpace(part)); name != "" {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	return nil
+}
 
-	scriptDir := filepath.Dir(scriptPath)
+// topLevelModule reduces "pkg.sub as alias" to "pkg". A relative import
+// ("from . import x") has no top-level name and yields nothing.
+func topLevelModule(s string) string {
+	if s == "" || strings.HasPrefix(s, ".") {
+		return ""
+	}
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		s = s[:i] // drop "as alias" and anything after
+	}
+	if i := strings.Index(s, "."); i >= 0 {
+		s = s[:i]
+	}
+	for _, r := range s {
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return ""
+		}
+	}
+	return s
+}
 
-	var deps []string
-	var localFiles []string
+func ExtractImportScan(scriptPath string) ImportScan {
+	rootDir := filepath.Dir(scriptPath)
+
+	var deps, localFiles []string
 	seenDeps := make(map[string]bool)
 	seenLocal := make(map[string]bool)
-	reader := bufio.NewReader(file)
-	re := regexp.MustCompile(`^\s*(?:import|from)\s+([a-zA-Z0-9_]+)`)
+	visited := map[string]bool{scriptPath: true}
+	queue := []string{scriptPath}
 
-	for {
-		line, _, err := reader.ReadLine()
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+	addLocal := func(p string) {
+		if !seenLocal[p] {
+			seenLocal[p] = true
+			localFiles = append(localFiles, p)
+		}
+		if !visited[p] {
+			visited[p] = true
+			queue = append(queue, p)
+		}
+	}
+
+	// Local modules are scanned too (a helper that imports seaborn needs it in
+	// the closure); visited stops import cycles.
+	for len(queue) > 0 {
+		path := queue[0]
+		queue = queue[1:]
+		file, err := os.Open(path)
 		if err != nil {
-			break
+			if path == scriptPath {
+				return ImportScan{}
+			}
+			fmt.Fprintf(os.Stderr, "pythondeps: cannot scan %s for imports: %v\n", path, err)
+			continue
 		}
-
-		lineStr := strings.TrimSpace(string(line))
-		matches := re.FindStringSubmatch(lineStr)
-		if len(matches) >= 2 {
-			imp := matches[1]
-
-			localFile := filepath.Join(scriptDir, imp+".py")
-			localPackage := filepath.Join(scriptDir, imp, "__init__.py")
-
-			if _, err := os.Stat(localFile); err == nil {
-				if !seenLocal[localFile] {
-					seenLocal[localFile] = true
-					localFiles = append(localFiles, localFile)
+		modDir := filepath.Dir(path)
+		reader := bufio.NewReader(file)
+		for {
+			line, _, err := reader.ReadLine()
+			if err != nil {
+				break
+			}
+			for _, imp := range importedModules(strings.TrimSpace(string(line))) {
+				found := false
+				for _, dir := range []string{modDir, rootDir} {
+					if f := filepath.Join(dir, imp+".py"); exists(f) {
+						addLocal(f)
+						found = true
+						break
+					}
+					if pkg := filepath.Join(dir, imp, "__init__.py"); exists(pkg) {
+						addLocal(pkg)
+						// pkg.sub imports are not tracked per line: scan the
+						// package's other modules, which are bundled anyway.
+						filepath.WalkDir(filepath.Dir(pkg), func(p string, d fs.DirEntry, err error) error {
+							if err == nil && !d.IsDir() && strings.HasSuffix(p, ".py") && !visited[p] {
+								visited[p] = true
+								queue = append(queue, p)
+							}
+							return nil
+						})
+						found = true
+						break
+					}
 				}
-				continue
-			}
-
-			if _, err := os.Stat(localPackage); err == nil {
-				if !seenLocal[localPackage] {
-					seenLocal[localPackage] = true
-					localFiles = append(localFiles, localPackage)
+				if found || stdlibModules[imp] {
+					continue
 				}
-				continue
-			}
-
-			if stdlibModules[imp] {
-				continue
-			}
-
-			if !seenDeps[imp] {
-				seenDeps[imp] = true
-				deps = append(deps, imp)
+				if !seenDeps[imp] {
+					seenDeps[imp] = true
+					deps = append(deps, imp)
+				}
 			}
 		}
+		file.Close()
 	}
 
 	return ImportScan{ExternalDeps: deps, LocalFiles: localFiles}
@@ -248,6 +343,20 @@ func ResolveNixPackage(pkg string) string {
 	return ""
 }
 
+// UnresolvedImports returns the imports that have no nix package mapping and
+// are not standard library, in the order given. They are left out of the
+// environment, so the script fails on the node with ModuleNotFoundError
+// unless the user names a package for them with --pkg.
+func UnresolvedImports(imports []string) []string {
+	var out []string
+	for _, imp := range imports {
+		if nixpkgsMapping[imp] == "" && !stdlibModules[imp] {
+			out = append(out, imp)
+		}
+	}
+	return out
+}
+
 func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 	seen := make(map[string]bool)
 	var result []string
@@ -268,25 +377,9 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 
 	for _, req := range explicitPkgs {
 		if strings.HasSuffix(req, ".txt") {
-			content, err := os.ReadFile(req)
-			if err != nil {
-				continue
-			}
-			lines := strings.Split(string(content), "\n")
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				pkgName := line
-				if idx := strings.IndexAny(line, "=>~<"); idx != -1 {
-					pkgName = strings.TrimSpace(line[:idx])
-				}
-				if mapped := ResolveNixPackage(pkgName); mapped != "" {
-					add(mapped)
-				} else {
-					add(pkgName)
-				}
+			names, _ := readRequirements(req)
+			for _, n := range names {
+				add(ResolveNixPackage(n))
 			}
 		} else {
 			if mapped := ResolveNixPackage(req); mapped != "" {
@@ -298,4 +391,82 @@ func ResolvePackages(astImports []string, explicitPkgs []string) []string {
 	}
 
 	return result
+}
+
+func readRequirements(path string) ([]string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: cannot read %s: %v\n", path, err)
+		return nil, err
+	}
+	return ParseRequirements(string(content)), nil
+}
+
+var reqName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
+
+// ParseRequirements returns the normalised (lower-case, "_" and "." as "-")
+// distribution names in a requirements.txt. Options (-r, -e, --index-url),
+// URLs, paths and anything else that is not a plain name are skipped with a
+// warning naming the line.
+func ParseRequirements(content string) []string {
+	var out []string
+	// pip-compile --generate-hashes wraps a requirement over several lines
+	// ending in a backslash; join them, then drop the per-requirement options.
+	content = strings.ReplaceAll(strings.ReplaceAll(content, "\r\n", "\n"), "\\\n", " ")
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.Index(line, " --hash"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if i := strings.Index(line, " #"); i >= 0 {
+			line = strings.TrimSpace(line[:i])
+		}
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name := reqName.FindString(line)
+		rest := strings.TrimSpace(line[len(name):])
+		// Only extras, a version spec or an environment marker may follow.
+		if strings.HasPrefix(line, "-") || strings.ContainsAny(line, "/\\@") || name == "" ||
+			(rest != "" && !strings.ContainsAny(rest[:1], "[=<>~!;")) || strings.HasSuffix(name, ".") {
+			fmt.Fprintf(os.Stderr, "      warning: requirements line skipped (not a plain package name): %s\n", line)
+			continue
+		}
+		out = append(out, strings.NewReplacer("_", "-", ".", "-").Replace(strings.ToLower(name)))
+	}
+	return out
+}
+
+// RequirementsBeside returns the requirements.txt next to the script, or "".
+func RequirementsBeside(scriptDir string) string {
+	p := filepath.Join(scriptDir, "requirements.txt")
+	if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		return p
+	}
+	return ""
+}
+
+// SplitByExistence sorts unresolved imports into those whose lower-case name
+// exists as a python package (per exists) and those that do not. The name
+// returned for a found import is the lower-case package name.
+func SplitByExistence(imports []string, exists func(names []string) (map[string]bool, error)) (found, missing []string, err error) {
+	if len(imports) == 0 {
+		return nil, nil, nil
+	}
+	names := make([]string, len(imports))
+	for i, imp := range imports {
+		names[i] = strings.ToLower(imp)
+	}
+	ok, err := exists(names)
+	if err != nil {
+		return nil, imports, err
+	}
+	for i, n := range names {
+		if ok[n] {
+			found = append(found, n)
+		} else {
+			missing = append(missing, imports[i])
+		}
+	}
+	return found, missing, nil
 }

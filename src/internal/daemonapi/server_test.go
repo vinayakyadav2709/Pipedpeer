@@ -733,3 +733,20 @@ func TestCancelWithInvalidJSON(t *testing.T) {
 		t.Fatalf("expected 400 for invalid JSON, got %d", resp.StatusCode)
 	}
 }
+
+// TestRewriteHostKeepsUserAndPort covers the endpoint rewrite behind
+// self-advertisement. Peers dial the endpoint, so publishing a routable Host
+// beside an unroutable SSHEndpoint fixes nothing.
+func TestRewriteHostKeepsUserAndPort(t *testing.T) {
+	for _, tc := range []struct{ in, host, want string }{
+		{"root@192.168.0.201:22", "100.67.24.101", "root@100.67.24.101:22"},
+		{"192.168.0.201:38080", "100.67.24.101", "100.67.24.101:38080"},
+		{"root@192.168.0.201", "100.67.24.101", "root@100.67.24.101"},
+		{"", "100.67.24.101", ""},                              // nothing to rewrite
+		{"root@192.168.0.201:22", "", "root@192.168.0.201:22"}, // no better answer
+	} {
+		if got := rewriteHost(tc.in, tc.host); got != tc.want {
+			t.Errorf("rewriteHost(%q, %q) = %q, want %q", tc.in, tc.host, got, tc.want)
+		}
+	}
+}

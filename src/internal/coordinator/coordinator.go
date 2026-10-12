@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dustin/go-humanize"
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
@@ -69,6 +74,7 @@ type Coordinator struct {
 	retryInterval    time.Duration
 	execBackoffBase  time.Duration
 	noSelf           bool
+	excludeMachine   string
 	requireGPU       bool
 	preferGPU        bool
 	strategy         string
@@ -79,6 +85,15 @@ type Coordinator struct {
 	cachedNodes []registry.NodeRecord
 	cacheTime   time.Time
 	rrCounter   int // round-robin counter
+	// refused maps a node that refused this job's closure to its fix line:
+	// it would refuse every retry, so placement skips it from then on.
+	refused map[string]string
+	// tried counts executions per node, so a retry goes to a node not yet
+	// tried when there is one.
+	tried map[string]int
+
+	selfCeilingOnce  sync.Once
+	selfCeilingBytes int64
 }
 
 // Config for the coordinator.
@@ -98,6 +113,7 @@ type Config struct {
 	RetryInterval    time.Duration       // how long to wait between queue retries (default: 30s)
 	ExecBackoffBase  time.Duration       // first wait after a failed execution, doubling per failure (default: 2s)
 	NoSelf           bool                // exclude self-node from placement
+	ExcludeMachine   string              // run --offload: drop every node with this machine key, a second daemon here included
 	RequireGPU       bool                // only GPU-capable nodes are eligible
 	PreferGPU        bool                // try GPU nodes first, fall back to CPU nodes
 	Strategy         string              // "smart" (default) or "round-robin"
@@ -140,11 +156,65 @@ func New(cfg Config) *Coordinator {
 		retryInterval:    cfg.RetryInterval,
 		execBackoffBase:  cfg.ExecBackoffBase,
 		noSelf:           cfg.NoSelf,
+		excludeMachine:   cfg.ExcludeMachine,
 		requireGPU:       cfg.RequireGPU,
 		preferGPU:        cfg.PreferGPU,
 		strategy:         cfg.Strategy,
 		roundRobinFn:     cfg.RoundRobinFn,
 	}
+}
+
+// WaitProgressEvery is how often FindNodeWithin reports while it waits.
+var WaitProgressEvery = 30 * time.Second
+
+// FindNodeWithin looks for a node repeatedly until one is chosen, the window
+// passes, or ctx ends, and returns the last decision either way.
+//
+// One look is not enough straight after a daemon starts or a peer joins: the
+// health poller and discovery have not caught up, and the cluster looks empty
+// for a few seconds although it is not. Nor when every node is busy: the
+// window is minutes, so waiting is called on the first miss (waited 0) and
+// every WaitProgressEvery after, with the decision that says why each node
+// is busy.
+func (c *Coordinator) FindNodeWithin(ctx context.Context, window, interval time.Duration, waiting func(d PlacementDecision, waited time.Duration)) PlacementDecision {
+	start := time.Now()
+	deadline := start.Add(window)
+	nextReport := start
+	decision := c.FindNode()
+	for decision.ChosenNode.NodeID == "" && time.Now().Before(deadline) {
+		if waiting != nil && !time.Now().Before(nextReport) {
+			waiting(decision, time.Since(start).Truncate(time.Second))
+			nextReport = time.Now().Add(WaitProgressEvery)
+		}
+		select {
+		case <-ctx.Done():
+			return decision
+		case <-time.After(interval):
+		}
+		decision = c.FindNode()
+	}
+	return decision
+}
+
+// RejectionSummary lists why each candidate was turned down, one per line,
+// for an error message that would otherwise only say "no eligible node".
+func (d PlacementDecision) RejectionSummary() string {
+	var b strings.Builder
+	for _, cand := range d.Candidates {
+		if !cand.Rejected {
+			continue
+		}
+		name, id := nodeName(cand.Node), cand.Node.NodeID[:min(8, len(cand.Node.NodeID))]
+		if name != id {
+			name += " (" + id + ")"
+		}
+		fmt.Fprintf(&b, "  %s: %s\n", name, cand.RejectReason)
+	}
+	if b.Len() == 0 {
+		// Without this line the caller printed a bare "nodes turned down:".
+		return "  none: no other node has reported in (check `pipedpeer nodes`)\n"
+	}
+	return b.String()
 }
 
 // FindNode selects the best node for a task.
@@ -197,16 +267,29 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	// surfaced through. buildSelfNode is one path, but the local daemon also
 	// lists itself in /v1/nodes (queryDaemonNodes) and LAN discovery can return
 	// it; filter by node id so "distribute to OTHER devices" is honoured.
-	if c.noSelf && c.selfIdentity.NodeID != "" {
+	if (c.noSelf && c.selfIdentity.NodeID != "") || c.excludeMachine != "" {
 		filtered := candidates[:0]
 		for _, cnd := range candidates {
-			if cnd.Node.NodeID == c.selfIdentity.NodeID {
+			if c.noSelf && cnd.Node.NodeID == c.selfIdentity.NodeID {
+				continue
+			}
+			if heartbeat.SameMachine(cnd.Node.Capabilities[heartbeat.MachineCapability], c.excludeMachine) {
 				continue
 			}
 			filtered = append(filtered, cnd)
 		}
 		candidates = filtered
 	}
+
+	// 4c. A node that refused this job's closure refuses it again.
+	c.mu.Lock()
+	for i := range candidates {
+		if fix, ok := c.refused[candidates[i].Node.NodeID]; ok {
+			candidates[i].Rejected = true
+			candidates[i].RejectReason = fix
+		}
+	}
+	c.mu.Unlock()
 
 	// 5. Arch compatibility filter — closure is built for local arch
 	for i := range candidates {
@@ -245,8 +328,8 @@ func (c *Coordinator) FindNode() PlacementDecision {
 			n.Load.AvailableMemBytes < c.requiredMemBytes {
 			candidates[i].Rejected = true
 			candidates[i].RejectReason = fmt.Sprintf(
-				"insufficient memory: need %d, available %d",
-				c.requiredMemBytes, n.Load.AvailableMemBytes)
+				"insufficient memory: need %s, available %s",
+				humanize.IBytes(uint64(c.requiredMemBytes)), humanize.IBytes(uint64(n.Load.AvailableMemBytes)))
 			continue
 		}
 
@@ -263,8 +346,8 @@ func (c *Coordinator) FindNode() PlacementDecision {
 			if bestFreeVRAM(n) < c.requiredGPUMem {
 				candidates[i].Rejected = true
 				candidates[i].RejectReason = fmt.Sprintf(
-					"insufficient VRAM: need %d, best free %d",
-					c.requiredGPUMem, bestFreeVRAM(n))
+					"insufficient VRAM: need %s, best free %s",
+					humanize.IBytes(uint64(c.requiredGPUMem)), humanize.IBytes(uint64(bestFreeVRAM(n))))
 				continue
 			}
 		}
@@ -333,6 +416,86 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	}
 }
 
+// RejectionLine is every turned-down node and why, on one line.
+func (d PlacementDecision) RejectionLine() string { return rejectionLine(d) }
+
+// nodeName names a node the way its owner knows it.
+func nodeName(n registry.NodeRecord) string {
+	if h := n.Capabilities["hostname"]; h != "" {
+		return h
+	}
+	return n.NodeID[:min(8, len(n.NodeID))]
+}
+
+// rejectionLine is every rejected candidate on one line: "pc1: reason; ...".
+func rejectionLine(d PlacementDecision) string {
+	var parts []string
+	for _, cand := range d.Candidates {
+		if cand.Rejected {
+			parts = append(parts, nodeName(cand.Node)+": "+cand.RejectReason)
+		}
+	}
+	if len(parts) == 0 {
+		return "no node reachable"
+	}
+	return strings.Join(parts, "; ")
+}
+
+// neverFits fails a job no node in the cluster could ever hold, whatever
+// frees up: more memory than any node's ceiling, a GPU where none has one,
+// or more VRAM than any GPU has. Without it such a job queued forever,
+// retrying every 30 s. A node whose ceiling or VRAM is unknown (an older
+// build, or this machine) might fit, so it keeps the job queued as before.
+func (c *Coordinator) neverFits(d PlacementDecision) error {
+	if len(d.Candidates) == 0 {
+		return nil
+	}
+	var why []string
+	sized := false // some node is too small, rather than unable to run it at all
+	for _, cand := range d.Candidates {
+		n := cand.Node
+		if cand.Rejected && (strings.HasPrefix(cand.RejectReason, "arch mismatch") || c.isRefused(n.NodeID)) {
+			why = append(why, nodeName(n)+": "+cand.RejectReason)
+			continue
+		}
+		switch {
+		case c.requireGPU && !hasGPU(n):
+			why = append(why, nodeName(n)+" has no GPU")
+		case c.requiredMemBytes > 0 && n.Load.MemCeilingBytes > 0 && n.Load.MemCeilingBytes < c.requiredMemBytes:
+			why = append(why, fmt.Sprintf("%s allows at most %s", nodeName(n), humanize.IBytes(uint64(n.Load.MemCeilingBytes))))
+		case c.requiredGPUMem > 0 && maxVRAM(n) > 0 && maxVRAM(n) < c.requiredGPUMem:
+			why = append(why, fmt.Sprintf("%s's largest GPU has %s", nodeName(n), humanize.IBytes(uint64(maxVRAM(n)))))
+		default:
+			return nil // this one might hold it once something frees up
+		}
+		sized = true
+	}
+	var need []string
+	if c.requiredMemBytes > 0 {
+		need = append(need, humanize.IBytes(uint64(c.requiredMemBytes))+" of memory")
+	}
+	if c.requireGPU {
+		need = append(need, "a GPU")
+	}
+	if c.requiredGPUMem > 0 {
+		need = append(need, humanize.IBytes(uint64(c.requiredGPUMem))+" of VRAM")
+	}
+	if len(need) == 0 || !sized {
+		return Permanent(fmt.Errorf("no node in the cluster can take this job: %s", strings.Join(why, "; ")))
+	}
+	return Permanent(fmt.Errorf("no node in the cluster can ever hold this job: it needs %s, and %s",
+		strings.Join(need, ", "), strings.Join(why, "; ")))
+}
+
+// maxVRAM is the node's largest GPU memory in bytes; 0 when unknown.
+func maxVRAM(n registry.NodeRecord) int64 {
+	best := n.Load.GPUMemBytes
+	for _, g := range n.Load.GPUs {
+		best = max(best, g.MemoryTotalBytes)
+	}
+	return best
+}
+
 // PlaceWithRetry attempts to place a task on a node with a lease.
 // If no node can accept, it queues the task and retries every RetryInterval
 // until placement succeeds or ctx is cancelled.
@@ -357,6 +520,9 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 		}
 
 		decision := c.FindNode()
+		if err := c.neverFits(decision); err != nil {
+			return nil, err
+		}
 
 		// Round-robin: try the chosen node, no fallback to other candidates
 		if c.strategy == "round-robin" {
@@ -368,7 +534,11 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 			}
 			// Chosen node rejected — let ExecuteWithRetry handle reschedule on next attempt
 			if statusFn != nil {
-				statusFn(fmt.Sprintf("Round-robin node %s rejected — queued (attempt %d)", decision.ChosenNode.NodeID[:min(8, len(decision.ChosenNode.NodeID))], attempt+1))
+				if decision.ChosenNode.NodeID == "" {
+					statusFn(fmt.Sprintf("No node has room right now (%s) — queued (attempt %d)", rejectionLine(decision), attempt+1))
+				} else {
+					statusFn(fmt.Sprintf("Round-robin node %s rejected — queued (attempt %d)", nodeName(decision.ChosenNode), attempt+1))
+				}
 			}
 		} else {
 			// Smart: try candidates in score order. When GPU is wanted, GPU-capable
@@ -404,6 +574,10 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 				order = append(append(order, gpuGroup...), cpuGroup...)
 				byScore(order)
 			}
+			// A retry goes to a node not yet tried, when there is one.
+			c.mu.Lock()
+			sort.SliceStable(order, func(i, j int) bool { return c.tried[order[i].Node.NodeID] < c.tried[order[j].Node.NodeID] })
+			c.mu.Unlock()
 
 			for _, cand := range order {
 				result, ok := c.tryCandidate(&cand.Node, &decision, submitterNode, cfg, statusFn)
@@ -414,7 +588,11 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 
 			// No node accepted — will retry (unless context cancelled)
 			if statusFn != nil {
-				statusFn(fmt.Sprintf("No node has capacity — task queued (attempt %d)", attempt+1))
+				why := ""
+				if len(order) == 0 {
+					why = " (" + rejectionLine(decision) + ")"
+				}
+				statusFn(fmt.Sprintf("No node has capacity%s — task queued (attempt %d)", why, attempt+1))
 			}
 		}
 	}
@@ -696,13 +874,17 @@ type StatusFunc func(msg string)
 //
 //	place → commit → execute → succeed or fail → reschedule if failed.
 //
-// The loop continues until the executor succeeds or ctx is cancelled (user ^C).
-// A failed execution completes the lease as "failed" and retries placement.
-// A failed commit (resources changed) retries placement immediately.
-// Tasks are NEVER auto-cancelled — only ctx cancellation stops the loop.
+// A failed execution completes the lease as "failed" and retries placement on
+// a node not yet tried where there is one, at most MaxExecAttempts times in
+// all; then it returns the last error. A failure that would follow the task
+// anywhere (Permanent) returns at once. A node that refused the closure is
+// left out from then on without counting as an attempt; the run fails only
+// when no node is left. A failed commit (resources changed) retries placement
+// immediately. ctx cancellation (user ^C) stops the loop.
 func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFunc, statusFn StatusFunc) (*LeaseResult, error) {
 	cfg := c.configSnapshot()
 	failures := 0
+	var failedOn []string
 
 	for attempt := 0; ; attempt++ {
 		// Check for cancellation before each attempt
@@ -754,13 +936,60 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 			return result, nil // success!
 		}
 
+		// Detached: the job keeps running on the node, which releases the
+		// lease when the job ends. No retry.
+		if errors.Is(execErr, daemonctl.ErrDetached) {
+			return result, execErr
+		}
+
+		// Cancelled by the caller: no "failed" lease, no backoff, no retry.
+		if ctx.Err() != nil {
+			_ = c.CompleteLease(daemonURL, result.LeaseID, "cancelled", result.NodeID)
+			return nil, fmt.Errorf("task cancelled: %w", ctx.Err())
+		}
+
 		// Execution failed — complete as failed and reschedule
 		_ = c.CompleteLease(daemonURL, result.LeaseID, "failed", result.NodeID)
+		name := placedName(result)
+
+		// A node that refused the closure refuses it on every retry, but
+		// another node may take it: leave this one out and place again.
+		if ClosureRefused(execErr) {
+			fix := fmt.Sprintf("refused this job's closure (%v); fix: run `pipedpeer trust` on %s", execErr, name)
+			c.mu.Lock()
+			if c.refused == nil {
+				c.refused = map[string]string{}
+			}
+			c.refused[result.NodeID] = fix
+			c.mu.Unlock()
+			if statusFn != nil {
+				statusFn(fmt.Sprintf("%s %s — placing the job on another node", name, fix))
+			}
+			continue
+		}
+
+		// Unless the failure would follow the task to any node.
+		var pe *permanentError
+		if errors.As(execErr, &pe) {
+			return nil, pe.err
+		}
+
+		c.mu.Lock()
+		if c.tried == nil {
+			c.tried = map[string]int{}
+		}
+		c.tried[result.NodeID]++
+		c.mu.Unlock()
+		failedOn = append(failedOn, name)
+		failures++
+		if failures >= MaxExecAttempts {
+			return nil, fmt.Errorf("gave up after %d failed attempts (on %s); last error: %w",
+				failures, strings.Join(failedOn, ", "), execErr)
+		}
 
 		// Back off before trying again. Some failures are not the node's fault
 		// (a full disk, a script that always crashes) and retrying flat out
 		// makes them worse: each attempt re-does the closure build and export.
-		failures++
 		delay := execRetryBackoff(c.execBackoffBase, failures)
 
 		if statusFn != nil {
@@ -774,8 +1003,55 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 		case <-time.After(delay):
 		}
 
-		// Loop back to placement — never auto-cancel
+		// Loop back to placement
 	}
+}
+
+// MaxExecAttempts is how many failed executions ExecuteWithRetry takes before
+// it gives up with the last error.
+const MaxExecAttempts = 3
+
+// ClosureRefused reports whether err is a node refusing the job's closure -
+// a key it does not trust, or an archive it cannot read. The string covers an
+// older node, whose job import says the same in its own words.
+func ClosureRefused(err error) bool {
+	var ce *daemonctl.ClosureRefusedError
+	return errors.As(err, &ce) || (err != nil && strings.Contains(err.Error(), "lacks a signature by a trusted key"))
+}
+
+func (c *Coordinator) isRefused(nodeID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.refused[nodeID]
+	return ok
+}
+
+// placedName names the node a placement chose, the way its owner knows it.
+func placedName(r *LeaseResult) string {
+	for _, cand := range r.Decision.Candidates {
+		if cand.Node.NodeID == r.NodeID {
+			return nodeName(cand.Node)
+		}
+	}
+	if r.Decision.ChosenNode.NodeID == r.NodeID {
+		return nodeName(r.Decision.ChosenNode)
+	}
+	return r.NodeID[:min(8, len(r.NodeID))]
+}
+
+// permanentError marks an execution failure that rescheduling cannot fix.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+// Permanent marks err as one that would recur on any node, so ExecuteWithRetry
+// returns it instead of placing the task again. A nil err stays nil.
+func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &permanentError{err: err}
 }
 
 // DefaultExecBackoffBase is the first wait after a failed execution.
@@ -843,6 +1119,10 @@ func extractHost(endpoint string) string {
 }
 
 func (c *Coordinator) buildSelfNode() registry.NodeRecord {
+	// The CLI's own cgroup says nothing about its daemon's ceiling (a CLI
+	// run inside a capped scope would read that scope's): ask the daemon.
+	load := c.selfLoad
+	load.MemCeilingBytes = c.selfCeiling()
 	return registry.NodeRecord{
 		NodeID:      c.selfIdentity.NodeID,
 		SSHEndpoint: c.selfSSH,
@@ -851,10 +1131,37 @@ func (c *Coordinator) buildSelfNode() registry.NodeRecord {
 			"arch":     c.selfIdentity.Arch,
 			"hostname": c.selfIdentity.Hostname,
 		},
-		Load:        c.selfLoad,
+		Load:        load,
 		State:       "healthy",
 		HealthScore: 1.0,
 	}
+}
+
+// selfCeiling is the most this machine's daemon will grant one job, from its
+// /health, read once per run. 0 (unknown: no daemon, or an older one) never
+// makes a job "too big for anyone".
+func (c *Coordinator) selfCeiling() int64 {
+	c.selfCeilingOnce.Do(func() {
+		if c.selfDaemon <= 0 {
+			return
+		}
+		url := fmt.Sprintf("http://127.0.0.1:%d/health", c.selfDaemon)
+		resp, err := c.httpClient.Get(url)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[coordinator] warning: could not ask this machine's daemon for its memory ceiling (%v); treating it as unknown\n", err)
+			return
+		}
+		defer resp.Body.Close()
+		var h struct {
+			Load *registry.LoadInfo `json:"load"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil || h.Load == nil {
+			fmt.Fprintf(os.Stderr, "[coordinator] warning: %s gave no memory ceiling (%v); treating it as unknown\n", url, err)
+			return
+		}
+		c.selfCeilingBytes = h.Load.MemCeilingBytes
+	})
+	return c.selfCeilingBytes
 }
 
 // queryDaemonNodes reads cluster membership from the local daemon. A daemon
@@ -1132,6 +1439,7 @@ func (c *Coordinator) configSnapshot() Config {
 		RetryInterval:    c.retryInterval,
 		ExecBackoffBase:  c.execBackoffBase,
 		NoSelf:           c.noSelf,
+		ExcludeMachine:   c.excludeMachine,
 		RequireGPU:       c.requireGPU,
 		PreferGPU:        c.preferGPU,
 		Strategy:         c.strategy,

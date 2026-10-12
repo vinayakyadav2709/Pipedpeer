@@ -2,7 +2,15 @@ package nodestore
 
 import (
 	"database/sql"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -220,6 +228,22 @@ func TestRemoveReportsCountsAndResolvesPrefixes(t *testing.T) {
 	}
 }
 
+// Internet peers all sit behind forwarders on 127.0.0.1. One leaving must
+// take only its own port, not every other peer's forwarder with it.
+func TestRemoveManualAtKeepsOtherForwarders(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertNode(Node{NodeID: "peer-a", Host: "127.0.0.1", Port: 40001, Source: "manual", IsManual: true})
+	_ = s.UpsertNode(Node{NodeID: "peer-b", Host: "127.0.0.1", Port: 40002, Source: "manual", IsManual: true})
+
+	if n, err := s.RemoveManualAt("127.0.0.1", 40001); err != nil || n != 1 {
+		t.Fatalf("RemoveManualAt: n=%d err=%v, want 1", n, err)
+	}
+	nodes, _ := s.ListAll()
+	if len(nodes) != 1 || nodes[0].NodeID != "peer-b" {
+		t.Fatalf("after removing port 40001, want only peer-b, got %+v", nodes)
+	}
+}
+
 // An existing database created before caps_json/load_json existed must migrate
 // in place rather than failing to open.
 func TestMigrationFromPreviousSchema(t *testing.T) {
@@ -289,5 +313,98 @@ func TestMigrationIsIdempotent(t *testing.T) {
 			t.Fatalf("open %d: %v", i+1, err)
 		}
 		s.Close()
+	}
+}
+
+// TestReaddingAnAddressReplacesTheOldIdentity. A worker that comes back with a
+// new node ID - a container recreated, a machine reinstalled - used to land
+// beside its old entry rather than replacing it, and manual entries are exempt
+// from PruneStale, so they accumulated forever. Eleven rows for a four-node
+// cluster, each dead one health-checked on every cycle.
+//
+// Goes through AddManual rather than the helper it calls: an earlier version
+// of this test called the helper directly and stayed green when the call site
+// was deleted, which is the failure this whole audit exists to catch.
+func TestReaddingAnAddressReplacesTheOldIdentity(t *testing.T) {
+	s := newTestStore(t)
+
+	// One address, answering with a different identity each time - a container
+	// recreated between the two adds.
+	var nodeID atomic.Value
+	nodeID.Store("gen1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"node_id":%q}`, nodeID.Load().(string))
+	}))
+	defer srv.Close()
+	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portStr)
+
+	// A manual neighbour at another port, and a discovered row at this one:
+	// neither is ours to remove.
+	_ = s.UpsertNode(Node{NodeID: "other", Host: host, Port: port + 1, Source: "manual", IsManual: true})
+	_ = s.UpsertNode(Node{NodeID: "found", Host: host, Port: port, Source: "discovery"})
+
+	if err := s.AddManual(host, port); err != nil {
+		t.Fatal(err)
+	}
+	nodeID.Store("gen2")
+	if err := s.AddManual(host, port); err != nil {
+		t.Fatal(err)
+	}
+
+	nodes, _ := s.ListAll()
+	got := map[string]bool{}
+	for _, n := range nodes {
+		got[n.NodeID] = true
+	}
+	if got["gen1"] {
+		t.Errorf("the superseded identity at %s:%d survived: %v", host, port, keysOf(got))
+	}
+	if !got["gen2"] {
+		t.Errorf("the node currently at %s:%d is missing: %v", host, port, keysOf(got))
+	}
+	if !got["other"] {
+		t.Errorf("a manual node at a different port was removed: %v", keysOf(got))
+	}
+	if !got["found"] {
+		t.Errorf("a discovered node was removed; only manual residue is ours to " +
+			"clear, and deleting discovered rows here races the discovery loop")
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestAPollFindingANewIdentityReplacesTheOldRow. AddManual drops a superseded
+// identity, but the health poller is what usually meets the new one: a lab
+// container recreated, or an internet forwarder port reused by another peer.
+// It added a manual row beside the old one on every recreation, and manual
+// rows are never pruned - twenty-odd dead rows for a four-node lab.
+func TestAPollFindingANewIdentityReplacesTheOldRow(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.UpsertNode(Node{NodeID: "found", Host: "10.0.0.5", Port: 38081, Source: "discovery"})
+	_ = s.UpsertNode(Node{NodeID: "other", Host: "10.0.0.5", Port: 38082, Source: "manual", IsManual: true})
+	for i := 0; i < 5; i++ {
+		if err := s.MarkHealthy(Node{NodeID: fmt.Sprintf("gen%d", i), Host: "10.0.0.5",
+			Port: 38081, Source: "manual", IsManual: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nodes, _ := s.ListAll()
+	got := map[string]bool{}
+	for _, n := range nodes {
+		got[n.NodeID] = true
+	}
+	if len(got) != 3 || !got["gen4"] || !got["found"] || !got["other"] {
+		t.Errorf("want gen4 (current), found (discovered) and other (another port), got %v", keysOf(got))
 	}
 }

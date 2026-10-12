@@ -1,5 +1,5 @@
 // Package nodestore is the daemon's record of every node it knows about:
-// itself, peers found on the LAN via mDNS, and peers added by hand.
+// itself, peers found on the LAN by UDP broadcast, and peers added by hand.
 //
 // The daemon is the single source of truth for cluster membership — the CLI,
 // the dashboard and the orchestrator all read it through the daemon's
@@ -185,7 +185,7 @@ func (s *Store) UpsertNode(n Node) error {
 
 func (s *Store) AddManual(host string, port int) error {
 	// Try to resolve the real node UUID immediately via the health endpoint, so
-	// the entry merges with the same node when mDNS finds it later.
+	// the entry merges with the same node when discovery finds it later.
 	healthURL := fmt.Sprintf("http://%s:%d/health", host, port)
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(healthURL)
@@ -201,6 +201,16 @@ func (s *Store) AddManual(host string, port int) error {
 			state = "healthy"
 		}
 	}
+	// One address, one daemon. Nodes are keyed by identity, so a worker that
+	// comes back with a new one - a container recreated, a machine
+	// reinstalled - lands beside its old entry rather than replacing it, and
+	// the old one is manual so PruneStale keeps it forever. Eleven rows for a
+	// four-node cluster, every stale one health-checked on every cycle, and
+	// `pipedpeer nodes` unreadable. Whoever answers at this address now is the
+	// node at this address.
+	if err := s.forgetOthersAt(host, port, nodeID); err != nil {
+		return err
+	}
 	return s.UpsertNode(Node{
 		NodeID:      nodeID,
 		Host:        host,
@@ -212,10 +222,33 @@ func (s *Store) AddManual(host string, port int) error {
 	})
 }
 
+// forgetOthersAt drops manual entries that claim this address under a
+// different identity.
+//
+// Manual only: a discovered node is re-found on its own and carries no such
+// residue, and deleting discovered rows here would race the discovery loop.
+func (s *Store) forgetOthersAt(host string, port int, keep string) error {
+	_, err := s.db.Exec(
+		`DELETE FROM nodes WHERE is_manual = 1 AND host = ? AND port = ? AND node_id != ?`,
+		host, port, keep)
+	return err
+}
+
 // RemoveManual deletes manual entries for a host and reports how many went.
 // The count matters: "removed" with zero rows is how ghosts survive cleanup.
 func (s *Store) RemoveManual(host string) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM nodes WHERE is_manual = 1 AND host = ?`, host)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// RemoveManualAt deletes the manual entries at one host:port. Internet mode
+// puts every peer's forwarder on 127.0.0.1, so removing by host alone would
+// take every other peer's forwarder with the one that left.
+func (s *Store) RemoveManualAt(host string, port int) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM nodes WHERE is_manual = 1 AND host = ? AND port = ?`, host, port)
 	if err != nil {
 		return 0, err
 	}
@@ -293,6 +326,16 @@ func (s *Store) MarkHealthy(n Node) error {
 	n.LastSeen = time.Now().Unix()
 	if n.HealthScore == 0 {
 		n.HealthScore = 1.0
+	}
+	// The node that answered at a manual address is the node there, the same
+	// rule AddManual applies. Without it, every new identity found at a known
+	// address - a lab container recreated, an internet forwarder port reused
+	// by another peer - added a manual row beside the old one, and manual rows
+	// are never pruned: twenty-odd dead rows for a four-node lab.
+	if n.IsManual {
+		if err := s.forgetOthersAt(n.Host, n.Port, n.NodeID); err != nil {
+			return err
+		}
 	}
 	return s.UpsertNode(n)
 }

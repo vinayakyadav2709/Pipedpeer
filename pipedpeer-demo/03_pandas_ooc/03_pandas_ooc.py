@@ -12,6 +12,8 @@ import time
 
 import pandas as pd
 
+_T0 = time.monotonic()
+
 CSV = "data.csv"
 
 t0 = time.monotonic()
@@ -24,3 +26,5 @@ result = df.groupby("cat").mean()
 t_agg = time.monotonic() - t0
 print(f"groupby('cat').mean(): {t_agg:.1f}s")
 print(result.head(10).to_string())
+
+print(f"TOTAL {time.monotonic() - _T0:.1f}s")

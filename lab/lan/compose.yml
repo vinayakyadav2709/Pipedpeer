@@ -1,0 +1,61 @@
+# The demo venue, in containers: one college LAN with this laptop on it.
+# Driven by scripts/lab-lan.sh (up, join, x, logs, down).
+#
+#   venue 10.88.0.0/24   gateway .1 = this laptop (LAPTOP-A: GPU, rendezvous,
+#                        its own daemon), pc1-pc3 .11-.13, pc4 .14
+#
+# pc1-pc3 are single-user nix as root (lab/nat's node image); pc4 is the
+# Ubuntu stand-in: systemd, a sudo user `pp`, and multi-user nix installed by
+# the script once systemd is up. Every pc runs `setup -y` but joins nothing:
+# `lab-lan.sh join` does that, so the live join can be rehearsed on any of them.
+#
+# Plain bridge, no routers: the venue is one LAN, and the containers reach the
+# internet (nix cache) through docker's masquerade. 10.88.0.0/16 is rootful
+# podman's default net; if compose reports an overlap, a podman network holds it.
+name: pipedpeer-lan
+
+x-pc: &pc
+  privileged: true
+  cpus: 2
+  mem_limit: 1200m
+  volumes:
+    - ../pipedpeer:/usr/local/bin/pipedpeer:ro
+
+x-pc-node: &pc-node
+  <<: *pc
+  build: { context: ../nat, dockerfile: Dockerfile.node }
+  image: localhost/pipedpeer-nat-node
+  environment:
+    XDG_DATA_HOME: /var/lib/pipedpeer
+    XDG_STATE_HOME: /var/lib/pipedpeer-state
+  # Stays up when setup fails, so the failure can be read inside.
+  command: ["sh", "-c", "pipedpeer setup -y || echo 'lab: pipedpeer setup -y failed' >&2; exec sleep infinity"]
+
+services:
+  pc1:
+    <<: *pc-node
+    container_name: pp-lan-pc1
+    hostname: pc1
+    networks: { venue: { ipv4_address: 10.88.0.11 } }
+  pc2:
+    <<: *pc-node
+    container_name: pp-lan-pc2
+    hostname: pc2
+    networks: { venue: { ipv4_address: 10.88.0.12 } }
+  pc3:
+    <<: *pc-node
+    container_name: pp-lan-pc3
+    hostname: pc3
+    networks: { venue: { ipv4_address: 10.88.0.13 } }
+  pc4:
+    <<: *pc
+    build: { context: ../nat, dockerfile: Dockerfile.multiuser }
+    image: localhost/pipedpeer-nat-multiuser
+    container_name: pp-lan-pc4
+    hostname: pc4
+    networks: { venue: { ipv4_address: 10.88.0.14 } }
+
+networks:
+  venue:
+    driver_opts: { com.docker.network.bridge.name: pp-venue }
+    ipam: { config: [{ subnet: 10.88.0.0/24, gateway: 10.88.0.1 }] }

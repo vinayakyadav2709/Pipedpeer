@@ -1,0 +1,46 @@
+[coordinator] Resource estimate: 512 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node ea8a95c6 (lease=86314061)
+[coordinator] Lease committed — executing on ea8a95c6
+=== Pipedpeer CLI ===
+Script: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map/pool_map.py
+Daemon: 192.168.0.107:38083
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2976159952/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map
+      Script: pool_map.py
+      Closure already on the node; nothing to send
+      Uploaded job 54fe1f06-e948-4908-b68d-50b8c5590431
+
+[7/7] Executing on remote...
+POOLMAP-OK items=48 seconds=0.1374 checksum=470568233.455799
+      Synced 1 file(s) to /home/rs/Projects/Pipedpeer/docs/benchmarks/raw/ws/pool_map (0 new, 1 updated, 0 deleted)
+
+=== Done ===
+History: /home/rs/.local/share/pipedpeer/jobs/1790955024641210846
+[coordinator] Task completed successfully on node ea8a95c6
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/var/tmp/pipedpeer-docs-cache/pipedpeer/scratch/build-2976159952/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets
+[pipedpeer] using 12 workers, not the 8 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] using 12 workers, not the 8 requested (cores=12); set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count
+[pipedpeer] local 12 items
+[pipedpeer] remote ok: 18 items in 77 ms on 192.168.0.107:38080, 192.168.0.107:38081, 192.168.0.107:38082

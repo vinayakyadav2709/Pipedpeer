@@ -12,14 +12,20 @@ docker/logs/
 docker/workspaces/
 .freebuff/
 pipedpeer-demo/**/data.csv
+pipedpeer-demo/**/results/
 
 # demo 05 file-sync outputs
 pipedpeer-demo/sync_note.txt
 pipedpeer-demo/created_by_job.txt
 pipedpeer-demo/delete_me.txt
+pipedpeer-demo/demo/rehearsal-results.txt
 
 # local-only notes
 future.md
 handoff.md
 plan.md
+plan-nat.md
 prompt.md
+plan-transfer.md
+pipedpeer-demo/demo/finale-logs/
+/src/pipedpeer

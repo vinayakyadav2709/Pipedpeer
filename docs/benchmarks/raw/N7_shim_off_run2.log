@@ -1,0 +1,42 @@
+[coordinator] Resource estimate: 512 MiB (tier=import)
+[coordinator] --remote: discovering a node other than this machine...
+[coordinator] Placed on node 5792c454 (lease=834cf432)
+[coordinator] Lease committed — executing on 5792c454
+=== Pipedpeer CLI ===
+Script: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle/pool_idle.py
+Daemon: 192.168.0.200:38081
+
+[1/7] Detecting imports...
+
+[2/7] Parsing dependencies...
+
+[3/7] Generating flake.nix...
+      Created: /home/yeet/.cache/pipedpeer/scratch/build-2823854782/flake.nix
+
+[4/7] Building locally...
+      Built successfully
+
+[5/7] Exporting closure...
+      Store path: /nix/store/w6cjl84hmjmqkw6hsva72i26kmk909jc-run
+
+[6/7] Uploading to daemon...
+      Project root: /mnt/Windows-SSD/Users/yvavi/yeet/coding/major/Pipedpeer/docs/benchmarks/raw/ws/pool_idle
+      Script: pool_idle.py
+      Closure already on the node; nothing to send
+      Uploaded job fcb7720e-31b6-4750-b101-9e78c252284a
+
+[7/7] Executing on remote...
+POOLIDLE-OK items=16 seconds=0.1069 checksum=623749.555711
+      No files changed on the remote
+
+=== Done ===
+History: /home/yeet/.local/share/pipedpeer/jobs/1791747660364995691
+[coordinator] Task completed successfully on node 5792c454
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+warning: creating lock file "/home/yeet/.cache/pipedpeer/scratch/build-2823854782/flake.lock": 
+• Added input 'nixpkgs':
+    'github:NixOS/nixpkgs/56c02bc' (2026-08-23)
+warning: ignoring the client-specified setting 'build-users-group', because it is a restricted setting and you are not a trusted user
+tar: Removing leading `/' from member names
+tar: Removing leading `/' from hard link targets

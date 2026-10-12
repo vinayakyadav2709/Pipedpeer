@@ -11,6 +11,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import train_test_split
 
+_T0 = time.monotonic()
+
 rng = np.random.RandomState(7)
 
 n_samples, n_features = 200_000, 20
@@ -30,3 +32,5 @@ y_pred = clf.predict(X_test)
 acc = accuracy_score(y_test, y_pred)
 print(f"fit time: {t_fit:.1f}s")
 print(f"accuracy: {acc:.4f}")
+
+print(f"TOTAL {time.monotonic() - _T0:.1f}s")

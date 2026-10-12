@@ -84,7 +84,10 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
 
 	// --remote excludes this machine, and with nothing else in the cluster
-	// the run must fail loudly instead of queuing forever.
+	// the run must fail loudly instead of queuing forever. One look only:
+	// given its usual wait, discovery finds whatever else runs on this
+	// network, and the cluster is no longer empty.
+	t.Setenv("PIPEDPEER_REMOTE_WAIT", "0s")
 	_, errOut, err := runCLIEWithEnv(t,
 		stateDir, xdg,
 		"run",
@@ -96,8 +99,10 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error when no eligible remote node, got none")
 	}
-	if !strings.Contains(errOut, "no eligible node found") {
-		t.Fatalf("expected 'no eligible node found' error, got: %s", errOut)
+	// check-only reports it as "NOT READY: no eligible node other than this
+	// machine"; a real run as "no eligible node found".
+	if !strings.Contains(errOut, "no eligible node") {
+		t.Fatalf("expected 'no eligible node' error, got: %s", errOut)
 	}
 }
 
@@ -118,6 +123,7 @@ func runCLIEWithEnv(t *testing.T, stateDir, xdg string, args ...string) (string,
 		"PIPEDPEER_DAEMON_STATE_DIR="+stateDir,
 		"XDG_DATA_HOME="+xdg,
 	)
+	cmd.Env = append(cmd.Env, isolatedDaemonEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -126,21 +132,16 @@ func runCLIEWithEnv(t *testing.T, stateDir, xdg string, args ...string) (string,
 	return stdout.String(), stderr.String(), err
 }
 
-func extractNodeID(t *testing.T, jsonData []byte) string {
-	t.Helper()
-	// Simple extraction without importing encoding/json
-	s := string(jsonData)
-	prefix := `"node_id": "`
-	idx := strings.Index(s, prefix)
-	if idx < 0 {
-		t.Fatalf("node_id not found in: %s", s)
-	}
-	rest := s[idx+len(prefix):]
-	end := strings.Index(rest, `"`)
-	if end < 0 {
-		t.Fatalf("node_id not terminated in: %s", s)
-	}
-	return rest[:end]
+// isolatedDaemonEnv keeps a test's daemon out of any real cluster. Without it
+// a daemon started here answered the LAN probes of a lab on the same host and
+// was listed (and placeable) there as a "yeet" node, and an inherited
+// rendezvous, registry or NATS address would join it to the user's cluster.
+// Empty values override the inherited ones: exec keeps the last of each key.
+var isolatedDaemonEnv = []string{
+	"PIPEDPEER_NO_LAN_DISCOVERY=1",
+	"PIPEDPEER_RENDEZVOUS=",
+	"PIPEDPEER_REGISTRY=",
+	"PIPEDPEER_NATS_URL=",
 }
 
 func freePort(t *testing.T) int {
@@ -255,8 +256,9 @@ func TestJobsListAndJobDetail(t *testing.T) {
 
 	// Test `jobs` command
 	out := runCLIWithXDG(t, stateDir, xdg, "jobs")
-	if !strings.Contains(out, "1234567890") {
-		t.Fatalf("expected job ID in jobs output, got: %s", out)
+	// jobs shows the short id a person types: the last 8 digits.
+	if !strings.Contains(out, "34567890") {
+		t.Fatalf("expected short job ID in jobs output, got: %s", out)
 	}
 	if !strings.Contains(out, "succeeded") {
 		t.Fatalf("expected 'succeeded' in jobs output, got: %s", out)
@@ -283,6 +285,7 @@ func runCLIWithXDG(t *testing.T, stateDir, xdg string, args ...string) string {
 		"PIPEDPEER_DAEMON_STATE_DIR="+stateDir,
 		"XDG_DATA_HOME="+xdg,
 	)
+	cmd.Env = append(cmd.Env, isolatedDaemonEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -297,7 +300,18 @@ func TestRegistryCLIStartsAndAcceptsConnections(t *testing.T) {
 	// Start registry as a subprocess, then query it with HTTP
 	port := freePort(t)
 
-	cmd := exec.Command("go", "run", ".", "registry", "--port", fmt.Sprintf("%d", port))
+	// Built, not `go run`. Killing a `go run` kills the wrapper and leaves the
+	// binary it spawned running: the suite left a registry behind on every
+	// invocation, holding its port until somebody noticed and killed it by
+	// hand. Killing a process we started ourselves actually stops it.
+	binPath := filepath.Join(t.TempDir(), "pipedpeer")
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(binPath, "registry", "--port", fmt.Sprintf("%d", port))
 	cmd.Dir = "."
 	cmd.Env = os.Environ()
 	if err := cmd.Start(); err != nil {
@@ -351,17 +365,61 @@ func TestRegistryCLIStartsAndAcceptsConnections(t *testing.T) {
 	}
 }
 
+// TestNodesCLIShowsSelf checks what its name says.
+//
+// It used to accept "NODE_ID" or "No nodes found", which between them cover
+// every output the command can produce - it passed whether the daemon listed
+// this machine, listed nothing, or was not running at all. A test that cannot
+// fail is worse than no test: it occupies the place where a real one would go.
 func TestNodesCLIShowsSelf(t *testing.T) {
 	stateDir := t.TempDir()
 	xdg := t.TempDir()
+	port := freePort(t)
 
-	// Stop any leftover daemon first
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
+	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
+	t.Cleanup(func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") })
 
-	out := runCLIWithEnv(t, stateDir, xdg, "nodes")
-	if !strings.Contains(out, "NODE_ID") && !strings.Contains(out, "No nodes found") {
-		t.Fatalf("expected nodes table or empty output, got: %s", out)
+	// The daemon registers itself on its first health poll, which is not
+	// instant.
+	var out string
+	for i := 0; i < 30; i++ {
+		out = runCLIWithEnv(t, stateDir, xdg, "nodes", "--port", fmt.Sprintf("%d", port))
+		if strings.Contains(out, "self") {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
 	}
+
+	if !strings.Contains(out, "MEM FREE") {
+		t.Fatalf("no nodes table at all:\n%s", out)
+	}
+	if !strings.Contains(out, "self") {
+		t.Fatalf("the running daemon does not list this machine, which is the one "+
+			"thing this command must always be able to show:\n%s", out)
+	}
+
+	// And the id shown has to be this daemon's, not any id at all.
+	status := runCLIWithEnv(t, stateDir, xdg, "status")
+	if id := nodeIDFromStatus(status); len(id) >= 8 {
+		// The table shows the short form, which is what an operator matches
+		// against; comparing the full uuid would fail on formatting alone.
+		if short := id[:8]; !strings.Contains(out, short) {
+			t.Errorf("nodes lists a self row, but not this daemon's id %q:\n%s", short, out)
+		}
+	}
+}
+
+// nodeIDFromStatus pulls a node id out of `pipedpeer status` output, or
+// returns "" when the format does not carry one.
+func nodeIDFromStatus(status string) string {
+	for _, field := range strings.Fields(status) {
+		trimmed := strings.Trim(field, "(),")
+		if rest, ok := strings.CutPrefix(trimmed, "node-id="); ok {
+			return rest
+		}
+	}
+	return ""
 }
 
 func TestAutoPlacementSelectsSelf(t *testing.T) {

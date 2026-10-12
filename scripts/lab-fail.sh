@@ -1,22 +1,67 @@
 #!/usr/bin/env bash
-# Failure-injection demo: fan a pool.map out across the 3-node lab, kill a
-# worker mid-flight, and prove the run still finishes with correct results
-# (the shim falls back to local compute for the lost batch).
+# Failure injection: fan a pool.map across the 3-node lab, kill a worker that
+# is actively taking chunks, and prove the run still finishes with correct
+# results.
+#
+# This script used to prove nothing. Its kernel was defined in the script's
+# own __main__, which the old by-reference dispatch could never ship, so every
+# chunk failed and the local pool quietly did all the work; its only
+# assertions were "exit 0" and "POOL-OK appeared", both of which local
+# fallback satisfies for free; and it deliberately killed a worker that was
+# *not* involved in the run. It therefore passed identically whether the
+# cluster did all of the work, some of it, or none of it.
+#
+# So the assertions now cover the thing being demonstrated: the shim's receipt
+# must show items that actually executed off this process, and the kill must
+# land on a worker that was holding chunks.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cli="$repo_root/bin/pipedpeer"
+ports=(38081 38082 38083)
 
-if [[ ! -x "$cli" ]]; then
-	echo "building binary..."
-	"$repo_root/scripts/build.sh"
-fi
+# This harness builds the cluster it then breaks, so it needs its siblings -
+# unlike the benchmarks, which only need a binary and a running cluster. Said
+# up front rather than discovered three steps in as "No such file or
+# directory".
+for sibling in lab-up.sh lab-down.sh; do
+	[[ -f "$repo_root/scripts/$sibling" ]] || {
+		echo "lab-fail needs $sibling beside it: it brings up the cluster it" >&2
+		echo "then breaks, rather than using one that is already running." >&2
+		echo "Copy the whole scripts/ directory, not this file alone." >&2
+		exit 2
+	}
+done
+
+source "$repo_root/scripts/lib/cli.sh"
+pp_resolve_cli "$repo_root" || exit 2
+cli="$PP_CLI"
+
+source "$repo_root/scripts/lib/runtime.sh"
+pp_pick_runtime || exit 1
+runtime="$PP_RUNTIME"
+
+# Once a token is configured, an unauthenticated probe gets 401 and `curl -sf`
+# reports that as a plain failure - which reads as "the daemon is down" when
+# it is answering perfectly well. Anything talking to this host's daemon has
+# to carry the token; the lab workers are fresh containers with none.
+pp_read_token
+
+# Each worker reports its own tally of pool work. Asking the daemon beats
+# grepping its log: the log lives inside the container at a path that depends
+# on how the daemon was started, and an assertion that silently finds nothing
+# is worse than no assertion at all.
+chunks_received() {
+	pp_curl -sf --max-time 3 "http://127.0.0.1:$((38080 + $1))/v1/pool/stats" 2>/dev/null |
+		python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("chunks_received", 0))
+except Exception: print(0)' 2>/dev/null || echo 0
+}
 
 "$repo_root/scripts/lab-up.sh"
 trap '"$repo_root/scripts/lab-down.sh" || true' EXIT
 
 echo "waiting for lab workers..."
-for port in 38081 38082 38083; do
+for port in "${ports[@]}"; do
 	ok=0
 	for _ in $(seq 1 60); do
 		if curl -sf "http://127.0.0.1:$port/health" >/dev/null 2>&1; then
@@ -32,21 +77,83 @@ for port in 38081 38082 38083; do
 done
 echo "lab is up"
 
+# The node IDs of the workers that exist right now. Containers are recreated
+# on every lab-up, so yesterday's rows are still in the store under different
+# IDs; counting "healthy" lines would happily match those.
+want_ids=()
+for port in "${ports[@]}"; do
+	id="$(curl -sf --max-time 3 "http://127.0.0.1:$port/health" |
+		python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])' 2>/dev/null || true)"
+	[[ -n "$id" ]] && want_ids+=("$id")
+done
+if (( ${#want_ids[@]} == 0 )); then
+	echo "FAIL: no lab worker reported a node id"
+	exit 1
+fi
+
+# An already-running daemon on this port makes `start` a silent no-op, and the
+# run is then served by whatever was there - typically an older build pointing
+# at containers that no longer exist. `stop` only finds daemons started with
+# the same state dir, so do not rely on it.
+"$cli" stop >/dev/null 2>&1 || true
+fuser -k 38080/tcp >/dev/null 2>&1 || true
+sleep 2
 "$cli" start 2>/dev/null || true
-for port in 38081 38082 38083; do
+up=0
+for _ in $(seq 1 30); do
+	if pp_curl -sf --max-time 3 "http://127.0.0.1:38080/health" >/dev/null 2>&1; then
+		up=1
+		break
+	fi
+	sleep 1
+done
+if [[ $up -ne 1 ]]; then
+	echo "FAIL: no daemon answering on :38080"
+	exit 1
+fi
+
+for port in "${ports[@]}"; do
 	"$cli" nodes add 127.0.0.1 "$port" >/dev/null 2>&1 || true
 done
 
-workdir="$(mktemp -d "${TMPDIR:-/tmp}/pipedpeer-fail.XXXXXX")"
-# Keep the lab teardown from the earlier trap; a second bare trap would replace it.
+# Wait until the daemon reports these exact workers healthy. /v1/nodes serves
+# state persisted from earlier runs, so a count is not evidence: a job started
+# against a stale view finds no peers holding the closure and runs entirely
+# local, with nothing in the output to say why.
+ready=0
+for _ in $(seq 1 40); do
+	nodes_json="$(pp_curl -sf --max-time 3 "http://127.0.0.1:38080/v1/nodes" || echo '[]')"
+	ready="$(printf '%s' "$nodes_json" | python3 -c 'import json,sys
+want = set(sys.argv[1:])
+try: nodes = json.load(sys.stdin)
+except Exception: nodes = []
+print(sum(1 for n in nodes if n.get("node_id") in want and n.get("state") == "healthy"))' "${want_ids[@]}" 2>/dev/null || echo 0)"
+	[[ "${ready:-0}" -ge "${#want_ids[@]}" ]] && break
+	sleep 1
+done
+if [[ "${ready:-0}" -lt "${#want_ids[@]}" ]]; then
+	echo "FAIL: daemon sees $ready of ${#want_ids[@]} lab workers as healthy"
+	"$cli" nodes || true
+	exit 1
+fi
+echo "daemon sees all ${#want_ids[@]} lab workers"
+
+# Not $TMPDIR: on a tmpfs /tmp this workspace competes with the job's own
+# data for RAM, and the daemon has already had uploads rejected that way.
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
+mkdir -p "$state_dir"
+workdir="$(mktemp -d "$state_dir/lab-fail.XXXXXX")"
+# Keep the lab teardown from the earlier trap; a second bare trap replaces it.
 trap 'rm -rf "$workdir"; "$repo_root/scripts/lab-down.sh" || true' EXIT
 task="$workdir/task.py"
 runlog="$workdir/run.log"
-# Anchor the workspace here, so the job ships this directory and not all of
-# $TMPDIR (findProjectRoot walks up looking for .pipedpeerignore or .git).
+receipt="$workdir/receipt.json"
+# Anchor the workspace here so the job ships this directory and not all of
+# its parent (findProjectRoot walks up looking for .pipedpeerignore or .git).
 : > "$workdir/.pipedpeerignore"
 
 cat > "$task" <<'EOF'
+import os
 import time
 from multiprocessing import Pool
 
@@ -55,55 +162,61 @@ def work(i):
     return i * i
 
 if __name__ == "__main__":
+    # More items than this machine's pool can cover in one round, so work
+    # genuinely has to leave it. With twenty the local pool absorbed nearly
+    # everything and at most one chunk ever reached a worker, which made a
+    # three-node lab indistinguishable from a one-node one.
+    n = int(os.environ.get("LAB_ITEMS", "80"))
     with Pool(8) as p:
-        out = p.map(work, range(20))
-    assert out == [i * i for i in range(20)], out
+        out = p.map(work, range(n))
+    assert out == [i * i for i in range(n)], out
     print("POOL-OK sum=%d" % sum(out))
 EOF
 
 echo "launching intercept run..."
-"$cli" run "$task" > "$runlog" 2>&1 &
+"$cli" run "$task" -e PIPEDPEER_RECEIPT=receipt.json > "$runlog" 2>&1 &
 runpid=$!
 
-# Wait until some worker is hosting the job, then kill a *different* worker
-# so the run itself survives and only a fan-out batch is lost.
-kill_port=""
+# Kill a worker that is actually holding chunks. Killing an idle one, which is
+# what this did before, removes nothing from the run and proves nothing about
+# recovering from a loss.
+kill_idx=""
 for _ in $(seq 1 90); do
-	kill_port=$(python3 - <<'PYEOF'
-import json, subprocess, sys
-
-ports = [38081, 38082, 38083]
-busy = set()
-for port in ports:
-    try:
-        ns = json.load(subprocess.check_output(
-            ["curl", "-sf", f"http://127.0.0.1:{port}/v1/nodes"], timeout=3))
-    except Exception:
-        continue
-    for n in ns:
-        if n.get("daemon_port") == port and n.get("load", {}).get("active_jobs", 0) > 0:
-            busy.add(port)
-if busy:
-    for port in ports:
-        if port not in busy:
-            sys.stdout.write(str(port))
-            break
-PYEOF
-)
-	[[ -n "$kill_port" ]] && break
+	for idx in 1 2 3; do
+		if [[ "$(chunks_received "$idx")" -gt 0 ]]; then
+			kill_idx="$idx"
+			break
+		fi
+	done
+	[[ -n "$kill_idx" ]] && break
 	sleep 2
 done
 
-if [[ -z "$kill_port" ]]; then
-	echo "warn: never saw the job land on a worker; killing worker 2 blindly"
-	kill_port=38082
+if [[ -z "$kill_idx" ]]; then
+	echo "FAIL: no worker ever received a pool chunk, so there was nothing to lose."
+	echo "      The run was never distributed; a dead-worker demo on top of that is meaningless."
+	kill $runpid 2>/dev/null || true
+	tail -30 "$runlog"
+	exit 1
 fi
-echo "killing worker on :$kill_port mid-flight"
-if command -v podman &>/dev/null; then
-	podman stop "pipedpeer-lab-$((kill_port - 38080))" >/dev/null 2>&1 || true
-elif command -v docker &>/dev/null; then
-	docker stop "pipedpeer-lab-$((kill_port - 38080))" >/dev/null 2>&1 || true
-fi
+
+# Let the fan-out settle before judging it. The search above stops at the
+# first worker holding anything, which is by construction one worker - reading
+# the tallies at that instant measures how quickly the first chunk arrived,
+# not how widely the work spread.
+settle="${LAB_SETTLE_SECS:-6}"
+sleep "$settle"
+
+# Snapshot the tallies before the kill: a stopped worker cannot answer for
+# what it did, and reading them afterwards reports zero for the one node we
+# know did the work.
+counts=()
+for idx in 1 2 3; do
+	counts+=("$(chunks_received "$idx")")
+done
+
+echo "killing worker $kill_idx (:$((38080 + kill_idx))) while it holds chunks"
+"$runtime" stop "pipedpeer-lab-$kill_idx" >/dev/null 2>&1 || true
 
 set +e
 wait $runpid
@@ -120,5 +233,62 @@ if ! grep -q "POOL-OK" "$runlog"; then
 	tail -30 "$runlog"
 	exit 1
 fi
+
+if [[ ! -f "$receipt" ]]; then
+	echo "FAIL: no receipt came back; cannot tell whether anything was distributed"
+	tail -30 "$runlog"
+	exit 1
+fi
+
+read -r remote_items remote_failures local_items < <(python3 - "$receipt" <<'PYEOF'
+import json, sys
+r = json.load(open(sys.argv[1]))
+print(r.get("remote_items", 0), r.get("remote_failures", 0), r.get("local_items", 0))
+PYEOF
+)
+
+if [[ "$remote_items" -eq 0 ]]; then
+	echo "FAIL: receipt shows no work executed off this process (local=$local_items)."
+	echo "      Correct results here mean only that local fallback covered everything."
+	cat "$receipt"
+	exit 1
+fi
+
+# One worker taking everything is not a fan-out, and it is exactly what a
+# broken peer ranking looks like: the run distributes, the receipt is non-zero,
+# and the cluster is being used as one slow machine. The counts were
+# snapshotted before the kill, so they describe the healthy state.
+workers_used=0
+for idx in 1 2 3; do
+	if [[ "${counts[$((idx - 1))]}" -gt 0 ]]; then
+		workers_used=$((workers_used + 1))
+	fi
+done
+if [[ "$workers_used" -lt 2 ]]; then
+	echo "FAIL: only $workers_used worker received chunks before the kill."
+	echo "      The run distributed, but to one node - a fan-out that is not fanning"
+	echo "      out, which reads identically to a healthy cluster in the receipt."
+	for idx in 1 2 3; do
+		echo "        worker $idx: ${counts[$((idx - 1))]} chunk request(s)"
+	done
+	exit 1
+fi
+
+# The killed worker must have been holding chunks, which is the whole premise.
+# Asserted rather than assumed: the search above takes the first worker with a
+# non-zero count, and a race could leave it at zero by snapshot time.
+if [[ "${counts[$((kill_idx - 1))]}" -eq 0 ]]; then
+	echo "FAIL: the worker that was killed held no chunks at the time, so losing it"
+	echo "      demonstrated nothing about surviving a loss."
+	exit 1
+fi
+
+echo
 grep "POOL-OK" "$runlog"
-echo "PASS: pool.map completed correctly despite a dead worker"
+echo "receipt: $remote_items items ran on the cluster, $local_items locally, $remote_failures chunk(s) lost"
+for idx in 1 2 3; do
+	note=""
+	[[ "$idx" == "$kill_idx" ]] && note=" (killed mid-flight)"
+	echo "  worker $idx: ${counts[$((idx - 1))]} chunk request(s) at kill time$note"
+done
+echo "PASS: pool.map distributed real work and completed correctly despite losing a worker mid-flight"

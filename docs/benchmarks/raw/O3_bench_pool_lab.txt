@@ -1,0 +1,14 @@
+# BENCH_ITEMS=48 scripts/bench-pool.sh   against the 3-container lab (single host: no speedup possible)
+# commit 4c91ef3, run 2026-10-02, Fedora 43 / Linux 6.19.13, i5-13420H 12 threads, 15 GiB. XDG_CACHE_HOME=/var/tmp/pipedpeer-docs-cache (see README: $HOME is a git repo on this host, which breaks the default build dir).
+building binary from /home/rs/Projects/Pipedpeer/src...
+Built: /home/rs/Projects/Pipedpeer/bin/pipedpeer
+workload: 48 items x 120000 spins
+
+plain      0.17s
+tuned      0.17s
+pipedpeer  0.24s
+
+receipt: 12 items on the cluster, 12 local, 0 failure(s), 0 declined
+         24 of 48 never left the local pool: not dispatched, not lost
+
+PASS: 0.24s vs 0.17s plain (within the 3x never-slower budget)

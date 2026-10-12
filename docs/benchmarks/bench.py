@@ -74,14 +74,34 @@ def summarise(samples):
     }
 
 
-def measure(label, script, repeat, extra_args=(), env=None, verify_token=None):
+def read_dispatched(ws):
+    """dispatched_items from the shim's receipt, or None when there is none."""
+    try:
+        return json.loads((ws / "receipt.json").read_text())["dispatched_items"]
+    except (OSError, ValueError, KeyError) as e:
+        print(f"  no usable receipt in {ws}: {e}", file=sys.stderr)
+        return None
+
+
+def measure(label, script, repeat, extra_args=(), env=None, verify_token=None,
+            expect_dispatched=None):
+    """expect_dispatched: when set, each run carries PIPEDPEER_RECEIPT and is
+    only ok if its receipt shows exactly that many dispatched items. N7 lost
+    its meaning once without anyone noticing; this makes that a failure."""
     ws = workspace_for(script)
+    if expect_dispatched is not None:
+        extra_args = (*extra_args, "-e", "PIPEDPEER_RECEIPT=receipt.json")
     samples = []
     for i in range(repeat):
+        (ws / "receipt.json").unlink(missing_ok=True)
         secs, rc, out = run_cli([ "run", script, *extra_args ], ws, env)
         ok = rc == 0 and (verify_token is None or verify_token in out)
-        samples.append({"iteration": i, "seconds": round(secs, 4), "ok": ok,
-                        "returncode": rc})
+        sample = {"iteration": i, "seconds": round(secs, 4), "ok": ok,
+                  "returncode": rc}
+        if expect_dispatched is not None:
+            sample["dispatched_items"] = read_dispatched(ws)
+            sample["ok"] = ok = ok and sample["dispatched_items"] == expect_dispatched
+        samples.append(sample)
         (RAW / f"{label}_run{i}.log").write_text(out)
         print(f"  {label} [{i}] {secs:7.3f}s rc={rc} ok={ok}", flush=True)
     return summarise(samples)
@@ -90,7 +110,14 @@ def measure(label, script, repeat, extra_args=(), env=None, verify_token=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repeat", type=int, default=5)
+    ap.add_argument("--only", default="",
+                    help="comma list (n1,n7,n3,n5): measure only these and merge "
+                         "them into the existing results.json")
     args = ap.parse_args()
+    only = {x for x in args.only.split(",") if x}
+
+    def want(key):
+        return not only or key in only
 
     RAW.mkdir(parents=True, exist_ok=True)
     if not CLI.exists():
@@ -113,32 +140,48 @@ def main():
         "measurements": {},
     }
 
-    print("\nN1 end-to-end latency, trivial job")
-    results["measurements"]["n1_trivial_latency"] = measure(
-        "N1_trivial", "trivial.py", args.repeat,
-        extra_args=["--remote"], verify_token="TRIVIAL-OK")
+    if want("n1"):
+        print("\nN1 end-to-end latency, trivial job")
+        results["measurements"]["n1_trivial_latency"] = measure(
+            "N1_trivial", "trivial.py", args.repeat,
+            extra_args=["--remote"], verify_token="TRIVIAL-OK")
 
-    print("\nN7 interception overhead when the cost model declines")
-    results["measurements"]["n7_shim_declines"] = measure(
-        "N7_shim_on", "pool_map.py", args.repeat,
-        extra_args=["--remote"], verify_token="POOLMAP-OK")
-    results["measurements"]["n7_shim_off"] = measure(
-        "N7_shim_off", "pool_map.py", args.repeat,
-        extra_args=["--remote", "-e", "PIPEDPEER_SHIM=0"],
-        verify_token="POOLMAP-OK")
+    if want("n7"):
+        print("\nN7 interception overhead when the cost model declines")
+        # pool_idle.py, not pool_map.py: pool_map.py is big enough that the shim
+        # distributes it, so N7 measured distribution, not idle interception.
+        results["measurements"]["n7_shim_declines"] = measure(
+            "N7_shim_on", "pool_idle.py", args.repeat,
+            extra_args=["--remote"], verify_token="POOLIDLE-OK",
+            expect_dispatched=0)
+        results["measurements"]["n7_shim_off"] = measure(
+            "N7_shim_off", "pool_idle.py", args.repeat,
+            extra_args=["--remote", "-e", "PIPEDPEER_SHIM=0"],
+            verify_token="POOLIDLE-OK")
 
-    print("\nN3 Pool.map with the cluster forced on")
-    results["measurements"]["n3_forced_distribute"] = measure(
-        "N3_forced", "pool_map.py", args.repeat,
-        extra_args=["--remote", "--distribute", "force"],
-        verify_token="POOLMAP-OK")
+    if want("n3"):
+        print("\nN3 Pool.map with the cluster forced on")
+        results["measurements"]["n3_forced_distribute"] = measure(
+            "N3_forced", "pool_map.py", args.repeat,
+            extra_args=["--remote", "--distribute", "force"],
+            verify_token="POOLMAP-OK")
 
-    print("\nN5 numpy: matmul should stay local, SVD may move")
-    results["measurements"]["n5_numpy"] = measure(
-        "N5_numpy", "numpy_ops.py", max(2, args.repeat // 2),
-        extra_args=["--remote"], verify_token="NUMPY-OK")
+    if want("n5"):
+        print("\nN5 numpy: matmul should stay local, SVD may move")
+        results["measurements"]["n5_numpy"] = measure(
+            "N5_numpy", "numpy_ops.py", max(2, args.repeat // 2),
+            extra_args=["--remote"], verify_token="NUMPY-OK")
 
     out = pathlib.Path(__file__).resolve().parent / "results.json"
+    if only:
+        # Merge: the other figures keep the host they were measured on, and
+        # each re-measured entry records its own.
+        merged = json.loads(out.read_text())
+        for k, v in results["measurements"].items():
+            v["host"] = results["host"]
+            v["cluster"] = results["cluster"]
+            merged["measurements"][k] = v
+        results = merged
     out.write_text(json.dumps(results, indent=2))
     print(f"\nwrote {out}")
 

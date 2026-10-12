@@ -16,7 +16,9 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
+	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -129,6 +131,21 @@ func (c *Client) StopWithoutDeregister() {
 	})
 }
 
+// NixKeyCapability is where a node publishes the key it signs store paths
+// with. Travels with the node record so a peer can decide to trust this
+// cluster's signatures specifically, rather than switching signature checking
+// off for the whole machine.
+const NixKeyCapability = "nix_pubkey"
+
+// ClosureFormatCapability is where a node says which closure transfer
+// formats it can receive.
+//
+// A sender needs this because the two formats are not interchangeable: an
+// older node handed a signature-carrying archive would try to read it as an
+// export stream and fail somewhere inside nix. Advertised rather than probed,
+// so a peer that has not been upgraded keeps receiving what it understands.
+const ClosureFormatCapability = "closure_formats"
+
 // Capabilities describes a node's static hardware: things that do not change
 // between heartbeats, so the scheduler can rank raw capability separately from
 // current load. Values are strings because they travel in NodeRecord.Capabilities.
@@ -137,6 +154,24 @@ func Capabilities(id identity.NodeIdentity) map[string]string {
 		"arch":     id.Arch,
 		"hostname": id.Hostname,
 	}
+	// Which physical machine this is, so a daemon sharing one with a peer can
+	// tell. Hostname will not do: containers get their own.
+	if m := Machine(); m != "" {
+		caps[MachineCapability] = m
+	}
+
+	// The key this node signs its store exports with, so peers can trust
+	// what it sends without trusting everything. Derived from the node
+	// identity, so a peer can check it against the fingerprint the
+	// connection was authenticated under rather than believing the claim.
+	if k, err := identity.Key(); err == nil {
+		caps[NixKeyCapability] = nixsign.PublicKey(k)
+	}
+
+	// The transfer formats this node can receive. Signatures only survive
+	// the second one, so a peer that sees it here can send a closure this
+	// machine will accept with require-sigs left on.
+	caps[ClosureFormatCapability] = narpack.FormatName
 
 	// CPU: core count, model and clock. Cached — cpu.Info() shells into
 	// /proc/cpuinfo and is called on every heartbeat.

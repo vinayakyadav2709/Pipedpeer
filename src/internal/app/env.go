@@ -1,14 +1,18 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 )
 
@@ -26,6 +30,9 @@ type Environment struct {
 	ProjectRoot  string
 	ScriptRel    string
 	FlakeContent string
+	// Stages is how long each build step took. Every run made from this
+	// environment starts its timeline with them.
+	Stages []jobhistory.Stage
 
 	tmpDir string
 }
@@ -44,6 +51,10 @@ type EnvOptions struct {
 	// Intercept embeds the sitecustomize shim into the workspace so parallel
 	// primitives route through the cluster (see nixgen/shim.go).
 	Intercept bool
+	// GPU selects the CUDA build of torch. Off, the closure is several
+	// gigabytes smaller and comes from the binary cache instead of a
+	// fixed-output wheel fetch.
+	GPU bool
 }
 
 // StageFn reports build progress. Callers own the numbering so a single run
@@ -56,16 +67,28 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	if stage == nil {
 		stage = func(int, string) {}
 	}
+	// Each step runs until the next one begins; the last until the build
+	// returns.
+	var timeline jobhistory.Timeline
+	endStep := func() {}
+	report := stage
+	stage = func(step int, title string) {
+		endStep()
+		endStep = timeline.Begin(buildStageName(step, title), "local")
+		report(step, title)
+	}
 	projectRoot := findProjectRoot(filepath.Dir(absScriptPath))
 
 	stage(1, "Detecting imports...")
 	importScan := pythondeps.ExtractImportScan(absScriptPath)
 
 	var imports []string
+	fromLock := false
 	uvLockPath := filepath.Join(projectRoot, "uv.lock")
 	if uvPkgs, err := pythondeps.ParseUVLock(uvLockPath); err == nil {
 		fmt.Printf("      Found uv.lock in project root\n")
 		imports = uvPkgs
+		fromLock = true
 	} else {
 		imports = importScan.ExternalDeps
 		if len(imports) > 0 {
@@ -77,19 +100,40 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	}
 
 	stage(2, "Parsing dependencies...")
-	nixPkgs := pythondeps.ResolvePackages(imports, opts.Pkgs)
+	if pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)) != "" {
+		fmt.Printf("      Using requirements.txt beside the script (as if passed with --pkg)\n")
+	}
+	nixPkgs, unknown := PlanPackages(absScriptPath, imports, opts.Pkgs, fromLock)
+	if len(unknown) > 0 {
+		found, missing, err := pythondeps.SplitByExistence(unknown, ProbePythonPackages)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
+		}
+		for _, f := range found {
+			fmt.Printf("      Not in the built-in table, but nixpkgs has python3Packages.%s: using it\n", f)
+			if !slices.Contains(nixPkgs, f) {
+				nixPkgs = append(nixPkgs, f)
+			}
+		}
+		if len(missing) > 0 {
+			fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
+				strings.Join(missing, ", "))
+		}
+	}
 	for _, pkg := range nixPkgs {
 		fmt.Printf("      Using Nix package: %s\n", pkg)
 	}
 
-	tmpDir, err := os.MkdirTemp("", "pipedpeer-*")
+	// On disk, not in RAM: the exported closure is written here and a torch
+	// closure is several gigabytes.
+	tmpDir, err := userdir.Scratch("build-*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temp dir: %v", err)
 	}
 	env := &Environment{ProjectRoot: projectRoot, tmpDir: tmpDir}
 
 	stage(3, "Generating flake.nix...")
-	env.FlakeContent = nixgen.GenerateFlake(nixPkgs, opts.PythonVersion)
+	env.FlakeContent = nixgen.GenerateFlake(nixPkgs, opts.PythonVersion, opts.GPU)
 	flakePath := filepath.Join(tmpDir, "flake.nix")
 	if err := os.WriteFile(flakePath, []byte(env.FlakeContent), 0644); err != nil {
 		env.Close()
@@ -99,8 +143,13 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 
 	stage(4, "Building locally...")
 	nixSystem := nixgen.NixArch()
-	cmd := exec.Command("nix", "build", ".#packages."+nixSystem+".default", "--option", "build-users-group", "")
-	cmd.Dir = tmpDir
+	cmd, cleanup, err := nixstore.Cmd(tmpDir, "nix", "build", flakeRef(nixSystem),
+		"--option", "build-users-group", "")
+	if err != nil {
+		env.Close()
+		return nil, err
+	}
+	defer cleanup()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -138,7 +187,100 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 		env.ScriptRel = filepath.Base(absScriptPath)
 	}
 
+	endStep()
+	env.Stages = timeline.Stages
 	return env, nil
+}
+
+// PlanPackages turns a script's imports, its --pkg values and its
+// requirements files (the one beside the script included) into nix packages,
+// reading each requirements file once. unknown lists, once each, the names the
+// built-in table does not know: every unmapped requirement name, plus the
+// imports nothing covers unless fromLock (uv.lock names are distributions, not
+// imports, so the import check does not apply). The caller probes nixpkgs for
+// unknown. Used by a run and by `run --check-only`, so both list the same.
+func PlanPackages(absScriptPath string, imports, pkgs []string, fromLock bool) (nix, unknown []string) {
+	if req := pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)); req != "" {
+		pkgs = append(append([]string{}, pkgs...), req)
+	}
+	var plain, reqNames []string
+	read := map[string]bool{}
+	for _, p := range pkgs {
+		if !strings.HasSuffix(p, ".txt") {
+			plain = append(plain, p)
+			continue
+		}
+		key := p
+		if abs, err := filepath.Abs(p); err == nil {
+			key = abs
+		}
+		if read[key] {
+			continue
+		}
+		read[key] = true
+		b, err := os.ReadFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "      warning: cannot read %s: %v\n", p, err)
+			continue
+		}
+		reqNames = append(reqNames, pythondeps.ParseRequirements(string(b))...)
+	}
+	nix = pythondeps.ResolvePackages(imports, plain)
+	addUnknown := func(n string) {
+		if !slices.Contains(unknown, n) {
+			unknown = append(unknown, n)
+		}
+	}
+	for _, n := range reqNames {
+		if m := pythondeps.ResolveNixPackage(n); m == "" {
+			addUnknown(n)
+		} else if !slices.Contains(nix, m) {
+			nix = append(nix, m)
+		}
+	}
+	if !fromLock {
+		for _, imp := range unpackaged(imports, append(plain, reqNames...)) {
+			addUnknown(imp)
+		}
+	}
+	return nix, unknown
+}
+
+// unpackaged lists imports with no nix package, leaving out any the user
+// named with --pkg or a requirements file (python3Packages.tqdm covers
+// "tqdm", the requirement "foo-bar" covers "foo_bar").
+func unpackaged(imports, pkgs []string) []string {
+	norm := strings.NewReplacer("_", "-").Replace
+	var out []string
+	for _, imp := range pythondeps.UnresolvedImports(imports) {
+		covered := false
+		for _, p := range pkgs {
+			if strings.EqualFold(norm(p[strings.LastIndex(p, ".")+1:]), norm(imp)) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, imp)
+		}
+	}
+	return out
+}
+
+// buildStageNames are the timeline's names for BuildEnvironment's steps.
+var buildStageNames = map[int]string{
+	1: "detect imports",
+	2: "resolve packages",
+	3: "generate flake",
+	4: "nix build",
+	5: "export closure",
+}
+
+func buildStageName(step int, title string) string {
+	if n, ok := buildStageNames[step]; ok {
+		return n
+	}
+	return strings.TrimSuffix(strings.ToLower(title), "...")
 }
 
 func findProjectRoot(scriptDir string) string {
@@ -154,4 +296,37 @@ func findProjectRoot(scriptDir string) string {
 			return scriptDir
 		}
 	}
+}
+
+// flakeRef uses the path: type so Nix does not treat the scratch dir as part
+// of an enclosing git tree (e.g. a git-tracked $HOME).
+func flakeRef(system string) string { return "path:.#packages." + system + ".default" }
+
+// ProbePythonPackages asks the pinned nixpkgs, in one nix eval, which of names
+// exist as python3Packages attributes. Names are import names already vetted
+// as [A-Za-z0-9_] by pythondeps, so they are safe inside the expression.
+func ProbePythonPackages(names []string) (map[string]bool, error) {
+	var list strings.Builder
+	for _, n := range names {
+		list.WriteString(`"` + n + `" `)
+	}
+	expr := fmt.Sprintf(`let ps = (builtins.getFlake %q).legacyPackages.%s.python3Packages; in builtins.listToAttrs (map (n: { name = n; value = ps ? ${n}; }) [ %s])`,
+		nixgen.NixpkgsRef, nixgen.NixArch(), list.String())
+	if err := os.MkdirAll(userdir.Cache(), 0o755); err != nil {
+		return nil, err
+	}
+	cmd, cleanup, err := nixstore.Cmd(userdir.Cache(), "nix", "eval", "--json", "--expr", expr)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nix eval: %w", err)
+	}
+	res := map[string]bool{}
+	if err := json.Unmarshal(out, &res); err != nil {
+		return nil, fmt.Errorf("nix eval output: %w", err)
+	}
+	return res, nil
 }

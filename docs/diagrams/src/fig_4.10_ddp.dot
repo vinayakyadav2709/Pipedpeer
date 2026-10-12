@@ -1,26 +1,25 @@
-// Figure 4.10 - Data parallel training: gradients meet on the daemon port.
-// The explanatory note lives in the caption, not the canvas: as a free-floating
-// node it forced the graph a quarter wider and shrank every label.
+// Figure 4.10 - Data parallel training: gradients meet on the daemon port and
+// the daemon reduces them. The explanatory note lives in the caption.
 digraph DDP {
   rankdir=TB; bgcolor="white"; nodesep=0.55; ranksep=0.60;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
   edge [fontname="Helvetica", fontsize=14, color="#555555"];
 
-  r0 [label="Rank 0\nits own data shard"];
-  r1 [label="Rank 1\nits own data shard"];
-  r2 [label="Rank 2\nits own data shard"];
+  r0 [label="Rank 0\nshard and batch\nsized by its share"];
+  r1 [label="Rank 1\nshard and batch\nsized by its share"];
+  r2 [label="Rank 2\nshard and batch\nsized by its share"];
 
-  board [label="Lead node daemon, on the ordinary daemon port\nholds one gradient blob per rank and releases\nthe whole set once every rank has arrived",
+  board [label="Lead node daemon, on the ordinary daemon port\nsums gradients in float64, weighted by samples:\nsum(n_i g_i) / sum(n_i)\ncompletes without a straggler after 45 s",
          fillcolor="#fdf6e3", color="#8a6d1f", penwidth=1.5];
 
-  avg [label="Every rank averages the set it receives\nand steps its own optimiser, so the weights\nstay identical across ranks",
+  avg [label="One averaged gradient back to every rank\nevery 20 syncs: refit the shares,\nor drop a rank that costs more sync than it adds",
        fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
-  r0 -> board [label="  gradients  "];
-  r1 -> board [label="  gradients  "];
-  r2 -> board [label="  gradients  "];
-  board -> avg [label="  the full set, once all ranks are in  ", penwidth=1.5];
+  r0 -> board [label="  gradients, fp16  "];
+  r1 -> board [label="  gradients, fp16  "];
+  r2 -> board [label="  gradients, fp16  "];
+  board -> avg [label="  one model, not the whole ring  ", penwidth=1.5];
 
   { rank=same; r0; r1; r2; }
 }

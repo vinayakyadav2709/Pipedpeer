@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipedpeer cluster</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ef;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.10);
+  --here: #2a78d6;      /* series 1: this machine */
+  --there: #eb6834;     /* series 2: another node */
+  --good: #0ca30c;
+  --warn: #fab219;
+  --crit: #d03b3b;
+  --accent-wash: rgba(42, 120, 214, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10);
+    --here: #3987e5;
+    --there: #d95926;
+    --accent-wash: rgba(57, 135, 229, 0.12);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --ring: rgba(255, 255, 255, 0.10);
+  --here: #3987e5;
+  --there: #d95926;
+  --accent-wash: rgba(57, 135, 229, 0.12);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+header h1 { font-size: 18px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+header .sub { color: var(--muted); font-size: 13px; }
+header .spacer { flex: 1; }
+.live { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; }
+.live i { width: 8px; height: 8px; border-radius: 50%; background: var(--good); display: inline-block; }
+.live.stale i { background: var(--warn); }
+.live.down i { background: var(--crit); }
+button, .btn {
+  font: inherit; font-size: 13px; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--ring); border-radius: 8px; padding: 5px 10px; cursor: pointer;
+}
+button:hover { background: var(--surface-2); }
+button:focus-visible, tr:focus-visible, input:focus-visible { outline: 2px solid var(--here); outline-offset: 2px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
+.tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 12px 14px; }
+.tile .k { color: var(--ink-2); font-size: 12px; }
+.tile .v { font-size: 26px; font-weight: 650; margin-top: 2px; letter-spacing: -0.02em; }
+.tile .v small { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+
+.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; margin-bottom: 18px; }
+.card > h2 { font-size: 14px; font-weight: 650; margin: 0; padding: 12px 14px 0; }
+.card > .note { color: var(--muted); font-size: 12px; padding: 2px 14px 0; margin: 0; }
+.scroll { overflow-x: auto; padding: 6px 4px 8px; }
+
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 10px; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+td { padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; }
+td .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-2); }
+tbody.clickable tr { cursor: pointer; }
+tbody.clickable tr:hover { background: var(--surface-2); }
+tbody.clickable tr.sel { background: var(--accent-wash); }
+.dim { color: var(--muted); }
+
+.status { display: inline-flex; align-items: center; gap: 6px; }
+.status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.status.good::before { background: var(--good); }
+.status.warn::before { background: var(--warn); }
+.status.crit::before { background: var(--crit); }
+
+.meter { display: inline-flex; align-items: center; gap: 8px; }
+.meter .track { width: 80px; height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 3px; background: var(--here); }
+
+.split { display: flex; height: 8px; width: 120px; gap: 2px; }
+.split span { border-radius: 2px; min-width: 0; }
+
+.detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.detail .pane { padding: 4px 14px 14px; }
+.detail h3 { font-size: 13px; font-weight: 650; margin: 14px 0 8px; }
+.empty { color: var(--muted); padding: 18px 14px; }
+
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+.gantt { position: relative; }
+.gantt .row { display: grid; grid-template-columns: 150px 80px minmax(0, 1fr) 64px; align-items: center; gap: 8px; height: 26px; }
+.gantt .name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gantt .where { color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; }
+.gantt .lane { position: relative; height: 26px; border-left: 1px solid var(--axis); }
+.gantt .lane .gl { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--grid); }
+.gantt .bar { position: absolute; top: 7px; height: 12px; border-radius: 0 4px 4px 0; min-width: 2px; }
+.gantt .bar.hit::after { content: ""; position: absolute; inset: -7px -4px; }
+.gantt .dur { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.gantt .axis { display: grid; grid-template-columns: 150px 80px minmax(0, 1fr) 64px; gap: 8px; height: 18px; }
+.gantt .axis .ticks { position: relative; color: var(--muted); font-size: 11px; }
+.gantt .axis .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.gantt .total { margin-top: 6px; color: var(--ink-2); font-size: 13px; }
+
+.hbar { display: grid; grid-template-columns: 170px minmax(0, 1fr) 56px; gap: 8px; align-items: center; height: 24px; }
+.hbar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-2); }
+.hbar .track { height: 10px; position: relative; }
+.hbar .track span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; background: var(--there); min-width: 2px; }
+.hbar .n { text-align: right; font-variant-numeric: tabular-nums; }
+
+.big-split { display: flex; height: 14px; gap: 2px; margin: 4px 0 6px; }
+.big-split span { border-radius: 3px; }
+.headline { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+.headline small { font-size: 13px; font-weight: 500; color: var(--ink-2); margin-left: 6px; }
+
+.tag { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--ring); color: var(--ink-2); }
+.tag.ship::before { content: "↗"; color: var(--there); font-weight: 700; }
+.tag.keep::before { content: "●"; color: var(--here); font-size: 9px; }
+.why { color: var(--ink-2); white-space: normal; }
+
+#tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--ring);
+  border-radius: 8px; padding: 7px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+  max-width: 280px;
+}
+#tip b { font-weight: 650; }
+#tip .m { color: var(--ink-2); }
+
+.auth { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 16px; margin-bottom: 18px; display: none; }
+.auth input { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--axis); background: var(--page); color: var(--ink); width: min(420px, 100%); }
+.auth p { margin: 0 0 10px; color: var(--ink-2); }
+
+@media (max-width: 640px) {
+  /* The where-cell stays in the grid, only hidden: removing it shifted every
+     cell left and put the bars in the zero-width column. */
+  .gantt .row, .gantt .axis { grid-template-columns: 96px 0 minmax(0, 1fr) 52px; column-gap: 6px; }
+  .gantt .where { visibility: hidden; }
+  .hbar { grid-template-columns: 110px minmax(0, 1fr) 44px; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .meter .fill, .gantt .bar, .hbar .track span { transition: width .3s ease, left .3s ease; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Pipedpeer</h1>
+    <span class="sub" id="where"></span>
+    <span class="spacer"></span>
+    <span class="live" id="live"><i></i><span id="liveText">connecting…</span></span>
+    <button id="pause" type="button" aria-pressed="false">Pause</button>
+    <button id="theme" type="button" title="Switch light / dark">Theme</button>
+  </header>
+
+  <div class="auth" id="auth">
+    <p>This cluster has a shared secret. Paste it to view the page — it stays in this browser only.<br>
+       <span class="dim">Show it on a cluster machine with <code>pipedpeer auth show</code>.</span></p>
+    <form id="authForm"><input id="token" type="password" autocomplete="off" placeholder="cluster secret" aria-label="cluster secret">
+      <button type="submit">Use</button></form>
+  </div>
+
+  <section class="tiles" id="tiles" aria-label="Cluster summary"></section>
+
+  <section class="card" aria-labelledby="nodesH">
+    <h2 id="nodesH">Nodes</h2>
+    <p class="note">Pool counters are since each daemon started.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Node</th><th>Host</th><th>State</th><th class="num">Cores</th><th>CPU</th>
+          <th class="num">Free memory</th><th class="num">Tasks</th>
+          <th class="num">Items run</th><th class="num">From peers</th><th class="num">Sent to peers</th><th class="num">Failed</th>
+        </tr></thead>
+        <tbody id="nodes"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="runsH">
+    <h2 id="runsH">Recent runs from this machine</h2>
+    <p class="note">Select a run to see where its time went, where its work ran, and why that node.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Started</th><th>Script</th><th>Status</th><th>Node</th><th class="num">Total</th><th>Slowest stage</th><th>Distributed</th>
+        </tr></thead>
+        <tbody id="runs" class="clickable"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="detailH" id="detailCard">
+    <h2 id="detailH">Run</h2>
+    <div class="detail" id="detail"><div class="empty">No run selected.</div></div>
+  </section>
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script>
+"use strict";
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const store = {
+    // Private windows and full quotas refuse storage: the page still works,
+    // it just asks for the token again next time.
+    get(k) { try { return localStorage.getItem(k); } catch (e) { console.warn("pipedpeer: cannot read " + k + " from localStorage", e); return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch (e) { console.warn("pipedpeer: cannot save " + k + " to localStorage", e); } },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { console.warn("pipedpeer: cannot remove " + k + " from localStorage", e); } },
+  };
+
+  // ---- formatting ----
+  const fmtMs = (ms) => {
+    if (ms == null) return "–";
+    if (ms < 1000) return Math.round(ms) + " ms";
+    if (ms < 60000) return (ms / 1000).toFixed(1) + " s";
+    const m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
+    return m + "m " + String(s).padStart(2, "0") + "s";
+  };
+  const fmtBytes = (b) => {
+    if (!b || b <= 0) return "–";
+    const u = ["B", "KiB", "MiB", "GiB", "TiB"]; let i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return (b >= 10 || i === 0 ? Math.round(b) : b.toFixed(1)) + " " + u[i];
+  };
+  const ago = (iso) => {
+    const t = Date.parse(iso); if (!t) return "–";
+    const s = Math.max(0, (Date.now() - t) / 1000);
+    if (s < 60) return Math.round(s) + "s ago";
+    if (s < 3600) return Math.round(s / 60) + "m ago";
+    if (s < 86400) return Math.round(s / 3600) + "h ago";
+    return new Date(t).toLocaleDateString();
+  };
+  const short = (id) => String(id || "").slice(0, 8);
+  const stateClass = (st) => st === "healthy" ? "good" : (st === "stale" || st === "unknown") ? "warn" : "crit";
+  const statusClass = (st) => st === "succeeded" ? "good" : st === "running" ? "warn" : st === "failed" ? "crit" : "";
+
+  // ---- tooltip ----
+  const tip = $("tip");
+  document.addEventListener("pointermove", (e) => {
+    const el = e.target.closest("[data-tip]");
+    if (!el) { tip.style.display = "none"; return; }
+    tip.innerHTML = el.getAttribute("data-tip");
+    tip.style.display = "block";
+    const w = tip.offsetWidth, h = tip.offsetHeight;
+    let x = e.clientX + 14, y = e.clientY + 14;
+    if (x + w > innerWidth - 8) x = e.clientX - w - 14;
+    if (y + h > innerHeight - 8) y = e.clientY - h - 14;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  });
+  document.addEventListener("pointerleave", () => { tip.style.display = "none"; });
+
+  // ---- theme ----
+  const applyTheme = (t) => { if (t) document.documentElement.setAttribute("data-theme", t); else document.documentElement.removeAttribute("data-theme"); };
+  applyTheme(store.get("pp-theme"));
+  $("theme").addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme")
+      || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    const next = cur === "dark" ? "light" : "dark";
+    store.set("pp-theme", next); applyTheme(next);
+  });
+
+  // ---- state ----
+  const fromHash = () => (location.hash.match(/^#run=([\w-]+)/) || [])[1];
+  let snap = null, selected = fromHash() || store.get("pp-run"), paused = false, lastOk = 0, timer = null;
+  addEventListener("hashchange", () => { const id = fromHash(); if (id) { selected = id; render(); } });
+  $("where").textContent = location.host;
+
+  $("pause").addEventListener("click", () => {
+    paused = !paused;
+    $("pause").textContent = paused ? "Resume" : "Pause";
+    $("pause").setAttribute("aria-pressed", String(paused));
+    if (!paused) poll();
+  });
+  $("authForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = $("token").value.trim();
+    if (v) { store.set("pp-token", v); $("auth").style.display = "none"; poll(); }
+  });
+
+  async function poll() {
+    clearTimeout(timer);
+    if (paused) return;
+    if (document.hidden) { timer = setTimeout(poll, 2000); return; }
+    const headers = {};
+    const tok = store.get("pp-token");
+    if (tok) headers["X-Pipedpeer-Token"] = tok;
+    try {
+      const r = await fetch("/v1/stats", { headers, cache: "no-store" });
+      if (r.status === 401) {
+        store.del("pp-token");
+        $("auth").style.display = "block";
+        setLive("down", "secret required");
+        return; // resumes when the form is submitted
+      }
+      if (!r.ok) throw new Error(r.status + " " + r.statusText);
+      snap = await r.json();
+      lastOk = Date.now();
+      setLive("", "live · updated " + new Date().toLocaleTimeString());
+      render();
+    } catch (err) {
+      console.warn("pipedpeer: /v1/stats poll failed", err);
+      setLive(lastOk && Date.now() - lastOk < 10000 ? "stale" : "down", "cannot reach the daemon");
+    }
+    timer = setTimeout(poll, 2000);
+  }
+  function setLive(cls, text) { $("live").className = "live " + cls; $("liveText").textContent = text; }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden && !paused) poll(); });
+
+  // ---- render ----
+  function render() {
+    if (!snap) return;
+    renderTiles(); renderNodes(); renderRuns(); renderDetail();
+  }
+
+  function renderTiles() {
+    const nodes = snap.nodes || [];
+    let healthy = 0, cores = 0, mem = 0, tasks = 0, gpus = 0;
+    for (const n of nodes) {
+      tasks += (n.leases || []).length;
+      if (n.state !== "healthy") continue;
+      healthy++;
+      cores += parseInt(n.capabilities?.cpu_cores || "0", 10) || 0;
+      mem += n.load?.available_mem_bytes || 0;
+      if (n.capabilities?.gpu_name) gpus++;
+    }
+    const tile = (k, v, s) => `<div class="tile"><div class="k">${esc(k)}</div><div class="v">${v}${s ? `<small>${esc(s)}</small>` : ""}</div></div>`;
+    $("tiles").innerHTML =
+      tile("Nodes healthy", healthy, "of " + nodes.length) +
+      tile("Cores", cores) +
+      tile("Free memory", esc(fmtBytes(mem))) +
+      tile("GPU nodes", gpus) +
+      tile("Tasks running", tasks);
+  }
+
+  function renderNodes() {
+    const rows = (snap.nodes || []).map((n) => {
+      const cpu = Math.max(0, Math.min(100, n.load?.cpu_percent || 0));
+      const p = n.pool;
+      const self = n.source === "self";
+      const reason = n.capabilities?.unreachable_reason;
+      const state = `<span class="status ${stateClass(n.state)}"${reason ? ` data-tip="<b>No direct path</b><br><span class='m'>${esc(esc(reason))}</span>"` : ""}>${esc(n.state)}${self ? " · this machine" : ""}</span>`;
+      const poolCells = p
+        ? `<td class="num">${p.items_executed_here}</td><td class="num">${p.chunks_from_peers}</td><td class="num">${p.parts_sent_to_peers}</td><td class="num">${p.parts_failed}</td>`
+        : `<td class="num dim" colspan="4">${n.state === "healthy" ? "did not answer" : "–"}</td>`;
+      return `<tr>
+        <td><span class="id">${esc(short(n.node_id))}</span></td>
+        <td>${esc(n.hostname || n.host)}</td>
+        <td>${state}</td>
+        <td class="num">${esc(n.capabilities?.cpu_cores || "–")}</td>
+        <td><span class="meter" data-tip="<b>${esc(esc(n.hostname || n.host))}</b><br><span class='m'>CPU ${cpu.toFixed(0)}% · memory ${(n.load?.memory_percent || 0).toFixed(0)}%</span>"><span class="track"><span class="fill" style="width:${cpu}%"></span></span>${cpu.toFixed(0)}%</span></td>
+        <td class="num">${esc(fmtBytes(n.load?.available_mem_bytes))}</td>
+        <td class="num">${(n.leases || []).length}</td>
+        ${poolCells}
+      </tr>`;
+    });
+    $("nodes").innerHTML = rows.join("") || `<tr><td colspan="11" class="dim">No nodes known yet.</td></tr>`;
+  }
+
+  const slowest = (stages) => (stages || []).reduce((a, s) => (!a || s.ms > a.ms ? s : a), null);
+  const receiptCounts = (rc) => {
+    if (!rc) return null;
+    const total = rc.mapped_items > 0 ? rc.mapped_items : (rc.remote_items + rc.local_items); // unshippable items ran here and are in local_items
+    const elsewhere = rc.mapped_items > 0 ? Math.min(rc.remote_used, rc.mapped_items) : rc.remote_items;
+    return total > 0 ? { total, elsewhere, here: total - elsewhere } : null;
+  };
+
+  function renderRuns() {
+    const jobs = snap.jobs || [];
+    if (!selected && jobs.length) selected = jobs[0].id;
+    const rows = jobs.map((j) => {
+      const sl = slowest(j.stages);
+      const c = receiptCounts(j.receipt);
+      const dist = c
+        ? `<span class="meter" data-tip="<b>${c.elsewhere} of ${c.total}</b> items ran on other machines"><span class="split">
+             <span style="flex:${c.elsewhere};background:var(--there)"></span><span style="flex:${c.here};background:var(--here)"></span>
+           </span>${c.elsewhere}/${c.total}</span>`
+        : `<span class="dim">–</span>`;
+      const node = j.target_id ? short(j.target_id) : (j.run_host || "–");
+      return `<tr tabindex="0" data-id="${esc(j.id)}" class="${j.id === selected ? "sel" : ""}" aria-selected="${j.id === selected}">
+        <td>${esc(ago(j.started_at))}</td>
+        <td>${esc(j.script)}</td>
+        <td><span class="status ${statusClass(j.status)}">${esc(j.status)}${j.status === "running" && j.stage ? " · " + esc(j.stage) : ""}</span></td>
+        <td><span class="id">${esc(node)}</span></td>
+        <td class="num">${esc(fmtMs(j.total_ms))}</td>
+        <td>${sl ? esc(sl.name) + ` <span class="dim">${esc(fmtMs(sl.ms))}</span>` : "–"}</td>
+        <td>${dist}</td>
+      </tr>`;
+    });
+    $("runs").innerHTML = rows.join("") || `<tr><td colspan="7" class="dim">No runs yet. Start one with <code>pipedpeer run script.py</code>.</td></tr>`;
+  }
+  const pick = (tr) => {
+    if (!tr) return;
+    selected = tr.dataset.id; store.set("pp-run", selected);
+    history.replaceState(null, "", "#run=" + selected);
+    renderRuns(); renderDetail();
+  };
+  $("runs").addEventListener("click", (e) => pick(e.target.closest("tr[data-id]")));
+  $("runs").addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(e.target.closest("tr[data-id]")); } });
+
+  function renderDetail() {
+    const j = (snap.jobs || []).find((x) => x.id === selected);
+    if (!j) { $("detail").innerHTML = `<div class="empty">No run selected.</div>`; $("detailH").textContent = "Run"; return; }
+    $("detailH").innerHTML = `Run <span class="id">${esc(j.id)}</span> · ${esc(j.script)} · <span class="status ${statusClass(j.status)}">${esc(j.status)}</span>`;
+    $("detail").innerHTML = `<div class="pane">${timelineHTML(j)}${receiptHTML(j)}${placementHTML(j)}</div>`;
+  }
+
+  function niceStep(span) {
+    const raw = span / 5, p = Math.pow(10, Math.floor(Math.log10(raw)));
+    for (const m of [1, 2, 5, 10]) if (raw <= m * p) return m * p;
+    return 10 * p;
+  }
+
+  function timelineHTML(j) {
+    const st = (j.stages || []).map((s) => ({ ...s, t: Date.parse(s.at) })).filter((s) => !isNaN(s.t));
+    if (!st.length) return `<h3>Where the time went</h3><p class="dim">No timeline recorded for this run.</p>`;
+    const t0 = Math.min(...st.map((s) => s.t));
+    const t1 = Math.max(...st.map((s) => s.t + s.ms));
+    const span = Math.max(t1 - t0, 1);
+    const step = niceStep(span);
+    const ticks = [];
+    for (let v = 0; v <= span + 1e-6; v += step) ticks.push(v);
+    const grid = ticks.map((v) => `<span class="gl" style="left:${(v / span) * 100}%"></span>`).join("");
+    const rows = st.map((s) => {
+      const local = s.where === "local";
+      const left = ((s.t - t0) / span) * 100, width = (s.ms / span) * 100;
+      const tipHTML = `<b>${esc(s.name)}</b><br><span class='m'>${local ? "this machine" : "node " + esc(s.where)}<br>starts +${esc(fmtMs(s.t - t0))} · takes ${esc(fmtMs(s.ms))}</span>`;
+      return `<div class="row">
+        <div class="name">${esc(s.name)}</div>
+        <div class="where">${esc(local ? "local" : s.where)}</div>
+        <div class="lane">${grid}<span class="bar hit" style="left:${left}%;width:${width}%;background:var(${local ? "--here" : "--there"})" data-tip="${esc(tipHTML)}"></span></div>
+        <div class="dur">${esc(fmtMs(s.ms))}</div>
+      </div>`;
+    }).join("");
+    const axis = `<div class="axis"><div></div><div></div><div class="ticks">${ticks.map((v) => `<span style="left:${(v / span) * 100}%">${esc(fmtMs(v))}</span>`).join("")}</div><div></div></div>`;
+    const sl = slowest(j.stages);
+    return `<h3>Where the time went</h3>
+      <div class="legend"><span><i style="background:var(--here)"></i>this machine</span><span><i style="background:var(--there)"></i>the node that ran it</span></div>
+      <div class="gantt" role="img" aria-label="Timeline of ${st.length} stages totalling ${esc(fmtMs(span))}">${rows}${axis}</div>
+      <div class="total">Total <b>${esc(fmtMs(span))}</b>${sl ? ` · slowest stage: <b>${esc(sl.name)}</b> (${esc(fmtMs(sl.ms))}, ${Math.round((sl.ms / span) * 100)}%)` : ""}</div>`;
+  }
+
+  function receiptHTML(j) {
+    const rc = j.receipt;
+    if (!rc) return `<h3>Where the work ran</h3><p class="dim">No receipt: the run was not intercepted, or it ran before receipts were kept.</p>`;
+    const c = receiptCounts(rc);
+    let html = `<h3>Where the work ran</h3>`;
+    if (!c && !(rc.decisions || []).length) return html + `<p class="dim">The shim intercepted nothing: no pool, joblib, numpy or pandas call was big enough to consider.</p>`;
+    if (c) {
+      const raced = rc.mapped_items > 0 ? Math.max(0, rc.remote_items + rc.local_items - rc.mapped_items) : 0;
+      html += `<div class="headline">${c.elsewhere} of ${c.total} items<small>ran on other machines (${Math.round((c.elsewhere / c.total) * 100)}%)</small></div>
+        <div class="big-split" role="img" aria-label="${c.elsewhere} on other machines, ${c.here} on the running node">
+          <span style="flex:${c.elsewhere};background:var(--there)" data-tip="<b>${c.elsewhere}</b> on other machines"></span>
+          <span style="flex:${c.here};background:var(--here)" data-tip="<b>${c.here}</b> on the running node"></span>
+        </div>
+        <div class="legend"><span><i style="background:var(--there)"></i>other machines ${c.elsewhere}</span><span><i style="background:var(--here)"></i>the running node ${c.here}</span>${raced ? `<span class="dim">${raced} computed on both (local cores raced slow remote chunks)</span>` : ""}</div>`;
+    }
+    const peers = {};
+    for (const p of rc.parts || []) for (const [k, v] of Object.entries(p.peers || {})) peers[k] = (peers[k] || 0) + v;
+    const names = Object.keys(peers).sort((a, b) => peers[b] - peers[a]);
+    if (names.length) {
+      const max = peers[names[0]];
+      html += `<h3>Items per peer</h3>` + names.map((n) =>
+        `<div class="hbar"><div class="label" title="${esc(n)}">${esc(n)}</div>
+           <div class="track"><span style="width:${(peers[n] / max) * 100}%" data-tip="<b>${esc(esc(n))}</b><br><span class='m'>${peers[n]} items run there</span>"></span></div>
+           <div class="n">${peers[n]}</div></div>`).join("");
+    }
+    const ds = rc.decisions || [];
+    if (ds.length) {
+      html += `<h3>Cost model decisions</h3><div class="scroll"><table><thead><tr><th>Decision</th><th>Operation</th><th>Why</th><th class="num">Size</th></tr></thead><tbody>` +
+        ds.map((d) => `<tr><td><span class="tag ${d.shipped ? "ship" : "keep"}">${d.shipped ? "shipped" : "kept local"}</span></td>
+          <td>${esc(d.op)}</td><td class="why">${esc(d.why)}</td><td class="num">${d.mb ? esc(d.mb.toFixed(0)) + " MB" : "–"}</td></tr>`).join("") +
+        `</tbody></table></div>` + (rc.decisions_dropped ? `<p class="dim">…and ${rc.decisions_dropped} more not recorded.</p>` : "");
+    }
+    if (rc.remote_failures) html += `<p><span class="status warn">${rc.remote_failures} dispatch(es) failed and were redone locally</span></p>`;
+    return html;
+  }
+
+  function placementHTML(j) {
+    const cs = j.candidates || [];
+    if (!cs.length) {
+      const why = (!j.placement_source || j.placement_source === "self")
+        ? "Ran on this machine: no placement was made. Pool work could still spill to peers, as shown above."
+        : j.placement_source === "explicit"
+          ? "The node was given with --host, so nothing was chosen."
+          : "No candidate list was recorded for this run.";
+      return `<h3>Why this node</h3><p class="dim">${esc(why)}</p>`;
+    }
+    const rows = [...cs].sort((a, b) => (b.chosen - a.chosen) || ((a.rejected ? 1 : 0) - (b.rejected ? 1 : 0)) || ((b.score || 0) - (a.score || 0)));
+    return `<h3>Why this node</h3>
+      <p class="dim">${cs.length} node(s) considered, ${cs.filter((c) => !c.rejected).length} eligible. ${j.placement_reason ? "Chosen: " + esc(j.placement_reason) + "." : ""}
+      The score is mostly headroom (idle CPU and memory, fewer running jobs), then capability (cores, clock, free memory), times health.</p>
+      <div class="scroll"><table><thead><tr><th></th><th>Node</th><th>Host</th><th class="num">Score</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">Jobs</th><th class="num">Free cores</th><th class="num">Free memory</th><th>Note</th></tr></thead><tbody>` +
+      rows.map((c) => `<tr>
+        <td>${c.chosen ? "→" : ""}</td>
+        <td><span class="id">${esc(short(c.node_id))}</span></td>
+        <td>${esc(c.host)}</td>
+        <td class="num">${c.rejected ? "–" : (c.score || 0).toFixed(3)}</td>
+        <td class="num">${(c.cpu_percent || 0).toFixed(0)}%</td>
+        <td class="num">${(c.mem_percent || 0).toFixed(0)}%</td>
+        <td class="num">${c.active_jobs || 0}</td>
+        <td class="num">${c.cores ? (c.free_cores || 0).toFixed(1) + " / " + c.cores : "–"}</td>
+        <td class="num">${esc(fmtBytes(c.avail_mem_bytes))}</td>
+        <td>${c.chosen ? `<span class="status good">chosen</span>` : c.rejected ? `<span class="status crit">rejected: ${esc(c.reason)}</span>` : ""}</td>
+      </tr>`).join("") + `</tbody></table></div>`;
+  }
+
+  setInterval(() => { if (snap) renderRuns(); }, 15000); // keep "x ago" fresh while paused
+  poll();
+})();
+</script>
+</body>
+</html>
