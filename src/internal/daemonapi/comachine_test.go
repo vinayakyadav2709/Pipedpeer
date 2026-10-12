@@ -316,8 +316,10 @@ func TestReservationsCountAgainstTheBudgetToo(t *testing.T) {
 	}
 	s.mu.Unlock()
 
+	// Both readings sample live host memory, which moves by a few pages
+	// between them; the bug this guards leaves the whole chunk on offer.
 	after := s.AvailableForJob()
-	if after > before-chunk {
+	if after > before-chunk+chunk/10 {
 		t.Errorf("after promising %d bytes the daemon still offers %d of its "+
 			"original %d; a promise it has already made must come off both "+
 			"readings, or it makes the same promise twice", chunk, after, before)
