@@ -85,6 +85,8 @@ func main() {
 		runDaemon(os.Args[2:])
 		return
 	}
+	// Everything below is the CLI: human log lines, not the daemon's JSON.
+	logging.SetupCLI()
 
 	rootCmd := &cobra.Command{
 		// A command that fails at run time should say why, not print its

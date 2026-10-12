@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 // Logger is the shared application-wide logger.
@@ -46,6 +47,15 @@ func isTerminal(f *os.File) bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// SetupCLI points the global zerolog logger (github.com/rs/zerolog/log, which
+// most internal packages write to) at the console writer. Its default is raw
+// JSON on stderr, which is right for daemon.log but showed up as JSON blobs in
+// the CLI's own output (a lost connection, attach). Call it in every process
+// except the daemon.
+func SetupCLI() {
+	log.Logger = Logger
 }
 
 // SetupJSON switches to JSON-structured logging (for production/daemon mode).
