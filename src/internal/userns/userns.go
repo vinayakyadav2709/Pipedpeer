@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package userns answers one question: may this unprivileged process create a
 // user namespace?
 //
