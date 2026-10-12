@@ -1290,6 +1290,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/pool/stats", s.handlePoolStats)
 	r.Get("/v1/bench", s.handleBench)
 	r.Post("/v1/ddp/sync", s.handleDDPSync)
+	r.Get("/v1/ddp/sync", s.handleDDPSyncStatus)
 	r.Post("/v1/ddp/down", s.handleDDPDown)
 	r.Post("/v1/ddp/join", s.handleDDPJoin)
 	r.Post("/v1/ddp/snapshot", s.handleDDPSnapshotPut)

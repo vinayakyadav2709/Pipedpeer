@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
@@ -45,6 +46,15 @@ func ddpHostName(n registry.NodeRecord) string {
 		return h
 	}
 	return shortID(n.NodeID)
+}
+
+// ddpHostList is the ring's machine names, by rank, comma-separated.
+func ddpHostList(ring []registry.NodeRecord) string {
+	names := make([]string, len(ring))
+	for i, n := range ring {
+		names[i] = strings.ReplaceAll(ddpHostName(n), ",", " ")
+	}
+	return strings.Join(names, ",")
 }
 
 // ddpAwaitRanks waits for every rank, including ranks started mid-run

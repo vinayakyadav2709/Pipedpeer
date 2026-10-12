@@ -679,6 +679,31 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"blobs": asStrings})
 }
 
+// handleDDPSyncStatus says which ranks have reached a round, so a rank held
+// at the start barrier can say whom it is waiting for.
+func (s *Server) handleDDPSyncStatus(w http.ResponseWriter, r *http.Request) {
+	seq, err := strconv.ParseInt(r.URL.Query().Get("seq"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "seq: " + err.Error()})
+		return
+	}
+	arrived := []int{}
+	world := 0
+	s.ddp.mu.Lock()
+	if e := s.ddp.entries[r.URL.Query().Get("group")+"/"+jsonInt(seq)]; e != nil {
+		world = e.world
+		for rank := range e.seen {
+			arrived = append(arrived, rank)
+		}
+		for rank := range e.blobs {
+			arrived = append(arrived, rank)
+		}
+	}
+	s.ddp.mu.Unlock()
+	sort.Ints(arrived)
+	writeJSON(w, http.StatusOK, map[string]any{"world": world, "arrived": arrived})
+}
+
 func jsonInt(v int64) string {
 	b, _ := json.Marshal(v)
 	return string(b)
