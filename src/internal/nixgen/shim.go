@@ -3486,6 +3486,14 @@ def _install_ddp():
     # back to every rank receiving every rank's payload - needed only against
     # a daemon too old to average.
     _REDUCE_OK = os.environ.get("PIPEDPEER_DDP_BLACKBOARD", "") != "1"
+    # The start barrier: the opening weight broadcast waits this long (seconds)
+    # for every rank, then the ring starts without the ranks still missing.
+    try:
+        _START_WAIT = max(1.0, float(os.environ.get("PIPEDPEER_DDP_START_WAIT", "") or 300))
+    except ValueError:
+        _log("ddp: PIPEDPEER_DDP_START_WAIT=%r is not a number of seconds; using 300"
+             % os.environ.get("PIPEDPEER_DDP_START_WAIT"))
+        _START_WAIT = 300.0
 
     # Averaging less often than every step trades accuracy for speed, so it
     # is off unless asked for: PIPEDPEER_DDP_SYNC_EVERY=auto.
@@ -3809,14 +3817,17 @@ def _install_ddp():
         import json
         import struct
         import time as _t
+        import urllib.error
         import urllib.request
         flat, shapes, sizes = _pack(arrs)
         flat = _np_ddp.ascontiguousarray(flat.astype(wire_dtype, copy=False))
         _t0 = _t.monotonic()
         _SEQ[0] += 1
+        opening = kind == "weights" and _SEQ[0] == 1
         header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
                              "world": _WORLD, "dtype": wire_dtype.name,
                              "count": int(flat.size), "kind": kind,
+                             "start_wait": _START_WAIT,
                              "sync_every": int(_SYNC_TUNED[0] or 0),
                              "step_ms": _mean_step_ms(),
                              "sync_ms": _mean_sync_ms(),
@@ -3829,8 +3840,21 @@ def _install_ddp():
             headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
         if _TOKEN:
             req.add_header("X-Pipedpeer-Token", _TOKEN)
-        with urllib.request.urlopen(req, timeout=240) as resp:
-            data = resp.read()
+        try:
+            # The opening round is the start barrier and may wait the whole
+            # start wait for a rank whose closure is still arriving.
+            with urllib.request.urlopen(req, timeout=(_START_WAIT + 60 if opening else 240)) as resp:
+                data = resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code != 410 or not opening:
+                raise
+            # Exit status 75 (EX_TEMPFAIL) tells pipedpeer this rank missed the
+            # start rather than failed, so it can be started again as a joiner.
+            _log("ddp: rank %d was not ready when the ring started training, and the "
+                 "ring went on without it; stopping this rank (it can join later)" % _RANK)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(75)
         nl = data.find(b"\n")
         if nl < 0:
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])

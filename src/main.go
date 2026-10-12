@@ -1205,8 +1205,14 @@ func runDDP(o ddpRunOptions) error {
 			errs <- ddpRankResult{rank: i, err: err}
 		}()
 	}
+	// Each starting rank can be stopped on its own: one that missed the start
+	// barrier may still be receiving its closure when the ring has finished.
+	stopRank := make([]context.CancelFunc, len(ranks))
 	for i, n := range ranks {
-		launch(o.Ctx, i, n, false)
+		ctx, cancel := context.WithCancel(o.Ctx)
+		defer cancel()
+		stopRank[i] = cancel
+		launch(ctx, i, n, false)
 	}
 
 	hosts := make([]string, len(ranks))
@@ -1271,11 +1277,11 @@ func runDDP(o ddpRunOptions) error {
 		go g.run(watchCtx)
 	}
 
-	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, added, func(rank int, err error) {
+	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, stopRank, added, func(rank int, err error) {
 		// The script failed, so the run is lost: stop looking for machines
 		// to add (ddpAwaitRanks stops any that slip through). A joiner's
 		// crash is the join failing, as in ddpAwaitRanks.
-		if rank < startRanks && app.IsPermanent(err) {
+		if rank < startRanks && app.IsPermanent(err) && !ddpMissedStart(err) {
 			stopWatch()
 		}
 		// torch's own mesh (gloo/nccl) cannot lose a member; only the
