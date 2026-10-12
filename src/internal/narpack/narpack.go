@@ -253,12 +253,10 @@ func PackSigned(m Manifest, cacheDir string, roots, closure, want []string, w io
 		if !send[p] {
 			continue
 		}
-		nar, err := os.ReadFile(filepath.Join(cacheDir, filepath.FromSlash(ni.URL)))
-		if err != nil {
+		// Streamed, never read whole: one path of a CUDA closure is gigabytes,
+		// and holding it in memory cost the sender that much RAM per path.
+		if err := copyEntry(tw, ni.URL, filepath.Join(cacheDir, filepath.FromSlash(ni.URL))); err != nil {
 			return fmt.Errorf("reading the archive for %s: %w", p, err)
-		}
-		if err := writeEntry(tw, ni.URL, nar); err != nil {
-			return err
 		}
 	}
 	return tw.Close()
@@ -271,6 +269,24 @@ func writeEntry(tw *tar.Writer, name string, body []byte) error {
 		return err
 	}
 	_, err := tw.Write(body)
+	return err
+}
+
+// copyEntry writes the file at src into the archive as name.
+func copyEntry(tw *tar.Writer, name, src string) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: st.Size()}); err != nil {
+		return err
+	}
+	_, err = io.Copy(tw, f)
 	return err
 }
 

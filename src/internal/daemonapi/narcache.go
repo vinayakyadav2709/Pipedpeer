@@ -464,9 +464,13 @@ func (s *Server) importStoreNAR(nar io.Reader, storePath string, partial bool) (
 	// about the archive rather than about the version.
 	br := bufio.NewReaderSize(nar, 1024)
 	if narpack.IsArchive(br) {
+		// The CLI's own upload arrives this way too, so this is the event
+		// line `pipedpeer events` shows for most imports.
+		start := time.Now()
 		if err := s.importSignedClosure(br, storePath); err != nil {
 			return fail(http.StatusInternalServerError, err.Error())
 		}
+		logClosureImported(storePath, start, "signed")
 		return http.StatusOK, map[string]any{"cached": false, "imported": true, "signed": true}
 	}
 
@@ -610,7 +614,7 @@ func (s *Server) materializeClosure(storePath string) error {
 }
 
 // logClosureImported is the "closure imported" event line (how = full |
-// partial) that `pipedpeer events` shows as environment work.
+// partial | signed) that `pipedpeer events` shows as environment work.
 func logClosureImported(storePath string, start time.Time, how string) {
 	log.Info().Str("store", storePath).Float64("secs", time.Since(start).Round(10*time.Millisecond).Seconds()).
 		Str("how", how).Msg("closure imported")

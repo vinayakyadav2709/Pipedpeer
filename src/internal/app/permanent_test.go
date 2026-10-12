@@ -24,6 +24,8 @@ func TestIsPermanent(t *testing.T) {
 		{"killed by signal", fmt.Errorf("execution failed: %w", &daemonctl.RemoteExitError{Code: 137}), false},
 		{"lost connection", errors.New("execution failed: stdout scanner: unexpected EOF"), false},
 		{"upload", errors.New("upload failed: connection refused"), false},
+		{"closure refused", fmt.Errorf("upload failed: %w", &daemonctl.ClosureRefusedError{Reason: "untrusted key"}), true},
+		{"old node refused unsigned import", errors.New("execution failed: remote: nix-store --import: exit status 1: error: cannot add path '/nix/store/x-pip' because it lacks a signature by a trusted key"), true},
 	} {
 		if got := IsPermanent(tc.err); got != tc.want {
 			t.Errorf("%s: IsPermanent = %v, want %v", tc.name, got, tc.want)

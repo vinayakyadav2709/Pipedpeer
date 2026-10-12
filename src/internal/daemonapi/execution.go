@@ -349,12 +349,20 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mkdir: " + err.Error()})
 		return
 	}
+	var storePath, scriptPath, narPath, skipBroadcast, leaseID string
 	fail := func(status int, msg string) {
 		os.RemoveAll(jobDir)
+		// No job will run under this lease: free the slot now. A submitter
+		// killed mid-transfer never sends /v1/complete, and the lease would
+		// otherwise block this node (a GPU node refuses "no GPU available")
+		// until the running-lease TTL.
+		if leaseID != "" {
+			log.Warn().Str("lease", leaseID).Str("error", msg).Msg("upload failed; releasing its lease")
+			s.processComplete(completeRequest{LeaseID: leaseID, Status: "upload failed"})
+		}
 		writeJSON(w, status, map[string]string{"error": msg})
 	}
 
-	var storePath, scriptPath, narPath, skipBroadcast string
 	var haveWorkspace bool
 	uploaded := make(map[string]FileStamp)
 
@@ -374,6 +382,8 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch part.FormName() {
+		case "lease_id":
+			leaseID = readField(part)
 		case "store_path":
 			storePath = readField(part)
 		case "script_path":
@@ -900,7 +910,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		// now nothing did, so one job's runaway allocation was every other
 		// job on the node's problem too.
 		parent, canCap, why := cgroups.Prepare()
-		limit := s.grantableMemory(cfg.MemLimitBytes, jobID)
+		limit := s.grantableMemory(cfg.MemLimitBytes, cfg.LeaseID, jobID)
 		if applyMemLimit(&ociCfg, limit, parent, canCap, jobID) {
 			log.Info().Int64("bytes", limit).Str("job", jobID).
 				Str("cgroup", parent).Msg("job memory capped by cgroup")
@@ -1251,13 +1261,29 @@ var usernsOnce sync.Once
 // admitted, though - admission already decided that much would fit, and a
 // ceiling under it would kill the job on arrival for a shortage that appeared
 // after it was let in.
-func (s *Server) grantableMemory(requested int64, jobID string) int64 {
+//
+// The admitted figure is the lease's reservation. The ceiling is not always
+// twice it: with no estimate, or under the floor, the submitter sends a fixed
+// cap, so halving the request misjudged what admission approved.
+func (s *Server) grantableMemory(requested int64, leaseID, jobID string) int64 {
 	if requested <= 0 {
 		return requested
 	}
-	// The submitter doubles the estimate, so half of what it asked for is the
-	// figure admission approved.
-	admitted := requested / 2
+	var admitted int64
+	if leaseID != "" {
+		s.mu.Lock()
+		if l, ok := s.leases[leaseID]; ok {
+			admitted = l.MemBytes
+		}
+		s.mu.Unlock()
+	}
+	if admitted <= 0 {
+		// No lease to read (a run placed without one) or it reserved no
+		// memory: half the ceiling, the usual doubling, is the best guess.
+		admitted = requested / 2
+		log.Debug().Str("job", jobID).Str("lease", leaseID).Int64("requested", requested).
+			Msg("no lease reservation for this job; taking half its ceiling as admitted")
+	}
 	spare := s.AvailableForJob()
 	if spare >= requested {
 		return requested

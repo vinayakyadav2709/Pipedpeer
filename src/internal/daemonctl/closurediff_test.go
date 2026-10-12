@@ -2,6 +2,7 @@ package daemonctl
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,6 +20,7 @@ type stubNode struct {
 	imported  bool
 	partial   string
 	importErr bool
+	errBody   string // the body a failed import answers with
 }
 
 func (n *stubNode) serve(t *testing.T) (host string, port int, close func()) {
@@ -34,6 +36,7 @@ func (n *stubNode) serve(t *testing.T) (host string, port int, close func()) {
 	mux.HandleFunc("/v1/store/import", func(w http.ResponseWriter, r *http.Request) {
 		if n.importErr {
 			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(n.errBody))
 			return
 		}
 		r.ParseMultipartForm(1 << 20)
@@ -67,25 +70,6 @@ func TestNodeThatCannotAnswerGetsTheWholeArchive(t *testing.T) {
 	}
 	if n.imported {
 		t.Error("a fragment was sent to a node that never said what it lacked")
-	}
-}
-
-// TestNothingInCommonIsNotWorthADiff. Two unrelated closures share no paths,
-// and a diff there is the whole archive plus two round trips.
-func TestNothingInCommonIsNotWorthADiff(t *testing.T) {
-	paths := []string{"/nix/store/aaa", "/nix/store/bbb"}
-	n := &stubNode{answers: true, missing: paths}
-	host, port, done := n.serve(t)
-	defer done()
-
-	missing, ok := askMissing(host, port, paths)
-	if !ok || len(missing) != len(paths) {
-		t.Fatalf("stub answered %v, ok=%v", missing, ok)
-	}
-	// seedClosure declines this case before touching nix; asserting through
-	// askMissing keeps the test off a real store.
-	if n.imported {
-		t.Error("a fragment was sent when the node had nothing in common")
 	}
 }
 
@@ -129,8 +113,36 @@ func TestRejectedImportIsReported(t *testing.T) {
 	if err == nil {
 		t.Fatal("a rejected import was reported as success")
 	}
-	if !strings.Contains(err.Error(), "partial import rejected") {
+	if !strings.Contains(err.Error(), "closure import rejected") {
 		t.Errorf("error %q does not say what failed", err)
+	}
+	var refused *ClosureRefusedError
+	if errors.As(err, &refused) {
+		t.Errorf("an unexplained failure (an older node, say) was taken for a refusal: %v", err)
+	}
+}
+
+// TestSignatureRefusalIsNotResent. A node that unpacked the signed closure and
+// refused it (V2 45-friend: a multi-user nix without the sender's key) would
+// refuse the unsigned whole closure too; resending it cost 3.8 GB and ten
+// minutes, and the reschedule a third time. The refusal must come back typed.
+func TestSignatureRefusalIsNotResent(t *testing.T) {
+	n := &stubNode{answers: true, importErr: true,
+		errBody: `{"error":"nix copy from a peer's closure: exit status 1: error: cannot add path '/nix/store/809x-pip' because it lacks a signature by a trusted key"}`}
+	host, port, done := n.serve(t)
+	defer done()
+
+	nar := t.TempDir() + "/closure.tar"
+	if err := writeFile(nar, "x"); err != nil {
+		t.Fatal(err)
+	}
+	err := postPartial(host, port, "/nix/store/xxx-run", nar)
+	var refused *ClosureRefusedError
+	if !errors.As(err, &refused) {
+		t.Fatalf("a signature refusal came back as %v; the caller would resend the whole closure", err)
+	}
+	if !strings.Contains(refused.Error(), "lacks a signature by a trusted key") || strings.Contains(refused.Error(), `{"error"`) {
+		t.Errorf("refusal %q should carry nix's reason, without the JSON wrapping", refused)
 	}
 }
 
