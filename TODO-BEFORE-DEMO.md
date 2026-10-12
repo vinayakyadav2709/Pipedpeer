@@ -10,6 +10,12 @@ the exact commands and the output to expect:
 [pipedpeer-demo/SETUP.md](pipedpeer-demo/SETUP.md) (machines and lab visit),
 [pipedpeer-demo/DEMO-SCRIPT.md](pipedpeer-demo/DEMO-SCRIPT.md) (the live
 demo) and [pipedpeer-demo/VERIFY.md](pipedpeer-demo/VERIFY.md) (checks).
+Each machine has a card with only its own steps, in order:
+[LAPTOP-A](pipedpeer-demo/cards/LAPTOP-A.md),
+[LAPTOP-B](pipedpeer-demo/cards/LAPTOP-B.md),
+[LAPTOP-C](pipedpeer-demo/cards/LAPTOP-C.md),
+[PC](pipedpeer-demo/cards/PC.md) (or `./demo/card.sh <ROLE>` in
+`pipedpeer-demo`).
 
 ## 1. Run the demo in Docker first (the friend, now)
 
