@@ -440,6 +440,43 @@ print("SHUFFLE-OK")
 `, "SHUFFLE-OK")
 }
 
+// TestShimPartitionedFrameFallsBackWhenTheClusterLosesItsChunks: the finale's
+// pandas job died on "daemon HTTP 500: pool run failed" when the node asked for
+// a chunk had no copy of it. Every partitioned op must then re-parse the
+// chunks here, say so, and give the local answer.
+func TestShimPartitionedFrameFallsBackWhenTheClusterLosesItsChunks(t *testing.T) {
+	runShimPython(t, "oocfallback", shimFakeDaemon+`
+import io, contextlib
+import pandas as pd
+import numpy as np
+big = pd.DataFrame({"k": np.random.randint(0, 9, 20000), "v": np.random.randn(20000), "s": np.random.randint(0, 50, 20000)})
+csv = os.path.join(TMP, "lost.csv")
+big.to_csv(csv, index=False)
+pf = shim._partitioned_read_csv(csv, {})
+assert len(pf._keys) > 3
+local_df = pd.read_csv(csv)
+class _Lost(dict):
+    def get(self, k, d=None):
+        raise KeyError("chunk cache miss: %s" % k)
+CACHE = _Lost()  # every node lost its chunks: each map now fails, as the real daemon's does
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    pd.testing.assert_frame_equal(pf.groupby("k").mean(), local_df.groupby("k").mean())
+    pd.testing.assert_frame_equal(pf.groupby("k").agg({"v": ["sum", "mean"], "s": "count"}),
+                                  local_df.groupby("k").agg({"v": ["sum", "mean"], "s": "count"}))
+    pd.testing.assert_frame_equal(pf._materialize(), local_df)
+    pd.testing.assert_frame_equal(pf.head(7).reset_index(drop=True), local_df.head(7).reset_index(drop=True))
+    right = pd.DataFrame({"k": list(range(9)), "tag": list("abcdefghi")})
+    pd.testing.assert_frame_equal(pf.merge(right, on="k", how="left", sort=True),
+                                  local_df.merge(right, on="k", how="left", sort=True))
+out = err.getvalue()
+for what in ("groupby", "materialize", "chunk fetch", "merge"):
+    assert ("WARNING: %s on the cluster failed" % what) in out, (what, out)
+assert shim._STATS["remote_failures"] >= 5, shim._STATS["remote_failures"]
+print("OOC-FALLBACK-OK")
+`, "OOC-FALLBACK-OK")
+}
+
 // TestShimOutOfCoreIntegrity (T5) checks the chunked read guarantees: line
 // boundaries, per-node working set bounded by one chunk (RAM flat), and the
 // plain-DataFrame fallback when the daemon is unreachable.

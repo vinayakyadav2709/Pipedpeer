@@ -974,9 +974,23 @@ func runDDP(o ddpRunOptions) error {
 		RoundRobinFn:     rrFn,
 	})
 
-	decision := coord.FindNode()
+	// Waits like a single-node run does: a ring started straight after
+	// another one (a rejoin run, say) sees the last run's memory and VRAM
+	// still in the nodes' reported load for a few seconds, and one look
+	// failed with a bare "no candidates available".
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	wait := placementWait()
+	decision := coord.FindNodeWithin(ctx, wait, time.Second, func() {
+		fmt.Printf("[coordinator] no eligible node for rank 0 yet; waiting up to %s for peers to report in...\n", wait)
+	})
 	rank0 := decision.ChosenNode
 	if rank0.NodeID == "" {
+		if why := decision.RejectionSummary(); why != "" {
+			fmt.Print("[coordinator] nodes turned down:\n" + why)
+		}
 		return fmt.Errorf("no node eligible for rank 0: %s", decision.Reason)
 	}
 	if rank0.DaemonPort == 0 {

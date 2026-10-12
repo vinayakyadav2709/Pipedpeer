@@ -2750,6 +2750,7 @@ def _partitioned_read_csv(path, kw):
     import os
     import pickle
     import pandas as _pd
+    import io
     _log('read_csv: streaming %.0f MB out-of-core' % (os.path.getsize(path) / 1e6))
     header = kw.get("header", "infer")
     if header == "infer":
@@ -2795,7 +2796,16 @@ def _partitioned_read_csv(path, kw):
     if items:
         metas.extend(_partitioned_read(src, extra, keys, items))
     cols = names if names is not None else list(metas[0]["dtypes"])
-    return _PartitionedFrame(all_keys, cols, metas, str(path))
+
+    def _local(idx):
+        want = set(idx)
+        for i, (start, end) in enumerate(_csv_ranges(str(path), header)):
+            if i in want:
+                with open(str(path), "rb") as f:
+                    f.seek(start)
+                    raw = f.read(end - start)
+                yield _pd.read_csv(io.BytesIO(raw), names=names, header=None, **parse_kw)
+    return _PartitionedFrame(all_keys, cols, metas, str(path), _local)
 
 
 def _csv_ranges(path, header):
@@ -2870,7 +2880,14 @@ def _partitioned_read_parquet(path, kw):
             keys, items = [], []
     if items:
         metas.extend(_partitioned_read(src, extra, keys, items))
-    return _PartitionedFrame(all_keys, list(metas[0]["dtypes"]), metas, str(path))
+
+    def _local(idx):
+        for i in sorted(set(idx)):
+            buf = io.BytesIO()
+            _pq.write_table(pf.read_row_group(i), buf)
+            buf.seek(0)
+            yield _pd.read_parquet(buf, **kw)
+    return _PartitionedFrame(all_keys, list(metas[0]["dtypes"]), metas, str(path), _local)
 
 
 class _PartitionedFrame:
@@ -2879,11 +2896,14 @@ class _PartitionedFrame:
     and merge run distributed; anything else materializes the chunks back into
     one local DataFrame (the documented fallback)."""
 
-    def __init__(self, keys, cols, meta, path):
+    def __init__(self, keys, cols, meta, path, local=None):
         self._keys = keys
         self._cols = list(cols)
         self._meta = meta
         self._path = path
+        # local(idx) re-parses chunks idx from the source file here, in
+        # order, one at a time: the fallback when the cluster cannot serve them.
+        self._local = local
 
     @property
     def shape(self):
@@ -2930,53 +2950,60 @@ class _PartitionedFrame:
     def merge(self, right, **kw):
         return _partitioned_merge(self, right, **kw)
 
-    def _chunk(self, i):
-        """Fetch one chunk (from its node's cache) as a local DataFrame."""
+    def _map(self, what, func_src, extra=None, idx=None):
+        """Run func_src's run(df) on each chunk in idx (default: all), on the
+        node that cached it; one result per chunk, in order.
+
+        A node can lose its cache (restart, eviction, the pool routing a key
+        to a peer that never parsed it): the daemon then answers HTTP 500.
+        That must not fail the user's script, so the chunks are re-parsed
+        here from the source file, one at a time, with a visible warning."""
         import base64
         import json
         import pickle
         import urllib.request
-        body = json.dumps({
-            "func_src": "def run(df):\n    return df\n",
-            "items": [0], "starmap": False, "cache_keys": [self._keys[i]],
-            "no_split": True,
-        }).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 1800) as resp:
-            rs = json.loads(resp.read())["results"]
-        return pickle.loads(base64.b64decode(rs[0]["pickle"]))
+        idx = list(range(len(self._keys))) if idx is None else list(idx)
+        req = {"func_src": func_src, "func_name": "run",
+               "items": list(range(len(idx))), "starmap": False,
+               "cache_keys": [self._keys[i] for i in idx], "no_split": True}
+        if extra is not None:
+            req["extra_b64"] = base64.b64encode(pickle.dumps(extra)).decode()
+        try:
+            r = urllib.request.Request(_URL + "/v1/pool/map", data=json.dumps(req).encode(),
+                                       headers={"Content-Type": "application/json",
+                                                "X-Pipedpeer-Store": _STORE})
+            with _daemon_open(r, 3600) as resp:
+                rs = json.loads(resp.read())["results"]
+            if len(rs) != len(idx):
+                raise RuntimeError("got %d results for %d chunks" % (len(rs), len(idx)))
+            return [pickle.loads(base64.b64decode(x["pickle"])) for x in rs]
+        except Exception as e:
+            if self._local is None:
+                raise
+            _record("ooc-" + what, len(idx), False, str(e)[:300])
+            _log("WARNING: %s on the cluster failed (%s); re-reading %d chunk(s) "
+                 "of %s on this machine instead - slower, same result"
+                 % (what, str(e)[:300], len(idx), self._path))
+        ns = dict(extra or {})
+        ns["_CACHE"] = {}
+        exec(func_src, ns)
+        return [ns["run"](df) for df in self._local(idx)]
+
+    def _chunk(self, i):
+        """Fetch one chunk (from its node's cache) as a local DataFrame."""
+        return self._map("chunk fetch", "def run(df):\n    return df\n", idx=[i])[0]
 
     def _materialize(self):
         """Fetch all chunks and concat into one local DataFrame."""
-        import base64
-        import json
-        import pickle
-        import urllib.request
         import pandas as _pd
-        body = json.dumps({
-            "func_src": "def run(df):\n    return df\n",
-            "items": list(range(len(self._keys))), "starmap": False,
-            "cache_keys": self._keys, "no_split": True,
-        }).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 3600) as resp:
-            rs = json.loads(resp.read())["results"]
-        dfs = [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
-        return _pd.concat(dfs, ignore_index=True)
+        return _pd.concat(self._map("materialize", "def run(df):\n    return df\n"),
+                          ignore_index=True)
 
     def _combine_agg(self, by, spec, args, kw, gb_kw):
         """Combine-safe agg over the chunks: each chunk node aggregates its
         rows (partials are tiny), the origin re-aggregates the partials —
         exact because sum/count/size/min/max/first/last/any/all compose, and
         mean recombines as sum(sum)/sum(count)."""
-        import base64
-        import json
-        import pickle
-        import urllib.request
         import pandas as _pd
         as_index = gb_kw.get("as_index", True)
         dropna = gb_kw.get("dropna", True)
@@ -2999,20 +3026,7 @@ class _PartitionedFrame:
             extra["_spec_count"] = None
             extra["_named"] = dict(spec_sum)
             extra["_named_count"] = dict(spec_count)
-        req = {
-            "func_src": src,
-            "func_name": "run",
-            "extra_b64": base64.b64encode(pickle.dumps(extra)).decode(),
-            "items": list(range(n)), "starmap": False,
-            "cache_keys": self._keys, "no_split": True,
-        }
-        body = json.dumps(req).encode()
-        req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                     headers={"Content-Type": "application/json",
-                                              "X-Pipedpeer-Store": _STORE})
-        with _daemon_open(req, 3600) as resp:
-            rs = json.loads(resp.read())["results"]
-        parts = [pickle.loads(base64.b64decode(r["pickle"])) for r in rs]
+        parts = self._map("groupby", src, extra)
         if has_mean:
             sums = [p[0] for p in parts]
             counts = [p[1] for p in parts]
@@ -3310,9 +3324,6 @@ def _partitioned_merge(pf, right, how="inner", on=None, left_on=None,
     found wherever they live. inner/left are exact (each left row exists in
     exactly one chunk); right/outer would duplicate right-only rows per chunk,
     so those materialize the left frame first (regular shuffle merge)."""
-    import json
-    import pickle
-    import urllib.request
     import pandas as _pd
     if (how not in ("inner", "left")
             or not isinstance(right, _pd.DataFrame)
@@ -3326,24 +3337,10 @@ def _partitioned_merge(pf, right, how="inner", on=None, left_on=None,
                 "left_index": left_index, "right_index": right_index,
                 "sort": False, "suffixes": suffixes}
     merge_kw.update(kw)
-    import base64
-    req = {
-        "func_src": ("import pandas as _pd\n"
-                     "def run(df):\n"
-                     "    return _pd.merge(df, _right, **_merge_kw)\n"),
-        "func_name": "run",
-        "extra_b64": base64.b64encode(pickle.dumps({"_right": right,
-                                                   "_merge_kw": merge_kw})).decode(),
-        "items": list(range(len(pf._keys))), "starmap": False,
-        "cache_keys": pf._keys, "no_split": True,
-    }
-    body = json.dumps(req).encode()
-    req = urllib.request.Request(_URL + "/v1/pool/map", data=body,
-                                 headers={"Content-Type": "application/json",
-                                          "X-Pipedpeer-Store": _STORE})
-    with _daemon_open(req, 3600) as resp:
-        rs = json.loads(resp.read())["results"]
-    res = _pd.concat([pickle.loads(base64.b64decode(r["pickle"])) for r in rs],
+    res = _pd.concat(pf._map("merge", ("import pandas as _pd\n"
+                                       "def run(df):\n"
+                                       "    return _pd.merge(df, _right, **_merge_kw)\n"),
+                             {"_right": right, "_merge_kw": merge_kw}),
                      ignore_index=True)
     if sort:
         if left_index or right_index:
@@ -3418,6 +3415,16 @@ def _install_ddp():
     # Each rank's share of a step, measured by placement. Equal shares are the
     # same thing as no shares, and are treated as such.
     _WEIGHTS = _parse_weights(os.environ.get("PIPEDPEER_DDP_WEIGHTS", ""), _WORLD)
+
+    def _live_ranks(weights=None, world=None):
+        """Ranks still training. _WORLD is the rank-id space: a dead rank
+        keeps its index with a zero share, so after one dies and one rejoins
+        _WORLD is 3 while 2 ranks train. Messages count ranks with this."""
+        w = _WEIGHTS if weights is None else weights
+        n = _WORLD if world is None else world
+        if not w:
+            return n
+        return sum(1 for x in w if x > 0) or n
     # The number of samples behind the gradient being sent, read from the
     # batch the model was last given. It decides how the daemon weighs this
     # rank's contribution, and it has to be the real figure rather than the
@@ -3671,7 +3678,8 @@ def _install_ddp():
                 1000.0 * sync_total / _DDP_STATS["syncs"],
                 _DDP_STATS["sent_bytes"] / 1048576.0,
                 _DDP_STATS["recv_bytes"] / 1048576.0))
-        if _WORLD < 2 or _STEP_SEC[1] < 2:
+        live = _live_ranks()
+        if live < 2 or _STEP_SEC[1] < 2:
             return
         compute = _STEP_SEC[0]
         # Machines, not ranks. Two ranks on one laptop are two identities and
@@ -3682,10 +3690,10 @@ def _install_ddp():
         # cannot tell us, so the old assumption stands in that case and is the
         # only place it still applies.
         try:
-            _machines = int(os.environ.get("PIPEDPEER_DDP_MACHINES", "") or _WORLD)
+            _machines = int(os.environ.get("PIPEDPEER_DDP_MACHINES", "") or live)
         except ValueError:
-            _machines = _WORLD
-        _machines = max(1, min(_machines, _WORLD))
+            _machines = live
+        _machines = max(1, min(_machines, live))
         alone = compute * _machines       # every machine's share, done by one
         together = compute + sync_total
         if together <= 0:
@@ -3702,20 +3710,20 @@ def _install_ddp():
                  "sync across %d ranks on %d machine(s), against about %.1fs for "
                  "THIS machine to have done the whole dataset (%.2fx). A faster "
                  "machine on its own may still beat that."
-                 % (compute, sync_total, _WORLD, _machines, alone, speedup))
-        elif _machines < _WORLD:
+                 % (compute, sync_total, live, _machines, alone, speedup))
+        elif _machines < live:
             _log("ddp: the ring did NOT pay for itself — %d ranks on %d "
                  "machine(s), so the extra ranks brought no extra hardware: "
                  "%.1fs of compute and %.1fs of sync against about %.1fs for "
                  "this machine alone. Co-located ranks divide one machine and "
                  "pay the sync on top; they are for a second accelerator, not "
                  "a second machine."
-                 % (_WORLD, _machines, compute, sync_total, alone))
+                 % (live, _machines, compute, sync_total, alone))
         else:
             _log("ddp: the ring did NOT pay for itself — %.1fs of compute and "
                  "%.1fs of sync across %d ranks, against about %.1fs for THIS "
                  "machine alone. Syncing costs more than the extra machines save.%s"
-                 % (compute, sync_total, _WORLD, alone,
+                 % (compute, sync_total, live, alone,
                     "" if _INT8_GRADS else
                     " PIPEDPEER_DDP_INT8=1 halves the bytes on the wire."))
 
@@ -4380,7 +4388,7 @@ def _install_ddp():
                          "the ring carries on and drops it" % (p["join"], e))
                     _drop_joiner(int(p["join"]), world, str(e)[:200])
             _log("ddp: the ring grows from %d to %d ranks at this epoch"
-                 % (_WORLD, world))
+                 % (_live_ranks(), _live_ranks(w, world)))
         _WORLD = world
         if w is not None:
             _WEIGHTS = list(w)
@@ -4451,7 +4459,7 @@ def _install_ddp():
             _SYNC_TUNED[0] = int(hdr["sync_every"])
         _log("ddp: rank %d joins the ring of %d with rank %s's model and optimizer, "
              "skipping the %d epoch(s) the ring already did"
-             % (_RANK, _WORLD, hdr.get("rank", 0), int(hdr["boundary"])))
+             % (_RANK, _live_ranks(), hdr.get("rank", 0), int(hdr["boundary"])))
         return int(hdr["boundary"])
 
     def _restore_join_lr():
@@ -4528,7 +4536,7 @@ def _install_ddp():
                     _SHARDED[id(self)] = reshared
                     sampler = reshared
                     _log("ddp: rank %d of %d now takes %d samples, batch %d"
-                         % (_RANK, _WORLD, len(reshared), reshared.batch))
+                         % (_RANK, _live_ranks(), len(reshared), reshared.batch))
 
             if hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(_EPOCHS.get(self, 0))
