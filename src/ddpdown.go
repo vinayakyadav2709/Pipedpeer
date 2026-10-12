@@ -110,6 +110,21 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 			if script && scriptErr == nil {
 				scriptErr = fmt.Errorf("rank %d on %s: the script failed: %w", r.rank, host, r.err)
 			}
+			if r.rank == 0 && !script && !joiner {
+				// Rank 0's machine is the ring's lead: the rendezvous and the
+				// daemon-backed sync live there, so the ranks left have
+				// nobody to sync with. Saying "continuing" here was wrong
+				// (the run failed a second later), and telling the lead
+				// daemon a rank is down cannot reach a dead lead.
+				if scriptErr == nil {
+					scriptErr = fmt.Errorf("rank 0 on %s died: its machine leads the ring, and the run can't continue without it: %w", host, r.err)
+				}
+				if running > 0 {
+					fmt.Fprintf(w, "[ddp] rank 0 on %s died: its machine leads the ring (rendezvous and sync), so the run can't continue without it; the other ranks will stop\n", host)
+					fmt.Fprintf(w, "[ddp]   cause: %v\n", r.err)
+				}
+				continue
+			}
 			if running > 0 {
 				if script {
 					fmt.Fprintf(w, "[ddp] rank %d on %s: its script failed; continuing on %d, but the run will fail\n", r.rank, host, running)
