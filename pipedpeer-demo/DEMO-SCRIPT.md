@@ -541,6 +541,9 @@ fixed that: V3 took 7.0 s, `ran on  yeet (192.168.0.200)`
 - **`7-gpu.sh` prints `No GPU machine among the peers - skipping`** while a
   GPU laptop is healthy: check `python3` exists on this PC (the script uses
   it to count nodes), then type the command by hand.
+- **Showing a machine dying on purpose:** stop the daemon on a machine that is
+  NOT the one in the `rank 0:` line. Rank 0 is the lead: it is the fastest GPU
+  machine, not necessarily the one you typed the command on.
 - **A GPU rank dies mid-run (`--ddp 2`):** the run prints
   `[ddp] rank 1 on gpu1 died; continuing on 1` and carries on; when that
   machine's daemon comes back it rejoins at the next epoch
