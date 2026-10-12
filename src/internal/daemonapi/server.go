@@ -531,6 +531,16 @@ func (s *Server) EnablePoolSpill() {
 		}
 		return 0
 	}
+	s.pool.machineFn = func(peer string) string {
+		s.peersMu.RLock()
+		defer s.peersMu.RUnlock()
+		for _, ph := range s.peerHealths {
+			if fmt.Sprintf("%s:%d", ph.Host, ph.Port) == peer {
+				return ph.Machine
+			}
+		}
+		return ""
+	}
 	s.pool.SetPeerFn(func(storePath, submitter string) []string {
 		s.peersMu.RLock()
 		defer s.peersMu.RUnlock()

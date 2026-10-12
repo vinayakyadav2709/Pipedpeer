@@ -65,7 +65,7 @@ func TestSummaryRendering(t *testing.T) {
 		Receipt: []byte(`{"by_where":{"peer:127.0.0.1:4000":5}}`)}
 	lines, unresolved = summaryLines(s, "h", nil)
 	got = strings.Join(lines, "\n")
-	if !strings.Contains(got, "ran on       h\n") || !strings.Contains(got, "5 items: 5 on 1 other (127.0.0.1:4000 5)") ||
+	if !strings.Contains(got, "ran on       h\n") || !strings.Contains(got, "5 items: 0 on h, 5 on 1 other (127.0.0.1:4000 5)") ||
 		!strings.HasSuffix(got, "cancelled after 6.2 s") || len(unresolved) != 1 {
 		t.Fatalf("got\n%s\nunresolved %v", got, unresolved)
 	}
