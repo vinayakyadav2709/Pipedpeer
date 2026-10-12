@@ -1126,9 +1126,10 @@ step uses that: it builds one environment importing the usual scientific set
 (numpy, pandas, scikit-learn, scipy, matplotlib, seaborn, tqdm and CUDA torch)
 on every machine through the dry run of Section~\ref{sec:observe}, so a script
 seen for the first time shares those paths and fetches only what it adds. A
-teacher-style script's first run took \textbf{TODO-NUM} without that step and
-\textbf{TODO-NUM} with it.
-% from rehearsal: teacher-script first run without and with prep-4-common (V1 PKG-PREP)
+teacher-style script's environment took \textbf{54}\,s to build without that
+step and \textbf{4}\,s with it, measured on a container of the rehearsal lab
+(Section~\ref{sec:res-rehearsal}).
+% rehearsal evidence v1/15-pc3-pkgprep-before-after.txt (8e14b9b): dry-run environment build, before/after prep-4-common
 
 \textbf{The keystone.} Nix \cite{dolstra2004nix} names every build output by a
 hash of its inputs. The generated flake pins an \emph{exact} nixpkgs
@@ -1308,8 +1309,9 @@ are killed by process group and forwards to peers are dropped, with nothing
 re-run. The coordinator records the lease as cancelled and does not retry. A
 connection that ends \emph{without} a cancel frame --- a crash, a lost network,
 a detach --- never kills the job, which is what background mode builds on. In
-the rehearsal, peers stopped \textbf{TODO-NUM}\,s after the interrupt.
-% from rehearsal: R5 Ctrl+C mid-Pool, seconds until peers' /v1/pool/stats stop growing
+the rehearsal (containers on one laptop), peers stopped within \textbf{2}\,s of
+the interrupt: their pool counters showed the cancel at the next 1.3\,s sample.
+% rehearsal evidence v1/31-ctrlc-poolwatch.txt (8e14b9b)
 
 \textbf{Background mode.} The daemon keeps every frame of a job's output in a
 log in the job's directory, in the order a live client saw it. A detach flag,
@@ -1509,8 +1511,9 @@ daemon's averaging group grows with it. Only data-loader scripts can grow; a
 script that slices its own tensors gets one line saying so. The refit now runs
 once per synchronisation and reaches every rank, where it used to hand new
 shares to one rank per cadence. Losing rank 0's machine still ends the run. In
-the rehearsal a returning rank was training again \textbf{TODO-NUM}\,s after its
-node came back.
+the rehearsal (two containers sharing one GPU) a returning rank joined the ring
+\textbf{4}\,s after its node's daemon started.
+% rehearsal evidence v2/23b-ddp-down-up.txt + gpulab/20261012-064736-logs gpu1/gpu2 daemon.log (1519952): daemon starting 05:37:47, rank joined 05:37:51
 % from rehearsal: V2 two-container GPU lab, seconds from node healthy to the rejoined rank's first sync
 
 \begin{figure}[H]
@@ -1742,9 +1745,9 @@ it comes from. Raw output for each is kept in the project's
   hardware threads, an RTX~3060 laptop GPU): the re-run of the idle
   interception measurement at commit \texttt{08ce1d4}, the test suite after the
   demonstration round, and the rehearsal of the demonstration in the
-  venue-shaped container lab and a two-container GPU lab at commit
-  \textbf{TODO-NUM}. Labelled as such.
-  % from rehearsal: the commit the V1/V2 verifier built
+  venue-shaped container lab at commit \texttt{31b5364} (first-pass figures
+  at \texttt{8e14b9b}) and a two-container GPU lab at \texttt{1519952}.
+  Labelled as such.
 \end{itemize}
 
 \textbf{One caveat governs the laboratory results.} All three workers are
@@ -1786,7 +1789,8 @@ as a defect of the tests rather than of the code they test; they now skip.
 
 After the October rounds (the leftover fixes and the demonstration work), the
 same suite gave \textbf{TODO-NUM} passed, \textbf{TODO-NUM} failed and
-\textbf{TODO-NUM} skipped across \textbf{TODO-NUM} packages.
+\textbf{TODO-NUM} skipped across \textbf{38} packages.
+% packages: rehearsal evidence fix5/go-test-full-2.txt (cc56753): 38 ok, 2 without test files; no -v run, so test counts are still open
 % from rehearsal: verifier's final go test -v -count=1 ./... at the verified commit
 New tests cover, among others, the hello's binding to its session, the
 secret going only to hosts that prove it, a cancel frame ending a running job
@@ -2098,8 +2102,9 @@ Mutations in the test audit & 95, all caught \\
 
 The August figure of 24,679 lines counted test files together with source; on
 that basis the October total is 55,149 lines. After the 12 October rounds the
-same counts are \textbf{TODO-NUM} lines of source, \textbf{TODO-NUM} lines of
-tests and \textbf{TODO-NUM} tests run.
+same counts are \textbf{42,424} lines of source in 114 files, \textbf{30,767}
+lines of tests in 154 files (at \texttt{cc56753}) and \textbf{TODO-NUM} tests run.
+% lines: wc -l over the tracked src/**/*.go at cc56753 (same method reproduces 23,100 test lines at 5bcf140)
 % from rehearsal: line counts with the same command as the table, at the verified commit; tests from the verifier's final go test -v
 
 \section{Rehearsing the Demonstration}
@@ -2123,19 +2128,26 @@ labs on one laptop)}
 \toprule
 \textbf{Step} & \textbf{Cold} & \textbf{Cached} \\
 \midrule
-Live join, until connected & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
-Headline parallel map & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
-Map over a lambda, \texttt{-{}-cold} then cached & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
-GPU job submitted from a GPU-less node & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
-Two-rank GPU ring on one shared GPU & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Live join, until connected & \textbf{1.8}\,s & --- \\
+Headline parallel map & \textbf{43.5}\,s & \textbf{17.0}\,s \\
+Map over a lambda, \texttt{-{}-cold} then cached & \textbf{20.5}\,s & \textbf{4.8}\,s \\
+GPU job submitted from a GPU-less node & \textbf{264.8}\,s & \textbf{7.6}\,s \\
+Two-rank GPU ring on one shared GPU & \textbf{TODO-NUM} & \textbf{9.5}\,s \\
 Combined script & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
-Five student-style scripts & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
-Unseen script, without and with common packages & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
+Five student-style scripts & \textbf{35--126}\,s each & \textbf{TODO-NUM} \\
+Unseen script's environment, without and with common packages & \textbf{54}\,s & \textbf{4}\,s \\
 Every script at once & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
 \bottomrule
 \end{tabularx}
 \end{table}
-% from rehearsal: V1 evidence summary for the processor rows, V2 for the GPU and ring rows
+% rehearsal evidence (~/Downloads/pipedpeer-work/evidence): join v2/56-join-pc3.txt (V1: 5.2 s); headline v1/30-host-00pool-first.txt + v2/71-step-2-headline.txt;
+% lambda v2/73-step-2b-cold-pc2.txt (V1 with 0.5% netem loss: 169.1/5.8 s); GPU v1/13-gpu-step.txt + v2/74b-gpu-pc1-direct.txt; ring v2/22-ddp2-ring.txt;
+% students v2/75-teacher-*.txt (first run after prep-4-common); common packages v1/15-pc3-pkgprep-before-after.txt.
+% Still open: ring cold, combined script (V2 run rejected for memory, then interrupted), students cached (not run), finale (V2 watcher hung)
+\noindent The first runs of the headline map and the GPU job are from the first
+rehearsal pass (\texttt{8e14b9b}), since the second pass found those steps warm;
+every other figure is from the second pass (\texttt{31b5364}; the ring from the
+GPU lab at \texttt{1519952}). A join has no cached form.
 
 \begin{table}[H]
 \centering
@@ -2147,17 +2159,18 @@ Every script at once & \textbf{TODO-NUM} & \textbf{TODO-NUM} \\
 \toprule
 \textbf{Drill} & \textbf{Result} \\
 \midrule
-Interrupt during a parallel map: time until peers stop & \textbf{TODO-NUM} \\
-Terminal closed during a run & \textbf{TODO-NUM} \\
-Detach, then attach while running and after it finished & \textbf{TODO-NUM} \\
-Submitter's network removed during a remote job, then attach & \textbf{TODO-NUM} \\
-A node stopped during a run & \textbf{TODO-NUM} \\
-A training rank killed during a run & \textbf{TODO-NUM} \\
-A training rank's machine back during a run & \textbf{TODO-NUM} \\
+Interrupt during a parallel map: time until peers stop & under \textbf{2}\,s \\
+Terminal closed during a run & stopped everywhere, as an interrupt \\
+Detach, then attach while running and after it finished & followed live; replayed in \textbf{1.0}\,s once finished \\
+Submitter's network removed during a remote job, then attach & \textbf{200}\,s outage: ran once, results back \textbf{15}\,s after reconnect \\
+A node stopped during a run & same checksum, \textbf{16.5}\,s against \textbf{17.0}\,s undisturbed \\
+A training rank killed during a run & survivor finished all 80 epochs, \textbf{90.5}\,s \\
+A training rank's machine back during a run & rejoined at the next epoch, \textbf{4}\,s after its daemon started \\
 \bottomrule
 \end{tabularx}
 \end{table}
-% from rehearsal: V1 R5 drills; V2 for the two ring rows
+% rehearsal evidence: v1/31-ctrlc-poolwatch.txt, v1/32-sighup*.txt, v1/34-attach.txt, v1/35-detach-attach-live.txt (8e14b9b);
+% v2/64-senderdeath-long-*.txt + v2/65-senderdeath-collected.txt, v2/72-step-9-failover.txt (31b5364); v2/23b-ddp-down-up.txt (GPU lab, 1519952)
 
 \section{Comparative Analysis}
 \label{sec:comparison}

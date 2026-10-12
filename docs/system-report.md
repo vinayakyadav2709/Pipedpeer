@@ -723,7 +723,8 @@ transfer sends only the paths a peer lacks (4.7). The demo's
 set (numpy, pandas, scikit-learn, scipy, matplotlib, seaborn, tqdm, and CUDA
 torch) through `--check-only` on every machine, so a script seen for the first
 time shares those store paths and fetches only what it adds. Before and after:
-TODO-NUM <!-- from rehearsal: teacher-script first run without and with prep-4-common -->.
+the environment of a teacher-style script built in 54 s without it and 4 s with
+it, on a container of the rehearsal lab <!-- evidence v1/15-pc3-pkgprep-before-after.txt (8e14b9b), dry-run build -->.
 
 **The store path is the cache key.** `nixgen/flake.go:34` pins an exact nixpkgs
 revision (`56c02bc00adcf003215cc4bd996d6efaf4cff188`). A branch would resolve
@@ -900,7 +901,8 @@ Ctrl+C left the script, its Pool chunks on peers and every DDP rank running.
   a detach) never kills the job. That is what background mode builds on.
 - Every exit, early failures included, now goes through one finish step that
   sends the done frame, writes the log, records the end and releases the lease.
-- Time from Ctrl+C to idle peers: TODO-NUM <!-- from rehearsal: R5 Ctrl+C mid-Pool, seconds until peers' /v1/pool/stats stop growing -->.
+- Time from Ctrl+C to idle peers: under 2 s in the container lab; the peers'
+  `/v1/pool/stats` showed the cancel at the next 1.3 s sample <!-- evidence v1/31-ctrlc-poolwatch.txt (8e14b9b) -->.
 
 **Background mode** (`ca853bb`, `b06d91a`, `272ca83`, `d188565`, `7939f84`). The
 SSH-era detach was deleted with the move to the daemon API (`f46d354`); this is
@@ -1086,7 +1088,8 @@ intercepted.
     back.
   - `rebalanceFor` now runs once per sync and reaches every rank; it used to
     hand new shares to one rank per cadence.
-  - Rejoin time in the rehearsal: TODO-NUM <!-- from rehearsal: V2 two-container GPU lab, seconds from node healthy to the rejoined rank's first sync -->.
+  - Rejoin time in the rehearsal (two containers sharing one GPU): 4 s from the
+    node's daemon starting to the rank joining the ring <!-- evidence v2/23b-ddp-down-up.txt + gpulab/20261012-064736-logs (1519952): daemon starting 05:37:47, rank joined 05:37:51 -->.
 - **The verdict.** At exit, each run prints whether the ring paid for itself,
   counting distinct machines rather than ranks.
 
@@ -1262,8 +1265,8 @@ number says which one it comes from:
   introducer. They were not repeated for this report.
 - **[Oct-12]** Run on 2026-10-12 on a second host (Fedora 44, 16 threads,
   RTX 3060 Laptop): the N7 re-run at `08ce1d4`, and the demo rehearsal (5.11)
-  in the `lab/lan` containers and a two-container GPU lab at TODO-NUM
-  <!-- from rehearsal: the commit the verifier built -->.
+  in the `lab/lan` containers at `31b5364` (first-pass figures at `8e14b9b`)
+  and a two-container GPU lab at `1519952`.
 
 **The caveat that governs this chapter.** The [Oct] and [Aug] lab workers are
 containers on one host, so they measure correctness, overhead, caching and fault
@@ -1287,7 +1290,8 @@ Commands: `go test -v -count=1 ./...` in `src/`, `scripts/check-skips.sh` and
 <!-- from rehearsal: V1/V2 verifier's final `go test -v -count=1 ./...` PASS/FAIL/SKIP counts and package count -->
 
 - **Packages:** all 36 packages that have tests pass. After the demo round:
-  TODO-NUM of TODO-NUM packages.
+  38 of 38 packages (`cc56753`, `go test -count=1 ./...`; 2 more have no test
+  files) <!-- evidence fix5/go-test-full-2.txt -->.
 - **Failures without torch:** the three are `TestWeightedShardsPartitionTheDataset`,
   `TestEqualStepsAcrossUnevenShares` and `TestShuffledShardsStayDisjoint`. They
   raise `ModuleNotFoundError` instead of skipping, which is a defect of the
@@ -1432,10 +1436,10 @@ Quoted from commit messages; the verbatim text is in
 | HTTP routes | 22 |
 | Tests run | 617 (615 pass, 2 skip) |
 | Mutation audit | 95 cases, all caught |
-| [Oct-12] Go, non-test / tests / tests run | TODO-NUM lines / TODO-NUM lines / TODO-NUM (TODO-NUM pass, TODO-NUM skip) |
-| [Oct-12] HTTP routes | TODO-NUM (the round adds `/v1/jobs/{id}/attach` and `/v1/jobs/{id}/status`) |
+| [Oct-12] Go, non-test / tests / tests run | 42,424 lines (114 files) / 30,767 lines (154 files) / TODO-NUM (TODO-NUM pass, TODO-NUM skip) |
+| [Oct-12] HTTP routes | 31 (the round adds `/v1/jobs/{id}/attach` and `/v1/jobs/{id}/status`) |
 
-<!-- from rehearsal: line counts with the same command as the [Oct] row, at the verified commit; test counts from the verifier's final go test -v -->
+<!-- lines: wc -l over the tracked src/**/*.go at cc56753 (the same method gives the [Oct] row's 23,100 test lines at 5bcf140); routes: r.Get/Post/Delete in daemonapi/server.go (22 at 5bcf140). from rehearsal: test counts from the verifier's final go test -v -->
 
 
 ### 5.9 Comparison
@@ -1476,29 +1480,37 @@ one CPU, so no figure here is a speedup.
 
 | Step | First run (cold) | Cached |
 |---|---|---|
-| Live join, `pipedpeer join` until "connected" | TODO-NUM | TODO-NUM |
-| Headline `Pool` script (`00_pool.py`) | TODO-NUM | TODO-NUM |
-| `06_pool_lambda.py --remote --cold`, then without `--cold` | TODO-NUM | TODO-NUM |
-| GPU step from a GPU-less node, `04_torch_ddp.py --remote --gpu force` | TODO-NUM | TODO-NUM |
-| `--ddp 2 --gpu force` on two containers sharing one GPU | TODO-NUM | TODO-NUM |
+| Live join, `pipedpeer join` until "connected" | 1.8 s | — |
+| Headline `Pool` script (`00_pool.py`) | 43.5 s | 17.0 s |
+| `06_pool_lambda.py --remote --cold`, then without `--cold` | 20.5 s | 4.8 s |
+| GPU step from a GPU-less node, `04_torch_ddp.py --remote --gpu force` | 264.8 s | 7.6 s |
+| `--ddp 2 --gpu force` on two containers sharing one GPU | TODO-NUM | 9.5 s |
 | `07_everything.py` | TODO-NUM | TODO-NUM |
-| Student scripts (five) | TODO-NUM | TODO-NUM |
-| Teacher-style script, without and with `prep-4-common` | TODO-NUM | TODO-NUM |
+| Student scripts (five), first run after `prep-4-common` | 35–126 s each | TODO-NUM |
+| Teacher-style script's environment, without and with `prep-4-common` | 54 s | 4 s |
 | Finale, every script at once | TODO-NUM | TODO-NUM |
 
-<!-- from rehearsal: V1 evidence (~/Downloads/pipedpeer-work/evidence/v1/summary.md) for the CPU rows; V2 for the GPU and DDP rows -->
+The first runs of the headline script and the GPU step are from the first
+pass (`8e14b9b`), since the second pass found those steps warm; every other
+figure is from the second pass (`31b5364`; the DDP ring from the GPU lab at
+`1519952`). A join has no cached form. The `--cold` row without network
+loss; with 0.5 % emulated loss in the first pass it was 169.1 s / 5.8 s.
+
+<!-- evidence (~/Downloads/pipedpeer-work/evidence): v2/56-join-pc3.txt (V1 5.2 s: v1/20-join-pc3.txt); v1/30-host-00pool-first.txt; v2/71-step-2-headline.txt;
+v2/73-step-2b-cold-pc2.txt; v1/14-pc3-truecold-2b.txt; v1/13-gpu-step.txt; v2/74b-gpu-pc1-direct.txt; v2/22-ddp2-ring.txt; v2/75-teacher-*.txt; v1/15-pc3-pkgprep-before-after.txt.
+Still open (from rehearsal): ring cold; 07_everything (V2 run rejected for memory, then interrupted: v2/76*.txt); students cached (not run); finale (V2 watcher hung: v2/80-step-13-finale.txt) -->
 
 | Drill | Result |
 |---|---|
-| Ctrl+C mid-Pool: seconds until peers stop | TODO-NUM |
-| Closed terminal (SIGHUP) | TODO-NUM |
-| Ctrl+Z, then `attach` while running and after it finished | TODO-NUM |
-| Submitter's network pulled during a `--remote` job, then `attach` | TODO-NUM |
-| A node stopped mid-run (failover) | TODO-NUM |
-| A DDP rank killed mid-run (survivors finish) | TODO-NUM |
-| A DDP rank's machine back mid-run (rejoins) | TODO-NUM |
+| Ctrl+C mid-Pool: seconds until peers stop | under 2 s (next 1.3 s sample) |
+| Closed terminal (SIGHUP) | stopped everywhere, as Ctrl+C |
+| Ctrl+Z, then `attach` while running and after it finished | followed live to the end; replayed in 1.0 s once finished |
+| Submitter's network pulled during a `--remote` job, then `attach` | 200 s outage: the CLI detached, the job ran once, results back 15 s after reconnect |
+| A node stopped mid-run (failover) | same checksum; 16.5 s against 17.0 s undisturbed |
+| A DDP rank killed mid-run (survivors finish) | the survivor finished all 80 epochs, 90.5 s |
+| A DDP rank's machine back mid-run (rejoins) | rejoined at the next epoch, 4 s after its daemon started |
 
-<!-- from rehearsal: V1 R5 drills; V2 for the two DDP rows -->
+<!-- evidence: v1/31-ctrlc-poolwatch.txt, v1/32-sighup*.txt, v1/34-attach.txt, v1/35-detach-attach-live.txt (8e14b9b); v2/64-senderdeath-long-*.txt, v2/65-senderdeath-collected.txt, v2/72-step-9-failover.txt (31b5364); v2/23b-ddp-down-up.txt (GPU lab, 1519952) -->
 
 ---
 
