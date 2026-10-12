@@ -45,8 +45,18 @@ func TestSummaryRendering(t *testing.T) {
 		`"by_where":{"local":84,"peer:10.88.0.11:38080":9,"peer:10.88.0.12:38080":9,"peer:10.88.0.13:38080":9,"peer:10.88.0.14:38080":9}}`)}
 	names = map[string]string{"10.88.0.11:38080": "pc1", "10.88.0.12:38080": "pc2", "10.88.0.13:38080": "pc3", "10.88.0.14:38080": "pc4"}
 	lines, _ = summaryLines(s, "yeet", names)
-	if got, want := lines[1], "  spread       96 items: 60 on yeet, 36 on 4 others (pc1 9, pc2 9, pc3 9, pc4 9) · 24 computed twice (local cores raced slow chunks)"; got != want {
+	if got, want := lines[1], "  spread       96 items: 84 on yeet, 36 on 4 others (pc1 9, pc2 9, pc3 9, pc4 9) · 24 computed twice (local cores raced slow chunks)"; got != want {
 		t.Fatalf("raced spread:\ngot  %s\nwant %s", got, want)
+	}
+
+	// V2 rehearsal: local cores raced every remote chunk, so no remote result
+	// was kept. The peers still did the work, and the line must not say 0
+	// beside their counts.
+	s = summary{Host: "127.0.0.1", Total: time.Second, Receipt: []byte(`{"remote_items":48,"local_items":288,"mapped_items":288,"remote_used":0,` +
+		`"by_where":{"local":288,"peer:10.88.0.11:38080":6,"peer:10.88.0.13:38080":18,"peer:10.88.0.14:38080":24}}`)}
+	lines, _ = summaryLines(s, "yeet", names)
+	if got, want := lines[1], "  spread       288 items: 288 on yeet, 48 on 3 others (pc4 24, pc3 18, pc1 6) · 48 computed twice (local cores raced slow chunks)"; got != want {
+		t.Fatalf("all-raced spread:\ngot  %s\nwant %s", got, want)
 	}
 
 	// Cancelled, nothing ran remotely, a peer with no known name.

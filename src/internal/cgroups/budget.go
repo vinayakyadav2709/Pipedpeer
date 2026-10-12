@@ -44,20 +44,10 @@ func (b Budget) Remaining() int64 {
 
 // SelfBudget reports this daemon's memory budget.
 func SelfBudget() Budget {
-	own := Self()
-	if own != "" {
-		root := filepath.Join("/sys/fs/cgroup", own)
-		// A scope's limit lives on the scope, but the daemon's processes sit
-		// in a leaf beneath it so the scope can delegate controllers - so the
-		// limit is on the parent of where we are.
-		for _, dir := range []string{root, filepath.Dir(root)} {
-			if max, ok := readBytes(filepath.Join(dir, "memory.max")); ok {
-				return Budget{
-					Total:    max,
-					Used:     usageOf(dir),
-					Enforced: true,
-				}
-			}
+	procCgroup, err := os.ReadFile("/proc/self/cgroup")
+	if err == nil {
+		if b, ok := limitBudget(mountpoint, string(procCgroup)); ok {
+			return b
 		}
 	}
 	// No enforced ceiling. Fall back to the share this daemon would have been
@@ -68,6 +58,85 @@ func SelfBudget() Budget {
 		return Budget{}
 	}
 	return Budget{Total: defaultShare(total), Used: 0, Enforced: false}
+}
+
+// limitBudget is the tightest enforced ceiling over this process's cgroup and
+// every ancestor, in the v2 hierarchy and the v1 memory hierarchy alike.
+// procCgroup is /proc/self/cgroup; mount is the cgroup filesystem root.
+//
+// Every level counts, because the kernel enforces every level. It used to
+// read only the daemon's cgroup and its parent: a daemon in a systemd user
+// scope inside a 1.17 GiB container found the scope's 6.7 GiB (half the
+// host) and stopped there, advertised it, took a torch job, and the container
+// was OOM-killed along with its systemd. The binding level is the one with
+// the least left, not the smallest limit: a large parent can be nearly full.
+func limitBudget(mount, procCgroup string) (Budget, bool) {
+	var best Budget
+	found := false
+	consider := func(b Budget) {
+		if !found || b.Remaining() < best.Remaining() {
+			best, found = b, true
+		}
+	}
+	for _, line := range strings.Split(procCgroup, "\n") {
+		f := strings.SplitN(line, ":", 3)
+		if len(f) != 3 {
+			continue
+		}
+		switch {
+		case f[0] == "0" && f[1] == "":
+			walkUp(mount, f[2], func(dir string) {
+				if max, ok := readBytes(filepath.Join(dir, "memory.max")); ok {
+					consider(Budget{Total: max, Used: usageOf(dir), Enforced: true})
+				}
+			})
+		case hasController(f[1], "memory"):
+			root := filepath.Join(mount, "memory")
+			walkUp(root, f[2], func(dir string) {
+				// v1 writes "no limit" as a page-rounded maximum near 2^63.
+				if max, ok := readBytes(filepath.Join(dir, "memory.limit_in_bytes")); ok && max < 1<<60 {
+					consider(Budget{Total: max, Used: usageOfV1(dir), Enforced: true})
+				}
+			})
+		}
+	}
+	return best, found
+}
+
+// walkUp calls fn for root/own and each of its ancestors up to root itself.
+// Levels missing from this mount (a container sees only its own subtree) are
+// visited too and simply have no files.
+func walkUp(root, own string, fn func(dir string)) {
+	root = filepath.Clean(root)
+	dir := filepath.Join(root, own)
+	for strings.HasPrefix(dir, root) {
+		fn(dir)
+		if dir == root {
+			return
+		}
+		dir = filepath.Dir(dir)
+	}
+}
+
+func hasController(list, name string) bool {
+	for _, c := range strings.Split(list, ",") {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// usageOfV1 is usageOf for the v1 memory controller's file names.
+func usageOfV1(dir string) int64 {
+	cur, ok := readBytes(filepath.Join(dir, "memory.usage_in_bytes"))
+	if !ok {
+		return 0
+	}
+	if inactive := readMemoryStat(filepath.Join(dir, "memory.stat"))["total_inactive_file"]; inactive < cur {
+		return cur - inactive
+	}
+	return 0
 }
 
 // defaultShare is the fraction of a machine one daemon may use. It matches

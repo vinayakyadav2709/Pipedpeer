@@ -116,9 +116,12 @@ func spreadLine(rc receipt, ranOn string, names map[string]string) (line string,
 	}
 	raced := ""
 	if rc.MappedItems > 0 {
-		// Count items once: the work counters include raced duplicates.
+		// Items are counted once; each machine's count is the work it did.
+		// An item local cores raced ran in two places, so the counts can sum
+		// to more than the total - the race note says by how much. Counting
+		// kept results instead printed "288 on yeet, 0 on 3 others (pc4 24,
+		// pc3 18, pc1 6)", where the peers' own counts contradicted the 0.
 		total = rc.Total()
-		local = total - rc.FromElsewhere()
 		if n := rc.Raced(); n > 0 {
 			raced = fmt.Sprintf(" · %d computed twice (local cores raced slow chunks)", n)
 		}
@@ -145,9 +148,6 @@ func spreadLine(rc receipt, ranOn string, names map[string]string) (line string,
 	parts := make([]string, len(list))
 	for i, p := range list {
 		parts[i] = fmt.Sprintf("%s %d", p.name, p.n)
-	}
-	if rc.MappedItems > 0 {
-		remote = rc.FromElsewhere()
 	}
 	others := fmt.Sprintf("%d on %d other", remote, len(list))
 	if len(list) > 1 {
