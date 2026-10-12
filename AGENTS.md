@@ -4,6 +4,8 @@
 
 ## Find your way
 
+Coming back to the project? Start with [docs/next-steps.md](docs/next-steps.md).
+
 1. [CONTEXT-MAP.md](CONTEXT-MAP.md): the six areas, their vocabulary, invariants and file:line entry points. Start here for any code change.
 2. [docs/adr/](docs/adr/): why things are the way they are. Read the matching ADR before reversing anything that looks odd.
 3. [docs/capabilities.md](docs/capabilities.md): what the system can and cannot do, with the reason.
