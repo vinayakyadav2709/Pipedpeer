@@ -613,17 +613,6 @@ func (s *Server) healthyPeers() ([]PeerHealth, int) {
 // Logged here alone, a refusal left the user with "local 80 items" and no
 // reason: the shim only sees that no peer holds the closure.
 func (s *Server) broadcastClosure(storePath string) []string {
-	// Export from our own store when no upload filled the cache: a job that
-	// lands on the machine that built its closure uploads no NAR, and without
-	// one this node seeds no peers and nothing can ever spill.
-	narPath, ok := s.narCache.ensureLocal(storePath)
-	if !ok {
-		// Nothing to send means no peer can ever be offered spill work, and
-		// the run will look healthy while staying entirely local. Say so.
-		log.Warn().Str("store", storePath).
-			Msg("no closure archive to broadcast; peers cannot take pool work")
-		return nil
-	}
 	targets, known := s.healthyPeers()
 	if len(targets) == 0 && known == 0 {
 		// The poller has not finished its first cycle. A daemon that has just
@@ -661,8 +650,29 @@ func (s *Server) broadcastClosure(storePath string) []string {
 			return nil
 		}
 	}
+	// Who gets it is settled before anything is packed. Packing first cost
+	// every GPU run 3m24s (V2 95): the whole CUDA closure was exported and
+	// then sent to nobody, because no peer had a GPU.
+	var need []PeerHealth
+	for i := range targets {
+		if !s.peerHasStore(&targets[i], storePath) {
+			need = append(need, targets[i])
+		}
+	}
+	if len(need) == 0 {
+		log.Info().Int("peers", len(targets)).Str("store", storePath).
+			Msg("every peer already holds the closure; nothing to broadcast")
+		return nil
+	}
+	targets = need
 	log.Info().Int("peers", len(targets)).Str("store", storePath).
 		Msg("broadcasting closure to peers")
+
+	// The old-format archive, exported from our own store when no upload
+	// filled the cache (a job on the machine that built its closure uploads
+	// none). Only a peer that cannot take the signed format needs it, so it
+	// is made at most once and only when such a peer asks.
+	legacy := sync.OnceValues(func() (string, bool) { return localArchive(s.narCache, storePath) })
 
 	var refusedMu sync.Mutex
 	var refused []string
@@ -678,10 +688,7 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	if s.serialImports.Load() {
 		for i := range targets {
 			ph := targets[i]
-			if s.peerHasStore(&ph, storePath) {
-				continue
-			}
-			if err := s.importStoreOnPeer(&ph, storePath, narPath); err != nil {
+			if err := s.importStoreOnPeer(&ph, storePath, legacy); err != nil {
 				refuse(&ph, err)
 			}
 		}
@@ -692,13 +699,10 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	var wg sync.WaitGroup
 	for i := range targets {
 		ph := targets[i]
-		if s.peerHasStore(&ph, storePath) {
-			continue
-		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.importStoreOnPeer(&ph, storePath, narPath); err != nil {
+			if err := s.importStoreOnPeer(&ph, storePath, legacy); err != nil {
 				refuse(&ph, err)
 			}
 		}()
@@ -719,8 +723,13 @@ func gpuPeersOnly(peers []PeerHealth) ([]PeerHealth, int) {
 	return keep, len(peers) - len(keep)
 }
 
-// importStoreOnPeer sends a closure NAR to a peer's /v1/store/import.
-func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) error {
+// localArchive is narCache.ensureLocal, as a variable so a test can see
+// whether a broadcast packed anything.
+var localArchive = (*narCache).ensureLocal
+
+// importStoreOnPeer sends a closure NAR to a peer's /v1/store/import. legacy
+// yields the whole old-format archive, made only if this peer needs it.
+func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath string, legacy func() (string, bool)) error {
 	// Send only what this peer lacks. The whole-closure archive is keyed on
 	// the top-level store path, so two environments differing by one package
 	// share none of it and every byte of python, numpy and the interpreter
@@ -731,6 +740,7 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) 
 	// archive, which is correct, just larger.
 	partial := false
 	signed := false
+	var narPath string
 	if ph.TakesSignedClosures() {
 		// The form that keeps signatures, so the peer can require them
 		// instead of being configured to stop asking. It carries its own
@@ -745,6 +755,12 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath, narPath string) 
 		if diff, ok := srv.diffNARFor(ph, storePath); ok {
 			defer os.RemoveAll(filepath.Dir(diff))
 			narPath, partial = diff, true
+		} else if whole, ok := legacy(); ok {
+			narPath = whole
+		} else {
+			// Nothing to send means this peer can never be offered spill
+			// work, and the run would look healthy while staying local.
+			return fmt.Errorf("no closure archive for %s: it is in neither this node's store nor its cache", storePath)
 		}
 	}
 

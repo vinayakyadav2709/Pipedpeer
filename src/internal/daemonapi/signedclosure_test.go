@@ -276,7 +276,7 @@ func TestTheSendPathHonoursWhatThePeerSaidItTakes(t *testing.T) {
 			}
 			defer func() { buildSignedClosure = oldBuild }()
 
-			_ = s.importStoreOnPeer(ph, "/nix/store/aaaa-root", nar)
+			_ = s.importStoreOnPeer(ph, "/nix/store/aaaa-root", func() (string, bool) { return nar, true })
 
 			if asked != tc.wantSignedField {
 				t.Errorf("the signed transfer was %sbuilt for a peer advertising %q",
