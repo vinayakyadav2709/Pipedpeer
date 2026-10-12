@@ -407,13 +407,16 @@ here only by tests in which every remote chunk fails. The cause was later traced
 to every worker refusing the broadcast closure for want of a trusted signing key
 (Section~\ref{sec:env}).
 
-\textbf{Rehearsal.} In the venue-shaped lab, the headline parallel map took
-\textbf{TODO-NUM}\,s on its first run and \textbf{TODO-NUM}\,s cached; a GPU job
-submitted from a node without a GPU ran on the GPU node in \textbf{TODO-NUM}\,s;
-an interrupt stopped work on every peer within \textbf{TODO-NUM}\,s; a detached
-job was reattached and returned its results; and a two-rank GPU ring on one
-shared GPU finished after one rank was killed, in \textbf{TODO-NUM}\,s.
-% from rehearsal: V1 summary (headline cold/cached, GPU step, Ctrl+C drill, detach/attach) and V2 (ring with a killed rank)
+\textbf{Rehearsal.} In the venue-shaped lab (containers on one laptop, so these
+are costs, not speedups), the headline parallel map took \textbf{43.5}\,s on its
+first run and \textbf{17.0}\,s cached; a GPU job submitted from a node without a
+GPU ran on the GPU node in \textbf{7.6}\,s with its environment cached
+(\textbf{264.8}\,s the first time); an interrupt stopped work on every peer
+within \textbf{2}\,s; a detached job was reattached and returned its results;
+and in a second lab, two containers sharing one GPU, a two-rank ring finished
+its 80 epochs after one rank was killed, in \textbf{90.5}\,s.
+% rehearsal evidence (~/Downloads/pipedpeer-work/evidence): v1/30-host-00pool-first.txt (8e14b9b), v2/71-step-2-headline.txt (31b5364),
+% v1/13-gpu-step.txt, v2/74b-gpu-pc1-direct.txt, v1/31-ctrlc-poolwatch.txt (1.3 s samples), v2/23b-ddp-down-up.txt (GPU lab, 1519952)
 
 \subsection{Recorded multi-machine results}
 
