@@ -577,3 +577,31 @@ func TestADeadLinkDoesNotDropItsReplacement(t *testing.T) {
 		t.Fatalf("a second teardown of the same link reported it gone again (gone=%v)", gone)
 	}
 }
+
+// TestALinkToOurselvesIsDropped. Two networks on the same private range make
+// one of a peer's LAN candidates an address of this machine; the dial lands on
+// our own endpoint and comes back authenticated as our own key. Linking it
+// joined and left this machine every two seconds (V2 evidence 38-*).
+func TestALinkToOurselvesIsDropped(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := 0
+	m := New(Config{
+		Key:    identity.KeyPair{Public: pub, Private: priv},
+		OnPeer: func(string, string) { joined++ },
+	})
+	conn := liveConn(t)
+	if err := m.linkUp(context.Background(), m.node(), conn, "punched-in"); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Peers()) != 0 || joined != 0 {
+		t.Fatalf("linked to ourselves: peers=%v joins=%d", m.Peers(), joined)
+	}
+	select {
+	case <-conn.Context().Done():
+	case <-time.After(5 * time.Second):
+		t.Error("the connection to ourselves was left open")
+	}
+}

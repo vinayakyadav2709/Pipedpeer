@@ -446,3 +446,19 @@ func TestTheAdoptedCollisionSocketHasNoReadDeadline(t *testing.T) {
 		t.Fatalf("the adopted socket stopped reading after the collision budget: %v", err)
 	}
 }
+
+// TestTheRaceIgnoresOurOwnAnswer. When a peer's candidate is one of our own
+// addresses (two networks on one private range), our probe reaches our own
+// socket. Answering it made the race pick this machine over the peer.
+func TestTheRaceIgnoresOurOwnAnswer(t *testing.T) {
+	meConn := loopbackConn(t)
+	me := NewProber(meConn, "cafecafecafecafe")
+	pump(t, meConn, me)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	got, err := me.Race(ctx, []Candidate{{Kind: KindLAN, Addr: addrOf(meConn)}}, 50*time.Millisecond)
+	if err == nil {
+		t.Fatalf("the race picked our own socket %s", got)
+	}
+}

@@ -349,6 +349,13 @@ func (p *Prober) Deliver(payload []byte, from netip.AddrPort) bool {
 	if !ok {
 		return false
 	}
+	if pr.from == p.self {
+		// Our own probe, sent to an address of a peer that is also one of
+		// ours (two networks on the same private range). Answering it let
+		// the race pick this machine over the real peer, and the dial then
+		// failed with "could not prove its identity".
+		return true
+	}
 	switch pr.kind {
 	case probeRequest:
 		// Somebody is punching at us. Answering does two things: it tells
