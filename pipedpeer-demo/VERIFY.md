@@ -1049,9 +1049,8 @@ TOTAL 20.3s
 ### B3 — Ctrl+C stops everything
 
 **Ctrl+C mid-run.** In a second terminal, run
-`~/Downloads/pipedpeer-work/tmp/poolwatch.sh 45`, which prints each pc's pool
-counters every second (a helper from the rehearsal laptop, not in the repo;
-without it, skip the poolwatch half). On the laptop: `pipedpeer run 00_pool.py`, then press
+`scripts/poolwatch.sh 45`, which prints each pc's pool counters every second
+(`ex=` items run there, `can=` chunks cancelled there, `py=` python processes). On the laptop: `pipedpeer run 00_pool.py`, then press
 Ctrl+C after the first `remote ok` line. Pass if
 (<!-- V3 9949ad0: docs-VERIFY-505-ctrlc.txt, docs-VERIFY-505-ctrlc-poolwatch.txt -->):
 ```
