@@ -641,6 +641,18 @@ One thing did change: what a node reports as free memory. `/health` now
 advertises what the node can actually *grant*, which is its memory budget less
 existing reservations (4.8), rather than the machine's free memory.
 
+**Placement within one run** (`1e07d56`).
+- A node that refuses the job's signed closure is left out for the rest of the
+  run, with ``fix: run `pipedpeer trust` on <node>``; the run fails only when no
+  node is left. A refusal is that node's missing trust, not every node's, so it
+  does not count as a failed attempt. A DDP ring still treats it as permanent.
+- This machine's memory ceiling comes from its own daemon's `/health`
+  (`mem_ceiling_bytes`), read once per run, instead of being unknown.
+- `--remote` waits up to 10 minutes for a node with room (it was 15 s;
+  `PIPEDPEER_REMOTE_WAIT` still overrides, and 0 takes one look). Every 30 s it
+  prints why each node is busy. A job that can never fit any node still fails at
+  once.
+
 ### 4.5 Leases
 
 Placement is a three-phase handshake. Its state machine
@@ -670,7 +682,10 @@ Recovery follows from the design:
 - **A dead submitter** stops renewing, and its slot is reclaimed.
 - **A dead worker** is marked unreachable at the next failed poll. The in-flight read
   fails, and the coordinator reschedules with back-off doubling from 2 s to a
-  2 min ceiling. Tasks are never dropped (`coordinator.go:764-799`).
+  2 min ceiling (`coordinator.go:764-799`). Waiting for room never drops a
+  task, but a job that *fails* is run at most three times, on nodes not yet
+  tried first, and then returns its last error; it used to retry a signal,
+  exit 126/127 or a sandbox failure forever (`1e07d56`).
 
 ### 4.6 Reproducing the environment
 
@@ -899,6 +914,15 @@ Ctrl+C left the script, its Pool chunks on peers and every DDP rank running.
   no back-off and no retry.
 - A connection that ends **without** the cancel frame (a crash, a lost network,
   a detach) never kills the job. That is what background mode builds on.
+- Ctrl+C also stops the submitter's own Nix work (`99cf0ad`). The closure export,
+  the signed pack and the seed used to run with no context, so nix-store kept
+  packing a multi-GB closure until the CLI exited. `nixstore.CmdContext` gives
+  Nix its own process group and on cancel sends it SIGTERM, then SIGKILL 5 s
+  later. SIGTERM comes first because a private store runs Nix inside crun in its
+  own session: crun passes SIGTERM on, and killing crun outright would leave Nix
+  running. A cancelled seed stops the upload instead of falling back to a whole
+  resend. In the lab, Ctrl+C during an upload left no nix-store, `nix copy` or
+  pack process on any container 1 s after the CLI exited <!-- evidence v5/22-item2-ctrlc-pack-pc2.txt, v5/22-item2-ctrlc-pack-ps.txt; the pack itself (0.1 s, and 4.3 s in v5/21) finished too fast to interrupt -->.
 - Every exit, early failures included, now goes through one finish step that
   sends the done frame, writes the log, records the end and releases the lease.
 - Time from Ctrl+C to idle peers: under 2 s in the container lab; the peers'
@@ -944,6 +968,23 @@ its replacement.
   two new routes. Both are additive, so older clients are unaffected
   (ADR-0006).
 
+**Whose network went away** (`879b86c`). When the exec connection drops, the
+CLI must tell a dead node from its own lost network: the first means run the job
+elsewhere, the second means detach and wait. It used to ask only another peer,
+so with two machines a silent node always looked like this machine being
+offline, the job was never rerun, and the watcher (which also needed another
+peer) never failed a detached one.
+- `networkUp` (`app/lostconn.go`) now runs three probes at once, 2 s each, none
+  needing root: another peer's `/health`, a registration with the introducer,
+  or a TCP connect to the default gateway on 53, 80 or 443 (accepted or refused
+  both count).
+- If any answers, the node is the one gone: a run fails over, and a detached
+  job is failed after `goneAfter`. For an internet node reached through the local
+  forwarder, only the introducer counts when one is set.
+- In the lab, with two machines, the CLI named the node gone 16 s after it was
+  killed ("while the default gateway 10.88.0.1 answers") and queued the job to
+  run elsewhere <!-- evidence v5/11-item1-kill-node-pc1.txt, v5/11-item1-kill-node-drill.txt (kill 13:31:55.63, verdict 13:32:11.67) -->.
+
 ### 4.9 Transparent interception
 
 **Delivery.**
@@ -984,6 +1025,14 @@ its replacement.
   remote chunks in flight. Local workers re-run any remote chunk that has not
   come back, and a slot table takes the first result. The call returns once the
   local side has covered every item (`fig_4.12_race_timeline.png`).
+- **A slow peer is raced, not discarded** (`8541355`). On the daemon, a peer
+  that ran past the 5-minute part budget used to be marked dead and its part
+  restarted locally from scratch, throwing away however far it had got. Now the
+  peer's copy keeps running, the same part starts locally, and the first to
+  finish is used. The loser is cancelled: a local loser's worker process group is
+  killed, a remote loser's connection closed. If both fail, the part fails with
+  both errors. A late-started local win is not counted in the speed
+  measurements.
 - **The receipt.** Every run can write a receipt (`PIPEDPEER_RECEIPT`) counting:
   - items run remotely and locally;
   - items dispatched;
@@ -1008,6 +1057,23 @@ its replacement.
   - splitting by headcount was 1.6× slower than not distributing at all;
   - splitting by measured throughput declined the 1-CPU worker and took a
     median 2.87 s, against 3.61 s by headcount (`8c9284c`).
+
+**Keeping this machine free: `run --offload`** (`ef68f02`). `--remote` moves the
+whole script, but its node could still spread pieces back to the sender, and
+nothing kept a local script's own spread work off this machine.
+- `--offload` passes this machine's id to the job as `PIPEDPEER_OFFLOAD`. The id
+  is the kernel boot ID that `heartbeat.Machine` uses, so every daemon on this
+  physical machine is excluded; it is never an address.
+- The script and its non-distributed code still run here. Pool, joblib and
+  executor chunks, pandas and numpy offloads and DDP ranks go only to other
+  machines, shipped as under `--distribute force` (no cost model).
+- With `--remote`, the chosen node's spreading skips this machine, which also
+  keeps this machine out of a `--remote` DDP ring.
+- A piece no other machine can take runs here with a one-line warning; the run
+  never fails for it. The summary's spread line always names this machine,
+  `0 on <host>` included. It is opt-in; defaults are unchanged.
+- The container lab cannot show it: its containers share the host's kernel boot
+  ID and so count as one machine.
 
 **What is intercepted, and how.**
 
@@ -1059,6 +1125,31 @@ intercepted.
   rates, if any share moved by 10% or more. It can drop the slowest rank (never
   rank 0, and never below two) when that rank adds more sync than compute. A
   round completes without a straggler after 45 s.
+- **A start barrier** (`c567369`, `9b47502`). On the friend's two-laptop ring,
+  rank 0 trained while rank 1 was still receiving its closure, so every sync
+  waited about 45 s for it. The first sync is now a barrier: every rank must
+  reach the opening weight broadcast (closure imported, script at its first
+  optimizer step) within `PIPEDPEER_DDP_START_WAIT` (default 5 min).
+  - Ranks still missing are dropped and rank 0 names them; no step waits on
+    them. After 2 s at the barrier rank 0 says whom it waits for ("waiting for
+    rank 1 on gpu1 to be ready … up to 5 min") and repeats every 30 s, reading
+    arrivals from an additive `GET /v1/ddp/sync` and host names from
+    `PIPEDPEER_DDP_HOSTS`.
+  - The barrier's time goes to `barrier_sec`, not the sync statistics, and
+    rank 0 prints it as not counted as sync. Before that, a 2.5 min wait at the
+    barrier was reported as sync: "36202 ms per sync", and 146.0 s of sync in a
+    148.7 s run whose training took 4.0 s on the other rank <!-- evidence v4/80-item1-ddp-start-barrier-default.txt, v4/80-item1-ddp-start-barrier-default-drill.txt (rank 1 throttled to 1 Mbit) -->.
+  - A late rank is refused (410); its shim exits 75 and the CLI prints a plain
+    line without failing the run or stopping the rejoin watcher, so a DataLoader
+    script can still take it back. A rank still running 60 s after another
+    finishes is stopped. With `PIPEDPEER_DDP_START_WAIT=30` and rank 1's link
+    throttled to 1 Mbit/s, rank 0 trained alone after 30 s and the CLI stopped
+    rank 1 61 s after the ring finished <!-- evidence v4/82-item1-ddp-start-wait-30s.txt, v4/82-item1-ddp-start-wait-30s-drill.txt -->.
+  - The SAME-gradients check marked a round duplicate on its first contribution,
+    and nothing undid it when the round closed on rank 0 alone. It now needs two
+    matching contributions.
+  - The barrier covers the default daemon sync channel, not the gloo or nccl
+    backends.
 - **A dead rank no longer ends the run** (`8e14b9b`). Until this commit one
   failed rank failed the whole run, although the sync already closed without it.
   Now the CLI prints which rank died and on which host, tells the lead daemon,
@@ -1078,8 +1169,16 @@ intercepted.
   returns, or a new eligible node, joins the ring at the next epoch boundary
   instead of sitting idle (`src/ddpup.go`, `daemonapi/ddpup.go`):
   - runDDP watches the nodes and starts a rank there;
-  - the joiner skips ahead with empty loader passes and loads the lead's model
-    and optimizer snapshot through the lead daemon;
+  - the joiner loads the lead's model and optimizer snapshot through the lead
+    daemon;
+  - for each epoch it missed it runs one real batch from the unsharded loader
+    (`82596fe`), so a script's loop variables exist (empty passes left
+    `print(loss)` after the loop raising NameError). During these batches
+    `backward()`, `optimizer.step()`, GradScaler's step, update and unscale_,
+    the sync and the step count do nothing, so nothing trains or is counted
+    twice, and the rank's output is prefixed `[rank N catch-up, not trained]`.
+    The snapshot now carries buffers too, copied in after the catch-up batches,
+    so BatchNorm running statistics come from the lead;
   - the shim's world size and rendezvous-hash shards grow to include it, so
     about 1/n of the data moves, and the daemon's averaging group grows with it.
   - Only DataLoader scripts can grow; a script that slices its own tensors gets
@@ -1129,17 +1228,20 @@ model kept every one local (`ec5d9fc`).
 
 The invariant is that using the cluster is never worse than not using it. Six
 layers hold it up:
-1. **The race** (4.9).
+1. **The race** (4.9), on the daemon too: a peer past its part budget is raced
+   by a local copy rather than discarded.
 2. **Per-primitive fallback.** Any exception in an intercepted call falls back to
    the original implementation. The one exception is an out-of-memory matmul,
    which raises (4.10).
 3. **Peer fallback.** A failed part tries the next peer, then runs locally.
 4. **Worker respawn.** A dead warm worker is restarted, and a one-shot process
    is the fallback.
-5. **Rescheduling.** A failed job is placed again with back-off; tasks are never
-   dropped. A cancelled one is not retried (4.8).
+5. **Rescheduling.** A failed job is placed again with back-off, on an untried
+   node first, at most three times; a node that refused its closure is skipped
+   (4.4, 4.5). A dead node is told apart from this machine's own lost network
+   before the job is rerun (4.8). A cancelled one is not retried (4.8).
 6. **Surviving ranks.** A DDP run continues on the ranks that are left when one
-   dies (4.9).
+   dies, and starts without a rank that misses the start barrier (4.9).
 
 Memory is bounded at the same time:
 - A pool request larger than the node's grantable memory is forwarded to a
@@ -1241,6 +1343,25 @@ receipt the shim writes to a file at exit (`PIPEDPEER_RECEIPT`), with
 items counted by where they ran. The daemon returns it on the done frame and
 the client stores it in the job history. Since `5b89f8c` the receipt also counts the items this machine
 runs itself, including a chunk it re-ran after a peer failed.
+
+**Usage lines** (`ca70da4`, `98e8684`). The claim that the sender stays free had
+no proof on screen. The summary gains two lines, sampled once a second from
+`/proc` and from the executing node's `/health` (`app/selfuse.go`):
+
+```
+  this machine CPU 22% avg · RAM +69 MB (peak +249 MB) · no GPU
+  on pc3       CPU 31% avg
+```
+
+<!-- evidence v5/41-item10-usage-pool-pc2.txt (00_pool.py --remote from pc2, lab) -->
+A GPU node adds GPU utilisation and peak VRAM. Any sampling failure prints a
+warning and drops the line; it never fails a run. A `--ddp` run samples this
+machine and each rank's node, and prints one `on <node>` line per machine under
+a `=== Usage ===` header (two ranks on one node share a line; a rank that joins
+mid-run gets none). Attach and collect summaries have no usage lines, since no
+CLI was there to take samples. For the same demo point, `04_torch_ddp.py` now
+trains a wider model in bigger batches, long enough for `nvidia-smi` to show the
+load.
 
 ---
 
@@ -1549,7 +1670,10 @@ measured worse than doing nothing:
   vanishing and can be attached later (4.8), but a Pool script runs on the
   submitter, so its machine must survive the job.
 - **DDP needs rank 0's machine.** A run continues without any other rank, but
-  rank 0's daemon holds the sync. Re-spreading needs a DataLoader.
+  rank 0's daemon holds the sync. Re-spreading needs a DataLoader. The start
+  barrier covers the daemon sync channel only, not gloo or nccl.
+- **`--offload` cannot be shown in the container lab.** Containers share the
+  host's kernel boot ID, so they count as one machine.
 - **Imports outside the table and nixpkgs fail.** An unknown import is looked up
   in nixpkgs and reported before the run if it is not there (4.6); it is no
   longer dropped silently.
@@ -1662,6 +1786,14 @@ See 4.3. In summary:
 | Background mode and attach | `daemonapi/joblog.go`, `daemonapi/attach.go`, `daemonctl/attach.go`, `app/attach.go`; commits ca853bb, 272ca83 |
 | DDP survives a dead rank | `main.go` runDDP; shim sampler; commit 8e14b9b |
 | Key helper | `setup/`, `nixsign/`; ADR-0018; commit 454754a |
+| `--offload` keeps spread work off this machine | `main.go`, `daemonapi/pool.go`, shim `PIPEDPEER_OFFLOAD`; `offload_test.go`; commit ef68f02 |
+| Usage lines in the summary | `app/selfuse.go`; commits ca70da4, 98e8684 |
+| Closure refusal skips one node; 3 failed runs at most | `coordinator/coordinator.go` `ExecuteWithRetry`; `fxplace_test.go`; commit 1e07d56 |
+| Slow peer raced, not discarded | `daemonapi/pool.go`; commit 8541355 |
+| Dead node told from a lost network | `app/lostconn.go` `networkUp`; commit 879b86c |
+| Ctrl+C stops nix export and pack | `nixstore/nixstore.go` `CmdContext`; `nixstore/cancel_test.go`; commit 99cf0ad |
+| DDP start barrier | `daemonapi/ddpsync.go`; `ddpstart_test.go`, `ddpstart_shim_test.go`; commits c567369, 9b47502 |
+| Rejoin catch-up batch, buffers in the snapshot | shim; `ddpup_shim_test.go`; commit 82596fe |
 
 ## Appendix B  What changed
 
@@ -1712,6 +1844,11 @@ See 4.3. In summary:
 | Output split into lines | Raw chunks; `\r` progress bars animate (4.8) |
 | Job with no estimate uncapped; no ceiling without systemd | 4 GiB default cap; memory watchdog (4.8) |
 | One dead DDP rank ends the run | Survivors continue on rendezvous-hash shards; a returning machine rejoins at the next epoch (4.9) |
+| DDP rank 0 trained while others still received the closure | Start barrier with named waits; late ranks refused; a rejoiner runs one catch-up batch per missed epoch (4.9) |
+| Sender's own spread work could land on it | `run --offload`; usage lines for this machine and each node (4.9, 4.14) |
+| Retried non-permanent failures forever; one refusing node failed the run; `--remote` waited 15 s | 3 failed runs at most; refusing node skipped; 10 min wait with reasons every 30 s (4.4, 4.5) |
+| With two machines, a dead node looked like this machine offline | Gateway and introducer probes decide (4.8) |
+| Ctrl+C left nix-store packing | Nix runs in its own process group and is stopped (4.8) |
 | Daemon activity only in `daemon.log` | `events`, CPU and GPU in `nodes` and `dashboard`, join watch, run summary, real `--check-only` (4.14) |
 | N7 measured distribution, not idle cost | Declined workload: about 0.12 s per job (5.3) |
 | Tests: 617 run | 829 run (822 pass, 7 skip) <!-- evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests) --> |

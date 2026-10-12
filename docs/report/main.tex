@@ -1054,6 +1054,15 @@ can actually \emph{grant} --- its own budget less the reservations of every
 daemon on the same machine --- rather than the machine's free memory
 (Section~\ref{sec:sandbox}).
 
+Within one run, placement also learns. A node that refuses the job's signed
+closure is left out for the rest of the run, and the client prints the command
+that fixes it on that node; a refusal is that node's missing trust, not every
+node's, so the run fails only when no node is left. The submitting machine's
+own memory ceiling is read once per run from its daemon instead of being
+unknown. A run sent away with \texttt{-{}-remote} now waits up to ten minutes
+for a node with room, rather than fifteen seconds, and every 30 seconds says why
+each node is busy; a job that could never fit any node still fails at once.
+
 \section{The Lease Protocol}
 \label{sec:lease}
 
@@ -1087,7 +1096,21 @@ renewing and the sweeper reclaims its slot. A worker that dies stops answering
 health checks, is marked unreachable at the next failed poll, and its in-flight
 connection fails, which the coordinator treats as a failed attempt and
 reschedules elsewhere, with back-off doubling from 2 seconds to a 2 minute
-ceiling. Tasks are never dropped.
+ceiling. Waiting for room never drops a task, but a job that \emph{fails} is run
+at most three times, on nodes not yet tried first, and then returns its last
+error; it used to retry a killed or sandbox-failed job forever.
+
+Deciding that a worker has died is less simple than it looks, because from the
+submitter a dead node and a lost network look the same: the connection drops.
+The first means run the job elsewhere, the second means detach and wait.
+The client used to ask only another peer, so with two machines a silent node
+always looked like the submitter being offline and the job was never rerun. It
+now runs three probes at once, two seconds each and none needing root: another
+peer's health endpoint, a registration with the introducer, and a TCP connection
+to the default gateway on a common port, where an accepted or a refused
+connection both count. If any answers, the node is the one gone. In the lab,
+with two machines, the client named the node gone 16\,s after it was killed.
+% evidence v5/11-item1-kill-node-pc1.txt, v5/11-item1-kill-node-drill.txt (kill 13:31:55.63, verdict 13:32:11.67)
 
 \section{Reproducing the Environment}
 \label{sec:env}
@@ -1312,6 +1335,13 @@ a detach --- never kills the job, which is what background mode builds on. In
 the rehearsal (containers on one laptop), peers stopped within \textbf{2}\,s of
 the interrupt: their pool counters showed the cancel at the next 1.3\,s sample.
 % rehearsal evidence v1/31-ctrlc-poolwatch.txt (8e14b9b)
+The interrupt now also stops the submitter's own Nix work. Exporting and packing
+the closure ran with no context, so Nix kept packing a multi-gigabyte closure
+until the client exited. Nix now runs in its own process group, which on cancel
+receives a termination signal and, five seconds later, a kill. The gentler
+signal comes first because a private store runs Nix inside \texttt{crun} in its
+own session: \texttt{crun} forwards it, while killing \texttt{crun} outright
+would leave Nix running.
 
 \textbf{Background mode.} The daemon keeps every frame of a job's output in a
 log in the job's directory, in the order a live client saw it. A detach flag,
@@ -1399,6 +1429,24 @@ its cores. On a lab cluster limited to 8, 2 and 1 CPUs, dividing by headcount
 ran 1.6 times slower than not distributing at all; dividing by measured
 throughput declined the one-CPU worker and took a median of 2.87\,s against
 3.61\,s by headcount.
+
+A peer that runs past its five-minute budget for a part is no longer written
+off. It used to be marked dead and its part restarted locally from scratch,
+discarding however far it had got; now the peer's copy keeps running, the same
+part starts locally, the first to finish is used, and the loser is cancelled. If
+both fail, the part fails with both errors.
+
+\textbf{Keeping the sender free.} Sending a script away does not by itself keep
+the sending machine idle: its node may spread pieces back to it, and a script
+run locally spreads its own work there. With \texttt{-{}-offload} the script and
+its sequential code still run on this machine, but every distributed piece ---
+parallel-map and \texttt{joblib} chunks, pandas and NumPy work, training ranks
+--- goes only to other machines, shipped without consulting the cost model.
+Machines are told apart by the kernel's boot identifier rather than an address,
+so every daemon on this physical machine is excluded. A piece no other machine
+can take runs here with a one-line warning rather than failing the run. Because
+the containers of the lab share one kernel, they count as one machine there,
+and the lab cannot show this.
 
 \begin{table}[H]
 \centering
@@ -1504,16 +1552,38 @@ its own tensors instead of using a data loader is not re-spread.
 \textbf{When a machine comes back.} A rank whose machine returns, or a new
 eligible node, joins the running ring at the next epoch boundary instead of
 sitting idle. The client watches the nodes and starts a rank there; the joiner
-skips ahead with empty passes over its data loader, loads the lead's model and
-optimiser snapshot through the lead daemon, and the shim's world size and
+loads the lead's model and optimiser snapshot through the lead daemon, and the
+shim's world size and
 rendezvous-hash shards grow to include it, so about $1/n$ of the data moves. The
 daemon's averaging group grows with it. Only data-loader scripts can grow; a
 script that slices its own tensors gets one line saying so. The refit now runs
 once per synchronisation and reaches every rank, where it used to hand new
-shares to one rank per cadence. Losing rank 0's machine still ends the run. In
+shares to one rank per cadence. For each epoch it missed, the joiner runs one
+real batch from its data loader during which backward passes, optimiser and
+gradient-scaler steps, synchronisation and step counting do nothing, so a
+script's loop variables exist afterwards and nothing trains twice; its output is
+marked as catch-up until its first real epoch. The snapshot now carries the
+model's buffers too, copied in after the catch-up batches, so batch-normalisation
+statistics come from the lead. Losing rank 0's machine still ends the run. In
 the rehearsal (two containers sharing one GPU) a returning rank joined the ring
 \textbf{4}\,s after its node's daemon started.
 % rehearsal evidence v2/23b-ddp-down-up.txt + gpulab/20261012-064736-logs gpu1/gpu2 daemon.log (1519952): daemon starting 05:37:47, rank joined 05:37:51
+
+\textbf{Starting together.} On a two-laptop ring, rank 0 trained while rank 1
+was still receiving its closure, so every synchronisation waited for it. The
+first synchronisation is now a barrier: every rank must reach the opening weight
+broadcast --- environment imported, script at its first optimiser step ---
+within a configurable wait of five minutes by default. Ranks still missing are
+dropped and named, and no step waits on them; while it waits, rank 0 says which
+rank on which host it is waiting for, every 30 seconds. The barrier's time is
+reported apart from synchronisation, since counting it there once produced
+advice built on a single 2.5 minute wait. A late rank is refused without failing
+the run and can rejoin through a data loader as above. With a 30 second wait and
+the second rank's link throttled to 1\,Mbit/s, rank 0 trained alone after
+30\,s and the late rank was stopped a minute after the ring finished. The
+barrier covers the daemon synchronisation channel, not the gloo or NCCL
+back-ends.
+% evidence v4/82-item1-ddp-start-wait-30s.txt, v4/82-item1-ddp-start-wait-30s-drill.txt; the 2.5 min wait: v4/80-item1-ddp-start-barrier-default.txt
 
 \begin{figure}[H]
     \centering
@@ -1605,11 +1675,15 @@ rank continues on the survivors (Section~\ref{sec:intercept}).
   cluster, which raises (Section~\ref{sec:cost}).
   \item \textbf{Peer fallback.} A failed peer is skipped for the remainder of
   that chunk and the next candidate tried; if all fail, the work runs locally.
+  A peer that is merely slow is raced by a local copy of its part, and the first
+  to finish wins.
   \item \textbf{Worker respawn.} A dead warm worker is restarted, falling back to
   a one-shot process if that fails.
   \item \textbf{Rescheduling.} A failed job is placed again with backoff doubling
-  from 2 seconds to a 2 minute ceiling. Tasks are never dropped; a cancelled
-  one is not retried.
+  from 2 seconds to a 2 minute ceiling, on an untried node first and at most
+  three times; a node that refused the closure is skipped, and a dead node is
+  told apart from a lost network first. Waiting for room never drops a task; a
+  cancelled one is not retried.
 \end{enumerate}
 
 \begin{figure}[H]
@@ -1682,6 +1756,17 @@ comes from a receipt the shim prints on its error stream at exit, with items
 counted by where they ran; the client hides that line and parses it. The
 receipt now also counts the items the executing machine ran itself, including a
 chunk it re-ran after a peer failed.
+
+\textbf{What each machine spent.} The claim that the sender stays free needed
+proof on screen. The summary gains two lines, sampled once a second from the
+kernel's process statistics and from the executing node's health endpoint: this
+machine's average CPU use, the memory it added and whether it used a GPU, and the
+same for the node, with GPU utilisation and peak VRAM where there is one. From a
+lab container that sent a parallel-map script away, they read ``CPU 22\% avg,
+RAM +69 MB'' for the sender and ``CPU 31\% avg'' for the node. A training ring
+prints one such line per machine. A sampling failure prints a warning and drops
+the line; it never fails the run.
+% evidence v5/41-item10-usage-pool-pc2.txt (00_pool.py --remote from pc2)
 
 \section{Test Workloads}
 \label{sec:workloads}
@@ -2332,7 +2417,8 @@ first cluster with a GPU.
   must survive the job.
   \item \textbf{A training ring needs rank 0's machine.} A ring continues
   without any other rank, but rank 0's daemon holds the synchronisation, and
-  re-spreading a dead rank's data needs a data loader.
+  re-spreading a dead rank's data needs a data loader. The start barrier
+  covers the daemon synchronisation channel only, not gloo or NCCL.
   \item \textbf{Dependencies outside the package set.} An import that neither the
   table nor the package set knows is reported before the run rather than dropped
   silently (Section~\ref{sec:env}), but the job still needs the user to name a
