@@ -51,7 +51,7 @@ func TestExecutionReportsTiming(t *testing.T) {
 	host, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 
-	up, err := UploadJob(host, port, tarPath, "", store, "job.py", UploadOptions{SkipBroadcast: true})
+	up, err := UploadJob(context.Background(), host, port, tarPath, "", store, "job.py", UploadOptions{SkipBroadcast: true})
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -111,7 +111,7 @@ open("out.txt", "w").write("result")
 	host, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	port, _ := strconv.Atoi(portStr)
 
-	up, err := UploadJob(host, port, tarPath, "", store, "job.py", UploadOptions{SkipBroadcast: true})
+	up, err := UploadJob(context.Background(), host, port, tarPath, "", store, "job.py", UploadOptions{SkipBroadcast: true})
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}

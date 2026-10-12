@@ -57,6 +57,8 @@ func sandboxFailed(err error, stderr string) bool {
 // an error (1-125). Retrying those only repeats the failure, and the
 // coordinator used to do so forever.
 //
+// Also counted: a node that refused the closure's signatures.
+//
 // Not counted: 126 and 127 (the node could not execute bin/run: a broken or
 // missing closure import), a death by signal (above 128: a node that was shut
 // down or ran short of memory kills its job that way), and a sandbox that
@@ -69,6 +71,13 @@ func IsPermanent(err error) bool {
 	var se *SandboxError
 	if errors.As(err, &se) {
 		return false
+	}
+	// A node that refused the closure's signatures refuses it again on every
+	// retry; each one cost a multi-GB resend (V2 45-friend). The string covers
+	// an older node too, whose job import says the same in its own words.
+	var ce *daemonctl.ClosureRefusedError
+	if errors.As(err, &ce) || (err != nil && strings.Contains(err.Error(), "lacks a signature by a trusted key")) {
+		return true
 	}
 	var xe *daemonctl.RemoteExitError
 	if errors.As(err, &xe) {

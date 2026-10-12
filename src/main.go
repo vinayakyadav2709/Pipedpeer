@@ -590,7 +590,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			// rank). A second Ctrl+C exits at once.
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer stop()
-			go func() { <-ctx.Done(); stop() }()
+			go exitOnSecondSignal(ctx, stop)
 
 			// DDP: --ddp N caps the rank count; without it, DDP auto-activates
 			// when the script uses torch.distributed and every eligible node
@@ -1963,7 +1963,7 @@ func newAttachCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 			defer stop()
-			go func() { <-ctx.Done(); stop() }()
+			go exitOnSecondSignal(ctx, stop)
 			return runOutcome(app.Attach(ctx, args[0]))
 		},
 	}
@@ -2977,4 +2977,16 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 		return []registry.NodeRecord{rank0}, []int{0}, []float64{1}
 	}
 	return out, slots, weights
+}
+
+// exitOnSecondSignal waits for the first Ctrl+C (which cancels ctx and lets
+// the command clean up), then exits at once with a line on the second.
+func exitOnSecondSignal(ctx context.Context, stop context.CancelFunc) {
+	<-ctx.Done()
+	stop()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	<-sig
+	fmt.Fprintln(os.Stderr, "\nsecond interrupt: exiting now")
+	os.Exit(130)
 }

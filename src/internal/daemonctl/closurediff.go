@@ -2,9 +2,9 @@ package daemonctl
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -36,64 +38,120 @@ import (
 // the node already has under that name is that path, and there is no version
 // of it that could be stale.
 //
-// Returns ok=false when a diff is not worth it or not possible, and
-// the caller sends the archive whole - every failure here is a slower
-// transfer rather than a broken one.
+// The archive is the signed format (narpack), never `nix-store --export`:
+// the export stream drops every signature, so a multi-user nix daemon - every
+// real Fedora or Ubuntu receiver - refused it with "lacks a signature by a
+// trusted key" even when the sender's key was trusted. A node that shares
+// nothing gets the whole closure the same way.
+//
+// Returns ok=false when the signed send is not possible (an older node, a
+// local packing failure, a transport error), and the caller sends the archive
+// whole the old way. A node that understood the archive and refused it sets
+// r.err instead: resending unsigned cannot satisfy a node that checks
+// signatures, and would cost the whole closure again.
 func seedClosure(host string, port int, storePath string) (seedResult, bool) {
+	return seed(host, port, storePath, false)
+}
+
+// seedWhole is seedClosure for a cold run: every path travels, whatever the
+// node already has.
+func seedWhole(host string, port int, storePath string) (seedResult, bool) {
+	return seed(host, port, storePath, true)
+}
+
+func seed(host string, port int, storePath string, whole bool) (seedResult, bool) {
 	paths, err := closurePathsLocal(storePath)
 	if err != nil || len(paths) == 0 {
 		fmt.Fprintf(os.Stderr, "      warning: cannot list the closure of %s (%v); sending it whole\n", storePath, err)
 		return seedResult{}, false
 	}
 	r := seedResult{total: len(paths)}
-	missing, ok := askMissing(host, port, paths)
-	if !ok {
-		// An older daemon does not know the question. Sending the whole
-		// closure is what it expects.
-		return r, false
-	}
-	if len(missing) == 0 {
-		// Every path is already there. Nothing to send, and nothing to do:
-		// the caller's own cache check decides whether to upload a NAR.
-		return r, true
-	}
-	if len(missing) == len(paths) {
-		// Nothing in common. A diff would be the whole archive with extra
-		// round trips.
-		return r, false
+	var missing []string // nil: every path
+	if !whole {
+		m, ok := askMissing(host, port, paths)
+		if !ok {
+			// An older daemon does not know the question. Sending the whole
+			// closure is what it expects.
+			return r, false
+		}
+		if len(m) == 0 {
+			// Every path is already there. Nothing to send, and nothing to do:
+			// the caller's own cache check decides whether to upload a NAR.
+			return r, true
+		}
+		if len(m) < len(paths) {
+			missing = m
+		}
 	}
 
 	// On disk, not in $TMPDIR: a partial closure can be gigabytes, and /tmp
 	// is often a tmpfs charged against the RAM the job is about to need.
 	dir, err := userdir.Scratch("closurediff-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "      warning: no temp file for the closure diff (%v); sending it whole\n", err)
+		fmt.Fprintf(os.Stderr, "      warning: no temp file for the closure (%v); sending it whole\n", err)
 		return r, false
 	}
 	defer os.RemoveAll(dir)
-	narPath := filepath.Join(dir, "partial.nar")
+	archive := filepath.Join(dir, "closure.tar")
 
 	t0 := time.Now()
-	if err := exportPathsLocal(missing, narPath); err != nil {
-		fmt.Fprintf(os.Stderr, "      warning: exporting %d missing paths failed (%v); sending it whole\n", len(missing), err)
+	if err := packSigned(storePath, paths, missing, archive); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: packing the closure with its signatures failed (%v); sending it whole unsigned\n", err)
 		return r, false
 	}
-	r.bytes = fileSize(narPath)
+	r.bytes = fileSize(archive)
 	fmt.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(r.bytes)), secs(time.Since(t0)))
 	t0 = time.Now()
-	if err := postPartial(host, port, storePath, narPath); err != nil {
-		fmt.Fprintf(os.Stderr, "      warning: sending the missing paths failed (%v); sending it whole\n", err)
+	if err := postPartial(host, port, storePath, archive); err != nil {
+		var refused *ClosureRefusedError
+		if errors.As(err, &refused) {
+			r.err = err
+			return r, false
+		}
+		fmt.Fprintf(os.Stderr, "      warning: sending the closure failed (%v); sending it whole\n", err)
 		return r, false
 	}
 	r.sent, r.sendTime = len(missing), time.Since(t0)
+	if missing == nil {
+		r.sent = len(paths)
+	}
 	return r, true
 }
 
-// seedResult is what seedClosure sent.
+// seedResult is what seedClosure sent. err is a refusal no resend can fix.
 type seedResult struct {
 	sent, total int
 	bytes       int64
 	sendTime    time.Duration
+	err         error
+}
+
+// ClosureRefusedError is a node that understood the signed closure and
+// refused it - most often a key it does not trust. Sending it again, signed
+// or not, or placing the job on that node again, repeats the refusal.
+type ClosureRefusedError struct{ Reason string }
+
+func (e *ClosureRefusedError) Error() string {
+	return "the node refused the closure: " + e.Reason
+}
+
+// refusalMarkers are what a node that unpacked a signed closure says when it
+// turns it down (daemonapi importSignedClosure, narpack.Import). Anything
+// else - an older node that cannot read the archive - is not a refusal.
+var refusalMarkers = []string{
+	"lacks a signature by a trusted key",
+	"nix copy from a peer's closure",
+	"refusing a closure whose signer key",
+	"closure archive is format",
+}
+
+func isRefusal(msg string) bool {
+	for _, m := range refusalMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // ClosureStatus reports how much of a closure a node already holds, for a
@@ -142,29 +200,46 @@ func closurePathsLocal(storePath string) ([]string, error) {
 	return strings.Fields(string(out)), nil
 }
 
-// exportPathsLocal writes a gzipped archive of exactly these paths. nix orders
-// an export so that references come before the things that need them, which
-// is what lets the far side import a fragment.
-func exportPathsLocal(paths []string, destPath string) error {
-	f, err := os.Create(destPath)
+// packSigned writes a signed closure archive (narpack) of storePath carrying
+// the NARs of want only (nil: all of paths). The paths are signed with this
+// node's key and published into the same cache directory the daemon sends
+// from (daemonapi closureCacheDir), so a closure both have sent is
+// compressed once.
+func packSigned(storePath string, paths, want []string, dest string) error {
+	ctx := context.Background()
+	// Signed before it is published: the signature is written into the
+	// cache's metadata at publish time.
+	if err := nixsign.EnsureSigned(ctx, paths); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: could not sign the closure (%v); the node may refuse it\n", err)
+	}
+	cacheDir := filepath.Join(userdir.Data(), "closure-cache")
+	if err := narpack.Publish(ctx, cacheDir, []string{storePath}); err != nil {
+		return err
+	}
+	// Named so a node that has not polled this one can still check the
+	// signature.
+	var m narpack.Manifest
+	if self, err := identity.Key(); err == nil {
+		m.Signer, m.SignerKey = self.Fingerprint(), nixsign.PublicKey(self)
+	} else {
+		fmt.Fprintf(os.Stderr, "      warning: no node key to name in the closure (%v); a node that has not polled this one will refuse it\n", err)
+	}
+	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	gz := gzip.NewWriter(f)
-	defer gz.Close()
-
-	// Signed before it leaves, so the far side can require a signature
-	// instead of being configured to stop asking for one.
-	_ = nixsign.EnsureSigned(context.Background(), paths)
-	cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store", "--export"}, paths...)...)
-	if err != nil {
+	if err := narpack.PackSigned(m, cacheDir, []string{storePath}, paths, want, f); err != nil {
+		f.Close()
 		return err
 	}
-	defer cleanup()
-	cmd.Stdout = gz
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	narpack.Touch(cacheDir, paths)
+	if _, err := narpack.Prune(cacheDir, narpack.MaxBytes()); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: could not bound the closure cache %s: %v\n", cacheDir, err)
+	}
+	return nil
 }
 
 // askMissing asks a node which of these paths it does not have. A node that
@@ -194,7 +269,18 @@ func askMissing(host string, port int, paths []string) ([]string, bool) {
 	return out.Missing, true
 }
 
-// postPartial hands the fragment to the node's store.
+// jsonError is the "error" field of a daemon's JSON answer, or the body.
+func jsonError(body []byte) string {
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	return strings.TrimSpace(string(body))
+}
+
+// postPartial hands the signed archive to the node's store.
 //
 // partial=1 matters: the receiving side must not file a fragment away as the
 // cache entry for this closure, or it would later forward it to a third node
@@ -211,7 +297,7 @@ func postPartial(host string, port int, storePath, narPath string) error {
 	go func() {
 		mp.WriteField("store_path", storePath)
 		mp.WriteField("partial", "1")
-		part, err := mp.CreateFormFile("nar", "closure-diff.nar")
+		part, err := mp.CreateFormFile("nar", "closure.tar")
 		if err == nil {
 			r, done := withProgress(f, fileSize(narPath), "      Sending missing paths")
 			_, err = io.Copy(part, r)
@@ -231,7 +317,10 @@ func postPartial(host string, port int, storePath, narPath string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("partial import rejected: %s", strings.TrimSpace(string(msg)))
+		if isRefusal(string(msg)) {
+			return &ClosureRefusedError{Reason: jsonError(msg)}
+		}
+		return fmt.Errorf("closure import rejected: %s", strings.TrimSpace(string(msg)))
 	}
 	return nil
 }

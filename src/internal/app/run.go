@@ -78,6 +78,20 @@ type Options struct {
 	QueuedAt time.Time
 }
 
+// releaseCancelledLease frees the node's lease when a run is cancelled before
+// its job started (build, closure seed, upload). Nothing on the node is bound
+// to the lease yet, so without this it held the slot until the running-lease
+// TTL, and a GPU node refused other runs for 5 min.
+func releaseCancelledLease(opts Options) {
+	if opts.LeaseID == "" {
+		return
+	}
+	if err := daemonctl.ReleaseLease(opts.DaemonHost, opts.DaemonPort, opts.LeaseID, "cancelled"); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: could not release lease %s on %s:%d (%v); the node frees it once renewals stop\n",
+			opts.LeaseID, opts.DaemonHost, opts.DaemonPort, err)
+	}
+}
+
 func Run(ctx context.Context, opts Options) (runErr error) {
 	if opts.DaemonHost == "" {
 		return fmt.Errorf("daemon host is required")
@@ -116,12 +130,14 @@ func Run(ctx context.Context, opts Options) (runErr error) {
 		// Ctrl+C reaches nix too, so a stopped build fails rather than
 		// finishing; say it was the cancel, not a broken build.
 		if ctx.Err() != nil {
+			releaseCancelledLease(opts)
 			return fmt.Errorf("environment build stopped (%v): %w", err, ctx.Err())
 		}
 		return &BuildError{Err: err}
 	}
 	defer env.Close()
 	if ctx.Err() != nil {
+		releaseCancelledLease(opts)
 		return fmt.Errorf("cancelled before upload: %w", ctx.Err())
 	}
 
@@ -242,13 +258,16 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		node = shortNode(opts.TargetID)
 	}
 	uploadStart := time.Now()
-	uploadResp, err := daemonctl.UploadJob(opts.DaemonHost, opts.DaemonPort,
+	uploadResp, err := daemonctl.UploadJob(ctx, opts.DaemonHost, opts.DaemonPort,
 		env.WorkspaceTar, env.NarPath, env.StorePath, env.ScriptRel,
-		daemonctl.UploadOptions{SkipBroadcast: opts.SkipBroadcast, Cold: opts.Cold})
+		daemonctl.UploadOptions{SkipBroadcast: opts.SkipBroadcast, Cold: opts.Cold, LeaseID: opts.LeaseID})
 	uploadDur := time.Since(uploadStart)
 	if err != nil {
 		timeline.Add("upload", node, uploadStart, uploadDur)
-		return fmt.Errorf("upload failed: %v", err)
+		if ctx.Err() != nil {
+			releaseCancelledLease(opts)
+		}
+		return fmt.Errorf("upload failed: %w", err)
 	}
 	sum.Closure = closureLine(uploadResp, uploadDur, opts.Cold)
 	// The node answers the upload only after handing the closure to its own
@@ -263,6 +282,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	}
 	note("      Uploaded job %s\n", uploadResp.JobID)
 	if ctx.Err() != nil {
+		releaseCancelledLease(opts)
 		return fmt.Errorf("cancelled before the job started: %w", ctx.Err())
 	}
 
