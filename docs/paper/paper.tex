@@ -297,7 +297,8 @@ for it and the survivors take its share at the next epoch boundary, while over
 A rank whose machine returns, or a new eligible node, joins a running ring at
 the next epoch boundary from the lead's model and optimiser snapshot, fetched
 through the lead daemon, and the rendezvous hash moves about $1/n$ of the
-samples to it; this needs a script that uses a data loader.
+samples to it; this needs a script that uses a data loader. Training starts
+behind a barrier, so no rank trains while another still receives its closure.
 
 \subsection{Operating a Run}
 \label{sec:ops}
@@ -314,7 +315,9 @@ or repeats. Output is forwarded as raw chunks, so progress bars redraw. Each run
 ends with a summary of where its items ran, drawn from a receipt the shim prints
 at exit; a dry run builds the environment and reports unresolved imports, the
 parallel calls found in the source and the intended placement; and a per-machine
-events feed turns the daemon's log into plain-language lines.
+events feed turns the daemon's log into plain-language lines. An offload flag
+keeps the script here but sends every distributed piece to other machines, and
+the summary shows what each machine spent.
 
 \section{The Cost Model}
 \label{sec:cost}

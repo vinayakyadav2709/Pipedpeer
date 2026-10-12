@@ -13,10 +13,14 @@ What the system does today and where it stops. Each row names its evidence (path
 | Distribute pandas groupby/merge and large CSV/parquet reads | Hash-shuffle and out-of-core partitioned reads; categorical keys included (`observed=False` restores the empty categories) | `internal/nixgen/shim.go` `_install_pandas`, `_install_io` |
 | Offload large numpy matmul/dot/tensordot, svd/eig | Module functions only; the `@` operator is not intercepted | `internal/nixgen/shim.go` `_install_numpy`, [known-issues](known-issues.md#read-in-the-code-not-exercised) |
 | Train torch DDP across nodes | `--ddp K`, sync through the daemon, ranks chosen by measured throughput; a sync closes without a dead rank after 45 s | [ADR-0010](adr/0010-gradient-sync-through-the-daemon.md), `5f807f7` |
+| Start DDP training only when every rank is ready | The first sync is a barrier (`PIPEDPEER_DDP_START_WAIT`, default 5 min); rank 0 names whom it waits for; ranks still missing are dropped and can rejoin later through a DataLoader, running one untrained catch-up batch per missed epoch | `internal/daemonapi/ddpsync.go`, `c567369`, `9b47502`, `82596fe` |
+| Keep this machine's CPU, GPU and memory out of the spread work | `run --offload`: the script runs here, every distributed piece goes to other machines (by kernel boot ID); a piece nobody else can take runs here with a warning. The summary's usage lines show this machine's and the node's load | `main.go`, `internal/daemonapi/pool.go`, `internal/app/selfuse.go`, `ef68f02`, `ca70da4` |
 | Find LAN peers with no configuration | UDP broadcast, TCP `/health` sweep when broadcast is filtered | `internal/discovery/` |
 | Join machines on different networks with no VPN or port forwarding | One introducer; port mapping, hole punching, collision for one symmetric side | [ADR-0004](adr/0004-introducer-only-rendezvous.md), `internal/direct/birthday.go` |
 | Keep working when the introducer goes down | Existing links survive; new joins wait for it | `1cabedd` |
-| Re-place a job whose node died | Lease expiry, then `ExecuteWithRetry` | `internal/coordinator/coordinator.go` `ExecuteWithRetry` |
+| Re-place a job whose node died | Gateway, introducer and peer probes tell a dead node from this machine's lost network; then `ExecuteWithRetry`, at most 3 failed runs, untried nodes first; a node that refuses the closure is skipped with a `pipedpeer trust` hint | `internal/app/lostconn.go` `networkUp`, `internal/coordinator/coordinator.go` `ExecuteWithRetry`, `879b86c`, `1e07d56` |
+| Wait for room with `--remote` | Up to 10 min (`PIPEDPEER_REMOTE_WAIT`), saying every 30 s why each node is busy; a job that fits no node fails at once | `main.go`, `1e07d56` |
+| Stop everything on Ctrl+C, the submitter's own Nix export and pack included | Nix runs in its own process group: SIGTERM, then SIGKILL after 5 s | `internal/nixstore/nixstore.go` `CmdContext`, `99cf0ad` |
 | Cap job memory without root | cgroup v2 in a user systemd scope | [ADR-0016](adr/0016-memory-caps-in-a-user-scope.md) |
 | Install and run without root | crun in `~/.local/bin`, private nix store | [ADR-0012](adr/0012-crun-only-runtime.md), [ADR-0013](adr/0013-rootless-private-nix-store.md) |
 | Use a worker's NVIDIA GPU inside the sandbox | Driver libraries bind-mounted into the job | `92191d3`, `internal/daemonapi/execution.go` `gpuDriverLibDir` |
@@ -41,4 +45,5 @@ What the system does today and where it stops. Each row names its evidence (path
 | The sandbox is not a boundary against a hostile member | uid 0 inside, no network namespace, no seccomp; unisolated without crun or user namespaces on a system store | [ADR-0012](adr/0012-crun-only-runtime.md), [system report 6.2](system-report.md#62-limitations) |
 | No per-user authority | One token per cluster; with no token the daemon is open | `internal/authtoken/token.go` `Current`, [SECURITY.md](../SECURITY.md) |
 | Auto-tuned DDP sync is off by default | It measured a worse final loss | [ADR-0010](adr/0010-gradient-sync-through-the-daemon.md) |
+| The DDP start barrier does not cover gloo or nccl | It is part of the daemon sync channel | `c567369` |
 | Thread pools are not distributed | They share memory; only process pools promise picklable, share-nothing work | [ADR-0001](adr/0001-interception-not-an-sdk.md) |
