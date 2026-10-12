@@ -26,7 +26,8 @@ the PCs.
   must come from the lab visit.
 - **Two physical GPUs.** The friend's real 2-GPU ring was never completed: in
   V3 it was placed on both laptops, then the friend's laptop dropped off the
-  network while the closure was still shipping. Check it in your own run.
+  network while the closure was still shipping. Check it in your own run;
+  until then it stays in the backup section (B4a), not the live flow.
 - **The venue itself:** real Wi-Fi, Wi-Fi client isolation, the college
   firewall, and Ubuntu's AppArmor rules.
 - **The demo scripts that need `python3`** (`demo/7-gpu.sh`,
@@ -44,7 +45,7 @@ the PCs.
 | Name | What | Role on the day |
 |---|---|---|
 | **LAPTOP-A** | Your Fedora laptop, NVIDIA GPU, ethernet if possible | runs `pipedpeer rendezvous`, shows `pipedpeer dashboard`, does steps 2, 3, 8 and 9 (backup B3, B5, B7) |
-| **LAPTOP-B** | Teammate's Fedora laptop, NVIDIA GPU | shows `pipedpeer events -f`, is the second GPU in step 5 (backup B1, B6) |
+| **LAPTOP-B** | Teammate's Fedora laptop, NVIDIA GPU | shows `pipedpeer events -f`, can take step 5's run instead of LAPTOP-A, is the second GPU in backup B4a (backup B1, B6) |
 | **PC-1, PC-2** | College Ubuntu PCs, no GPU | do steps 4, 5, 6 and 7's dry run, and the end of 9 (a PC sending GPU work is the point; backup B2) |
 | **PC-3** | College Ubuntu PC | **left unjoined at prep**, joins live in step 1, gets stopped in step 8 |
 
@@ -133,7 +134,7 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 | 2 | the cluster | LAPTOP-A | instant | — |
 | 3 | headline: python3 vs pipedpeer | LAPTOP-A | 27 s (9.5 s python3 + 17.0 s pipedpeer) | — (prep builds it) |
 | 4 | cold vs cached | PC-2 | 4.8 s | 20.5 s send only; 169 s with build, empty store, 0.5 % loss (V1) |
-| 5 | GPU from a PC with no GPU | PC-1 | 7.6 s (`--remote`); 7.0 s (`--gpu force` alone, V3); `--ddp 2` 9.5 s | 1150–1261 s CUDA build, 635 s first `--ddp 2` ship: prep only |
+| 5 | GPU from a PC with no GPU (one GPU) | PC-1 | ~15 s script (13.4 s training) + overhead: 18.9 s total (V5, run locally on the laptop) | 1150–1261 s CUDA build: prep only |
 | 6 | everything in one script | PC-2 (`--remote` on a small PC) | 26.7 s (V3, `--remote` from pc3) | 664.6 s (637.7 s build, V3); 700.6 s (V2): prep only |
 | 7 | the teacher's own script: dry run, then their script | PC-1, then any | dry run 0.8 s; their script 19.6–69.5 s (second run, `students/` scripts, V2) | dry run 42 s on an empty store; their script 35.3–125.7 s on the first run after the common prep, of which the environment build is 0.4–7.1 s (V2) |
 | 8 | failover: stop a PC mid-job | LAPTOP-A + PC-3 | 16.7 s (V2), 19.5 s (V1) | — |
@@ -371,6 +372,20 @@ $ pipedpeer run 06_pool_lambda.py --remote
 The progress bar draws in place during "Sending closure". That's why the
 script isn't piped.
 
+Since ca70da4 a `--remote` summary has two usage lines: this machine's load,
+then the running node's. V5, `00_pool.py --remote` from pc2
+(<!-- V5 ef68f02: docs-new-usage-remote-pool-pc2.txt -->):
+```
+  ran on       pc3 (10.88.0.13)
+…
+  this machine CPU 22% avg · RAM +69 MB (peak +249 MB) · no GPU
+  on pc3       CPU 31% avg
+```
+On a run without `--remote` both lines name the same machine. A Pool script
+can still spread pieces back to the sender (pc2 took 12 of 96 items in that
+run), and the lab's containers all share one laptop, so 22 % is not a clean
+idle reading; step 5 is where "this machine" should sit near idle.
+
 **Say:** "The first run ships the environment once. After that only the
 script travels." Also: "This script uses a lambda, which plain
 `multiprocessing` can't send to another process at all."
@@ -396,12 +411,18 @@ run fails.
 Before you start: run `watch -n1 nvidia-smi` on LAPTOP-A and LAPTOP-B, and
 turn those screens round.
 
+This step is **one GPU only**. The two-GPU `--ddp 2` run was never run on two
+real laptops, so it is backup B4a. `7-gpu.sh` runs only the one-GPU half;
+`DEMO_DDP=1 ./demo/7-gpu.sh` adds the two-GPU half when asked.
+
 The lab containers had no `python3`, so `7-gpu.sh` skipped there
 (`No GPU machine among the peers - skipping`, 74-step-7-gpu-pc1.txt). V2 ran
 the script's command directly on pc1. The script filters the output down to
 the lines below.
 
-**Screen** (<!-- V2 31b5364: 74b-gpu-pc1-direct.txt -->):
+**Screen, the shape of the run from a PC** (<!-- V2 31b5364: 74b-gpu-pc1-direct.txt -->).
+This is the script before ca70da4 made it bigger: it trained for 1.3 s, and
+the summary had no usage lines yet.
 ```
 $ pipedpeer run 04_torch_ddp.py --remote --gpu force
 …
@@ -421,82 +442,56 @@ TOTAL 2.9s
   files back   none
   total        7.6 s
 ```
-Then the `--ddp 2 --gpu force` half, one rank on each laptop GPU. V2 ran it
-in the GPU lab: two containers sharing this laptop's one RTX 3060, sent from
-a GPU-less container (<!-- V2 cc56753: 113-c-ddp-ring-cached.txt -->):
+**The resized script, V5.** This was captured **running locally on the
+laptop** (`--gpu force`, no `--remote`), not sent from a PC: pc1's first CUDA
+download stalled in the lab (40-item11-gpu-step-pc1-cold-download-stalled.txt).
+From a PC, expect the training lines below inside the run shape above
+(<!-- V5 ef68f02: docs-new-gpu-step-host-local.txt -->):
 ```
-$ pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
-=== Distributed training: 2 ranks ===
-rank 0: a43e931b (10.89.0.12:38080)
-rank 1: 29ffe602 (10.89.0.11:38080)
-sync: daemon channel via 10.89.0.12:38080 (no extra ports)
+$ pipedpeer run 04_torch_ddp.py --gpu force
 …
 using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
-using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
-[pipedpeer] ddp: sharding 60000 samples across 2 ranks
+training ...
+epoch 0: 74 steps, loss 0.0360
+epoch 1: 74 steps, loss 0.0157
+epoch 2: 74 steps, loss 0.0098
+training done in 13.4s
+final loss: 0.013376683928072453
+TOTAL 15.1s
 …
-final loss: 0.18032728135585785
-TOTAL 5.5s
-[pipedpeer] ddp: 43 sync(s), 1.6s total (36 ms each), 66.2 MiB sent, 66.2 MiB received
-[pipedpeer] ddp: the ring did NOT pay for itself — 2 ranks on 1 machine(s), …
+=== Summary ===
+  ran on       yeet (127.0.0.1)
+  environment  built in 0.8 s
+  closure      already on the node
+  script       18.1 s · peak memory 1.4 GB
+  this machine CPU 12% avg · RAM +28 MB (peak +1.1 GB) · GPU 55% avg
+  on yeet      CPU 12% avg · GPU 74% avg · VRAM 665 MB peak
+  files back   none
+  total        18.9 s
 ```
-On the two real laptops, expect the two `rank N:` lines to name LAPTOP-A and
-LAPTOP-B and the two `using GPU:` lines to show different cards (RTX 3060 and
-RTX 3050). "did NOT pay for itself" was right in the lab (one GPU shared);
-on two laptops it may say so too, because the demo model is tiny.
-V3 got as far as placing the ring on both laptops (this laptop's RTX 3060 and
-the friend's RTX 3050 over Tailscale), sent from a GPU-less container
-(<!-- V3 9949ad0: 53-friend-ring-cold.txt -->):
-```
-=== Distributed training: 2 ranks ===
-rank 0: 06b9a112 (192.168.0.200:38080)
-rank 1: 94bd5f98 (127.0.0.1:41293)
-shares: rank 0 56%, rank 1 44% — measured, so a slower rank takes less rather than setting the pace for everyone
-sync: daemon channel via 192.168.0.200:38080 (no extra ports)
-```
-Then the friend's laptop dropped off the network while its 1 GB closure was
-still arriving (~2.1 MB/s over a relay), rank 1 died
-(`[ddp] rank 1 on fedora died; continuing on 1`) and the run finished on one
-rank in 794.7 s. Rank 0 also started training before rank 1 had its closure,
-waiting ~45 s per sync, and printed `every rank produced the SAME gradients`;
-FX-DDPREADY makes rank 0 wait for every rank. On one LAN with prep done,
-expect both `using GPU:` lines (RTX 3060 and RTX 3050), no `SAME gradients`
-line and no `died` line.
-V4 ran this in the GPU lab, not on two laptops: two containers sharing one RTX 3060
-(<!-- V4 c567369: docs-DEMO-491-ring-gpulab-substitute.txt -->):
-```
-$ (sub1) pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
-=== Distributed training: 2 ranks ===
-rank 0: 96d92571 (10.89.0.12:38080)
-rank 1: fe7332e0 (10.89.0.11:38080)
-sync: daemon channel via 10.89.0.12:38080 (no extra ports)
-…
-using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
-using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
-```
-`SAME gradients` and `died` did not appear. The real two-laptop run is still to be
-checked during your own run.
+`nvidia-smi`, sampled once a second during that run, read 0 % while the
+script loaded, then **100 % for 13 s** at 632–634 MiB, then 0 % again
+(<!-- V5 ef68f02: docs-new-gpu-step-host-nvidia-smi.csv -->).
 
-**Start barrier.** Rank 0 waits at step 1 until every rank has its closure and has
-started, up to 5 minutes (`PIPEDPEER_DDP_START_WAIT`), before training. With a slow
-machine the screen sits after the `rank N:` lines: V4 on a 1 Mbit link waited about
-146 s (<!-- V4 c567369: 80-item1-ddp-start-barrier-default.txt -->). With the wait set
-to 30 the line is `rank 1 not ready after 30s …`
-(<!-- V4 c567369: 82-item1-ddp-start-wait-30s.txt -->).
+The two usage lines are this run's proof that the sender stays free. Run
+locally, as here, both name the same machine (`this machine` and `on yeet`).
+Sent from a PC, `this machine` is the PC and `on …` is the laptop.
+
 
 **Say:** "This PC has no GPU. The job went to the laptop that has one, and the
-script didn't change. With `--ddp 2` it trains on both laptops' GPUs at once
-and keeps their gradients in sync."
+script didn't change." Then, pointing at the two usage lines: "This machine
+stays near idle; the work shows up on the other machine's line."
 
-**Time:** 7.6 s with `--remote` (V2; V1's 264.8 s was the broadcast FX-NAR
-removed). `--ddp 2` cached: 9.5 s; its first run took 635 s, packing and
-sending 3.1 GB to each rank (112-c-ddp-ring-cold.txt). The CUDA build is
-1150–1261 s per machine. Both are prep only.
+**Time:** cached, about 15 s of script (13.4 s of it training) plus the run's
+overhead: 18.9 s in total run locally on the laptop (V5). From a PC, add the
+hop: V2's `--remote` run of the old 1.3 s script took 7.6 s in total (V1's
+264.8 s was the broadcast FX-NAR removed). The CUDA build is 1150–1261 s per
+machine: prep only.
 `run 04_torch_ddp.py --gpu force` without `--remote` also works from a GPU-less
 PC (`--gpu force: this machine has no GPU; placing the run on a GPU node...`,
 95-c-gpuforce-from-gpuless-pc1.txt); V2's total there was 212.0 s, about
 3 min 24 s of it packing the GPU closure for peers that never got it. f182b0f
-fixed that: V3 took 7.0 s, `ran on  yeet (192.168.0.200)`
+fixed that: V3 took 7.0 s with the old script, `ran on  yeet (192.168.0.200)`
 (<!-- V3 9949ad0: docs-VERIFY-225-gpuforce-pc1.txt -->).
 
 **Watch out for:**
@@ -507,9 +502,13 @@ fixed that: V3 took 7.0 s, `ran on  yeet (192.168.0.200)`
 - **`Warning: peer … did not take this environment`:** V1 showed this when a
   CPU-only PC ran out of memory taking the CUDA closure. FX-NAR fixed it. If
   it comes back, it is harmless for this step.
-- **`nvidia-smi` stays at 0 %:** expected. The demo model trains in under a
-  second (V1's nvidia-smi log never moved); point at "using GPU" instead.
-  <!-- V1 8e14b9b: 13-gpu-nvidia-smi.txt -->
+- **`nvidia-smi` stays at 0 %:** V5 showed 100 % for 13 s on the laptop that
+  ran it. Look at the other laptop's screen (the `ran on` line names it); if
+  neither moves, point at "using GPU" instead. Before ca70da4 the model
+  trained in under a second and V1's log never moved
+  <!-- V1 8e14b9b: 13-gpu-nvidia-smi.txt -->.
+- **Showing two GPUs on request:** `DEMO_DDP=1 ./demo/7-gpu.sh` runs the
+  `--ddp 2` half after the one-GPU run (B4a). Without it, the script stops after one GPU.
 - **Never run this cold on stage.**
 - **`7-gpu.sh` prints `No GPU machine among the peers - skipping`** while a
   GPU laptop is healthy: check `python3` exists on this PC (the script uses
@@ -1118,7 +1117,85 @@ cancelled — remote work stopped
   ignore it; the job did stop. The two `resource_tracker … leaked semaphore`
   lines are expected.
 
-### B4 — A GPU machine dies mid-run (`--ddp 2`) · from step 5
+### B4a — Two GPUs at once (`--ddp 2`) · from step 5
+
+Show this only if asked "can it use both GPUs?". It is not in the live flow:
+the two-laptop ring has never run on real hardware. `7-gpu.sh` offers it after
+a pause when it sees two GPU machines; since ca70da4 it runs 1 epoch
+(`pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force 1`), because each step now
+syncs about 34 MB of gradients. No `--ddp 2` run has been timed since that
+resize.
+
+One rank on each laptop GPU. V2 ran it in the GPU lab: two containers sharing this laptop's one RTX 3060, sent from
+a GPU-less container (<!-- V2 cc56753: 113-c-ddp-ring-cached.txt -->):
+```
+$ pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
+=== Distributed training: 2 ranks ===
+rank 0: a43e931b (10.89.0.12:38080)
+rank 1: 29ffe602 (10.89.0.11:38080)
+sync: daemon channel via 10.89.0.12:38080 (no extra ports)
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+[pipedpeer] ddp: sharding 60000 samples across 2 ranks
+…
+final loss: 0.18032728135585785
+TOTAL 5.5s
+[pipedpeer] ddp: 43 sync(s), 1.6s total (36 ms each), 66.2 MiB sent, 66.2 MiB received
+[pipedpeer] ddp: the ring did NOT pay for itself — 2 ranks on 1 machine(s), …
+```
+On the two real laptops, expect the two `rank N:` lines to name LAPTOP-A and
+LAPTOP-B and the two `using GPU:` lines to show different cards (RTX 3060 and
+RTX 3050). "did NOT pay for itself" was right in the lab (one GPU shared);
+on two laptops it may say so too, because the demo model is tiny.
+V3 got as far as placing the ring on both laptops (this laptop's RTX 3060 and
+the friend's RTX 3050 over Tailscale), sent from a GPU-less container
+(<!-- V3 9949ad0: 53-friend-ring-cold.txt -->):
+```
+=== Distributed training: 2 ranks ===
+rank 0: 06b9a112 (192.168.0.200:38080)
+rank 1: 94bd5f98 (127.0.0.1:41293)
+shares: rank 0 56%, rank 1 44% — measured, so a slower rank takes less rather than setting the pace for everyone
+sync: daemon channel via 192.168.0.200:38080 (no extra ports)
+```
+Then the friend's laptop dropped off the network while its 1 GB closure was
+still arriving (~2.1 MB/s over a relay), rank 1 died
+(`[ddp] rank 1 on fedora died; continuing on 1`) and the run finished on one
+rank in 794.7 s. Rank 0 also started training before rank 1 had its closure,
+waiting ~45 s per sync, and printed `every rank produced the SAME gradients`;
+FX-DDPREADY makes rank 0 wait for every rank. On one LAN with prep done,
+expect both `using GPU:` lines (RTX 3060 and RTX 3050), no `SAME gradients`
+line and no `died` line.
+V4 ran this in the GPU lab, not on two laptops: two containers sharing one RTX 3060
+(<!-- V4 c567369: docs-DEMO-491-ring-gpulab-substitute.txt -->):
+```
+$ (sub1) pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
+=== Distributed training: 2 ranks ===
+rank 0: 96d92571 (10.89.0.12:38080)
+rank 1: fe7332e0 (10.89.0.11:38080)
+sync: daemon channel via 10.89.0.12:38080 (no extra ports)
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+```
+`SAME gradients` and `died` did not appear. The real two-laptop run is still to be
+checked during your own run.
+
+**Start barrier.** Rank 0 waits at step 1 until every rank has its closure and has
+started, up to 5 minutes (`PIPEDPEER_DDP_START_WAIT`), before training. With a slow
+machine the screen sits after the `rank N:` lines: V4 on a 1 Mbit link waited about
+146 s (<!-- V4 c567369: 80-item1-ddp-start-barrier-default.txt -->). With the wait set
+to 30 the line is `rank 1 not ready after 30s …`
+(<!-- V4 c567369: 82-item1-ddp-start-wait-30s.txt -->).
+
+**Say:** "With `--ddp 2` it trains on both laptops' GPUs at once and keeps
+their gradients in sync."
+
+**Time:** cached 9.5 s with the old script (V2, GPU lab); its first run took
+635 s, packing and sending 3.1 GB to each rank (112-c-ddp-ring-cold.txt):
+prep only.
+
+### B4 — A GPU machine dies mid-run (`--ddp 2`) · from B4a
 
 - **Showing a machine dying on purpose:** stop the daemon on a machine that is
   NOT the one in the `rank 0:` line. Rank 0 is the lead: it is the fastest GPU
@@ -1262,6 +1339,36 @@ intercepted on its own. It shows breadth, not speed."
 **Time:** 288 s for the step in V2 (pandas out-of-core 216.5 s of it); 101.7 s
 without `PIPEDPEER_OOC_MIN` in the `./setup.sh` pass (70-setup-firstpass.txt).
 Optional for that reason.
+
+### B8 — `--offload`: the script runs here, its spread work doesn't · any PC
+
+**Not verified on two physical machines.** Show it only if asked, and say so.
+
+```
+$ pipedpeer run 00_pool.py --offload
+```
+What it promises (ef68f02): the script and its plain code run on this machine,
+but its distributed pieces (Pool, joblib and executor chunks, pandas and numpy
+offloads, DDP ranks) go only to other machines, and the summary's spread line
+says `0 on <this machine>`. A piece no other machine can take runs here with a
+one-line warning; the run does not fail.
+
+The lab could not show it. V5 ran it on pc2
+(<!-- V5 ef68f02: docs-new-offload-pc2-LAB-ARTIFACT.txt -->):
+```
+[pipedpeer] local 14 items
+[pipedpeer] remote ok: 14 items in 4875 ms on 10.88.0.11:38080, 10.88.0.13:38080, 10.88.0.14:38080, 192.168.0.200:38080
+…
+  ran on       pc2 (127.0.0.1)
+…
+  spread       96 items: 28 on pc2, 68 on 4 others (pc3 23, yeet 17, pc1 14, pc4 14)
+```
+The daemon did send every part to peers (pc2's own address is not in the
+`remote ok` lists). But the lab containers share the laptop's kernel: the lab
+gave each daemon its own machine id, while the sandboxed script still read the
+laptop's (52-item12-sandbox-bootid-pc2.txt), so the script process counted
+itself as a peer: hence `local 14 items` and `28 on pc2`. On two
+physical machines expect `0 on <this machine>`; that is still to be checked.
 
 ---
 

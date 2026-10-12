@@ -221,6 +221,35 @@ that broadcast). In the lab, run `pipedpeer run` directly as above:
 `./demo/7-gpu.sh` needs `python3`, which the containers lack, so there it only
 prints `No GPU machine among the peers - skipping` (74-step-7-gpu-pc1.txt).
 
+ca70da4 made the script bigger and added two usage lines to the summary. V5's
+pc1 run stalled on its first CUDA download
+(40-item11-gpu-step-pc1-cold-download-stalled.txt), so the resized script was
+captured **running locally on the laptop** instead
+(<!-- V5 ef68f02: docs-new-gpu-step-host-local.txt -->):
+```
+$ pipedpeer run 04_torch_ddp.py --gpu force
+…
+epoch 0: 74 steps, loss 0.0360
+…
+training done in 13.4s
+…
+  this machine CPU 12% avg · RAM +28 MB (peak +1.1 GB) · GPU 55% avg
+  on yeet      CPU 12% avg · GPU 74% avg · VRAM 665 MB peak
+  files back   none
+  total        18.9 s
+```
+`nvidia-smi` sampled once a second read 100 % for 13 s at 632–634 MiB
+(<!-- V5 ef68f02: docs-new-gpu-step-host-nvidia-smi.csv -->). Run locally, both
+usage lines name the same machine. Sent with `--remote`, they name the sender
+and the node; V5, `00_pool.py --remote` from pc2
+(<!-- V5 ef68f02: docs-new-usage-remote-pool-pc2.txt -->):
+```
+  ran on       pc3 (10.88.0.13)
+…
+  this machine CPU 22% avg · RAM +69 MB (peak +249 MB) · no GPU
+  on pc3       CPU 31% avg
+```
+
 **7b. `--gpu force` without `--remote`, from the GPU-less pc1:**
 ```bash
 scripts/lab-lan.sh x pc1 pipedpeer run 04_torch_ddp.py --gpu force
@@ -1170,9 +1199,26 @@ during your own run with the friend's laptop.
 7. Two-GPU runs (`--ddp 2`) print one `on <node>` usage line per machine
    (98e8684), and the start barrier names who it waits for (9b47502).
 8. `--offload` across two physical machines: the spread line shows
-   `0 on <this machine>` (ef68f02). The lab cannot show it, because every
-   container shares the laptop's identity.
+   `0 on <this machine>` (ef68f02). Partly checked in V5 on pc2
+   (<!-- V5 ef68f02: docs-new-offload-pc2-LAB-ARTIFACT.txt -->): the daemon
+   sent every part to peers (pc2 is in no `remote ok` list), but the spread
+   line said `28 on pc2` and the script printed `local 14 items`. The
+   containers share the laptop's kernel; the sandboxed script read the
+   laptop's machine id, not pc2's (52-item12-sandbox-bootid-pc2.txt), so it
+   counted itself as a peer. Still to check on two physical machines.
 9. The real two-laptop GPU run with the friend's laptop.
+
+Known gaps found in V5, not fixed yet:
+
+10. A rescheduled job with no reachable node retries every 30 s with no
+    limit (`No node has capacity (no node reachable) — task queued`, then
+    `Queued — retrying in 30s (attempt N)...`), and resumes when the node
+    returns. V5 killed pc2 under a running job; the CLI was still queueing
+    ~5 min later, and placed the rerun on pc2 once it was started again
+    (11-item1-kill-node-pc1.txt, 11-item1-kill-node-drill.txt).
+11. Ctrl+C during `[4/7] Building locally...` of a `--remote` run is not acted
+    on until the build ends (21-item2-ctrlc-pack-pc3.txt). Ctrl+C during the
+    upload stops at once (`Upload stopped: cancelled`, 22-item2-ctrlc-pack-pc2.txt).
 
 ## Afterwards
 

@@ -16,6 +16,7 @@ there unless you give them one (V3 ran prep-3 inside `nix shell …#python3`); t
 PCs and our laptops have `python3`. The friend's real 2-GPU ring (RTX 3060 + RTX 3050)
 is still to be checked in your own run: in V3 the ring was placed on both laptops, then
 the friend's laptop dropped off the network mid-ship and the run finished on one rank.
+Until it is checked, the live GPU step is single-GPU and `--ddp 2` is backup only.
 
 One script does each machine: `setup-machine.sh <role>` (install, `pipedpeer setup -y`,
 `auth set`, join; it can be re-run). It reuses `demo/prep-*.sh` instead of copying them.
@@ -276,6 +277,14 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
    The GPU half passed. The `07_everything.py` half runs on the PC itself and needs about
    3.1 GiB free; pc1 had 2.1 GiB. On an 8–16 GB PC expect `ok` for both and no
    `GPU PREP FAILED`.
+   Since ca70da4 the GPU run trains for about 13 s (V3's script took 4.5 s in all), and a
+   `--remote` summary has two more lines, this machine's load and the node's. V5,
+   `00_pool.py --remote` from pc2 (<!-- V5 ef68f02: docs-new-usage-remote-pool-pc2.txt -->):
+   ```
+     this machine CPU 22% avg · RAM +69 MB (peak +249 MB) · no GPU
+     on pc3       CPU 31% avg
+   ```
+   On a run without `--remote` both lines name the same machine.
 6. On the laptop: `./demo/prep-2-rehearse.sh` → `demo/rehearsal-results.txt` (cold, warm, speedup;
    the only speed numbers to quote). It generates `data.csv`, which prep-1 checks for, so run
    it **before** prep-1. V3 took 1390 s for the whole script
