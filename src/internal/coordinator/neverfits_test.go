@@ -56,3 +56,15 @@ func TestEmptyRoundRobinPickIsNamed(t *testing.T) {
 		t.Errorf("got %q", line)
 	}
 }
+
+// TestRejectionSummaryNamesEachNode: the --remote refusal listed bare keys
+// and raw byte counts, and printed an empty list when no peer reported in.
+func TestRejectionSummaryNamesEachNode(t *testing.T) {
+	got := PlacementDecision{Candidates: []ScoredNode{node("pc1", 0, false)}}.RejectionSummary()
+	if got != "  pc1 (pc1-0000): insufficient memory\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := (PlacementDecision{}).RejectionSummary(); !strings.Contains(got, "no other node has reported in") {
+		t.Fatalf("empty decision: got %q", got)
+	}
+}

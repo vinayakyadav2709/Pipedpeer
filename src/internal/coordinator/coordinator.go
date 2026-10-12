@@ -182,8 +182,15 @@ func (d PlacementDecision) RejectionSummary() string {
 		if !cand.Rejected {
 			continue
 		}
-		id := cand.Node.NodeID
-		fmt.Fprintf(&b, "  %s: %s\n", id[:min(8, len(id))], cand.RejectReason)
+		name, id := nodeName(cand.Node), cand.Node.NodeID[:min(8, len(cand.Node.NodeID))]
+		if name != id {
+			name += " (" + id + ")"
+		}
+		fmt.Fprintf(&b, "  %s: %s\n", name, cand.RejectReason)
+	}
+	if b.Len() == 0 {
+		// Without this line the caller printed a bare "nodes turned down:".
+		return "  none: no other node has reported in (check `pipedpeer nodes`)\n"
 	}
 	return b.String()
 }
@@ -286,8 +293,8 @@ func (c *Coordinator) FindNode() PlacementDecision {
 			n.Load.AvailableMemBytes < c.requiredMemBytes {
 			candidates[i].Rejected = true
 			candidates[i].RejectReason = fmt.Sprintf(
-				"insufficient memory: need %d, available %d",
-				c.requiredMemBytes, n.Load.AvailableMemBytes)
+				"insufficient memory: need %s, available %s",
+				humanize.IBytes(uint64(c.requiredMemBytes)), humanize.IBytes(uint64(n.Load.AvailableMemBytes)))
 			continue
 		}
 
@@ -304,8 +311,8 @@ func (c *Coordinator) FindNode() PlacementDecision {
 			if bestFreeVRAM(n) < c.requiredGPUMem {
 				candidates[i].Rejected = true
 				candidates[i].RejectReason = fmt.Sprintf(
-					"insufficient VRAM: need %d, best free %d",
-					c.requiredGPUMem, bestFreeVRAM(n))
+					"insufficient VRAM: need %s, best free %s",
+					humanize.IBytes(uint64(c.requiredGPUMem)), humanize.IBytes(uint64(bestFreeVRAM(n))))
 				continue
 			}
 		}

@@ -132,7 +132,7 @@ type OutputMessage struct {
 	// so the client can say that instead of reporting a signal number.
 	OOMKilled     bool  `json:"oom_killed,omitempty"`
 	MemLimitBytes int64 `json:"mem_limit_bytes,omitempty"`
-	// PeakMemBytes is the largest RSS (process tree, bytes) seen while running.
+	// PeakMemBytes is the largest PSS (process tree, bytes) seen while running.
 	// It is set on the Done frame so the submitter can learn a job's real
 	// footprint and feed the historical estimation tier.
 	PeakMemBytes int64 `json:"peak_mem_bytes,omitempty"`
