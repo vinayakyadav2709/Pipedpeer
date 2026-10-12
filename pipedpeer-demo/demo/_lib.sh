@@ -66,11 +66,16 @@ pause() {
 #   node_count gpu-self   1 if this machine has a GPU
 DAEMON_PORT="${PIPEDPEER_DAEMON_PORT:-38080}"
 node_count() {
-	python3 - "$DAEMON_PORT" "$1" <<'PY'
-import json, sys, urllib.request
+	# The API is token-authenticated once a cluster secret is set.
+	PP_TOKEN="$("$PIPE" auth show 2>/dev/null)" python3 - "$DAEMON_PORT" "$1" <<'PY'
+import json, os, re, sys, urllib.request
 port, what = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/nodes")
+tok = os.environ.get("PP_TOKEN", "").strip()
+if re.fullmatch(r"[0-9a-fA-F]{16,}", tok):
+    req.add_header("X-Pipedpeer-Token", tok)
 try:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/nodes", timeout=3) as r:
+    with urllib.request.urlopen(req, timeout=3) as r:
         nodes = json.load(r)
 except Exception as e:
     print(f"  (counting nodes: daemon on port {port} not answering: {e}; counted 0)", file=sys.stderr)

@@ -61,7 +61,8 @@ fi
 stop() {
 	echo
 	echo "${R}  stopping every job${N}"
-	kill -TERM "${pids[@]}" 2>/dev/null
+	# The watcher too: left running, the 'wait' below never returns.
+	kill -TERM "${pids[@]}" ${watcher:+"$watcher"} 2>/dev/null
 	wait
 	exit 130
 }
