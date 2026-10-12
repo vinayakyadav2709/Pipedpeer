@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -1355,6 +1356,13 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
 				// next best candidate. If every peer fails, the work is ours.
+				//
+				// One time budget for the whole walk, and a peer that runs out
+				// of it ends the walk. A timeout says the work is slow, not
+				// that the peer is broken, so the next peer would only start
+				// the same work from scratch: a one-item svd part tried four
+				// peers at 300 s each and hung for over 15 minutes.
+				deadline := started.Add(remotePartBudget)
 				for _, peer := range p.peers {
 					if ctx.Err() != nil {
 						break
@@ -1362,7 +1370,12 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					if pm.peerDead(peer) {
 						continue
 					}
-					r, e = pm.runRemote(peer, storePath, p.c)
+					left := time.Until(deadline)
+					if left <= 0 {
+						log.Printf("[pool] part %d: no time left of %s for another peer; running its %d items here", i, remotePartBudget, len(p.c.items))
+						break
+					}
+					r, e = pm.runRemote(peer, storePath, p.c, left)
 					if e == nil {
 						d := time.Since(started)
 						ch.prov.record("peer:"+peer, len(p.c.items), d.Milliseconds())
@@ -1375,6 +1388,10 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 						break // the requester left; the peer did nothing wrong
 					}
 					pm.markPeerDead(peer)
+					if ne := net.Error(nil); errors.As(e, &ne) && ne.Timeout() {
+						log.Printf("[pool] part %d: peer %s did not finish %d items in %s; running them here, not on another peer", i, peer, len(p.c.items), time.Since(started).Round(100*time.Millisecond))
+						break
+					}
 				}
 				if e != nil && ctx.Err() == nil {
 					// D2/D3 — a remote node adds capacity, never subtracts.
@@ -1558,7 +1575,12 @@ func (pm *poolManager) dropWorker(storePath string, w *poolWorker) {
 // runRemote forwards a sub-chunk to a peer daemon's /v1/pool/map. The peer must
 // have the same closure already (peerFn filters for that). Failures are fatal
 // for the chunk: the caller returns them rather than silently dropping work.
-func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, error) {
+// remotePartBudget is how long one part may spend on peers, across every peer
+// it tries, before it runs locally. A variable so tests can shorten it.
+var remotePartBudget = 5 * time.Minute
+
+// runRemote posts a part to one peer and waits up to timeout for its results.
+func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time.Duration) ([]any, error) {
 	// no_fanout: the origin splits exactly once; a peer must never re-split and
 	// forward again (one-hop tree, results flow straight back to the origin).
 	var body []byte
@@ -1597,10 +1619,10 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk) ([]any, erro
 	}
 	req.Header.Set("X-Pipedpeer-Store", storePath)
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("peer %s: %v", peer, err)
+		return nil, fmt.Errorf("peer %s: %w", peer, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

@@ -123,12 +123,25 @@ func runCLIEWithEnv(t *testing.T, stateDir, xdg string, args ...string) (string,
 		"PIPEDPEER_DAEMON_STATE_DIR="+stateDir,
 		"XDG_DATA_HOME="+xdg,
 	)
+	cmd.Env = append(cmd.Env, isolatedDaemonEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+// isolatedDaemonEnv keeps a test's daemon out of any real cluster. Without it
+// a daemon started here answered the LAN probes of a lab on the same host and
+// was listed (and placeable) there as a "yeet" node, and an inherited
+// rendezvous, registry or NATS address would join it to the user's cluster.
+// Empty values override the inherited ones: exec keeps the last of each key.
+var isolatedDaemonEnv = []string{
+	"PIPEDPEER_NO_LAN_DISCOVERY=1",
+	"PIPEDPEER_RENDEZVOUS=",
+	"PIPEDPEER_REGISTRY=",
+	"PIPEDPEER_NATS_URL=",
 }
 
 func freePort(t *testing.T) int {
@@ -272,6 +285,7 @@ func runCLIWithXDG(t *testing.T, stateDir, xdg string, args ...string) string {
 		"PIPEDPEER_DAEMON_STATE_DIR="+stateDir,
 		"XDG_DATA_HOME="+xdg,
 	)
+	cmd.Env = append(cmd.Env, isolatedDaemonEnv...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

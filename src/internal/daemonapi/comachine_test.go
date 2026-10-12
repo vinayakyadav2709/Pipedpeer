@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 )
 
 // TestAPeerSharingThisMachineIsSubtracted.
@@ -359,4 +361,59 @@ func TestLeaseAdmissionHonoursTheSameBoundsAsEverythingElse(t *testing.T) {
 			"admission is not using the bounds the rest of the daemon reports",
 			offered+(1<<30), offered)
 	}
+}
+
+// TestSelfRowShowsWhatThisDaemonMayGrant. The `nodes` self row printed the
+// host's free memory: a daemon in a 1.5 GiB container listed itself with
+// 9.8 GiB while its peers, reading /health, saw 1.5 GiB. A roommate holding
+// more than any machine has makes the grantable figure 0 whatever this
+// machine's free memory or budget, so the row must say 0.
+func TestSelfRowShowsWhatThisDaemonMayGrant(t *testing.T) {
+	me := heartbeat.Machine()
+	if me == "" {
+		t.Skip("NOT VERIFIED: this kernel exposes no boot id, so no roommate " +
+			"can be set up to pin the grantable figure")
+	}
+	s := New("self")
+	store, err := nodestore.NewAt(filepath.Join(t.TempDir(), "nodes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s.store = store
+	s.SetSelfInfo("root@127.0.0.1:22", 38080, map[string]string{})
+
+	s.peersMu.Lock()
+	if s.peerHealths == nil {
+		s.peerHealths = map[string]*PeerHealth{}
+	}
+	s.peerHealths["127.0.0.1:1"] = &PeerHealth{
+		Host: "127.0.0.1", Port: 1, NodeID: "roommate",
+		Status: "healthy", Machine: me, ReservedMem: 1 << 50,
+	}
+	s.peersMu.Unlock()
+	forgetRoommates(s)
+
+	s.upsertSelf()
+	nodes, err := store.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		if n.NodeID != "self" {
+			continue
+		}
+		if n.AvailableMem != 0 {
+			t.Errorf("self row offers %d bytes; nothing is grantable", n.AvailableMem)
+		}
+		var load struct {
+			Avail int64 `json:"available_mem_bytes"`
+		}
+		_ = json.Unmarshal([]byte(n.LoadJSON), &load)
+		if load.Avail != 0 {
+			t.Errorf("self row load offers %d bytes; nothing is grantable", load.Avail)
+		}
+		return
+	}
+	t.Fatal("upsertSelf wrote no self row")
 }

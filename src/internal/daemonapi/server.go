@@ -1100,7 +1100,12 @@ func (s *Server) ReservedMem() int64 {
 // Peers on other machines are not subtracted: their memory is their own.
 func (s *Server) AvailableForJob() int64 {
 	reserved := s.ReservedMem()
-	load := heartbeat.CollectLoad(s.ActiveJobs(), reserved)
+	return s.grantableFrom(heartbeat.CollectLoad(s.ActiveJobs(), reserved), reserved)
+}
+
+// grantableFrom is AvailableForJob for a load already collected with the
+// given reservations, so a caller that needs the load too reads it once.
+func (s *Server) grantableFrom(load registry.LoadInfo, reserved int64) int64 {
 	avail := load.AvailableMemBytes - s.reservedOnThisMachine()
 	if avail < 0 {
 		avail = 0
@@ -1319,7 +1324,7 @@ func (s *Server) healthSnapshot() healthResponse {
 	// free. A container worker capped at 2 GiB advertising the host's 10.7 GiB
 	// is inviting work it will be killed for accepting, and every scheduler
 	// that reads this - ring placement, pool peer choice - believes it.
-	grantable := s.AvailableForJob()
+	grantable := s.grantableFrom(load, reserved)
 	load.AvailableMemBytes = grantable
 	return healthResponse{
 		Status:        "ok",
@@ -2079,9 +2084,14 @@ func (s *Server) upsertSelf() {
 		return // SetSelfInfo not called (tests, or daemon not fully started)
 	}
 
-	load := heartbeat.CollectLoad(s.ActiveJobs(), s.ReservedMem())
+	reserved := s.ReservedMem()
+	load := heartbeat.CollectLoad(s.ActiveJobs(), reserved)
 	load.QueueDepth = s.QueueDepth()
 	load.RecentFailures = s.RecentFailures()
+	// The same grantable figure /health gives peers. The raw free memory is
+	// the host's: a daemon in a 1.5 GiB container showed 9.8 GiB on its own
+	// `nodes` row, and local placement read that row.
+	load.AvailableMemBytes = s.grantableFrom(load, reserved)
 	capsJSON, _ := json.Marshal(caps)
 	loadJSON, _ := json.Marshal(load)
 

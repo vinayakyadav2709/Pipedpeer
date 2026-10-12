@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -75,6 +77,15 @@ type Advertiser struct {
 	doneCh chan struct{}
 }
 
+// OffEnv turns LAN discovery off when set to "1": the daemon neither answers
+// probes nor sends them. Test daemons set it. A daemon a test starts on a
+// developer's laptop otherwise answered the lab's probes and showed up in a
+// real cluster as a placeable "yeet" node (and found the lab's nodes itself).
+const OffEnv = "PIPEDPEER_NO_LAN_DISCOVERY"
+
+// Off reports whether LAN discovery is turned off by OffEnv.
+func Off() bool { return os.Getenv(OffEnv) == "1" }
+
 // NewAdvertiser creates a LAN advertiser.
 func NewAdvertiser(info ServiceInfo) *Advertiser {
 	return &Advertiser{
@@ -86,6 +97,10 @@ func NewAdvertiser(info ServiceInfo) *Advertiser {
 
 // Start begins broadcasting presence and responding to discovery requests.
 func (a *Advertiser) Start() error {
+	if Off() {
+		log.Printf("[discovery] LAN discovery off (%s=1): not answering probes", OffEnv)
+		return nil
+	}
 	// Two listeners, one responder loop each: the multicast group catches
 	// probes from same-host daemons, the broadcast port catches probes from
 	// other machines. Both reuse the port so they never conflict.
@@ -161,6 +176,9 @@ func (a *Advertiser) Stop() {
 // Sends a broadcast probe and collects responses.
 // Timeout controls how long to wait for responses (default 1s).
 func Discover(timeout time.Duration) []DiscoveredNode {
+	if Off() {
+		return nil
+	}
 	if timeout == 0 {
 		timeout = 1 * time.Second
 	}
