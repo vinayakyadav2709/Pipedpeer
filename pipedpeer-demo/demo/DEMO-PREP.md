@@ -56,8 +56,8 @@ Open UDP ports 38443–38446 in its cloud firewall.
 **5. On box-a, check and rehearse:**
 
 ```bash
-./demo/prep-1-check.sh        # must end with READY
 ./demo/prep-2-rehearse.sh     # 15-25 min; saves timings to demo/rehearsal-results.txt
+./demo/prep-1-check.sh        # must end with READY; checks for the data.csv prep-2 makes
 ```
 
 Read `demo/rehearsal-results.txt` afterwards. Any step less than about 1.2×
