@@ -5,7 +5,10 @@
 #   ./demo/13-finale.sh pool numpy      # a subset, by name (see the list below)
 #
 # Each job goes out with 'pipedpeer python' (round-robin, --remote) and writes
-# to demo/finale-logs/<name>.log. Ctrl+C stops every job everywhere.
+# to demo/finale-logs/<name>.log. Ctrl+C stops every job everywhere. The torch
+# job is the exception: --remote means "not this machine", and LAPTOP-A is
+# likely the only GPU, so it goes out with --gpu force instead (any GPU node,
+# this one included).
 source "$(dirname "$0")/_lib.sh"
 
 # name  dir  script  extra args
@@ -45,8 +48,10 @@ for row in "${pick[@]}"; do
 		echo "${Y}  skipping $name: $dir/$script not found${N}"
 		continue
 	fi
+	how=(python "$script")
+	[[ "$name" == torch ]] && how=(run "$script" --strategy round-robin --isolate=false --gpu force)
 	# shellcheck disable=SC2086 # extra is a word list on purpose
-	(cd "$dir" && exec "$PIPE" python "$script" --job-name "finale-$name" $extra) \
+	(cd "$dir" && exec "$PIPE" "${how[@]}" --job-name "finale-$name" $extra) \
 		</dev/null >"$logs/$name.log" 2>&1 &
 	pids+=($!) names+=("$name")
 	echo "  started $name  (log: demo/finale-logs/$name.log)"

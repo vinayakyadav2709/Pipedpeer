@@ -3,6 +3,7 @@ package heartbeat
 import (
 	"runtime"
 
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -27,6 +28,7 @@ func CollectLoad(activeJobs int, reservedMemBytes int64) registry.LoadInfo {
 		TotalMemBytes:     totalMem,
 		AvailableMemBytes: available,
 		ReservedMemBytes:  reservedMemBytes,
+		MemCeilingBytes:   cgroups.SelfBudget().Total,
 		TotalCPUs:         runtime.NumCPU(),
 	}
 

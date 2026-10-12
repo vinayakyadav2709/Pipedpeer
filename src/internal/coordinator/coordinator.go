@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/natsbus"
@@ -373,6 +374,78 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	}
 }
 
+// nodeName names a node the way its owner knows it.
+func nodeName(n registry.NodeRecord) string {
+	if h := n.Capabilities["hostname"]; h != "" {
+		return h
+	}
+	return n.NodeID[:min(8, len(n.NodeID))]
+}
+
+// rejectionLine is every rejected candidate on one line: "pc1: reason; ...".
+func rejectionLine(d PlacementDecision) string {
+	var parts []string
+	for _, cand := range d.Candidates {
+		if cand.Rejected {
+			parts = append(parts, nodeName(cand.Node)+": "+cand.RejectReason)
+		}
+	}
+	if len(parts) == 0 {
+		return "no node reachable"
+	}
+	return strings.Join(parts, "; ")
+}
+
+// neverFits fails a job no node in the cluster could ever hold, whatever
+// frees up: more memory than any node's ceiling, a GPU where none has one,
+// or more VRAM than any GPU has. Without it such a job queued forever,
+// retrying every 30 s. A node whose ceiling or VRAM is unknown (an older
+// build, or this machine) might fit, so it keeps the job queued as before.
+func (c *Coordinator) neverFits(d PlacementDecision) error {
+	if len(d.Candidates) == 0 {
+		return nil
+	}
+	var why []string
+	for _, cand := range d.Candidates {
+		n := cand.Node
+		if cand.Rejected && strings.HasPrefix(cand.RejectReason, "arch mismatch") {
+			why = append(why, nodeName(n)+": "+cand.RejectReason)
+			continue
+		}
+		switch {
+		case c.requireGPU && !hasGPU(n):
+			why = append(why, nodeName(n)+" has no GPU")
+		case c.requiredMemBytes > 0 && n.Load.MemCeilingBytes > 0 && n.Load.MemCeilingBytes < c.requiredMemBytes:
+			why = append(why, fmt.Sprintf("%s allows at most %s", nodeName(n), humanize.IBytes(uint64(n.Load.MemCeilingBytes))))
+		case c.requiredGPUMem > 0 && maxVRAM(n) > 0 && maxVRAM(n) < c.requiredGPUMem:
+			why = append(why, fmt.Sprintf("%s's largest GPU has %s", nodeName(n), humanize.IBytes(uint64(maxVRAM(n)))))
+		default:
+			return nil // this one might hold it once something frees up
+		}
+	}
+	var need []string
+	if c.requiredMemBytes > 0 {
+		need = append(need, humanize.IBytes(uint64(c.requiredMemBytes))+" of memory")
+	}
+	if c.requireGPU {
+		need = append(need, "a GPU")
+	}
+	if c.requiredGPUMem > 0 {
+		need = append(need, humanize.IBytes(uint64(c.requiredGPUMem))+" of VRAM")
+	}
+	return Permanent(fmt.Errorf("no node in the cluster can ever hold this job: it needs %s, and %s",
+		strings.Join(need, ", "), strings.Join(why, "; ")))
+}
+
+// maxVRAM is the node's largest GPU memory in bytes; 0 when unknown.
+func maxVRAM(n registry.NodeRecord) int64 {
+	best := n.Load.GPUMemBytes
+	for _, g := range n.Load.GPUs {
+		best = max(best, g.MemoryTotalBytes)
+	}
+	return best
+}
+
 // PlaceWithRetry attempts to place a task on a node with a lease.
 // If no node can accept, it queues the task and retries every RetryInterval
 // until placement succeeds or ctx is cancelled.
@@ -397,6 +470,9 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 		}
 
 		decision := c.FindNode()
+		if err := c.neverFits(decision); err != nil {
+			return nil, err
+		}
 
 		// Round-robin: try the chosen node, no fallback to other candidates
 		if c.strategy == "round-robin" {
@@ -408,7 +484,11 @@ func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn f
 			}
 			// Chosen node rejected — let ExecuteWithRetry handle reschedule on next attempt
 			if statusFn != nil {
-				statusFn(fmt.Sprintf("Round-robin node %s rejected — queued (attempt %d)", decision.ChosenNode.NodeID[:min(8, len(decision.ChosenNode.NodeID))], attempt+1))
+				if decision.ChosenNode.NodeID == "" {
+					statusFn(fmt.Sprintf("No node has room right now (%s) — queued (attempt %d)", rejectionLine(decision), attempt+1))
+				} else {
+					statusFn(fmt.Sprintf("Round-robin node %s rejected — queued (attempt %d)", nodeName(decision.ChosenNode), attempt+1))
+				}
 			}
 		} else {
 			// Smart: try candidates in score order. When GPU is wanted, GPU-capable
@@ -916,6 +996,11 @@ func extractHost(endpoint string) string {
 }
 
 func (c *Coordinator) buildSelfNode() registry.NodeRecord {
+	// The CLI's own cgroup says nothing about its daemon's ceiling (a CLI
+	// run inside a capped scope would read that scope's), so self's
+	// ceiling is unknown here and never makes a job "too big for anyone".
+	load := c.selfLoad
+	load.MemCeilingBytes = 0
 	return registry.NodeRecord{
 		NodeID:      c.selfIdentity.NodeID,
 		SSHEndpoint: c.selfSSH,
@@ -924,7 +1009,7 @@ func (c *Coordinator) buildSelfNode() registry.NodeRecord {
 			"arch":     c.selfIdentity.Arch,
 			"hostname": c.selfIdentity.Hostname,
 		},
-		Load:        c.selfLoad,
+		Load:        load,
 		State:       "healthy",
 		HealthScore: 1.0,
 	}

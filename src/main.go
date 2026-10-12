@@ -34,6 +34,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/discovery"
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/internet"
@@ -600,11 +601,6 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			// ponytail: no redundancy margin yet — on a large cluster with
 			// flaky nodes, all-in means one death kills the run. If that ever
 			// bites, add a heuristic here (spare ranks, or eligible-N).
-			// gpuPlace: a DDP run with --gpu force fell back to one node. The
-			// single-node default is this machine, which may have no GPU (a
-			// lab PC submitting to the GPU boxes), so the one node is placed
-			// by the coordinator like --remote, GPU nodes only, self included.
-			gpuPlace := false
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
 				eligible := ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
 				worldSize := eligible
@@ -646,10 +642,8 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						return runOutcome(err)
 					}
 					fmt.Printf("[coordinator] running on one node: every ring available measures slower\n")
-					gpuPlace = requireGPU && daemonHost == ""
 				} else if ddpNodes > 1 {
 					fmt.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
-					gpuPlace = requireGPU && daemonHost == ""
 				}
 			}
 
@@ -659,11 +653,17 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			var placementDegraded bool
 			var placementCandidates int
 
+			// --gpu force never runs on a machine without a GPU. The
+			// single-node default is this machine, and a GPU-less one (a lab
+			// PC submitting to the GPU laptop, or a DDP ring that fell back to
+			// one node) got "insufficient memory" or ran on its CPU. Such a
+			// run is placed like --remote instead, on GPU nodes only.
+			gpuPlace := requireGPU && !remote && daemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
 			if remote || gpuPlace {
 				if remote {
 					fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
 				} else {
-					fmt.Println("[coordinator] --gpu force: placing the run on the best GPU node...")
+					fmt.Println("[coordinator] --gpu force: this machine has no GPU; placing the run on a GPU node...")
 				}
 
 				rrFn := func(count int) int {
