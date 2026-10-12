@@ -489,7 +489,7 @@ Use -y to skip the install confirmation prompt.`,
 	}
 	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation, auto-install")
 	cmd.Flags().Bool("no-install", false, "Check only, don't install anything")
-	cmd.Flags().Bool("uninstall", false, "Remove the nix key helper, its sudoers rule and the keys it made system nix trust")
+	cmd.Flags().Bool("uninstall", false, "Remove the AppArmor profile, the nix key helper, its sudoers rule and the keys it made system nix trust")
 	cmd.Flags().Int("port", 38080, "Daemon port")
 	return cmd
 }

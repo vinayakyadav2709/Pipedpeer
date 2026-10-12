@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -389,16 +390,17 @@ func helperUninstallScript() string {
 	}, "\n") + "\n"
 }
 
-// Uninstall removes what setup installed as root: the key helper, its
-// sudoers rule, the include line and the keys file. It is
+// Uninstall removes what setup installed as root: the AppArmor profile, the
+// key helper, its sudoers rule, the include line and the keys file. It is
 // `pipedpeer setup --uninstall`.
 func Uninstall() error {
+	profileErr := removeProfile()
 	fmt.Println("  Removing pipedpeer's nix key helper, its sudoers rule and the keys it trusted (sudo)...")
 	if err := runAsRoot(helperUninstallScript()); err != nil {
-		return fmt.Errorf("could not remove the nix key helper: %w", err)
+		return errors.Join(profileErr, fmt.Errorf("could not remove the nix key helper: %w", err))
 	}
 	fmt.Println("  Done. System nix no longer trusts the cluster's keys.")
-	return nil
+	return profileErr
 }
 
 // nixRoute is how setup gets this machine a nix.
@@ -654,6 +656,10 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 		}
 	}
 
+	// Before the daemon starts, because AppArmor attaches the profile only
+	// to a process exec'd after it is loaded.
+	profileLoaded := allowUserns(noInstall)
+
 	fmt.Println()
 	fmt.Println("  Post Install Setup")
 	fmt.Println("  ------------------")
@@ -674,6 +680,10 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 		fmt.Printf("  Daemon starting on :%d...  ✓\n", daemonPort)
 	} else {
 		fmt.Printf("  Daemon already running on :%d\n", daemonPort)
+		if profileLoaded {
+			fmt.Println("  It started before the AppArmor profile, so its jobs still run unisolated.\n" +
+				"  Restart it: pipedpeer stop && pipedpeer setup")
+		}
 	}
 
 	// After the daemon is up, because the report asks the router for the
