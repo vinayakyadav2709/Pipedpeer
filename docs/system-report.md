@@ -1285,9 +1285,9 @@ Commands: `go test -v -count=1 ./...` in `src/`, `scripts/check-skips.sh` and
 |---|---|---|---|
 | With torch (CPU wheel, as CI installs) | 615 | 0 | 2 (integration opt-in) |
 | Same host, no torch | 607 | 3 | 7 |
-| [Oct-12] after the demo round, with torch | TODO-NUM | TODO-NUM | TODO-NUM |
+| [Oct-12] after the demo round, with torch | 822 | 0 | 7 (2 integration opt-in, 5 depend on the host's Nix install) |
 
-<!-- from rehearsal: V1/V2 verifier's final `go test -v -count=1 ./...` PASS/FAIL/SKIP counts and package count -->
+<!-- evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests) -->
 
 - **Packages:** all 36 packages that have tests pass. After the demo round:
   38 of 38 packages (`cc56753`, `go test -count=1 ./...`; 2 more have no test
@@ -1436,10 +1436,10 @@ Quoted from commit messages; the verbatim text is in
 | HTTP routes | 22 |
 | Tests run | 617 (615 pass, 2 skip) |
 | Mutation audit | 95 cases, all caught |
-| [Oct-12] Go, non-test / tests / tests run | 42,424 lines (114 files) / 30,767 lines (154 files) / TODO-NUM (TODO-NUM pass, TODO-NUM skip) |
+| [Oct-12] Go, non-test / tests / tests run | 42,424 lines (114 files) / 30,767 lines (154 files) / 829 (822 pass, 7 skip) |
 | [Oct-12] HTTP routes | 31 (the round adds `/v1/jobs/{id}/attach` and `/v1/jobs/{id}/status`) |
 
-<!-- lines: wc -l over the tracked src/**/*.go at cc56753 (the same method gives the [Oct] row's 23,100 test lines at 5bcf140); routes: r.Get/Post/Delete in daemonapi/server.go (22 at 5bcf140). from rehearsal: test counts from the verifier's final go test -v -->
+<!-- lines: wc -l over the tracked src/**/*.go at cc56753 (the same method gives the [Oct] row's 23,100 test lines at 5bcf140); routes: r.Get/Post/Delete in daemonapi/server.go (22 at 5bcf140). tests: evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests) -->
 
 
 ### 5.9 Comparison
@@ -1709,4 +1709,4 @@ See 4.3. In summary:
 | One dead DDP rank ends the run | Survivors continue on rendezvous-hash shards; a returning machine rejoins at the next epoch (4.9) |
 | Daemon activity only in `daemon.log` | `events`, CPU and GPU in `nodes` and `dashboard`, join watch, run summary, real `--check-only` (4.14) |
 | N7 measured distribution, not idle cost | Declined workload: about 0.12 s per job (5.3) |
-| Tests: 617 run | TODO-NUM run <!-- from rehearsal: verifier's final go test -v --> |
+| Tests: 617 run | 829 run (822 pass, 7 skip) <!-- evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests) --> |
