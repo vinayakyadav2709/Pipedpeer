@@ -1,13 +1,20 @@
 package main
 
-import "testing"
+import (
+	"crypto/ed25519"
+	"testing"
+
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
+)
 
 func TestParseEventLine(t *testing.T) {
 	cases := []struct {
 		line, kind, text string
 		minor            bool
 	}{
-		{"\x1b[90m8:47PM\x1b[0m \x1b[32mINF\x1b[0m \x1b[1mpeer left\x1b[0m \x1b[36mcomponent=\x1b[0mdaemon \x1b[36mpeer=\x1b[0m788d5efa0b86342c", "leave", "788d5efa0b86342c left", false},
+		{"\x1b[90m8:47PM\x1b[0m \x1b[32mINF\x1b[0m \x1b[1mpeer left\x1b[0m \x1b[36mcomponent=\x1b[0mdaemon \x1b[36mpeer=\x1b[0m788d5efa0b86342c", "leave", "788d5efa left", false},
 		{"8:47PM INF internet: peer 788d5efa reachable at 127.0.0.1:36885 (punched-in) component=daemon", "link", "788d5efa reachable (punched-in)", false},
 		{"20:47:01 INF internet: peer b4fd388c is trying to reach us; punching back component=daemon", "link", "b4fd388c is calling; answering", false},
 		{"8:47PM INF internet: could not meet b4fd388c: no direct path to b4fd388c after trying 1 address(es) component=daemon", "nopath", "no direct path to b4fd388c", false},
@@ -25,7 +32,7 @@ func TestParseEventLine(t *testing.T) {
 		{`{"level":"info","message":"system nix now trusts these cluster keys"}`, "trust", "system nix now trusts these cluster keys", false},
 		{"2026/10/11 20:47:02 [pool] chunk: 40 items -> 3 part(s), 2 remote, 1 local", "pool", "chunk: 40 items -> 3 part(s), 2 remote, 1 local", false},
 		{"8:47PM INF daemon starting component=daemon max_concurrent=0 node_id=652290ff port=38080", "start", "daemon starting (port 38080)", false},
-		{`22:28:00 INF peer has no direct path; not offering it work component=daemon peer=56acaf8942e73a3e reason="no answer from any address"`, "nopath", "56acaf8942e73a3e has no direct path (no answer from any address); not offering it work", false},
+		{`22:28:00 INF peer has no direct path; not offering it work component=daemon peer=56acaf8942e73a3e reason="no answer from any address"`, "nopath", "56acaf89 has no direct path (no answer from any address); not offering it work", false},
 		{"2026/10/12 03:45:45 [pool] received pool/map from 127.0.0.1:34750: items=60 b64=false cache_keys=0 required_mem=6713398886 forwarded=\"\"", "pool", "received pool/map: 60 items", false},
 		{"22:28:00 INF internet: peer 1777eb7a reachable at 127.0.0.1:35247 (punched-in) component=daemon", "link", "1777eb7a reachable (punched-in)", false},
 		{`{"level":"warn","message":"withholding the cluster token"}`, "warn", "withholding the cluster token", true},
@@ -63,5 +70,33 @@ func TestFingerprintNamedViaForwarderAddr(t *testing.T) {
 	left := clusterEvent{Kind: "leave", Text: "1777eb7afcac95a8 left"}.withNames(names)
 	if left.Text != "pc2 left" {
 		t.Fatalf("got %q", left.Text)
+	}
+}
+
+// TestInternetJoinNamedByKey. An internet join names the peer's machine key;
+// the node table knows that key (its nix signing key) and the hostname, so the
+// event shows the hostname whatever forwarder port the link used (V2 evidence
+// 56: every internet JOIN/LEAVE showed only a key).
+func TestInternetJoinNamedByKey(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k := identity.KeyPair{Public: pub, Private: priv}
+	names := namesOf([]clusterNode{{
+		NodeID: "b7b73c2d-aad0-41e5-b9c5-49a46da18d08",
+		Capabilities: map[string]string{
+			"hostname":                 "pc3",
+			heartbeat.NixKeyCapability: nixsign.PublicKey(k),
+		},
+	}})
+	e, _ := parseEventLine("06:54:51 INF peer joined over the internet at=127.0.0.1:46723 component=daemon peer=" + k.Fingerprint()[:16])
+	if got := e.withNames(names).Text; got != "pc3 joined over the internet (127.0.0.1:46723)" {
+		t.Errorf("got %q", got)
+	}
+	// No name known: the short key, not the 16-character one.
+	e, _ = parseEventLine("06:54:54 INF peer left component=daemon peer=5e8b30e0a14edde1")
+	if got := e.withNames(names).Text; got != "5e8b30e0 left" {
+		t.Errorf("got %q", got)
 	}
 }

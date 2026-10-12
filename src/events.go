@@ -16,6 +16,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 )
 
 // clusterEvent is one thing this machine's daemon did, read back out of
@@ -154,13 +156,13 @@ func classifyEvent(at time.Time, level, msg string, f map[string]string) (cluste
 	case msg == "peer up":
 		return ev("join", who()+" is up"+paren(f["at"]))
 	case msg == "peer joined over the internet":
-		e, _ := ev("join", f["peer"]+" joined over the internet"+paren(f["at"]))
+		e, _ := ev("join", shortKey(f["peer"])+" joined over the internet"+paren(f["at"]))
 		e.peer, e.addr = f["peer"], f["at"]
 		return e, true
 	case msg == "peer down":
 		return ev("leave", who()+" is gone")
 	case msg == "peer left":
-		return ev("leave", f["peer"]+" left")
+		return ev("leave", shortKey(f["peer"])+" left")
 	case reachableRe.MatchString(msg):
 		m := reachableRe.FindStringSubmatch(msg)
 		e, _ := ev("link", m[1]+" reachable ("+m[3]+")")
@@ -173,7 +175,7 @@ func classifyEvent(at time.Time, level, msg string, f map[string]string) (cluste
 	case couldNotRe.MatchString(msg):
 		return ev("nopath", "no direct path to "+couldNotRe.FindStringSubmatch(msg)[1])
 	case msg == "peer has no direct path; not offering it work":
-		return ev("nopath", f["peer"]+" has no direct path"+paren(f["reason"])+"; not offering it work")
+		return ev("nopath", shortKey(f["peer"])+" has no direct path"+paren(f["reason"])+"; not offering it work")
 	case msg == "lease granted":
 		return ev("work", "lease granted: job "+f["job"]+" from "+f["submitter"])
 	case msg == "lease released":
@@ -214,6 +216,15 @@ func classifyEvent(at time.Time, level, msg string, f map[string]string) (cluste
 		return e, true
 	}
 	return clusterEvent{}, false
+}
+
+// shortKey is a machine key cut to the 8 characters the internet log uses;
+// withNames swaps it for the hostname when the node table knows one.
+func shortKey(k string) string {
+	if len(k) > 8 {
+		return k[:8]
+	}
+	return k
 }
 
 // collapseEvents merges consecutive events with the same kind and text.
@@ -299,15 +310,26 @@ func followEvents(ctx context.Context, logFile string, all bool, fn func(cluster
 
 // nodeNames maps the first 8 characters of each node id to its hostname.
 func nodeNames(daemonPort int) map[string]string {
-	names := map[string]string{}
 	nodes, err := fetchClusterNodes(daemonPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "events: could not look up node names, showing ids: %v\n", err)
-		return names
+		return map[string]string{}
 	}
+	return namesOf(nodes)
+}
+
+// namesOf maps node ids, key fingerprints and forwarder addresses to hostnames.
+func namesOf(nodes []clusterNode) map[string]string {
+	names := map[string]string{}
 	for _, n := range nodes {
 		if h := n.Capabilities["hostname"]; h != "" && len(n.NodeID) >= 8 {
 			names[n.NodeID[:8]] = h
+			// Internet join/leave lines name the machine key, not the node id.
+			// The node publishes that key (its nix signing key), so the name
+			// holds for every forwarder port the peer has ever used.
+			if fp, ok := nixsign.FingerprintOf(n.Capabilities[heartbeat.NixKeyCapability]); ok {
+				names[fp[:8]] = h
+			}
 			// An internet peer's id in the log is a key fingerprint, not the
 			// node id; its row is the local forwarder address.
 			if i := strings.LastIndex(n.SSHEndpoint, "@"); i >= 0 {
