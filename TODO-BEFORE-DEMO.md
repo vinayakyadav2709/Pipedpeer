@@ -4,7 +4,8 @@
 > checklist for the demo round (October 2026), not project documentation.
 > Longer-term work is in [docs/next-steps.md](docs/next-steps.md).
 
-Everything here uses the `nightly-fixes` branch. The guides it points to hold
+Everything here uses the `dev` branch (the demo build; install it with the
+README's `--channel nightly` line once the nightly has rebuilt). The guides it points to hold
 the exact commands and the output to expect:
 [pipedpeer-demo/SETUP.md](pipedpeer-demo/SETUP.md) (machines and lab visit),
 [pipedpeer-demo/DEMO-SCRIPT.md](pipedpeer-demo/DEMO-SCRIPT.md) (the live
@@ -53,11 +54,11 @@ everything from their backup in one go (the restore script there,
 - [ ] `sudo ~/.local/bin/pipedpeer setup --uninstall` (removes the key helper,
       the sudoers rule and the nix include)
 - [ ] `rm -f ~/.local/share/pipedpeer/auth_token ~/.local/share/pipedpeer/cluster.json`
-- [ ] Either keep the new build (`nightly-fixes`, needed for the demo) or put
+- [ ] Either keep the new build (the `dev` nightly, needed for the demo) or put
       yours back: `mv ~/.local/bin/pipedpeer.bak ~/.local/bin/pipedpeer`
 - [ ] Start your own daemon again if you want it: `cd ~/Projects/Pipedpeer && ./bin/pipedpeer start`
 
-For the demo itself, every machine needs the same `nightly-fixes` build:
+For the demo itself, every machine needs the same `dev` nightly build:
 SETUP.md, "Per machine".
 
 ## 3. LATER — not now (user, 2026-10-12): the two-laptop GPU run
@@ -69,7 +70,7 @@ of the live demo (DEMO-SCRIPT backup **B4a**; `7-gpu.sh` skips it unless
 `DEMO_DDP=1`).
 
 - Both GPU laptops and one machine without a GPU on the **same Wi-Fi or
-  LAN**, all on the same `nightly-fixes` build, joined to one cluster
+  LAN**, all on the same `dev` nightly build, joined to one cluster
   (SETUP.md).
 - Prepare the CUDA environment on each laptop once first (it is ~3.6 GB):
   `./demo/prep-3-gpu.sh` (SETUP.md, lab visit).

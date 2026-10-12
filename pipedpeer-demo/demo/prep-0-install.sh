@@ -4,10 +4,10 @@
 #   ./demo/prep-0-install.sh                     # install the nightly build
 #   ./demo/prep-0-install.sh /path/to/pipedpeer  # install a binary you copied over
 #
-# Every machine must run the SAME binary. The fixes the demo depends on are
-# on the nightly-fixes branch, and the nightly channel is built from dev - so
-# until they are merged and the nightly has rebuilt, copy your own build
-# (`make build` -> bin/pipedpeer, linux/amd64) to each machine and pass it here.
+# Every machine must run the SAME binary. The demo build is the nightly
+# channel, built from dev (the demo round was merged into dev on 2026-10-12).
+# To use your own build instead, copy it (`make build` -> bin/pipedpeer,
+# linux/amd64) to each machine and pass it here.
 # The sha256 printed at the end must match on all three.
 set -euo pipefail
 
