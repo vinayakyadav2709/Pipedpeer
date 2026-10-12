@@ -10,8 +10,8 @@ you see. Nothing is listed here that Claude did not actually run.
   rehearsal pass 2, in `~/Downloads/pipedpeer-work/evidence/v2/<file>`.
 - `<!-- V3 9949ad0: <file> -->`: output from the final re-check, in
   `~/Downloads/pipedpeer-work/evidence/v3/<file>`.
-- `<!-- confirm in V4 -->`: the line shown is the expected one, because a fix
-  made after V3 changes it. Run the check anyway and note what you see.
+- `<!-- V4 c567369: <file> -->`: output from the V4 re-check of lines a fix made
+  after V3 changed, in `~/Downloads/pipedpeer-work/evidence/v4/<file>`.
 - **Pass if** lists the lines that must appear exactly. Times, ids, hashes and
   CPU percentages vary from run to run. Names like `yeet` (this laptop) and
   pc1–pc4 (the containers) are what the lab uses.
@@ -254,9 +254,14 @@ before packing it; V3 took 7.0 s (<!-- V3 9949ad0: docs-VERIFY-225-gpuforce-pc1.
 The same with `--check-only` (no `--remote`) said `placement    this machine
 (no --remote)` and `lease        refused: job rejected by remote daemon:
 insufficient mem…` in V3 (05-dl-pc1-torch-checkonly.txt), although the real
-run goes to the GPU node. FX-CLI2 fixes the check, so expect
-`placement    yeet (--gpu force, this machine has no GPU; …)` and no
-`refused`. <!-- confirm in V4 -->
+run goes to the GPU node. FX-CLI2 fixed the check. V4 printed
+(<!-- V4 c567369: docs-VERIFY-259-checkonly-gpuforce-pc1.txt -->):
+```
+  gpu          required · GPU nodes: yeet
+  ddp          1 eligible rank(s) — runs on one node
+  placement    yeet (--gpu force, this machine has no GPU; score=1.332,…
+```
+with no `refused` line.
 
 **7c. Two GPU ranks (`--ddp 2`), DDP-DOWN and DDP-UP.** These ran in the GPU
 lab: two containers (gpu1, gpu2) sharing this laptop's one RTX 3060 and a
@@ -356,7 +361,35 @@ has its closure. Check it in your own run: from a GPU-less machine, with prep
 done, `pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force`; expect the two
 `rank N:` lines to name the two laptops, two `using GPU:` lines with
 different GPU names, no `SAME gradients` or `died` line, and both
-`nvidia-smi` screens busy. <!-- confirm in V4 -->
+`nvidia-smi` screens busy.
+
+V4 ran this in the GPU lab, not on two laptops: two containers sharing one RTX 3060
+(<!-- V4 c567369: docs-VERIFY-359-ring-gpulab-substitute.txt -->):
+```
+$ (sub1) pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
+=== Distributed training: 2 ranks ===
+rank 0: 96d92571 (10.89.0.12:38080)
+rank 1: fe7332e0 (10.89.0.11:38080)
+sync: daemon channel via 10.89.0.12:38080 (no extra ports)
+…
+       Sent 43 of 43 store paths: 3.1 GB in 25.2 s
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+```
+`SAME gradients` and `died` did not appear. The real two-laptop run is still to be
+checked during your own run.
+
+**What you'll see at the start (DDP start barrier).** Rank 0 waits at step 1 until every
+rank has its closure and has started, up to 5 minutes (`PIPEDPEER_DDP_START_WAIT`),
+before it trains. With one slow machine that wait is visible: V4 on a 1 Mbit link
+printed `training ...` at 12:51:42 and the first `daemon-channel sync ready` lines at
+12:54:07, about 146 s later (<!-- V4 c567369: 80-item1-ddp-start-barrier-default.txt -->).
+With `PIPEDPEER_DDP_START_WAIT=30` the line is
+(<!-- V4 c567369: 82-item1-ddp-start-wait-30s.txt -->):
+```
+[pipedpeer] ddp: rank 1 not ready after 30s (closure still on its way, or the script not started); training started on the 1 rank(s) that were, and their data moves to them at the next epoch. …
+```
 
 **8. Dry run (step 3):**
 ```bash
@@ -691,9 +724,11 @@ warning: could not list 10.88.0.1's peers for the summary: Get "http://10.88.0.1
 A second `attach` printed the same and did not apply the files again:
 `counts.txt` kept its time (`04:13:54.821959135`) across both.
 The `spread` line says `1 other` although pc1–pc4 all took work (the
-`remote ok` lines name 10.88.0.11–14); FX-CLI2 names them, so expect
-`169 on 4 others (…)` naming pc1–pc4.
-<!-- confirm in V4 -->
+`remote ok` lines name 10.88.0.11–14); FX-CLI2 names them. V4 printed
+(<!-- V4 c567369: docs-VERIFY-696-attach-spread-pc4.txt -->):
+```
+  spread       400 items: 218 on yeet, 182 on 4 others (pc2 52, pc4 51, pc3 47, pc1 32)
+```
 Start the laptop's daemon again: `pipedpeer start`.
 
 **16. --detach.** On the laptop: `pipedpeer run 00_pool.py --detach`. It
@@ -1066,9 +1101,24 @@ the job ended on the node (done); collecting it
 ```
 Epochs 4–59 were not printed; `pipedpeer attach <id>` on pc1 printed them all,
 through `training done in 18.3s` and `TOTAL 19.5s`
-(docs-DEMO-806-senderdeath-gpu-attach.txt). FX-CLI2 makes the collect print
-the rest of the output: expect `epoch 4: …` through `TOTAL …` before the
-summary. <!-- confirm in V4 -->
+(docs-DEMO-806-senderdeath-gpu-attach.txt). FX-CLI2 makes the collect print the rest of the
+output too. V4 printed from `epoch 2`, not `epoch 4`, because epochs 0–1 had already
+shown live before the connection dropped (<!-- V4 c567369: docs-VERIFY-1071-reconnect-collect-pc1.txt -->):
+```
+epoch 1: 30 steps, loss 0.1147
+
+lost the connection to 192.168.0.200:38080 (connection lost: …); checking whether the node or this machine went away...
+the job ended on the node (done); collecting it
+      No files changed on the remote
+epoch 2: 30 steps, loss 0.0592
+…
+epoch 59: 30 steps, loss 0.0000
+training done in 19.1s
+final loss: 2.151369881175924e-05
+TOTAL 20.3s
+
+=== Summary ===
+```
 
 **27. A node killed mid-job.** Run a `--remote` job from pc3 that lands on pc4,
 then `scripts/lab-lan.sh x pc4 pipedpeer stop` mid-run. Pass if

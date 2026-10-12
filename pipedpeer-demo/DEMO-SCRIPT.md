@@ -14,7 +14,7 @@ evidence files are in `~/Downloads/pipedpeer-work/evidence/v1/`.
 from rehearsal pass 2 (same lab, evidence in
 `~/Downloads/pipedpeer-work/evidence/v2/`). `<!-- V3 9949ad0: <file> -->`
 marks output from the final re-check (same lab, evidence in
-`~/Downloads/pipedpeer-work/evidence/v3/`). `<!-- confirm in V4 -->` marks an
+`~/Downloads/pipedpeer-work/evidence/v3/`). `<!-- V4 c567369: <file> -->` marks an
 expected line: a fix made after V3 changes it. `…` marks lines cut from an
 excerpt. In the excerpts, `yeet` is the
 rehearsal laptop (LAPTOP-A), and pc1–pc4 are the containers that stood in for
@@ -488,7 +488,28 @@ rank in 794.7 s. Rank 0 also started training before rank 1 had its closure,
 waiting ~45 s per sync, and printed `every rank produced the SAME gradients`;
 FX-DDPREADY makes rank 0 wait for every rank. On one LAN with prep done,
 expect both `using GPU:` lines (RTX 3060 and RTX 3050), no `SAME gradients`
-line and no `died` line. <!-- confirm in V4 -->
+line and no `died` line.
+V4 ran this in the GPU lab, not on two laptops: two containers sharing one RTX 3060
+(<!-- V4 c567369: docs-DEMO-491-ring-gpulab-substitute.txt -->):
+```
+$ (sub1) pipedpeer run 04_torch_ddp.py --ddp 2 --gpu force
+=== Distributed training: 2 ranks ===
+rank 0: 96d92571 (10.89.0.12:38080)
+rank 1: fe7332e0 (10.89.0.11:38080)
+sync: daemon channel via 10.89.0.12:38080 (no extra ports)
+…
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+using GPU: NVIDIA GeForce RTX 3060 Laptop GPU
+```
+`SAME gradients` and `died` did not appear. The real two-laptop run is still to be
+checked during your own run.
+
+**Start barrier.** Rank 0 waits at step 1 until every rank has its closure and has
+started, up to 5 minutes (`PIPEDPEER_DDP_START_WAIT`), before training. With a slow
+machine the screen sits after the `rank N:` lines: V4 on a 1 Mbit link waited about
+146 s (<!-- V4 c567369: 80-item1-ddp-start-barrier-default.txt -->). With the wait set
+to 30 the line is `rank 1 not ready after 30s …`
+(<!-- V4 c567369: 82-item1-ddp-start-wait-30s.txt -->).
 
 **Say:** "This PC has no GPU. The job went to the laptop that has one, and the
 script didn't change. With `--ddp 2` it trains on both laptops' GPUs at once
@@ -846,8 +867,16 @@ TOTAL 21.4s
 ```
 `attach` replayed the output from the start, then followed it live. Its
 `spread` line said `50 on 1 other (other machines 50)` although pc2 and pc3
-both took work; FX-CLI2 makes it name them, so expect
-`50 on 2 others (pc2 …, pc3 …)`. <!-- confirm in V4 -->
+both took work; FX-CLI2 makes it name them. V4 printed
+(<!-- V4 c567369: docs-DEMO-850-attach-spread-host.txt -->):
+```
+  spread       192 items: 186 on yeet, 50 on 2 others (pc2 48, pc3 2) · 44 computed twice (local cores raced slow chunks)
+```
+`07_everything.py` run from the laptop spreads only to PCs that built that environment
+themselves (`prep-4-common` does this): the CUDA closure is never broadcast to GPU-less
+PCs. The first V4 host run was all local (`spread       72 items, all on yeet`,
+<!-- V4 c567369: 42-item4-ctrlz-everything-host.txt -->); the attach above is
+45-item4-attach-everything-host.txt.
 `pipedpeer run <script> --detach` does the same without the keypress: it
 returns in 0.5 s with the same two lines (35-detach.txt).
 
@@ -955,7 +984,20 @@ The job (21.2 s) had finished while pc1 was offline; the CLI noticed when the
 network came back and collected it, but printed none of the epochs after
 `epoch 3`. `pipedpeer attach <id>` had all of them, up to `training done in
 18.3s` and `TOTAL 19.5s`. FX-CLI2 makes the collect print the rest of the
-output too: expect `epoch 4` … `TOTAL` before the summary. <!-- confirm in V4 -->
+output too. V4 printed from `epoch 2`, not `epoch 4`, because epochs 0–1 had already shown
+live (<!-- V4 c567369: docs-DEMO-958-reconnect-collect-pc1.txt, 30-item3-senderdeath-pc1.txt -->):
+```
+epoch 1: 30 steps, loss 0.1147
+
+lost the connection to 192.168.0.200:38080 (connection lost: …); checking whether the node or this machine went away...
+the job ended on the node (done); collecting it
+      No files changed on the remote
+epoch 2: 30 steps, loss 0.0592
+…
+TOTAL 20.3s
+
+=== Summary ===
+```
 
 **Say:** "The job lives where it runs. The sender can disappear and come back
 for the answer."
