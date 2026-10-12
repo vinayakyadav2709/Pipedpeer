@@ -42,7 +42,10 @@ if __name__ == "__main__":
     X = torch.randn(240, 4)
     y = X.sum(1, keepdim=True)
     loader = DataLoader(TensorDataset(torch.arange(240), X, y), batch_size=8, shuffle=True)
-    model = torch.nn.Linear(4, 1)
+    # BatchNorm: running stats the joiner must take from the ring, not from
+    # its catch-up batches. GradScaler: asserts after a backward that did nothing.
+    model = torch.nn.Sequential(torch.nn.BatchNorm1d(4), torch.nn.Linear(4, 1))
+    scaler = torch.amp.GradScaler("cpu")
     opt = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     # Stepped once an epoch, the empty ones a joiner skips included: those
     # steps must not decay the rate the joiner took from the ring a second time.
@@ -51,12 +54,14 @@ if __name__ == "__main__":
         seen = []
         for idx, xb, yb in loader:
             opt.zero_grad()
-            torch.nn.functional.mse_loss(model(xb), yb).backward()
-            opt.step()
+            scaler.scale(torch.nn.functional.mse_loss(model(xb), yb)).backward()
+            scaler.step(opt)
+            scaler.update()
             seen.extend(idx.tolist())
             time.sleep(0.1)
         sched.step()
-        print("EPOCH", epoch, len(seen), flush=True)
+        # The loop's variables, which an epoch a joiner skips must still bind.
+        print("EPOCH", epoch, len(seen), len(xb), flush=True)
     print("SEEN", " ".join(str(i) for i in sorted(seen)))
     print("PARAMS", " ".join("%.6f" % v for p in model.parameters() for v in p.detach().flatten().tolist()))
 `
@@ -151,8 +156,14 @@ if __name__ == "__main__":
 	if !strings.Contains(ranks[0].out.String(), "handed the model and optimizer to joining rank 2") {
 		t.Errorf("rank 0 never handed over the model:\n%s", ranks[0].out.String())
 	}
-	if field(joiner, "EPOCH 0 ") != "0" {
-		t.Errorf("the joiner trained the ring's first epoch again:\n%s", joiner)
+	// A skipped epoch runs one placeholder batch, so the script's loop
+	// variables exist, and its output is tagged as not trained.
+	if field(joiner, "EPOCH 0 ") != "" || !strings.Contains(joiner, "[rank 2 catch-up, not trained] EPOCH 0 8 8") {
+		t.Errorf("the joiner's skipped first epoch is not a tagged placeholder batch:\n%s", joiner)
+	}
+
+	if !strings.Contains(joiner, "took the ring's 3 buffer(s)") {
+		t.Errorf("the joiner kept its own BatchNorm stats:\n%s", joiner)
 	}
 
 	if !strings.Contains(joiner, "restored to the ring's") {
