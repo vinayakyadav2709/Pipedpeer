@@ -33,7 +33,9 @@ echo
 note "'using GPU: ...' printed by a machine that has no GPU. The script did not change."
 note "'this machine' is this PC during the ~15 s of training: idle. The 'on ...' line is the laptop's GPU."
 
-if [[ "$g" -ge 2 ]]; then
+# The two-GPU half is backup only (DEMO-SCRIPT B4a): never run on two real
+# laptops before the freeze. DEMO_DDP=1 ./demo/7-gpu.sh shows it on request.
+if [[ "$g" -ge 2 && "${DEMO_DDP:-0}" == 1 ]]; then
 	pause
 	# One epoch: each step syncs ~34 MB of gradients, and Wi-Fi makes three
 	# epochs of that a long wait.
