@@ -366,3 +366,28 @@ func TestProportionalBatchesChangeSharesNotMembership(t *testing.T) {
 		}
 	}
 }
+
+// TestKeepAllAdmitsWhatTheUserAskedFor: an explicit --ddp N keeps a node the
+// k*rate rule would drop (a slower second GPU), on a smaller share.
+func TestKeepAllAdmitsWhatTheUserAskedFor(t *testing.T) {
+	h1, p1, c1 := benchNode(t, 10_000_000_000)
+	defer c1()
+	h2, p2, c2 := benchNode(t, 3_000_000_000)
+	defer c2()
+	cands := []Candidate{
+		{NodeID: "fast", Host: h1, Port: p1, Cores: 16, MemBytes: 1 << 40},
+		{NodeID: "slow", Host: h2, Port: p2, Cores: 16, MemBytes: 1 << 40},
+	}
+	if p := Select(context.Background(), cands, Options{ProbeMillis: 50}); has(chosenIDs(p), "slow") {
+		t.Fatal("setup: the auto ring should prune the slow node")
+	}
+	p := Select(context.Background(), cands, Options{ProbeMillis: 50, KeepAll: true, ProportionalBatches: true})
+	if !has(chosenIDs(p), "slow") || !has(chosenIDs(p), "fast") {
+		t.Fatalf("KeepAll chose %v, want both", chosenIDs(p))
+	}
+	for _, c := range p.Chosen {
+		if c.Candidate.NodeID == "slow" && c.Weight >= 0.5 {
+			t.Errorf("the slow node got weight %.2f, want the smaller share", c.Weight)
+		}
+	}
+}

@@ -105,6 +105,12 @@ type Options struct {
 	// weight. Until it does, every rank computes the same batch and waits for
 	// the slowest, which changes which nodes are worth having.
 	ProportionalBatches bool
+	// KeepAll admits every device that fits instead of only those that pay
+	// for themselves: the user named the rank count (--ddp N), so measuring a
+	// node as slower is a reason to give it a smaller share, not to drop it.
+	// The CPU probe cannot rank GPUs either, so pruning a GPU ring on it
+	// dropped a perfectly good second GPU.
+	KeepAll bool
 }
 
 // slotRef remembers which node and accelerator a scheduled device came from.
@@ -277,7 +283,10 @@ func admit(p schedule.Plan, opts Options) schedule.Plan {
 	sort.Slice(shares, func(i, j int) bool { return shares[i].Device.Rate > shares[j].Device.Rate })
 
 	best, bestThroughput := 0, 0.0
-	for k := 1; k <= len(shares); k++ {
+	if opts.KeepAll {
+		best = len(shares)
+	}
+	for k := 1; k <= len(shares) && !opts.KeepAll; k++ {
 		slowest := shares[k-1].Device.Rate
 		if throughput := float64(k) * slowest; throughput > bestThroughput {
 			best, bestThroughput = k, throughput

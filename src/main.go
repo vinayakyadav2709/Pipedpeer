@@ -598,6 +598,11 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			// ponytail: no redundancy margin yet — on a large cluster with
 			// flaky nodes, all-in means one death kills the run. If that ever
 			// bites, add a heuristic here (spare ranks, or eligible-N).
+			// gpuPlace: a DDP run with --gpu force fell back to one node. The
+			// single-node default is this machine, which may have no GPU (a
+			// lab PC submitting to the GPU boxes), so the one node is placed
+			// by the coordinator like --remote, GPU nodes only, self included.
+			gpuPlace := false
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
 				eligible := ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
 				worldSize := eligible
@@ -639,8 +644,10 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						return runOutcome(err)
 					}
 					fmt.Printf("[coordinator] running on one node: every ring available measures slower\n")
+					gpuPlace = requireGPU && daemonHost == ""
 				} else if ddpNodes > 1 {
 					fmt.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
+					gpuPlace = requireGPU && daemonHost == ""
 				}
 			}
 
@@ -650,8 +657,12 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			var placementDegraded bool
 			var placementCandidates int
 
-			if remote {
-				fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
+			if remote || gpuPlace {
+				if remote {
+					fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
+				} else {
+					fmt.Println("[coordinator] --gpu force: placing the run on the best GPU node...")
+				}
 
 				rrFn := func(count int) int {
 					url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", daemonPort, count)
@@ -675,7 +686,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					RequiredMemBytes: resReq.MemBytes,
 					RequiredCores:    requiredCores,
 					RequiredGPUMem:   requiredGPUMem,
-					NoSelf:           true,
+					NoSelf:           remote,
 					RequireGPU:       requireGPU,
 					PreferGPU:        preferGPU,
 					Strategy:         strategy,
@@ -692,6 +703,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				if decision.ChosenNode.NodeID == "" {
 					if why := decision.RejectionSummary(); why != "" {
 						fmt.Print("[coordinator] nodes turned down:\n" + why)
+					}
+					if !remote {
+						return fmt.Errorf("no GPU node can take this run — drop --gpu force to run it on a CPU")
 					}
 					return fmt.Errorf("no eligible node found — run without --remote to execute on this machine")
 				}
@@ -2918,6 +2932,9 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 		// exclude anything materially slower, because with equal batches it
 		// would set the pace for everyone.
 		ProportionalBatches: proportional,
+		// An explicit --ddp N is the user's call: every rank they asked for
+		// runs, the slower ones on a smaller share. Only the auto ring prunes.
+		KeepAll: o.MaxRanks > 0,
 		// No working-set size is threaded through here yet, so a node too
 		// small for the model is still admitted and fails at run time rather
 		// than being declined. ddpplace supports the gate; the estimate lives

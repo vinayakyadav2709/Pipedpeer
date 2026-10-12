@@ -164,3 +164,25 @@ func TestARerunUnderTheSameNameGetsAFreshGroup(t *testing.T) {
 		t.Errorf("groups %q and %q: want distinct, prefixed ddp-train-", a, b)
 	}
 }
+
+// TestTheLeadDyingEndsTheRun: rank 0's machine hosts the rendezvous and the
+// sync, so the ring cannot carry on without it. Say so instead of
+// "continuing on 1", don't post to the dead lead, and fail the run.
+func TestTheLeadDyingEndsTheRun(t *testing.T) {
+	results := make(chan ddpRankResult, 2)
+	results <- ddpRankResult{rank: 0, err: errors.New("connection lost")}
+	results <- ddpRankResult{rank: 1}
+	var out bytes.Buffer
+	called := false
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"gpu1", "gpu2"}, nil,
+		func(int, error) { called = true })
+	if err == nil || !strings.Contains(err.Error(), "leads the ring") {
+		t.Fatalf("got %v, want a failure saying the lead's machine died", err)
+	}
+	if strings.Contains(out.String(), "continuing") || !strings.Contains(out.String(), "rank 0 on gpu1 died") {
+		t.Errorf("wrong message for a dead lead:\n%s", out.String())
+	}
+	if called {
+		t.Error("the dead lead daemon was told a rank is down")
+	}
+}
