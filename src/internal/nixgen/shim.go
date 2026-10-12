@@ -3461,6 +3461,10 @@ def _install_ddp():
     # The learning rates the ring had when this rank took its model, per
     # optimizer, put back once the skipped epochs are behind it.
     _JOIN_LR = [None]
+    # True from a skipped epoch's placeholder batch until the joiner's next
+    # epoch starts; with it the stdout the script had before.
+    _CATCHUP = [False]
+    _CATCHUP_OUT = [None]
     # Every optimizer the script built, so a model can be handed to a joiner.
     _OPTS = []
     # Set when the daemon has told this rank the ring is better off without
@@ -4139,6 +4143,36 @@ def _install_ddp():
         for i, t in enumerate(tensors):
             t.data.copy_(_th.from_numpy(lead[i]).to(t.device))
     _STEPPED = weakref.WeakSet()
+    # Modules holding buffers (BatchNorm running stats), in first-forward
+    # order: the same order on every rank running the same script, which is
+    # how a joiner matches the ring's buffers to its own.
+    _BUF_SEEN = weakref.WeakSet()
+    _BUF_MODS = []
+    _JOIN_BUFS = [None]
+
+    def _buffer_list():
+        return [b for m in (r() for r in _BUF_MODS) if m is not None
+                for b in m._buffers.values() if b is not None]
+
+    def _load_join_buffers():
+        """Take the ring's buffers once the catch-up batches are behind.
+
+        Not at the join itself: this rank has run no forward pass then, so it
+        cannot know its modules, and the catch-up batches would move the
+        running stats again afterwards."""
+        theirs, _JOIN_BUFS[0] = _JOIN_BUFS[0], None
+        if theirs is None:
+            return
+        mine = _buffer_list()
+        if len(mine) != len(theirs) or any(a.shape != b.shape for a, b in zip(mine, theirs)):
+            _log("ddp: the ring's %d buffer(s) do not match this rank's %d; keeping "
+                 "this rank's own (BatchNorm running stats may differ)"
+                 % (len(theirs), len(mine)))
+            return
+        with _th.no_grad():
+            for a, b in zip(mine, theirs):
+                a.copy_(b.to(a.device))
+        _log("ddp: took the ring's %d buffer(s) after the catch-up batches" % len(mine))
     _ORIG_FWD = _th.nn.Module.forward
     _FWD = weakref.WeakSet()
     _ORIG_ITER = _th.utils.data.DataLoader.__iter__
@@ -4197,6 +4231,11 @@ def _install_ddp():
         _orig_step = self.step
 
         def _step(_self, *sa, **skw):
+            if _CATCHUP[0]:
+                # A joiner's placeholder batch for an epoch the ring already
+                # trained: no update, no sync, no step counted.
+                _BATCH_N[0] = 0
+                return None
             if _BACKEND == "daemon":
                 n = _STEPN.get(id(self), 0)
                 _STEPN[id(self)] = n + 1
@@ -4263,7 +4302,7 @@ def _install_ddp():
         self.step = _types.MethodType(_step, self)
 
     def _forward(self, *args, **kw):
-        if _WORLD > 1 and not _NATIVE_DDP and self not in _FWD:
+        if _WORLD > 1 and not _NATIVE_DDP and not _CATCHUP[0] and self not in _FWD:
             if _BACKEND == "daemon":
                 # Only sync once training is underway (mirrors the gloo
                 # branch, which waits for the process group): the optimizer's
@@ -4415,6 +4454,7 @@ def _install_ddp():
                        for o in opts],
             "opts": [o.state_dict() for o in opts],
             "stepn": [_STEPN.get(id(o), 0) for o in opts],
+            "buffers": [b.detach().cpu() for b in _buffer_list()],
         }
         header = json.dumps({"group": _GROUP, "rank": _RANK, "join": join,
                              "boundary": boundary, "seq": _SEQ[0], "world": world,
@@ -4528,6 +4568,7 @@ def _install_ddp():
                 # nobody else makes.
                 _STEPPED.add(o)
                 _STEPN[id(o)] = int(stepn)
+        _JOIN_BUFS[0] = state.get("buffers")
         _JOIN_LR[0] = [(weakref.ref(o), [g.get("lr") for g in o.param_groups])
                        for o in opts]
         _SEQ[0] = int(hdr["seq"])
@@ -4562,6 +4603,65 @@ def _install_ddp():
                     g["lr"] = lr
         _JOIN_LR[0] = None
 
+    class _CatchupOut:
+        """The joiner's stdout during catch-up: each line is tagged, so the
+        placeholder epochs' prints are not read as training."""
+
+        def __init__(self, inner):
+            self._inner = inner
+            self._bol = True
+
+        def write(self, s):
+            out = []
+            for part in s.splitlines(True):
+                if self._bol:
+                    out.append("[rank %d catch-up, not trained] " % _RANK)
+                out.append(part)
+                self._bol = part.endswith("\n")
+            self._inner.write("".join(out))
+            return len(s)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    def _begin_catchup():
+        if not _CATCHUP[0]:
+            _CATCHUP[0] = True
+            _CATCHUP_OUT[0] = sys.stdout
+            sys.stdout = _CatchupOut(sys.stdout)
+
+    def _end_catchup():
+        if _CATCHUP[0]:
+            _CATCHUP[0] = False
+            if isinstance(sys.stdout, _CatchupOut):
+                sys.stdout.flush()
+                sys.stdout = _CATCHUP_OUT[0]
+
+    def _catchup_batch(loader):
+        """One real batch for an epoch the ring already did.
+
+        An empty epoch left the script's loop variables unbound, so a joiner
+        died on the first print(loss) after its loop. One batch binds them;
+        backward and the optimizer step are no-ops while _CATCHUP is set, so
+        nothing trains, syncs or counts twice."""
+        for batch in _ORIG_ITER(loader):
+            yield batch
+            break
+
+    _ORIG_BACKWARD = _th.Tensor.backward
+
+    def _backward(self, *a, **kw):
+        if _CATCHUP[0]:
+            return None
+        return _ORIG_BACKWARD(self, *a, **kw)
+
+    def _catchup_noop(fn):
+        def wrapped(*a, **kw):
+            if _CATCHUP[0]:
+                return None
+            return fn(*a, **kw)
+        return wrapped
+
     def _iter(self):
         sampler = getattr(self, "sampler", None)
         if _WORLD > 1 and not _NATIVE_DDP:
@@ -4573,7 +4673,10 @@ def _install_ddp():
                 if call < _JOIN_AT[0]:
                     # An epoch the ring finished before this rank arrived.
                     _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
-                    return iter(())
+                    _begin_catchup()
+                    return _catchup_batch(self)
+                _end_catchup()
+                _load_join_buffers()
                 _JOIN[0] = False
                 _restore_join_lr()
             # An epoch boundary is the one place the ring can change safely:
@@ -4643,7 +4746,12 @@ def _install_ddp():
         layer too, and an inner layer's leading dimension is not the batch
         once a model reshapes.
         """
-        if _WORLD <= 1 or _BATCH_N[0]:
+        if _WORLD <= 1:
+            return
+        if module._buffers and module not in _BUF_SEEN:
+            _BUF_SEEN.add(module)
+            _BUF_MODS.append(weakref.ref(module))
+        if _BATCH_N[0] or _CATCHUP[0]:
             return
         for a in args:
             if hasattr(a, "shape") and getattr(a, "ndim", 0) >= 1:
@@ -4665,6 +4773,15 @@ def _install_ddp():
     _th.nn.Module.forward = _forward
     _th.utils.data.DataLoader._pp_shard = _shard
     _th.utils.data.DataLoader.__iter__ = _iter
+    if _JOIN[0]:
+        _th.Tensor.backward = _backward
+        # A GradScaler finds no gradients after a no-op backward and asserts;
+        # its step, update and unscale_ sit out the catch-up batch too.
+        for cls in {getattr(getattr(_th, "amp", None), "GradScaler", None),
+                    getattr(getattr(_th.cuda, "amp", None), "GradScaler", None)} - {None}:
+            for name in ("step", "update", "unscale_"):
+                if name in cls.__dict__:
+                    setattr(cls, name, _catchup_noop(cls.__dict__[name]))
     _log("ddp interception installed")
 
 
