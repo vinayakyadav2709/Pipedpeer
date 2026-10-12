@@ -41,6 +41,10 @@ banner "Finale - ${#pick[@]} jobs at once"
 note "Watch the dashboard: every row busy."
 pause
 
+# Eight jobs at once fill every machine, so a job often fits only once another
+# finishes. --remote gives up after 15 s by default; let each one wait instead.
+export PIPEDPEER_REMOTE_WAIT="${PIPEDPEER_REMOTE_WAIT:-10m}"
+
 pids=() names=()
 for row in "${pick[@]}"; do
 	read -r name dir script extra <<<"$row"

@@ -62,6 +62,11 @@ if [[ -n "$introducer" ]]; then
 	echo "==> [$role] join through $introducer"
 	pipedpeer join "$introducer"
 else
+	# The daemon reads the secret at start; without a restart it keeps answering
+	# without proving the token, and peers refuse it (join restarts it for us).
+	echo "==> [$role] restarting the daemon so it uses the secret"
+	pipedpeer stop >/dev/null 2>&1 || echo "note: no daemon was running"
+	pipedpeer start
 	echo "==> [$role] no --introducer: waiting on LAN auto-discovery (see 'pipedpeer nodes' in ~30 s)"
 fi
 
