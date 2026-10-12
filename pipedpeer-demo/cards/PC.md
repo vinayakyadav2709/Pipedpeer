@@ -28,7 +28,7 @@ By hand: the sudo password when setup asks (Nix, crun, firewall, key helper).
    then `cd Pipedpeer-dev/pipedpeer-demo`
 2. `./demo/prep-0-install.sh` (installs the nightly, runs `setup -y`).
    Its `sha256:` line must match LAPTOP-A's.
-3. After LAPTOP-A has set up: copy its `join-command.txt` here by pen drive and
+3. After LAPTOP-A has set up: open its `join-command.txt` here (you sent it to yourself) and
    run the `ubuntu-pc` line from it, or type the values:
    `./setup-machine.sh ubuntu-pc --token <secret> --introducer <LAPTOP-A IP> --prep`
    It first connects to LAPTOP-A; if it can't, it says how to fix it and stops
@@ -59,7 +59,7 @@ By hand: the sudo password when setup asks.
 5. AppArmor and firewall as in 1a steps 5–6. Check this PC reaches LAPTOP-A:
    `timeout 2 bash -c ': </dev/tcp/<LAPTOP-A IP>/38080' && echo reachable`. No
    `reachable`: [SETUP.md, "Can't reach LAPTOP-A"](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/SETUP.md#cant-reach-laptop-a).
-6. Keep LAPTOP-A's `join-command.txt` (pen drive) at hand: its `0-join.sh` line is your step 1
+6. Keep LAPTOP-A's `join-command.txt` (sent to yourself) at hand: its `0-join.sh` line is your step 1
    command, token included. Or type the values.
 
 ## 2. On the day

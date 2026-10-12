@@ -20,7 +20,7 @@ Same in both layouts (three laptops on Wi-Fi, or a lab).
    then `cd Pipedpeer-dev/pipedpeer-demo`
 2. `./demo/prep-0-install.sh` (installs the nightly over any older build, runs
    `setup -y`). Its `sha256:` line must match LAPTOP-A's.
-3. After LAPTOP-A has set up: copy its `join-command.txt` here by pen drive and
+3. After LAPTOP-A has set up: open its `join-command.txt` here (you sent it to yourself) and
    run the `gpu-laptop` line from it, or type the values:
    `./setup-machine.sh gpu-laptop --token <secret> --introducer <LAPTOP-A IP> --prep`
    It first connects to LAPTOP-A; if it can't, it says why (most likely the Wi-Fi
