@@ -595,7 +595,8 @@ TOTAL 21.0s
 **A PC needs about 3.1 GiB free to run `./demo/12-everything.sh` itself**
 (it runs `pipedpeer run 07_everything.py` without `--remote`, and a machine
 that never ran the script estimates from its imports). V3's pc2 had about
-650 MB free and exited 1 after a 15 s wait
+650 MB free and exited 1 after a 15 s wait (since 1e07d56 the wait is up to 10 min, with
+a line every 30 s, and a job this machine could never hold fails at once)
 (<!-- V3 9949ad0: docs-VERIFY-736-12-everything-pc2.txt -->):
 ```
 $ pipedpeer run 07_everything.py
@@ -1170,7 +1171,8 @@ The middle part is `pipedpeer tasks --watch`, redrawn every second. All eight
 possible in the lab:
 - `demo/13-finale.sh` now sets `PIPEDPEER_REMOTE_WAIT=10m` (50bae3e): eight
   jobs fill every machine, so a job often fits only once another finishes,
-  and `--remote` gives up after 15 s by default. With the 15 s default V3's
+  and `--remote` gave up after 15 s by default (10 min since 1e07d56, so the
+  finale's setting is now just explicit). With the old 15 s default V3's
   first finale ran 6 of 8 (numpy and everything failed;
   31-item3-finale-run1-15s-wait.txt). Override it with
   `PIPEDPEER_REMOTE_WAIT=<duration> ./demo/13-finale.sh`.

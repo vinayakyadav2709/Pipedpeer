@@ -271,6 +271,8 @@ Not reproducible in containers. <!-- from rehearsal: lab visit -->
 
    GPU PREP FAILED - fix the FAILED lines above before the demo
    ```
+   (Captured before 1e07d56. The wait is now up to 10 min, `PIPEDPEER_REMOTE_WAIT`, with a
+   line every 30 s saying why each machine is busy; a job no machine could ever hold fails at once.)
    The GPU half passed. The `07_everything.py` half runs on the PC itself and needs about
    3.1 GiB free; pc1 had 2.1 GiB. On an 8–16 GB PC expect `ok` for both and no
    `GPU PREP FAILED`.
