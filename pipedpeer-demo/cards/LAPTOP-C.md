@@ -30,7 +30,7 @@ By hand: the sudo password when setup asks (Nix, firewall).
 5. Check this laptop reaches LAPTOP-A:
    `timeout 2 bash -c ': </dev/tcp/<LAPTOP-A IP>/38080' && echo reachable`. No
    `reachable`: [SETUP.md, "Can't reach LAPTOP-A"](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/SETUP.md#cant-reach-laptop-a).
-6. Keep LAPTOP-A's `join-command.txt` (pen drive) at hand: its `0-join.sh` line is your
+6. Keep LAPTOP-A's `join-command.txt` (sent to yourself) at hand: its `0-join.sh` line is your
    step 1 command, token included. Or type the values.
 
 ## 2. On the day

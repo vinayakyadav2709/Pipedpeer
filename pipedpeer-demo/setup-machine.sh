@@ -52,7 +52,7 @@ write_join_command() {
 	(
 		umask 077
 		cat >"$file" <<EOF
-# Contains the cluster secret: copy by pen drive, never commit.
+# Contains the cluster secret: send it to yourself (chat, email or a secret gist), never commit it.
 # Written by setup-machine.sh on the first machine ($ip). Run each line in pipedpeer-demo/.
 
 # LAPTOP-B (the GPU laptop):
@@ -68,7 +68,7 @@ EOF
 	)
 	chmod 600 "$file"
 	echo "Secret made here. The other machines' commands are in $file (mode 600)."
-	echo "Copy it to them by pen drive, or type the values: --token $tok --introducer $ip"
+	echo "Send it to yourself (chat, email or a secret gist) and open it on the others, or type the values: --token $tok --introducer $ip"
 }
 
 # start_rendezvous: `pipedpeer rendezvous` as a systemd user service, so it

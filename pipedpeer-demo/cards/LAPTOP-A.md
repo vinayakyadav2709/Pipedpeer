@@ -25,7 +25,7 @@ goes **first**, before every other.
    the secret, and starts `pipedpeer rendezvous` as the systemd user service
    `pipedpeer-rendezvous`: no terminal to keep open, and re-running starts no second one.
    It writes `join-command.txt` (mode 600, holds the secret: never commit it) with the
-   other machines' exact lines. Copy it to them by pen drive, or type the values
+   other machines' exact lines. Send it to yourself (chat, email or a secret gist) and open it on the others, or type the values
    (`pipedpeer auth show`, and your IP from `ip -4 route get 1.1.1.1`, after `src`).
    If it notes that logging out stops the service: stay logged in (locking the screen
    is fine), or run `loginctl enable-linger`. Stop it after the demo with

@@ -38,7 +38,7 @@ In the terminal you ran them from, run that export once, or open a new terminal.
 writes `pipedpeer-demo/join-command.txt` (mode 600, git-ignored): the other machines'
 exact lines, with the real secret and `--introducer <this machine's LAN IP>` (the `src`
 of `ip -4 route get 1.1.1.1`), and the live-join `./demo/0-join.sh` line. It holds the
-cluster secret: copy it by pen drive, never commit it. Or type the values.
+cluster secret: send it to yourself (chat, email or a secret gist), never commit it. Or type the values.
 
 **Every problem message has one shape:** what is wrong, numbered steps to fix it, how to
 check, then "re-run this same command".

@@ -13,7 +13,7 @@ cd Pipedpeer-dev/pipedpeer-demo
 ./demo/prep-0-install.sh
 
 # Join LAPTOP-A and build the environments (slow the first time). The exact line is in
-# join-command.txt from LAPTOP-A (pen drive); or type the values. Checks LAPTOP-A is reachable first.
+# join-command.txt from LAPTOP-A (sent to yourself); or type the values. Checks LAPTOP-A is reachable first.
 ./setup-machine.sh gpu-laptop --token <secret> --introducer <LAPTOP-A IP> --prep
 
 ######## On the day

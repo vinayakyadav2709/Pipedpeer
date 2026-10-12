@@ -14,7 +14,7 @@ cd Pipedpeer-dev/pipedpeer-demo
 # First machine: make the secret, start the rendezvous as a background service, write join-command.txt
 ./setup-machine.sh fedora-laptop --rendezvous
 
-# Give the others join-command.txt by pen drive (it holds the secret), or read these two values out
+# Give the others join-command.txt by sending it to yourself (chat, email or a secret gist; it holds the secret), or read these two values out
 pipedpeer auth show
 ip -4 route get 1.1.1.1
 

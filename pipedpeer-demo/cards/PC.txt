@@ -16,7 +16,7 @@ cd Pipedpeer-dev/pipedpeer-demo
 ######## Setup visit: a PC that is NOT PC-3
 
 # Join LAPTOP-A and build the common environment (slow the first time). The exact line is in
-# join-command.txt from LAPTOP-A (pen drive); or type the values. Checks LAPTOP-A is reachable first.
+# join-command.txt from LAPTOP-A (sent to yourself); or type the values. Checks LAPTOP-A is reachable first.
 ./setup-machine.sh ubuntu-pc --token <secret> --introducer <LAPTOP-A IP> --prep
 
 # The GPU/"everything" environment (this PC sends those steps); expect no "GPU PREP FAILED"
