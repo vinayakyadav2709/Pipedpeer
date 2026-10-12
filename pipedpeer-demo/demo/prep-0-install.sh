@@ -30,10 +30,9 @@ else
 		bash -s -- --channel nightly
 fi
 
-case ":$PATH:" in
-*":$HOME/.local/bin:"*) ;;
-*) echo "NOTE: add ~/.local/bin to PATH:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-esac
+# Same PATH step as setup-machine.sh: LAPTOP-C and PC-3 never run that one.
+source "$(dirname "$0")/_checks.sh"
+ensure_local_bin_path
 
 echo "==> setup (nix, crun, identity, firewall, daemon)"
 "$dest" setup -y

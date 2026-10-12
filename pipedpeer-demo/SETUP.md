@@ -25,6 +25,23 @@ DEMO-SCRIPT.md, "Machines and screens".
 
 One script does each machine: `setup-machine.sh <role>` (install, `pipedpeer setup -y`,
 `auth set`, join; it can be re-run). It reuses `demo/prep-*.sh` instead of copying them.
+Each machine's commands alone, ready to copy, are in `cards/<ROLE>.txt`
+(`./demo/card.sh --commands <ROLE>`).
+
+**PATH is handled.** `prep-0-install.sh` and `setup-machine.sh` add
+`export PATH="$HOME/.local/bin:$PATH"` to `~/.bashrc` and `~/.zshrc` (those that exist,
+never twice) when `~/.local/bin` is not on PATH, and print `PATH:` lines saying so. The
+`NOTE: add ~/.local/bin to PATH` in the V3 output below is from before that change.
+In the terminal you ran them from, run that export once, or open a new terminal.
+
+**The first machine writes `join-command.txt`.** `setup-machine.sh` with no `--token`
+writes `pipedpeer-demo/join-command.txt` (mode 600, git-ignored): the other machines'
+exact lines, with the real secret and `--introducer <this machine's LAN IP>` (the `src`
+of `ip -4 route get 1.1.1.1`), and the live-join `./demo/0-join.sh` line. It holds the
+cluster secret: copy it by pen drive, never commit it. Or type the values.
+
+**Every problem message has one shape:** what is wrong, numbered steps to fix it, how to
+check, then "re-run this same command".
 
 **Same binary everywhere.** `setup-machine.sh` installs the nightly only when no
 `pipedpeer` is on PATH. The demo needs the current `dev` build, which the nightly channel
@@ -93,8 +110,8 @@ $ (host) pipedpeer nodes   # 40 s later
 | Machine | Role | Notes |
 |---|---|---|
 | College Ubuntu PC | `ubuntu-pc` | sudo is available (DECIDED), so the normal path: system Nix + crun. See "Firewall" and "AppArmor" below. |
-| Your Fedora laptop | `fedora-laptop` | First machine: run with no `--token`, then read the secret with `pipedpeer auth show`. Runs `pipedpeer rendezvous` (keep it in its own terminal). |
-| Friend's GPU laptop | `gpu-laptop` | Needs the NVIDIA driver (`nvidia-smi` works). Runs `prep-3-gpu.sh` for the CUDA torch environment. The real 2-GPU ring with your laptop was never run in a rehearsal: check it in your own run (`./demo/7-gpu.sh` from a PC, both `nvidia-smi` screens). |
+| Your Fedora laptop | `fedora-laptop` | First machine: run with no `--token`, then read the secret with `pipedpeer auth show`. Add `--rendezvous`: runs `pipedpeer rendezvous` as the systemd user service `pipedpeer-rendezvous` (see "Rendezvous service"). |
+| Friend's GPU laptop | `gpu-laptop` | Needs the NVIDIA driver (`nvidia-smi` works). Without one, `setup-machine.sh` prints how to install it (Fedora: RPM Fusion `akmod-nvidia`; Ubuntu: `ubuntu-drivers install`) and goes on: the laptop joins as CPU only. Runs `prep-3-gpu.sh` for the CUDA torch environment. The real 2-GPU ring with your laptop was never run in a rehearsal: check it in your own run (`./demo/7-gpu.sh` from a PC, both `nvidia-smi` screens). |
 
 What `pipedpeer setup -y` printed on the Ubuntu stand-in (Debian + systemd, Determinate
 multi-user Nix, user `pp` with sudo) (<!-- V1 8e14b9b: lab-up-logs/pc4-setup.log -->):
@@ -155,6 +172,36 @@ sudo firewall-cmd --add-port=38080/tcp --add-port=38099/udp --add-port=38445/udp
 V1 did show that a join still succeeds with the rendezvous port blocked, through LAN
 discovery (<!-- V1 8e14b9b: 70-firewall-join.txt -->: `connected (4 peer(s))`).
 
+### Rendezvous service
+
+`./setup-machine.sh fedora-laptop --rendezvous` runs `pipedpeer rendezvous` as the systemd
+user service `pipedpeer-rendezvous` (unit file `~/.config/systemd/user/pipedpeer-rendezvous.service`,
+`enable --now`). It needs no terminal of its own, survives closing the terminal and comes
+back at the next login after a reboot. Re-running finds it active and starts no second one;
+a rendezvous already running by hand in a terminal is refused with a message (stop it first).
+Logging out stops it unless lingering is on: the script says so; stay logged in (a locked
+screen is fine) or run `loginctl enable-linger`.
+```
+systemctl --user status pipedpeer-rendezvous         # is it up?
+journalctl --user -u pipedpeer-rendezvous -n 20      # why not?
+systemctl --user disable --now pipedpeer-rendezvous  # after the demo
+```
+<!-- not yet run on a real machine -->
+
+### Can't reach LAPTOP-A
+
+`setup-machine.sh … --introducer <IP>` first opens a TCP connection to `<IP>:38080`
+(bash `/dev/tcp`, 2 s); `prep-1-check.sh` does the same to every peer. On failure it prints
+what is wrong (most likely the Wi-Fi's client isolation), the fixes in order (on LAPTOP-A
+`pipedpeer status`/`pipedpeer start`; re-run `./demo/prep-0-install.sh` there for the
+firewall; move every machine to a phone hotspot or your own router and use LAPTOP-A's new IP
+from `ip -4 addr`), the check, and stops without joining (prep-1-check: `NOT READY`).
+`ping` is no longer the check: ICMP and TCP are filtered separately. By hand, from a
+machine that does not run `setup-machine.sh` (LAPTOP-C, PC-3):
+```
+timeout 2 bash -c ': </dev/tcp/<LAPTOP-A IP>/38080' && echo reachable
+```
+
 ### AppArmor (Ubuntu 24.04 and later)
 
 Ubuntu 24.04+ restricts unprivileged user namespaces, which crun's sandbox needs. With the
@@ -166,7 +213,9 @@ system Nix that `setup -y` installs, jobs still **run, unisolated**, and every j
 ```
 followed by the exact fix for that machine: a one-file AppArmor profile for the pipedpeer
 binary (preferred), or `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
-(machine-wide, weaker). Apply the profile at the lab visit so the demo runs sandboxed. The
+(machine-wide, weaker). `pipedpeer setup` now applies the profile itself on Ubuntu 24.04+;
+at the lab visit check that a job prints no `unisolated` line, and if one still does, run
+the fallback block in `cards/PC.txt` (profile, daemon restart, sysctl last). The
 daemon log says `no user namespace: jobs run unisolated`. Only a private no-root store
 (no sudo) makes this fatal; with sudo available that path is not used.
 Not reproducible in containers. <!-- from rehearsal: lab visit -->
@@ -179,12 +228,13 @@ whole; VERIFY.md runs the same layout in Docker.
 
 1. Same binary on all three: `./demo/prep-0-install.sh <path-to-binary>` on each, and
    compare the `sha256` lines.
-2. LAPTOP-A: `./setup-machine.sh fedora-laptop`; note the secret. Start `pipedpeer
-   rendezvous` in its own terminal, then `pipedpeer join <LAPTOP-A IP>` on LAPTOP-A
-   itself (it prints `no peers found`, as in "Lab visit" step 4: normal for the first
+2. LAPTOP-A: `./setup-machine.sh fedora-laptop --rendezvous` (makes the secret, starts
+   the rendezvous service, writes `join-command.txt`), then `pipedpeer join <LAPTOP-A IP>`
+   on LAPTOP-A itself (it prints `no peers found`, as in "Lab visit" step 4: normal for the first
    machine).
 3. LAPTOP-B: `./setup-machine.sh gpu-laptop --token <secret> --introducer <LAPTOP-A IP> --prep`
-   (joins, then runs prep-4 and prep-3 on its own GPU). Join by IP, never by discovery:
+   (the line from `join-command.txt`; checks LAPTOP-A is reachable, joins, then runs
+   prep-4 and prep-3 on its own GPU). Join by IP, never by discovery:
    Wi-Fi access points often drop broadcast (client isolation).
 4. LAPTOP-A: `./demo/prep-4-common.sh`, then `./demo/prep-3-gpu.sh` (its own GPU).
 5. LAPTOP-C: `./demo/prep-4-common.sh` **only** (prep-0 already ran `setup -y`). It is
@@ -203,13 +253,15 @@ whole; VERIFY.md runs the same layout in Docker.
 7. LAPTOP-A: `./demo/prep-1-check.sh`. Expect READY, with
    `warn  only 1 peer - the demo works, but say 'two machines'` (only LAPTOP-B is joined).
    <!-- not yet run in this layout -->
-8. If `ping <LAPTOP-A IP>` fails from another laptop, that Wi-Fi blocks laptops from each
-   other outright. Nothing is relayed, so move to a network you control (a phone hotspot
-   or your own router) and join again by IP.
+8. If a laptop can't reach LAPTOP-A (setup-machine.sh or prep-1-check says so, or the
+   `/dev/tcp` check above fails), that Wi-Fi blocks laptops from each other outright.
+   Nothing is relayed, so follow "Can't reach LAPTOP-A": a network you control (a phone
+   hotspot or your own router), then join again by IP.
 
 ## Lab visit (layout 2: only if we get a lab, 1–3 PCs)
 
-1. First machine (Fedora laptop): `./setup-machine.sh fedora-laptop`. Note the secret.
+1. First machine (Fedora laptop): `./setup-machine.sh fedora-laptop --rendezvous`. It
+   writes `join-command.txt` with the secret.
 2. Each other machine except PC-3 (it joins live on the day; give it `setup -y` only):
    `./setup-machine.sh <role> --token <secret>`.
 3. Wait ~30 s and run `pipedpeer nodes` on the laptop. LAN auto-discovery should list every
@@ -227,8 +279,8 @@ whole; VERIFY.md runs the same layout in Docker.
    the demo. A machine that stays `unreachable` with `0 B` after setup holds an old secret:
    run `pipedpeer stop; pipedpeer start` on it (V3's pc1 and pc2, before 50bae3e:
    docs-SETUP-115-discovery-nodes.txt, docs-SETUP-115-discovery-after-restart.txt).
-4. If Wi-Fi and wired do not see each other: on the laptop run `pipedpeer rendezvous`
-   (leave it open), then on each machine `./setup-machine.sh <role> --token <secret> --introducer <laptop-ip>`.
+4. If Wi-Fi and wired do not see each other: the rendezvous already runs on the laptop
+   (step 1's `--rendezvous`), so on each machine `./setup-machine.sh <role> --token <secret> --introducer <laptop-ip>`.
    Our laptops on Wi-Fi and the PCs on ethernet are different subnets, which broadcast
    discovery never crosses, so in this layout expect to need it. Expected on each machine (<!-- V1 8e14b9b: 05-join-pcs.txt -->):
    ```

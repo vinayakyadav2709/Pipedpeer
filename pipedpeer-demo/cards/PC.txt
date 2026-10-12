@@ -1,0 +1,87 @@
+# PC: commands only, in order. What to expect at each: https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/cards/PC.md
+# Get this file:  curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cards/PC.txt
+# Replace <secret> and <LAPTOP-A IP> before pasting. Every command runs in Pipedpeer-dev/pipedpeer-demo.
+# Layout 2 (lab). Roles: 3 PCs = PC-1, PC-2, PC-3; 2 PCs = first plays PC-1 and PC-2, second PC-3;
+# 1 PC = all three. PC-3 (the last PC) joins live in step 1: it skips the join below.
+
+######## Setup visit: every PC
+
+# Get the demo folder (no git needed)
+curl -L https://github.com/vinayakyadav2709/Pipedpeer/archive/refs/heads/dev.tar.gz | tar xz
+cd Pipedpeer-dev/pipedpeer-demo
+
+# Install the nightly and run setup (sudo password when asked); the sha256 line must match LAPTOP-A's
+./demo/prep-0-install.sh
+
+######## Setup visit: a PC that is NOT PC-3
+
+# Join LAPTOP-A and build the common environment (slow the first time). The exact line is in
+# join-command.txt from LAPTOP-A (pen drive); or type the values. Checks LAPTOP-A is reachable first.
+./setup-machine.sh ubuntu-pc --token <secret> --introducer <LAPTOP-A IP> --prep
+
+# The GPU/"everything" environment (this PC sends those steps); expect no "GPU PREP FAILED"
+./demo/prep-3-gpu.sh
+
+######## Setup visit: PC-3 only (never setup-machine.sh or pipedpeer join before step 1)
+
+# Build the common environment only
+./demo/prep-4-common.sh
+
+# Can this PC reach LAPTOP-A? Must print "reachable"; if not: SETUP.md, "Can't reach LAPTOP-A"
+timeout 2 bash -c ': </dev/tcp/<LAPTOP-A IP>/38080' && echo reachable
+
+######## Setup visit: every PC, sandbox check (Ubuntu 24.04+)
+
+# pipedpeer setup applies the AppArmor fix itself on Ubuntu 24.04+. Check: this must print
+# "sandboxed: ok"; a line with "run unisolated" means the fix did not take: use the next block.
+pipedpeer run 00_pool.py 2>&1 | grep unisolated || echo "sandboxed: ok"
+
+# Fallback, only if a job still prints "run unisolated" (sudo, once). Ubuntu 24.04+ forbids
+# unprivileged user namespaces, which crun's sandbox needs. This profile allows them for the
+# pipedpeer binary alone (crun, which it starts, inherits it); the restart makes the daemon
+# pick it up (PC-3 is not joined yet, so restarting it is safe). Then run the check above again.
+printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile pipedpeer %s flags=(unconfined) {\n  userns,\n}\n' "$(readlink -f "$(command -v pipedpeer)")" | sudo tee /etc/apparmor.d/pipedpeer
+sudo apparmor_parser -r /etc/apparmor.d/pipedpeer
+pipedpeer stop; pipedpeer start
+
+# Last resort, only if the profile did not help: lift the restriction machine-wide
+# (weaker: affects every program; lasts until reboot). Restart and check again.
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+pipedpeer stop; pipedpeer start
+
+# Peers missing: the firewall must list 38080/tcp, 38099/udp, 38447/udp
+sudo ufw status
+
+######## On the day: every PC
+
+# T-30 min: daemon up? (pipedpeer start only if status says not running)
+pipedpeer status
+pipedpeer start
+
+######## On the day: only the steps for your role(s)
+
+# Step 1 live join (PC-3; the exact line is in join-command.txt from LAPTOP-A)
+./demo/0-join.sh <LAPTOP-A IP> <secret>
+
+# PC-2, before step 6: read this PC's MEM FREE (under about 3.1 GiB: the --remote line in step 6)
+pipedpeer nodes
+
+# Step 4 cold vs cached (PC-2)
+./demo/2b-cold.sh
+
+# Step 5 GPU from no GPU (PC-1)
+./demo/7-gpu.sh
+
+# Step 6 everything (PC-2; MEM FREE under 3.1 GiB: the second line instead)
+./demo/12-everything.sh
+pipedpeer run 07_everything.py --remote
+
+# Step 7 teacher's script (PC-1; their own: ./demo/11-teacher.sh their.py [data files])
+pipedpeer run 00_pool.py --remote --check-only
+
+# Step 8 failover (PC-3): at LAPTOP-A's first "[pipedpeer] remote ok:" line stop; start again afterwards
+pipedpeer stop
+pipedpeer start
+
+# Step 9 receipts (PC-2, after LAPTOP-A's ./demo/10-proof.sh); empty means use another PC
+pipedpeer traffic

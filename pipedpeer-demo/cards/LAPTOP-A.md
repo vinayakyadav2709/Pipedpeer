@@ -2,6 +2,9 @@
 
 Card URL: https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/cards/LAPTOP-A.md
 
+Commands only, ready to copy: [LAPTOP-A.txt](LAPTOP-A.txt)
+(`./demo/card.sh --commands LAPTOP-A`, or `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cards/LAPTOP-A.txt`).
+
 Only this machine's actions, in order. The say/expect detail for each step is in
 [DEMO-SCRIPT.md](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/DEMO-SCRIPT.md#the-flow).
 Same in both layouts (three laptops on Wi-Fi, or a lab).
@@ -17,26 +20,32 @@ goes **first**, before every other.
    then `cd Pipedpeer-dev/pipedpeer-demo`
 2. `./demo/prep-0-install.sh` (installs the nightly, runs `setup -y`).
    Write down its `sha256:` line; every machine must print the same one.
-   If it says `NOTE: add ~/.local/bin to PATH`, run `export PATH="$HOME/.local/bin:$PATH"`.
-3. `./setup-machine.sh fedora-laptop` (no `--token`: this is the first machine).
-   Read the secret with `pipedpeer auth show`; the other machines need it.
-   Find your IP with `hostname -I`; the other machines need that too.
-4. New terminal: `pipedpeer rendezvous`. Leave it open until the demo is over.
-5. `pipedpeer join <your IP>`. Expect `no peers found` and "This is normal for
+3. `./setup-machine.sh fedora-laptop --rendezvous` (no `--token`: this is the first
+   machine). It adds `~/.local/bin` to PATH in `~/.bashrc`/`~/.zshrc` if missing, makes
+   the secret, and starts `pipedpeer rendezvous` as the systemd user service
+   `pipedpeer-rendezvous`: no terminal to keep open, and re-running starts no second one.
+   It writes `join-command.txt` (mode 600, holds the secret: never commit it) with the
+   other machines' exact lines. Copy it to them by pen drive, or type the values
+   (`pipedpeer auth show`, and your IP from `ip -4 route get 1.1.1.1`, after `src`).
+   If it notes that logging out stops the service: stay logged in (locking the screen
+   is fine), or run `loginctl enable-linger`. Stop it after the demo with
+   `systemctl --user disable --now pipedpeer-rendezvous`.
+4. `pipedpeer join <your IP>`. Expect `no peers found` and "This is normal for
    the first machine": the others join after you.
-6. `./demo/prep-4-common.sh`, then `./demo/prep-3-gpu.sh` (slow the first time:
+5. `./demo/prep-4-common.sh`, then `./demo/prep-3-gpu.sh` (slow the first time:
    the common environment took 1150–1261 s per machine in rehearsal).
-7. When LAPTOP-B (and in a lab, every PC except the last) has joined:
+6. When LAPTOP-B (and in a lab, every PC except the last) has joined:
    `./demo/prep-2-rehearse.sh`. It writes `demo/rehearsal-results.txt`: the
    only speed numbers to quote. A step under 1.2× goes to "if asked".
-8. `./demo/prep-1-check.sh` (after prep-2, never before). Expect `READY`.
+7. `./demo/prep-1-check.sh` (after prep-2, never before). Expect `READY`. It also
+   connects to every peer; a peer it can't reach prints how to fix that.
    Layout 1 (only LAPTOP-B joined): expect
    `warn  only 1 peer - the demo works, but say 'two machines'`.
 
 ## 2. On the day
 
 - **T−30 min:** `pipedpeer status`, expect `daemon running (pid=… node-id=… port=38080)`.
-  Not running: `pipedpeer start`. Check `pipedpeer rendezvous` still runs in its terminal.
+  Not running: `pipedpeer start`. Check `systemctl --user status pipedpeer-rendezvous` says `active (running)`.
 - **T−30 min:** `./demo/prep-1-check.sh`, expect `READY` with the same hash as at prep.
 - **T−10 min:** second terminal: `pipedpeer dashboard`. **Keep it up the whole demo.**
   Then `./demo/1-cluster.sh` once. Font large (Ctrl+Shift+=), ~100 columns.

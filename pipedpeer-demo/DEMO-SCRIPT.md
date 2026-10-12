@@ -117,7 +117,8 @@ Follow [SETUP.md](SETUP.md). When it is done, all of these are true:
 
 1. Every machine runs the **same binary**. `demo/prep-0-install.sh` prints a
    `sha256`; compare it across machines.
-2. `pipedpeer rendezvous` runs in its own terminal on LAPTOP-A.
+2. The rendezvous runs on LAPTOP-A as a service (`setup-machine.sh … --rendezvous`):
+   `systemctl --user status pipedpeer-rendezvous` says `active (running)`.
 3. Every machine except **PC-3** ran `pipedpeer auth set <token>` and
    `pipedpeer join <LAPTOP-A IP>`.
 4. PC-3 has run `pipedpeer setup -y` only, never `join`, so that step 1 shows
@@ -1511,4 +1512,4 @@ cluster manager.
 
 Run `pipedpeer stop` on each college PC (layout 2) or on LAPTOP-C (layout 1). To leave the college cluster, run
 `pipedpeer join <other address>` later; one join resets it. On LAPTOP-A, stop
-`pipedpeer rendezvous` with Ctrl+C.
+the rendezvous: `systemctl --user disable --now pipedpeer-rendezvous`.

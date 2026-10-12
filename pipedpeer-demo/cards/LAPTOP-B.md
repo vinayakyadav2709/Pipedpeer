@@ -2,6 +2,9 @@
 
 Card URL: https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/cards/LAPTOP-B.md
 
+Commands only, ready to copy: [LAPTOP-B.txt](LAPTOP-B.txt)
+(`./demo/card.sh --commands LAPTOP-B`, or `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cards/LAPTOP-B.txt`).
+
 Only this machine's actions, in order. The say/expect detail for each step is in
 [DEMO-SCRIPT.md](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/pipedpeer-demo/DEMO-SCRIPT.md#the-flow).
 Same in both layouts (three laptops on Wi-Fi, or a lab).
@@ -10,21 +13,21 @@ Same in both layouts (three laptops on Wi-Fi, or a lab).
 
 0. If this laptop still holds the old rehearsal setup, put it back to normal
    first: [TODO-BEFORE-DEMO.md, section 2](https://github.com/vinayakyadav2709/Pipedpeer/blob/dev/TODO-BEFORE-DEMO.md).
-   By hand: the NVIDIA driver must already be installed (`nvidia-smi` works);
+   By hand: the NVIDIA driver should already be installed (`nvidia-smi` works);
    the sudo password when setup asks (Nix, firewall, key helper).
 1. Get the demo folder (no git needed):
    `curl -L https://github.com/vinayakyadav2709/Pipedpeer/archive/refs/heads/dev.tar.gz | tar xz`
    then `cd Pipedpeer-dev/pipedpeer-demo`
 2. `./demo/prep-0-install.sh` (installs the nightly over any older build, runs
    `setup -y`). Its `sha256:` line must match LAPTOP-A's.
-   If it says `NOTE: add ~/.local/bin to PATH`, run `export PATH="$HOME/.local/bin:$PATH"`.
-3. After LAPTOP-A has set up: get the secret (`pipedpeer auth show` there) and
-   its IP, check `ping <LAPTOP-A IP>`, then:
+3. After LAPTOP-A has set up: copy its `join-command.txt` here by pen drive and
+   run the `gpu-laptop` line from it, or type the values:
    `./setup-machine.sh gpu-laptop --token <secret> --introducer <LAPTOP-A IP> --prep`
-   It joins (expect `connected (N peer(s))`), then runs prep-4 and prep-3 on
-   this GPU (slow the first time: 1150–1261 s per machine in rehearsal).
-   If `ping` fails, the Wi-Fi blocks laptops from each other: move everyone to a
-   phone hotspot or your own router and join again by IP.
+   It first connects to LAPTOP-A; if it can't, it says why (most likely the Wi-Fi
+   blocks laptops from each other), how to fix it, and stops without joining. Then it
+   joins (expect `connected (N peer(s))`) and runs prep-4 and prep-3 on this GPU (slow
+   the first time: 1150–1261 s per machine in rehearsal). With no working NVIDIA
+   driver it warns, says how to install one, and goes on: the laptop joins as CPU only.
 
 ## 2. On the day
 
