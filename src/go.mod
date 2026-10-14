@@ -9,7 +9,7 @@ require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/klauspost/compress v1.18.5
+	github.com/klauspost/compress v1.20.3
 	github.com/nats-io/nats-server/v2 v2.12.7
 	github.com/nats-io/nats.go v1.51.0
 	github.com/quic-go/quic-go v0.61.0
