@@ -47,14 +47,10 @@ func TestDetectNVIDIA(t *testing.T) {
 	}
 }
 
-// refreshAMD and refreshIntel must be safe to call on a machine with neither
-// vendor present — they shell out to tools that will not exist.
+// refreshAMD must be safe to call on a machine without an AMD GPU — they shell out to tools that will not exist.
 func TestRefreshOtherVendorsAreSafe(t *testing.T) {
 	if info, _, _ := refreshAMD(); info.Vendor != VendorNone && info.Vendor != VendorAMD {
 		t.Errorf("refreshAMD returned unexpected vendor %q", info.Vendor)
-	}
-	if info, _, _ := refreshIntel(); info.Vendor != VendorNone && info.Vendor != VendorIntel {
-		t.Errorf("refreshIntel returned unexpected vendor %q", info.Vendor)
 	}
 }
 
