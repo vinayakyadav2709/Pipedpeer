@@ -2284,8 +2284,8 @@ func freeCoresFromLoad(load registry.LoadInfo) float64 {
 // telemetry is passed in because reading it shells out to vendor tools.
 func (s *Server) reserveGPULocked(devices []gpu.DeviceUsage, gpuPresent bool, minVRAM int64) int {
 	if len(devices) == 0 {
-		// A GPU with no per-device telemetry (Intel, or AMD without a
-		// parseable rocm-smi) can still run the job on device 0. But with no
+		// A GPU with no per-device telemetry (AMD without a parseable
+		// rocm-smi) can still run the job on device 0. But with no
 		// VRAM numbers we cannot honour a minimum, so a request that specifies
 		// one must be refused rather than accepted on a guess.
 		if gpuPresent && minVRAM == 0 {

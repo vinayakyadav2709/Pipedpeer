@@ -993,10 +993,6 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 					"ROCR_VISIBLE_DEVICES=0",
 					"HSA_OVERRIDE_GFX_VERSION=0",
 				)
-			case gpu.VendorIntel:
-				ociCfg.Process.Env = append(ociCfg.Process.Env,
-					"ONEAPI_DEVICE_SELECTOR=level_zero:*",
-				)
 			}
 		}
 

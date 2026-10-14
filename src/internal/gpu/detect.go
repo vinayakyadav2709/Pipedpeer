@@ -18,7 +18,6 @@ type Vendor string
 const (
 	VendorNVIDIA Vendor = "nvidia"
 	VendorAMD    Vendor = "amd"
-	VendorIntel  Vendor = "intel"
 	VendorNone   Vendor = "none"
 )
 
@@ -83,12 +82,6 @@ func refreshCache() {
 		return
 	}
 	if info, usage, devs := refreshAMD(); info.Vendor != VendorNone {
-		gpuCache.info = info
-		gpuCache.usage = usage
-		gpuCache.devs = devs
-		return
-	}
-	if info, usage, devs := refreshIntel(); info.Vendor != VendorNone {
 		gpuCache.info = info
 		gpuCache.usage = usage
 		gpuCache.devs = devs
@@ -263,20 +256,6 @@ func perDeviceAMD() []DeviceUsage {
 	return devs
 }
 
-// refreshIntel detects Intel GPUs via lspci. No usage counters are reported:
-// Intel exposes them through i915 perf/sysfs rather than a stable CLI, so the
-// node advertises the device but is scheduled on CPU metrics alone.
-func refreshIntel() (Info, Usage, []DeviceUsage) {
-	info := detectIntel()
-	if info.Vendor != VendorIntel {
-		return Info{Vendor: VendorNone}, Usage{}, nil
-	}
-	if info.Count == 0 {
-		info.Count = 1
-	}
-	return info, Usage{}, nil
-}
-
 func parseInt64(s string) int64 {
 	v, _ := strconv.ParseInt(strings.TrimSpace(strings.Fields(s + " ")[0]), 10, 64)
 	return v
@@ -376,46 +355,6 @@ func amdGFXTarget() string {
 		}
 	}
 	return ""
-}
-
-func detectIntel() Info {
-	if _, err := exec.LookPath("lspci"); err != nil {
-		return Info{Vendor: VendorNone}
-	}
-	out, err := exec.Command("lspci", "-nn").Output()
-	if err != nil {
-		return Info{Vendor: VendorNone}
-	}
-	found := false
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "VGA") && strings.Contains(line, "Intel") {
-			found = true
-			break
-		}
-		if strings.Contains(line, "3D") && strings.Contains(line, "Intel") {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return Info{Vendor: VendorNone}
-	}
-
-	devices := scanDevices("dri", []string{"card0"}, []int{128})
-	name := "Intel GPU"
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(line, "Intel") {
-			parts := strings.SplitN(line, ":", 3)
-			if len(parts) == 3 {
-				name = strings.TrimSpace(parts[2])
-			}
-		}
-	}
-	return Info{
-		Vendor:  VendorIntel,
-		Devices: devices,
-		Name:    name,
-	}
 }
 
 func scanDevices(subdir string, exactNames []string, renderMinors []int) []DeviceNode {
