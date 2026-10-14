@@ -41,4 +41,5 @@ echo
 echo "binary: $dest"
 echo "sha256: $(sha256sum "$dest" | cut -c1-16)   <- must be identical on every machine"
 echo
-echo "Next: ./join-machine.sh <introducer-ip> [token]   (box-a first, without a token)"
+echo "Next: the next line of your card (cards/<ROLE>.txt). First machine: ./setup-machine.sh fedora-laptop --rendezvous;"
+echo "      the others: their line from join-command.txt (PC-3: ./demo/prep-4-common.sh only, no join)."
