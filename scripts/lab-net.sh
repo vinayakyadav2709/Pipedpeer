@@ -79,7 +79,11 @@ start() {
 	return 1
 }
 
-nid() { x "$1" 'curl -sf --max-time 3 http://127.0.0.1:4242/health | jq -r .node_id' 2>/dev/null; }
+# /health answers 401 without the token once a node has one (authtoken).
+nid() {
+	x "$1" 'tok="$(jq -r ".token // empty" "$XDG_DATA_HOME/pipedpeer/cluster.json" 2>/dev/null)"
+		curl -sf --max-time 3 -H "X-Pipedpeer-Token: $tok" http://127.0.0.1:4242/health | jq -r .node_id' 2>/dev/null
+}
 
 # rows <node>: "node_id state path host" per /v1/nodes row.
 rows() { x "$1" ppnodes 2>/dev/null; }
@@ -225,7 +229,7 @@ e2() {
 	$rt exec -d ppn-b sh -c "pipedpeer connect '$code' >/var/log/connect.log 2>&1; echo \$? >/var/log/connect.rc"
 	t0="$(now)"
 	while lt "$(since "$t0")" 90; do
-		if [[ -z "$t_up" ]] && x b 'curl -sf --max-time 1 http://127.0.0.1:4242/health' >/dev/null 2>&1; then
+		if [[ -z "$t_up" ]] && x b 'curl -s -o /dev/null --max-time 1 http://127.0.0.1:4242/health' >/dev/null 2>&1; then # any answer, 401 included, means up
 			t_up="$(now)"
 		fi
 		x b 'test -f /var/log/connect.rc' && break

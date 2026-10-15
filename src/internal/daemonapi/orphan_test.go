@@ -94,6 +94,10 @@ func TestPruneDropsJobLog(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(s.jobDir, id), old, old); err != nil {
 		t.Fatal(err)
 	}
+	// The log Append just wrote is fresh, so prune goes by FinishedAt.
+	s.jobsMu.Lock()
+	s.jobs[id].FinishedAt = time.Now().Add(-2 * FinishedJobRetention)
+	s.jobsMu.Unlock()
 	if n, err := s.PruneCompletedJobDirs(JobRetention); err != nil || n != 1 {
 		t.Fatalf("prune = %d, %v", n, err)
 	}
