@@ -60,6 +60,16 @@ def test_int8_round_trip_within_half_a_step_per_block():
     assert np.abs(flat[9000:] - back[9000:]).max() < 1e-4
 
 
+def test_int8_subnormal_block_gets_a_positive_scale():
+    # peak/127 underflows to 0 for a subnormal peak; the daemon refuses a
+    # non-positive scale (ddpreduce.go), so the block must fall back to 1.
+    np = pytest.importorskip("numpy")
+    flat = np.array([1e-44, 0.0, 0.5, -0.25], dtype=np.float32)
+    counts = [2, 2]
+    q, scales, dequant = ddp_wire._int8_encode(flat, counts)
+    assert all(s > 0 for s in scales) and np.all(np.isfinite(dequant))
+
+
 def test_int8_error_feedback_delivers_small_gradients():
     # A component far below one quantisation step rounds to zero every time;
     # carried forward it arrives in full over many steps.
