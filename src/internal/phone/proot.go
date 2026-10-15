@@ -32,8 +32,9 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
-// Distro is the proot-distro container the full-node route runs in.
-const Distro = "debian"
+// Distro is the proot-distro container the full-node route runs in: its own
+// name, so uninstall removes it and never a Debian of the user's.
+const Distro = "pipedpeer"
 
 // marker exists inside the Debian once setup finished there; its presence is
 // what makes the Termux binary forward and what InProot looks for. A
@@ -76,7 +77,8 @@ func ProotReady() bool { return IsTermux() && exists(filepath.Join(Rootfs(), mar
 // when the full-node route is set up; otherwise it returns and the command
 // runs here. Called first thing in main.
 func Launch(args []string) {
-	if !ProotReady() {
+	// uninstall runs here: it removes the container itself.
+	if !ProotReady() || len(args) > 0 && args[0] == "uninstall" {
 		return
 	}
 	os.Exit(forward(args))
@@ -358,12 +360,12 @@ func SetupProot(w io.Writer) error {
 		return nil
 	}
 	if runStep(io.Discard, "proot-distro", "list") != nil {
-		if err := step("installing proot-distro", "pkg", "install", "-y", "proot-distro"); err != nil {
+		if err := tracked(func() error { return step("installing proot-distro", "pkg", "install", "-y", "proot-distro") }); err != nil {
 			return err
 		}
 	}
 	if runStep(io.Discard, "proot-distro", "login", Distro, "--", "true") != nil {
-		if err := step("installing Debian for the full node (~100 MB)", "proot-distro", "install", Distro); err != nil {
+		if err := step("installing Debian for the full node (~100 MB)", "proot-distro", "install", "--name", Distro, "debian"); err != nil {
 			return err
 		}
 	}

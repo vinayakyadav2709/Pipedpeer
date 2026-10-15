@@ -285,7 +285,11 @@ func Setup(w io.Writer) error {
 	term.OK(w, "this phone takes Pool/joblib work only (pool_only in %s)", clustercfg.Path())
 	install := func(what string, pkgs ...string) bool {
 		fmt.Fprintf(w, "installing %s (pkg install %s), this can take a few minutes...\n", what, strings.Join(pkgs, " "))
-		out, err := runCmd("pkg", append([]string{"install", "-y"}, pkgs...)...)
+		var out []byte
+		err := tracked(func() (err error) {
+			out, err = runCmd("pkg", append([]string{"install", "-y"}, pkgs...)...)
+			return err
+		})
 		if err != nil {
 			log.Warn().Err(err).Strs("packages", pkgs).Str("output", tail(out)).Msg("phone: pkg install failed")
 			term.Warn(w, "pkg install %s failed: %v", strings.Join(pkgs, " "), err)
@@ -305,9 +309,12 @@ func Setup(w io.Writer) error {
 		term.Fail(w, "%v", err)
 		return nil
 	}
+	hadPickle := len(missingModules(py, []string{"cloudpickle"})) == 0
 	if out, err := runCmd(py, "-m", "pip", "install", "-q", "cloudpickle"); err != nil {
 		log.Warn().Err(err).Str("output", tail(out)).Msg("phone: pip install cloudpickle failed")
 		term.Action(w, "for by-value functions: %s -m pip install cloudpickle", py)
+	} else if !hadPickle {
+		record(nil, []string{"cloudpickle"})
 	}
 	have := []string{}
 	for _, m := range []string{"numpy", "torch", "scipy", "cloudpickle"} {
