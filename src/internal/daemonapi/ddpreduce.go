@@ -89,6 +89,10 @@ type ddpAccumulator struct {
 	// gives the small shard twice the influence per sample it deserves. The
 	// combined gradient is sum(n_i * g_i) / sum(n_i).
 	weight float64
+	// sumSq is the sample-weighted sum of each contribution's squared norm,
+	// sum(n_i * ||x_i||^2): with sum and weight it gives how far the ranks
+	// disagree (drift) without holding any rank's payload.
+	sumSq float64
 }
 
 func newDDPAccumulator(dtype ddpDType, n int) *ddpAccumulator {
@@ -137,19 +141,22 @@ func (a *ddpAccumulator) addSegmented(payload []byte, scales []float64, weight f
 		if len(payload) != want {
 			return fmt.Errorf("payload is %d bytes, want %d int8 values", len(payload), want)
 		}
-		off := 0
+		off, sq := 0, 0.0
 		for i, n := range a.segments {
 			sc := scales[i]
 			if sc <= 0 {
 				return fmt.Errorf("segment %d has a non-positive scale", i)
 			}
 			for j := 0; j < n; j++ {
-				a.sum[off+j] += float64(int8(payload[off+j])) * sc * weight
+				v := float64(int8(payload[off+j])) * sc
+				a.sum[off+j] += v * weight
+				sq += v * v
 			}
 			off += n
 		}
 		a.count++
 		a.weight += weight
+		a.sumSq += sq * weight
 		return nil
 	}
 	return a.addFlat(payload, scales[0], weight)
@@ -164,32 +171,69 @@ func (a *ddpAccumulator) addFlat(payload []byte, scale float64, weight float64) 
 		return fmt.Errorf("payload is %d bytes, want %d for %d %s values",
 			len(payload), want, len(a.sum), a.dtype)
 	}
+	sq := 0.0
+	add := func(i int, v float64) {
+		a.sum[i] += v * weight
+		sq += v * v
+	}
 	switch a.dtype {
 	case ddpF16:
 		for i := range a.sum {
-			a.sum[i] += float64(float16ToFloat32(binary.LittleEndian.Uint16(payload[i*2:]))) * weight
+			add(i, float64(float16ToFloat32(binary.LittleEndian.Uint16(payload[i*2:]))))
 		}
 	case ddpF32:
 		for i := range a.sum {
-			a.sum[i] += float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[i*4:]))) * weight
+			add(i, float64(math.Float32frombits(binary.LittleEndian.Uint32(payload[i*4:]))))
 		}
 	case ddpF64:
 		for i := range a.sum {
-			a.sum[i] += math.Float64frombits(binary.LittleEndian.Uint64(payload[i*8:])) * weight
+			add(i, math.Float64frombits(binary.LittleEndian.Uint64(payload[i*8:])))
 		}
 	case ddpI8:
 		if scale <= 0 {
 			return fmt.Errorf("int8 payload needs a positive scale")
 		}
 		for i := range a.sum {
-			a.sum[i] += float64(int8(payload[i])) * scale * weight
+			add(i, float64(int8(payload[i]))*scale)
 		}
 	default:
 		return fmt.Errorf("unsupported dtype %q", a.dtype)
 	}
+	a.sumSq += sq * weight
 	a.count++
 	a.weight += weight
 	return nil
+}
+
+// driftCap stands in for an infinite drift (ranks disagreeing about a mean of
+// zero), which JSON cannot carry.
+const driftCap = 1e9
+
+// drift is how far the ranks' contributions disagree, relative to what they
+// agree on: sqrt(sum(n_i*||x_i - m||^2) / sum(n_i)) / ||m||, with m the
+// weighted mean. 0 when every rank sent the same thing; about 1 when the
+// spread is as large as the mean. DiLoCo (--ddp-sync fast) sizes its sync
+// interval from it. ok is false with fewer than two contributions.
+func (a *ddpAccumulator) drift() (float64, bool) {
+	if a.count < 2 || a.weight <= 0 {
+		return 0, false
+	}
+	inv := 1 / a.weight
+	m2 := 0.0
+	for _, s := range a.sum {
+		m := s * inv
+		m2 += m * m
+	}
+	// sum(n_i*||x_i||^2)/W - ||m||^2 is the weighted spread; rounding can take
+	// it a hair below zero when the ranks agree exactly.
+	spread := max(a.sumSq*inv-m2, 0)
+	if m2 <= 0 {
+		if spread > 0 {
+			return driftCap, true
+		}
+		return 0, true
+	}
+	return min(math.Sqrt(spread/m2), driftCap), true
 }
 
 // meanSegmented is mean with a scale per segment.

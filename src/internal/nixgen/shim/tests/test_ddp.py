@@ -74,3 +74,158 @@ def test_int8_error_feedback_delivers_small_gradients():
         err = x - dequant
         sent += ddp._int8_decode(q, scales, counts)
     assert abs(sent[1] - 1.0) < 1.0 / 127
+
+
+def test_read_frames_round_trip_and_truncation():
+    import struct
+    frames = [b"", b"a", b"xyz" * 1000]
+    buf = b"".join(struct.pack(">I", len(f)) + f for f in frames)
+    assert [bytes(m) for m in ddp._read_frames(buf, 3)] == frames
+    assert [bytes(m) for m in ddp._read_frames(memoryview(buf), 2)] == frames[:2]
+    with pytest.raises(RuntimeError):
+        ddp._read_frames(buf[:-1], 3)
+    with pytest.raises(RuntimeError):
+        ddp._read_frames(buf, 4)
+
+
+# DiLoCo schedule (--ddp-sync fast).
+
+def test_interval_grows_on_low_drift_and_shrinks_on_high():
+    assert ddp._diloco_next_interval(4, 0.1, 1.0, 100, None) == 8
+    assert ddp._diloco_next_interval(4, 2.0, 1.0, 100, None) == 2
+    assert ddp._diloco_next_interval(4, 0.85, 1.0, 100, None) == 4   # dead band
+    assert ddp._diloco_next_interval(64, 0.0, 1.0, 100, None) == ddp._DILOCO_H_MAX
+    assert ddp._diloco_next_interval(2, 9.0, 1.0, 100, None) == ddp._DILOCO_H_FLOOR
+    # Not measured (a state round, an older daemon): unchanged.
+    assert ddp._diloco_next_interval(8, None, 1.0, 100, None) == 8
+    assert ddp._diloco_next_interval(8, 0.1, None, 100, None) == 8
+
+
+def test_interval_tightens_over_the_last_tenth():
+    total = 1000
+    assert ddp._diloco_next_interval(64, 0.0, 1.0, 800, total) == 64
+    assert ddp._diloco_next_interval(64, 0.0, 1.0, 950, total) == 32
+    assert ddp._diloco_next_interval(64, 0.0, 1.0, 995, total) == 3
+    assert ddp._diloco_next_interval(64, 0.0, 1.0, 999, total) == 1
+    assert ddp._diloco_cap(999, total) == 1
+
+
+def test_interval_never_runs_past_the_end():
+    # A short run whose tenth is under 64 steps: H stops at the last step.
+    assert ddp._diloco_next_interval(64, 0.0, 1.0, 150, 200) == 50
+    n, h = 150, 64
+    while ddp._diloco_cap(n, 200) > 1:
+        h = ddp._diloco_next_interval(h, 0.0, 1.0, n, 200)
+        n += h
+        assert n <= 200
+
+
+def test_no_tightening_without_a_run_length_is_said():
+    assert ddp._diloco_cap(10 ** 6, None) is None
+    assert "no tightening" in ddp._diloco_note(None)
+    assert "tightens" in ddp._diloco_note(1000)
+    assert ddp._diloco_warmup(None) == 50
+    assert ddp._diloco_warmup(1000) == 100
+    assert ddp._diloco_warmup(30) == 10
+
+
+def test_outer_step_matches_torch_nesterov():
+    np = pytest.importorskip("numpy")
+    torch = pytest.importorskip("torch")
+    rng = np.random.default_rng(0)
+    theta = rng.standard_normal(5).astype(np.float32)
+    p = torch.nn.Parameter(torch.from_numpy(theta.copy()))
+    ref = torch.optim.SGD([p], lr=0.7, momentum=0.9, nesterov=True)
+    buf = None
+    for _ in range(4):
+        delta = rng.standard_normal(5).astype(np.float32)
+        theta, buf = ddp._outer_nesterov(theta, buf, delta)
+        p.grad = torch.from_numpy(delta.copy())
+        ref.step()
+        np.testing.assert_allclose(theta, p.detach().numpy(), rtol=1e-5, atol=1e-6)
+
+
+def _adam_ring():
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("numpy")
+    torch.manual_seed(0)
+    model = torch.nn.Linear(3, 2)
+    opt = torch.optim.Adam(model.parameters(), lr=0.01)
+    params = [p for g in opt.param_groups for p in g["params"]]
+    return torch, model, opt, params
+
+
+def _local_step(torch, model, opt):
+    x = torch.randn(4, 3)
+    model(x).pow(2).mean().backward()
+    opt.step()
+    opt.zero_grad()
+
+
+def test_round_applies_the_outer_step_and_keeps_the_lr():
+    torch, model, opt, params = _adam_ring()
+    import numpy as np
+    st = ddp._DiLoCo()
+    st.begin(params, 2, 0)
+    start = [t.copy() for t in st.theta]
+    _local_step(torch, model, opt)
+    st.samples = 4
+    seen = []
+
+    def reduce(deltas, extras, samples):
+        seen.append(samples)
+        return [d.copy() for d in deltas + extras], 0.5   # one rank: its own mean
+
+    drift = ddp._diloco_round(st, opt, params, reduce)
+    assert drift == 0.5 and seen == [4] and st.samples == 0
+    for p, t0 in zip(params, start):
+        local = p.detach().numpy()
+        # The snapshot did not move with training, and theta was applied.
+        assert not np.allclose(t0, local)
+    for p, t0, b in zip(params, start, st.buf):
+        delta = b  # first outer step: buf = delta
+        want = t0 - 0.7 * (delta + 0.9 * delta)
+        np.testing.assert_allclose(p.detach().numpy(), want, rtol=1e-5, atol=1e-6)
+    assert opt.param_groups[0]["lr"] == 0.01
+
+
+def test_optimizer_state_rides_with_the_weights_every_k():
+    torch, model, opt, params = _adam_ring()
+    st = ddp._DiLoCo()
+    st.begin(params, 2, 0)
+    calls = []
+
+    def reduce(deltas, extras, samples):
+        calls.append((len(deltas), len(extras)))
+        return [d.copy() for d in deltas + extras], None
+
+    k = ddp._DILOCO_STATE_EVERY
+    for _ in range(2 * k):
+        _local_step(torch, model, opt)
+        ddp._diloco_round(st, opt, params, reduce)
+    assert len(calls) == 2 * k                  # one round per outer step
+    with_state = [i + 1 for i, (_, e) in enumerate(calls) if e]
+    assert with_state == [k, 2 * k]
+    # Adam: exp_avg and exp_avg_sq for each parameter, in the same call as
+    # the pseudo-gradients.
+    assert calls[k - 1] == (len(params), 2 * len(params))
+    # Forced (the end of the run, a ring change): state now.
+    calls.clear()
+    ddp._diloco_round(st, opt, params, reduce, force_state=True)
+    assert calls == [(len(params), 2 * len(params))]
+    assert opt.param_groups[0]["lr"] == 0.01
+
+
+def test_averaged_moments_are_written_back():
+    torch, model, opt, params = _adam_ring()
+    st = ddp._DiLoCo()
+    st.begin(params, 2, 0)
+    _local_step(torch, model, opt)
+
+    def reduce(deltas, extras, samples):
+        return [d.copy() for d in deltas] + [e * 0 + 0.25 for e in extras], None
+
+    ddp._diloco_round(st, opt, params, reduce, force_state=True)
+    for p in params:
+        assert torch.all(opt.state[p]["exp_avg"] == 0.25)
+        assert torch.all(opt.state[p]["exp_avg_sq"] == 0.25)
