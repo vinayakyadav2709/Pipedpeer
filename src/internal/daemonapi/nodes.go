@@ -3,8 +3,11 @@ package daemonapi
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,6 +57,37 @@ type nodesState struct {
 	hinter           func(node string, candidates []string)
 
 	gossip gossipState
+
+	// strangers holds "nodeID|host:port" candidates where something answered
+	// that could not prove it holds the cluster token while another path of
+	// that node worked: on a network that reuses the node's subnet the
+	// address is someone else's machine (E6). They are dropped, logged once
+	// and not re-learnt from gossip until the node has no working path.
+	// ponytail: in memory, so a restart probes each once more.
+	strangerMu sync.Mutex
+	strangers  map[string]bool
+}
+
+func strangerKey(nodeID, host string, port int) string {
+	return nodeID + "|" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+func (s *Server) isStranger(nodeID, host string, port int) bool {
+	s.strangerMu.Lock()
+	defer s.strangerMu.Unlock()
+	return s.strangers[strangerKey(nodeID, host, port)]
+}
+
+// forgetStrangers lets a node's refused candidates be learnt again, for when
+// none of its paths works any more.
+func (s *Server) forgetStrangers(nodeID string) {
+	s.strangerMu.Lock()
+	defer s.strangerMu.Unlock()
+	for k := range s.strangers {
+		if strings.HasPrefix(k, nodeID+"|") {
+			delete(s.strangers, k)
+		}
+	}
 }
 
 // NodeDiscovered is a node found by LAN discovery. Host is the packet's
@@ -95,6 +129,9 @@ func (s *Server) nodeList() ([]nodeResp, error) {
 	nodes := make([]nodeResp, 0, len(dbNodes))
 	for _, n := range dbNodes {
 		resp := toNodeResp(n)
+		if n.Source != string(nodestore.PathSelf) {
+			resp.Paths = s.pathList(n.NodeID)
+		}
 		if resp.Reason == "" && resp.State == "unreachable" {
 			resp.Reason = s.lastPathError(n.NodeID)
 		}
@@ -104,6 +141,31 @@ func (s *Server) nodeList() ([]nodeResp, error) {
 		nodes = append(nodes, resp)
 	}
 	return nodes, nil
+}
+
+// pathResp is one address of a node as /v1/nodes serves it, so a reader
+// (doctor) can judge the node by the path that works rather than the first.
+type pathResp struct {
+	Kind   string `json:"kind"`
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+	Active bool   `json:"active,omitempty"`
+	OK     bool   `json:"ok,omitempty"` // verified and still answering
+	Err    string `json:"err,omitempty"`
+}
+
+func (s *Server) pathList(nodeID string) []pathResp {
+	paths, err := s.store.Paths(nodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", nodeID).Msg("could not read node paths for /v1/nodes")
+		return nil
+	}
+	out := make([]pathResp, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, pathResp{Kind: string(p.Kind), Host: p.Host, Port: p.Port, Active: p.Active,
+			OK: !p.LastOK.IsZero() && p.LastErr == "", Err: p.LastErr})
+	}
+	return out
 }
 
 // lastPathError is the most useful failure the store holds for a node whose
@@ -197,6 +259,7 @@ type nodeResp struct {
 	Host         string            `json:"host"`
 	Path         string            `json:"path"`
 	Reason       string            `json:"reason,omitempty"`
+	Paths        []pathResp        `json:"paths,omitempty"`
 }
 
 // staleAfter is how long a node may go unheard-from before /v1/nodes stops

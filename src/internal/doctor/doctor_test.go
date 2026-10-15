@@ -353,3 +353,57 @@ func TestMachinePhone(t *testing.T) {
 		t.Errorf("route line %v, sandbox warning %v; want both", phone, box)
 	}
 }
+
+// E6: two sites reuse 192.168.0.0/24, so the peer's own LAN address is a
+// stranger's here. The node is judged by the path that works; the stranger
+// only warns, and an address where nothing answers is not mentioned.
+func TestPeerJudgedByItsWorkingPath(t *testing.T) {
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", now.Format(http.TimeFormat))
+	}))
+	defer peer.Close()
+	host, port, _ := net.SplitHostPort(strings.TrimPrefix(peer.URL, "http://"))
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := fakeDaemon(t, 204, map[string]any{
+		// Seconds after Wi-Fi came back: the introducer has not heard from
+		// us yet, the peer answers. A warning, not a failure.
+		"/v1/introducers": []introducerState{{Addr: "203.0.113.10:4244", LastErr: "no answer for 1m0s"}},
+		"/v1/nodes": []node{{
+			NodeID: "e0f6b71788baf703", Host: "192.168.0.2", DaemonPort: 4242, State: "healthy", Source: "gossip",
+			Reason:       "192.168.0.2:4242 answered but could not prove it holds the cluster token; not sending it: its proof does not match",
+			Capabilities: map[string]string{"hostname": "ppnode-a"},
+			Paths: []nodePath{
+				{Kind: "gossip", Host: "192.168.0.2", Port: 4242,
+					Err: `Get "http://192.168.0.2:4242/health": 192.168.0.2:4242 answered but could not prove it holds the cluster token; not sending it: its proof does not match`},
+				{Kind: "gossip", Host: "192.168.0.9", Port: 4242, Err: "192.168.0.9:4242 did not answer the cluster token check; not sending it: context deadline exceeded"},
+				{Kind: "internet", Host: host, Port: p, Active: true, OK: true},
+			},
+		}},
+	})
+	c := cluster(api)
+	c.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if strings.HasPrefix(addr, "192.168.") {
+			return nil, errors.New("connection timed out")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	got := c.Run(context.Background())
+	if f := find(t, got, "ppnode-a (e0f6b717) healthy at "+net.JoinHostPort(host, port)); f.Level != OK {
+		t.Fatalf("working path: %+v", f)
+	}
+	f := find(t, got, "a different machine answers at 192.168.0.2:4242 on this network; using the internet path")
+	if f.Level != Warn {
+		t.Fatalf("stranger: %+v", f)
+	}
+	if f := find(t, got, "introducer 203.0.113.10:4244 not answering"); f.Level != Warn || !strings.Contains(f.What, "peers still answer") {
+		t.Fatalf("silent introducer with a peer answering: %+v", f)
+	}
+	for _, c := range got {
+		if c.Level == Fail || strings.Contains(c.What, "192.168.0.9") {
+			t.Fatalf("unexpected check %+v in %+v", c, got)
+		}
+	}
+}

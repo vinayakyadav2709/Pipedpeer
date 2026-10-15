@@ -279,7 +279,7 @@ func prove(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) 
 	if ok {
 		return nil
 	}
-	err := askProof(ctx, rt, scheme, addr, tok)
+	answered, err := askProof(ctx, rt, scheme, addr, tok)
 	provenMu.Lock()
 	defer provenMu.Unlock()
 	if err == nil {
@@ -287,7 +287,7 @@ func prove(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) 
 		delete(refused, addr)
 		return nil
 	}
-	err = fmt.Errorf("%s could not prove it holds the cluster token; not sending it: %w", addr, err)
+	err = &ProofError{Addr: addr, Answered: answered, Err: err}
 	if !refused[addr] {
 		refused[addr] = true
 		log.Warn().Err(err).Str("addr", addr).Msg("withholding the cluster token")
@@ -295,10 +295,41 @@ func prove(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) 
 	return err
 }
 
-func askProof(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) error {
+// ProofError is a failed token proof. Answered tells "something answered at
+// Addr and could not prove it holds the token" (another cluster, a stranger
+// on a reused address, an older build) from "nothing answered" (down, wrong
+// network, firewalled): only the first is a rejection.
+type ProofError struct {
+	Addr     string
+	Answered bool
+	Err      error
+}
+
+// UnprovenPhrase is in every answered-but-unproven ProofError's text, for
+// readers that only get the text (doctor, connect, over /v1/nodes).
+const UnprovenPhrase = "answered but could not prove it holds the cluster token"
+
+func (e *ProofError) Error() string {
+	if e.Answered {
+		return fmt.Sprintf("%s %s; not sending it: %v", e.Addr, UnprovenPhrase, e.Err)
+	}
+	return fmt.Sprintf("%s did not answer the cluster token check; not sending it: %v", e.Addr, e.Err)
+}
+
+func (e *ProofError) Unwrap() error { return e.Err }
+
+// Unproven reports whether err is a proof that something answered and failed:
+// a machine that is there and is not one of ours.
+func Unproven(err error) bool {
+	var pe *ProofError
+	return errors.As(err, &pe) && pe.Answered
+}
+
+// askProof reports whether addr answered at all, and the proof's error.
+func askProof(ctx context.Context, rt http.RoundTripper, scheme, addr, tok string) (bool, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Errorf("making a challenge: %w", err)
+		return false, fmt.Errorf("making a challenge: %w", err)
 	}
 	challenge := hex.EncodeToString(b)
 	if scheme == "" {
@@ -308,27 +339,27 @@ func askProof(ctx context.Context, rt http.RoundTripper, scheme, addr, tok strin
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+addr+"/health", nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set(ChallengeHeader, challenge)
 	resp, err := rt.RoundTrip(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	_ = resp.Body.Close()
 	got := resp.Header.Get(ProofHeader)
 	if got == "" {
-		return fmt.Errorf("its reply carried no proof (HTTP %d)", resp.StatusCode)
+		return true, fmt.Errorf("its reply carried no proof (HTTP %d)", resp.StatusCode)
 	}
 	want, err := proof(tok, challenge, resp.TLS)
 	if err != nil {
-		return fmt.Errorf("binding the proof to the TLS session: %w", err)
+		return true, fmt.Errorf("binding the proof to the TLS session: %w", err)
 	}
 	if !hmac.Equal([]byte(got), []byte(want)) {
-		return errors.New("its proof does not match")
+		return true, errors.New("its proof does not match")
 	}
-	return nil
+	return true, nil
 }
 
 // Install makes every outbound daemon call carry the token. Wrapping the

@@ -48,7 +48,24 @@ func TestConnectClassifiesThreeOutcomes(t *testing.T) {
 		{"nobody answered",
 			`[` + selfRow + `]`,
 			`[{"addr":"10.0.0.1:4244","last_reply":"0001-01-01T00:00:00Z","last_err":"no reply"}]`, `[]`,
-			connFailed, "nobody answered"},
+			connFailed, "no introducer answered"},
+		// The real laptops: no introducer reachable, and a candidate's token
+		// check timed out. Nothing refused the secret.
+		{"no introducer, token check timed out",
+			`[` + selfRow + `,{"node_id":"cccccccccccccccc","state":"unreachable","source":"gossip",` +
+				`"reason":"Get \"http://192.168.1.5:4242/health\": 192.168.1.5:4242 could not prove it holds the cluster token; not sending it: context deadline exceeded"}]`,
+			`[{"addr":"192.168.1.5:4244","last_reply":"0001-01-01T00:00:00Z","last_err":"no reply"},` +
+				`{"addr":"203.0.113.7:4244","last_reply":"0001-01-01T00:00:00Z"}]`, `[]`,
+			connFailed, "Tailscale"},
+		{"no introducer, peer did not answer the token check",
+			`[` + selfRow + `]`,
+			`[{"addr":"192.168.1.5:4244","last_reply":"0001-01-01T00:00:00Z"}]`,
+			`[{"peer":"dddddddddddddddd","reason":"192.168.1.5:4242 did not answer the cluster token check; not sending it: EOF"}]`,
+			connFailed, "no introducer answered (tried 192.168.1.5:4244)"},
+		{"answered without proof",
+			`[` + selfRow + `]`, replied,
+			`[{"peer":"dddddddddddddddd","reason":"10.0.0.9:4242 answered but could not prove it holds the cluster token; not sending it: its proof does not match"}]`,
+			connFailed, "rejected this machine's secret"},
 		{"secret rejected",
 			`[` + selfRow + `]`, replied,
 			`[{"peer":"dddddddddddddddd","reason":"could not prove it holds the cluster token"}]`,
@@ -68,6 +85,9 @@ func TestConnectClassifiesThreeOutcomes(t *testing.T) {
 			printConnResult(&b, r)
 			if !strings.Contains(b.String(), c.mention) {
 				t.Fatalf("output lacks %q:\n%s", c.mention, b.String())
+			}
+			if !strings.Contains(c.mention, "secret") && strings.Contains(b.String(), "rejected") {
+				t.Fatalf("blames the secret with nothing refusing it:\n%s", b.String())
 			}
 		})
 	}

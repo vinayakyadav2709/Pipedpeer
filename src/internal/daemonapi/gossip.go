@@ -293,7 +293,7 @@ func (s *Server) applyRecord(rec addrRecord) {
 		if !routable(h) {
 			continue // another machine's loopback is ours
 		}
-		if s.store != nil && rec.DaemonPort > 0 {
+		if s.store != nil && rec.DaemonPort > 0 && !s.isStranger(rec.NodeID, h, rec.DaemonPort) {
 			if err := s.store.SeePath(rec.NodeID, nodestore.PathGossip, h, rec.DaemonPort); err != nil {
 				log.Warn().Err(err).Str("node", rec.NodeID).Str("host", h).Msg("could not record gossiped address")
 			}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
@@ -101,6 +102,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	}
 	ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: string(node.Source), Status: "unreachable"}
 	var verified *healthResponse
+	var unproven []nodestore.Path
 	for _, p := range candidateOrder(paths) {
 		if verified != nil && p.Kind != nodestore.PathLAN {
 			break // only LAN candidates can still beat what answered
@@ -122,6 +124,9 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 			continue
 		}
 		if err != nil {
+			if authtoken.Unproven(err) {
+				unproven = append(unproven, p)
+			}
 			if ferr := s.store.PathFailed(node.NodeID, p.Host, p.Port, err.Error()); ferr != nil {
 				log.Warn().Err(ferr).Str("peer", node.NodeID).Str("at", addr).Msg("could not record failed path")
 			}
@@ -149,10 +154,14 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	}
 
 	if verified == nil {
+		s.forgetStrangers(node.NodeID)
 		if err := s.store.MarkUnreachable(node.NodeID); err != nil {
 			log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not record unreachable peer")
 		}
 		return ph
+	}
+	for _, p := range unproven {
+		s.dropStranger(node.NodeID, p, ph)
 	}
 	h := *verified
 	ph.Status = "healthy"
@@ -191,6 +200,26 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not record healthy peer")
 	}
 	return ph
+}
+
+// dropStranger drops a candidate where a machine outside the cluster answered,
+// once another path (ph's) reaches the node, and keeps gossip from re-adding it.
+func (s *Server) dropStranger(nodeID string, p nodestore.Path, ph *PeerHealth) {
+	if p.Host == ph.Host && p.Port == ph.Port {
+		return
+	}
+	s.strangerMu.Lock()
+	if s.strangers == nil {
+		s.strangers = map[string]bool{}
+	}
+	s.strangers[strangerKey(nodeID, p.Host, p.Port)] = true
+	s.strangerMu.Unlock()
+	addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+	log.Warn().Str("peer", nodeID).Str("at", addr).Str("using", net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))).
+		Msg("a different machine answers at this address on this network; dropping it and using the node's working path")
+	if err := s.store.DropPath(nodeID, p.Host, p.Port); err != nil {
+		log.Warn().Err(err).Str("peer", nodeID).Str("at", addr).Msg("could not drop path")
+	}
 }
 
 // dropPath lets go of a path that belongs to someone else now, and of the
