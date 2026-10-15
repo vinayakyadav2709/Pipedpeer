@@ -64,10 +64,13 @@ synchronisation is chosen only for ring sizes where it kept accuracy.
   with the host's network and no seccomp filter, and isolation is skipped with a
   warning on a node lacking \texttt{crun} or user namespaces.
   \item \textbf{Measurement.} Speedup comes from containers with fixed processor
-  quotas and a few real machines; hole-punch success across many networks, two
+  quotas and a few real machines; the success rate of hole punching across many networks, two
   GPUs in one machine and fast synchronisation at five to seven ranks are not
   measured. NAT traversal is evaluated on the two-site testbed on one host and
   over an overlay between real homes.
+  \item \textbf{Seed spread.} The 1\% accuracy bar applies to the mean over
+  seeds; single seeds spread wider, from $-3.9\%$ to $+2.2\%$ against one
+  device, so one run can miss the bar while the mean meets it.
   \item \textbf{Trust.} Every holder of the cluster secret can run code on every
   node (Section~\ref{sec:security}).
 \end{itemize}

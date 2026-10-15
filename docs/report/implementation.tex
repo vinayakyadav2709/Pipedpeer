@@ -555,9 +555,8 @@ node's ordinary daemon port, which works wherever the daemon port works,
 including over the links of Section~\ref{sec:nat}. The daemon \emph{reduces}:
 gradients arrive as raw frames, are summed in double precision weighted by the
 number of samples behind each, $\sum_i n_i g_i / \sum_i n_i$, and one averaged
-gradient is returned (Figure~\ref{fig:ddp}). A design in which every rank
-received every other rank's gradient ran the same training job in 62.9\,s
-across two machines, against 2.9\,s on one machine alone. Gradients
+gradient is returned (Figure~\ref{fig:ddp}). An earlier all-to-all design, in which every rank received every other rank's
+gradient, ran a two-machine job in 62.9\,s against 2.9\,s on one machine. Gradients
 travel as 8-bit integers with one scale per block of 4096 values, the rounding
 error carried into the next step in both directions (error feedback)
 \cite{dettmers2016eightbit, seide2014onebit}. In exact mode a ring of three or
@@ -590,10 +589,12 @@ released or shrunk.
 
 \textbf{Synchronising less often.} \texttt{-{}-ddp-sync fast} synchronises every
 $H$ steps instead of every step, in the manner of DiLoCo
-\cite{douillard2023diloco} and post-local SGD \cite{lin2020localsgd}: ten steps
-of exact synchronisation as a warm-up, then local steps, with the ranks' weights
-averaged by the number of samples each processed, every epoch ending on a
-synchronisation, and the optimiser's moments averaged every tenth round. It never
+\cite{douillard2023diloco} and post-local SGD \cite{lin2020localsgd}: exact
+synchronisation as a warm-up for a tenth of the run, at least 10 and at most
+500 steps (10 when the run's length is unknown), then local steps, with the
+ranks' weights averaged by the number of samples each processed, every epoch
+ending on a synchronisation, the interval shrinking towards one step over the
+last tenth of the run, and the optimiser's moments averaged every tenth round. It never
 adds epochs or changes the batch or the learning rate. The outer step is plain
 averaging (outer learning rate 1, no momentum). DiLoCo's Nesterov outer step,
 momentum 0.9 at an outer learning rate of 0.7, settles at $0.7/(1-0.9) = 7$ times
@@ -690,7 +691,7 @@ the result is cached, and a failed probe keeps the work local.
     \caption[Cost model decision regions]{Decision regions of Equation~\ref{eq:cost} for the pandas path
     ($\rho = 1$, $R = R' = 1$\,GFLOP/s) at three nodes on a 500\,MB/s link.
     The step at 512\,MiB is a separate rule, not Equation~\ref{eq:cost}: work
-    below 8 flop per byte stays local up to 512\,MiB, so grouped aggregation and
+    below 8 FLOP per byte stays local up to 512\,MiB, so grouped aggregation and
     joins are distributed only above it.}
     \label{fig:cost}
 \end{figure}
