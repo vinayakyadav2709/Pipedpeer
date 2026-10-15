@@ -226,6 +226,29 @@ Reproduce (one lab session; `single` and `exact` once, then the defaults):
 UNLOCKED=1 BL_LAB_NAME=dtune TRAIN_MEM=1g PROFILES="lan wifi" scripts/bench-diloco.sh run
 ```
 
+**Wall time, idle host (QUIET-RERUN, 2026-10-16).** Binary 90dac09, 2
+containers of 2 CPUs and 2 GB, warm environment, holding the bench lock, no
+other lab or agent running. One seed (seed 1) per cell. This run measures
+wall time only: the loss verdicts above stand, and the table's 1-seed loss
+column is not a verdict. Rows in `~/.local/state/pipedpeer/bench-quiet/diloco/`.
+
+| model | single | exact lan | exact wifi | fast lan | fast wifi | MiB/rank exact / fast |
+|---|---|---|---|---|---|---|
+| gpu | 27.9 s | 20.0 s | 41.8 s | 15.2 s | 18.9 s | 81.1 / 10.7 |
+| ddp04 | 16.9 s | 14.6 s | 43.7 s | 10.4 s | 14.1 s | 98.9 / 10.7 |
+| tfm | 26.7 s | 22.7 s | 35.9 s | 19.1 s | 22.9 s | 21.7 / 2.4 |
+
+On LAN, fast sync is 1.2-1.4x faster than exact and 1.4-1.8x faster than one
+container. On Wi-Fi, fast sync is 1.6-3.1x faster than exact (exact pays 147-314 syncs over the slow link) and 1.2-1.5x faster than one container. This build syncs gpu and tfm a few more times
+than the DILOCO-TUNE rows above (16 and 20 against 13 and 16 syncs, 10.7 and
+2.4 MiB against 9.1 and 1.4 MiB).
+
+```sh
+BL_OUT=~/.local/state/pipedpeer/bench-quiet BL_EMU=scripts/lab-emu-warm.sh LAB_WARM_SET=bench-after \
+  SEEDS=1 PROFILES="lan wifi" scripts/bench-diloco.sh run
+BL_OUT=... SEEDS=1 PROFILES=wifi ARMS=exact scripts/bench-diloco.sh run   # exact on wifi
+```
+
 ## Ranks (DILOCO-MANY): the interval by ring size
 
 **Result.** Plain averaging lands further from one device as ranks are

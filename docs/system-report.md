@@ -1843,12 +1843,12 @@ every demo-day run, exported with `pipedpeer jobs --export-all`.
 
 | Result | Value | Source |
 |---|---|---|
-| One GPU vs split: cell where split wins / where solo wins | TODO(verify) | `docs/benchmarks/ddp-switch.md` (emulated) |
-| DiLoCo validation loss gap vs one GPU, per model (mean of 3 seeds, spread) | TODO(verify) | `docs/benchmarks/diloco.md` (emulated) |
-| Pool request body: before / after, 100 MB payload | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
+| One GPU vs split: cell where split wins / where solo wins | split wins small-heavy LAN 9.1 vs 11.8 s; solo wins large-light Wi-Fi 8.0 vs 80.7 s (idle host) | `docs/benchmarks/ddp-switch.md` (emulated) |
+| DiLoCo validation loss gap vs one GPU, per model (mean of 3 seeds, spread) | LAN/Wi-Fi +0.64/+0.61%, -2.14/-2.09%, +0.18/+0.50%; wall time vs exact 1.2-1.4x faster LAN, 1.6-3.1x Wi-Fi (idle host, 1 seed) | `docs/benchmarks/diloco.md` (emulated) |
+| Pool request body: before / after, 100 MB payload | build 2.77 -> 0.06 s (100 x 1 MB), 18.3 -> 0.06 s (1000 x 100 KB) | `docs/benchmarks/w10.md` (emulated) |
 | Workspace re-upload after editing one file | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
-| Closure seed to a node holding every path | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
-| Pool estimate error, before (7-37x) / after | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
+| Closure seed to a node holding every path | empty-script overhead 0.64 -> 0.23 s (warm, idle host) | `docs/benchmarks/w10.md` (emulated) |
+| Pool estimate error, before (7-37x) / after | error not recorded by the lab; maps crossing nodes 1.7-2.1x faster, small maps now stay local | `docs/benchmarks/w10.md` (emulated) |
 | Scaling map: superlinear steps found | TODO(verify) | `docs/benchmarks/scaling.md`, `scaling-train.md` (emulated) |
 | Peer IP change recovered / introducer IP change recovered | TODO(verify) (targets < 30 s / < 60 s) | `make test-net` |
 | Tailscale, two laptops: cpu.py, gpu.py, both.py | TODO(verify) | manual checklist |

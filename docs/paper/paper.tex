@@ -530,11 +530,13 @@ Table~\ref{tab:recorded} lists them. They show modest gains and honest losses: a
 parallel map ran faster on two machines than on one, while two-machine training
 on a 54\,Mbit/s link did not beat one machine (fp16 26\% slower, int8 about
 level) --- which the system itself reports at the end of each run, and which
-now leads it to fall back to one machine on its own. Container-lab results for
-the latest changes --- the one-GPU-or-split decision \todo{ddp-switch}, fast
-synchronisation's wall time (its accuracy is in Section~\ref{sec:fastsync}),
-the parallel map's request body \todo{pool body} --- and real runs between two laptops over Tailscale
-\todo{tailscale} are to be added. After the introducer changed address, a three-machine cluster was
+now leads it to fall back to one machine on its own. In the container lab on an
+idle host, splitting a small model with heavy steps over two containers beat one
+(9.1 against 11.8\,s), while a 9\,MB model with light steps over Wi-Fi ran ten
+times slower split than alone (80.7 against 8.0\,s). Building the parallel
+map's request body for a 100\,MB payload fell from 2.77\,s to 0.06\,s (100
+items of 1\,MB) and from 18.3\,s to 0.06\,s (1000 items). Real runs between
+two laptops over Tailscale \todo{tailscale} are to be added. After the introducer changed address, a three-machine cluster was
 connected again without any command in 12.1--12.6\,s over three runs (limit 60\,s).
 
 \begin{table}[t]
@@ -573,7 +575,8 @@ profiles, three seeds each, plain averaging every 64 steps after a 10-step
 warm-up landed $+0.64/+0.61\%$, $-2.14/-2.09\%$ and $+0.18/+0.50\%$ from one
 device on the GPU example's perceptron, the training example's, and a small
 transformer, each within exact sync's own spread, sending 9--15$\times$ fewer
-bytes per rank; wall time is pending \todo{diloco}. With the paper's outer
+bytes per rank, and on an idle host it finished 1.2--1.4$\times$ faster than
+exact sync on LAN and 1.6--3.1$\times$ faster on Wi-Fi (one seed). With the paper's outer
 step the transformer was $+21.7\%$ even at 156 local steps. In-process, the
 largest interval passing on every model was 32 at two ranks, 16 at three and 4
 at four; at eight ranks the transformer failed at every interval down to 2, so
@@ -589,9 +592,10 @@ outer learning rate each failed.
 \textbf{Slow peers and slow links.} With one peer at a tenth of the CPU, four
 consecutive runs took 1.60, 1.25, 1.09 and 1.08$\times$ an equal cluster's
 time, against 2.11, 1.35, 1.37 and 1.31$\times$ before. With the second of
-two nodes held to 800\,kbit/s, a cold run fell from 1000.9\,s to 256.9\,s and
-a warm one from 603.7\,s to 67.3\,s once the job no longer waited for the
-slowest closure import; idle-host reruns \todo{bcast quiet}.
+two nodes held to 800\,kbit/s, a cold run fell from 1000.9\,s to 137.5\,s and
+a warm one from 603.7\,s to 62.4\,s once the job no longer waited for the
+slowest closure import (the old times are bounded by the 600\,s timeout,
+measured before the fix; the new ones are idle-host reruns).
 
 \subsection{Threats to validity}
 
