@@ -91,8 +91,38 @@ func TestInviteCodeCarriesSecretAndAddrs(t *testing.T) {
 	if err != nil || inv.Secret != "sekrit" {
 		t.Fatalf("decode: %+v %v", inv, err)
 	}
-	got := inviteAddrs([]string{"10.0.0.2", "10.0.0.2"}, []string{"intro.example", "1.2.3.4:4244", "a", "b", "c", "d", "e"})
+	got := inviteAddrs("", []string{"10.0.0.2", "10.0.0.2"}, []string{"intro.example", "1.2.3.4:4244", "a", "b", "c", "d", "e"})
 	if len(got) != maxInviteAddrs || got[0] != "10.0.0.2:4244" || got[1] != "intro.example:4244" {
 		t.Fatalf("addrs = %v", got)
+	}
+}
+
+// TestPublicAddressFirst: a hosted introducer (1:1 NAT VM) puts its public
+// address first in the invite; with none set and only private IPs, invite
+// warns.
+func TestPublicAddressFirst(t *testing.T) {
+	isolate(t)
+	if err := authtoken.Set("sekrit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetPublicAddress("203.0.113.7"); err != nil {
+		t.Fatal(err)
+	}
+	code, err := InviteCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := invite.Decode(code)
+	if err != nil || len(inv.Addrs) == 0 || inv.Addrs[0] != "203.0.113.7:4244" {
+		t.Fatalf("addrs = %v, %v", inv.Addrs, err)
+	}
+	if got := inviteAddrs("vm.example:5000", []string{"10.0.0.2"}, nil); got[0] != "vm.example:5000" {
+		t.Fatalf("addrs = %v", got)
+	}
+	if !publicHint("", []string{"10.0.0.2", "192.168.1.5"}) {
+		t.Error("only private IPs and no public address: no hint")
+	}
+	if publicHint("203.0.113.7", []string{"10.0.0.2"}) || publicHint("", []string{"10.0.0.2", "203.0.113.9"}) {
+		t.Error("hint printed although a public address exists")
 	}
 }

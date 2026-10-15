@@ -127,11 +127,20 @@ Use -y to answer yes to every question.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			autoYes, _ := cmd.Flags().GetBool("yes")
 			noInstall, _ := cmd.Flags().GetBool("no-install")
+			if cmd.Flags().Changed("public-address") {
+				addr, _ := cmd.Flags().GetString("public-address")
+				if err := setup.SetPublicAddress(addr); err != nil {
+					return err
+				}
+			}
 			_, err := setup.Run(autoYes, noInstall, daemonctl.DefaultPort)
 			return err
 		},
 	}
 	cmd.Flags().BoolP("yes", "y", false, "Answer yes to every question")
 	cmd.Flags().Bool("no-install", false, "Check only, don't install anything")
+	cmd.Flags().String("public-address", "",
+		"this machine's address as seen from other networks (host or host:port, e.g. a cloud VM's public IP); "+
+			"invites list it first. Empty clears it")
 	return cmd
 }
