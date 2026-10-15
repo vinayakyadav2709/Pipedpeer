@@ -31,6 +31,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/runrec"
@@ -46,6 +47,9 @@ func main() {
 	if nixtrust.IsHelper() {
 		os.Exit(nixtrust.Main(os.Args[1:]))
 	}
+	// On a phone set up as a full node, every command runs in its proot
+	// Debian, where /nix is (internal/phone/proot.go).
+	phone.Launch(os.Args[1:])
 
 	// Before anything dials out. The daemon path returns just below, so
 	// installing these later left the daemon itself - the process that does

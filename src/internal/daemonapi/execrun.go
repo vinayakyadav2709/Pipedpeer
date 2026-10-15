@@ -18,6 +18,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/userns"
 	"github.com/rs/zerolog/log"
 
@@ -279,6 +280,19 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// safe run, it produces a run that cannot start, so say so instead.
 	sandboxRequired := nixstore.Private()
 
+	// A full-node phone has no user namespaces: its sandbox is a proot view
+	// plus rlimits (phone.SandboxShell), weaker than crun and said so once.
+	var phoneBox string
+	if cfg.Isolate && phone.InProot() {
+		box, err := phone.SandboxShell(job.WorkDir, s.grantableMemory(cfg.MemLimitBytes, cfg.LeaseID, jobID), shellQuote)
+		if err != nil {
+			fail("phone sandbox: " + err.Error())
+			return
+		}
+		phoneBoxOnce.Do(func() { log.Warn().Msg(phone.SandboxNote) })
+		phoneBox, cfg.Isolate = box, false
+	}
+
 	if cfg.Isolate {
 		if _, err := exec.LookPath("crun"); err != nil {
 			if sandboxRequired {
@@ -314,7 +328,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	var oomBefore int64
 
 	if !cfg.Isolate {
-		runCmd := buildNonIsolatedCmd(runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
+		runCmd := buildNonIsolatedCmd(phoneBox, runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
 		cmd := exec.Command("sh", "-c", runCmd)
 		// Its own process group, so a cancel reaches python and everything
 		// it started, not just the shell.
@@ -538,3 +552,6 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	finish(done)
 	releaseHeapAfterWork()
 }
+
+// phoneBoxOnce logs the phone sandbox note once per daemon.
+var phoneBoxOnce sync.Once

@@ -16,6 +16,10 @@ type Machine struct {
 	Userns   func() (bool, string)
 	Crun     func() bool
 	Nix      func() bool
+	// Phone is the phone route (phone.Route; "" off a phone) and PhoneBox
+	// the phone sandbox line: they replace the user namespace and crun
+	// checks, which a phone without root never passes.
+	Phone, PhoneBox string
 	// PCIRoot is /sys/bus/pci/devices; DriverDir is /proc/driver/nvidia.
 	PCIRoot   string
 	DriverDir string
@@ -48,16 +52,23 @@ func (m Machine) Run(ctx context.Context) []Check {
 		out = append(out, Check{Fail, tool + " blocks " + ports + ": peers cannot reach this machine", "pipedpeer setup -y"})
 	}
 
-	if ok, why := m.Userns(); ok {
-		out = append(out, Check{Level: OK, What: "user namespaces allowed"})
-	} else {
-		out = append(out, Check{Fail, "user namespaces refused, jobs cannot run in a sandbox here", why})
-	}
-
-	if m.Crun() {
-		out = append(out, Check{Level: OK, What: "crun installed"})
-	} else {
-		out = append(out, Check{Fail, "crun missing (the job sandbox)", "pipedpeer setup -y"})
+	switch {
+	case m.Phone != "":
+		out = append(out, Check{Level: OK, What: "phone: " + m.Phone})
+		if m.PhoneBox != "" {
+			out = append(out, Check{Warn, m.PhoneBox, ""})
+		}
+	default:
+		if ok, why := m.Userns(); ok {
+			out = append(out, Check{Level: OK, What: "user namespaces allowed"})
+		} else {
+			out = append(out, Check{Fail, "user namespaces refused, jobs cannot run in a sandbox here", why})
+		}
+		if m.Crun() {
+			out = append(out, Check{Level: OK, What: "crun installed"})
+		} else {
+			out = append(out, Check{Fail, "crun missing (the job sandbox)", "pipedpeer setup -y"})
+		}
 	}
 	if m.Nix() {
 		out = append(out, Check{Level: OK, What: "nix usable"})
