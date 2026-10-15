@@ -250,12 +250,16 @@ def _install_joblib():
     # travels the way Pool.map's kernel does (ADR-0017): source, else
     # cloudpickle, once per chunk in the globals frame; the task names it.
     jb_payload = {
-        "src": ("import os, pickle\n"
+        "src": ("import functools, os, pickle\n"
                 "def _pp_unshare(x):\n"
                 "    if type(x) is tuple and len(x) == 2 and x[0] == '__pp_shared__':\n"
                 "        return globals()[x[1]]\n"
                 "    return x\n"
                 "def _pp_func(f):\n"
+                "    if type(f) is tuple and len(f) == 4 and f[0] == '__pp_partial__':\n"
+                "        return functools.partial(_pp_func(f[1]),\n"
+                "                                 *[_pp_unshare(x) for x in f[2]],\n"
+                "                                 **{n: _pp_unshare(v) for n, v in f[3].items()})\n"
                 "    if not (type(f) is tuple and len(f) == 2 and f[0] == '__pp_func__'):\n"
                 "        return f\n"
                 "    p = globals()[f[1]]\n"
@@ -296,9 +300,16 @@ def _install_joblib():
         fkeys = {}
 
         def fref(f):
-            # ponytail: only f's own module is checked; a partial or wrapper
-            # around a __main__ function still goes by reference and fails
-            # remotely (local covers it).
+            # delayed(partial(kernel, x)): the partial pickles by reference
+            # to its func, so unwrap it, ship func, rebuild it on the runner.
+            # ponytail: other wrappers around a __main__ function still go by
+            # reference and fail remotely (local covers it).
+            if type(f) is functools.partial:
+                inner = fref(f.func)
+                if inner is not f.func:
+                    return ("__pp_partial__", inner, tuple(ref(x) for x in f.args),
+                            {n: ref(v) for n, v in f.keywords.items()})
+                return f
             if _is_library_module(sys.modules.get(getattr(f, "__module__", None))):
                 return f
             key = fkeys.get(id(f))
