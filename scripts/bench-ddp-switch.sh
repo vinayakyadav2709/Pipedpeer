@@ -25,7 +25,9 @@
 #   scripts/bench-ddp-switch.sh --gpu-baseline  # needs a CUDA torch (BL_GPU_PYTHON)
 #
 # Knobs: MODELS ("small large"), COMPUTE ("light heavy"), PROFILES
-# ("lan wifi 5g"), LOSS (0), TRAIN_MEM (2g), STEPS (60), BL_REPS (3).
+# ("lan wifi 5g"), LOSS (0), TRAIN_MEM (2g), STEPS (60), BL_REPS (3),
+# ONLY ("<model>-<compute>:<variant>[:<profile>]" tokens, e.g.
+# "large-light:split:wifi small-heavy:solo"): rerun exactly those rows.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 
@@ -92,14 +94,23 @@ work="$BL_OUT/ddp-switch/work"
 bl_workloads "$work"
 
 # shellcheck disable=SC2086
+wanted() { # wanted <cell> <variant> <profile>
+	[[ -z "${ONLY:-}" || " $ONLY " == *" $1:$2 "* || " $ONLY " == *" $1:$2:$3 "* ]]
+}
+any_variant() { # any_variant <variant>: does ONLY select anything of it?
+	[[ -z "${ONLY:-}" || " $ONLY " == *":$1 "* || " $ONLY " == *":$1:"* ]]
+}
+
 # --gpu off --mem 1G: the daemon estimates 2.1 GB for a torch job, more than a 2g node.
 cell() { # cell <variant> <model> <compute> [flags...] - BL_REPS reps, first failure ends it
 	local v="$1" m="$2" c="$3"
 	shift 3
+	wanted "$m-$c" "$v" "${BL_PROFILE:-lan}" || return 0
 	bl_reps "$m-$c" "$v" "$mode" train.py --gpu off --mem 1G $(model_env "$m") $(compute_env "$c") -e BENCH_STEPS="$steps" "$@"
 }
 
 # solo: one node; the link profile cannot matter, so it runs once on lan.
+if any_variant solo; then
 bl_lab_up 1 "$mem" lan 0 "$bin"
 bl_put 1 "$work"
 bl_warm train.py --gpu off --mem 1G -e BENCH_STEPS=1
@@ -108,8 +119,10 @@ for m in "${models[@]}"; do
 		cell solo "$m" "$c"
 	done
 done
+fi
 
 # split and auto: two nodes, links reshaped per profile without a restart.
+if any_variant split || any_variant auto; then
 bl_lab_up 2 "$mem" "${profiles[0]}" "$loss" "$bin"
 bl_put 1 "$work"
 bl_warm train.py --gpu off --mem 1G --ddp 2 -e BENCH_STEPS=1
@@ -122,6 +135,7 @@ for p in "${profiles[@]}"; do
 		done
 	done
 done
+fi
 bl_lab_down
 
 bl_table

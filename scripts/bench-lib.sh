@@ -11,7 +11,10 @@
 #   - the bench lock: each timed run holds ~/.cache/pipedpeer-bench.lock only
 #     while it runs (not while a lab comes up or warms), so two recorded runs
 #     never share the CPU.
-#   - result capture: one CSV row per run, every row labelled emulated=1.
+#   - result capture: one CSV row per run, every row labelled emulated=1, with
+#     the host's 1-minute load average when it ended (load1): rows taken while
+#     other agents load the host are not paper numbers; rerun them quietly
+#     with ONLY= in each driver.
 #     Medians and markdown tables come from bl_table.
 #
 # Every number this produces is EMULATED: equal cgroup quotas plus tc netem on
@@ -55,7 +58,7 @@ bl_init() {
 	# warms, so other timed units are not queued behind a lab waiting for RAM.
 	exec 9>"$BL_LOCK"
 	BL_CSV="$BL_OUT/$BL_SUITE/results.csv"
-	[[ -f "$BL_CSV" ]] || echo "suite,case,variant,binary,rev,profile,loss,nodes,rep,status,wall_s,script_s,step_s,sync_s,world,loss_val,steps,emulated,when,log" > "$BL_CSV"
+	[[ -f "$BL_CSV" ]] || echo "suite,case,variant,binary,rev,profile,loss,nodes,rep,status,wall_s,script_s,step_s,sync_s,world,loss_val,steps,emulated,when,log,load1" > "$BL_CSV"
 	trap 'bl_lab_down' EXIT
 }
 
@@ -313,7 +316,7 @@ if os.path.exists(steps) and os.path.getsize(steps):
 row = ["$BL_SUITE", "$case", "$variant", "$binlabel", "$BL_REV", "$BL_PROFILE", "$BL_LOSS", "$BL_NODES_UP", "$rep",
        status, "%.3f" % (float(t1) - float(t0)), script, last(r"BENCH_STEP_S ([0-9.]+)"), sync,
        str(max(worlds)) if worlds else "", last(r"BENCH_LOSS ([0-9.]+)"), last(r"BENCH_STEPS_DONE (\d+)"),
-       "1", time.strftime("%Y-%m-%dT%H:%M:%S"), log]
+       "1", time.strftime("%Y-%m-%dT%H:%M:%S"), log, open("/proc/loadavg").read().split()[0]]
 print(",".join(row))
 PY
 	[[ "$(tail -1 "$BL_CSV" | cut -d, -f10)" == ok ]] && return 0
@@ -357,9 +360,9 @@ from collections import defaultdict
 cells = defaultdict(list)
 for r in csv.DictReader(open(sys.argv[1])):
     cells[(r["case"], r["variant"], r["binary"], r["rev"], r["profile"], r["loss"], r["nodes"])].append(r)
-med = lambda rs, k: (lambda v: "%.2f" % statistics.median(v) if v else "-")([float(r[k]) for r in rs if r["status"] == "ok" and r[k]])
-print("| case | variant | binary | profile | loss | nodes | runs ok | wall s | script s | step s | sync s | world | loss | label |")
-print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+med = lambda rs, k: (lambda v: "%.2f" % statistics.median(v) if v else "-")([float(r[k]) for r in rs if r["status"] == "ok" and r.get(k)])
+print("| case | variant | binary | profile | loss | nodes | runs ok | wall s | script s | step s | sync s | world | loss | host load | label |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 bad = []
 for (c, v, b, rev, p, l, n), rs in sorted(cells.items()):
     ok = sum(r["status"] == "ok" for r in rs)
@@ -369,9 +372,9 @@ for (c, v, b, rev, p, l, n), rs in sorted(cells.items()):
                 c, v, b, p, n, "times out" if r["status"] == "timeout" else "fails",
                 rev, r["wall_s"].split(".")[0], r.get("log") or "?"))
     worlds = sorted({r["world"] for r in rs if r["world"]})
-    print("| %s | %s | %s %s | %s | %s%% | %s | %d/%d | %s | %s | %s | %s | %s | %s | emulated |" % (
+    print("| %s | %s | %s %s | %s | %s%% | %s | %d/%d | %s | %s | %s | %s | %s | %s | %s | emulated |" % (
         c, v, b, rev, p, l, n, ok, len(rs), med(rs, "wall_s"), med(rs, "script_s"), med(rs, "step_s"),
-        med(rs, "sync_s"), "/".join(worlds) or "-", med(rs, "loss_val")))
+        med(rs, "sync_s"), "/".join(worlds) or "-", med(rs, "loss_val"), med(rs, "load1")))
 if bad:
     print()
     print("Failed cells (remaining reps skipped):")
