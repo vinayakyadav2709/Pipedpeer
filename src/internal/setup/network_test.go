@@ -264,10 +264,11 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	}
 }
 
-// TestEveryDaemonPortIsOpened. Opening only the QUIC port left the daemon API,
-// discovery and the DDP master range blocked on a college PC.
+// TestEveryDaemonPortIsOpened. Opening only the QUIC port left the daemon API
+// and discovery blocked on a college PC. The 4242 block: API tcp + discovery
+// udp on 4242, direct QUIC 4243, introducer 4244; no DDP range (gloo removed).
 func TestEveryDaemonPortIsOpened(t *testing.T) {
-	want := []string{"38080/tcp", "38099/udp", "38447/udp", "38445/udp", "29500-29509/tcp"}
+	want := []string{"4242/tcp", "4242/udp", "4243/udp", "4244/udp"}
 	got := FirewallRules()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("FirewallRules() = %v, want %v", got, want)
@@ -287,17 +288,38 @@ func TestEveryDaemonPortIsOpened(t *testing.T) {
 
 	u := &fakeFirewall{
 		present: map[string]bool{"ufw": true},
-		replies: map[string]string{"ufw status": "Status: active\n38447/udp ALLOW\n"},
+		replies: map[string]string{"ufw status": "Status: active\n4243/udp ALLOW\n"},
 	}
 	u.install(t)
 	openFirewall(context.Background(), got, true)
-	for _, r := range []string{"38080/tcp", "38099/udp", "38445/udp", "29500:29509/tcp"} {
+	for _, r := range []string{"4242/tcp", "4242/udp", "4244/udp"} {
 		if !u.didRun("ufw allow " + r) {
 			t.Errorf("ufw: %s not allowed; ran %v", r, u.ran)
 		}
 	}
-	if u.didRun("ufw allow 38447/udp") {
+	if u.didRun("ufw allow 4243/udp") {
 		t.Error("ufw: an already-allowed rule was added again")
+	}
+}
+
+// TestCloseFirewallRemovesNewAndLegacy: uninstall leaves a college PC with
+// none of this build's or an old build's ports open.
+func TestCloseFirewallRemovesNewAndLegacy(t *testing.T) {
+	u := &fakeFirewall{
+		present: map[string]bool{"ufw": true},
+		replies: map[string]string{"ufw status": "Status: active\n4242/tcp ALLOW\n29500:29509/tcp ALLOW\n"},
+	}
+	u.install(t)
+	if err := CloseFirewall(); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []string{"4242/tcp", "29500:29509/tcp"} {
+		if !u.didRun("ufw delete allow " + r) {
+			t.Errorf("ufw: %s not removed; ran %v", r, u.ran)
+		}
+	}
+	if u.didRun("ufw delete allow 4244/udp") {
+		t.Error("removed a rule that was not there")
 	}
 }
 
