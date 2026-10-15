@@ -534,11 +534,11 @@ func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart 
 	if !single {
 		return
 	}
-	if left {
-		runrec.WriteSimple(os.Stderr, runrec.Simple(rec))
-	}
+	// WriteDetailed opens with the simple line, so -v prints it only once.
 	if say.Verbose {
 		runrec.WriteDetailed(os.Stderr, rec)
+	} else if left {
+		runrec.WriteSimple(os.Stderr, runrec.Simple(rec))
 	}
 }
 
