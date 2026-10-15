@@ -143,3 +143,75 @@ def _write_receipt():
             f.write(body)
     except Exception as e:
         _log("could not write receipt file %s: %r" % (path, e))
+
+
+# Cost-model inputs from the run record (C24), not from a second timer: the
+# compute/send steps record.py already holds say how fast each machine is and
+# what an operation costs per byte. Pure functions of a step list, so the
+# shim's cost models (numpy_ops, pandas_ops, transfer) can ask at any point.
+
+def _record_steps():
+    try:
+        from pipedpeer_shim import record
+    except ImportError:  # record.py still sits beside sitecustomize.py (U03 moves it)
+        import record
+    return record.steps()
+
+
+def speed_index(steps=None, ref=None):
+    """Per-machine compute speed, bytes processed per second relative to ref
+    (default: this job's machine, else the fastest). {machine: index}."""
+    if steps is None:
+        steps = _record_steps()
+    if ref is None:
+        ref = os.environ.get("PIPEDPEER_NODE_ID", "")
+    nbytes, ns = {}, {}
+    for s in steps:
+        if s.get("step") != "compute" or not s.get("bytes") or s.get("dur_ns", 0) <= 0:
+            continue
+        m = s.get("node") or s.get("machine", "")
+        nbytes[m] = nbytes.get(m, 0) + s["bytes"]
+        ns[m] = ns.get(m, 0) + s["dur_ns"]
+    rate = {m: nbytes[m] / ns[m] for m in nbytes}
+    if not rate:
+        return {}
+    base = rate.get(ref) or max(rate.values())
+    return {m: r / base for m, r in rate.items()}
+
+
+def op_cost(steps=None):
+    """Per step name, the least-squares fit seconds = a + b * bytes over the
+    recorded steps: {name: (a, b)}. Needs two distinct sizes; with one size,
+    the cost is all per-byte (a = 0)."""
+    if steps is None:
+        steps = _record_steps()
+    pts = {}
+    for s in steps:
+        if s.get("bytes") and s.get("dur_ns", 0) > 0:
+            pts.setdefault(s["step"], []).append((s["bytes"], s["dur_ns"] / 1e9))
+    out = {}
+    for name, xy in pts.items():
+        n = len(xy)
+        mx = sum(x for x, _ in xy) / n
+        my = sum(y for _, y in xy) / n
+        sxx = sum((x - mx) ** 2 for x, _ in xy)
+        if sxx == 0:
+            out[name] = (0.0, my / mx)
+            continue
+        b = sum((x - mx) * (y - my) for x, y in xy) / sxx
+        a = my - b * mx
+        if b < 0 or a < 0:  # noise on a narrow size range: fall back to per-byte
+            _log("op_cost: fit for %s gave a=%.3g b=%.3g; using mean per-byte cost" % (name, a, b))
+            a, b = 0.0, my / mx
+        out[name] = (a, b)
+    return out
+
+
+def predict(name, nbytes, costs=None):
+    """Seconds a step of nbytes is expected to take, or None when unmeasured."""
+    if costs is None:
+        costs = op_cost()
+    ab = costs.get(name)
+    if ab is None:
+        return None
+    return ab[0] + ab[1] * nbytes
