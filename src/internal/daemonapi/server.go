@@ -953,7 +953,9 @@ func (s *Server) liveJobIDs() map[string]bool {
 
 // bindLease ties a lease to the job running under it, so the lease lives
 // as long as the job (see sweepExpired) and ends with it (releaseJobLease).
-// An unknown lease is logged and ignored: the job still runs.
+// A lease that already expired (its submitter stopped renewing before the
+// job arrived) is taken again, bound to the job, so a running job is never
+// invisible to admission; its memory and GPU reservation are gone with it.
 func (s *Server) bindLease(leaseID, jobID string) {
 	if leaseID == "" {
 		return
@@ -962,11 +964,14 @@ func (s *Server) bindLease(leaseID, jobID string) {
 	lease, ok := s.leases[leaseID]
 	if ok {
 		lease.JobID = jobID
+	} else {
+		now := time.Now()
+		s.leases[leaseID] = &Lease{LeaseID: leaseID, JobID: jobID, State: LeaseRunning, GPUIndex: -1,
+			CreatedAt: now, ExpiresAt: now, RenewedAt: now}
 	}
 	s.mu.Unlock()
 	if !ok {
-		log.Warn().Str("lease", leaseID).Str("job", jobID).Msg("job names a lease this node does not hold; running it unbound")
-		return
+		log.Warn().Str("lease", leaseID).Str("job", jobID).Msg("job names a lease that expired before it started; holding a new one for it with no reservation")
 	}
 	s.persist()
 }

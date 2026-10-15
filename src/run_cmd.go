@@ -490,6 +490,9 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			detachCh, stopSuspend := watchSuspend(ctx, true)
 			defer stopSuspend()
 
+			// Nothing else keeps the lease until the job starts and binds it:
+			// a cold env build plus closure send outlived the 5-min TTL.
+			stopRenew := daemonctl.KeepLeaseAlive(daemonHost, daemonPort, acceptResp.LeaseID)
 			runErr := app.Run(ctx, app.Options{
 				ScriptPath:        scriptPath,
 				DaemonHost:        daemonHost,
@@ -516,6 +519,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 				DetachCh:          detachCh,
 				LeaseID:           acceptResp.LeaseID,
 			})
+			stopRenew()
 
 			// A detached job still holds its lease; the node releases it
 			// when the job ends.
