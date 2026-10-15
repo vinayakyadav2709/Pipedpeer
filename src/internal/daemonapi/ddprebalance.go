@@ -222,19 +222,54 @@ func planSolo(reports map[int]rankReport, live, syncEvery int) (int, float64, fl
 	return fast, solo, split
 }
 
+// dilocoEvery is --ddp-sync fast's interval: DILOCO-TUNE (d82bde9,
+// docs/benchmarks/diloco.md) held every test model within 1% of one GPU with
+// plain averaging at H=64.
+const dilocoEvery = 64
+
+// planDiLoCo is U32's comparison: the ring's step under DiLoCo (each rank's
+// compute plus one sync per dilocoEvery steps; the smallest, as in planSolo)
+// against planSolo's split and solo times. DiLoCo trains a slightly
+// different model, so it must beat both by ddpSoloMargin, never tie. No
+// verdict (false) until planSolo has one: every rank measured.
+func planDiLoCo(reports map[int]rankReport, live int, solo, split float64) (float64, bool) {
+	if live < 2 || len(reports) < live || solo <= 0 || split <= 0 {
+		return 0, false
+	}
+	fast := math.MaxFloat64
+	for _, rep := range reports {
+		fast = min(fast, rep.StepMillis+rep.SyncMillis/dilocoEvery)
+	}
+	return fast, fast*ddpSoloMargin < min(split, solo)
+}
+
 // soloFor decides D2 for a ring the user did not size: when the fastest rank
 // alone beats the split, every other rank is released at the next epoch
 // boundary (they exit 77) and that rank takes the whole dataset, syncing
 // nothing. Only for a hash-sharded DataLoader ring - the only kind whose data
 // can move to one rank - and never under --ddp N, during a join, or twice.
 // Returns the note fragment, or "". Caller holds the board lock.
+//
+// U32: when the ranks left the sync mode to us, DiLoCo is the third option,
+// taken only when it beats both (planDiLoCo); the ring keeps every rank.
 func (b *ddpBoard) soloFor(group string, r *ddpRun, world int) string {
-	if r.fixed || r.released || !r.sharded || r.join != nil || r.loading != nil {
+	if r.fixed || r.released || r.join != nil || r.loading != nil {
 		return ""
 	}
 	live := world - b.dropsBelow(group, world)
 	keep, solo, split := planSolo(r.reports, live, r.syncEvery)
-	if keep < 0 {
+	if r.autoSync && !r.diloco {
+		if fast, ok := planDiLoCo(r.reports, live, solo, split); ok {
+			r.diloco = true
+			why := fmt.Sprintf("training with DiLoCo, sync every %d steps: about %.0f ms a step "+
+				"against %.0f ms for the exact split and %.0f ms on one rank alone "+
+				"(--ddp-sync exact for per-step sync)", dilocoEvery, fast, split, solo)
+			log.Info().Str("group", group).Float64("diloco_ms", fast).Float64("split_ms", split).
+				Float64("solo_ms", solo).Msg("ddp: " + why)
+			return fmt.Sprintf(`, "diloco": %d, "why": %q`, dilocoEvery, why)
+		}
+	}
+	if keep < 0 || !r.sharded {
 		return ""
 	}
 	r.released = true

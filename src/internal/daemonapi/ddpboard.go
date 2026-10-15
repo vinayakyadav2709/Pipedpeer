@@ -205,6 +205,9 @@ type ddpRun struct {
 	fixed bool
 	// released: the ring was told to finish on one rank (soloFor).
 	released bool
+	// autoSync: the ranks left the sync mode to us (sync_mode "auto"), so
+	// soloFor may switch them to DiLoCo; diloco: it did, once.
+	autoSync, diloco bool
 	// syncEvery is the interval the ranks last proposed (1 = every step).
 	syncEvery int
 	// residual is the int8 reply's rounding error per kind and payload size,

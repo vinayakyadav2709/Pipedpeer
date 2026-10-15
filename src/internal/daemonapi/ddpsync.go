@@ -162,6 +162,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		if req.Fixed {
 			run.fixed = true
 		}
+		run.autoSync = req.SyncMode == "auto"
 		if req.SyncEvery > 0 {
 			run.syncEvery = req.SyncEvery
 		}
