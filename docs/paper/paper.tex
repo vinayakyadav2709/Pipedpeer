@@ -503,8 +503,8 @@ Pool map, 20-core host alone vs.\ with 16-core peer (LAN) & 5.8--6.4 vs.\ 4.9--5
 CPU script, one laptop vs.\ two over the internet & 17.4--18.1 vs.\ 13.3--14.6\,s \\
 Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s \\
 \quad final loss, same three & .087495 / .087497 / .087688 \\
-Training, two laptops: 1 GPU / exact / fast sync & 4.2 / 37.1 / 7.4\,s \\
-\quad validation loss, same three & .0794 / .0797 / .0796 \\
+Training, two laptops: 1 GPU / exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
+\quad validation loss, same four & .0794 / .0797 / .0797 / .0796 \\
 Ring of 16/8/2 cores, equal vs.\ measured batches & 25.4 vs.\ 23.6\,s \\
 New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
 Rejoin after introducer address change & 12.1--12.6\,s \\
@@ -520,7 +520,10 @@ over two containers beat one (9.1 against 11.8\,s), while a 9\,MB model with
 light steps over Wi-Fi ran ten times slower split than alone (80.7 against
 8.0\,s). Between physical machines neither split beat one GPU
 (Table~\ref{tab:phys}), and at the end of the run the system reported so; this
-is why the lead keeps a ring only when it measures it faster. Measured batch
+is why the lead keeps a ring only when it measures it faster. With automatic
+sync, the two-laptop ring ran 19 exact steps, switched to fast mode and
+finished in 14.6\,s with 25 syncs: auto pays a short exact warm-up before it
+switches. Measured batch
 sizes beat equal ones on an uneven ring.
 
 \textbf{Fast synchronisation.} On two ranks with LAN and Wi-Fi profiles, plain
