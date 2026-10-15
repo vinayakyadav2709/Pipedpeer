@@ -25,18 +25,17 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 )
 
 type ddpRunOptions struct {
 	Ctx            context.Context // cancelling it stops every rank
 	Nodes          int
 	DaemonPort     int
-	MasterPort     int
 	ScriptPath     string
 	ScriptArgs     []string
 	JobName        string
 	Isolate        bool
-	RegistryURL    string
 	PythonVersion  string
 	Pkgs           []string
 	Envs           []string
@@ -59,9 +58,9 @@ type ddpRunOptions struct {
 
 // runDDP launches a transparent multi-rank training run: rank 0 is placed by
 // the coordinator, ranks 1..K-1 come from the daemon's healthy node store,
-// and every rank gets RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT plus
-// PIPEDPEER_DDP=1, which makes the sitecustomize shim initialize the torch
-// process group and wrap DistributedDataParallel without touching user code.
+// and every rank gets RANK/WORLD_SIZE plus PIPEDPEER_DDP=1, which makes the
+// sitecustomize shim sync the model through the lead rank's daemon without
+// touching user code.
 func runDDP(o ddpRunOptions) error {
 	absScript, err := filepath.Abs(o.ScriptPath)
 	if err != nil {
@@ -92,7 +91,6 @@ func runDDP(o ddpRunOptions) error {
 	}
 
 	coord := coordinator.New(coordinator.Config{
-		RegistryURL:      o.RegistryURL,
 		SelfIdentity:     nodeID,
 		SelfSSH:          fmt.Sprintf("root@%s:22", detectLocalIP()),
 		SelfDaemon:       o.DaemonPort,
@@ -113,16 +111,16 @@ func runDDP(o ddpRunOptions) error {
 	// another one (a rejoin run, say) sees the last run's memory and VRAM
 	// still in the nodes' reported load for a few seconds, and one look
 	// failed with a bare "no candidates available".
-	ctx := o.Ctx
-	if ctx == nil {
-		ctx = context.Background()
+	if o.Ctx == nil {
+		o.Ctx = context.Background()
 	}
+	ctx := o.Ctx
 	wait := placementWait()
 	decision := coord.FindNodeWithin(ctx, wait, time.Second, placementProgress("for rank 0 ", wait))
 	rank0 := decision.ChosenNode
 	if rank0.NodeID == "" {
 		if why := decision.RejectionSummary(); why != "" {
-			fmt.Print("[coordinator] nodes turned down:\n" + why)
+			fmt.Fprint(os.Stderr, "[coordinator] nodes turned down:\n"+why)
 		}
 		return fmt.Errorf("no node eligible for rank 0: %s", decision.Reason)
 	}
@@ -147,17 +145,17 @@ func runDDP(o ddpRunOptions) error {
 		// Fewer ranks than asked for, because more would be slower. Said out
 		// loud: silently running a smaller ring than requested is the kind of
 		// thing that should never be discovered from a log file.
-		fmt.Printf("      Using %d rank(s) rather than %d: the rest would slow the ring down\n",
+		say.Printf("      Using %d rank(s) rather than %d: the rest would slow the ring down\n",
 			len(ring), o.Nodes)
 		o.Nodes = len(ring)
 	}
 	// The lead has to be a node every other rank can reach, and a peer
 	// reached over the internet is registered at 127.0.0.1 on a port only
 	// this daemon forwards. Reordering rather than dropping: such a node is
-	// still a good rank, it just cannot be the one everybody syncs to.
-	if reordered, ok := ddpLeadFirst(ring, ddpSelfMachine(o.DaemonPort)); ok {
-		ring = reordered
-	} else {
+	// still a good rank, it just cannot be the one everybody syncs to. Slots
+	// and shares move with it: they are per ring position.
+	lead := ddpLeadIndex(ring, ddpSelfMachine(o.DaemonPort))
+	if lead < 0 {
 		return fmt.Errorf("no rank in this ring can lead it: every candidate is " +
 			"reached through a local forwarder, so the address they would all " +
 			"sync to points at themselves. A ring needs at least one node with " +
@@ -165,9 +163,16 @@ func runDDP(o ddpRunOptions) error {
 			"network they share")
 	}
 
+	ring, ringSlots = ddpToFront(ring, lead), ddpToFront(ringSlots, lead)
+	if len(ringWeights) == len(ring) {
+		ringWeights = ddpToFront(ringWeights, lead)
+	}
+
 	rank0, peers := ring[0], ring[1:o.Nodes]
 	ringSlots = ringSlots[:o.Nodes]
-	ringWeights = ddpNormaliseWeights(ringWeights[:o.Nodes])
+	if len(ringWeights) >= o.Nodes {
+		ringWeights = ddpNormaliseWeights(ringWeights[:o.Nodes])
+	}
 
 	masterAddr := ddpExtractHost(rank0.SSHEndpoint)
 	if masterAddr == "" || masterAddr == "127.0.0.1" || masterAddr == "localhost" {
@@ -182,22 +187,8 @@ func runDDP(o ddpRunOptions) error {
 		}
 		masterAddr = localIPFor(peerHost)
 	}
-	masterPort := o.MasterPort
-	if masterPort == 0 {
-		// ponytail: fixed base port (torch convention 29500) so a firewall is
-		// opened ONCE for the small range instead of per-run. The port is
-		// negotiated live against the leader host: connection refused =
-		// nothing listening = safe to claim; occupied = next in range. Two
-		// simultaneous DDP runs whose leaders land on the same machine fit
-		// as long as they stay inside the span — beyond that, pin an exact
-		// --ddp-port. Future zero-firewall option: tunnel the rendezvous
-		// through the daemons' already-open 38080 channel (~a day of work,
-		// makes the orchestrator a relay, extra hop to debug).
-		masterPort = ddpPickMasterPort(masterAddr, 29500, 10)
-	}
-
-	fmt.Printf("=== Distributed training: %d ranks ===\n", o.Nodes)
-	fmt.Printf("rank 0: %s (%s:%d)\n", rank0.NodeID[:min(8, len(rank0.NodeID))], masterAddr, rank0.DaemonPort)
+	say.Printf("=== Distributed training: %d ranks ===\n", o.Nodes)
+	say.Printf("rank 0: %s (%s:%d)\n", rank0.NodeID[:min(8, len(rank0.NodeID))], masterAddr, rank0.DaemonPort)
 	for i, n := range peers {
 		where := ""
 		if ddpSharesNode(ring[:o.Nodes], i+1) {
@@ -205,29 +196,26 @@ func runDDP(o ddpRunOptions) error {
 			// would read as a mistake in the node list.
 			where = fmt.Sprintf(" device %d", ringSlots[i+1])
 		}
-		fmt.Printf("rank %d: %s (%s:%d)%s\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
+		say.Printf("rank %d: %s (%s:%d)%s\n", i+1, n.NodeID[:min(8, len(n.NodeID))],
 			ddpExtractHost(n.SSHEndpoint), n.DaemonPort, where)
 	}
 	if uneven := ddpUneven(ringWeights); uneven {
-		fmt.Printf("shares: %s — measured, so a slower rank takes less rather "+
+		say.Printf("shares: %s — measured, so a slower rank takes less rather "+
 			"than setting the pace for everyone\n", ddpSharePercents(ringWeights))
 	}
-	if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
-		fmt.Printf("MASTER_ADDR=%s MASTER_PORT=%d backend=%s\n\n", masterAddr, masterPort, os.Getenv("PIPEDPEER_DDP_BACKEND"))
-	} else {
-		fmt.Printf("sync: daemon channel via %s:%d (no extra ports)\n\n", masterAddr, rank0.DaemonPort)
-	}
+	say.Printf("sync: daemon channel via %s:%d (no extra ports)\n\n", masterAddr, rank0.DaemonPort)
 
-	env, err := app.BuildEnvironment(absScript, app.EnvOptions{
+	env, err := app.BuildEnvironment(ctx, absScript, app.EnvOptions{
 		PythonVersion: o.PythonVersion,
 		Pkgs:          o.Pkgs,
 		Intercept:     true, // DDP transparency lives in the sitecustomize shim
 		GPU:           o.RequireGPU || o.PreferGPU,
+		Verbose:       say.Verbose,
 	}, func(step int, title string) {
 		if step == 1 {
-			fmt.Printf("[%d/7] %s\n", step, title)
+			say.Printf("[%d/7] %s\n", step, title)
 		} else {
-			fmt.Printf("\n[%d/7] %s\n", step, title)
+			say.Printf("\n[%d/7] %s\n", step, title)
 		}
 	})
 	if err != nil {
@@ -272,8 +260,12 @@ func runDDP(o ddpRunOptions) error {
 				fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", world),
 				fmt.Sprintf("RANK=%d", i),
 				fmt.Sprintf("WORLD_SIZE=%d", world),
+				// For a script that sets up torch.distributed itself
+				// (native DDP): the shim's own sync needs neither. Nothing
+				// is probed or opened for it; such a script needs the port
+				// reachable on the lead machine.
 				fmt.Sprintf("MASTER_ADDR=%s", masterAddr),
-				fmt.Sprintf("MASTER_PORT=%d", masterPort),
+				fmt.Sprintf("MASTER_PORT=%d", ddpNativeMasterPort),
 				// The address THIS rank would reach us at, which is not
 				// necessarily the one another rank would use.
 				fmt.Sprintf("PIPEDPEER_SUBMITTER=%s",
@@ -281,8 +273,7 @@ func runDDP(o ddpRunOptions) error {
 						strconv.Itoa(o.DaemonPort))),
 				// Sync rides the lead rank's daemon on the one port that
 				// already works between every pair of nodes; ranks never
-				// open sockets of their own (MASTER_* stays only for the
-				// gloo escape hatch, PIPEDPEER_DDP_BACKEND=gloo).
+				// open sockets of their own.
 				fmt.Sprintf("PIPEDPEER_DDP_SYNC=http://%s/v1/ddp/sync",
 					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
 				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
@@ -294,6 +285,11 @@ func runDDP(o ddpRunOptions) error {
 				// Names for the start barrier's "waiting for rank 1 on gpu1".
 				"PIPEDPEER_DDP_HOSTS="+ddpHostList(ring),
 			)
+			if o.MaxRanks >= 2 {
+				// --ddp N: the user chose the ring, so the shim never shrinks
+				// it or changes the sync interval on its own (C2).
+				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_FIXED=1")
+			}
 			if join {
 				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_JOIN=1")
 			} else if len(ringWeights) == len(ring) {
@@ -336,7 +332,9 @@ func runDDP(o ddpRunOptions) error {
 				EstimatedMemBytes: resReq.MemBytes,
 				EstimationTier:    resReq.Tier,
 			}
-			err := app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+			err := ddpRunWatched(ctx, opts.DaemonHost, opts.DaemonPort, o.DaemonPort, func(ctx context.Context) error {
+				return app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+			})
 			up.ended(n.NodeID, err != nil && ctx.Err() == nil, time.Now())
 			errs <- ddpRankResult{rank: i, err: err}
 		}()
@@ -358,18 +356,17 @@ func runDDP(o ddpRunOptions) error {
 		usageNodes[i] = app.UsageNode{Name: hosts[i], Host: ddpExtractHost(n.SSHEndpoint), Port: n.DaemonPort}
 	}
 	// ponytail: ranks that join later are not sampled; add them in start() if the demo needs it.
-	usage := app.StartUsage(usageNodes)
+	var usage *app.Usage
+	if say.Verbose {
+		usage = app.StartUsage(usageNodes)
+	}
 	leadHost := ddpExtractHost(rank0.SSHEndpoint)
-	backend := os.Getenv("PIPEDPEER_DDP_BACKEND")
-	daemonSync := backend != "gloo" && backend != "nccl"
 
-	// Machines that come back, or turn up, join the ring. Only the daemon
-	// sync can grow: torch's own mesh is fixed at init.
+	// Machines that come back, or turn up, join the ring.
 	added := make(chan ddpAdded)
-	startRanks := len(ranks) // ranks from here on are joiners
 	watchCtx, stopWatch := context.WithCancel(o.Ctx)
 	defer stopWatch()
-	if daemonSync {
+	{
 		gpuKind := o.RequireGPU || o.PreferGPU
 		gpuRing := gpuKind && ddpHasGPU(rank0)
 		g := &ddpGrower{
@@ -379,7 +376,7 @@ func runDDP(o ddpRunOptions) error {
 			leadPort:   rank0.DaemonPort,
 			group:      jobSet,
 			maxRanks:   o.MaxRanks,
-			out:        os.Stdout,
+			out:        ddpProgressOut(),
 			fetch:      ddpFetchNodes,
 			check:      ddpJoinCheck,
 			want: func(n registry.NodeRecord) bool {
@@ -408,7 +405,7 @@ func runDDP(o ddpRunOptions) error {
 				ranksMu.Lock()
 				ranks = append(ranks, n)
 				ranksMu.Unlock()
-				fmt.Printf("[ddp] rank %d: starting on %s (%s:%d); it joins at the ring's next epoch\n",
+				say.Printf("[ddp] rank %d: starting on %s (%s:%d); it joins at the ring's next epoch\n",
 					rank, ddpHostName(n), ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
 				launch(ctx, rank, n, true)
 				return true
@@ -417,18 +414,8 @@ func runDDP(o ddpRunOptions) error {
 		go g.run(watchCtx)
 	}
 
-	firstErr := ddpAwaitRanks(o.Ctx, os.Stdout, errs, hosts, stopRank, added, func(rank int, err error) {
-		// The script failed, so the run is lost: stop looking for machines
-		// to add (ddpAwaitRanks stops any that slip through). A joiner's
-		// crash is the join failing, as in ddpAwaitRanks.
-		if rank < startRanks && app.IsPermanent(err) && !ddpMissedStart(err) {
-			stopWatch()
-		}
-		// torch's own mesh (gloo/nccl) cannot lose a member; only the
-		// daemon-backed sync can be told to carry on.
-		if !daemonSync {
-			return
-		}
+	// Failures go to stderr: stdout is the script's.
+	firstErr := ddpAwaitRanks(o.Ctx, os.Stderr, errs, hosts, stopRank, added, func(rank int, err error) {
 		ranksMu.Lock()
 		world := len(ranks)
 		ranksMu.Unlock()
@@ -437,33 +424,18 @@ func runDDP(o ddpRunOptions) error {
 		}
 	})
 	stopWatch()
-	usage.Print(os.Stdout)
+	if usage != nil {
+		usage.Print(os.Stdout)
+	}
 	if firstErr != nil {
-		if os.Getenv("PIPEDPEER_DDP_BACKEND") == "gloo" || os.Getenv("PIPEDPEER_DDP_BACKEND") == "nccl" {
-			fmt.Printf("[ddp] hint: if a rank timed out rendezvousing on %s:%d, the port range is likely firewalled — open it once with `sudo ufw allow 29500:29510/tcp` on the rank-0 machine, or pin an exact port with --ddp-port\n", masterAddr, masterPort)
-		} else {
-			fmt.Printf("[ddp] hint: sync runs on the lead daemon at %s:%d — check that every rank can curl that address, and `pipedpeer traffic` there for arriving /v1/ddp/sync posts\n", masterAddr, rank0.DaemonPort)
-		}
+		say.Printf("[ddp] hint: sync runs on the lead daemon at %s:%d — check that every rank can reach that address\n", masterAddr, rank0.DaemonPort)
 	}
 	return firstErr
 }
 
-// ddpPickMasterPort picks the DDP rendezvous port by probing the leader host
-// live: an accepted dial means occupied (skip to the next), connection refused
-// means nothing is listening there yet — safe to claim for rank 0's store. A
-// dial timeout is ambiguous (firewall drop) and indistinguishable across the
-// whole range, so return the base and let the shim's bounded rendezvous
-// timeout surface it as a clear failure instead of hanging forever.
-func ddpPickMasterPort(host string, base, span int) int {
-	for p := base; p < base+span; p++ {
-		c, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(p)), time.Second)
-		if err != nil {
-			return p
-		}
-		c.Close()
-	}
-	return base
-}
+// ddpNativeMasterPort is MASTER_PORT for scripts that start torch.distributed
+// themselves (torch's own default). The shim's daemon sync uses no port.
+const ddpNativeMasterPort = 29500
 
 // ddpOneDeviceKind keeps the ring to a single kind of device.
 //
@@ -631,28 +603,47 @@ func ddpForwardedLead(n registry.NodeRecord, selfMachine string) bool {
 	return key == "" || key != selfMachine
 }
 
-// ddpLeadFirst reorders a ring so its lead is a node every rank can reach.
-//
-// Reordered rather than filtered: a node that cannot lead is still a
-// perfectly good rank, and dropping it would shrink a ring for no reason.
-// Returns false when nothing in the ring can lead, which has to be said
-// rather than papered over - picking one anyway hangs every rank at the
-// first barrier with no indication why.
-func ddpLeadFirst(ring []registry.NodeRecord, selfMachine string) ([]registry.NodeRecord, bool) {
+// ddpLeadIndex picks the ring member to lead it: one every rank can reach,
+// and a GPU node whenever one can lead, so a mixed set never puts the sync
+// and the reference model on a CPU (Finding 22: the CPU lead built a
+// smaller net and every weight sync was refused). -1 when nothing in the
+// ring can lead, which has to be said rather than papered over: picking one
+// anyway hangs every rank at the first barrier with no indication why.
+func ddpLeadIndex(ring []registry.NodeRecord, selfMachine string) int {
+	first := -1
 	for i, n := range ring {
 		if ddpForwardedLead(n, selfMachine) {
 			continue
 		}
-		if i == 0 {
-			return ring, true
+		if ddpHasGPU(n) {
+			return i
 		}
-		out := make([]registry.NodeRecord, 0, len(ring))
-		out = append(out, ring[i])
-		out = append(out, ring[:i]...)
-		out = append(out, ring[i+1:]...)
-		return out, true
+		if first < 0 {
+			first = i
+		}
 	}
-	return ring, false
+	return first
+}
+
+// ddpToFront moves s[i] to the front, keeping the others in order. Moved
+// rather than dropped: a node that cannot lead is still a good rank.
+func ddpToFront[T any](s []T, i int) []T {
+	if i <= 0 || i >= len(s) {
+		return s
+	}
+	out := make([]T, 0, len(s))
+	out = append(out, s[i])
+	out = append(out, s[:i]...)
+	return append(out, s[i+1:]...)
+}
+
+// ddpProgressOut is where the ring's progress lines go: stdout under -v,
+// nowhere otherwise.
+func ddpProgressOut() io.Writer {
+	if say.Verbose {
+		return os.Stdout
+	}
+	return io.Discard
 }
 
 func ddpDistinctMachines(ring []registry.NodeRecord) int {
@@ -727,15 +718,22 @@ func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredM
 	return ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, requiredMem, "")
 }
 
-// ddpExcluded reports whether n may not take a rank: this node under NoSelf
-// (--remote), and any node on the machine --offload keeps work off, by its
-// machine key.
+// ddpExcluded reports whether n may not take a rank: a node with a role
+// (pool-only, introducer-only: C5), this node under NoSelf (--remote), and
+// any node on the machine --offload keeps work off, by its machine key.
 func ddpExcluded(o ddpRunOptions, n registry.NodeRecord) bool {
+	if n.Capabilities[ddpRoleCapability] != "" {
+		return true
+	}
 	if o.NoSelf && o.SelfNodeID != "" && n.NodeID == o.SelfNodeID {
 		return true
 	}
 	return heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], o.ExcludeMachine)
 }
+
+// ddpRoleCapability marks a node that takes no DDP rank: "pool-only" or
+// "introducer-only" (C5; absent on a full node).
+const ddpRoleCapability = "role"
 
 // ddpEligibleCountExcept is ddpEligibleCount without the nodes on the machine
 // whose key is exclude ("" excludes nothing).
@@ -751,7 +749,7 @@ func ddpEligibleCountExcept(daemonPort int, requireGPU bool, requiredGPUMem, req
 	}
 	count := 0
 	for _, n := range all {
-		if n.State != "healthy" {
+		if n.State != "healthy" || n.Capabilities[ddpRoleCapability] != "" {
 			continue
 		}
 		if heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], exclude) {
@@ -869,11 +867,11 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 	})
 
 	if !plan.Measured {
-		fmt.Printf("      Note: no peer answered the throughput probe; placement is " +
+		say.Printf("      Note: no peer answered the throughput probe; placement is " +
 			"using advertised core counts, which ignore load and any cap on the peer\n")
 	}
 	for _, r := range plan.Rejected {
-		fmt.Printf("      Not using %s: %s\n", shortID(r.Candidate.NodeID), r.Reason)
+		say.Printf("      Not using %s: %s\n", shortID(r.Candidate.NodeID), r.Reason)
 	}
 
 	// GPU peers first among the admitted, for the same reason the gate kept
