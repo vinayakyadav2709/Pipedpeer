@@ -40,8 +40,8 @@ func TestProbeHost(t *testing.T) {
 	if d.Arch != "arm64" || d.Hostname != "worker9" {
 		t.Fatalf("expected caps parsed, got arch=%q hostname=%q", d.Arch, d.Hostname)
 	}
-	if !strings.HasSuffix(d.SSHEndpoint, ":22") || !strings.HasPrefix(d.SSHEndpoint, "root@") {
-		t.Fatalf("unexpected ssh endpoint %q", d.SSHEndpoint)
+	if d.Host != ip {
+		t.Fatalf("host = %q, want %q", d.Host, ip)
 	}
 }
 
@@ -112,5 +112,19 @@ func TestTheSweepDoesNotLeakTheToken(t *testing.T) {
 	}
 	if n := leaked.Load(); n != 0 {
 		t.Fatalf("the sweep handed the token over %d time(s)", n)
+	}
+}
+
+// TestSweepCoversBelowTheHost: a machine at .200 still probes .1 (B8), and
+// the targets stay inside the prefix.
+func TestSweepCoversBelowTheHost(t *testing.T) {
+	s := subnet{ip: net.IPv4(10, 1, 2, 200).To4(), mask: net.CIDRMask(24, 32)}
+	got := sweepTargets(s)
+	if len(got) != 254 || got[0].String() != "10.1.2.1" || got[253].String() != "10.1.2.254" {
+		t.Fatalf("targets %v .. %v (%d)", got[0], got[len(got)-1], len(got))
+	}
+	small := sweepTargets(subnet{ip: net.IPv4(10, 1, 2, 70).To4(), mask: net.CIDRMask(26, 32)})
+	if len(small) != 62 || small[0].String() != "10.1.2.65" {
+		t.Fatalf("/26: %d targets from %v", len(small), small[0])
 	}
 }

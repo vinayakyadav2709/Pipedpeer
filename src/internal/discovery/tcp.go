@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,11 +41,8 @@ func DiscoverTCP(daemonPort int, timeout time.Duration) []DiscoveredNode {
 	seenNode := map[string]bool{}
 	found := atomic.Bool{}
 
-	for _, sub := range localSubnets() {
-		base := binary.BigEndian.Uint32(sub.ip.To4())
-		for i := uint32(1); i <= 254; i++ {
-			ip := make(net.IP, 4)
-			binary.BigEndian.PutUint32(ip, base+i)
+	for _, sub := range sweepSubnets() {
+		for _, ip := range sweepTargets(sub) {
 			if self[ip.String()] || seenJob[ip.String()] {
 				continue
 			}
@@ -96,11 +94,11 @@ func probeHost(ip string, port int) *DiscoveredNode {
 		return nil
 	}
 	return &DiscoveredNode{
-		NodeID:      h.NodeID,
-		SSHEndpoint: fmt.Sprintf("root@%s:22", ip),
-		DaemonPort:  port,
-		Arch:        h.Capabilities["arch"],
-		Hostname:    h.Capabilities["hostname"],
+		NodeID:     h.NodeID,
+		Host:       ip,
+		DaemonPort: port,
+		Arch:       h.Capabilities["arch"],
+		Hostname:   h.Capabilities["hostname"],
 	}
 }
 
@@ -108,6 +106,47 @@ func probeHost(ip string, port int) *DiscoveredNode {
 type subnet struct {
 	ip   net.IP // an address inside the subnet (the interface address)
 	mask net.IPMask
+	name string // interface name
+}
+
+// virtualPrefixes name interfaces whose networks hold containers or tunnels,
+// not the machines of this LAN; sweeping them wastes the probe budget (B8).
+var virtualPrefixes = []string{"docker", "veth", "br-", "tailscale"}
+
+func sweepSubnets() []subnet {
+	var out []subnet
+	for _, s := range localSubnets() {
+		virtual := false
+		for _, p := range virtualPrefixes {
+			virtual = virtual || strings.HasPrefix(s.name, p)
+		}
+		if !virtual {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// sweepTargets lists up to 254 host addresses of the subnet, starting at its
+// network address and staying inside its prefix, so addresses below the
+// machine's own are covered too. Bigger subnets than /24 get the first slice.
+func sweepTargets(s subnet) []net.IP {
+	ones, bits := s.mask.Size()
+	if bits != 32 || ones >= 31 {
+		return nil
+	}
+	n := uint32(1)<<(32-ones) - 2 // hosts, without network and broadcast
+	if n > 254 {
+		n = 254
+	}
+	base := binary.BigEndian.Uint32(s.ip.To4().Mask(s.mask))
+	out := make([]net.IP, 0, n)
+	for i := uint32(1); i <= n; i++ {
+		ip := make(net.IP, 4)
+		binary.BigEndian.PutUint32(ip, base+i)
+		out = append(out, ip)
+	}
+	return out
 }
 
 // localSubnets lists the IPv4 networks of every up, non-loopback interface.
@@ -130,7 +169,7 @@ func localSubnets() []subnet {
 			if !ok || ipNet.IP.To4() == nil {
 				continue
 			}
-			out = append(out, subnet{ip: ipNet.IP.To4(), mask: ipNet.Mask})
+			out = append(out, subnet{ip: ipNet.IP.To4(), mask: ipNet.Mask, name: iface.Name})
 		}
 	}
 	return out

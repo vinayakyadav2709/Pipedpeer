@@ -16,29 +16,27 @@ import (
 
 // DiscoveredNode is a node found via LAN discovery.
 type DiscoveredNode struct {
-	NodeID      string `json:"node_id"`
-	DaemonAddr  string `json:"daemon_addr"` // "10.0.1.5:38080"
-	DaemonPort  int    `json:"daemon_port"`
-	SSHEndpoint string `json:"ssh_endpoint"` // "root@10.0.1.5:22"
-	Arch        string `json:"arch"`
-	Hostname    string `json:"hostname"`
+	NodeID     string `json:"node_id"`
+	Host       string `json:"host"` // where the reply came from, never what the node claims
+	DaemonPort int    `json:"daemon_port"`
+	Arch       string `json:"arch"`
+	Hostname   string `json:"hostname"`
 }
 
 // ServiceInfo is what each daemon advertises on the network.
 // For now we use a simple UDP broadcast approach (can be upgraded to mDNS later).
 type ServiceInfo struct {
-	NodeID      string  `json:"node_id"`
-	DaemonPort  int     `json:"daemon_port"`
-	SSHEndpoint string  `json:"ssh_endpoint"`
-	Arch        string  `json:"arch"`
-	Hostname    string  `json:"hostname"`
-	CPUPercent  float64 `json:"cpu_percent"`
-	MemPercent  float64 `json:"memory_percent"`
-	ActiveJobs  int     `json:"active_jobs"`
+	NodeID     string  `json:"node_id"`
+	DaemonPort int     `json:"daemon_port"`
+	Arch       string  `json:"arch"`
+	Hostname   string  `json:"hostname"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemPercent float64 `json:"memory_percent"`
+	ActiveJobs int     `json:"active_jobs"`
 }
 
 const (
-	broadcastPort = 38099
+	broadcastPort = 4242
 	// multicastGroup carries probes between daemons on the same host. A UDP
 	// broadcast sent to a port that several sockets share is delivered by the
 	// kernel to only ONE of them, so co-located daemons (a lab, containers on
@@ -211,35 +209,18 @@ func Discover(timeout time.Duration) []DiscoveredNode {
 
 	for time.Now().Before(deadline) {
 		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, _, err := conn.ReadFrom(buf)
+		n, src, err := conn.ReadFrom(buf)
 		if err != nil {
 			continue
 		}
-
-		msg := string(buf[:n])
-		if len(msg) <= len(magicHeader)+1 {
+		d, ok := parseReply(buf[:n], src)
+		if !ok {
 			continue
 		}
-		if msg[:len(magicHeader)] != magicHeader {
-			continue
-		}
-
-		jsonPart := msg[len(magicHeader)+1:]
-		var info ServiceInfo
-		if err := json.Unmarshal([]byte(jsonPart), &info); err != nil {
-			continue
-		}
-
 		mu.Lock()
-		if !seen[info.NodeID] {
-			seen[info.NodeID] = true
-			results = append(results, DiscoveredNode{
-				NodeID:      info.NodeID,
-				DaemonAddr:  fmt.Sprintf("%s:%d", extractHost(info.SSHEndpoint), info.DaemonPort),
-				DaemonPort:  info.DaemonPort,
-				SSHEndpoint: info.SSHEndpoint,
-				Arch:        info.Arch,
-			})
+		if !seen[d.NodeID] {
+			seen[d.NodeID] = true
+			results = append(results, d)
 		}
 		mu.Unlock()
 	}
@@ -280,20 +261,27 @@ func localBroadcasts() []net.IP {
 	return addrs
 }
 
-func extractHost(sshEndpoint string) string {
-	// Parse "root@10.0.1.5:22" → "10.0.1.5"
-	// Also handles "10.0.1.5:22" → "10.0.1.5"
-	hostPart := sshEndpoint
-	for i, c := range sshEndpoint {
-		if c == '@' {
-			hostPart = sshEndpoint[i+1:]
-			break
-		}
+// parseReply turns one probe reply into a node. The host is the packet's
+// source address: a daemon advertises the address it had at start-up, which is
+// stale after a network change.
+func parseReply(pkt []byte, src net.Addr) (DiscoveredNode, bool) {
+	msg := string(pkt)
+	if len(msg) <= len(magicHeader)+1 || msg[:len(magicHeader)] != magicHeader {
+		return DiscoveredNode{}, false
 	}
-	for j, c := range hostPart {
-		if c == ':' {
-			return hostPart[:j]
-		}
+	var info ServiceInfo
+	if err := json.Unmarshal([]byte(msg[len(magicHeader)+1:]), &info); err != nil {
+		return DiscoveredNode{}, false
 	}
-	return hostPart
+	udp, ok := src.(*net.UDPAddr)
+	if !ok || info.NodeID == "" {
+		return DiscoveredNode{}, false
+	}
+	return DiscoveredNode{
+		NodeID:     info.NodeID,
+		Host:       udp.IP.String(),
+		DaemonPort: info.DaemonPort,
+		Arch:       info.Arch,
+		Hostname:   info.Hostname,
+	}, true
 }
