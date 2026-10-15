@@ -136,10 +136,14 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			if verbose {
 				envs = append(envs, "PIPEDPEER_VERBOSE=1")
 			}
+			// Unset = auto: exact, and the lead may switch the ring to DiLoCo
+			// when it measures it faster (U32). Naming a mode pins it.
 			switch ddpSync, _ := cmd.Flags().GetString("ddp-sync"); ddpSync {
-			case "", "exact":
-			case "fast":
-				envs = append(envs, "PIPEDPEER_DDP_SYNC_MODE=fast")
+			case "":
+			case "exact", "fast":
+				if cmd.Flags().Changed("ddp-sync") {
+					envs = append(envs, "PIPEDPEER_DDP_SYNC_MODE="+ddpSync)
+				}
 			default:
 				return fmt.Errorf("--ddp-sync must be exact or fast, got %q", ddpSync)
 			}
@@ -543,7 +547,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 	// (pipedpeer run t.py --epochs 3), as with python.
 	cmd.Flags().SetInterspersed(false)
 	cmd.Flags().BoolP("verbose", "v", false, "Show pipedpeer's own progress: placement, build steps, summary and the detailed run record")
-	cmd.Flags().String("ddp-sync", "exact", "Training sync: exact (every step, same maths as one GPU) or fast (local steps with periodic averaging)")
+	cmd.Flags().String("ddp-sync", "exact", "Training sync: exact (every step, same maths as one GPU) or fast (local steps with periodic averaging). Unset: exact, switched to fast only when the ring measures it faster")
 	cmd.Flags().String("host", "", "Daemon host:port, or a registered node ID")
 	cmd.Flags().String("job-name", "", "Optional job name")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")

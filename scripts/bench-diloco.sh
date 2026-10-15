@@ -15,6 +15,8 @@
 #   single  one container, no --ddp: the "one GPU" reference the 1% is judged on
 #   exact   --ddp 2 (per-step sync): control, separates sharding from DiLoCo
 #   fast    --ddp 2 --ddp-sync fast, once per network profile
+#   auto    no --ddp, no --ddp-sync (U32): exact sync until the lead daemon
+#           measures DiLoCo faster and switches the ring; opt-in via ARMS
 #   gpu     the single run on this machine's real GPU (BL_GPU_PYTHON): shows
 #           how far CPU and GPU numerics alone move the loss
 #
@@ -58,6 +60,8 @@ workload() { # workload <dir>
 	: > "$1/.pipedpeerignore"
 	cat > "$1/diloco.py" <<'PY'
 import os, time
+# A torch.distributed script as far as `pipedpeer run` can tell: the auto arm
+# runs it without --ddp, so the CLI rings it on its own (not a fixed ring).
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -287,7 +291,7 @@ if [[ "$arms" == *" single "* ]]; then
 		for s in "${seeds[@]}"; do run_one "$m" single "$s"; done
 	done
 fi
-if [[ "$arms" == *" exact "* || "$arms" == *" fast "* ]]; then
+if [[ "$arms" == *" exact "* || "$arms" == *" fast "* || "$arms" == *" auto "* ]]; then
 	bl_lab_up 2 "$mem" "${profiles[0]}" 0 "$BL_BIN"
 	bl_put 1 "$work"
 	bl_warm diloco.py --gpu off --ddp 2 -e BENCH_EPOCHS=0
@@ -306,6 +310,14 @@ if [[ "$arms" == *" exact "* || "$arms" == *" fast "* ]]; then
 					# shellcheck disable=SC2086 # the variant's flags are a list of -e flags
 					for s in "${seeds[@]}"; do run_one "$m" "${v%%=*}" "$s" -v --ddp 2 --ddp-sync fast ${v#*=}; done
 				done
+			done
+		done
+	fi
+	if [[ "$arms" == *" auto "* ]]; then
+		for p in "${profiles[@]}"; do
+			bl_lab_shape "$p" 0
+			for m in "${models[@]}"; do
+				for s in "${seeds[@]}"; do run_one "$m" auto "$s" -v; done
 			done
 		done
 	fi
