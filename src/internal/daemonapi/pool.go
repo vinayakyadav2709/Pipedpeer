@@ -247,20 +247,42 @@ type poolManager struct {
 	// carries closure fetch and worker spawn, so it is not a speed sample.
 	warmMu sync.Mutex
 	warm   map[string]bool
+	// replyIDs: peer address -> the node id its last reply named.
+	replyIDs map[string]string
 	// backups counts tail backups running now; at most one at a time.
 	backups atomic.Int32
 
 	stats poolStats
 }
 
-// key is the per-node measurement key for a peer address.
+// key is the per-node measurement key for a peer address: its node id from
+// the node table, else the id the peer named in its last reply, else the
+// address.
 func (pm *poolManager) key(peer string) string {
 	if pm.nodeFn != nil {
 		if id := pm.nodeFn(peer); id != "" {
 			return id
 		}
 	}
+	pm.warmMu.Lock()
+	defer pm.warmMu.Unlock()
+	if id := pm.replyIDs[peer]; id != "" {
+		return id
+	}
 	return peer
+}
+
+// sawNode remembers the node id a peer named in its reply's receipt.
+func (pm *poolManager) sawNode(peer, id string) {
+	if id == "" {
+		return
+	}
+	pm.warmMu.Lock()
+	defer pm.warmMu.Unlock()
+	if pm.replyIDs == nil {
+		pm.replyIDs = map[string]string{}
+	}
+	pm.replyIDs[peer] = id
 }
 
 // firstPart reports whether this is the first part (node, fn) has run since
@@ -1217,6 +1239,10 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					release()
 					if e == nil {
 						d := time.Since(sent)
+						key = pm.key(peer) // the reply may have named the node
+						if where == "local" {
+							key = pm.selfID // the backup copy here won
+						}
 						steps := []runrec.Step{pm.step(key, "queue", qStart, waited, i)}
 						if compute > 0 && where != "local" {
 							steps = append(steps, pm.step(key, "compute", sent, time.Duration(compute*float64(time.Second)), i))
@@ -1507,12 +1533,14 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 		var out struct {
 			ResultsFrames int `json:"results_frames"`
 			Receipt       struct {
+				Node  string     `json:"node"`
 				Parts []provPart `json:"parts"`
 			} `json:"receipt"`
 		}
 		if err := json.Unmarshal(body[:nl], &out); err != nil || out.ResultsFrames <= 0 {
 			return nil, 0, fmt.Errorf("peer %s: bad frames response: %v", peer, err)
 		}
+		pm.sawNode(peer, out.Receipt.Node)
 		for _, p := range out.Receipt.Parts {
 			computeSec += float64(p.Ms) / 1000
 		}

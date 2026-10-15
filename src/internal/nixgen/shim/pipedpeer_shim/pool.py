@@ -11,7 +11,7 @@ from pipedpeer_shim.core import (
     _SubmitBatcher, _cluster_ready, _log, _offload_warn,
 )
 from pipedpeer_shim.stats import (
-    _STATS, _STATS_LOCK, _add_stat, _decide, _record, _record_local,
+    _RELAYED_STEPS, _STATS, _STATS_LOCK, _add_stat, _decide, _record, _record_local,
 )
 from pipedpeer_shim.transfer import (
     _daemon_open, _dumps, _loads, _pool_required, _pool_send,
@@ -128,6 +128,29 @@ def _fn_fp(payload):
                              ).encode()).hexdigest()[:16]
         payload["fp"] = fp
     return fp
+
+
+def _relay_steps(receipt):
+    """Put the daemons' own steps from a chunk receipt (queue at a node,
+    compute there) into this job's run record as they are: each names the
+    machine that ran it, a peer's node id for a remote part. A step without
+    one is a peer's part as far as the receipt says (where "peer:<addr>")."""
+    for p in (receipt or {}).get("parts", []):
+        where = str(p.get("where", ""))
+        for st in p.get("steps") or []:
+            try:
+                machine = (st.get("machine") or st.get("node")
+                           or (where[5:] if where.startswith("peer:") else ""))
+                s = {"machine": str(machine),
+                     "node": str(st.get("node", "")), "chunk": int(st.get("chunk", -1)),
+                     "step": str(st["step"]), "start_ns": int(st["start_ns"]),
+                     "dur_ns": int(st["dur_ns"])}
+                if st.get("bytes"):
+                    s["bytes"] = int(st["bytes"])
+            except (KeyError, TypeError, ValueError) as e:
+                _log("skipped an unreadable step in a chunk receipt (%s): %r" % (e, st))
+                continue
+            _RELAYED_STEPS.append(s)
 
 
 # The _Flight the current deliver thread's request belongs to.
@@ -556,15 +579,7 @@ class _ClusterPool:
         ms = (time.monotonic() - t0) * 1000
         receipt = info.get("receipt")
         _record(kind, len(out), True, "", ms, receipt)
-        # The daemons' own steps (queue at a node, compute there), relayed
-        # into this job's run record.
-        for p in (receipt or {}).get("parts", []):
-            for st in p.get("steps") or []:
-                try:
-                    record.step(st["step"], int(st.get("dur_ns", 0)) / 1e9, int(st.get("bytes", 0)),
-                                int(st.get("chunk", -1)), st.get("node") or str(p.get("where", "")))
-                except (KeyError, TypeError, ValueError) as e:
-                    _log("skipped an unreadable step in a chunk receipt (%s): %r" % (e, st))
+        _relay_steps(receipt)
         out = _RemotePairs(out)
         out.elsewhere = sum(int(p.get("items", 0)) for p in (receipt or {}).get("parts", [])
                             if str(p.get("where", "")).startswith("peer:"))

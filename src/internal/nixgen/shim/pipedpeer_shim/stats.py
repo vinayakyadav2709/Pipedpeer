@@ -43,6 +43,11 @@ _STATS = {"remote_items": 0, "local_items": 0, "dispatched_items": 0,
 # remote chunks an item can be computed twice - so they can sum to more than
 # was mapped, and only these two say what the run's results are made of.
 _STATS_LOCK = threading.Lock()
+# Run-record steps the daemons recorded (C24 dicts, already carrying the
+# machine that ran them: a peer's node id for a remote part), appended to the
+# receipt's "steps" as they are; record.step would stamp them with this job's
+# machine.
+_RELAYED_STEPS = []
 # The pid that actually intercepted something, claimed on the first record.
 # Pool workers and multiprocessing's own helper processes (the forkserver, on
 # 3.14+) import this shim as well and reach exit with pristine counters; if
@@ -143,7 +148,9 @@ def _write_receipt():
     import json
     with _STATS_LOCK:
         # The run record's steps (C24) ride in the receipt under "steps".
-        body = json.dumps(record.into(dict(_STATS)))
+        rec = record.into(dict(_STATS))
+        rec["steps"] = rec["steps"] + list(_RELAYED_STEPS)
+        body = json.dumps(rec)
     try:
         with open(path, "w") as f:
             f.write(body)
