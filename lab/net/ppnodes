@@ -1,0 +1,6 @@
+#!/bin/sh
+# One line per /v1/nodes row: node_id state path host. Token from cluster.json.
+cfg="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/cluster.json"
+tok="$(jq -r '.token // empty' "$cfg" 2>/dev/null)"
+curl -sf --max-time 3 -H "X-Pipedpeer-Token: $tok" http://127.0.0.1:4242/v1/nodes |
+	jq -r '.[] | "\(.node_id) \(.state) \(.path // "-") \(.host // "-")"'

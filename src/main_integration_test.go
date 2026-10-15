@@ -29,15 +29,6 @@ func detectContainerRuntime() string {
 // composeArgs returns the arguments for a compose operation based on the runtime.
 // For podman-compose: returns ["up", "-d", ...] (no "compose" subcommand)
 // For docker: returns ["compose", "up", "-d", ...] (includes "compose" subcommand)
-// worker1Port is the port lab/docker-compose.yml starts worker1's daemon on.
-//
-// It has to be said, because the lab runs with network_mode: host - so inside
-// the container 127.0.0.1:38080 is not this worker's daemon, it is whatever
-// the host machine is running. Defaulting to 38080 made the CLI submit to the
-// developer's own daemon, which answered 401, which surfaced as "remote daemon
-// rejected job".
-const worker1Port = 38081
-
 func composeArgs(runtime string, args ...string) []string {
 	if runtime == "podman-compose" {
 		return args
@@ -435,7 +426,7 @@ echo "hidden" > secret.txt
 	nodeIDOut := readNodeID()
 	if nodeIDOut == "" {
 		// Daemon hasn't created identity yet — start it explicitly first
-		dockerExec(t, ctx, labDir, fmt.Sprintf("/pipedpeer start --port %d && sleep 2", worker1Port))
+		dockerExec(t, ctx, labDir, "/pipedpeer start && sleep 2")
 		nodeIDOut = readNodeID()
 	}
 	if nodeIDOut == "" {
@@ -446,25 +437,14 @@ echo "hidden" > secret.txt
 			"under XDG_DATA_HOME, and in this container that is:\n%s", where)
 	}
 
-	// The daemon answering on worker1Port must be this container's, not
-	// something else that got there first. The lab is host-networked, so any
-	// other daemon on the machine holding that port answers instead - a
-	// hetero-lab container left running from an earlier measurement did
-	// exactly that, and the run failed four steps later with "target_id does
-	// not match this node", which names the symptom and not the cause.
-	answering := strings.TrimSpace(dockerExec(t, ctx, labDir, fmt.Sprintf(
-		"/pipedpeer nodes --port %d 2>/dev/null | grep ' self$' | cut -d' ' -f1 | tr -d '*'", worker1Port)))
-	if answering == "" || !strings.HasPrefix(nodeIDOut, answering) {
-		t.Fatalf("the daemon on port %d reports node %q, but worker1's identity is %q.\n"+
-			"Something else on this machine is holding that port - the lab runs with\n"+
-			"network_mode: host, so another daemon (a lab left up from an earlier run)\n"+
-			"answers in worker1's place. Free it first: docker ps, then stop it.",
-			worker1Port, answering, nodeIDOut)
-	}
+	// Each lab worker has its own network namespace (lab/docker-compose.yml),
+	// so 127.0.0.1:4242 inside worker1 is worker1's daemon and nothing else.
+	// With the old host-networked lab another daemon on the machine could
+	// answer in its place.
 
 	// Run the compiled binary from inside worker1 — no --host means self
-	out, err := dockerExecE(ctx, labDir, fmt.Sprintf(
-		"cd /tmp/sync-test && /pipedpeer run script.py --port %d -e MY_VAR=testvar", worker1Port))
+	out, err := dockerExecE(ctx, labDir,
+		"cd /tmp/sync-test && /pipedpeer run -e MY_VAR=testvar script.py")
 	if err != nil {
 		t.Fatalf("cli run failed: %v\noutput: %s", err, out)
 	}
@@ -517,7 +497,4 @@ echo "hidden" > secret.txt
 
 	// Verify stdout.log was created (content may vary due to PTY allocation in Docker)
 	// File existence is already verified in the must-exist loop above
-
-	// Copy integration job data to test_results
-	runCmdE(ctx, labDir, "docker", "cp", "pipedpeer-lab-1:/root/.local/share/pipedpeer/jobs", "/app/test_results/integration_job_data")
 }

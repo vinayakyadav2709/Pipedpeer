@@ -1,6 +1,9 @@
-FROM nixos/nix:2.31.3
+FROM docker.io/nixos/nix:2.31.3
 
-# Install crun OCI runtime for sandboxed job execution
-RUN nix-env -iA nixpkgs.crun
+# crun runs the sandboxed jobs; curl serves the health checks.
+RUN nix-env -iA nixpkgs.crun nixpkgs.curl
+ENV PATH=/usr/local/bin:$PATH
 
-CMD ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker online :38081' && exec sleep infinity"]
+# The cluster token arrives as LAB_TOKEN (scripts/lab-up.sh); written to the
+# one config file before setup so the daemon starts inside that cluster.
+CMD ["sh", "-c", "if [ -n \"$LAB_TOKEN\" ]; then mkdir -p \"$XDG_DATA_HOME/pipedpeer\" && umask 077 && printf '{\"token\":\"%s\"}\\n' \"$LAB_TOKEN\" > \"$XDG_DATA_HOME/pipedpeer/cluster.json\"; fi; /usr/local/bin/pipedpeer setup -y && echo \"Worker $(hostname) online :4242\" && exec sleep infinity"]

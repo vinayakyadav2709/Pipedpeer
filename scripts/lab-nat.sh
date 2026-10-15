@@ -47,19 +47,19 @@ fi
 
 LAB_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 export LAB_TOKEN
-rv=198.51.100.10:38445
+rv=198.51.100.10:4244
 
 if [[ "$mode" == nat ]]; then
 	nodes=(a b c d)
-	services=(rendezvous router-a router-b router-c router-d node-a node-b node-c node-d)
+	services=(introducer router-a router-b router-c router-d node-a node-b node-c node-d)
 else
 	nodes=(b)
-	services=(rendezvous router-a router-b mu)
+	services=(introducer router-a router-b mu)
 fi
 
 ctr() { [[ "$1" == mu ]] && echo pp-nat-mu || echo "pp-nat-node-$1"; }
 x() { local c; c="$(ctr "$1")"; shift; "$rt" exec "$c" "$@"; }
-api() { x "$1" curl -sf --max-time 5 -H "X-Pipedpeer-Token: $LAB_TOKEN" "http://127.0.0.1:38080$2"; }
+api() { x "$1" curl -sf --max-time 5 -H "X-Pipedpeer-Token: $LAB_TOKEN" "http://127.0.0.1:4242$2"; }
 fail() { echo "FAIL: $*"; exit 1; }
 # wait_for <seconds> <command...>: poll every 3 s until it succeeds.
 wait_for() {
@@ -79,7 +79,7 @@ collect() {
 			-name daemon.log 2>/dev/null)' >"$logdir/$n.daemon.log" 2>&1
 		"$rt" logs "$(ctr "$n")" >"$logdir/$n.out" 2>&1
 	done
-	"$rt" logs pp-nat-rendezvous >"$logdir/rendezvous.out" 2>&1
+	"$rt" logs pp-nat-introducer >"$logdir/introducer.out" 2>&1
 	if [[ "${LAB_NAT_KEEP:-0}" == 1 ]]; then
 		echo "LAB_NAT_KEEP=1: containers left running; tear down with: cd lab/nat && $rt compose down"
 	else
@@ -201,9 +201,9 @@ if [[ "$mode" == nat ]]; then
 		o=$([[ $s == c ]] && echo d || echo c)
 		links "$s" "${id[$o]}" && fail "symmetric<->symmetric $s<->$o linked; the NATs are not what they claim"
 	done
-	x c pipedpeer nodes >"$logdir/nodes-c.txt" 2>&1 || true
-	grep -q 'Peers with no direct path' "$logdir/nodes-c.txt" ||
-		fail "\`pipedpeer nodes\` on c does not list d as unreachable (see $logdir/nodes-c.txt)"
+	x c pipedpeer status >"$logdir/status-c.txt" 2>&1 || true
+	grep -qi 'unreachable' "$logdir/status-c.txt" ||
+		fail "\`pipedpeer status\` on c does not list d as unreachable (see $logdir/status-c.txt)"
 	echo "  c<->d symmetric/symmetric: unreachable, '$reason_both' on both ends"
 
 	run_pool a
@@ -221,7 +221,7 @@ as_pp() {
 	mu runuser -u pp -- env HOME=/home/pp XDG_RUNTIME_DIR=/run/user/1000 \
 		DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus \
 		PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:/bin \
-		PIPEDPEER_TOKEN="$LAB_TOKEN" PIPEDPEER_RENDEZVOUS="$rv" "$@"
+		PIPEDPEER_TOKEN="$LAB_TOKEN" "$@"
 }
 
 wait_for 120 mu systemctl is-active dbus || fail "systemd never came up in mu"
@@ -237,6 +237,9 @@ wait_for 30 mu test -S /run/user/1000/bus || fail "no user session for pp in mu"
 # The one sudo. A temporary blanket rule stands in for the user typing the
 # password; it is removed before anything the claim depends on.
 mu sh -c "echo 'pp ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/zz-lab-setup && chmod 0440 /etc/sudoers.d/zz-lab-setup"
+as_pp sh -c 'mkdir -p ~/.local/share/pipedpeer && umask 077 &&
+	printf "{\"token\":\"%s\",\"introducers\":[\"%s\"]}\n" "$PIPEDPEER_TOKEN" "$1" >~/.local/share/pipedpeer/cluster.json' _ "$rv" ||
+	fail "could not write pp's cluster.json in mu"
 as_pp pipedpeer setup -y >"$logdir/mu-setup.log" 2>&1 ||
 	{ mu rm -f /etc/sudoers.d/zz-lab-setup; tail -20 "$logdir/mu-setup.log"; fail "setup as pp in mu"; }
 mu rm -f /etc/sudoers.d/zz-lab-setup

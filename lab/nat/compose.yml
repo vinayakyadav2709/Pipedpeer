@@ -25,22 +25,27 @@ x-node: &node
   volumes:
     - ../pipedpeer:/usr/local/bin/pipedpeer:ro
   # $$: compose would otherwise substitute LAB_ROUTER from the host.
-  command: ["sh", "-c", "ip route replace default via $$LAB_ROUTER && pipedpeer setup -y && exec sleep infinity"]
+  command: ["sh", "-c", "ip route replace default via $$LAB_ROUTER && mkdir -p \"$$XDG_DATA_HOME/pipedpeer\" && printf '{\"token\":\"%s\",\"introducers\":[\"%s\"]}\\n' \"$$LAB_TOKEN\" \"$$LAB_INTRODUCER\" > \"$$XDG_DATA_HOME/pipedpeer/cluster.json\" && pipedpeer setup -y && exec sleep infinity"]
 
 x-node-env: &node-env
-  PIPEDPEER_TOKEN: ${LAB_TOKEN:?scripts/lab-nat.sh sets LAB_TOKEN}
-  PIPEDPEER_RENDEZVOUS: 198.51.100.10:38445
+  # Token and introducer go into cluster.json (the one config file) before
+  # setup; PIPEDPEER_TOKEN too, for commands run with docker exec.
+  LAB_TOKEN: ${LAB_TOKEN:?scripts/lab-nat.sh sets LAB_TOKEN}
+  PIPEDPEER_TOKEN: ${LAB_TOKEN}
+  LAB_INTRODUCER: 198.51.100.10:4244
   XDG_DATA_HOME: /var/lib/pipedpeer
   XDG_STATE_HOME: /var/lib/pipedpeer-state
 
 services:
-  rendezvous:
+  introducer:
     <<: *router
-    container_name: pp-nat-rendezvous
+    container_name: pp-nat-introducer
     volumes:
       - ../pipedpeer:/usr/local/bin/pipedpeer:ro
-    # No relay: a pair the lab claims is direct cannot be carried by one.
-    command: ["pipedpeer", "rendezvous", "--relay", ""]
+    # A cluster member that only introduces (every daemon can; this one takes
+    # no jobs). There is no relay code: every pair the lab links is direct.
+    environment: { <<: *node-env }
+    command: ["sh", "-c", "mkdir -p \"$$XDG_DATA_HOME/pipedpeer\" && printf '{\"token\":\"%s\",\"introducers\":[\"%s\"]}\\n' \"$$LAB_TOKEN\" \"127.0.0.1:4244\" > \"$$XDG_DATA_HOME/pipedpeer/cluster.json\" && pipedpeer start --introducer-only && exec sleep infinity"]
     networks:
       public: { ipv4_address: 198.51.100.10 }
 

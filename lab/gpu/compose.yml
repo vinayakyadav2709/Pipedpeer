@@ -2,7 +2,7 @@
 # GPU through CDI (docker, spec in /var/run/cdi/nvidia.yaml); sub1 has no GPU
 # and plays the college PC that submits. Driven by scripts/lab-gpu.sh.
 #
-#   gpu 10.89.0.0/24   gpu1 .11 (also the rendezvous), gpu2 .12, sub1 .13
+#   gpu 10.89.0.0/24   gpu1 .11 (starts the cluster), gpu2 .12, sub1 .13
 #
 # The node image is lab/nat's (nix, root). It has no glibc loader at /lib64, so
 # the host's nvidia-smi cannot start; the command below links nix's loader and
