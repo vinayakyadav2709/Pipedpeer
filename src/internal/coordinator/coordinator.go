@@ -81,6 +81,7 @@ type Coordinator struct {
 
 	selfCeilingOnce  sync.Once
 	selfCeilingBytes int64
+	selfRole         string // the local daemon's heartbeat.Role, from /health
 }
 
 // Config for the coordinator.

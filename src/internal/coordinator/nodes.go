@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -34,23 +35,29 @@ func (c *Coordinator) buildSelfNode() registry.NodeRecord {
 	// run inside a capped scope would read that scope's): ask the daemon.
 	load := c.selfLoad
 	load.MemCeilingBytes = c.selfCeiling()
+	caps := map[string]string{
+		"arch":     c.selfIdentity.Arch,
+		"hostname": c.selfIdentity.Hostname,
+	}
+	// Self replaces the daemon's own /v1/nodes entry (mergeNode), so the
+	// daemon's role must ride along: a chunks-only phone takes no jobs.
+	if c.selfRole != "" {
+		caps[heartbeat.RoleCapability] = c.selfRole
+	}
 	return registry.NodeRecord{
-		NodeID:      c.selfIdentity.NodeID,
-		SSHEndpoint: c.selfSSH,
-		DaemonPort:  c.selfDaemon,
-		Capabilities: map[string]string{
-			"arch":     c.selfIdentity.Arch,
-			"hostname": c.selfIdentity.Hostname,
-		},
-		Load:        load,
-		State:       "healthy",
-		HealthScore: 1.0,
+		NodeID:       c.selfIdentity.NodeID,
+		SSHEndpoint:  c.selfSSH,
+		DaemonPort:   c.selfDaemon,
+		Capabilities: caps,
+		Load:         load,
+		State:        "healthy",
+		HealthScore:  1.0,
 	}
 }
 
 // selfCeiling is the most this machine's daemon will grant one job, from its
 // /health, read once per run. 0 (unknown: no daemon, or an older one) never
-// makes a job "too big for anyone".
+// makes a job "too big for anyone". The same read records the daemon's role.
 func (c *Coordinator) selfCeiling() int64 {
 	c.selfCeilingOnce.Do(func() {
 		if c.selfDaemon <= 0 {
@@ -64,9 +71,12 @@ func (c *Coordinator) selfCeiling() int64 {
 		}
 		defer resp.Body.Close()
 		var h struct {
-			Load *registry.LoadInfo `json:"load"`
+			Load         *registry.LoadInfo `json:"load"`
+			Capabilities map[string]string  `json:"capabilities"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil || h.Load == nil {
+		err = json.NewDecoder(resp.Body).Decode(&h)
+		c.selfRole = h.Capabilities[heartbeat.RoleCapability]
+		if err != nil || h.Load == nil {
 			fmt.Fprintf(os.Stderr, "[coordinator] warning: %s gave no memory ceiling (%v); treating it as unknown\n", url, err)
 			return
 		}
@@ -84,12 +94,14 @@ func (c *Coordinator) queryDaemonNodes() []storedNode {
 	}
 	resp, err := c.httpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", c.selfDaemon))
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[coordinator] warning: cannot ask this machine's daemon for its node list (%v); placing without it\n", err)
 		return nil
 	}
 	defer resp.Body.Close()
 
 	var nodes []storedNode
-	if json.NewDecoder(resp.Body).Decode(&nodes) != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		fmt.Fprintf(os.Stderr, "[coordinator] warning: this machine's daemon gave no node list (HTTP %d: %v); placing without it\n", resp.StatusCode, err)
 		return nil
 	}
 	return nodes

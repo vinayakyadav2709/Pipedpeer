@@ -14,6 +14,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -118,6 +119,30 @@ func TestSelfNodeCarriesTheDaemonsCeiling(t *testing.T) {
 	c := New(Config{SelfIdentity: makeID("self", "laptop", "x86_64-linux"), SelfDaemon: port})
 	if got := c.buildSelfNode().Load.MemCeilingBytes; got != 1500<<20 {
 		t.Fatalf("self ceiling %d, want %d", got, 1500<<20)
+	}
+}
+
+// A chunks-only phone ran `pipedpeer run` and placed the job on itself:
+// buildSelfNode replaced the daemon's own entry and dropped its role.
+func TestChunksOnlySelfPlacesElsewhere(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/nodes" {
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"load": registry.LoadInfo{},
+			"capabilities": map[string]string{heartbeat.RoleCapability: heartbeat.RoleChunksOnly}})
+	}))
+	defer ts.Close()
+	port, _ := strconv.Atoi(ts.URL[strings.LastIndex(ts.URL, ":")+1:])
+	c := New(Config{SelfIdentity: makeID("phone", "phone", "aarch64-linux"), SelfDaemon: port,
+		DiscoverFn: func() []registry.NodeRecord {
+			return []registry.NodeRecord{{NodeID: "laptop", State: "healthy",
+				Capabilities: map[string]string{"hostname": "laptop", "arch": "aarch64-linux"},
+				Load:         registry.LoadInfo{AvailableMemBytes: 8 << 30}}}
+		}})
+	if d := c.FindNode(); d.ChosenNode.NodeID != "laptop" {
+		t.Fatalf("chose %q (%s), want laptop", d.ChosenNode.NodeID, d.RejectionLine())
 	}
 }
 

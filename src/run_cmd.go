@@ -119,6 +119,12 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
 			remote, _ := cmd.Flags().GetBool("remote")
+			// A node with a role (a chunks-only phone) refuses whole jobs, so
+			// its own runs are placed like --remote rather than sent to it.
+			if role := localDaemonRole(daemonPort); !remote && daemonHost == "" && role != "" {
+				say.Println("[coordinator] this machine is a " + role + " node and takes no jobs; placing the run on another node...")
+				remote = true
+			}
 			offload, _ := cmd.Flags().GetBool("offload")
 			strategy, _ := cmd.Flags().GetString("strategy")
 			distribute, _ := cmd.Flags().GetString("distribute")
@@ -642,6 +648,24 @@ func envGPU(requireGPU, preferGPU bool, daemonPort int, selfID, targetID string,
 
 // runDaemonPort is this machine's daemon API port: the one the running (or
 // last) daemon recorded, else the default.
+// localDaemonRole is the local daemon's heartbeat.Role from its /health; ""
+// for a full node or no daemon (a missing daemon is reported by the run).
+func localDaemonRole(port int) string {
+	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Capabilities map[string]string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		say.Warnf("cannot read this machine's daemon role from /health (%v); treating it as a full node\n", err)
+		return ""
+	}
+	return h.Capabilities[heartbeat.RoleCapability]
+}
+
 func runDaemonPort() int {
 	if p := daemonctl.Status().Port; p > 0 {
 		return p

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 )
 
 // DiscoverTCP finds daemons by probing the local subnet's /health endpoints
@@ -152,7 +154,7 @@ func sweepTargets(s subnet) []net.IP {
 // localSubnets lists the IPv4 networks of every up, non-loopback interface.
 func localSubnets() []subnet {
 	var out []subnet
-	ifaces, err := net.Interfaces()
+	ifaces, err := netaddr.Interfaces()
 	if err != nil {
 		return out
 	}
@@ -160,7 +162,7 @@ func localSubnets() []subnet {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		addrs, err := iface.Addrs()
+		addrs, err := netaddr.Addrs(iface)
 		if err != nil {
 			continue
 		}

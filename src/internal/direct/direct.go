@@ -41,6 +41,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 )
 
 // Candidate is one address a peer might be reachable at, and how it was
@@ -262,13 +264,13 @@ func newNonce() ([8]byte, error) {
 func Gather(port uint16, mapped netip.AddrPort, reflex netip.AddrPort) []Candidate {
 	var out []Candidate
 
-	ifaces, err := net.Interfaces()
+	ifaces, err := netaddr.Interfaces()
 	if err == nil {
 		for _, ifc := range ifaces {
 			if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
 				continue
 			}
-			addrs, err := ifc.Addrs()
+			addrs, err := netaddr.Addrs(ifc)
 			if err != nil {
 				continue
 			}
