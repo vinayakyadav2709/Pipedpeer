@@ -261,6 +261,23 @@ The subsystems, all under `src/internal/` (plus `main`):
 | `service`, `warmup`, `doctor`, `phone` | Autostart user unit; background build of common environments; diagnostics with fixes; Termux pool worker |
 | `daemonctl`, `setup`, `userdir`, `userns`, `netaddr`, `logging`, `say`, `term`, `app` | Supporting |
 
+Large packages are split by responsibility; one line per file:
+
+| File (under `src/`) | Responsibility |
+|---|---|
+| `ddp_cmd.go`, `ddp_plan.go` | `runDDP` (the CLI side of a training run); rank weights, uneven splits and the lead choice |
+| `internal/coordinator/coordinator.go`, `find.go`, `nodes.go`, `place.go`, `execute.go` | the `Coordinator` type and `FindNodeWithin`; filtering and rejection reasons; node list, `scoreNode` and `scoreGPUNode`; lease request, commit and `PlaceWithRetry`; `ExecuteWithRetry` and its back-off |
+| `internal/daemonctl/execution.go`, `upload.go`, `workspace.go` | streaming an execution and fetching results; job upload and closure send; workspace tar and NAR export |
+| `internal/internet/internet.go`, `connect.go`, `hints.go`, `link.go`, `introducer.go` | the `Manager` and its loop; interface watching, redial and the connect race; candidate hints and the router-mapping check; link lifecycle, forwarders and no-path back-off; the in-daemon introducer |
+| `internal/daemonapi/server.go`, `serverhttp.go`, `serverlease.go`, `serverclosure.go` | `Server` construction and constants; router, admission and trusted-key refresh; leases, persistence and the sweeper; closure broadcast to peers |
+| `internal/daemonapi/execrun.go`, `execsupervise.go`, `execupload.go`, `execresults.go`, `execution.go` | `handleJobExec` and the OCI bundle; memory cap, output streaming and cancel; workspace upload; results archive and NAR import; shared helpers and the GPU driver directory |
+| `internal/daemonapi/pool.go`, `poolhandlers.go`, `poolrun.go`, `poolremote.go`, `poolworker.go`, `poolwire.go`, `poolcompress.go`, `poolscripts.go` | the pool manager state; `/v1/pool/*` handlers and body limit; chunk placement and peer choice; remote runs and racing; local worker processes; frame wire format; per-link compression; the embedded worker Python |
+| `internal/daemonapi/ddpsync.go`, `ddpboard.go`, `ddprequest.go`, `ddplocal.go`, `ddppacing.go`, `ddpreduce.go`, `ddprebalance.go` | one DDP sync round trip; the per-run board (expected ranks, drops); request parsing; the single-machine path; pacing and per-rank times; the weighted reduction; rebalance and the DiLoCo plan |
+| `internal/daemonapi/nodes.go`, `nodespeers.go`, `nodespoll.go`, `narcache.go`, `narimport.go`, `narsubstitute.go`, `cas.go` | `/v1/nodes` and staleness; peer add, remove and path verification; the poller; the signed-archive cache; store import and missing-path checks; substitution from cache.nixos.org; content-addressed workspace files |
+| `internal/nixgen/shim/pipedpeer_shim/pool.py`, `pool_func.py`, `pool_pacing.py`, `pool_race.py`, `pool_resources.py` | the `Pool` drop-in; function payloads and chunking; pacing and cancellation; racing local against remote (and the joblib backend); pool width and memory probes |
+| `.../pandas_ops.py`, `pandas_frame.py`, `pandas_combine.py`, `pandas_ooc.py` | install hooks and shuffles; the partitioned frame; combining partial aggregates; out-of-core reads |
+| `.../ddp.py`, `ddp_state.py`, `ddp_sync.py`, `ddp_ring.py`, `ddp_loader.py`, `ddp_fast.py`, `ddp_wire.py`, `ddp_diloco.py`, `ddp_sampler.py` | the DDP interception and install; the run-state object; every sync with the lead daemon; ring changes and releases; DataLoader wiring; the fast-sync driver; wire pieces (exit codes, int8 codec, frames); DiLoCo schedule and outer step; weighted batch split and shard sampler |
+
 The relay code, the NATS transport, the standalone registry and the ping
 package were deleted in the address-book phase. No job traffic is relayed
 (4.2).
@@ -426,7 +443,7 @@ two such machines come to share a direct, encrypted link.
   peers (commit `42c2426`).
 
 **Candidates.** Each node offers three kinds of candidate address
-(`direct/direct.go:58-89`):
+(`direct/direct.go:48-69`):
 - `lan`: its LAN addresses;
 - `mapped`: a port its router agreed to forward;
 - `reflex`: the address the introducer saw.
@@ -436,7 +453,7 @@ The router is asked through PCP, then NAT-PMP, then UPnP-IGD
 actually granted. A mapping is withheld if its external IP differs from the one
 the introducer saw. Only the IP is compared, and on the first poll, before any
 reflexive address is known, the mapping is published unchecked
-(`internet/internet.go:340-358, 801-809`). The check exists because a mapping on
+(`internet/hints.go:121-147, 299-316`). The check exists because a mapping on
 a router behind a second NAT, such as a phone tether, would otherwise be
 published as reachable when it is not.
 
@@ -452,7 +469,7 @@ published as reachable when it is not.
 
 **The race.**
 - Both sides probe every pairing of their candidates every 250 ms, for a 15 s
-  window (`direct/direct.go:374-414`; `internet.go:441`).
+  window (`direct/direct.go:386-433`; `internet/connect.go:238-239`).
 - Trying candidates one at a time would add a timeout per address that cannot
   work.
 - When the race fails because one side's NAT allocates a new port per
@@ -494,7 +511,7 @@ accepted, and re-registers with every introducer.
 
 **No relay.**
 - A peer with no direct path is not relayed. It is logged with the reason, never
-  handed to the scheduler, and retried after a back-off (`internet.go:597-607`).
+  handed to the scheduler, and retried after a back-off (`internet/link.go:137-160`).
 - A relay was built (commit `a6e0723`) and then removed from the data path
   (`95e0712`), because it would carry every byte of every job.
 - A live link is never expired because the introducer went away. A peer was
@@ -533,7 +550,7 @@ one has three layers. `fig_4.2_trust.png` shows them.
   `auth_token` file migrates on first read.
 - Every route on the daemon, `/health` included, requires it in
   `X-Pipedpeer-Token` or as a bearer token. The comparison is constant-time and
-  a mismatch is a 401 (`daemonapi/server.go:1070`).
+  a mismatch is a 401 (`authtoken/token.go:164-167`).
 - Outbound requests to `/health` and `/v1/*` carry it automatically, but only
   to a host that has proved it holds it (`4885a42`). The LAN sweep used to send
   the token in plain HTTP to every host on the /24 that answered on the port.
@@ -580,7 +597,7 @@ one has three layers. `fig_4.2_trust.png` shows them.
   of the nodes it knows to a `trusted-public-keys` file.
 - `setup` adds those keys to the system Nix configuration as
   `extra-trusted-public-keys`, with consent, and **never** writes
-  `require-sigs = false` (`setup/setup.go:184-253`; commit `cf2e3ae`).
+  `require-sigs = false` (`setup/setup.go:153-295`; commit `cf2e3ae`).
 - A closure sent between daemons in the signed format is imported with `nix copy
   --from`, so the receiving Nix applies its own signature policy. This was
   verified on a machine with `require-sigs = true`: a closure signed by a
@@ -621,14 +638,14 @@ belief that it does not check signatures; it does.
   every holder can run code on every node.
 - **The trusted-key list is not tied to an authenticated identity.** Any node
   in the node store contributes its key, including one found by unauthenticated
-  LAN discovery (`daemonapi/server.go:1578-1615`).
+  LAN discovery (`daemonapi/serverhttp.go:160-209`).
 - **The key helper trusts on the token's word.** With the helper installed,
   anyone holding the cluster token can get signed paths trusted by system Nix
   on every machine with no human in the loop. That was already true after the
   old manual trust step; SECURITY.md and ADR-0018 say so.
 - **One import path skips signature checking.** The older transfer format, which
   the submitter still uses for its own upload, imports with `--no-check-sigs`
-  (`daemonapi/execution.go:1132`). Single-user Nix does check signatures on the
+  (`daemonapi/execresults.go:173`). Single-user Nix does check signatures on the
   signed path; the belief that it did not was corrected in `8484714`.
 - **LAN discovery is unauthenticated.** Discovery accepts any responder as a
   candidate, but the token goes only to hosts that prove they hold it, and a
@@ -654,7 +671,7 @@ They are deduplicated by node ID. Then five hard filters run in order
 
 Each rejection records a reason, which surfaces in `pipedpeer jobs <id> --explain`.
 
-Survivors are scored by `coordinator.scoreNode` (`coordinator.go:942-976`),
+Survivors are scored by `coordinator.scoreNode` (`coordinator/nodes.go:126-158`),
 unchanged since August:
 
 ```go
@@ -683,7 +700,7 @@ Two properties matter:
 
 See `fig_4.4_scoring_weights.png`. When a GPU is wanted, `scoreGPUNode` adds up
 to 0.8 more from VRAM, device count, free VRAM, compute capability and a
-utilisation penalty (`coordinator.go:987-1024`).
+utilisation penalty (`coordinator/nodes.go:171-209`).
 
 One thing did change: what a node reports as free memory. `/health` now
 advertises what the node can actually *grant*, which is its memory budget less
@@ -715,11 +732,11 @@ complete/cancel -> released
 
 The constants are `DefaultLeaseDuration = 30s`, `DefaultGracePeriod = 5s`,
 `DefaultSweepInterval = 2s` and `DefaultRunningLeaseTTL = 5m`
-(`daemonapi/server.go:44-51`).
+(`daemonapi/server.go:28-35`).
 
 The concurrency and memory checks and the lease insertion happen under one
 lock, so two racing submitters cannot both take the last slot. The cores check
-runs just before the lock is taken (`server.go:1757-1767`).
+runs just before the lock is taken (`serverhttp.go:309-319`).
 
 `/v1/accept` checks, in order:
 1. cores;
@@ -731,7 +748,7 @@ Recovery follows from the design:
 - **A dead submitter** stops renewing, and its slot is reclaimed.
 - **A dead worker** is marked unreachable at the next failed poll. The in-flight read
   fails, and the coordinator reschedules with back-off doubling from 2 s to a
-  2 min ceiling (`coordinator.go:764-799`). Waiting for room never drops a
+  2 min ceiling (`coordinator/execute.go:141, 205-224`). Waiting for room never drops a
   task, but a job that *fails* is run at most three times, on nodes not yet
   tried first, and then returns its last error; it used to retry a signal,
   exit 126/127 or a sandbox failure forever (`1e07d56`).
@@ -741,7 +758,7 @@ Recovery follows from the design:
 **Import scanning is a line-oriented parser.**
 - The August version used a single regular expression, which kept only the
   first name of `import a, b`.
-- `pythondeps/deps.go:155-177` now parses each line by hand:
+- `pythondeps/deps.go:177-199` now parses each line by hand:
   - `#` comments are stripped;
   - `from X import ...` yields `X`;
   - `import a, b as c` yields both `a` and `b`;
@@ -764,11 +781,11 @@ Recovery follows from the design:
   of them, and added when it exists.
 - Only the imports still without a package are reported, before anything runs:
   `Not packaged (the job will fail to import it): X — add it with --pkg
-  <nixpkgs name>` (`app/env.go:106`). A failed eval says so and falls back to
+  <nixpkgs name>` (`app/env.go:149-151`). A failed eval says so and falls back to
   the warning. Until `15d37b2` such an import was dropped silently and the job
   died on `ImportError` on the node.
 - A `requirements.txt` beside the script is read as if it had been passed with
-  `--pkg`, and the run says so in one line (`app/env.go:90`).
+  `--pkg`, and the run says so in one line (`app/env.go:134-136`).
 - `uv.lock`, whose names replace detection, and `--pkg` remain the escape
   hatches.
 
@@ -790,7 +807,7 @@ time shares those store paths and fetches only what it adds. Before and after:
 the environment of a teacher-style script built in 54 s without it and 4 s with
 it, on a container of the rehearsal lab <!-- evidence v1/15-pc3-pkgprep-before-after.txt (8e14b9b), dry-run build -->.
 
-**The store path is the cache key.** `nixgen/flake.go:34` pins an exact nixpkgs
+**The store path is the cache key.** `nixgen/flake.go:35` pins an exact nixpkgs
 revision (`56c02bc00adcf003215cc4bd996d6efaf4cff188`). A branch would resolve
 differently on different days, so the same script would get a different store
 path and the cache would miss. A fixed revision makes the store path a stable
@@ -871,7 +888,7 @@ an import.
 ### 4.8 Execution, isolation and memory
 
 **The sandbox.** Jobs run under `crun` in an OCI bundle
-(`fig_4.7_sandbox.png`; `daemonapi/execution.go:703-737`).
+(`fig_4.7_sandbox.png`; `daemonapi/execrun.go:401-434`).
 - The root filesystem is read-only and minimal.
 - Mounts:
   - `/nix` read-only;
@@ -891,7 +908,7 @@ an import.
   twice its estimate, with a 512 MiB floor. The limit is clamped to what the
   node can grant, but never below what admission approved.
 - A job with no estimate used to run with no cap at all. It is now capped at
-  4 GiB (`app/run.go:336`, `acbbfa2`), with a note pointing to `--mem`; the node
+  4 GiB (`app/run.go:311-313, 569`, `acbbfa2`), with a note pointing to `--mem`; the node
   still lowers that to what it can spare.
 - If the job is killed and the cgroup's `oom_kill` counter rose, the client is
   told the job ran out of memory and how to raise `--mem`.
@@ -1094,7 +1111,7 @@ peer) never failed a detached one.
 
 **Sharing work by measured speed.**
 - On the daemon, a chunk is split across peers by `schedule.Compute`
-  (`schedule/schedule.go:129-281`). Each device is modelled as a setup time plus
+  (`schedule/schedule.go:129-300`). Each device is modelled as a setup time plus
   a rate, fitted from its last eight observed parts (`daemonapi/poolrates.go`).
 - The solver chooses the makespan *T* that finishes all the work. It drops any
   device whose setup time alone exceeds *T*, because that device "cannot start
@@ -1324,7 +1341,7 @@ Memory is bounded at the same time:
   healthier peer.
 - A request needing more than 40% of it runs in sequential micro-chunks.
 - The `/v1/pool/map` body is capped at the smaller of 2 GiB and half the
-  daemon's budget (`daemonapi/pool.go:738-752`).
+  daemon's budget (`daemonapi/poolhandlers.go:58-71`).
 
 ### 4.12 Resource estimation
 
@@ -1969,35 +1986,35 @@ See 4.3. In summary:
 
 | Claim | Evidence |
 |---|---|
-| Store path is the cache key | `nixgen/flake.go:34`; 5.2 |
+| Store path is the cache key | `nixgen/flake.go:35`; 5.2 |
 | Path-level closure diff | `daemonctl/closurediff.go`; `/v1/store/missing`; commit 193e1bf |
 | Signed transfer | `daemonapi/signedclosure.go`, `narpack/`, `nixsign/`; commit cf2e3ae |
-| Setup never writes require-sigs=false | `setup/setup.go:184-253`; mutation audit case |
-| Shared secret on every route | `authtoken/token.go`; `daemonapi/server.go:1070-1093` |
-| Pinned TLS, opportunistic | `tlsid/dial.go:16-21, 107-114`; `tlsid/listener.go` |
-| Hole punching, birthday collision | `direct/direct.go`, `direct/birthday.go`, `internet/internet.go` |
+| Setup never writes require-sigs=false | `setup/setup.go:153-295`; mutation audit case |
+| Shared secret on every route | `authtoken/token.go`; `authtoken/token.go:136-171` |
+| Pinned TLS, opportunistic | `tlsid/dial.go:16-21, 106-110`; `tlsid/listener.go` |
+| Hole punching, birthday collision | `direct/direct.go`, `direct/birthday.go`, `internet/connect.go` |
 | No relay in the data path | `internal/relay` deleted; commit 95e0712 removed it from the daemon |
-| Router mapping published only if it matches | `internet/internet.go:340-358` |
-| Placement scoring | `coordinator/coordinator.go:942-976` |
-| Lease constants | `daemonapi/server.go:44-51` |
-| Staleness thresholds | `daemonapi/server.go:1287,1620` |
+| Router mapping published only if it matches | `internet/hints.go:121-147` |
+| Placement scoring | `coordinator/nodes.go:126-158` |
+| Lease constants | `daemonapi/server.go:28-35` |
+| Staleness thresholds | `daemonapi/nodes.go:199-210`; `nodestore/store.go:122-125` |
 | Discovery is UDP, not mDNS | `discovery/discovery.go:39-47` |
-| Import scan is a line parser | `pythondeps/deps.go:155-177` |
-| Makespan work sharing | `schedule/schedule.go:129-281`; `daemonapi/poolrates.go` |
+| Import scan is a line parser | `pythondeps/deps.go:177-199` |
+| Makespan work sharing | `schedule/schedule.go:129-300`; `daemonapi/poolrates.go` |
 | Daemon-side weighted gradient average | `daemonapi/ddpreduce.go`; mutation audit case |
-| Per-job and daemon memory ceilings | `cgroups/`; `daemonapi/execution.go:745-764` |
-| Sandbox namespaces, no netns or seccomp | `daemonapi/execution.go:703-737`; `sandboxquirks.go:141-147` |
+| Per-job and daemon memory ceilings | `cgroups/`; `daemonapi/execrun.go:436-461` |
+| Sandbox namespaces, no netns or seccomp | `daemonapi/execrun.go:401-434`; `sandboxquirks.go:141-147` |
 | Hash shuffle exact in value | `TestShimHashShuffleMatchesLocal` |
 | Remote failure degrades to local | `TestShimRaceCorrectWithDeadRemote` |
 | Unknown import resolved or reported | `pythondeps/`; `app/env.go:90-106`; commits 15d37b2, 2c91f14, f3b564d |
-| Cancel stops the job everywhere | `daemonapi/execution.go`, `daemonapi/pool.go`, `coordinator/coordinator.go`; commits d961dbb, dcfa6f5, d28c69e |
+| Cancel stops the job everywhere | `daemonapi/execsupervise.go`, `daemonapi/poolhandlers.go`, `coordinator/execute.go`; commits d961dbb, dcfa6f5, d28c69e |
 | Background mode and attach | `daemonapi/joblog.go`, `daemonapi/attach.go`, `daemonctl/attach.go`, `app/attach.go`; commits ca853bb, 272ca83 |
 | DDP survives a dead rank | `ddp_cmd.go` runDDP; shim sampler; commit 8e14b9b |
 | Key helper | `setup/`, `nixsign/`; ADR-0018; commit 454754a |
-| `--offload` keeps spread work off this machine | `run_cmd.go`, `daemonapi/pool.go`, shim `PIPEDPEER_OFFLOAD`; `offload_test.go`; commit ef68f02 |
+| `--offload` keeps spread work off this machine | `run_cmd.go`, `daemonapi/poolhandlers.go`, shim `PIPEDPEER_OFFLOAD`; `offload_test.go`; commit ef68f02 |
 | Usage lines in the summary | `app/selfuse.go`; commits ca70da4, 98e8684 |
-| Closure refusal skips one node; 3 failed runs at most | `coordinator/coordinator.go` `ExecuteWithRetry`; `fxplace_test.go`; commit 1e07d56 |
-| Slow peer raced, not discarded | `daemonapi/pool.go`; commit 8541355 |
+| Closure refusal skips one node; 3 failed runs at most | `coordinator/execute.go` `ExecuteWithRetry`; `fxplace_test.go`; commit 1e07d56 |
+| Slow peer raced, not discarded | `daemonapi/poolremote.go`; commit 8541355 |
 | Dead node told from a lost network | `app/lostconn.go` `networkUp`; commit 879b86c |
 | Ctrl+C stops nix export and pack | `nixstore/nixstore.go` `CmdContext`; `nixstore/cancel_test.go`; commit 99cf0ad |
 | DDP start barrier | `daemonapi/ddpsync.go`; `ddpstart_test.go`, `ddpstart_shim_test.go`; commits c567369, 9b47502 |
