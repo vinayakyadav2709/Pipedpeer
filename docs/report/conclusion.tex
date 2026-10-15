@@ -39,8 +39,8 @@ networks with a single command and no relay. Its contributions are:
 The principle that runs through the design is that the cluster is used only when
 a measurement says it will help: work is divided by measured speed rather than
 by headcount, dense matrix products stay local on a CPU cluster, a training ring
-whose size the user did not fix is released when one GPU is faster, and fast synchronisation is chosen
-automatically only within the ring sizes where it was shown to keep accuracy.
+whose size the user did not fix is released when one GPU is faster, and fast
+synchronisation is chosen only for ring sizes where it kept accuracy.
 
 \section{Limitations}
 
@@ -53,9 +53,8 @@ automatically only within the ring sizes where it was shown to keep accuracy.
   take parallel chunks only.
   \item \textbf{Submitter and lead.} A parallel script runs on its submitter,
   which must survive the job, and a training ring needs rank 0's machine.
-  \item \textbf{Fast synchronisation for small rings.} At eight ranks the
-  transformer failed at every interval down to 2, so no interval is used for
-  five or more ranks and automatic mode keeps such rings exact.
+  \item \textbf{Fast synchronisation for small rings.} No interval kept accuracy
+  at eight ranks, so automatic mode keeps rings of five or more exact.
   \item \textbf{Interception gaps.} Only \texttt{map} of a process-pool executor
   is intercepted, the \texttt{@} operator is not, and numerical work under
   32\,MB never leaves the node, by design.
@@ -72,9 +71,7 @@ automatically only within the ring sizes where it was shown to keep accuracy.
 \section{Security}
 \label{sec:security}
 
-Section~\ref{sec:trust} describes the protections: a secret on every route,
-pinned TLS, authenticated QUIC links and signed closures. Their limits are
-significant. Every holder of the secret can run code on every node, and jobs can
+The protections of Section~\ref{sec:trust} have significant limits. Every holder of the secret can run code on every node, and jobs can
 read the secret. TLS on a local network is trust on first use and can be
 downgraded by an attacker who can break the handshake. The list of keys trusted
 to sign closures includes nodes found by unauthenticated LAN discovery, and the

@@ -109,10 +109,10 @@ floor is declined by the cost model; a forced run of the same workload does
 dispatch, so the decline is the model's choice and not a dead cluster.
 Declining costs about 0.12\,s per job, the measurement of the head of the map
 plus the decision: a median of 0.80\,s against 0.68\,s with interception
-disabled. Interpreter start-up for a job that imports nothing heavy is
+disabled. Interpreter startup for a job that imports nothing heavy is
 $1.24\times$ that of plain Python when NumPy, pandas, torch and joblib are
 patched on first import, against $20.0\times$ when they are patched at
-start-up (Figure~\ref{fig:resshim}). A continuous-integration check fails any
+startup (Figure~\ref{fig:resshim}). A continuous-integration check fails any
 change that raises this ratio above $3\times$.
 
 \begin{figure}[!htbp]
@@ -120,7 +120,7 @@ change that raises this ratio above $3\times$.
     \includegraphics[width=150mm]{\figpath{fig_5.2_shim_overhead.png}}
     \caption[Cost of interception]{Left: the declined 16-item parallel map, median
     and range; the enabled side's cold first run is left out of its range. Right: interpreter
-    start-up with libraries patched at start-up and on first import.}
+    startup with libraries patched at startup and on first import.}
     \label{fig:resshim}
 \end{figure}
 
@@ -164,7 +164,9 @@ on its CPUs.
 Figure~\ref{fig:ressync} compare a two-rank ring under exact and fast
 synchronisation every 64 steps with one device. Every model stays within the
 1\% bar on both link profiles, each gap within the spread of exact
-synchronisation's own gap, while each rank sends 9 to 16 times fewer bytes. Fast synchronisation was
+synchronisation's own gap, while each rank sends 9 to 16 times fewer bytes;
+MLP-C's negative gap reflects that periodic averaging can generalise slightly
+better than exact synchronisation \cite{lin2020localsgd}. Fast synchronisation was
 faster than exact on every model and profile, by 1.2--1.4 times on the LAN and
 1.6--3.1 times on Wi-Fi.
 
@@ -366,7 +368,7 @@ small number of times on the machines and links available.
 \toprule
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
-Parallel map, 20-core machine and 16-core peer over Tailscale, plain Python against PipedPeer & about 6\,s against 5\,s; under half the items on the peer \\
+Parallel map, 20-core machine and 16-core peer over Tailscale, plain Python against PipedPeer & 5.8--6.4\,s against 4.9--5.4\,s; 116 of 256 items on the peer \\
 Training on two machines over a home link of about 54\,Mbit/s: one machine / two ranks fp16 / two ranks int8 & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
 Introducer traffic during a cross-network run & 0.2\,MB, against about 30\,MB between the peers \\
 Signed closure on a host that requires signatures & imported when the sender's key was trusted; refused when it was removed \\
@@ -376,7 +378,8 @@ Daemon memory ceiling, 3\,GiB allocation under a 1\,GiB ceiling & child killed i
 \end{table}
 
 These support modest claims: a parallel map runs faster across two machines
-than on one, though short of what the core counts allow; exact training over a
+than on one, though short of what the core counts allow, since a job of about
+5\,s is dominated by setup and serialisation; exact training over a
 home link does not beat one machine; and the introducer carries a negligible
 share of the traffic.
 
@@ -391,7 +394,8 @@ PipedPeer is partial or the weaker system.}
 \renewcommand{\arraystretch}{1.2}
 \rowcolors{2}{}{rowgray}
 \small
-\begin{tabularx}{\textwidth}{X C{1.6cm} C{1.2cm} C{1.2cm} C{1.2cm} C{1.35cm} C{1.1cm}}
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\textwidth}{X C{1.6cm} C{1.2cm} C{1.2cm} C{1.2cm} C{1.35cm} C{1.35cm}}
 \toprule
 \textbf{Property} & \textbf{Piped\-Peer} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{BOINC} & \textbf{ssh} \\
 \midrule
@@ -412,7 +416,7 @@ Proven in production use    & no & yes & yes & yes & yes & yes \\
 \end{tabularx}
 \par\smallskip\raggedright\footnotesize $^{\dagger}$When one introducer is
 reachable; otherwise a public address or an overlay such as Tailscale is needed.
-$^{*}$Any worker; not the submitter of a parallel script or the machine of a
+\par $^{*}$Any worker; not the submitter of a parallel script or the machine of a
 training ring's rank~0.
 \end{table}
 
@@ -420,6 +424,6 @@ The upper block lists the criteria on which PipedPeer was designed to differ, so
 it wins them by construction; the lower block is the more informative half
 (Section~\ref{sec:security}). Spark, Ray and Dask are far more capable at scale,
 with mature schedulers and tooling; PipedPeer trades maturity and scale for the
-elimination of set-up, code change and network configuration. BOINC
+elimination of setup, code change and network configuration. BOINC
 \cite{anderson2004boinc}, closest in spirit, is a platform for specific projects
 with their own servers rather than a general executor.

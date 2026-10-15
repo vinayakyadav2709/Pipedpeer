@@ -90,11 +90,14 @@ package set, so it has the same store path on every machine, and a peer
 receives only the store paths it lacks. The parallel primitives the script
 already uses are substituted at import time; parallel maps are divided by a
 makespan solver over measured peer throughput, and numerical work moves only
-when a cost model predicts a gain. Machines behind different routers meet
+when a cost model predicts a gain. PyTorch data-parallel training is
+synchronised through the daemons with batches weighted by measured speed, either
+exactly or by DiLoCo-style periodic averaging, which stayed within 1\% of one
+device's validation loss while sending 9--16$\times$ fewer bytes. Machines behind different routers meet
 through an introducer that any member can serve, then connect directly over
 authenticated QUIC; no data is relayed. In a container lab a repeat
 submission took 0.83\,s against 23.4\,s for the first, and interception cost
-$1.24\times$ the start-up of a trivial job. Between two laptops in different
+$1.24\times$ the startup of a trivial job. Between two laptops in different
 homes, over a Tailscale network, a CPU-bound script ran in about 14\,s against 18\,s on one.
 \end{abstract}
 
@@ -111,7 +114,7 @@ computation involved. Apache Spark~\cite{zaharia2010spark},
 Ray~\cite{moritz2018ray} and Dask~\cite{rocklin2015dask} presuppose a
 configured cluster with a head node, matching software on every worker, a
 scheduler process, and a network on which every machine reaches every other.
-Remote execution over \texttt{ssh} avoids the set-up but provides no
+Remote execution over \texttt{ssh} avoids the setup but provides no
 environment management, placement, isolation or fault tolerance, and still
 needs a reachable address.
 
@@ -140,6 +143,9 @@ evaluated in the submitting client, with a three-phase lease
 (Section~\ref{sec:placement}).
 \item \textbf{A fallback that preserves the result on every distributed path}
 (Section~\ref{sec:ft}).
+\item \textbf{Speed-weighted data-parallel training through the daemon}, with
+exact or fast (DiLoCo-style) synchronisation chosen by ring size
+(Sections~\ref{sec:intercept}, \ref{sec:train}).
 \end{enumerate}
 
 \section{Related Work}
@@ -181,7 +187,7 @@ Proven in production       & \textbf{no} & yes & yes & yes & yes \\
 \end{tabularx}
 \par\smallskip\raggedright\scriptsize $^{\dagger}$When one introducer is
 reachable; otherwise a public address or an overlay is needed.
-$^{*}$Any worker; not the submitter of a parallel script or the machine of a
+\par $^{*}$Any worker; not the submitter of a parallel script or the machine of a
 training ring's rank~0.
 \end{table}
 
@@ -207,7 +213,7 @@ DiLoCo~\cite{douillard2023diloco} and local SGD~\cite{lin2020localsgd}.
 \section{System Design}
 
 \textbf{Design goals.} (G1) The script runs unchanged. (G2) Joining needs one
-set-up command, plus one code across networks. (G3) No machine is special:
+setup command, plus one code across networks. (G3) No machine is special:
 there is no head node, scheduler or registry, and every machine both submits
 and works. (G4) Distribution never changes the result and is declined when it
 would be slower. (G5) No job data passes through a third machine.
@@ -255,7 +261,8 @@ S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200}
 
 where $u_{\mathrm{cpu}}$ and $u_{\mathrm{mem}}$ are processor and memory utilisation in percent, $n_{\text{jobs}}$ the running jobs,
 $\hat{c},\hat{f},\hat{m},\hat{r}$ core count, clock, free memory and free-core
-ratio normalised onto $[0,1]$, and $h \in [0,1]$ the node's health score. Load dominates hardware:
+ratio normalised onto $[0,1]$, and $h \in [0,1]$ the node's health score; $S$
+is clamped at zero, and a GPU request adds up to 0.8 for GPU capacity. Load dominates hardware:
 the utilisation terms can subtract $1.0$, the hardware terms move the score by
 at most $\pm0.18$, and a missing metric takes the neutral $0.5$. Free memory is what a node
 can \emph{grant}: where a user \texttt{systemd} is available, each daemon runs under a cgroup ceiling of half the machine,
@@ -304,7 +311,7 @@ router's mapping belongs to the socket that opened it; both sides probe every
 candidate pair every 250\,ms for 15\,s. When one side's NAT allocates a new port
 per destination, that side opens 256 sockets toward the peer while the other
 sends 600 probes to random ports, and the socket that is hit is
-kept~\cite{anderson2020nat}.
+kept~\cite{anderson2020nat}, about 91\% of rounds over 64{,}511 ports.
 
 The winning path carries QUIC with a hello signed by each node's
 Ed25519~\cite{bernstein2012ed25519} key and checked against the node it meant to
@@ -334,8 +341,8 @@ module-level function, including one in \texttt{\_\_main\_\_}, or \emph{by
 value} through cloudpickle~\cite{cloudpickle} when it is a lambda or closure.
 The node that holds a map splits it once among its peers, and each peer runs
 its part on its own cores. The split is a makespan solver: each device is modelled
-as a set-up time plus a rate, fitted from the parts it has returned, and a
-device whose set-up alone exceeds the makespan is declined. A part unfinished
+as a setup time plus a rate, fitted from the parts it has returned, and a
+device whose setup alone exceeds the makespan is declined. A part unfinished
 past its prediction counts as taking at least that long, a part waiting or
 overdue is copied to a free peer, and the first copy to finish wins.
 
@@ -382,9 +389,9 @@ and $K$ nodes, divisible work moves only when
 \end{equation}
 Work needs at least two nodes and 32\,MB; work that does not fit in local memory
 moves regardless, and a matrix product that fits nowhere raises an error rather
-than exhausting the machine. A GPU peer raises $R'$ sixfold. The inequality is
+than exhausting the machine. A GPU peer raises $R'$ sixfold, a conservative heuristic multiplier. The inequality is
 first tried at an optimistic 10\,Gbit/s and, only if offloading could win,
-bandwidth is measured with a 64\,MB probe through the dispatch path (Fig.~\ref{fig:cost}).
+bandwidth is taken from recent transfers or an 8\,MB probe through the dispatch path (Fig.~\ref{fig:cost}).
 Indivisible work (SVD) moves when transfer costs under half the local time. At
 about 200\,GFLOP/s, local BLAS outruns a CPU cluster's transport, so dense
 matrix products stay local, while a GPU peer can win.
@@ -393,7 +400,9 @@ matrix products stay local, while a GPU peer can win.
 \centering
 \includegraphics[width=\columnwidth]{\figpath{fig_4.11_cost_model.png}}
 \caption{Decision regions of Equation~\ref{eq:cost} for the pandas path
-($\rho=1$, 1\,GFLOP/s) at three nodes on a 500\,MB/s link.}
+($\rho=1$, 1\,GFLOP/s) at three nodes on a 500\,MB/s link. The step at
+512\,MB is a separate rule: below 8 flop per byte, work up to 512\,MB stays
+local.}
 \label{fig:cost}
 \end{figure}
 
@@ -417,9 +426,8 @@ PipedPeer's, and a summary of where its items ran.
 
 \subsection{Implementation}
 
-PipedPeer is about 48{,}000 lines of Go~1.25 in a single binary that is both client
-and daemon, with about 37{,}000 lines of tests, and an 8{,}000-line Python
-interception package embedded in it. The daemon serves an HTTP API, makes
+PipedPeer is a single Go~1.25 binary that is both client and daemon, built from
+46 Go packages and an embedded Python interception shim. The daemon serves an HTTP API, makes
 direct links with quic-go, builds environments with Nix flakes, and runs each
 job in a \texttt{crun} sandbox. The test suite is checked by a mutation audit:
 disabling any one of 95 features --- among them gradient weighting, co-located
@@ -436,13 +444,14 @@ when is it faster?
 \subsection{Setup}
 \label{sec:setup}
 
-A 12-thread laptop runs a lab of three worker daemons in containers, each with a
+A 12-thread Intel i5-13420H laptop with 15\,GiB of memory under Fedora~43
+runs a lab of three worker daemons in containers, each with a
 fixed processor and memory limit; where the network matters, links are shaped
 with \texttt{tc netem} to the latency, bandwidth and loss of a LAN, a Wi-Fi
 network or a 5G link. Because the containers share one processor, the lab
 measures correctness, overhead, caching and cost growth, and speedup only as one
-container against several of the same size. A 16-thread laptop with a single GPU
-runs a second lab. Physical runs use two laptops in different homes (RTX~3060
+container against several of the same size. A 16-thread laptop with an RTX~3060
+laptop GPU under Fedora~44 runs a second lab. Physical runs use two laptops in different homes (RTX~3060
 and RTX~3050), a 20-core and a 16-core host joined over Tailscale, and a Samsung
 Galaxy S20~FE (Android~13). Between the two laptops, PipedPeer's own QUIC link ran on
 top of a Tailscale (WireGuard) network with 6--8\,ms round trip, because the
@@ -462,7 +471,7 @@ the mean of three seeds.
 
 \subsection{Microbenchmarks (Q1, Q2)}
 
-\textbf{Interception.} Start-up of a job that imports nothing heavy takes
+\textbf{Interception.} Startup of a job that imports nothing heavy takes
 0.117\,s with interception against 0.094\,s without ($1.24\times$). On a whole job that the cost model declines, a 16-item map with 0.01\,s
 of work and none of it dispatched, the median was 0.80\,s against 0.68\,s:
 declining costs about 0.12\,s per job.
@@ -504,7 +513,7 @@ in 90.5\,s.
 
 Table~\ref{tab:phys} lists the physical-machine results. A parallel map and a
 mixed CPU script (pool, joblib, NumPy, pandas) ran faster on two machines than
-on one, the latter with about half its items on the second laptop. The first
+on one (a job of about 5\,s is dominated by setup and serialisation), the latter with about half its items on the second laptop. The first
 run of a new GPU environment is dominated by its build (487\,s of 506\,s,
 mostly downloading CUDA PyTorch); the same script then took 17.7\,s. On the phone, a laptop's CPU script spread over
 both laptops and the phone gave the phone 8 of 192 items with an unchanged
@@ -529,7 +538,7 @@ measurements.
 \toprule
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
-Pool map, 20-core host alone vs.\ with 16-core peer (Tailscale) & 6 vs.\ 5\,s \\
+Pool map, 20-core host alone vs.\ with 16-core peer (Tailscale) & 5.8--6.4 vs.\ 4.9--5.4\,s \\
 CPU script, one laptop vs.\ two over Tailscale & 18 vs.\ 14\,s \\
 Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s \\
 \quad final loss, same three & 0.0875 / 0.0875 / 0.0877 \\
@@ -556,8 +565,9 @@ measured batch sizes against 25.4\,s with equal ones.
 
 \textbf{Fast synchronisation.} On two ranks in the lab with LAN and Wi-Fi
 profiles, plain averaging every 64 steps after a 10-step warm-up changed
-validation loss against one device by $+0.64\%$/$+0.61\%$ on a first
-perceptron, $-2.14\%$/$-2.09\%$ on a second and $+0.18\%$/$+0.50\%$ on a small
+validation loss against one device by $+0.64\%$/$+0.61\%$ on a GPU-sized
+MLP (MLP-G), $-2.14\%$/$-2.09\%$ on a CPU-sized MLP (MLP-C; periodic averaging
+can generalise slightly better~\cite{lin2020localsgd}) and $+0.18\%$/$+0.50\%$ on a small
 transformer (each pair LAN/Wi-Fi), each within exact sync's own spread, while
 sending 9--16$\times$ fewer bytes per rank; it finished 1.2--1.4$\times$ faster
 than exact sync on LAN and 1.6--3.1$\times$ on Wi-Fi (one seed). DiLoCo's outer
@@ -643,7 +653,7 @@ its submitter and rank~0, and to run a controlled evaluation on more machines.
 
 \bibitem{termux} Termux, ``Termux: Android terminal emulator and Linux environment.'' [Online]. Available: \url{https://termux.dev}
 
-\bibitem{proot} PRoot, ``chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
+\bibitem{proot} PRoot, ``chroot, mount \texttt{-{}-bind}, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
 
 \bibitem{anderson2020nat} D.~Anderson, ``How NAT traversal works,'' Tailscale blog, Aug. 2020. [Online]. Available: \url{https://tailscale.com/blog/how-nat-traversal-works}
 
