@@ -1720,7 +1720,7 @@ added is itself a finding: fast synchronisation helps the two to four machines
 of a small group and not a crowd of phones. In-process measurements of the remedies the
 literature offers --- keeping each rank's batch so the global batch grows,
 drift correction, compressed exact synchronisation, and retuning the interval
-and outer step per ring size --- are to be added \todo{many-rank table}.
+and outer step per ring size --- were measured: of those, only exact synchronisation with rank-16 PowerSGD compression and error feedback kept every model within 1\% of one device at 4, 8 and 11 ranks (worst mean $+0.18\%$), at $3.2\times$ fewer bytes than int8 exact on the perceptrons and with every step synchronised; keeping each rank's batch (with or without learning-rate scaling or doubled epochs), SparseLoCo, top-k, FedProx, rank-4 PowerSGD and outer learning rates of 1.25 or more all failed.
 
 \textbf{Choosing fast synchronisation automatically.} By default a run asks
 for ``auto''. The lead daemon switches a ring to fast synchronisation once,
@@ -2610,7 +2610,7 @@ One GPU against a split: a cell where the split wins, and one where one GPU wins
 Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time \todo{diloco} & container lab \\
 The DiLoCo paper's outer step (Nesterov 0.7, momentum 0.9) at our intervals & fails at every interval; small transformer $+21.7\%$ at 156 local steps & container lab \\
 Largest passing fast-sync interval by ring size & 2 ranks: 32; 3: 16; 4: 4; 5 or more: none & in-process \\
-Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & \todo{many-rank table} & in-process \\
+Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & worst mean $+0.18\%$ at 4, 8 and 11 ranks with rank-16 PowerSGD on exact sync; all other remedies fail & in-process \\
 Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.09, 1.08\times$ (were $2.11, 1.35, 1.37, 1.31\times$) & container lab \\
 Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 256.9\,s, warm 603.7 to 67.3\,s; idle-host rerun \todo{bcast quiet} & container lab \\
 Phone as a full node through proot and Nix & \todo{phone run} & real \\
@@ -2618,8 +2618,8 @@ Parallel map request body, before and after, 100\,MB payload & \todo{pool body} 
 Workspace re-upload after editing one file & \todo{workspace} & container lab \\
 Environment seed to a node holding every path & \todo{seed} & container lab \\
 Pool time estimate error, before (7--37$\times$) and after & \todo{estimates} & container lab \\
-Superlinear steps found by the scaling map & \todo{scaling map} & container lab \\
-Peer and introducer address change, time to recover & \todo{test-net} & container network \\
+Superlinear steps found by the scaling map & none in the numeric sweeps (payload 1\,KB--64\,MB, items 8--2048, cost $10^3$--$3\times10^6$, 2--4 nodes, spread 1--10$\times$); CPU-time growth fits; 4 equal nodes ran a map $2.9\times$ faster than one (2.37 to 0.81\,s, loaded host) & container lab \\
+Introducer address change, time to recover, no commands run & 12.1--12.6\,s over three runs (limit 60\,s); a joining machine connected in 0.2--0.4\,s & container network \\
 Two laptops over Tailscale: CPU, GPU and combined scripts & \todo{tailscale} & real \\
 \bottomrule
 \end{tabularx}
