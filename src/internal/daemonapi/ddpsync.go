@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 )
 
 // DDP sync over the daemon's own channel. Ranks never open ports of their
@@ -124,6 +127,11 @@ type ddpEntry struct {
 	// later rank's must match it (manifestRank names whose it is).
 	manifest     *ddpManifest
 	manifestRank int
+
+	// shard is the butterfly shard this round averages (0: shard 0 or the
+	// whole vector), so its reply's rounding error is kept apart from the
+	// other shards' when one daemon serves two.
+	shard int
 }
 
 type ddpBoard struct {
@@ -140,6 +148,9 @@ type ddpBoard struct {
 	// between steps - which is how the ring's measurement came to be logged
 	// 41 times for a 90-step run.
 	runs map[string]*ddpRun // key: group
+	// local holds the machine-local rounds of ranks sharing this daemon's
+	// machine (handleDDPLocal). Key: group + "/" + seq + "@local".
+	local map[string]*ddpLocalRound
 }
 
 // expectedCount is how many ranks this round waits for. Falls back to the
@@ -270,6 +281,7 @@ func newDDPBoard() *ddpBoard {
 		entries:  make(map[string]*ddpEntry),
 		measured: make(map[string]time.Time),
 		runs:     make(map[string]*ddpRun),
+		local:    make(map[string]*ddpLocalRound),
 	}
 }
 
@@ -304,6 +316,11 @@ func (b *ddpBoard) sweep(maxAge time.Duration) {
 	for group, r := range b.runs {
 		if time.Since(r.seen) > maxAge {
 			delete(b.runs, group)
+		}
+	}
+	for k, lr := range b.local {
+		if time.Since(lr.created) > maxAge {
+			delete(b.local, k)
 		}
 	}
 }
@@ -381,6 +398,30 @@ type ddpSyncRequest struct {
 	Manifest *ddpManifest `json:"manifest,omitempty"`
 	// Fixed: the user chose this ring (--ddp N); never shrink it.
 	Fixed bool `json:"fixed,omitempty"`
+
+	// Shard/Shards: one shard of a butterfly reduce (U26). Rank k's daemon
+	// averages shard k of every rank's vector, so no one link carries the
+	// whole ring (N-1 gradients in and out at the hub's lead). Shard 0 goes to
+	// the lead with the full header and carries the ring's control; shards
+	// above 0 are bare sums under their own key. Absent: the whole vector.
+	Shard  int `json:"shard,omitempty"`
+	Shards int `json:"shards,omitempty"`
+	// Local/Upstream: ranks sharing this daemon's machine (multi-GPU) average
+	// here first, and this daemon sends the lead at Upstream one contribution
+	// standing for all of them: one network sync per machine.
+	Local    []int  `json:"local,omitempty"`
+	Upstream string `json:"upstream,omitempty"`
+	// Members: the ranks a forwarded contribution stands for, each with its
+	// own report, so the lead counts, measures and tells every one of them.
+	Members []ddpMember `json:"members,omitempty"`
+}
+
+// ddpMember is one rank inside a machine's combined contribution.
+type ddpMember struct {
+	Rank       int     `json:"rank"`
+	StepMillis float64 `json:"step_ms,omitempty"`
+	SyncMillis float64 `json:"sync_ms,omitempty"`
+	Samples    int     `json:"samples,omitempty"`
 }
 
 // ddpManifest is one rank's view of the model it syncs.
@@ -506,9 +547,40 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := req.Group + "/" + jsonInt(req.Seq)
+	if req.Shards > 0 && (mode != ddpModeReduce || req.Shard < 0 || req.Shard >= req.Shards ||
+		req.Shards > req.World) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a shard needs reduce mode and shard in [0,shards), shards <= world"})
+		return
+	}
+	if len(req.Local) > 0 {
+		s.handleDDPLocal(w, r, req, blob, mode)
+		return
+	}
+	// The ranks this contribution stands for: the sender, or every rank of a
+	// machine whose daemon averaged them first.
+	contributors := []int{req.Rank}
+	reports := []ddpMember{{Rank: req.Rank, StepMillis: req.StepMillis, SyncMillis: req.SyncMillis, Samples: req.Samples}}
+	if len(req.Members) > 0 {
+		contributors, reports = nil, req.Members
+		for _, m := range req.Members {
+			if m.Rank < 0 || m.Rank >= req.World {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "member rank outside [0,world)"})
+				return
+			}
+			contributors = append(contributors, m.Rank)
+		}
+	}
 
-	opening := req.Kind == "weights" && req.Seq == 1
+	key := req.Group + "/" + jsonInt(req.Seq)
+	if req.Shard > 0 {
+		key += "#" + strconv.Itoa(req.Shard)
+	}
+	// Whether this request carries the ring's control (shares, drops, notes,
+	// step times): shard 0 or the whole vector. A butterfly shard above 0 is
+	// a bare sum, wherever it lands.
+	lead := req.Shard == 0
+
+	opening := lead && req.Kind == "weights" && req.Seq == 1
 
 	s.ddp.mu.Lock()
 	if r := s.ddp.runs[req.Group]; r != nil && r.aborted != "" {
@@ -542,6 +614,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			partialAt: time.Now().Add(wait),
 			opening:   opening,
 			kind:      req.Kind,
+			shard:     req.Shard,
 		}
 		if mode == ddpModeReduce {
 			if req.Count <= 0 || req.DType.size() == 0 {
@@ -576,7 +649,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	if e.expected < 1 {
 		e.expected = 1
 	}
-	{
+	if lead {
 		run := s.ddp.run(req.Group)
 		if req.World > run.world {
 			run.world = req.World
@@ -609,15 +682,18 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	if req.SyncEvery > e.syncEvery {
 		e.syncEvery = req.SyncEvery
 	}
-	if req.StepMillis > 0 {
+	for _, rep := range reports {
+		if !lead || rep.StepMillis <= 0 {
+			continue
+		}
 		if e.stepMillis == nil {
 			e.stepMillis = map[int]float64{}
 		}
-		e.stepMillis[req.Rank] = req.StepMillis
-		s.ddp.observe(req.Group, req.Rank, rankReport{
-			StepMillis: req.StepMillis,
-			SyncMillis: req.SyncMillis,
-			Samples:    req.Samples,
+		e.stepMillis[rep.Rank] = rep.StepMillis
+		s.ddp.observe(req.Group, rep.Rank, rankReport{
+			StepMillis: rep.StepMillis,
+			SyncMillis: rep.SyncMillis,
+			Samples:    rep.Samples,
 		})
 		if _, said := s.ddp.measured[req.Group]; !said && len(e.stepMillis) >= e.world {
 			s.ddp.measured[req.Group] = time.Now()
@@ -651,12 +727,13 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				e.err = fmt.Errorf("%s", why)
 			}
 		}
-		if req.Kind != "" && e.kind != "" && req.Kind != e.kind && !e.seen[req.Rank] && e.err == nil {
+		fresh := !slices.ContainsFunc(contributors, func(c int) bool { return e.seen[c] })
+		if req.Kind != "" && e.kind != "" && req.Kind != e.kind && fresh && e.err == nil {
 			e.err = fmt.Errorf("rank %d sent %s to sync %d while the others sent %s: the "+
 				"ranks' sync schedules disagree, and averaging the two would train on "+
 				"garbage", req.Rank, req.Kind, req.Seq, e.kind)
 		}
-		if !e.seen[req.Rank] && e.err == nil {
+		if fresh && e.err == nil {
 			// Only worth doing early: ranks that duplicate work do it from
 			// the first step, and hashing every payload forever would put a
 			// pass over the model into every sync.
@@ -679,7 +756,9 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				// and a timeout three minutes later would name nothing.
 				e.err = fmt.Errorf("rank %d: %w", req.Rank, addErr)
 			} else {
-				e.seen[req.Rank] = true
+				for _, c := range contributors {
+					e.seen[c] = true
+				}
 			}
 		}
 		complete = e.err != nil || liveIn(s.ddp, req.Group, e.seen) >= e.expectedCount()
@@ -766,8 +845,17 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		if e.partial > 0 {
 			ranks = e.partial
 		}
-		e.fetched[req.Rank] = true
-		rebalanceJSON := s.ddp.noteFor(req.Group, req.Rank, req.Seq)
+		// The ring's notes ride shard 0 only: the shim reads that reply for
+		// them, and a note marked told on another shard's reply is lost.
+		rebalanceJSON := ""
+		for _, c := range contributors {
+			e.fetched[c] = true
+			if lead {
+				if f := s.ddp.noteFor(req.Group, c, req.Seq); f != "" {
+					rebalanceJSON = f
+				}
+			}
+		}
 		if len(e.fetched) >= e.expectedCount() || rerr != nil {
 			delete(s.ddp.entries, key)
 		}
@@ -814,6 +902,197 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		asStrings[i] = string(b)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"blobs": asStrings})
+}
+
+// ddpLocalRound is one sync round of the ranks sharing this daemon's machine
+// (the multi-GPU fast path, U26): their contributions are summed here, sent
+// to the lead as one, and the lead's reply is handed back to each of them
+// byte for byte. A machine with two GPUs then uploads and downloads one
+// gradient a step instead of two.
+type ddpLocalRound struct {
+	acc     *ddpAccumulator
+	hdr     ddpSyncRequest // the first arrival's header: the forward's template
+	members []ddpMember
+	want    int
+	sent    bool          // the forward has started; later arrivals only wait
+	fetched int           // members that took the reply home
+	done    chan struct{} // closed once status, ctype and body hold the answer
+	status  int
+	ctype   string
+	body    []byte
+	created time.Time
+}
+
+// handleDDPLocal is one rank's half of a machine-local round. The round goes
+// to the lead once every local rank is in, or after ddpPartialAfter with
+// whoever is (a dead local rank must not hold up the ring longer than a dead
+// remote one would); the lead's answer, refusals included, is every local
+// rank's answer.
+func (s *Server) handleDDPLocal(w http.ResponseWriter, r *http.Request, req ddpSyncRequest, blob []byte, mode ddpMode) {
+	if mode != ddpModeReduce || req.Count <= 0 || req.DType.size() == 0 || req.Shards > 0 ||
+		!slices.Contains(req.Local, req.Rank) || !strings.HasPrefix(req.Upstream, "http://") ||
+		!strings.HasSuffix(req.Upstream, "/v1/ddp/sync") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a machine-local sync needs " +
+			"reduce mode, a count and dtype, this rank in local, and the lead's /v1/ddp/sync as upstream"})
+		return
+	}
+	key := req.Group + "/" + jsonInt(req.Seq) + "@local"
+	s.ddp.mu.Lock()
+	lr := s.ddp.local[key]
+	if lr == nil {
+		lr = &ddpLocalRound{acc: newDDPAccumulator(req.DType, req.Count), hdr: req,
+			want: len(req.Local), done: make(chan struct{}), created: time.Now()}
+		if len(req.Counts) > 1 {
+			if err := lr.acc.withSegments(req.Counts); err != nil {
+				s.ddp.mu.Unlock()
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "segment lengths: " + err.Error()})
+				return
+			}
+		}
+		s.ddp.local[key] = lr
+	}
+	fresh := !slices.ContainsFunc(lr.members, func(m ddpMember) bool { return m.Rank == req.Rank })
+	if fresh && !lr.sent {
+		scales := req.Scales
+		if len(scales) == 0 {
+			scales = []float64{req.Scale}
+		}
+		if err := lr.acc.addSegmented(blob, scales, float64(req.Samples)); err != nil {
+			s.ddp.mu.Unlock()
+			// The other local ranks go on without this one (partial), and the
+			// lead counts it missing; this rank stops with the reason.
+			log.Warn().Str("group", req.Group).Int("rank", req.Rank).Err(err).
+				Msg("ddp: machine-local sync refused a contribution")
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("rank %d: %v", req.Rank, err)})
+			return
+		}
+		lr.members = append(lr.members, ddpMember{Rank: req.Rank, StepMillis: req.StepMillis,
+			SyncMillis: req.SyncMillis, Samples: req.Samples})
+		lr.hdr.SyncEvery = max(lr.hdr.SyncEvery, req.SyncEvery)
+		lr.hdr.Sharded = lr.hdr.Sharded || req.Sharded
+		lr.hdr.Fixed = lr.hdr.Fixed || req.Fixed
+	}
+	if !lr.sent && len(lr.members) >= lr.want {
+		lr.sent = true
+		go s.ddpForwardLocal(key, lr)
+	}
+	s.ddp.mu.Unlock()
+
+	partial := time.NewTimer(ddpPartialAfter)
+	defer partial.Stop()
+	hard := time.NewTimer(ddpPartialAfter + ddpHardTimeout + time.Minute)
+	defer hard.Stop()
+	for {
+		select {
+		case <-lr.done:
+			s.ddp.mu.Lock()
+			if lr.fetched++; lr.fetched >= len(lr.members) && s.ddp.local[key] == lr {
+				delete(s.ddp.local, key)
+			}
+			s.ddp.mu.Unlock()
+			w.Header().Set("Content-Type", lr.ctype)
+			w.WriteHeader(lr.status)
+			_, _ = w.Write(lr.body)
+			return
+		case <-r.Context().Done():
+			return
+		case <-partial.C:
+			s.ddp.mu.Lock()
+			if !lr.sent && len(lr.members) > 0 {
+				lr.sent = true
+				log.Warn().Str("group", req.Group).Int64("seq", req.Seq).
+					Int("arrived", len(lr.members)).Int("want", lr.want).
+					Msg("ddp: machine-local sync goes to the lead without every local rank")
+				go s.ddpForwardLocal(key, lr)
+			}
+			s.ddp.mu.Unlock()
+		case <-hard.C:
+			writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "machine-local ddp sync timed out"})
+			return
+		}
+	}
+}
+
+// ddpForwardLocal sends a machine's combined contribution to the lead: the
+// sample-weighted mean of its ranks, weighted at the lead by their total
+// samples, so the ring's average is the same sum(n_i*g_i)/sum(n_i) the hub
+// computes. int8 is re-quantised here with its own error feedback (the
+// machine's uplink half, kept apart from any downlink residual).
+func (s *Server) ddpForwardLocal(key string, lr *ddpLocalRound) {
+	s.ddp.mu.Lock()
+	var res []float64
+	if lr.acc.dtype == ddpI8 {
+		run := s.ddp.run(lr.hdr.Group)
+		if run.residual == nil {
+			run.residual = map[string][]float64{}
+		}
+		k := "up/" + lr.hdr.Kind + "/" + strconv.Itoa(len(lr.acc.sum))
+		if res = run.residual[k]; res == nil {
+			res = make([]float64, len(lr.acc.sum))
+			run.residual[k] = res
+		}
+	}
+	payload, scales, err := lr.acc.meanResidual(res)
+	hdr := lr.hdr
+	hdr.Rank, hdr.Members = lr.members[0].Rank, append([]ddpMember(nil), lr.members...)
+	hdr.Local = nil // the lead takes it as an ordinary contribution; ddpPostUpstream drops Upstream
+	hdr.StepMillis, hdr.SyncMillis, hdr.Data = 0, 0, ""
+	hdr.Samples = int(math.Round(lr.acc.weight))
+	hdr.Scale, hdr.Scales = 0, nil
+	if lr.acc.dtype == ddpI8 && len(scales) > 0 {
+		hdr.Scale, hdr.Scales = scales[0], scales
+	}
+	lr.acc = nil
+	s.ddp.mu.Unlock()
+
+	status, ctype, body := http.StatusConflict, "application/json", []byte(nil)
+	if err == nil {
+		status, ctype, body, err = ddpPostUpstream(hdr, payload)
+	}
+	if err != nil {
+		// No answer from the lead is the lead lost for every local rank (C3
+		// exit 76), said in the same words the shim uses for a direct sync.
+		log.Warn().Str("group", hdr.Group).Str("upstream", hdr.Upstream).Err(err).
+			Msg("ddp: machine-local sync could not reach the lead")
+		status, ctype = http.StatusConflict, "application/json"
+		body, _ = json.Marshal(map[string]any{"abort": true,
+			"error": "the lead machine stopped answering this machine's daemon (" + err.Error() + ")"})
+	}
+	s.ddp.mu.Lock()
+	lr.status, lr.ctype, lr.body = status, ctype, body
+	close(lr.done)
+	s.ddp.mu.Unlock()
+}
+
+// ddpPostUpstream POSTs one combined contribution to the lead daemon and
+// returns its answer as is.
+func ddpPostUpstream(hdr ddpSyncRequest, payload []byte) (int, string, []byte, error) {
+	upstream := hdr.Upstream
+	hdr.Upstream = ""
+	head, err := json.Marshal(hdr)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, upstream, bytes.NewReader(putFrame(append(head, '\n'), payload)))
+	if err != nil {
+		return 0, "", nil, err
+	}
+	req.Header.Set("Content-Type", DDPReduceContentType)
+	if tok := authtoken.Current(); tok != "" {
+		req.Header.Set("X-Pipedpeer-Token", tok)
+	}
+	// The lead holds a round up to its start wait or partial timeout; this
+	// bounds only a lead that stopped answering altogether.
+	resp, err := (&http.Client{Timeout: ddpHardTimeout + time.Minute}).Do(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	return resp.StatusCode, resp.Header.Get("Content-Type"), body, nil
 }
 
 // handleDDPSyncStatus says which ranks have reached a round, so a rank held
@@ -1001,6 +1280,9 @@ func (b *ddpBoard) finishLocked(group string, e *ddpEntry) {
 		}
 		n := len(e.acc.sum)
 		k := e.kind + "/" + strconv.Itoa(n)
+		if e.shard > 0 {
+			k += "#" + strconv.Itoa(e.shard) // equal shards on one daemon stay apart
+		}
 		if res = r.residual[k]; res == nil {
 			res = make([]float64, n)
 			r.residual[k] = res
