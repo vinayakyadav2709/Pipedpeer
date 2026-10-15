@@ -81,6 +81,10 @@ type ddpSyncRequest struct {
 	Manifest *ddpManifest `json:"manifest,omitempty"`
 	// Fixed: the user chose this ring (--ddp N); never shrink it.
 	Fixed bool `json:"fixed,omitempty"`
+	// SyncMode is "auto" from a rank that runs exact sync by default and can
+	// switch to DiLoCo when the lead says so (U32); "exact" or "fast" when the
+	// user chose with --ddp-sync. Absent from older shims: never switched.
+	SyncMode string `json:"sync_mode,omitempty"`
 
 	// Shard/Shards: one shard of a butterfly reduce (U26). Rank k's daemon
 	// averages shard k of every rank's vector, so no one link carries the

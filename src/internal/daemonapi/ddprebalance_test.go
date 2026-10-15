@@ -280,3 +280,73 @@ func TestFinishedRunsAreForgotten(t *testing.T) {
 		t.Error("a run that synced just now was forgotten mid-flight")
 	}
 }
+
+// U32: a ring that left the sync mode to the lead (sync_mode "auto").
+func autoRing(t *testing.T, fixed bool, reps map[int]rankReport) *ddpBoard {
+	t.Helper()
+	b := soloRing(t, fixed, reps)
+	b.runs["g"].autoSync = true
+	return b
+}
+
+// TestAutoPicksDiLoCoWhenItBeatsBoth: wifiSplit is ~28 ms a step under
+// DiLoCo, 40 ms on rank 0 alone, 520 ms split exactly. DiLoCo, said once,
+// with the way to turn it off.
+func TestAutoPicksDiLoCoWhenItBeatsBoth(t *testing.T) {
+	b := autoRing(t, false, wifiSplit)
+	frag := b.rebalanceFor("g", 2)
+	if !strings.Contains(frag, `"diloco": 64`) || strings.Contains(frag, "release") {
+		t.Fatalf("want a DiLoCo switch and no release: %q", frag)
+	}
+	if !strings.Contains(frag, "training with DiLoCo") || !strings.Contains(frag, "--ddp-sync exact") {
+		t.Errorf("the line does not say it switched and how to undo it: %q", frag)
+	}
+	if again := b.rebalanceFor("g", 2); strings.Contains(again, "diloco") {
+		t.Errorf("told the ring twice: %q", again)
+	}
+}
+
+// TestAutoKeepsExactUnlessDiLoCoIsFaster: the decision is on predicted step
+// time alone; each losing case keeps what D2 did before U32.
+func TestAutoKeepsExactUnlessDiLoCoIsFaster(t *testing.T) {
+	cases := map[string]struct {
+		reps        map[int]rankReport
+		fixed, auto bool
+		want        string // "" = no release either (a refit may still come)
+	}{
+		// 100 ms compute, 10 ms sync: DiLoCo saves 10%, inside the margin.
+		"fast link": {map[int]rankReport{
+			0: {StepMillis: 100, SyncMillis: 10, Samples: 32},
+			1: {StepMillis: 100, SyncMillis: 10, Samples: 32}}, false, true, ""},
+		// One rank alone (10 ms) beats DiLoCo (36 ms): D2's release.
+		"solo wins": {map[int]rankReport{
+			0: {StepMillis: 5, SyncMillis: 2000, Samples: 32},
+			1: {StepMillis: 200, SyncMillis: 2000, Samples: 32}}, false, true, `"release": 0`},
+		// --ddp N / PIPEDPEER_DDP_FIXED=1: never.
+		"fixed": {wifiSplit, true, true, ""},
+		// --ddp-sync exact (or an older shim): never; D2 as before.
+		"user chose exact": {wifiSplit, false, false, `"release": 0`},
+	}
+	for name, c := range cases {
+		b := soloRing(t, c.fixed, c.reps)
+		b.runs["g"].autoSync = c.auto
+		frag := b.rebalanceFor("g", 2)
+		if strings.Contains(frag, "diloco") {
+			t.Errorf("%s: picked DiLoCo: %q", name, frag)
+		}
+		if c.want == "" && strings.Contains(frag, "release") || !strings.Contains(frag, c.want) {
+			t.Errorf("%s: note %q, want %q", name, frag, c.want)
+		}
+	}
+}
+
+// TestPlanDiLoCoNeedsEveryRank: no verdict on a subset or before planSolo
+// has one.
+func TestPlanDiLoCoNeedsEveryRank(t *testing.T) {
+	if _, ok := planDiLoCo(map[int]rankReport{0: wifiSplit[0]}, 2, 40, 520); ok {
+		t.Error("judged a ring of two on one report")
+	}
+	if _, ok := planDiLoCo(wifiSplit, 2, 0, 0); ok {
+		t.Error("judged a ring planSolo had no verdict on")
+	}
+}
