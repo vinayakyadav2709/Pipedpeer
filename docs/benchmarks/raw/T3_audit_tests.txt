@@ -1,20 +1,24 @@
 # scripts/audit-tests.sh  (mutation audit: break each feature, require its named tests to fail)
-# commit 4c91ef3, 2026-10-02T20:47:47+05:30, Linux 6.19.13-200.fc43.x86_64, 12 threads (i5-13420H), Python 3.14.4 + torch 2.14.1+cpu venv
+# commit 8d63c30, 2026-10-16T04:14:22+05:30, Linux 7.2.9-201.fc44.x86_64, 15 threads (AMD Ryzen 7 5800H), Python 3.14.8 + torch 2.13.0+cpu (system python3), run under systemd-run MemoryMax=3G CPUQuota=400% in a scratch worktree
 Breaking each feature and requiring its tests to notice.
 
 weighted gradient fold                         red — the test catches it
 equal step counts across shares                red — the test catches it
-contiguous shards                              red — the test catches it
+each rank owns its own shard                   red — the test catches it
 one shuffle seed for every rank                red — the test catches it
 rebalance hysteresis                           red — the test catches it
 drop weighs sync against compute               red — the test catches it
+dropped rank is not waited for                 (code now in src/internal/daemonapi/ddpboard.go)
 dropped rank is not waited for                 red — the test catches it
 archive codec reads gzip                       red — the test catches it
 sniffing does not consume                      red — the test catches it
 out-of-memory branch                           red — the test catches it
 GPU peer priced above CPU                      red — the test catches it
+per-peer local address                         (code now in src/daemon_cmd.go)
 per-peer local address                         red — the test catches it
+queue depth is counted                         (code now in src/internal/daemonapi/serverlease.go)
 queue depth is counted                         red — the test catches it
+recent failures are counted                    (code now in src/internal/daemonapi/serverlease.go)
 recent failures are counted                    red — the test catches it
 every module on an import line                 red — the test catches it
 nix found in installer locations               red — the test catches it
@@ -23,17 +27,23 @@ closure fragment marked partial                red — the test catches it
 bandwidth probe is skipped                     red — the test catches it
 a second GPU gets a rank                       red — the test catches it
 co-located ranks split node memory             red — the test catches it
+roommate reservations subtracted               (code now in src/internal/daemonapi/serverlease.go)
 roommate reservations subtracted               red — the test catches it
+roommate asked live, not cached                (code now in src/internal/daemonapi/serverlease.go)
 roommate asked live, not cached                red — the test catches it
 page cache is not spent budget                 red — the test catches it
+state is snapshotted before marshal            (code now in src/internal/daemonapi/serverlease.go)
 state is snapshotted before marshal            red — the test catches it
+prefer-GPU excludes CPU nodes                  (code now in src/ddp_plan.go)
 prefer-GPU excludes CPU nodes                  red — the test catches it
+a straggler is named                           (code now in src/internal/daemonapi/ddppacing.go)
 a straggler is named                           red — the test catches it
 dead env vars are refused                      red — the test catches it
 setup finds nix off PATH                       red — the test catches it
 the userns diagnosis names a fix               red — the test catches it
 the missing-nix error names where it looked    red — the test catches it
 one address holds one node                     red — the test catches it
+the ring counts machines, not ranks            (code now in src/ddp_plan.go)
 the ring counts machines, not ranks            red — the test catches it
 a double-NAT mapping is not published          red — the test catches it
 the granted lease is what gets renewed         red — the test catches it
@@ -48,14 +58,19 @@ a probe is told apart from QUIC                red — the test catches it
 the wrong machine cannot win the race          red — the test catches it
 the splice waits for the response              red — the test catches it
 one socket carries probes and QUIC             red — the test catches it
+a forwarded peer cannot lead a ring            (code now in src/ddp_plan.go)
 a forwarded peer cannot lead a ring            red — the test catches it
 a stopped firewall is not an active one        red — the test catches it
 the firewall is not touched without consent    red — the test catches it
+a mapping that is not ours is not published    (code now in src/internal/internet/hints.go)
 a mapping that is not ours is not published    red — the test catches it
 an inbound connection becomes a usable peer    red — the test catches it
 both ends of a direct link can originate       red — the test catches it
+a live link outlives the introducer            (code now in src/internal/internet/hints.go)
 a live link outlives the introducer            red — the test catches it
+an unreachable peer is reported, not offered   (code now in src/internal/internet/link.go)
 an unreachable peer is reported, not offered   red — the test catches it
+a penalty belongs to a situation, not a peer   (code now in src/internal/internet/hints.go)
 a penalty belongs to a situation, not a peer   red — the test catches it
 a signing key must belong to the node offering it red — the test catches it
 a key label cannot disagree with its bytes     red — the test catches it
@@ -76,17 +91,22 @@ a peer that cannot answer is sent everything   red — the test catches it
 an archive cannot write outside its directory  red — the test catches it
 a narinfo is read past a huge References line  red — the test catches it
 an unknown archive format is refused           red — the test catches it
+the signed format is only sent to a peer that asked (code now in src/internal/daemonapi/serverclosure.go)
 the signed format is only sent to a peer that asked red — the test catches it
 a peer name that merely contains the format is not it red — the test catches it
 a foreign tar is not a closure archive         red — the test catches it
 sniffing does not consume the archive          red — the test catches it
+a signed archive is never cached as the closure (code now in src/internal/daemonapi/narimport.go)
 a signed archive is never cached as the closure red — the test catches it
+a sender cannot materialise something else     (code now in src/internal/daemonapi/narimport.go)
 a sender cannot materialise something else     red — the test catches it
 setup never disables signature checking        red — the test catches it
-setup with no keys edits nothing               red — the test catches it
+setup with no keys still installs the helper   red — the test catches it
 every Pool entry point takes a kernel with no source red — the test catches it
 apply works without keyword arguments          red — the test catches it
+a dead forwarder releases its peer             (code now in src/internal/internet/link.go)
 a dead forwarder releases its peer             red — the test catches it
+the forwarder outlives the attempt that made it (code now in src/internal/internet/link.go)
 the forwarder outlives the attempt that made it red — the test catches it
 the closure cache evicts least-recently-used   red — the test catches it
 evicting removes the archive too               red — the test catches it
@@ -95,7 +115,7 @@ sending a closure records it as used           red — the test catches it
 an evicted archive is not still claimed as cached red — the test catches it
 the nar cache evicts least-recently-used       red — the test catches it
 a joined cluster survives a restart            red — the test catches it
-what was typed beats what was remembered       red — the test catches it
+the newest introducers are the ones kept       red — the test catches it
 a bare host gets the default port              red — the test catches it
 
 ======================================================
