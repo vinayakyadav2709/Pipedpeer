@@ -250,9 +250,13 @@ func TestDriverBoundNoDevNode(t *testing.T) {
 }
 
 // kfdNode writes a KFD topology node; loc is the PCI bus<<8|dev<<3|fn.
-func (h *fakeHost) kfdNode(n string, cpus, simds, loc int) {
-	h.write("sys/class/kfd/kfd/topology/nodes/"+n+"/properties", fmt.Sprintf(
-		"cpu_cores_count %d\nsimd_count %d\nmem_banks_count 1\nlocation_id %d\ndomain 0\n", cpus, simds, loc))
+// mem < 0 leaves local_mem_size out (older kernels).
+func (h *fakeHost) kfdNode(n string, cpus, simds, loc int, mem int64) {
+	p := fmt.Sprintf("cpu_cores_count %d\nsimd_count %d\nmem_banks_count 1\nlocation_id %d\ndomain 0\n", cpus, simds, loc)
+	if mem >= 0 {
+		p += fmt.Sprintf("local_mem_size %d\n", mem)
+	}
+	h.write("sys/class/kfd/kfd/topology/nodes/"+n+"/properties", p)
 }
 
 func TestAPUByKFDTopology(t *testing.T) {
@@ -265,17 +269,28 @@ func TestAPUByKFDTopology(t *testing.T) {
 	// one node, so it is integrated and the host is no GPU node.
 	h := newFakeHost(t)
 	amd(h, "0000:c1:00.0")
-	h.kfdNode("0", 16, 8, 0xc100)
+	h.kfdNode("0", 16, 8, 0xc100, -1)
 	info, _, devs := fromSysfs(enumeratePCI())
 	if !info.GPUs[0].Integrated || info.Vendor != VendorNone || info.Best != -1 || devs != nil {
 		t.Fatalf("2 GiB APU counted as a GPU node: %+v", info)
 	}
 
+	// Split layout (Cezanne 0x1638 on kernel 7.2): CPUs on node 0, the iGPU
+	// node has no CPU cores but local_mem_size 0.
+	h = newFakeHost(t)
+	amd(h, "0000:05:00.0")
+	h.kfdNode("0", 16, 0, 0, 0)
+	h.kfdNode("1", 0, 32, 0x500, 0)
+	info, _, devs = fromSysfs(enumeratePCI())
+	if !info.GPUs[0].Integrated || info.Vendor != VendorNone || info.Best != -1 || devs != nil {
+		t.Fatalf("split-layout APU counted as a GPU node: %+v", info)
+	}
+
 	// A real 2 GiB dGPU: separate CPU and GPU nodes.
 	h = newFakeHost(t)
 	amd(h, "0000:03:00.0")
-	h.kfdNode("0", 16, 0, 0)
-	h.kfdNode("1", 0, 8, 0x300)
+	h.kfdNode("0", 16, 0, 0, 0)
+	h.kfdNode("1", 0, 8, 0x300, 2<<30)
 	info, _, _ = fromSysfs(enumeratePCI())
 	if info.GPUs[0].Integrated || info.Vendor != VendorAMD || info.Best != 0 {
 		t.Fatalf("2 GiB dGPU misread as an APU: %+v", info)

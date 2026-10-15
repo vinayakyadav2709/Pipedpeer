@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -258,8 +259,8 @@ func fromSysfs(pci []Device) (Info, Usage, []DeviceUsage) {
 	return info, usage, devs
 }
 
-// classifyAMD marks an APU's iGPU as integrated. KFD topology is the signal:
-// an APU's node has both CPU cores and SIMDs. Without a KFD node for the
+// classifyAMD marks an APU's iGPU as integrated. KFD topology is the signal
+// (see kfdAPU). Without a usable KFD node for the
 // device it falls back to VRAM under 2 GiB (strict: a real 2 GB dGPU reads
 // exactly 2 GiB). A suspended device with nothing cached has no VRAM and stays
 // discrete: a boot display never runtime-suspends.
@@ -276,8 +277,11 @@ func classifyAMD(d *Device) {
 }
 
 // kfdAPU reports whether the KFD topology node of the PCI device at addr
-// ("0000:c1:00.0") is an APU: cpu_cores_count > 0 and simd_count > 0 on the
-// same node. known is false when no node matches.
+// ("0000:c1:00.0") is an APU. Two layouts exist: older kernels put the CPU
+// cores and SIMDs on one node (cpu_cores_count > 0); newer ones split them, and
+// the GPU node then reads local_mem_size 0 (seen on a Cezanne 0x1638, kernel
+// 7.2, with a 2 GiB carve-out) where a dGPU reports its VRAM. known is false
+// when no node matches, or a split node lacks local_mem_size.
 func kfdAPU(addr string) (apu, known bool) {
 	files, _ := filepath.Glob(filepath.Join(sysRoot, "class/kfd/kfd/topology/nodes/*/properties"))
 	for _, f := range files {
@@ -292,7 +296,14 @@ func kfdAPU(addr string) (apu, known bool) {
 		}
 		loc := props["location_id"] // bus<<8 | device<<3 | function
 		if fmt.Sprintf("%04x:%02x:%02x.%x", props["domain"], loc>>8, (loc>>3)&0x1f, loc&7) == addr {
-			return props["cpu_cores_count"] > 0, true
+			if props["cpu_cores_count"] > 0 {
+				return true, true
+			}
+			if mem, ok := props["local_mem_size"]; ok {
+				return mem == 0, true
+			}
+			logf("KFD node %s for %s has no local_mem_size, cannot tell APU from dGPU", f, addr)
+			return false, false
 		}
 	}
 	return false, false
@@ -316,11 +327,17 @@ func stackState(pci []Device, stack string) (usable, asleep bool) {
 	return
 }
 
+// nvFailOnce keeps a broken nvidia-smi to one log line per process; detection
+// refreshes on every run and would repeat it.
+var nvFailOnce sync.Once
+
 // liveNVIDIA runs the single nvidia-smi query and maps rows by PCI address.
 func liveNVIDIA(pci []Device) (changed bool) {
 	rows, err := queryNVIDIA()
 	if err != nil {
-		logf("%s failed with every NVIDIA GPU awake, counting none of them: %v", nvidiaSMI, err)
+		nvFailOnce.Do(func() {
+			logf("%s failed with every NVIDIA GPU awake, counting none of them (logged once): %v", nvidiaSMI, err)
+		})
 	}
 	seen := map[string]bool{}
 	for _, r := range rows {
