@@ -348,13 +348,14 @@ func (s *Server) poolStats() *poolStatsStore {
 }
 
 // poolHWOf reads a machine's CPU from its heartbeat capabilities: this
-// daemon's own, else the node store's copy. machine is a node id or a
-// heartbeat machine key.
-func (s *Server) poolHWOf(machine string) (poolHW, bool) {
+// daemon's own, else the node store's copy. Stats are keyed by node id
+// (identity key fingerprint) only, as the run record is: a second key for
+// the same machine would split its stats.
+func (s *Server) poolHWOf(nodeID string) (poolHW, bool) {
 	s.selfMu.RLock()
 	caps := s.selfCaps
 	s.selfMu.RUnlock()
-	if machine == s.nodeID || (caps != nil && caps["machine"] == machine) {
+	if nodeID == s.nodeID {
 		if h, ok := capsHW(caps); ok {
 			return h, true
 		}
@@ -364,11 +365,11 @@ func (s *Server) poolHWOf(machine string) (poolHW, bool) {
 	}
 	nodes, err := s.store.ListAll()
 	if err != nil {
-		log.Warn().Err(err).Str("machine", machine).Msg("pool stats: node store unreadable; no hardware check")
+		log.Warn().Err(err).Str("node", nodeID).Msg("pool stats: node store unreadable; no hardware check")
 		return poolHW{}, false
 	}
 	for _, n := range nodes {
-		if n.CapsJSON == "" {
+		if n.NodeID != nodeID || n.CapsJSON == "" {
 			continue
 		}
 		var c map[string]string
@@ -376,9 +377,7 @@ func (s *Server) poolHWOf(machine string) (poolHW, bool) {
 			log.Warn().Err(err).Str("peer", n.NodeID).Msg("pool stats: stored capabilities unreadable")
 			continue
 		}
-		if n.NodeID == machine || c["machine"] == machine {
-			return capsHW(c)
-		}
+		return capsHW(c)
 	}
 	return poolHW{}, false
 }
@@ -399,7 +398,8 @@ func capsHW(c map[string]string) (poolHW, bool) {
 	return poolHW{Model: c["cpu_model"], Cores: cores, MHz: mhz}, true
 }
 
-// poolPrior returns what earlier parts and runs measured for fn on machine,
+// poolPrior returns what earlier parts and runs measured for fn on machine
+// (a node id, never a heartbeat machine key),
 // or a cores x MHz estimate from another machine that ran fn.
 func (s *Server) poolPrior(machine, fn string) (itemsPerSec, overheadSec float64, ok bool) {
 	return s.poolStats().prior(machine, fn, time.Now(), s.poolHWOf)
