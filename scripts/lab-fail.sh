@@ -57,7 +57,7 @@ echo "waiting for lab workers..."
 for idx in 1 2 3; do
 	ok=0
 	for _ in $(seq 1 90); do
-		if w "$idx" 'curl -sf --max-time 2 http://127.0.0.1:4242/health' >/dev/null 2>&1; then
+		if api "$idx" /health >/dev/null 2>&1; then
 			ok=1
 			break
 		fi
@@ -75,7 +75,7 @@ echo "lab is up"
 # below would be measuring discovery, not failover.
 want_ids=()
 for idx in 2 3; do
-	id="$(w "$idx" 'curl -sf --max-time 3 http://127.0.0.1:4242/health' |
+	id="$(api "$idx" /health |
 		python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])' 2>/dev/null || true)"
 	[[ -n "$id" ]] && want_ids+=("$id")
 done
