@@ -38,7 +38,13 @@ from pipedpeer_shim.pandas_ops import (
     _install_io, _install_pandas,
 )
 from pipedpeer_shim.pool import (
-    _ClusterPool, _func_payload, _func_pickle, _is_library_module, _race_items,
+    _ClusterPool,
+)
+from pipedpeer_shim.pool_func import (
+    _func_payload, _func_pickle, _is_library_module,
+)
+from pipedpeer_shim.pool_race import (
+    _race_items,
 )
 from pipedpeer_shim.ddp import (
     _PENDING_PATCHES, _install_ddp,

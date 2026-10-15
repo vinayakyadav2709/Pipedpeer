@@ -5,28 +5,28 @@ import importlib
 import pickle
 
 
-from pipedpeer_shim import core, numpy_ops, pool, transfer
+from pipedpeer_shim import core, numpy_ops, pool_func, transfer
 
 
 def test_modules_import_without_heavy_deps():
-    for name in ("core", "stats", "transfer", "numpy_ops", "pandas_ops", "pool", "ddp"):
+    for name in ("core", "stats", "transfer", "numpy_ops", "pandas_ops", "pandas_ooc", "pandas_combine", "pandas_frame", "pool", "pool_pacing", "pool_race", "pool_resources", "pool_func", "ddp"):
         importlib.import_module("pipedpeer_shim." + name)
     importlib.import_module("sitecustomize")
 
 
 def test_adaptive_chunk_bounds():
-    assert pool._adaptive_chunk(0) == 64
-    assert pool._adaptive_chunk(-1) == 64
-    assert pool._adaptive_chunk(1e-9) == 256      # cheap items: capped large
-    assert pool._adaptive_chunk(10.0) == 1        # costly items: one per chunk
-    assert pool._adaptive_chunk(0.01) == 50       # ~0.5 s of work per chunk
+    assert pool_func._adaptive_chunk(0) == 64
+    assert pool_func._adaptive_chunk(-1) == 64
+    assert pool_func._adaptive_chunk(1e-9) == 256      # cheap items: capped large
+    assert pool_func._adaptive_chunk(10.0) == 1        # costly items: one per chunk
+    assert pool_func._adaptive_chunk(0.01) == 50       # ~0.5 s of work per chunk
 
 
 def test_chunk_covers_every_item_in_order():
     seq = list(range(10))
-    parts = pool._chunk(seq, 3)
+    parts = pool_func._chunk(seq, 3)
     assert parts == [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
-    assert pool._chunk(seq, 0) == [seq]           # 0 falls back to 64
+    assert pool_func._chunk(seq, 0) == [seq]           # 0 falls back to 64
 
 
 def test_frames_body_layout():

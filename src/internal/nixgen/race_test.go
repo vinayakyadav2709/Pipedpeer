@@ -32,7 +32,7 @@ func runRaceProbe(t *testing.T, mode string) {
 	src := `
 import sys, time
 sys.path.insert(0, sys.argv[1])
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pool_func, pool_race
 
 def double(x):
     time.sleep(0.01)
@@ -51,7 +51,7 @@ def main():
             # win their slots and still be there at the end.
             return [(i, ("R", v * 2)) for i, v in chunk]
 
-    payload = pool._func_payload(double)
+    payload = pool_func._func_payload(double)
     assert payload is not None, "a module-level function must be shippable"
 
     p = StubPool(processes=2)
@@ -107,12 +107,12 @@ func TestShimRaceAdaptiveChunk(t *testing.T) {
 	src := `
 import sys
 sys.path.insert(0, sys.argv[1])
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pool_func, pool_race
 # cheap item -> big chunk, costly item -> small chunk, bounded
-assert pool._adaptive_chunk(0.0001) == 256
-assert pool._adaptive_chunk(1.0) == 1
-assert pool._adaptive_chunk(0) == 64
-assert pool._chunk(list(range(10)), 0) == [list(range(10))]
+assert pool_func._adaptive_chunk(0.0001) == 256
+assert pool_func._adaptive_chunk(1.0) == 1
+assert pool_func._adaptive_chunk(0) == 64
+assert pool_func._chunk(list(range(10)), 0) == [list(range(10))]
 print("chunk-ok")
 `
 	script := filepath.Join(dir, "probe.py")
@@ -145,7 +145,7 @@ func TestShimRaceSharesFollowSpeed(t *testing.T) {
 	src := `
 import sys, time
 sys.path.insert(0, sys.argv[1])
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pool_func, pool_race
 
 def slow(vals):                      # one local lane, 50 ms an item
     out = []
@@ -159,7 +159,7 @@ def fast(chunk):                     # the cluster: 5 ms a chunk
     return [(i, ("R", v)) for i, v in chunk]
 
 items = list(range(80))
-r = pool._race_items(items, 0.05, 1, slow, fast)
+r = pool_race._race_items(items, 0.05, 1, slow, fast)
 assert [v for _, v in r] == items, r[:5]
 remote = sum(1 for tag, _ in r if tag == "R")
 assert remote > len(items) * 3 // 4, "the cluster took only %d of %d" % (remote, len(items))
@@ -194,7 +194,7 @@ func TestARaceLeavesNoChunkBehind(t *testing.T) {
 	src := `
 import sys, threading, time
 sys.path.insert(0, sys.argv[1])
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pool_func, pool_race
 
 def run_local(vals):
     time.sleep(0.005 * len(vals))
@@ -202,11 +202,11 @@ def run_local(vals):
 
 # A peer that answers instantly but ran the work on the origin node.
 def on_origin(chunk):
-    out = pool._RemotePairs((i, v * 2) for i, v in chunk)
+    out = pool_race._RemotePairs((i, v * 2) for i, v in chunk)
     out.elsewhere = 0
     return out
 
-r = pool._race_items(list(range(40)), 0.005, 2, run_local, on_origin)
+r = pool_race._race_items(list(range(40)), 0.005, 2, run_local, on_origin)
 assert r == [v * 2 for v in range(40)], r[:8]
 assert stats._STATS["remote_used"] == 0, stats._STATS["remote_used"]
 
@@ -220,7 +220,7 @@ def stuck(chunk):
     time.sleep(60)
     return None
 
-r = pool._race_items(list(range(400)), 0.005, 2, run_local, stuck)
+r = pool_race._race_items(list(range(400)), 0.005, 2, run_local, stuck)
 assert r == [v * 2 for v in range(400)], r[:8]
 n = len(started)
 time.sleep(0.5)

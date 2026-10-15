@@ -244,7 +244,7 @@ os.environ["PIPEDPEER_STORE_PATH"] = ""
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
 # pandas and numpy are imported by the scripts that use them, not here. This
 # preamble is shared by every test that needs a fake daemon, and importing them
 # unconditionally made the cost-model and numpy tests skip for want of pandas
@@ -256,7 +256,7 @@ core._ENABLED = True
 core._URL = "http://127.0.0.1:%d" % PORT
 core._STORE = ""
 core._NUM_SHARDS = "3"
-pandas_ops._OOC_CHUNK = 4096
+pandas_ooc._OOC_CHUNK = 4096
 `
 
 // runShimPython writes the shim plus a python script and runs it; any nonzero
@@ -377,7 +377,7 @@ pd.testing.assert_frame_equal(got.sort_index().sort_values(by=["lv", "rv"]).rese
 big = pd.DataFrame({"k": np.random.randint(0, 9, 20000), "v": np.random.randn(20000), "s": np.random.randint(0, 50, 20000)})
 csv = os.path.join(TMP, "big.csv")
 big.to_csv(csv, index=False)
-pf = pandas_ops._partitioned_read_csv(csv, {})
+pf = pandas_ooc._partitioned_read_csv(csv, {})
 assert len(pf) == 20000 and pf.shape[1] == 3
 local_df = pd.read_csv(csv)
 pd.testing.assert_frame_equal(pf._materialize(), local_df)
@@ -408,7 +408,7 @@ import numpy as np
 big = pd.DataFrame({"k": np.random.randint(0, 9, 20000), "v": np.random.randn(20000), "s": np.random.randint(0, 50, 20000)})
 csv = os.path.join(TMP, "lost.csv")
 big.to_csv(csv, index=False)
-pf = pandas_ops._partitioned_read_csv(csv, {})
+pf = pandas_ooc._partitioned_read_csv(csv, {})
 assert len(pf._keys) > 3
 local_df = pd.read_csv(csv)
 class _Lost(dict):
@@ -443,7 +443,7 @@ import numpy as np
 csv = os.path.join(TMP, "lines.csv")
 with open(csv, "wb") as f:
     f.write(b"k,v\n" + b"".join(b"k%d,%d\n" % (i % 5, i) for i in range(1000)))
-ranges = list(pandas_ops._csv_ranges(csv, 0))
+ranges = list(pandas_ooc._csv_ranges(csv, 0))
 offs = [ranges[0][0]] + [b for _, b in ranges]
 assert offs[0] == 4, offs
 data = open(csv, "rb").read()
@@ -461,11 +461,11 @@ r = pd.read_csv(csv)
 assert isinstance(r, pd.DataFrame) and len(r) == 1000
 os.environ["PIPEDPEER_DAEMON_URL"] = "http://127.0.0.1:%d" % PORT
 
-pandas_ops._OOC_CHUNK = 1024 * 1024
+pandas_ooc._OOC_CHUNK = 1024 * 1024
 big = pd.DataFrame({"k": np.random.randint(0, 9, 800000), "v": np.random.randn(800000), "s": np.random.randint(0, 50, 800000)})
 bigcsv = os.path.join(TMP, "ram.csv")
 big.to_csv(bigcsv, index=False)
-pf = pandas_ops._partitioned_read_csv(bigcsv, {})
+pf = pandas_ooc._partitioned_read_csv(bigcsv, {})
 assert len(pf) == len(big)
 b64_byte = MAX_CHUNK[0] * 3 // 4
 assert b64_byte <= 1024 * 1024 + 65536, b64_byte
@@ -553,7 +553,7 @@ func TestShimNumPyInterception(t *testing.T) {
 import time
 import base64
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
 import numpy as np
 
 core._ENABLED = True
@@ -606,7 +606,7 @@ func TestShimNumPyRespectsTheCostModelsNo(t *testing.T) {
 	runShimPythonEnv(t, "t8b", shimFakeDaemon+`
 import time
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
 import numpy as np
 
 core._ENABLED = True
@@ -657,7 +657,7 @@ func TestShimForceDistributeBypassesCostModel(t *testing.T) {
 	script := filepath.Join(dir, "probe.py")
 	if err := os.WriteFile(script, []byte(`
 import sitecustomize as sc
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
 
 # 1 KB of work with modest flops: auto mode must refuse, force must accept.
 assert transfer._should_spill(1024, 4) is True, "_should_spill ignored force"
@@ -706,7 +706,7 @@ func TestShimDoesNotImportHeavyLibsAtStartup(t *testing.T) {
 import sys
 assert sys.modules.get("sitecustomize") is not None, "shim did not load"
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
 assert core._ENABLED, "shim not enabled; this test would be vacuous"
 for mod in ("torch", "pandas", "numpy", "joblib", "sklearn"):
     assert mod not in sys.modules, mod + " was imported at startup"
@@ -724,7 +724,7 @@ func TestShimPatchesOnFirstImport(t *testing.T) {
 	src := `
 import sys
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
 assert core._ENABLED, "shim not enabled; this test would be vacuous"
 assert "numpy" not in sys.modules, "numpy imported before the script asked"
 import numpy as np
