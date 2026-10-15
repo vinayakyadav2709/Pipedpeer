@@ -102,7 +102,8 @@
 \newcommand{\uidtwo}{2023300264}
 \newcommand{\uidthree}{2023300072}
 
-\newcommand{\guidename}{Prof. Rupali Sawant}
+\newcommand{\guidename}{Dr. Rupali Sawant}
+\newcommand{\mentorname}{Dayanand Ambawade}% FILL-AT-SUBMISSION: mentor's title (Dr./Prof.)
 
 \newcommand{\projecttitle}{PipedPeer: Zero-Configuration Distributed Computing via Recursive, Decentralised  Coordination}
 
@@ -662,7 +663,8 @@ from a Nix environment) and
     and places the job; the worker admits it, caches the closure and runs it
     sandboxed under a memory ceiling. Both roles are the same binary. Peers on
     other networks are reached over direct QUIC links that an introducer helps
-    establish but never carries.}
+    establish but never carries; every daemon is an introducer for its own
+    cluster. Phones take parallel chunks under \texttt{proot} and Nix.}
     \label{fig:architecture}
 \end{figure}
 
@@ -721,8 +723,8 @@ of nodes.
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_3.2_dfd_level0.png}}
-    \caption{Level 0 DFD --- context diagram. The introducer and the registry are
-    dashed because the system works without them.}
+    \caption{Level 0 DFD --- context diagram. The introducer is dashed because
+    the system works without it on one network.}
     \label{fig:dfd0}
 \end{figure}
 
@@ -763,8 +765,9 @@ identity and trust store (node key, pinned certificates, trusted Nix keys).
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_3.4_use_case.png}}
     \caption{Use cases. A peer daemon is an actor in its own right, because
-    every node serves closures and executes chunks for others; the introducer
-    registers nodes and forwards punch requests.}
+    every node serves closures, executes chunks and introduces its cluster's
+    peers; a phone executes chunks; a hosted introducer only registers nodes
+    and forwards punch requests.}
     \label{fig:usecase}
 \end{figure}
 
@@ -989,8 +992,8 @@ cover.
     \centering
     \includegraphics[width=0.95\textwidth]{\figpath{fig_4.2_trust.png}}
     \caption{The three layers of trust: a shared secret on every API route,
-    pinned TLS (or QUIC across networks) on the wire, and the node key that both
-    authenticates links and signs closures.}
+    pinned TLS (or QUIC across networks) on the wire, and the node key that
+    makes the certificate, authenticates links and signs closures.}
     \label{fig:trust}
 \end{figure}
 
@@ -1266,7 +1269,7 @@ which is the default when a script imports torch, unless \texttt{-{}-gpu off}
     \includegraphics[width=0.92\textwidth]{\figpath{fig_4.6_closure_cache.png}}
     \caption{The store path is the cluster-wide cache key. Most submissions ship
     no environment at all, and a related environment ships only the store paths
-    the receiver lacks.}
+    the receiver lacks. The upload never waits more than 60\,s for a slow peer.}
     \label{fig:closure}
 \end{figure}
 
@@ -1355,7 +1358,8 @@ returns it and the client prints why the peer took no work.
     \caption{What the job can and cannot see. The absences are as deliberate as
     the mounts. Shared memory is mounted world-writable because Python's
     \texttt{multiprocessing} requires it, and the driver libraries are bound
-    file by file so that the host C library cannot shadow the closure's.}
+    file by file so that the host C library cannot shadow the closure's. On a
+    phone, \texttt{proot} takes the place of \texttt{crun}.}
     \label{fig:sandbox}
 \end{figure}
 
@@ -1800,8 +1804,9 @@ torch gloo and NCCL back-ends were removed, so this channel is the only one.
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_4.10_ddp.png}}
-    \caption{Gradient exchange over the daemon port. The lead daemon reduces the
-    sample-weighted gradients and returns one average.}
+    \caption{Synchronisation over the daemon port. The lead daemon averages by
+    samples and returns one average: int8 gradients every step in exact mode,
+    weights every $H$ steps in fast mode; auto switches to fast once.}
     \label{fig:ddp}
 \end{figure}
 
@@ -2376,8 +2381,8 @@ alongside the skip check and a never-slower pool benchmark.
 \begin{figure}[H]
     \centering
     \includegraphics[width=0.92\textwidth]{\figpath{fig_5.2_shim_overhead.png}}
-    \caption{Left: the parallel-map job of Table~\ref{tab:shimcost}, clean runs
-    only (failed-and-retried runs excluded).
+    \caption{Left: the declined parallel map of Table~\ref{tab:shimidle}; the
+    enabled side's cold first run is left out of its range.
     Right: interpreter start-up, with eager patching (August) and deferred
     patching (October).}
     \label{fig:resshim}

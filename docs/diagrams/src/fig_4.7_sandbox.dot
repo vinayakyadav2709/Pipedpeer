@@ -27,6 +27,7 @@ digraph Sandbox {
     m2 [label="/work          read write"];
     m3 [label="/dev/shm      mode 1777"];
     m4 [label="/tmp           scratch"];
+    m9 [label="home          private"];
     m5 [label="/dev/nvidia*   devices"];
     m6 [label="/run/opengl-driver/lib\nbound file by file"];
     m8 [label="memory.max     per job\n2x estimate, swap equal"];
@@ -34,7 +35,7 @@ digraph Sandbox {
     ns [label="Namespaces\npid, ipc, mount, uts\n(+ user, when rootless)", fillcolor="#ffffff"];
     no [label="Not provided\nno network namespace,\nno seccomp filter,\nno capability list,\nuid 0 inside",
         fillcolor="#ffffff", style="rounded,filled,dashed"];
-    { rank=same; m1; m2; m3; m4; m5; m6; m8; m7; ns; no; }
+    { rank=same; m1; m2; m3; m4; m9; m5; m6; m8; m7; ns; no; }
   }
 
   nix  -> m1 [label=" bind "];
@@ -43,4 +44,9 @@ digraph Sandbox {
   gpu  -> m6 [label=" driver libraries "];
   cg   -> m8 [label=" child cgroup "];
   net  -> m7 [label=" shared ", style=dashed, color="#a33333", fontcolor="#a33333"];
+
+  // Phones run chunks under proot instead (report: Phones as full nodes).
+  phone [label="On a phone: proot, not crun\nmemory limit: the job's memory\nplus 2 GiB address space,\nlower priority; a weaker sandbox",
+         fillcolor="#f5f5f5", color="#888888", style="rounded,filled,dashed"];
+  cg -> phone [style=invis];
 }

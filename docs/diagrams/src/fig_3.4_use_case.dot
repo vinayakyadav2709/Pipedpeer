@@ -11,7 +11,8 @@ digraph UseCase {
   user  [label="User"];
   admin [label="Node\noperator"];
   peer  [label="Peer\ndaemon"];
-  intro [label="Introducer"];
+  phone [label="Phone\n(Termux)"];
+  intro [label="Hosted\nintroducer"];
 
   subgraph cluster_sys {
     label="PipedPeer"; labelloc=b; labeljust=l; fontsize=18; fontname="Helvetica";
@@ -21,19 +22,22 @@ digraph UseCase {
           penwidth=1.2, width=0, height=0];
     u1 [label="Run a script on the cluster"];
     u2 [label="Ask for a GPU or a memory floor"];
-    u3 [label="Train with data parallelism"];
+    u3 [label="Train with data parallelism\n(exact, fast or auto sync)"];
     u4 [label="Inspect jobs and nodes"];
     u5 [label="Accept and lease work"];
+    u12 [label="Introduce its cluster's peers"];
     u6 [label="Serve a signed closure to peers"];
     u7 [label="Execute parallel chunks"];
-    u8 [label="Install prerequisites"];
-    u9 [label="Set the cluster secret"];
-    u10 [label="Join a cluster across networks"];
+    u13 [label="Join under proot and Nix"];
+    u8 [label="Set up the machine"];
+    u9 [label="Invite a machine"];
+    u10 [label="Connect with an invite code"];
     u11 [label="Register nodes, forward punches"];
   }
 
   user -> u1; user -> u2; user -> u3; user -> u4;
   admin -> u8; admin -> u9; admin -> u10;
-  peer -> u5; peer -> u6; peer -> u7;
+  peer -> u5; peer -> u6; peer -> u7; peer -> u12;
+  phone -> u7; phone -> u13;
   intro -> u11;
 }

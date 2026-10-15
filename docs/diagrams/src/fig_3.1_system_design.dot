@@ -1,7 +1,8 @@
 // Figure 3.1 - PipedPeer system design.
-// Every box is on the path. The introducer sits outside both nodes because it
-// is the one role that is not symmetric, and it is dashed because a LAN
-// cluster needs none.
+// Every box is on the path. Every daemon serves the introducer for its own
+// cluster; it is drawn apart, dashed, because a LAN cluster needs none and a
+// hosted introducer-only server may take the role. Phones join as nodes that
+// take parallel chunks under proot and Nix.
 digraph SystemDesign {
   rankdir=TB; compound=true; bgcolor="white"; nodesep=0.35; ranksep=0.42;
   node [fontname="Helvetica", fontsize=16, shape=box, style="rounded,filled",
@@ -32,7 +33,8 @@ digraph SystemDesign {
   }
 
   peers [label="Peer nodes\nthe same daemon, on this network\nor linked directly across networks", shape=box3d, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
-  intro [label="Introducer (optional)\naddress book only,\ncarries no job data", style="rounded,filled,dashed", fillcolor="#f5f5f5", color="#888888"];
+  phone [label="Phones (Termux)\nproot and Nix,\npool and torch chunks", shape=box3d, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
+  intro [label="Introducer, in every daemon\nor a hosted introducer-only server\naddress book only, no job data", style="rounded,filled,dashed", fillcolor="#f5f5f5", color="#888888"];
 
   place -> admit [lhead=cluster_worker, penwidth=1.8, color="#1e50a0",
                   label="  1. accept and commit\l  2. ship missing store paths and files\l  3. run, streaming the output\l"];
@@ -40,6 +42,8 @@ digraph SystemDesign {
                    label="  4. results  "];
 
   cache   -> peers [style=dashed, label="  signed closure  "];
-  sandbox -> peers [style=dashed, label="  parallel work,\l  shared by measured speed\l"];
+  sandbox -> peers [style=dashed, label="  parallel work and training ranks,\l  shared by measured speed\l"];
+  sandbox -> phone [style=dashed, label="  chunks  "];
+  { rank=same; peers; phone; }
   intro   -> peers [style=dotted, arrowhead=none, color="#888888", label="  candidate addresses  "];
 }

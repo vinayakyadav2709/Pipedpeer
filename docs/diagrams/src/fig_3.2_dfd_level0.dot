@@ -1,4 +1,5 @@
-// Figure 3.2 - Level 0 DFD (context diagram).
+// Figure 3.2 - Level 0 DFD (context diagram). The NATS registry was removed
+// (7f75695), so the introducer is the only optional entity.
 // Laid out top-to-bottom: left-to-right gave a 3.8:1 strip whose labels were
 // under 6pt once scaled to the text width.
 digraph DFD0 {
@@ -8,23 +9,19 @@ digraph DFD0 {
 
   user [label="User", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a",
         penwidth=1.6, width=2.0, height=0.9];
-  peer [label="Peer nodes", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a",
+  peer [label="Peer nodes\nand phones", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a",
         penwidth=1.6, width=2.0, height=0.9];
   intro [label="Introducer\n(optional)", shape=box, style="filled,dashed", fillcolor="#f5f5f5",
-        color="#888888", penwidth=1.6, width=2.0, height=0.9];
-  reg  [label="Registry\n(optional)", shape=box, style="filled,dashed", fillcolor="#f5f5f5",
         color="#888888", penwidth=1.6, width=2.0, height=0.9];
 
   sys [label="0\nPipedPeer\ndaemon", shape=circle, style=filled, fillcolor="#dce9f7",
        color="#1e50a0", penwidth=2.0, width=2.1, fixedsize=true];
 
-  user -> sys [label="  script, arguments,\l  working directory,\l  shared secret\l"];
+  user -> sys [label="  script, arguments,\l  working directory,\l  invite code\l"];
   sys -> user [label="  streamed output,\l  result files\l"];
-  sys -> peer [label="  missing store paths,\l  workspace, parallel work\l"];
+  { rank=same; user; intro; }
+  sys -> peer [label="  missing store paths,\l  workspace, parallel work,\l  gradients or weights\l"];
   peer -> sys [label="  capacity, load,\l  computed results\l"];
   sys -> intro [label="  candidate addresses  ", style=dashed];
   intro -> sys [label="  peers' candidates,\l  punch requests\l", style=dashed];
-  sys -> reg  [label="  registration  ", style=dashed];
-  reg -> sys  [label="  peer list  ", style=dashed];
-  { rank=same; intro; reg; }
 }

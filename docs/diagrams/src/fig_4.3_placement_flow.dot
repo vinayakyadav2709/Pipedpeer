@@ -8,7 +8,7 @@ digraph Placement {
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.10"];
   edge [fontname="Helvetica", fontsize=13, color="#555555"];
 
-  gather [label="Gather candidates\nnode store, discovery, registry, self"];
+  gather [label="Gather candidates\nnode store, discovery, self;\nnodes with a role are never offered a job"];
   f1 [label="Architecture matches?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
   f2 [label="GPU present, if required?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
   f3 [label="Memory, cores, VRAM enough?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
@@ -17,7 +17,7 @@ digraph Placement {
   score [label="Score the survivors\nload penalties, hardware bonuses"];
   lease [label="Reserve a lease on the best node\naccept, then commit"];
   run   [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
-  wait  [label="Nothing eligible\nqueue, retry every 30 s", fillcolor="#fbe9e9", color="#a33333"];
+  wait  [label="Nothing eligible\nqueue, retry every 30 s;\na job no node could ever fit fails at once", fillcolor="#fbe9e9", color="#a33333"];
 
   gather -> f1;
   f1 -> f2 [label=" yes "];
@@ -36,6 +36,6 @@ digraph Placement {
   wait -> gather [label=" retry ", style=dashed, color="#a33333", fontcolor="#a33333"];
 
   lease -> score [label=" refused: next candidate ", style=dashed, color="#a33333", fontcolor="#a33333"];
-  run -> score [label=" failed: reschedule with backoff ", style=dashed, color="#a33333", fontcolor="#a33333"];
+  run -> score [label=" failed: untried node first, backoff,\l at most three runs\l ", style=dashed, color="#a33333", fontcolor="#a33333"];
   { rank=same; score; wait; }
 }

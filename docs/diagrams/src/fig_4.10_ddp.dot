@@ -1,5 +1,7 @@
-// Figure 4.10 - Data parallel training: gradients meet on the daemon port and
-// the daemon reduces them. The explanatory note lives in the caption.
+// Figure 4.10 - Data parallel training: ranks meet on the daemon port and the
+// lead daemon averages. Exact mode exchanges int8 gradients every step; fast
+// mode (DiLoCo-style) averages weights every H steps; auto switches to fast
+// once when it is predicted faster. The explanatory note lives in the caption.
 digraph DDP {
   rankdir=TB; bgcolor="white"; nodesep=0.55; ranksep=0.60;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
@@ -8,17 +10,17 @@ digraph DDP {
 
   r0 [label="Rank 0\nshard and batch\nsized by its share"];
   r1 [label="Rank 1\nshard and batch\nsized by its share"];
-  r2 [label="Rank 2\nshard and batch\nsized by its share"];
+  r2 [label="Rank 2, on another network\nover the QUIC link\nsized by its share"];
 
-  board [label="Lead node daemon, on the ordinary daemon port\nsums gradients in float64, weighted by samples:\nsum(n_i g_i) / sum(n_i)\ncompletes without a straggler after 45 s",
+  board [label="Lead node daemon, on the ordinary daemon port\naverages in float64, weighted by samples: sum(n_i x_i) / sum(n_i)\nexact: gradients every step, int8 with error feedback\nfast (DiLoCo): weights every H steps, H by ring size\nauto: exact warm-up, then fast once if predicted faster",
          fillcolor="#fdf6e3", color="#8a6d1f", penwidth=1.5];
 
-  avg [label="One averaged gradient back to every rank\nevery 20 syncs: refit the shares,\nor drop a rank that costs more sync than it adds",
+  avg [label="One average back to every rank\na round closes without a straggler after 45 s;\nevery 20 syncs: refit the shares, or drop a rank\nthat costs more sync than it adds;\nkeep only the fastest rank when the split loses",
        fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
-  r0 -> board [label="  gradients, fp16  "];
-  r1 -> board [label="  gradients, fp16  "];
-  r2 -> board [label="  gradients, fp16  "];
+  r0 -> board [label="  gradients  \l  or weights  \l"];
+  r1 -> board [label="  gradients  \l  or weights  \l"];
+  r2 -> board [label="  gradients  \l  or weights  \l"];
   board -> avg [label="  one model, not the whole ring  ", penwidth=1.5];
 
   { rank=same; r0; r1; r2; }
