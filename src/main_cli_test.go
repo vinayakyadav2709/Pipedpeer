@@ -2,15 +2,18 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 )
 
 func TestStartStopStatusLifecycle(t *testing.T) {
@@ -35,9 +38,26 @@ func TestStartStopStatusLifecycle(t *testing.T) {
 		t.Fatalf("expected stopped daemon output, got: %s", out)
 	}
 
-	out = runCLIWithEnv(t, stateDir, xdg, "status")
-	if !strings.Contains(out, "daemon stopped") {
-		t.Fatalf("expected daemon stopped status, got: %s", out)
+	// A stopped daemon is a failed status: exit 1 and a line saying so.
+	sout, serr, err := runCLIEWithEnv(t, stateDir, xdg, "status")
+	if err == nil || !strings.Contains(sout+serr, "daemon stopped") {
+		t.Fatalf("expected a failing 'daemon stopped' status, got err=%v: %s%s", err, sout, serr)
+	}
+}
+
+func TestExitCode(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want int
+	}{
+		{fmt.Errorf("execution failed: %w", &daemonctl.RemoteExitError{Code: 3}), 3},
+		{errCancelReported, 130},
+		{fmt.Errorf("wrapped: %w", context.Canceled), 130},
+		{errors.New("anything else"), 1},
+	} {
+		if got := exitCode(c.err); got != c.want {
+			t.Errorf("exitCode(%v) = %d, want %d", c.err, got, c.want)
+		}
 	}
 }
 
@@ -59,8 +79,9 @@ func TestRunCheckOnlyAutoStartsDaemon(t *testing.T) {
 		"run",
 		scriptPath,
 		"--host", fmt.Sprintf("127.0.0.1:%d", port),
-		"--port", fmt.Sprintf("%d", port),
 		"--check-only",
+		"-v", // "started daemon" is a verbose-only line
+
 	)
 
 	if !strings.Contains(out, "started daemon") {
@@ -92,7 +113,6 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 		stateDir, xdg,
 		"run",
 		scriptPath,
-		"--port", fmt.Sprintf("%d", port),
 		"--remote",
 		"--check-only",
 	)
@@ -182,44 +202,23 @@ func TestBinaryBuildsAndRuns(t *testing.T) {
 		t.Fatal("binary is empty")
 	}
 
-	// Run with 'status' command — should work without any setup
-	cmd := exec.Command(binPath, "status")
+	// Bare `pipedpeer` prints help (it used to try to run a script), and
+	// help lists only the commands a user needs.
+	cmd := exec.Command(binPath)
 	cmd.Env = append(os.Environ(), "PIPEDPEER_DAEMON_STATE_DIR="+t.TempDir(), "XDG_DATA_HOME="+t.TempDir())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("binary execution failed: %v\n%s", err, out)
+		t.Fatalf("bare pipedpeer failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "daemon") {
-		t.Fatalf("expected daemon status output, got: %s", out)
+	help := string(out)
+	for _, want := range []string{"Usage:", "status", "dashboard", "ui", "jobs", "attach", "run", "setup", "start", "stop"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help lacks %q:\n%s", want, help)
+		}
 	}
-}
-
-func TestInitCreatesIgnoreFile(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	// Build binary first so we can run it from any directory
-	binPath := filepath.Join(t.TempDir(), "pipedpeer")
-	build := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	cmd := exec.Command(binPath, "init")
-	cmd.Dir = tmpDir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("init failed: %v\noutput: %s", err, out)
-	}
-
-	ignoreFile := filepath.Join(tmpDir, ".pipedpeerignore")
-	content, err := os.ReadFile(ignoreFile)
-	if err != nil {
-		t.Fatalf("expected .pipedpeerignore to exist: %v", err)
-	}
-
-	for _, expected := range []string{".git/", "__pycache__/", "node_modules/"} {
-		if !strings.Contains(string(content), expected) {
-			t.Fatalf("expected %s in ignore file, got: %s", expected, content)
+	for _, gone := range []string{"registry", "net-check", "rendezvous", "completion", "traffic", " map ", "events", " trust ", " auth "} {
+		if strings.Contains(help, gone) {
+			t.Errorf("help still lists %q:\n%s", gone, help)
 		}
 	}
 }
@@ -264,13 +263,20 @@ func TestJobsListAndJobDetail(t *testing.T) {
 		t.Fatalf("expected 'succeeded' in jobs output, got: %s", out)
 	}
 
-	// Test `job --id` command
-	out = runCLIWithXDG(t, stateDir, xdg, "job", "--id", jobID, "--output")
-	if !strings.Contains(out, "status: succeeded") {
+	if strings.Contains(out, "history path") || strings.Contains(out, "DURATION_MS") {
+		t.Fatalf("jobs still shows raw columns or the history path: %s", out)
+	}
+	if !strings.Contains(out, "1m0s") || !strings.Contains(out, "train.py") {
+		t.Fatalf("expected the script and a human duration, got: %s", out)
+	}
+
+	// `jobs <id>` absorbed `job --id`.
+	out = runCLIWithXDG(t, stateDir, xdg, "jobs", jobID, "--output")
+	if !strings.Contains(out, "succeeded") {
 		t.Fatalf("expected status in job detail, got: %s", out)
 	}
-	if !strings.Contains(out, "target_id: gpu-1") {
-		t.Fatalf("expected target_id in job detail, got: %s", out)
+	if !strings.Contains(out, "gpu-box (gpu-1)") {
+		t.Fatalf("expected where it ran in job detail, got: %s", out)
 	}
 	if !strings.Contains(out, "training done") {
 		t.Fatalf("expected stdout content in --output, got: %s", out)
@@ -296,82 +302,9 @@ func runCLIWithXDG(t *testing.T, stateDir, xdg string, args ...string) string {
 	return stdout.String() + stderr.String()
 }
 
-func TestRegistryCLIStartsAndAcceptsConnections(t *testing.T) {
-	// Start registry as a subprocess, then query it with HTTP
-	port := freePort(t)
-
-	// Built, not `go run`. Killing a `go run` kills the wrapper and leaves the
-	// binary it spawned running: the suite left a registry behind on every
-	// invocation, holding its port until somebody noticed and killed it by
-	// hand. Killing a process we started ourselves actually stops it.
-	binPath := filepath.Join(t.TempDir(), "pipedpeer")
-	build := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	cmd := exec.Command(binPath, "registry", "--port", fmt.Sprintf("%d", port))
-	cmd.Dir = "."
-	cmd.Env = os.Environ()
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("failed to start registry: %v", err)
-	}
-	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-
-	// Wait for registry to be ready
-	var ready bool
-	for i := 0; i < 30; i++ {
-		time.Sleep(200 * time.Millisecond)
-		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				ready = true
-				break
-			}
-		}
-	}
-	if !ready {
-		t.Fatal("registry did not become ready within 6s")
-	}
-
-	// Register a node
-	regBody := `{"node_id":"cli-test-node","ssh_endpoint":"root@10.0.1.5:22","daemon_port":38080}`
-	resp, err := http.Post(
-		fmt.Sprintf("http://127.0.0.1:%d/v1/register", port),
-		"application/json",
-		strings.NewReader(regBody),
-	)
-	if err != nil {
-		t.Fatalf("register failed: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200 from register, got %d", resp.StatusCode)
-	}
-
-	// Query nodes
-	resp, err = http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", port))
-	if err != nil {
-		t.Fatalf("nodes query failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	var buf bytes.Buffer
-	buf.ReadFrom(resp.Body)
-	if !strings.Contains(buf.String(), "cli-test-node") {
-		t.Fatalf("expected cli-test-node in nodes response, got: %s", buf.String())
-	}
-}
-
-// TestNodesCLIShowsSelf checks what its name says.
-//
-// It used to accept "NODE_ID" or "No nodes found", which between them cover
-// every output the command can produce - it passed whether the daemon listed
-// this machine, listed nothing, or was not running at all. A test that cannot
-// fail is worse than no test: it occupies the place where a real one would go.
-func TestNodesCLIShowsSelf(t *testing.T) {
+// TestStatusShowsSelf checks that `status` lists this machine in its table.
+// Accepting any output here once let the test pass with no daemon at all.
+func TestStatusShowsSelf(t *testing.T) {
 	stateDir := t.TempDir()
 	xdg := t.TempDir()
 	port := freePort(t)
@@ -384,7 +317,7 @@ func TestNodesCLIShowsSelf(t *testing.T) {
 	// instant.
 	var out string
 	for i := 0; i < 30; i++ {
-		out = runCLIWithEnv(t, stateDir, xdg, "nodes", "--port", fmt.Sprintf("%d", port))
+		out = runCLIWithEnv(t, stateDir, xdg, "status")
 		if strings.Contains(out, "self") {
 			break
 		}
@@ -392,34 +325,17 @@ func TestNodesCLIShowsSelf(t *testing.T) {
 	}
 
 	if !strings.Contains(out, "MEM FREE") {
-		t.Fatalf("no nodes table at all:\n%s", out)
+		t.Fatalf("no node table at all:\n%s", out)
 	}
 	if !strings.Contains(out, "self") {
-		t.Fatalf("the running daemon does not list this machine, which is the one "+
-			"thing this command must always be able to show:\n%s", out)
+		t.Fatalf("the running daemon does not list this machine:\n%s", out)
 	}
-
-	// And the id shown has to be this daemon's, not any id at all.
-	status := runCLIWithEnv(t, stateDir, xdg, "status")
-	if id := nodeIDFromStatus(status); len(id) >= 8 {
-		// The table shows the short form, which is what an operator matches
-		// against; comparing the full uuid would fail on formatting alone.
-		if short := id[:8]; !strings.Contains(out, short) {
-			t.Errorf("nodes lists a self row, but not this daemon's id %q:\n%s", short, out)
-		}
+	if !strings.Contains(out, fmt.Sprintf("port=%d", port)) {
+		t.Errorf("status does not report the daemon's own port %d:\n%s", port, out)
 	}
-}
-
-// nodeIDFromStatus pulls a node id out of `pipedpeer status` output, or
-// returns "" when the format does not carry one.
-func nodeIDFromStatus(status string) string {
-	for _, field := range strings.Fields(status) {
-		trimmed := strings.Trim(field, "(),")
-		if rest, ok := strings.CutPrefix(trimmed, "node-id="); ok {
-			return rest
-		}
+	if host, err := os.Hostname(); err == nil && !strings.Contains(out, host) {
+		t.Errorf("status lists a self row, but not this machine's name %q:\n%s", host, out)
 	}
-	return ""
 }
 
 func TestAutoPlacementSelectsSelf(t *testing.T) {
@@ -440,8 +356,8 @@ func TestAutoPlacementSelectsSelf(t *testing.T) {
 		stateDir, xdg,
 		"run",
 		scriptPath,
-		"--port", fmt.Sprintf("%d", port),
 		"--check-only",
+		"-v", // [coordinator] lines are verbose-only
 	)
 
 	if !strings.Contains(out, "[coordinator]") {

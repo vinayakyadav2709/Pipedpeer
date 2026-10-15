@@ -9,8 +9,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
+
+// localDaemonPort is the port this machine's daemon listens on: the one it
+// recorded at start, else the default.
+func localDaemonPort() int {
+	if p := daemonctl.Status().Port; p > 0 {
+		return p
+	}
+	return daemonctl.DefaultPort
+}
 
 // clusterTask is one live lease, tagged with the node running it.
 type clusterTask struct {
@@ -27,11 +37,17 @@ type clusterTask struct {
 
 // clusterNode is a node as reported by the daemon's /v1/nodes.
 type clusterNode struct {
-	NodeID       string            `json:"node_id"`
-	SSHEndpoint  string            `json:"ssh_endpoint"`
-	DaemonPort   int               `json:"daemon_port"`
-	State        string            `json:"state"`
-	Source       string            `json:"source"`
+	NodeID      string `json:"node_id"`
+	SSHEndpoint string `json:"ssh_endpoint"`
+	DaemonPort  int    `json:"daemon_port"`
+	State       string `json:"state"`
+	Source      string `json:"source"`
+	// Host, Path and Reason are additive /v1/nodes fields: the active
+	// address, how it is reached (lan|internet|self) and why a row is not
+	// healthy. Older daemons leave them empty.
+	Host         string            `json:"host,omitempty"`
+	Path         string            `json:"path,omitempty"`
+	Reason       string            `json:"reason,omitempty"`
 	Capabilities map[string]string `json:"capabilities"`
 	Load         registry.LoadInfo `json:"load"`
 }
@@ -105,7 +121,7 @@ func fetchClusterTasks(daemonPort int) ([]clusterTask, error) {
 		go func(n clusterNode) {
 			defer wg.Done()
 
-			host := hostFromEndpoint(n.SSHEndpoint)
+			host := n.address()
 			resp, err := client.Get(fmt.Sprintf("http://%s:%d/v1/jobs", host, n.DaemonPort))
 			if err != nil {
 				return
@@ -154,6 +170,14 @@ func fetchClusterTasks(daemonPort int) ([]clusterTask, error) {
 
 	sort.Slice(tasks, func(i, j int) bool { return tasks[i].Age > tasks[j].Age })
 	return tasks, nil
+}
+
+// address is the node's active host, falling back to its ssh endpoint.
+func (n clusterNode) address() string {
+	if n.Host != "" {
+		return n.Host
+	}
+	return hostFromEndpoint(n.SSHEndpoint)
 }
 
 // hostFromEndpoint pulls "host" out of "user@host:port".

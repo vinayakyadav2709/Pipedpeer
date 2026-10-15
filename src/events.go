@@ -377,13 +377,14 @@ func keepLearned(fresh, old map[string]string) map[string]string {
 
 func newEventsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "events",
-		Short: "Show what this machine's daemon has been doing (joins, links, jobs, environments, pool work)",
+		Use:    "events",
+		Hidden: true,
+		Short:  "Show what this machine's daemon has been doing (joins, links, jobs, environments, pool work)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			follow, _ := cmd.Flags().GetBool("follow")
 			limit, _ := cmd.Flags().GetInt("limit")
 			all, _ := cmd.Flags().GetBool("all")
-			port, _ := cmd.Flags().GetInt("port")
+			port := localDaemonPort()
 			logFile := daemonctl.DefaultPaths().LogFile
 
 			names := nodeNames(port)
@@ -415,6 +416,5 @@ func newEventsCmd() *cobra.Command {
 	cmd.Flags().BoolP("follow", "f", false, "Keep running and print new events")
 	cmd.Flags().Int("limit", 30, "Max events to show")
 	cmd.Flags().Bool("all", false, "Include network details and other warnings")
-	cmd.Flags().Int("port", 38080, "Local daemon port (for node names)")
 	return cmd
 }

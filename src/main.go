@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"io"
 	"net"
 	"net/http"
@@ -16,14 +14,16 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/coordinator"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -31,10 +31,10 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
-	"github.com/pipedpeer/pipedpeer/internal/ping"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
-	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userns"
 )
@@ -82,130 +82,86 @@ func main() {
 		// main prints the error, so a cancel already reported stays one line.
 		SilenceErrors: true,
 		Use:           "pipedpeer",
-		Short:         "Decentralized compute orchestrator",
-		Long:          "Pipedpeer — submit, schedule, and execute compute tasks across a peer-to-peer mesh.",
+		Version:       version,
+		Short:         "Run a Python script on more machines",
+		Long: "pipedpeer runs your Python script like python does, and spreads its work over the\n" +
+			"machines in your cluster when that is faster.\n\n" +
+			"  pipedpeer setup          prepare this machine (once)\n" +
+			"  pipedpeer run main.py    run a script\n" +
+			"  pipedpeer status         see the machines and what they are doing",
 	}
+	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
-	viper.SetEnvPrefix("PIPEDPEER")
-	viper.AutomaticEnv()
-	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
-
+	// New commands (invite, connect, doctor, uninstall) are added by their
+	// own units; join, trust, auth and the network probes are gone.
 	rootCmd.AddCommand(
 		newStartCmd(),
 		newStopCmd(),
 		newStatusCmd(),
 		newSetupCmd(),
-		newTrustCmd(),
 		newRunCmd(),
 		newDashboardCmd(),
 		newJobsCmd(),
-		newJobCmd(),
-		newInitCmd(),
-		newRegistryCmd(),
-		newNodesCmd(),
-		newPingCmd(),
-		newNetCheckCmd(),
-		newNetPunchCmd(),
-		newJoinCmd(),
-		newNetJoinCmd(),
-		newRelayTestCmd(),
-		newRelayConnectCmd(),
-		newRendezvousCmd(),
-		newTrafficCmd(),
-		newTasksCmd(),
 		newMapCmd(),
-		newAuthCmd(),
 		newEventsCmd(),
 		newAttachCmd(),
-		newStatsCmd(),
 		newUICmd(),
 	)
 
-	rootCmd.RunE = newRunCmd().RunE
-
-	// Pre-process args to support `pipedpeer python script.py [args...]` shorthand
-	args := os.Args[1:]
-	if len(args) >= 2 && args[0] == "python" {
-		scriptPath := args[1]
-		if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Error: script file '%s' does not exist.\n", scriptPath)
-			os.Exit(1)
-		}
-
-		// Rewrite into: run <script> --strategy round-robin --remote --isolate=false
-		newArgs := []string{
-			"run",
-			scriptPath,
-			"--strategy", "round-robin",
-			"--remote",
-			"--isolate=false",
-		}
-
-		// Append any remaining args
-		if len(args) > 2 {
-			newArgs = append(newArgs, args[2:]...)
-		}
-		args = newArgs
-	}
-
-	rootCmd.SetArgs(args)
+	rootCmd.SetArgs(os.Args[1:])
 
 	if err := rootCmd.Execute(); err != nil {
 		if !errors.Is(err, errCancelReported) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
 }
 
-func newInitCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "init",
-		Short: "Create a .pipedpeerignore file in the current directory",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			content := `.git/
-__pycache__/
-.venv/
-venv/
-env/
-node_modules/
-`
-			if err := os.WriteFile(".pipedpeerignore", []byte(content), 0644); err != nil {
-				return err
-			}
-			fmt.Println("Created .pipedpeerignore")
-			return nil
-		},
+// version is stamped by GoReleaser (-X main.version=...).
+var version = "dev"
+
+// exitCode is what the process exits with for a failed command: the
+// script's own code when a remote job ended non-zero, 130 for a cancel
+// (like a shell after Ctrl+C), 1 otherwise.
+func exitCode(err error) int {
+	var re *daemonctl.RemoteExitError
+	if errors.As(err, &re) && re.Code > 0 {
+		return re.Code
 	}
+	if errors.Is(err, errCancelReported) || errors.Is(err, context.Canceled) {
+		return 130
+	}
+	return 1
 }
 
 func newStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show daemon status",
+		Short: "Show the machines in the cluster and what they are doing",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			st := daemonctl.Status()
 			if !st.Running {
-				fmt.Println("daemon stopped")
-				return nil
+				return errors.New("daemon stopped (start it with: pipedpeer start)")
 			}
-			fmt.Printf("daemon running (pid=%d node-id=%s port=%d)\n", st.PID, st.NodeID, st.Port)
+			fmt.Printf("daemon running (pid=%d node-id=%s port=%d version=%s)\n", st.PID, st.NodeID, localDaemonPort(), version)
+			printStatus(os.Stdout, localDaemonPort())
 			return nil
 		},
 	}
 }
-
 func newMapCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "map",
-		Short: "Scatter one script across many shards/inputs and gather the results",
+		Use:    "map",
+		Hidden: true,
+		Short:  "Scatter one script across many shards/inputs and gather the results",
 		Long: "Build a Python environment once, then run the script as many tasks across " +
 			"the cluster, one per input file / args-file line / data shard. Each task gets " +
 			"its own results directory and PIPEDPEER_SHARD_ID/NUM_SHARDS envs.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scriptPath, _ := cmd.Flags().GetString("script")
-			daemonPort, _ := cmd.Flags().GetInt("port")
-			registryURL, _ := cmd.Flags().GetString("registry")
+			daemonPort := localDaemonPort()
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			gpuMode, _ := cmd.Flags().GetString("gpu")
 			gpuID, _ := cmd.Flags().GetString("gpu-id")
@@ -276,23 +232,25 @@ func newMapCmd() *cobra.Command {
 
 			userMem := resourceest.ParseMemString(mustString(cmd, "mem"))
 			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
-			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
+			say.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
 
 			rrFn := func(count int) int {
 				url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", daemonPort, count)
 				resp, err := http.Get(url)
 				if err != nil {
+					say.Warnf("round-robin index unavailable, starting at 0: %v\n", err)
 					return 0
 				}
 				defer resp.Body.Close()
 				var r struct{ Index int }
-				json.NewDecoder(resp.Body).Decode(&r)
+				if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+					say.Warnf("round-robin index unreadable, starting at 0: %v\n", err)
+				}
 				return r.Index
 			}
 
 			coord := coordinator.New(coordinator.Config{
-				RegistryURL:      registryURL,
 				SelfIdentity:     nodeID,
 				SelfSSH:          fmt.Sprintf("root@%s:22", detectLocalIP()),
 				SelfDaemon:       daemonPort,
@@ -307,24 +265,25 @@ func newMapCmd() *cobra.Command {
 				RoundRobinFn:     rrFn,
 			})
 
-			env, err := app.BuildEnvironment(scriptPath, app.EnvOptions{
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+			defer cancel()
+			go func() { <-ctx.Done(); cancel() }()
+
+			absScript, err := filepath.Abs(scriptPath)
+			if err != nil {
+				return err
+			}
+			env, err := app.BuildEnvironment(ctx, absScript, app.EnvOptions{
 				PythonVersion: pythonVersion,
 				Pkgs:          pkgs,
+				Verbose:       say.Verbose,
 			}, func(step int, title string) {
-				if step == 1 {
-					fmt.Printf("[%d/7] %s\n", step, title)
-				} else {
-					fmt.Printf("\n[%d/7] %s\n", step, title)
-				}
+				say.Printf("[%d/7] %s\n", step, title)
 			})
 			if err != nil {
 				return err
 			}
 			defer env.Close()
-
-			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-			defer cancel()
-			go func() { <-ctx.Done(); cancel() }()
 			_, stopSuspend := watchSuspend(ctx, false)
 			defer stopSuspend()
 
@@ -373,19 +332,17 @@ func newMapCmd() *cobra.Command {
 	cmd.Flags().Int("concurrency", 0, "Max concurrent tasks (default: all)")
 	cmd.Flags().String("results-dir", "", "Where per-task results are written")
 	cmd.Flags().String("reduce", "", "Script run locally over gathered results")
-	cmd.Flags().Int("port", 38080, "Daemon API port")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
 	cmd.Flags().Bool("remote", false, "Only scatter tasks to other machines (excludes this one)")
 	cmd.Flags().String("gpu", "", "GPU mode: force, prefer, off")
 	cmd.Flags().String("gpu-id", "", "Pin GPU device IDs")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM on a single GPU")
-	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("python", "", "Python version")
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
-	_ = cmd.Flags().MarkHidden("strategy") // round-robin is only set internally by the python shorthand
+	_ = cmd.Flags().MarkHidden("strategy")
 	return cmd
 }
 
@@ -402,9 +359,10 @@ func mustStringSlice(cmd *cobra.Command, name string) []string {
 func newDashboardCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
-		Short: "Live unified view of all workers, peers, and recent tasks (Ctrl+C / q to exit)",
+		Short: "Live view of the machines, their work and recent runs (q to exit)",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("port")
+			daemonPort := localDaemonPort()
 			interval, _ := cmd.Flags().GetDuration("interval")
 
 			nodeID, err := identity.GetOrCreate()
@@ -412,7 +370,9 @@ func newDashboardCmd() *cobra.Command {
 				return err
 			}
 
-			daemonctl.EnsureStarted(nodeID.NodeID, daemonPort)
+			if _, err := daemonctl.EnsureStarted(nodeID.NodeID, daemonPort); err != nil {
+				say.Warnf("could not start the daemon, showing what is left: %v\n", err)
+			}
 
 			st := daemonctl.Status()
 			m := dashModel{
@@ -426,51 +386,38 @@ func newDashboardCmd() *cobra.Command {
 			return runDashboard(tea.NewProgram(m, tea.WithAltScreen()))
 		},
 	}
-	cmd.Flags().Int("port", 38080, "Daemon API port")
 	cmd.Flags().Duration("interval", 2*time.Second, "Refresh interval (e.g. 1s, 2s, 500ms)")
 	return cmd
 }
 func newJobsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "jobs",
-		Short: "List recent job history",
+		Use:   "jobs [id]",
+		Short: "List recent runs, or show one run in detail",
+		Long: "Without an id: the recent runs started on this machine.\n" +
+			"With an id (or \"last\"): that run, plus any of --output, --timeline, --explain,\n" +
+			"--receipt, --steps, or --export csv|json for its step record.\n" +
+			"--export-all <dir> writes every run's record as CSV and JSON into <dir>.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			limit, _ := cmd.Flags().GetInt("limit")
-			historyPath := jobhistory.BaseDir()
-			if err := os.MkdirAll(historyPath, 0755); err != nil {
-				return err
+			if dir := mustString(cmd, "export-all"); dir != "" {
+				return exportAllRuns(dir, mustString(cmd, "since"))
 			}
-			items, err := jobhistory.List(limit)
-			if err != nil {
-				return err
+			if len(args) == 1 {
+				return showJob(cmd, args[0])
 			}
-			if len(items) == 0 {
-				fmt.Println("no jobs found yet (run a non-check-only job first)")
-				fmt.Printf("history path: %s\n", historyPath)
-				return nil
-			}
-			fmt.Printf("history path: %s\n", historyPath)
-			fmt.Println("ID\tSTATUS\tMODE\tJOB\tJOB_SET\tTARGET\tHOST\tDURATION_MS\tSTARTED")
-			warned := false
-			for _, it := range items {
-				mode := "fg"
-				status := it.Status
-				if it.Detached {
-					mode = "bg"
-					// History only knows what the submitter last saw; a
-					// detached job's daemon knows whether it has finished.
-					if status == jobhistory.StateRunning {
-						status = detachedJobStatus(it.ID, &warned)
-					}
+			for _, f := range []string{"output", "timeline", "explain", "receipt", "steps", "export"} {
+				if cmd.Flags().Changed(f) {
+					return fmt.Errorf("--%s needs a job id (see: pipedpeer jobs)", f)
 				}
-				fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n", jobhistory.ShortID(it.ID), status, mode, it.JobName, it.JobSet, it.TargetID, it.Remote, it.DurationMs, it.StartedAt)
 			}
-			return nil
+			limit, _ := cmd.Flags().GetInt("limit")
+			return listJobs(os.Stdout, limit)
 		},
 	}
 	pruneCmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Delete job history entries not touched within --older-than",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			olderThan, _ := cmd.Flags().GetDuration("older-than")
 			n, err := jobhistory.Prune(olderThan)
@@ -484,8 +431,223 @@ func newJobsCmd() *cobra.Command {
 	pruneCmd.Flags().Duration("older-than", 7*24*time.Hour,
 		"Delete entries untouched for this long")
 	cmd.AddCommand(pruneCmd)
-	cmd.Flags().Int("limit", 20, "Max jobs to show")
+	cmd.Flags().Int("limit", 20, "Max runs to list")
+	cmd.Flags().Bool("output", false, "Print the run's output")
+	cmd.Flags().Bool("timeline", false, "Show where the run's time went, stage by stage")
+	cmd.Flags().Bool("explain", false, "Show every machine considered for the run and why the chosen one won")
+	cmd.Flags().Bool("receipt", false, "Show what was sent to other machines, kept local, and why")
+	cmd.Flags().Bool("steps", false, "Show every step of every chunk on every machine")
+	cmd.Flags().String("export", "", "Print the run's step record as csv or json")
+	cmd.Flags().String("export-all", "", "Write every run's record as CSV and JSON into this directory")
+	cmd.Flags().String("since", "", "With --export-all: only runs since this date (2006-01-02 or RFC 3339)")
 	return cmd
+}
+
+// listJobs prints the recent runs as a table a person reads.
+func listJobs(w io.Writer, limit int) error {
+	items, err := jobhistory.List(limit)
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(w, "no runs yet")
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tSCRIPT\tSTATUS\tWHERE\tTOOK\tSTARTED")
+	warned := false
+	for _, it := range items {
+		status := it.Status
+		if it.Detached {
+			// History only knows what the submitter last saw; a
+			// detached job's daemon knows whether it has finished.
+			if status == jobhistory.StateRunning {
+				status = detachedJobStatus(it.ID, &warned)
+			}
+			status += " (background)"
+		}
+		script := filepath.Base(it.ScriptPath)
+		if it.ScriptPath == "" {
+			script = it.JobName
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", jobhistory.ShortID(it.ID), truncate(script, 24), status,
+			whereRan(it.Remote, ""), humanMs(it.DurationMs), humanStarted(it.StartedAt))
+	}
+	return tw.Flush()
+}
+
+// whereRan names the machine a run went to: its host, else "-".
+func whereRan(remote, runHost string) string {
+	if runHost != "" {
+		return runHost
+	}
+	if remote == "" {
+		return "-"
+	}
+	return hostFromEndpoint(remote)
+}
+
+// humanMs is a duration rounded to what a person cares about.
+func humanMs(ms int64) string {
+	if ms <= 0 {
+		return "-"
+	}
+	d := time.Duration(ms) * time.Millisecond
+	switch {
+	case d < time.Second:
+		return d.Round(time.Millisecond).String()
+	case d < time.Minute:
+		return d.Round(100 * time.Millisecond).String()
+	default:
+		return d.Round(time.Second).String()
+	}
+}
+
+// humanStarted is "3 minutes ago" for an RFC 3339 time, the raw text otherwise.
+func humanStarted(s string) string {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+	return humanize.Time(t)
+}
+
+// showJob prints one run: a short summary, then each section asked for.
+func showJob(cmd *cobra.Command, id string) error {
+	if id == "last" {
+		recent, err := jobhistory.List(1)
+		if err != nil {
+			return err
+		}
+		if len(recent) == 0 {
+			return fmt.Errorf("no runs yet")
+		}
+		id = recent[0].ID
+	}
+	r, dir, err := jobhistory.Resolve(id)
+	if err != nil {
+		return err
+	}
+	flag := func(name string) bool { v, _ := cmd.Flags().GetBool(name); return v }
+
+	if format := mustString(cmd, "export"); format != "" {
+		rec, err := runrec.Load(dir)
+		if err != nil {
+			return fmt.Errorf("no step record for run %s: %w", jobhistory.ShortID(r.ID), err)
+		}
+		switch format {
+		case "csv":
+			return runrec.WriteCSV(os.Stdout, rec)
+		case "json":
+			return runrec.WriteJSON(os.Stdout, rec)
+		default:
+			return fmt.Errorf("invalid --export %q (want csv or json)", format)
+		}
+	}
+
+	fmt.Printf("%s  %s  %s\n", jobhistory.ShortID(r.ID), filepath.Base(r.ScriptPath), r.Status)
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	row := func(k, v string) {
+		if v != "" && v != "-" {
+			fmt.Fprintf(tw, "  %s\t%s\n", k, v)
+		}
+	}
+	started := r.StartedAt
+	if t, err := time.Parse(time.RFC3339Nano, r.StartedAt); err == nil {
+		started = t.Local().Format("2006-01-02 15:04:05") + " (" + humanize.Time(t) + ")"
+	}
+	row("started", started)
+	row("took", humanMs(r.DurationMs))
+	where := whereRan(r.Remote, r.RunHost)
+	if r.TargetID != "" {
+		where += " (" + shortID(r.TargetID) + ")"
+	}
+	row("ran on", where)
+	if r.ExitCode != 0 {
+		row("exit code", strconv.Itoa(r.ExitCode))
+	}
+	row("error", r.Error)
+	row("results", r.LocalSyncRoot)
+	if len(r.Stages) > 0 {
+		row("timeline", jobhistory.Summary(r.Stages))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+
+	if flag("explain") {
+		fmt.Println("\n== Placement ==")
+		jobhistory.WriteExplanation(os.Stdout, r)
+	}
+	if flag("timeline") {
+		fmt.Println("\n== Timeline ==")
+		jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
+	}
+	if flag("receipt") {
+		fmt.Println("\n== Receipt ==")
+		rc, ok, err := jobhistory.ReadReceipt(dir)
+		switch {
+		case err != nil:
+			return err
+		case !ok:
+			fmt.Println("No receipt for this run (interception off, or run before receipts were kept).")
+		default:
+			jobhistory.WriteReceipt(os.Stdout, rc)
+		}
+	}
+	if flag("steps") {
+		fmt.Println("\n== Steps ==")
+		rec, err := runrec.Load(dir)
+		if err != nil {
+			fmt.Printf("No step record for this run: %v\n", err)
+		} else {
+			runrec.WriteDetailed(os.Stdout, rec)
+		}
+	}
+	if flag("output") {
+		for _, part := range []struct{ title, file string }{
+			{"output", "stdout.log"}, {"errors", "stderr.log"}, {"remote logs", "remote_logs.txt"},
+		} {
+			text, err := jobhistory.ReadOptionalText(dir, part.file)
+			if err != nil {
+				say.Warnf("could not read %s of run %s: %v\n", part.file, jobhistory.ShortID(r.ID), err)
+				continue
+			}
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			fmt.Printf("\n--- %s ---\n%s", part.title, text)
+			if !strings.HasSuffix(text, "\n") {
+				fmt.Println()
+			}
+		}
+	}
+	return nil
+}
+
+// exportAllRuns is the one demo-day command: every run's record into dir.
+func exportAllRuns(dir, sinceText string) error {
+	var since time.Time
+	if sinceText != "" {
+		var err error
+		if since, err = time.ParseInLocation("2006-01-02", sinceText, time.Local); err != nil {
+			if since, err = time.Parse(time.RFC3339, sinceText); err != nil {
+				return fmt.Errorf("invalid --since %q (want 2006-01-02 or RFC 3339)", sinceText)
+			}
+		}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	n, err := runrec.ExportAll(dir, since)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("exported %d run(s) to %s\n", n, dir)
+	return nil
 }
 
 // detachedJobStatus asks the daemon running a detached job how it is doing.
@@ -529,425 +691,6 @@ func newAttachCmd() *cobra.Command {
 			return runOutcome(app.Attach(ctx, args[0]))
 		},
 	}
-}
-
-func newJobCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "job",
-		Short: "Show details for a specific job",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			id, _ := cmd.Flags().GetString("id")
-			withOutput, _ := cmd.Flags().GetBool("output")
-			timeline, _ := cmd.Flags().GetBool("timeline")
-			explain, _ := cmd.Flags().GetBool("explain")
-			showReceipt, _ := cmd.Flags().GetBool("receipt")
-			if last, _ := cmd.Flags().GetBool("last"); last && id == "" {
-				recent, err := jobhistory.List(1)
-				if err != nil {
-					return err
-				}
-				if len(recent) == 0 {
-					return fmt.Errorf("no jobs recorded yet")
-				}
-				id = recent[0].ID
-			}
-			if id == "" {
-				return fmt.Errorf("--id is required (or --last for the most recent job)")
-			}
-			r, dir, err := jobhistory.Resolve(id)
-			if err != nil {
-				return err
-			}
-			if timeline || explain || showReceipt {
-				fmt.Printf("job %s  %s  %s\n", r.ID, filepath.Base(r.ScriptPath), r.Status)
-				if explain {
-					fmt.Println("\n== Placement ==")
-					jobhistory.WriteExplanation(os.Stdout, r)
-				}
-				if timeline {
-					fmt.Println("\n== Timeline ==")
-					jobhistory.WriteWaterfall(os.Stdout, r.Stages, 40)
-				}
-				if showReceipt {
-					fmt.Println("\n== Receipt ==")
-					rc, ok, err := jobhistory.ReadReceipt(dir)
-					switch {
-					case err != nil:
-						return err
-					case !ok:
-						fmt.Println("No receipt for this run (interception off, or run before receipts were kept).")
-					default:
-						jobhistory.WriteReceipt(os.Stdout, rc)
-					}
-				}
-				return nil
-			}
-			fmt.Printf("id: %s\n", r.ID)
-			fmt.Printf("status: %s\n", r.Status)
-			fmt.Printf("error: %s\n", r.Error)
-			fmt.Printf("started_at: %s\n", r.StartedAt)
-			fmt.Printf("finished_at: %s\n", r.FinishedAt)
-			fmt.Printf("duration_ms: %d\n", r.DurationMs)
-			fmt.Printf("script_path: %s\n", r.ScriptPath)
-			fmt.Printf("remote: %s\n", r.Remote)
-			fmt.Printf("target_id: %s\n", r.TargetID)
-			fmt.Printf("detached: %t\n", r.Detached)
-			fmt.Printf("isolate: %t\n", r.Isolate)
-			fmt.Printf("job_name: %s\n", r.JobName)
-			fmt.Printf("run_host: %s\n", r.RunHost)
-			fmt.Printf("store_path: %s\n", r.StorePath)
-			fmt.Printf("remote_job_dir: %s\n", r.RemoteJobDir)
-			fmt.Printf("local_sync_root: %s\n", r.LocalSyncRoot)
-			fmt.Printf("received_files: %d\n", r.ReceivedFiles)
-			fmt.Printf("new_files: %d\n", r.NewFiles)
-			fmt.Printf("updated_files: %d\n", r.UpdatedFiles)
-			fmt.Printf("deleted_files: %d\n", r.DeletedFiles)
-			fmt.Printf("unchanged_files: %d\n", r.UnchangedFiles)
-			fmt.Printf("manifest_path: %s\n", r.ManifestPath)
-			fmt.Printf("history_dir: %s\n", dir)
-			if len(r.Stages) > 0 {
-				fmt.Printf("timeline: %s\n", jobhistory.Summary(r.Stages))
-			}
-			if withOutput {
-				stdout, _ := jobhistory.ReadOptionalText(dir, "stdout.log")
-				stderr, _ := jobhistory.ReadOptionalText(dir, "stderr.log")
-				remoteLogs, _ := jobhistory.ReadOptionalText(dir, "remote_logs.txt")
-				fmt.Println("--- stdout ---")
-				if strings.TrimSpace(stdout) == "" {
-					fmt.Println("(empty)")
-				} else {
-					fmt.Println(stdout)
-				}
-				fmt.Println("--- stderr ---")
-				if strings.TrimSpace(stderr) == "" {
-					fmt.Println("(empty)")
-				} else {
-					fmt.Println(stderr)
-				}
-				if strings.TrimSpace(remoteLogs) != "" {
-					fmt.Println("--- remote logs ---")
-					fmt.Println(remoteLogs)
-				}
-			}
-			fmt.Printf("artifacts: %s\n", filepath.Join(dir, "metadata.json"))
-			return nil
-		},
-	}
-	cmd.Flags().String("id", "", "Job ID")
-	cmd.Flags().Bool("last", false, "Show the most recent job")
-	cmd.Flags().Bool("output", false, "Print stdout/stderr")
-	cmd.Flags().Bool("timeline", false, "Show where the run's time went, stage by stage")
-	cmd.Flags().Bool("explain", false, "Show every node considered for the run and why the chosen one won")
-	cmd.Flags().Bool("receipt", false, "Show what the shim sent to other machines, kept local, and why")
-	return cmd
-}
-
-func newRegistryCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "registry",
-		Short: "Start a standalone node registry server",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			port, _ := cmd.Flags().GetInt("port")
-			reg := registry.New(registry.DefaultConfig())
-			sig := make(chan os.Signal, 1)
-			signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-			go func() {
-				<-sig
-				reg.Stop()
-				os.Exit(0)
-			}()
-			fmt.Printf("Registry listening on :%d\n", port)
-			return reg.ListenAndServe(port)
-		},
-	}
-	cmd.Flags().Int("port", 38090, "Registry listen port")
-	return cmd
-}
-
-func newNodesCmd() *cobra.Command {
-	// Bare "pipedpeer nodes" lists; subcommands manage membership.
-	listRun := func(cmd *cobra.Command, args []string) error {
-		daemonPort, _ := cmd.Flags().GetInt("port")
-		return printNodes(daemonPort)
-	}
-
-	cmd := &cobra.Command{
-		Use:   "nodes",
-		Short: "List cluster nodes and manage manual registrations",
-		Long:  "Nodes are auto-discovered on the LAN. Use 'nodes add' to register workers that discovery cannot reach.",
-		RunE:  listRun,
-	}
-	cmd.PersistentFlags().Int("port", 38080, "Local daemon API port")
-
-	listCmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all known nodes",
-		RunE:  listRun,
-	}
-
-	addCmd := &cobra.Command{
-		Use:   "add <host> <port>",
-		Short: "Register a worker node",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("port")
-			host := args[0]
-			port, err := strconv.Atoi(args[1])
-			if err != nil || port < 1 || port > 65535 {
-				return fmt.Errorf("invalid port: %s", args[1])
-			}
-			body, _ := json.Marshal(map[string]interface{}{"host": host, "port": port})
-			resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort),
-				"application/json", bytes.NewReader(body))
-			if err != nil {
-				return fmt.Errorf("daemon unreachable: %w", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != 200 {
-				return fmt.Errorf("daemon rejected: %d", resp.StatusCode)
-			}
-			fmt.Printf("added node %s:%d\n", host, port)
-			return nil
-		},
-	}
-
-	removeCmd := &cobra.Command{
-		Use:   "remove [host|node-id]",
-		Short: "Remove a node by host or node ID (short IDs from 'nodes list' work; --all clears everything)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("port")
-			all, _ := cmd.Flags().GetBool("all")
-
-			target := "_all"
-			if !all {
-				if len(args) != 1 {
-					return fmt.Errorf("requires <host> argument (or use --all)")
-				}
-				target = args[0]
-			}
-
-			req, _ := http.NewRequest("DELETE",
-				fmt.Sprintf("http://127.0.0.1:%d/v1/nodes/%s", daemonPort, target), nil)
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return fmt.Errorf("daemon unreachable: %w", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != 200 {
-				var body struct {
-					Error string `json:"error"`
-				}
-				json.NewDecoder(resp.Body).Decode(&body)
-				if body.Error != "" {
-					return fmt.Errorf("%s", body.Error)
-				}
-				return fmt.Errorf("daemon rejected: %d", resp.StatusCode)
-			}
-			if all {
-				fmt.Println("removed all nodes")
-			} else {
-				fmt.Printf("removed nodes at %s\n", target)
-			}
-			return nil
-		},
-	}
-	removeCmd.Flags().Bool("all", false, "Remove all nodes (both manual and auto-discovered)")
-
-	cmd.AddCommand(listCmd, addCmd, removeCmd)
-	return cmd
-}
-
-// printNodes renders the daemon's view of the cluster, including the hardware
-// dimensions the scheduler actually weighs.
-func printNodes(daemonPort int) error {
-	nodes, err := fetchClusterNodes(daemonPort)
-	if err != nil {
-		fmt.Println("No nodes found (daemon unreachable — start it with: pipedpeer start)")
-		return nil
-	}
-	if len(nodes) == 0 {
-		fmt.Println("No nodes found")
-		printUnreachable(os.Stdout, daemonPort)
-		return nil
-	}
-
-	printNodeTable(os.Stdout, nodes)
-	printUnreachable(os.Stdout, daemonPort)
-	return nil
-}
-
-// printUnreachable lists peers with no direct path; a fetch error goes to stderr.
-func printUnreachable(w io.Writer, daemonPort int) {
-	bad, err := fetchUnreachable(daemonPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not list peers with no direct path: %v\n", err)
-		return
-	}
-	if len(bad) == 0 {
-		return
-	}
-	fmt.Fprintln(w, "\nPeers with no direct path (not offered work):")
-	for _, p := range bad {
-		fmt.Fprintf(w, "  %-10s %s\n", shortID(p.Peer), p.Reason)
-	}
-}
-
-func newTasksCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:     "tasks",
-		Aliases: []string{"ps"},
-		Short:   "List tasks running across the cluster and the node running each",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			daemonPort, _ := cmd.Flags().GetInt("port")
-			watch, _ := cmd.Flags().GetBool("watch")
-			interval, _ := cmd.Flags().GetDuration("interval")
-
-			render := func() error {
-				tasks, err := fetchClusterTasks(daemonPort)
-				if err != nil {
-					return err
-				}
-				if len(tasks) == 0 {
-					fmt.Println("no tasks running")
-					return nil
-				}
-				fmt.Printf("%-10s %-16s %-20s %-10s %-10s %-8s %s\n",
-					"LEASE", "NODE", "JOB", "STATE", "SUBMITTER", "GPU", "AGE")
-				for _, t := range tasks {
-					gpu := "-"
-					if t.GPUIndex >= 0 {
-						gpu = strconv.Itoa(t.GPUIndex)
-					}
-					job := t.JobName
-					if job == "" {
-						job = "-"
-					}
-					fmt.Printf("%-10s %-16s %-20s %-10s %-10s %-8s %s\n",
-						shortID(t.LeaseID), t.Hostname, truncate(job, 20), t.State,
-						shortID(t.Submitter), gpu, t.Age.Truncate(time.Second))
-				}
-				return nil
-			}
-
-			if !watch {
-				return render()
-			}
-			for {
-				fmt.Print("\033[H\033[2J") // clear screen
-				if err := render(); err != nil {
-					fmt.Printf("error: %v\n", err)
-				}
-				time.Sleep(interval)
-			}
-		},
-	}
-	cmd.Flags().Int("port", 38080, "Local daemon API port")
-	cmd.Flags().Bool("watch", false, "Refresh continuously")
-	cmd.Flags().Duration("interval", 2000*time.Millisecond, "Refresh interval (e.g. 500ms, 2000ms)")
-	return cmd
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-3] + "..."
-}
-
-// newTrafficCmd renders this node's pool-map traffic ledger from the daemon
-// log: every chunk received (and from whom), every chunk forwarded to a peer,
-// and every fan-out split. Run it on any node to see that node's side of the
-// ledger. The shim's side (what your run sent) is in the job output instead:
-// pipedpeer job --id <ID> --output.
-func newTrafficCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "traffic",
-		Short: "Show this node's pool-map traffic ledger",
-		Long:  "Prints the [pool] lines from this node's daemon log.",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			watch, _ := cmd.Flags().GetBool("watch")
-			limit, _ := cmd.Flags().GetInt("limit")
-			logFile := daemonctl.DefaultPaths().LogFile
-			if _, err := os.Stat(logFile); err != nil {
-				return fmt.Errorf("daemon log not found at %s (is the daemon running?)", logFile)
-			}
-			if watch {
-				return tailTraffic(logFile)
-			}
-			data, err := os.ReadFile(logFile)
-			if err != nil {
-				return err
-			}
-			var out []string
-			for _, line := range strings.Split(string(data), "\n") {
-				if strings.Contains(line, "[pool]") {
-					out = append(out, line)
-				}
-			}
-			if len(out) > limit {
-				out = out[len(out)-limit:]
-			}
-			for _, line := range out {
-				fmt.Println(line)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().BoolP("watch", "f", false, "Follow new entries (tail -f)")
-	cmd.Flags().Int("limit", 50, "Max entries to show")
-	return cmd
-}
-
-// tailTraffic follows the daemon log from the end, printing [pool] lines as
-// they arrive. Ponytail: a plain poll loop; log file is written by the
-// daemonctl-managed process, no rotation handling (the daemon re-opens on
-// restart and Start() truncates).
-func tailTraffic(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
-		return err
-	}
-	buf := make([]byte, 4096)
-	var pending []byte
-	for {
-		n, err := f.Read(buf)
-		if n > 0 {
-			pending = append(pending, buf[:n]...)
-			for {
-				idx := bytes.IndexByte(pending, '\n')
-				if idx < 0 {
-					break
-				}
-				line := pending[:idx]
-				pending = pending[idx+1:]
-				if bytes.Contains(line, []byte("[pool]")) {
-					fmt.Println(string(line))
-				}
-			}
-		}
-		if err != nil {
-			time.Sleep(time.Second)
-		}
-	}
-}
-
-func newPingCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "ping <host:port> [host:port ...]",
-		Short: "Live health dashboard for workers",
-		Long:  "Polls /health on each worker every second and displays a live status table.",
-		Args:  cobra.MinimumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			interval, _ := cmd.Flags().GetDuration("interval")
-			return ping.Run(args, interval)
-		},
-	}
-	cmd.Flags().Duration("interval", 1000*time.Millisecond, "Poll interval (e.g. 1000ms)")
-	return cmd
 }
 
 func min(a, b int) int {

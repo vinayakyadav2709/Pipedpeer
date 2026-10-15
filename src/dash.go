@@ -144,10 +144,17 @@ func (m dashModel) View() string {
 
 	tw := m.tableWidth()
 	peerRows := [][]string{}
+	names := map[string]int{}
+	for _, p := range m.peers {
+		names[p.Capabilities["hostname"]]++
+	}
 	for _, p := range m.peers {
 		node := p.Capabilities["hostname"]
 		if node == "" {
 			node = shortID(p.NodeID)
+		} else if names[node] > 1 {
+			// Cloned lab PCs share a hostname; the id tells them apart.
+			node += " (" + shortID(p.NodeID) + ")"
 		}
 		if p.Source == "self" {
 			node += "*"
