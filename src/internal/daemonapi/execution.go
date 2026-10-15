@@ -868,7 +868,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		procDone := make(chan struct{})
 		go superviseCancel(jobID, cancelCh, procDone, signalGroup(jobID, cmd.Process.Pid))
 		readers := streamOutput(stdout, stderr, outCh)
-		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
+		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond, "")
 		readers.Wait()
 		cmd.Wait()
 		runDur = time.Since(runStart)
@@ -1037,7 +1037,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		procDone := make(chan struct{})
 		go superviseCancel(jobID, cancelCh, procDone, signalContainer(jobID, containerID, cmd.Process.Pid))
 		readers := streamOutput(stdout, stderr, outCh)
-		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond)
+		tracker := newPeakMemTracker(int32(cmd.Process.Pid), 500*time.Millisecond, jobCgroupDir(capParent, jobID))
 		readers.Wait()
 		cmd.Wait()
 		runDur = time.Since(runStart)
@@ -1545,4 +1545,12 @@ func cpuLimitCores(root, cg string) float64 {
 			return best
 		}
 	}
+}
+
+// jobCgroupDir is the cgroup directory of a capped job, "" when it has none.
+func jobCgroupDir(parent, jobID string) string {
+	if parent == "" {
+		return ""
+	}
+	return filepath.Join("/sys/fs/cgroup", parent, jobID)
 }

@@ -1,6 +1,11 @@
 package daemonapi
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,13 +21,44 @@ type peakMemTracker struct {
 	mu     sync.Mutex
 	peakKB int64
 	stopCh chan struct{}
-	warned bool // PSS fallback already logged for this job
+	warned bool   // PSS fallback already logged for this job
+	cgDir  string // the job's cgroup directory; empty = walk /proc
+}
+
+// cgroupAnonKernel is anon + kernel_stack + slab from a cgroup v2 memory.stat,
+// in bytes. Page cache ("file") is left out: a job reading a big CSV must not
+// record the cache as its own memory, it feeds the admission estimator.
+func cgroupAnonKernel(dir string) (int64, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "memory.stat"))
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	found := false
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) != 2 || (f[0] != "anon" && f[0] != "kernel_stack" && f[0] != "slab") {
+			continue
+		}
+		v, err := strconv.ParseInt(f[1], 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		total += v
+		found = f[0] == "anon" || found
+	}
+	if !found {
+		return 0, errors.New("memory.stat has no anon line")
+	}
+	return total, nil
 }
 
 // newPeakMemTracker starts sampling every interval for the process tree rooted
-// at rootPID. Call stop() when the job finishes to halt sampling.
-func newPeakMemTracker(rootPID int32, interval time.Duration) *peakMemTracker {
-	t := &peakMemTracker{stopCh: make(chan struct{})}
+// at rootPID. Call stop() when the job finishes to halt sampling. A non-empty
+// cgDir (the job's cgroup) is read instead of walking /proc, which cost ~4% of
+// a core; the walk remains the fallback, logged once.
+func newPeakMemTracker(rootPID int32, interval time.Duration, cgDir string) *peakMemTracker {
+	t := &peakMemTracker{stopCh: make(chan struct{}), cgDir: cgDir}
 	go t.poll(rootPID, interval)
 	return t
 }
@@ -35,7 +71,7 @@ func (t *peakMemTracker) poll(rootPID int32, interval time.Duration) {
 		case <-t.stopCh:
 			return
 		case <-tick.C:
-			kb := t.treeMem(rootPID)
+			kb := t.sample(rootPID)
 			if kb > t.peak() {
 				t.mu.Lock()
 				if kb > t.peakKB {
@@ -53,6 +89,19 @@ func (t *peakMemTracker) stop() int64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.peakKB * 1024
+}
+
+// sample is one reading in KB: the cgroup when there is one, else the walk.
+func (t *peakMemTracker) sample(rootPID int32) int64 {
+	if t.cgDir != "" {
+		b, err := cgroupAnonKernel(t.cgDir)
+		if err == nil {
+			return b / 1024
+		}
+		log.Warn().Err(err).Str("cgroup", t.cgDir).Msg("peak memory: job cgroup unreadable, walking /proc instead")
+		t.cgDir = ""
+	}
+	return t.treeMem(rootPID)
 }
 
 func (t *peakMemTracker) peak() int64 {
