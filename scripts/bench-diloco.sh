@@ -220,9 +220,10 @@ if os.path.exists(gpu):
     for r in csv.DictReader(open(gpu)):
         if r["loss"]:
             g.setdefault(r["model"], {})[int(r["seed"])] = float(r["loss"])
+EPOCHS = {"gpu": 3, "ddp04": 6, "tfm": 2}  # diloco.py's epochs per model
 def f(v, p="%.4f"): return p % v if v is not None else "-"
 def med(v): return st.median(v) if v else None
-print("| model | arm | profile | seeds | val loss mean | min-max | std | gap vs single (mean) | per-seed gaps | worst rank gap | wall s | MiB sent/rank | syncs | verdict |")
+print("| model | arm | profile | seeds | val loss mean | min-max | std | gap vs single (mean) | per-seed gaps | worst rank gap | wall s | MiB sent/rank | syncs (per epoch) | verdict |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
 verdict = {}
 for m in sorted({k[0] for k in last}):
@@ -246,20 +247,23 @@ for m in sorted({k[0] for k in last}):
         syncs = [int(ext[(m, arm, prof, s)][8]) / max(1, int(rows[s]["world"] or 1)) for s in rows if (m, arm, prof, s) in ext]
         mgap = (st.mean(ls) / ref - 1) if ref and arm != "single" else None
         v = "-"
-        if arm == "fast":
+        if arm not in ("single", "exact"):  # fast and every FAST_VARIANTS arm
             v = "PASS" if mgap is not None and mgap <= tol and len(ls) >= 3 else "FAIL"
-            verdict[m] = verdict.get(m, True) and v == "PASS"
+            verdict.setdefault((arm, prof), {})[m] = v == "PASS"
         print("| %s | %s | %s | %d | %.4f | %.4f-%.4f | %.4f | %s | %s | %s | %s | %s | %s | %s |" % (
             m, arm, "-" if arm == "single" else prof, len(ls), st.mean(ls), min(ls), max(ls), st.pstdev(ls),
             f(mgap and 100 * mgap, "%+.2f%%") if arm != "single" else "-",
             " ".join("%+.2f%%" % (100 * x) for x in gaps) if arm != "single" else "-",
             f(max(worst) * 100, "%+.2f%%") if worst and arm != "single" else "-",
             f(med([float(r["wall_s"]) for r in rows.values()]), "%.0f"), f(med(sent), "%.1f"),
-            f(med(syncs), "%.0f"), v))
+            "%s (%s)" % (f(med(syncs), "%.0f"), f(med(syncs) and med(syncs) / EPOCHS.get(m, 1), "%.1f")), v))
 print()
-print("Tolerance: fast's mean validation loss over the seeds within %.0f%% (relative) of single's. "
-      "Overall: %s" % (100 * tol, "PASS" if verdict and all(verdict.values()) else "FAIL") +
-      "".join(" | %s %s" % (m, "pass" if ok else "fail") for m, ok in sorted(verdict.items())))
+print("Tolerance: a fast arm's mean validation loss over the seeds within %.0f%% (relative) of single's, "
+      "on every model." % (100 * tol))
+print()
+for (arm, prof), ok in sorted(verdict.items()):
+    print("- %s (%s): %s" % (arm, prof, "PASS" if all(ok.values()) else "FAIL") +
+          "".join(" | %s %s" % (m, "pass" if o else "fail") for m, o in sorted(ok.items())))
 PY
 	exit 0
 	;;

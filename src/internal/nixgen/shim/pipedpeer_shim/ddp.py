@@ -198,10 +198,12 @@ class _PassEnd:
 # its own for H steps, then the ranks average how far they moved (the
 # pseudo-gradient theta_global - theta_local, weighted by the samples each
 # trained on) and every rank applies that average to the last synced model
-# with an outer Nesterov step (Douillard et al. 2023). The schedule: exact
-# per-step sync first (post-local SGD, Lin et al. 2020), then H adapted to
-# how far the ranks drift apart (AdaComm-style, Wang & Joshi 2019), then back
-# to exact over the last tenth of the run when its length is known. The
+# with an outer Nesterov step (Douillard et al. 2023; by default lr 1 and no
+# momentum, which is plain averaging). The schedule: exact per-step sync
+# first (post-local SGD, Lin et al. 2020), then a fixed H (or, with
+# PIPEDPEER_DILOCO_H=0, H adapted to how far the ranks drift apart,
+# AdaComm-style, Wang & Joshi 2019), a sync on every epoch's last step, then
+# back to exact over the last tenth of the run when its length is known. The
 # script's batch, learning rate and epochs are never touched.
 
 
@@ -218,19 +220,26 @@ def _env_num(name, default, kind=float):
         return default
 
 
-# The paper's defaults (user, Decisions). Tuning variables, for the DiLoCo
-# benchmark (scripts/bench-diloco.sh): PIPEDPEER_DILOCO_OUTER_LR,
-# PIPEDPEER_DILOCO_MOMENTUM, PIPEDPEER_DILOCO_H (a fixed interval instead of
-# the adaptive one; 0 = adaptive) and PIPEDPEER_DILOCO_UNWEIGHTED=1 (average
-# the ranks as equals instead of by samples).
-_DILOCO_OUTER_LR = _env_num("PIPEDPEER_DILOCO_OUTER_LR", 0.7)
-_DILOCO_MOMENTUM = _env_num("PIPEDPEER_DILOCO_MOMENTUM", 0.9)
-_DILOCO_FIXED_H = _env_num("PIPEDPEER_DILOCO_H", 0, int)
+# Defaults from DILOCO-TUNE (docs/benchmarks/diloco.md): plain model averaging
+# (outer lr 1, no momentum) every 64 steps after a 10-step exact warm-up. The
+# paper's outer Nesterov 0.7/0.9 amplifies the step about 7x at our intervals
+# and failed the 1% bar at every H we can reach (up to one sync per epoch);
+# the drift-adaptive interval collapsed to H=2 on the transformer. Tuning
+# variables, for scripts/bench-diloco.sh: PIPEDPEER_DILOCO_OUTER_LR,
+# PIPEDPEER_DILOCO_MOMENTUM, PIPEDPEER_DILOCO_H (the fixed interval; 0 = the
+# drift-adaptive one), PIPEDPEER_DILOCO_WARMUP (exact-sync steps before local
+# training; 0 = the rule in _diloco_warmup) and PIPEDPEER_DILOCO_UNWEIGHTED=1
+# (average the ranks as equals instead of by samples).
+_DILOCO_OUTER_LR = _env_num("PIPEDPEER_DILOCO_OUTER_LR", 1.0)
+_DILOCO_MOMENTUM = _env_num("PIPEDPEER_DILOCO_MOMENTUM", 0.0)
+_DILOCO_FIXED_H = _env_num("PIPEDPEER_DILOCO_H", 64, int)
+_DILOCO_WARMUP = _env_num("PIPEDPEER_DILOCO_WARMUP", 0, int)
 _DILOCO_UNWEIGHTED = os.environ.get("PIPEDPEER_DILOCO_UNWEIGHTED") == "1"
 _DILOCO_H_MAX = 64
-# The local phase starts here and doubles or halves at each sync; H=1 is
-# exact sync, which only the warm-up and the final tightening use, so every
-# local phase ends with a round that also syncs the optimizer state.
+# With PIPEDPEER_DILOCO_H=0 the local phase starts at 2 and doubles or halves
+# at each sync; H=1 is exact sync, which only the warm-up and the final
+# tightening use, so every local phase ends with a round that also syncs the
+# optimizer state.
 _DILOCO_H_START = _DILOCO_FIXED_H or 2
 _DILOCO_H_FLOOR = 2
 # Every Kth outer step the inner optimizer's state (Adam's exp_avg and
@@ -249,10 +258,13 @@ _DILOCO_TIGHTEN = 0.1
 
 def _diloco_warmup(total):
     """Exact-sync steps before local training: a tenth of the run, between
-    10 and 500 steps, when its length is known; else 50."""
+    10 and 500 steps, when its length is known; else 10 (DILOCO-TUNE: 10
+    and 50 ended equal, 10 syncs 3-4x less on a short run)."""
     import math
+    if _DILOCO_WARMUP > 0:
+        return _DILOCO_WARMUP
     if not total:
-        return 50
+        return 10
     return min(500, max(10, int(math.ceil(_DILOCO_TIGHTEN * total))))
 
 
@@ -285,7 +297,10 @@ def _diloco_next_interval(h, drift, ref, n, total):
             h = h * 2
         elif excess > _DILOCO_DRIFT_SHRINK:
             h = h // 2
-    h = min(_DILOCO_H_MAX, max(1 if _DILOCO_FIXED_H else _DILOCO_H_FLOOR, h))
+    if _DILOCO_FIXED_H:   # a fixed interval may exceed the adaptive ceiling
+        h = max(1, h)
+    else:
+        h = min(_DILOCO_H_MAX, max(_DILOCO_H_FLOOR, h))
     cap = _diloco_cap(n, total)
     return h if cap is None else min(h, cap)
 
@@ -1948,9 +1963,11 @@ def _install_ddp():
                     if _RANK == 0:
                         # Shown without -v: the ranks no longer run the
                         # script's exact arithmetic.
-                        _warn("training with DiLoCo, sync every %d-%d steps after %d "
+                        every = ("%d" % _DILOCO_FIXED_H if _DILOCO_FIXED_H
+                                 else "%d-%d" % (_DILOCO_H_START, _DILOCO_H_MAX))
+                        _warn("training with DiLoCo, sync every %s steps after %d "
                               "exact ones — --ddp-sync exact for per-step sync"
-                              % (_DILOCO_H_START, _DILOCO_H_MAX, _diloco_warmup(_TOTAL[0])))
+                              % (every, _diloco_warmup(_TOTAL[0])))
             ep = _EPOCH[0]
             if ep is not None:
                 ep[1] += 1
