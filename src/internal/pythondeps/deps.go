@@ -158,6 +158,17 @@ func HasDistributedImports(scriptPath string) bool {
 		strings.Contains(src, "torch.dist")
 }
 
+// StartsProcessGroup reports whether the script sets up torch.distributed
+// itself (native DDP): its gloo/NCCL ring then connects rank to rank on ports
+// of its own, which no forwarder carries.
+func StartsProcessGroup(scriptPath string) bool {
+	data, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "init_process_group")
+}
+
 func ExtractImports(scriptPath string) []string {
 	scan := ExtractImportScan(scriptPath)
 	return scan.ExternalDeps

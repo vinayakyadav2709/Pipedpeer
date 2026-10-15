@@ -29,7 +29,7 @@ func TestDDPEligibleAdmitsIdleNodesUnderTheEstimate(t *testing.T) {
 	_, p, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	port, _ := strconv.Atoi(p)
 
-	n, refused := ddpEligibleRanks(port, false, 0, 900<<20, "")
+	n, refused := ddpEligibleRanks(port, false, 0, 900<<20, "", false)
 	if n != 2 {
 		t.Errorf("eligible = %d, want 2 (lead + idle)", n)
 	}

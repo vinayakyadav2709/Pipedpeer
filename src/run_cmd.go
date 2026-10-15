@@ -261,11 +261,12 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			ddpOffload := false
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
 				exclude := offloadKey
-				eligible, refused := ddpEligibleSettled(ctx, daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
+				native := pythondeps.StartsProcessGroup(scriptPath)
+				eligible, refused := ddpEligibleSettled(ctx, daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude, native)
 				if exclude != "" && eligible == 0 {
 					say.Warnf("--offload: no other machine can take a rank, so this machine trains\n")
 					exclude = ""
-					eligible, refused = ddpEligibleSettled(ctx, daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
+					eligible, refused = ddpEligibleSettled(ctx, daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude, native)
 				}
 				ddpOffload = exclude != ""
 				worldSize := eligible
@@ -295,6 +296,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 						RequiredCores:  requiredCores,
 						NoSelf:         remote || ddpOffload,
 						ExcludeMachine: exclude,
+						Native:         native,
 						Strategy:       strategy,
 						MemOverride:    memOverride,
 						MaxRanks:       max(ddpNodes, 0),
