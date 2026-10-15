@@ -17,6 +17,12 @@ ring size** — every 32 steps for 2 ranks, 16 for 3, 4 for 4, and no fast
 sync at all from 5 ranks up (nothing passed at 8). See
 [Ranks](#ranks-diloco-many-the-interval-by-ring-size).
 
+**Many ranks, other methods (MANY-SIM, 2026-10-15, simulated only)**: of
+ten methods tried at 4, 8 and 11 ranks, only exact sync with a PowerSGD
+codec passes everywhere past 4 ranks, at about the bytes of fast sync's H=4
+on the MLPs. Nothing beats today's table at 2-4 ranks. See
+[Many ranks](#many-ranks-many-sim-other-methods-simulated).
+
 ## Method
 
 - Driver: `scripts/bench-diloco.sh` (runner `scripts/bench-lib.sh`, rig
@@ -302,6 +308,160 @@ cells at 2-8 ranks, and `single` for each seed:
 ```sh
 python3 scripts/sim-diloco-ranks.py tfm 0 eq+H16+W10 N3 src/internal/nixgen/shim
 python3 scripts/sim-diloco-ranks.py tfm 0 single - src/internal/nixgen/shim
+```
+
+## Many ranks (MANY-SIM): other methods, simulated
+
+**Simulated only, for the paper.** Nothing here has run on the lab or real
+machines, and the shim does not change. The question: can anything keep
+training within 1% of one device past the ranks table above (5+ ranks), or
+beat that table at 2-4 ranks, on bytes or syncs? Methods come from the
+MANY-LIT scan (SparseLoCo, PowerSGD, FedProx, SCAFFOLD, AdaScale, outer
+lr/H retune). DeMo and MuLoCo were left out: they replace the user's
+optimizer.
+
+**Result.**
+
+| method | arm | passes (all three models) | bytes and syncs | verdict |
+|---|---|---|---|---|
+| today's table, plain averaging | `eq+H4+W10` (H32 at 2) | 2 and 4 ranks; fails 8, 11 (tfm +1.2/+1.8%, ddp04 +1.1% at 11) | MLPs 26-33 MB, tfm 7 MB; 9-43 syncs/epoch | reference |
+| exact sync, int8 + error feedback (today's exact wire) | `exact+Cint8` | 4, 8, 11 (worst mean +0.25%) | 81-97 MB, tfm 22 MB; every step synced | reference |
+| exact sync, PowerSGD rank 16 + EF | `exact+Cpsgd16` | **4, 8, 11** (worst mean +0.18%) | MLPs 25-31 MB (3.2x below int8, the bytes of fast H=4); tfm 36 MB (1.7x above int8: d=64 matrices); every step synced | best past 4 ranks |
+| exact sync, PowerSGD rank 4 + EF | `exact+Cpsgd4` | none (gpu +1.3%, tfm +2.1 to +4.2%) | 7-11 MB | fails |
+| exact sync, top-k 3% + EF | `exact+Ctopk0.03` | none (+50 to +350%) | 5-23 MB | fails: EF lags the momentum |
+| SparseLoCo: top-k 3% + EF on the pseudo-gradient, outer momentum off | `eq+H2/H8+W10+T0.03` | none (gpu +4 to +7%, ddp04 +3 to +7%) | 2.6-3x below the same H dense | fails: the residual has too few rounds to drain in 150-300 steps |
+| FedProx pull mu 0.01 / 0.1 | `eq+H4+W10+P…` | 4 only (same as without); 0.1 worse everywhere (ddp04 +7%) | no extra bytes | no help: the shards are iid, drift is noise |
+| SCAFFOLD | - | not run | 2x bytes | skipped: FedProx showed drift toward the anchor is not the cause |
+| outer lr 1.25, H=4 | `eq+H4+W10+L1.25` | none (ddp04 +12 to +61%) | as H=4 | unstable |
+| outer lr 1.25, H=2 | `eq+H2+W10+L1.25` | 8 and 11 by the one-sided bar, but gpu -11% (changed training); fails 4 (one tfm seed +22%) | as H=2: MLPs 47-58 MB, 16-80 syncs/epoch | unstable; at most an aggressive opt-in |
+| outer lr 1.5 | `eq+H4+W10+L1.5` | none (ddp04 diverges) | - | fails |
+| option 1: per-rank batch kept, lr unchanged | `exact+K`, `eq+H4+W10+K` | none at 2-11 (gpu +24 to +176%, ddp04 +122 to +1082%) | N x fewer syncs | fails: these models need the steps |
+| option 1 + linear lr x N (10% ramp) | `exact+K+Xlin` | none (ddp04 diverges) | as option 1 | fails |
+| option 1 + sqrt(N) lr | `exact+K+Xsqrt` | none (tfm passes at 2 only) | as option 1 | fails |
+| option 1 + AdaScale gain | `exact+K+A` | none (tfm passes at 2 only); measured gain 1.00-1.06 on the MLPs, 1.1-1.4 on tfm | as option 1 | fails: the MLPs' batch is past its critical size |
+| option 1 + 2x epochs (plain / sqrt lr / AdaScale) | `exact+K+E2`, `+Xsqrt+E2`, `+A+E2` | none: at 2 ranks gpu -22% and ddp04 -15% with sqrt lr (more training, not faster) but tfm +1.2 to +1.6%; at 4 ranks MLPs +7 to +121% | compute per rank 0.96 at 2 ranks (2x today's), 0.48 at 4 | fails |
+
+**Recommended default by rank range (finding, not a plan; tuning levels
+are parked):**
+
+- 2-4 ranks: keep today's table (H 32/16/4, plain averaging). No method
+  passed with fewer bytes or syncs; none gives a >30% win here.
+- 5-11 ranks: exact sync (fast mode stays off, as today), with PowerSGD
+  rank 16 + error feedback as the codec on the layers where its factors are
+  smaller than int8 (`r(m+n) < mn/4`), int8 on the rest. Passes on every
+  model at 4, 8 and 11; on the MLPs 3.2x fewer bytes than int8 exact, the
+  same bytes as fast H=4 at 4 ranks. Costs: two small matmuls and a QR a
+  layer each step, one model-sized error buffer (int8 EF already keeps
+  one), and two round trips a step (P, then Q) where int8 needs one. Not
+  measured: latency over a real link, and models bigger than these.
+- 12+ ranks: not simulated.
+
+Sorting for opt-in levels, for a later decision:
+
+| class | methods |
+|---|---|
+| default-eligible | PowerSGD r16 hybrid codec on exact sync (any rank count; passes everywhere, fewer bytes on MLPs, small cost) |
+| safe | none beyond the default |
+| aggressive | outer lr 1.25 at H=2 for 8-11 ranks (passes the one-sided bar but moves gpu 11% lower: changed dynamics; unstable at 4 ranks) |
+| do not ship | option 1 with or without lr scaling (linear, sqrt, AdaScale) or 2x epochs; SparseLoCo at 3%; top-k exact; FedProx; outer lr >= 1.25 at H=4; PowerSGD r4; DeMo, MuLoCo (change the optimizer) |
+
+Proposed level names, if the levels are built: `--ddp-tune off` (today),
+`safe` (= the default above), `aggressive` (adds outer lr 1.25 at H=2 past
+4 ranks, with the one line saying training dynamics may change).
+
+**Harness.** `scripts/sim-diloco-ranks.py` as in DILOCO-MANY (N equal
+ranks, global batch split, 10-step exact warm-up, plain sample-weighted
+averaging, every epoch's end synced), with new arms: `exact` (every step),
+`+C<codec>` (int8, `psgd<r>`, `topk<d>`, each with per-rank error
+feedback; PowerSGD warm-starts Q and leaves vectors uncompressed),
+`+T<d>` SparseLoCo, `+P<mu>` FedProx, `+S` SCAFFOLD, `+L`/`+M` outer
+lr/momentum, `+K` per-rank batch kept, `+Xlin`/`+Xsqrt` lr scaling with a
+10% ramp, `+A` AdaScale (gain from the ranks' gradient spread, EMA 0.9,
+clamped to [1, N]), `+E<f>` epochs x f. Seeds 0-2, gap against the same
+seeds' one-device run; pass = mean <= +1%; below -5% is marked "changed".
+Bytes are what one rank sends, counted as the shim's int8 wire (1 B a
+value plus a 4 B scale per 4096) for dense syncs and optimizer-state
+syncs, 8 B per kept value for top-k, fp32 factors for PowerSGD (int8
+factors would cut them 4x again); downlink not counted. Compute per rank
+is the samples one rank trains as a share of one device's. ASSUMED: top-k
+values cost 8 B (fp32 + int32 index), not SparseLoCo's 2-bit values;
+SCAFFOLD's control variate is the mean raw local gradient (its option II
+for plain SGD).
+
+Full table (gap = mean over seeds 0-2 against one device; MB, syncs per
+epoch listed gpu/ddp04/tfm):
+
+| arm | ranks | gpu | ddp04 | tfm | all pass | MB one rank sends | syncs per epoch | compute per rank |
+|---|---|---|---|---|---|---|---|---|
+| eq+H2+W10 | 4 | **+0.01** (worst +0.0) | **+0.38** (worst +0.9) | **+0.91** (worst +1.8) | **PASS** | 46.5/57.6/13.4 | 26/16/80 | 0.25 |
+| eq+H2+W10 | 8 | **+0.02** (worst +0.0) | **-0.88** (worst -0.2) | +1.03 (worst +1.7) | fail | 46.5/57.6/13.4 | 26/16/80 | 0.12 |
+| eq+H2+W10 | 11 | **+0.03** (worst +0.1) | **+0.01** (worst +0.8) | +2.02 (worst +2.5) | fail | 46.5/57.6/13.4 | 26/16/80 | 0.09 |
+| eq+H2+W10+L1.25 | 4 | **-11.18** (worst -10.9) changed | **-7.30** (worst -3.2) changed | +8.91 (worst +22.2) | fail | 46.5/57.6/13.4 | 26/16/80 | 0.25 |
+| eq+H2+W10+L1.25 | 8 | **-11.15** (worst -10.8) changed | **-6.08** (worst -2.0) changed | **+0.90** (worst +1.9) | **PASS** | 46.5/57.6/13.4 | 26/16/80 | 0.12 |
+| eq+H2+W10+L1.25 | 11 | **-11.10** (worst -10.8) changed | **-1.54** (worst +4.5) | **+0.85** (worst +1.3) | **PASS** | 46.5/57.6/13.4 | 26/16/80 | 0.09 |
+| eq+H2+W10+T0.03 | 4 | +4.25 (worst +5.1) | +6.83 (worst +11.1) | **+0.61** (worst +1.2) | fail | 17.9/21.5/5.3 | 26/16/80 | 0.25 |
+| eq+H2+W10+T0.03 | 8 | +4.30 (worst +5.1) | +5.99 (worst +8.3) | +1.04 (worst +1.7) | fail | 17.9/21.5/5.3 | 26/16/80 | 0.12 |
+| eq+H2+W10+T0.03 | 11 | +4.33 (worst +5.1) | +6.04 (worst +7.7) | +1.43 (worst +2.1) | fail | 17.9/21.5/5.3 | 26/16/80 | 0.09 |
+| eq+H32+W10 | 2 | **+0.06** (worst +0.1) | **+0.64** (worst +2.2) | **+0.73** (worst +1.7) | **PASS** | 8.9/8.9/1.6 | 5/3/10 | 0.49 |
+| eq+H4+W10 | 4 | **+0.03** (worst +0.0) | **-0.61** (worst -0.1) | **+0.98** (worst +1.2) | **PASS** | 26.3/33.0/7.0 | 15/9/43 | 0.25 |
+| eq+H4+W10 | 8 | **+0.10** (worst +0.1) | **-0.15** (worst +0.6) | +1.24 (worst +1.7) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.12 |
+| eq+H4+W10 | 11 | **+0.14** (worst +0.2) | +1.12 (worst +1.7) | +1.79 (worst +2.2) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.09 |
+| eq+H4+W10+K | 4 | +51.33 (worst +58.5) | +316.71 (worst +327.3) | +15.18 (worst +19.5) | fail | 9.5/10.6/2.1 | 6/3/14 | 0.25 |
+| eq+H4+W10+K | 8 | +156.57 (worst +177.0) | +639.00 (worst +717.4) | +39.12 (worst +45.7) | fail | 7.3/7.3/1.3 | 4/2/9 | 0.12 |
+| eq+H4+W10+K | 11 | +176.04 (worst +184.9) | +1081.52 (worst +1139.6) | +64.71 (worst +85.9) | fail | 6.2/6.7/1.1 | 4/2/8 | 0.09 |
+| eq+H4+W10+L1.25 | 4 | **-5.39** (worst -4.9) changed | +11.53 (worst +19.7) | **+0.74** (worst +1.0) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.25 |
+| eq+H4+W10+L1.25 | 8 | **-4.22** (worst -2.9) | +61.21 (worst +163.3) | +1.46 (worst +2.9) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.12 |
+| eq+H4+W10+L1.25 | 11 | **-3.53** (worst -2.5) | +33.21 (worst +55.7) | +1.40 (worst +2.0) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.09 |
+| eq+H4+W10+L1.5 | 8 | +101.20 (worst +202.6) | +3716.78 (worst +8485.7) | +1.25 (worst +2.2) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.12 |
+| eq+H4+W10+P0.01 | 4 | **+0.32** (worst +0.3) | **+0.30** (worst +0.8) | **+0.84** (worst +1.2) | **PASS** | 26.3/33.0/7.0 | 15/9/43 | 0.25 |
+| eq+H4+W10+P0.01 | 8 | **+0.39** (worst +0.4) | **+0.54** (worst +1.6) | +1.30 (worst +1.8) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.12 |
+| eq+H4+W10+P0.01 | 11 | **+0.42** (worst +0.4) | +1.76 (worst +2.0) | +1.85 (worst +2.3) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.09 |
+| eq+H4+W10+P0.1 | 4 | +2.72 (worst +2.8) | +7.46 (worst +9.7) | **+0.94** (worst +1.3) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.25 |
+| eq+H4+W10+P0.1 | 8 | +2.76 (worst +2.9) | +7.05 (worst +9.1) | +1.85 (worst +2.4) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.12 |
+| eq+H4+W10+P0.1 | 11 | +2.81 (worst +2.9) | +8.56 (worst +9.8) | +2.45 (worst +3.1) | fail | 26.3/33.0/7.0 | 15/9/43 | 0.09 |
+| eq+H8+W10+T0.03 | 4 | +6.84 (worst +7.0) | +3.32 (worst +5.7) | +1.65 (worst +2.6) | fail | 8.4/9.8/1.8 | 9/6/24 | 0.25 |
+| eq+H8+W10+T0.03 | 8 | +6.95 (worst +7.0) | +3.27 (worst +5.8) | +2.20 (worst +3.0) | fail | 8.4/9.8/1.8 | 9/6/24 | 0.12 |
+| eq+H8+W10+T0.03 | 11 | +7.03 (worst +7.3) | +3.30 (worst +4.6) | +3.84 (worst +5.2) | fail | 8.4/9.8/1.8 | 9/6/24 | 0.09 |
+| exact+Cint8 | 4 | **+0.00** (worst +0.0) | **+0.01** (worst +0.2) | **+0.08** (worst +0.3) | **PASS** | 80.6/97.4/21.9 | 48/29/156 | 0.25 |
+| exact+Cint8 | 8 | **+0.00** (worst +0.0) | **-0.04** (worst +0.2) | **+0.19** (worst +0.5) | **PASS** | 80.6/97.4/21.9 | 48/29/156 | 0.12 |
+| exact+Cint8 | 11 | **+0.00** (worst +0.0) | **-0.00** (worst +0.1) | **+0.25** (worst +0.4) | **PASS** | 80.6/97.4/21.9 | 48/29/156 | 0.09 |
+| exact+Cpsgd16 | 4 | **+0.18** (worst +0.2) | **-0.01** (worst +0.3) | **-0.09** (worst +0.3) | **PASS** | 25.4/30.6/36.2 | 48/29/156 | 0.25 |
+| exact+Cpsgd16 | 8 | **+0.18** (worst +0.2) | **-0.05** (worst +0.1) | **-0.02** (worst +0.5) | **PASS** | 25.4/30.6/36.2 | 48/29/156 | 0.12 |
+| exact+Cpsgd16 | 11 | **+0.18** (worst +0.2) | **-0.01** (worst +0.4) | **-0.12** (worst +0.3) | **PASS** | 25.4/30.6/36.2 | 48/29/156 | 0.09 |
+| exact+Cpsgd4 | 4 | +1.29 (worst +1.3) | **+0.41** (worst +0.6) | +2.13 (worst +4.0) | fail | 7.2/8.7/10.6 | 48/29/156 | 0.25 |
+| exact+Cpsgd4 | 8 | +1.29 (worst +1.3) | **+0.20** (worst +0.7) | +2.06 (worst +3.2) | fail | 7.2/8.7/10.6 | 48/29/156 | 0.12 |
+| exact+Cpsgd4 | 11 | +1.29 (worst +1.3) | **+0.28** (worst +0.4) | +4.15 (worst +8.0) | fail | 7.2/8.7/10.6 | 48/29/156 | 0.09 |
+| exact+Ctopk0.03 | 4 | +78.75 (worst +97.3) | +137.75 (worst +209.5) | +51.70 (worst +74.0) | fail | 19.3/23.4/5.2 | 48/29/156 | 0.25 |
+| exact+Ctopk0.03 | 8 | +71.12 (worst +99.9) | +162.58 (worst +293.8) | +91.25 (worst +128.2) | fail | 19.3/23.4/5.2 | 48/29/156 | 0.12 |
+| exact+Ctopk0.03 | 11 | +80.58 (worst +100.9) | +345.13 (worst +694.0) | +82.86 (worst +127.0) | fail | 19.3/23.4/5.2 | 48/29/156 | 0.09 |
+| exact+K | 2 | +24.28 (worst +24.4) | +122.37 (worst +136.4) | +1.88 (worst +3.2) | fail | 40.3/47.0/11.0 | 24/14/78 | 0.48 |
+| exact+K | 4 | +51.34 (worst +58.5) | +316.35 (worst +326.5) | +10.71 (worst +14.0) | fail | 20.1/23.5/5.5 | 12/7/39 | 0.25 |
+| exact+K | 8 | +156.57 (worst +177.0) | +639.08 (worst +717.1) | +36.45 (worst +41.7) | fail | 10.1/10.1/2.7 | 6/3/19 | 0.12 |
+| exact+K | 11 | +176.04 (worst +184.9) | +1081.52 (worst +1139.6) | +57.52 (worst +77.6) | fail | 6.7/6.7/2.0 | 4/2/14 | 0.09 |
+| exact+K+A | 2 | +23.86 (worst +24.2) | +108.98 (worst +124.1) | **+0.92** (worst +1.5) | fail | 40.3/47.0/11.0 | 24/14/78 | 0.48 |
+| exact+K+A | 4 | +51.06 (worst +58.5) | +313.86 (worst +323.7) | +7.47 (worst +9.9) | fail | 20.1/23.5/5.5 | 12/7/39 | 0.24 |
+| exact+K+A | 8 | +156.43 (worst +176.8) | +639.16 (worst +714.0) | +32.16 (worst +38.7) | fail | 10.1/10.1/2.7 | 6/3/19 | 0.10 |
+| exact+K+A | 11 | +175.95 (worst +184.8) | +1080.07 (worst +1139.0) | +45.46 (worst +52.3) | fail | 6.7/6.7/2.0 | 4/2/14 | 0.07 |
+| exact+K+A+E2 | 2 | **-11.90** (worst -10.6) changed | **-4.87** (worst -3.8) | +1.17 (worst +1.5) | fail | 80.6/94.0/21.9 | 48/28/156 | 0.96 |
+| exact+K+A+E2 | 4 | +23.69 (worst +24.2) | +93.80 (worst +107.7) | +1.14 (worst +2.1) | fail | 40.3/47.0/11.0 | 24/14/78 | 0.48 |
+| exact+K+E2 | 2 | **-0.46** (worst -0.4) | **+0.88** (worst +2.5) | +1.59 (worst +3.7) | fail | 80.6/94.0/21.9 | 48/28/156 | 0.96 |
+| exact+K+E2 | 4 | +24.32 (worst +24.6) | +120.70 (worst +136.5) | **+0.52** (worst +0.9) | fail | 40.3/47.0/11.0 | 24/14/78 | 0.48 |
+| exact+K+Xlin | 4 | +21.19 (worst +23.2) | +4716.94 (worst +12734.5) | +2.56 (worst +3.1) | fail | 20.1/23.5/5.5 | 12/7/39 | 0.24 |
+| exact+K+Xlin | 8 | +198.08 (worst +234.9) | +nan (worst +nan) | +6.41 (worst +8.3) | fail | 10.1/10.1/2.7 | 6/3/19 | 0.10 |
+| exact+K+Xlin | 11 | +nan (worst +53135.1) | +nan (worst +nan) | +27.01 (worst +32.3) | fail | 6.7/6.7/2.0 | 4/2/14 | 0.07 |
+| exact+K+Xsqrt | 2 | +17.21 (worst +17.4) | +33.47 (worst +36.9) | **+0.75** (worst +0.8) | fail | 40.3/47.0/11.0 | 24/14/78 | 0.48 |
+| exact+K+Xsqrt | 4 | +41.24 (worst +44.0) | +257.16 (worst +390.1) | +3.21 (worst +4.6) | fail | 20.1/23.5/5.5 | 12/7/39 | 0.24 |
+| exact+K+Xsqrt | 8 | +119.17 (worst +146.3) | +1088.53 (worst +1179.8) | +16.64 (worst +21.3) | fail | 10.1/10.1/2.7 | 6/3/19 | 0.10 |
+| exact+K+Xsqrt | 11 | +184.23 (worst +191.3) | +1086.73 (worst +1131.7) | +32.55 (worst +37.0) | fail | 6.7/6.7/2.0 | 4/2/14 | 0.07 |
+| exact+K+Xsqrt+E2 | 2 | **-22.35** (worst -21.3) changed | **-15.27** (worst -11.0) changed | +1.45 (worst +3.4) | fail | 80.6/94.0/21.9 | 48/28/156 | 0.96 |
+| exact+K+Xsqrt+E2 | 4 | +7.49 (worst +8.3) | +14.09 (worst +28.0) | **-0.15** (worst +0.4) | fail | 40.3/47.0/11.0 | 24/14/78 | 0.48 |
+
+Reproduce (one run per line of a job list, in the agents slice, skipping
+finished runs; then the table above):
+
+```sh
+printf '%s\n' "tfm 0 single -" "tfm 0 exact+Cpsgd16 N8" > jobs.txt
+scripts/sim-diloco-many.sh jobs.txt out/ src/internal/nixgen/shim 2
 ```
 
 ## Diagnosis (DILOCO-DIAG)
