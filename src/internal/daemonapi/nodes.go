@@ -44,6 +44,16 @@ type nodesState struct {
 	pendingMu sync.Mutex
 	pending   map[string]struct{}
 
+	// pathGen counts RemovePeer calls; removedAt holds the generation each
+	// address was removed at. A probe that started before a removal must not
+	// re-add the path it dropped (PathOK recreates a missing path), so
+	// verifying takes pathMu and checks removedAt against the generation the
+	// probe started at. ponytail: entries are never deleted; bounded by the
+	// forwarder ports ever used.
+	pathMu    sync.Mutex
+	pathGen   uint64
+	removedAt map[string]uint64
+
 	// introducerStatus and hinter come from internet mode (nil without it).
 	hookMu           sync.RWMutex
 	introducerStatus func() []IntroducerState
@@ -63,9 +73,11 @@ type NodeDiscovered struct {
 }
 
 // SetDiscoverFn installs the LAN discovery probe used by the peer poller.
-// Must be called before StartPeerPoller.
+// Guarded: AddPeer's immediate poll can already be running.
 func (s *Server) SetDiscoverFn(fn func() []NodeDiscovered) {
+	s.hookMu.Lock()
 	s.discoverFn = fn
+	s.hookMu.Unlock()
 }
 
 func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
@@ -277,9 +289,15 @@ func (s *Server) AddPeer(host string, port int) error {
 		return fmt.Errorf("node store unavailable")
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	since := s.pathGeneration()
 	h, err := probeHealth(host, port)
 	if err != nil {
 		log.Warn().Err(err).Str("at", addr).Msg("internet peer not answering yet; retrying every poll")
+		s.pathMu.Lock()
+		defer s.pathMu.Unlock()
+		if s.removedAt[addr] > since {
+			return nil // removed while we probed
+		}
 		s.pendingMu.Lock()
 		if s.pending == nil {
 			s.pending = map[string]struct{}{}
@@ -288,7 +306,7 @@ func (s *Server) AddPeer(host string, port int) error {
 		s.pendingMu.Unlock()
 		return nil
 	}
-	if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port); err != nil {
+	if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port, since); err != nil {
 		return err
 	}
 	// Poll now rather than at the next sweep: a peer not yet marked healthy is
@@ -297,16 +315,41 @@ func (s *Server) AddPeer(host string, port int) error {
 	return nil
 }
 
-// adoptPath records host:port as a verified path of nodeID.
-func (s *Server) adoptPath(nodeID string, kind nodestore.PathKind, host string, port int) error {
-	if err := s.store.SeePath(nodeID, kind, host, port); err != nil {
-		return fmt.Errorf("record path %s:%d for %s: %w", host, port, nodeID, err)
-	}
-	if err := s.store.PathOK(nodeID, kind, host, port); err != nil {
+// adoptPath records host:port as a verified path of nodeID, unless RemovePeer
+// dropped that address after generation since.
+func (s *Server) adoptPath(nodeID string, kind nodestore.PathKind, host string, port int, since uint64) error {
+	ok, err := s.verifyPath(nodeID, kind, host, port, since)
+	if err != nil {
 		return fmt.Errorf("verify path %s:%d for %s: %w", host, port, nodeID, err)
 	}
-	tlsid.Expect(net.JoinHostPort(host, strconv.Itoa(port)), nodeID)
+	if !ok {
+		log.Info().Str("peer", nodeID).Str("at", net.JoinHostPort(host, strconv.Itoa(port))).
+			Msg("path removed while it was being checked; not re-adding it")
+	}
 	return nil
+}
+
+func (s *Server) pathGeneration() uint64 {
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
+	return s.pathGen
+}
+
+// verifyPath is PathOK plus the pin, skipped (false) when the address was
+// removed after generation since. Under pathMu, so a removal cannot land
+// between the check and the write.
+func (s *Server) verifyPath(nodeID string, kind nodestore.PathKind, host string, port int, since uint64) (bool, error) {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
+	if s.removedAt[addr] > since {
+		return false, nil
+	}
+	if err := s.store.PathOK(nodeID, kind, host, port); err != nil {
+		return false, err
+	}
+	tlsid.Expect(addr, nodeID)
+	return true, nil
 }
 
 // RemovePeer forgets the internet path at host:port, for when internet mode's
@@ -315,8 +358,16 @@ func (s *Server) RemovePeer(host string, port int) error {
 	if s.store == nil {
 		return fmt.Errorf("node store unavailable")
 	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	s.pathMu.Lock()
+	defer s.pathMu.Unlock()
+	s.pathGen++
+	if s.removedAt == nil {
+		s.removedAt = map[string]uint64{}
+	}
+	s.removedAt[addr] = s.pathGen
 	s.pendingMu.Lock()
-	delete(s.pending, net.JoinHostPort(host, strconv.Itoa(port)))
+	delete(s.pending, addr)
 	s.pendingMu.Unlock()
 
 	nodes, err := s.store.ListAll()
@@ -338,7 +389,7 @@ func (s *Server) RemovePeer(host string, port int) error {
 	}
 	// The forwarder port goes back to the pool; the next peer behind it is
 	// another node.
-	tlsid.Forget(net.JoinHostPort(host, strconv.Itoa(port)))
+	tlsid.Forget(addr)
 	return nil
 }
 
@@ -399,8 +450,11 @@ func (s *Server) pollAllNodes() {
 	// 1. LAN discovery adds candidates only. A sighting never replaces a
 	//    working path and never refreshes a row (E4, E5e): the path checks
 	//    below decide.
-	if s.discoverFn != nil {
-		for _, d := range s.discoverFn() {
+	s.hookMu.RLock()
+	discover := s.discoverFn
+	s.hookMu.RUnlock()
+	if discover != nil {
+		for _, d := range discover() {
 			if d.NodeID == "" || d.NodeID == s.nodeID || d.Host == "" || d.DaemonPort == 0 {
 				continue
 			}
@@ -471,6 +525,7 @@ func (s *Server) pollAllNodes() {
 
 // retryPending polls the forwarders AddPeer could not identify yet.
 func (s *Server) retryPending() {
+	since := s.pathGeneration()
 	s.pendingMu.Lock()
 	addrs := make([]string, 0, len(s.pending))
 	for a := range s.pending {
@@ -487,7 +542,7 @@ func (s *Server) retryPending() {
 		if err != nil {
 			continue // logged once by AddPeer; still pending
 		}
-		if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port); err != nil {
+		if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port, since); err != nil {
 			log.Warn().Err(err).Str("at", a).Msg("internet peer answered but its path could not be stored")
 			continue
 		}
@@ -573,6 +628,7 @@ func candidateOrder(paths []nodestore.Path) []nodestore.Path {
 // node is marked so. While the active path is not a LAN one, LAN candidates are
 // still tried so a verified LAN path can take over (nodestore decides).
 func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
+	since := s.pathGeneration()
 	paths, err := s.store.Paths(node.NodeID)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not read node paths")
@@ -606,11 +662,14 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 			s.dropPath(node.NodeID, p.Host, p.Port, "node "+h.NodeID+" answers at "+addr)
 			continue
 		}
-		if err := s.store.PathOK(node.NodeID, p.Kind, p.Host, p.Port); err != nil {
+		ok, err := s.verifyPath(node.NodeID, p.Kind, p.Host, p.Port, since)
+		if err != nil {
 			log.Warn().Err(err).Str("peer", node.NodeID).Str("at", addr).Msg("could not record verified path")
 			continue
 		}
-		tlsid.Expect(addr, node.NodeID)
+		if !ok {
+			continue // RemovePeer dropped it while we probed
+		}
 		if verified == nil {
 			hh := h
 			verified = &hh
