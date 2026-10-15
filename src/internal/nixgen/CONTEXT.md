@@ -89,7 +89,7 @@ One round where every rank posts its gradients (or weights) to the lead's daemon
 Per-rank slices of the script's batch, by speed, summing to the script's batch; the learning rate is never changed.
 
 **Sync interval**:
-Steps between syncs; 1 by default. `--ddp-sync fast` (`PIPEDPEER_DDP_SYNC=fast`) is DiLoCo: exact warm-up, then a drift-driven interval in [1, 64] that tightens near the end, sample-weighted pseudo-gradients and an outer Nesterov step.
+Steps between syncs; 1 by default. `--ddp-sync fast` (`PIPEDPEER_DDP_SYNC_MODE=fast`) is DiLoCo: exact warm-up, then a drift-driven interval in [1, 64] that tightens near the end, sample-weighted pseudo-gradients and an outer Nesterov step.
 
 **Training exit codes**:
 75 missed start barrier, 76 ring aborted or lead lost (after one `pipedpeer: training stopped: <reason>` line), 77 rank released because the ring shrank (not a failure).
