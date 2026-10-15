@@ -3,7 +3,7 @@
 This records the work done after the report was written, on branch
 `nightly-fixes-s` in October 2026. It covers what changed, how to test each
 part, and what comes next. It is a historical record: command names and ports
-below were updated to the current build (`jobs <id>` for the old `job`,
+below were updated to the current build (`jobs <id>` for the old `job`, `jobs last` for `job --last`,
 `status` for `nodes`/`stats`, port 4242), but the demo scripts it names were
 retired; the plan after the address-book phase is in `next-steps.md`. `known-issues.md` holds the original defect list,
 with each entry marked when resolved.
@@ -221,7 +221,7 @@ execution's final message, and the seeding time in the upload's answer.
 
 Where it shows:
 - Every run now ends with the `=== Summary ===` block; the stage timeline is kept in the history record.
-- `pipedpeer jobs <id> --timeline` draws the timeline as bars on a shared time axis.
+- `pipedpeer jobs <id> --timeline` draws the timeline as bars on a shared time axis; `jobs last` picks the most recent run.
 
 ### Test it automatically
 
@@ -239,7 +239,7 @@ least 300 ms of script time.
 cd /tmp/pptest
 printf 'import time\nt=time.time()\nsum(i*i for i in range(3_000_000))\nprint("done in %%.2fs" %% (time.time()-t))\n' > job.py
 pp run job.py
-pp jobs <id> --timeline
+pp jobs last --timeline
 ```
 
 The run ends with a line such as:
@@ -248,7 +248,7 @@ The run ends with a line such as:
 Stages: detect imports 0ms · … · nix build 520ms · export closure 5ms · upload 5.3s · sandbox setup 0ms · script 254ms · sync results 8ms (total 6.1s)
 ```
 
-and `jobs <id> --timeline` draws it:
+and `jobs last --timeline` draws it:
 
 ```
 STAGE             WHERE        START      TIME
@@ -363,7 +363,7 @@ if __name__ == "__main__":
     print("POOL", len(r), "in %.2fs" % (time.time() - t))
 EOF
 pp run pool.py
-pp jobs <id> --receipt
+pp jobs last --receipt
 ```
 
 The run ends with a Summary row such as
@@ -388,7 +388,7 @@ A run placed by the coordinator, explained:
 
 ```bash
 pp run job.py --remote
-pp jobs <id> --explain
+pp jobs last --explain
 ```
 
 ```
@@ -420,7 +420,7 @@ ID                   SCRIPT             STATUS     NODE          TOTAL  SLOWEST 
 1791725631738480222  pool.py            succeeded  e5b24777       2.3s  seed peers 1s          15/200 items remote
 ```
 
-All three views at once: `pp jobs <id> --timeline --explain --receipt`.
+All three views at once: `pp jobs last --timeline --explain --receipt`.
 
 ### Limits
 
@@ -494,8 +494,8 @@ pp ui                        # opens http://127.0.0.1:4242/ui#token=…
 
 What to check on the page:
 1. The tiles and the nodes table match `pp status`.
-2. The newest run is selected. Its timeline matches `pp jobs <id> --timeline`,
-   and "Where the work ran" matches `pp jobs <id> --receipt`.
+2. The newest run is selected. Its timeline matches `pp jobs last --timeline`,
+   and "Where the work ran" matches `pp jobs last --receipt`.
 3. Start another run (`pp run pool.py`) while the page is open. It appears at
    the top within two seconds, as `running · executing`, then `succeeded`.
 4. Click an older run. The address changes to `#run=<id>`, and reloading keeps
@@ -589,7 +589,7 @@ run into 90 minutes in the record). Each run writes a row to
 **The demo flow:**
 - **Step 1** ends by printing the live page's address (`pipedpeer ui --print`) for the second screen.
 - **Step 14, `14-capstone.sh`,** is new: the capstone, showing each stage's time, `results/` arriving, and the `spread` row.
-- **Step 10, `10-proof.sh`,** now shows `pipedpeer jobs <id> --timeline` and `--receipt`.
+- **Step 10, `10-proof.sh`,** now shows `pipedpeer jobs last --timeline` and `--receipt`.
 - `setup.sh` generates the capstone's data and rehearses it.
 - `prep-2-rehearse.sh` times it against its local baseline.
 - DEMO-SCRIPT.md and DEMO-PREP.md follow these changes, and the "first run cost" table uses the new numbers.
@@ -650,7 +650,7 @@ cd pipedpeer-demo/07_capstone
 python3 make_data.py                                      # once, ~200 MB
 pp run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7 -e PIPEDPEER_SHIM=0   # baseline
 pp run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7                        # cluster
-pp jobs <id> --receipt     # joblib, pool.map decisions; items per peer
+pp jobs last --receipt     # joblib, pool.map decisions; items per peer
 ls results/
 ```
 
