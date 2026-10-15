@@ -63,6 +63,11 @@ type chunk struct {
 	python string
 	// oob mirrors poolRequest.Oob.
 	oob bool
+	// forwardedBy is the node id that forwarded this request whole
+	// (X-Pipedpeer-Forwarded; "1" from older builds). That node could not
+	// admit the work, so no part of it goes back there: a chunk is forwarded
+	// at most once.
+	forwardedBy string
 	// ctx is the request this chunk serves. It ends when the requester goes
 	// away (its job was killed, or the origin dropped a forward), and that
 	// kills the local workers and drops the peer forwards started for it.
@@ -312,6 +317,22 @@ func (pm *poolManager) offloadPeers(peers []string, machine string) ([]string, b
 		out = append(out, p)
 	}
 	return out, heartbeat.SameMachine(selfMachine(), machine)
+}
+
+// dropForwarder removes the node that forwarded this chunk (by node id) from
+// its peers: it could not admit the work, so sending it parts would only
+// bounce them. "" or an older build's "1" matches no node and drops nothing.
+func (pm *poolManager) dropForwarder(peers []string, nodeID string) []string {
+	if nodeID == "" {
+		return peers
+	}
+	out := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if pm.key(p) != nodeID {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // peerCores is the prior for an unmeasured peer.
@@ -626,10 +647,20 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	// local, strong peers), the whole request is forwarded to the best peer —
 	// the orchestrator executes 0% heavy compute. 503 only when no peer can
 	// take it.
+	//
+	// Forwarding happens at most once: a request that was itself forwarded,
+	// or is a part (no_fanout) another node already split, is refused here
+	// instead, and its sender falls back to its next peer or runs it.
+	forwardedBy := r.Header.Get("X-Pipedpeer-Forwarded")
 	if req.RequiredMemBytes > 0 {
 		available := s.AvailableForJob()
+		if fromLocalShim {
+			// The job asking is running here under its own lease; its pool
+			// work is that job's memory, not a new promise on top of it.
+			available = s.availableForOwnJob()
+		}
 		if available < req.RequiredMemBytes {
-			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
+			if forwardedBy == "" && !req.NoFanout {
 				if peer := s.pool.bestPeer(storePath, submitter, offload, phone.Need(python, req.FuncSrc != "")); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
 					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload, python) {
@@ -653,11 +684,12 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				starmap: req.Starmap, itemsB64: req.ItemsB64, itemsZlib: req.ItemsZlib, noSplit: req.NoSplit,
 				noFanout: req.NoFanout, force: req.Force, requiredMem: req.RequiredMemBytes,
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
-				chunkDir: chunkDirFor(storePath),
-				offload:  offload,
-				fnFP:     req.FnFP,
-				python:   python,
-				oob:      req.Oob,
+				chunkDir:    chunkDirFor(storePath),
+				offload:     offload,
+				fnFP:        req.FnFP,
+				python:      python,
+				oob:         req.Oob,
+				forwardedBy: forwardedBy,
 				// originLocal stays unset: setting it here would change
 				// placement, which is out of this path's remit.
 				prov: &provenance{},
@@ -689,6 +721,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		python:      python,
 		oob:         req.Oob,
 		originLocal: fromLocalShim,
+		forwardedBy: forwardedBy,
 		prov:        &provenance{},
 		ctx:         r.Context(),
 	}
@@ -812,7 +845,13 @@ func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawB
 	hdr := http.Header{}
 	hdr.Set("Content-Type", "application/json")
 	hdr.Set("X-Pipedpeer-Store", storePath)
-	hdr.Set("X-Pipedpeer-Forwarded", "1")
+	// Our node id, so the peer keeps every part of it off this node; any
+	// non-empty value reads as forwarded (older builds send "1").
+	fwd := s.nodeID
+	if fwd == "" {
+		fwd = "1"
+	}
+	hdr.Set("X-Pipedpeer-Forwarded", fwd)
 	if python != "" {
 		hdr.Set("X-Pipedpeer-Python", python)
 	}
@@ -931,6 +970,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 	// --offload: none of the parts below may land on the kept-off machine,
 	// and when that is this node, it takes no share of its own.
 	peers, offHere := pm.offloadPeers(peers, ch.offload)
+	peers = pm.dropForwarder(peers, ch.forwardedBy)
 	if offHere && len(peers) == 0 {
 		log.Printf("[pool] --offload: no other machine shares this closure; running %d items on this machine", len(ch.items))
 	}
