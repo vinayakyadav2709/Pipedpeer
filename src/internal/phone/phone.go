@@ -114,18 +114,92 @@ func CanRun(store string, h http.Header) bool {
 	if want == "" && !funcSrc {
 		return false
 	}
-	_, have, err := hostPython()
+	py, have, err := hostPython()
 	if err != nil {
 		log.Warn().Err(err).Msg("phone: pool-only node answers not runnable")
 		return false
 	}
-	return funcSrc || minor(have) == want
+	if !funcSrc && minor(have) != want {
+		return false
+	}
+	if miss := missingModules(py, strings.Split(h.Get(ImportsHeader), ",")); len(miss) > 0 {
+		log.Warn().Strs("missing", miss).Str("python", py).
+			Msg("phone: refusing a chunk whose modules this phone's python lacks (pkg install python-<name> or pip install <name>)")
+		return false
+	}
+	return true
+}
+
+// importable caches modules python can import: a real import, because a
+// package can be installed and still fail to load (Termux torch dlopens the
+// system libvulkan.so). A missing one is asked again, so a later pkg install
+// counts without a restart.
+var (
+	importMu   sync.Mutex
+	importable = map[string]bool{}
+	tryImports = func(py string, mods []string) (map[string]bool, error) {
+		var stderr strings.Builder
+		cmd := exec.Command(py, append([]string{"-c",
+			"import importlib, sys\nfor m in sys.argv[1:]:\n    try:\n        importlib.import_module(m)\n        print(m, True)\n    except Exception as e:\n        print(m, False)\n        print('pipedpeer: import %s failed: %r' % (m, e), file=sys.stderr)"},
+			mods...)...)
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			log.Warn().Str("python", py).Str("stderr", msg).Msg("phone: module check")
+		}
+		if err != nil {
+			return nil, err
+		}
+		got := map[string]bool{}
+		for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if f := strings.Fields(l); len(f) == 2 {
+				got[f[0]] = f[1] == "True"
+			}
+		}
+		return got, nil
+	}
+)
+
+// missingModules returns the names in mods that py cannot import.
+func missingModules(py string, mods []string) []string {
+	importMu.Lock()
+	defer importMu.Unlock()
+	var ask []string
+	for _, m := range mods {
+		if m = strings.TrimSpace(m); m == "" {
+			continue
+		}
+		if _, ok := importable[m]; !ok {
+			ask = append(ask, m)
+		}
+	}
+	if len(ask) > 0 {
+		got, err := tryImports(py, ask)
+		if err != nil {
+			log.Warn().Err(err).Strs("modules", ask).Msg("phone: cannot ask python which modules it has; treating them as missing")
+			return ask
+		}
+		var miss []string
+		for _, m := range ask {
+			if got[m] {
+				importable[m] = true
+			} else {
+				miss = append(miss, m)
+			}
+		}
+		return miss
+	}
+	return nil
 }
 
 // Need is the header a runnable check sends for a chunk: the submitter's
-// python and whether the chunk ships func_src.
-func Need(python string, funcSrc bool) http.Header {
+// python, whether the chunk ships func_src, and the modules it imports
+// (Modules).
+func Need(python string, funcSrc bool, modules ...string) http.Header {
 	h := http.Header{}
+	if len(modules) > 0 {
+		h.Set(ImportsHeader, strings.Join(modules, ","))
+	}
 	if python != "" {
 		h.Set(PythonHeader, python)
 	}
@@ -149,8 +223,21 @@ func exists(p string) bool {
 	return err == nil
 }
 
-// Setup makes this node pool-only (no nix, crun or firewall on a phone) and
-// says what is still missing.
+// Termux packages Setup installs. Required: the pool runner and numpy work.
+// ML: torch and scipy chunks (about 350 MB more, docs/phone.md); a failure
+// there leaves a numpy-only worker. cloudpickle comes from pip (no Termux
+// package): by-value functions reference it when they unpickle.
+var (
+	requiredPkgs = []string{"python", "python-numpy"}
+	mlPkgs       = []string{"python-torch", "python-scipy"}
+	runCmd       = func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}
+)
+
+// Setup makes this node pool-only (no nix, crun or firewall on a phone),
+// installs Termux python with numpy, torch and scipy, and says what is still
+// missing.
 func Setup(w io.Writer) error {
 	c, err := clustercfg.Load()
 	if err != nil {
@@ -163,16 +250,47 @@ func Setup(w io.Writer) error {
 		}
 	}
 	term.OK(w, "this phone takes Pool/joblib work only (pool_only in %s)", clustercfg.Path())
+	install := func(what string, pkgs ...string) bool {
+		fmt.Fprintf(w, "installing %s (pkg install %s), this can take a few minutes...\n", what, strings.Join(pkgs, " "))
+		out, err := runCmd("pkg", append([]string{"install", "-y"}, pkgs...)...)
+		if err != nil {
+			log.Warn().Err(err).Strs("packages", pkgs).Str("output", tail(out)).Msg("phone: pkg install failed")
+			term.Warn(w, "pkg install %s failed: %v", strings.Join(pkgs, " "), err)
+			return false
+		}
+		return true
+	}
+	if !install("python and numpy", requiredPkgs...) {
+		term.Action(w, "install python by hand: pkg install %s", strings.Join(requiredPkgs, " "))
+	}
+	if !install("torch and scipy for ML chunks (~350 MB)", mlPkgs...) {
+		term.Action(w, "for ML chunks: pkg install %s (numpy chunks work without it)", strings.Join(mlPkgs, " "))
+	}
+	pyOnce = sync.Once{} // python may be new since the last probe
 	py, v, err := hostPython()
 	if err != nil {
-		term.Action(w, "install python: pkg install python python-numpy")
+		term.Fail(w, "%v", err)
 		return nil
 	}
-	term.OK(w, "python %s at %s", v, py)
-	if err := exec.Command(py, "-c", "import numpy").Run(); err != nil {
-		log.Warn().Err(err).Msg("phone: numpy import failed")
-		term.Action(w, "install numpy: pkg install python-numpy")
+	if out, err := runCmd(py, "-m", "pip", "install", "-q", "cloudpickle"); err != nil {
+		log.Warn().Err(err).Str("output", tail(out)).Msg("phone: pip install cloudpickle failed")
+		term.Action(w, "for by-value functions: %s -m pip install cloudpickle", py)
 	}
+	have := []string{}
+	for _, m := range []string{"numpy", "torch", "scipy", "cloudpickle"} {
+		if len(missingModules(py, []string{m})) == 0 {
+			have = append(have, m)
+		}
+	}
+	term.OK(w, "python %s at %s with %s", v, py, strings.Join(have, ", "))
 	term.Action(w, "keep the worker awake: termux-wake-lock (and keep the phone charging)")
 	return nil
+}
+
+// tail is the last 400 bytes of a command's output, for a log line.
+func tail(b []byte) string {
+	if len(b) > 400 {
+		b = b[len(b)-400:]
+	}
+	return strings.TrimSpace(string(b))
 }
