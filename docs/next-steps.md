@@ -85,6 +85,10 @@ Parked by the user on 2026-10-15:
   `/dev/kfd`).
 - Training that survives losing its lead machine (DDP-LEAD).
 - Automatic batch sizing (Pollux/AdaScale).
+- Tuning levels (`--ddp-tune`) and defaults that change batch, learning
+  rate, sync interval or epochs, so fast sync stays accurate past 4
+  ranks. The simulated results are in
+  [benchmarks/diloco.md](benchmarks/diloco.md).
 - A single machine never crashing on huge numpy.
 - Sleep handling (no sleep inhibitor).
 - Web page parity with the CLI (the page is read-only by design).
