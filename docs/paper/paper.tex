@@ -101,10 +101,11 @@ averaging; at the default two-rank interval of 32 steps, averaging stayed
 within 1\% of one device's validation loss on every test model while each rank
 sent 7.6--9.2$\times$ fewer bytes than exact synchronisation. Machines behind
 different routers meet through an introducer that any member can serve, then
-connect directly over authenticated QUIC; no data is relayed. In a container lab a repeat
-submission took 0.83\,s against 23.4\,s for the first, and interception cost
+connect directly over QUIC, authenticated by node keys and a cluster secret;
+no data is relayed. A phone joins as a chunk worker. In a container lab, a submission whose closure the worker
+held took a median of 0.83\,s against 23.4\,s for the first, and interception cost
 $1.24\times$ the startup of a trivial job. Between two laptops in different
-homes, over a Tailscale network, a CPU-bound script ran in about 14\,s against 18\,s on one.
+homes over Tailscale, a CPU-bound script took about 14\,s against 18\,s on one.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -200,12 +201,9 @@ training ring's rank~0.
 The cross-network mechanism follows established practice. Reflexive addresses
 are discovered as in STUN~\cite{rfc8489}; port mappings are requested with
 PCP~\cite{rfc6887}, NAT-PMP~\cite{rfc6886} and UPnP-IGD~\cite{upnpigd}; simultaneous UDP probing from the
-socket that will carry the connection is the hole punching of Ford et
-al.~\cite{ford2005p2p}; links are QUIC~\cite{rfc9000}.
+socket that will carry the connection is the hole punching of Ford et~al.~\cite{ford2005p2p}; links are QUIC~\cite{rfc9000}.
 
-Edge-computing offloading studies the decision our cost model makes. Deng et
-al.~\cite{deng2023} weigh transmission against local computation; Yong et
-al.~\cite{yong2023} show partial offloading beating all-or-nothing, the regime
+Edge-computing offloading studies the decision our cost model makes. Deng et~al.~\cite{deng2023} weigh transmission against local computation; Yong et~al.~\cite{yong2023} show partial offloading beating all-or-nothing, the regime
 our interception works in; learned policies~\cite{he2024} exceed a fixed rule at
 the price of training; and topology-aware placement~\cite{zhao2023} outperforms
 scalar scoring, a limitation our placement shares. Spenger~\cite{kth2025thesis}
@@ -227,7 +225,7 @@ would be slower. (G5) No job data passes through a third machine.
 Coordination is \emph{decentralised}: every daemon serves the introducer for
 its cluster, placement is computed in the submitting client, and a training
 ring's lead is simply the node that runs rank~0 of that job. It is
-\emph{recursive} in that division repeats at each level: the node that holds a
+\emph{recursive} (the ``recursive'' of the title) in that division repeats at each level: the node that holds a
 parallel map splits it among its peers, and each part is split again across the
 cores of the node that runs it. A node that cannot hold a map forwards it whole,
 once, to a peer that can, and that peer makes the split; a part already split
@@ -279,7 +277,7 @@ Work is reserved by a three-phase lease; the concurrency and memory checks and
 the insertion happen under one lock. The submitter renews every 30\,s, also
 while the environment builds and uploads, against a five-minute expiry. A
 submitter that dies stops renewing and its slot is reclaimed; a worker that dies
-leaves the healthy set and its job is rescheduled with back-off.
+has its job rescheduled with back-off.
 
 \subsection{Environment Reproduction}
 \label{sec:env}
@@ -301,7 +299,7 @@ before trusting it for that import. Closures go only to peers of the same
 architecture; a peer of another architecture receives the package list and
 builds its own environment once. A phone joins under Termux~\cite{termux}, where
 \texttt{proot-distro} provides, through \texttt{proot}~\cite{proot}, a Debian
-root with single-user Nix, and takes parallel chunks only.
+root with single-user Nix, and takes chunks only.
 
 \subsection{Joining Across Networks}
 \label{sec:nat}
@@ -383,15 +381,15 @@ steps; at our intervals of 2--64 steps PipedPeer uses plain averaging (outer lr
 no interval past four ranks. Under automatic sync the lead switches a ring to
 fast mode once, when the predicted fast step with a 10\% margin beats the exact
 split and, for a ring not fixed by \texttt{-{}-ddp~$N$}, also the fastest rank
-alone; with \texttt{-{}-ddp~$N$} the ring size is fixed and auto chooses only the
-sync mode.
+alone; under \texttt{-{}-ddp~$N$} auto chooses only the sync mode.
 
 \subsection{The Cost Model}
 \label{sec:cost}
 
 Numerical work is gated. With $b$ payload bytes, $\phi$ operations per byte,
-$\rho$ link crossings, $B$ bandwidth, $R$ and $R'$ local and remote throughput
-and $K$ nodes, divisible work moves only when
+$\rho$ link crossings, $B$ bandwidth, $R$ and $R'$ local and remote throughput,
+and $K$ the nodes that hold the environment, the submitting one included and
+each priced at $R'$, divisible work moves only when
 \begin{equation}
 \label{eq:cost}
 \frac{b\phi}{R} \;>\; \frac{\rho\,b}{B} \;+\; \frac{b\phi}{R'K}\times 1.3 .
@@ -461,12 +459,10 @@ measures correctness, overhead, caching and cost growth, and speedup only as one
 container against several of the same size. A 16-thread laptop with an RTX~3060
 laptop GPU under Fedora~44 runs a second lab. Physical runs use two laptops in different homes (RTX~3060
 and RTX~3050), a 20-core and a 16-core host joined over Tailscale, and a Samsung
-Galaxy S20~FE (Android~13). Between the two laptops, PipedPeer's own QUIC link ran on
-top of a Tailscale (WireGuard) network with 6--8\,ms round trip, because both
-laptops joined one Tailscale network: neither home offered a
-reachable introducer, since one router refuses port mapping and the other
-machine sits behind two NATs. These runs measure distribution between homes,
-not PipedPeer's NAT traversal. NAT traversal without
+Galaxy S20~FE (Android~13). Between the laptops, PipedPeer's QUIC link ran over Tailscale
+(WireGuard, 6--8\,ms round trip), since neither home offered a reachable
+introducer (one router refuses port mapping, the other machine sits behind two
+NATs); these runs measure distribution between homes, not NAT traversal. NAT traversal without
 Tailscale is evaluated on a two-site container testbed on one host: two
 containers on separate private networks, both numbered 192.168.0.0/24, each
 behind a router container whose iptables rules translate addresses and drop
@@ -474,15 +470,15 @@ unsolicited inbound packets, with the introducer on a third network standing for
 the internet; every user command is run across it.
 Training accuracy is measured against one device trained on the same data:
 two-rank rings in the lab, larger rings in-process, with the ranks side by side
-on a single machine. Lab wall times are medians of three to five runs, and of
-one seed for training; lab accuracy is a mean of three seeds, in-process
-accuracy of seeds 0--2 and, where run, 0--5. MiB and GiB are binary.
+on a single machine. Lab wall times are medians of three to five runs; training
+wall times are one seed. Lab accuracy is a mean of three seeds. In-process
+accuracy is a mean of seeds 0--2 and, where run, of seeds 0--5. MiB and GiB are binary.
 
 \subsection{Microbenchmarks (Q1, Q2)}
 
 \textbf{Interception.} Startup of a job that imports nothing heavy takes
-0.117\,s with interception against 0.094\,s without (best of five, $1.24\times$). On a whole job that the cost model declines, a 16-item map with 0.01\,s
-of work and none of it dispatched, the median was 0.80\,s against 0.68\,s:
+0.117\,s with interception against 0.094\,s without (best of five, $1.24\times$). On a declined job, a 16-item map with 0.01\,s
+of work, the median was 0.80\,s against 0.68\,s:
 declining costs about 0.12\,s per job.
 
 \textbf{Environment cache.} The first submission of a job took 23.4\,s. The
@@ -498,14 +494,14 @@ already held sent 29\,MB instead of 206\,MB.
 \label{fig:cache}
 \end{figure}
 
-\textbf{Work split.} On a lab limited to 8, 2 and 1 CPUs, a headcount split was
-$1.6\times$ slower than local (3.6\,s); the measured split declined the 1-CPU
-worker and took 2.9\,s, better but still $1.3\times$ slower than local. With one peer at a tenth of the CPU,
+\textbf{Work split.} On a lab limited to 8, 2 and 1 CPUs, a headcount split took
+3.6\,s, $1.6\times$ slower than local; the measured split declined the 1-CPU
+worker and took 2.9\,s, still $1.3\times$ slower than local. With one peer at a tenth of the CPU,
 the slowdown against an equal cluster fell from $1.6\times$ on the first run to
 $1.08\times$ by the fourth as the rate estimates converged.
 
-\textbf{Introducer.} In a run between two physical machines the
-introducer's host carried 0.2\,MB against about 30\,MB between the peers, and
+\textbf{Introducer.} Between two physical machines the
+introducer's host carried 0.2\,MB, the peers about 30\,MB, and
 with the introducer suspended a known peer was reached in 0.03\,s.
 
 \subsection{End-to-end runs (Q3)}
@@ -523,13 +519,12 @@ in 90.5\,s.
 Table~\ref{tab:phys} lists the physical-machine results. A parallel map and a
 mixed CPU script (pool, joblib, NumPy, pandas) ran faster on two machines than
 on one (a job of about 5\,s is dominated by setup and serialisation), the latter with about half its items on the second laptop. The first
-run of a new GPU environment is dominated by its build (487\,s of 506\,s,
-mostly downloading CUDA PyTorch); the same script then took 17.7\,s. On the phone, a laptop's CPU script spread over
+run of the combined script took 506\,s from submission, 487\,s of it building
+its GPU environment (mostly CUDA PyTorch); a repeat took 17.7\,s (15.6\,s in the script). On the phone, a laptop's CPU script spread over
 both laptops and the phone gave the phone 8 of 192 items with an unchanged
 result, after the phone had built the environment from the cache in 27\,s.
-Without its pandas step the script took a median of 62.8\,s on the phone
-with Nix's Python in \texttt{proot}, against 73.1\,s with Termux's (three runs
-each).
+Without its pandas step the script took 62.8\,s on the phone
+with Nix's Python in \texttt{proot}, against 73.1\,s with Termux's (medians of three).
 
 \textbf{Across two NATs.} On the two-site testbed (Section~\ref{sec:setup}),
 scripts, parallel maps, remote runs and both training sync modes ran across the
@@ -538,7 +533,8 @@ introducer, a public address or an overlay such as Tailscale is needed.
 
 \begin{table}[t]
 \centering
-\caption{Results between physical machines}
+\caption{Results between physical machines. Times are the scripts' own except
+the last row (records: \texttt{docs/benchmarks/real-hardware.md})}
 \label{tab:phys}
 \renewcommand{\arraystretch}{1.15}
 \footnotesize
@@ -550,7 +546,7 @@ Pool map, 20-core host alone vs.\ with 16-core peer (Tailscale) & 5.8--6.4 vs.\ 
 CPU script, one laptop vs.\ two over Tailscale & 18 vs.\ 14\,s \\
 Training, two laptops (Tailscale): 1 GPU / \texttt{-{}-ddp~2} exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
 \quad val.\ loss: 1 GPU / exact / fast / auto & 0.0794 / 0.0797 / 0.0797 / 0.0796 \\
-New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
+Combined script, from submission: first run vs.\ repeat & 506 vs.\ 17.7\,s \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -562,10 +558,9 @@ New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
 over two containers beat one (9.1 against 11.8\,s), while a 9\,MB model with
 light steps over Wi-Fi ran ten times slower split than alone (80.7 against
 8.0\,s). Between the two laptops no split beat one GPU
-(Table~\ref{tab:phys}). Those rings were fixed with \texttt{-{}-ddp~2}, so
-automatic sync could choose only the sync mode: the ring switched to fast mode
-after a short exact warm-up and finished in 14.6\,s, $2.5\times$ faster than
-exact; without \texttt{-{}-ddp~$N$} the lead releases a ring that one rank
+(Table~\ref{tab:phys}). With the ring fixed by \texttt{-{}-ddp~2}, automatic sync
+switched to fast mode after a short exact warm-up and finished in 14.6\,s,
+against 8.5\,s with fast sync throughout; without \texttt{-{}-ddp~$N$} the lead releases a ring that one rank
 alone outruns. Offered 16-, 8- and 2-core ranks on one machine, admission
 took the first two, which ran in 23.6\,s with measured batch sizes against
 25.4\,s with equal ones.
@@ -581,7 +576,7 @@ exact sync, and the ring finished 1.2--1.4$\times$ faster than exact on LAN and
 (three seeds, LAN and Wi-Fi, worst $+0.64\%$), but in-process the transformer
 failed on seeds 0--2 ($+2.13\%$). DiLoCo's outer
 step left the transformer $21.7\%$ above one device even at one sync per
-epoch (156 local steps).
+epoch.
 
 \textbf{Many ranks.} In-process runs, on up to six seeds, set the interval $H(n)$ as the largest that passed on every model: 32 at
 two ranks, 16 at three and 4 at four; at
@@ -600,8 +595,10 @@ NAT traversal is evaluated on the two-site testbed (Section~\ref{sec:setup}) and
 over an overlay between real homes.
 TLS is trust on first use, the keys trusted to sign closures are not yet bound to
 an authenticated identity, and authorisation is one shared secret. Only Python is
-supported, and a training ring depends on rank~0's machine. The 1\% accuracy
-bar is a mean over seeds; single seeds spread from $-3.9\%$ to $+2.2\%$.
+supported, and a training ring depends on rank~0's machine. Fast sync was never
+measured at five to seven ranks. The 1\% accuracy
+bar is a mean over seeds; single seeds spread from $-3.9\%$ (lab, 64 steps) to $+2.2\%$
+(in-process, 32).
 
 \section{Conclusion and Future Work}
 
@@ -611,8 +608,7 @@ path, substitutes the parallel primitives a script already uses, divides work
 by measured speed, and joins machines across networks over direct,
 authenticated links with no relay and no privileged node.
 Its central rule is to measure before distributing and to decline when that
-would be slower; the cost gate, the measured split and the ring's own check
-each follow from it. Future work is to bind signing
+would be slower. Future work is to bind signing
 keys to authenticated identities and require TLS, to add locality- and
 topology-aware placement and AMD accelerators, to let a training ring survive
 its submitter and rank~0, and to run a controlled evaluation on more machines.
@@ -621,13 +617,13 @@ its submitter and rank~0, and to run a controlled evaluation on more machines.
 
 \bibitem{zaharia2010spark} M.~Zaharia, M.~Chowdhury, M.~J.~Franklin, S.~Shenker, and I.~Stoica, ``Spark: Cluster computing with working sets,'' in \textit{Proc. 2nd USENIX Workshop on Hot Topics in Cloud Computing}, 2010.
 
-\bibitem{moritz2018ray} P.~Moritz et al., ``Ray: A distributed framework for emerging AI applications,'' in \textit{Proc. 13th USENIX OSDI}, 2018, pp.~561--577.
+\bibitem{moritz2018ray} P.~Moritz et~al., ``Ray: A distributed framework for emerging AI applications,'' in \textit{Proc. 13th USENIX OSDI}, 2018, pp.~561--577.
 
 \bibitem{rocklin2015dask} M.~Rocklin, ``Dask: Parallel computation with blocked algorithms and task scheduling,'' in \textit{Proc. 14th Python in Science Conf.}, 2015, pp.~126--132.
 
 \bibitem{dolstra2004nix} E.~Dolstra, M.~de~Jonge, and E.~Visser, ``Nix: A safe and policy-free system for software deployment,'' in \textit{Proc. 18th LISA}, 2004, pp.~79--92.
 
-\bibitem{petersohn2020modin} D.~Petersohn et al., ``Towards scalable dataframe systems,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~2033--2046, 2020.
+\bibitem{petersohn2020modin} D.~Petersohn et~al., ``Towards scalable dataframe systems,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~2033--2046, 2020.
 
 \bibitem{anderson2004boinc} D.~P.~Anderson, ``BOINC: A system for public-resource computing and storage,'' in \textit{Proc. 5th IEEE/ACM Workshop on Grid Computing}, 2004, pp.~4--10.
 
@@ -653,19 +649,19 @@ its submitter and rank~0, and to run a controlled evaluation on more machines.
 
 \bibitem{kth2025thesis} J.~Spenger, ``Programming models for failure-transparent distributed systems,'' Ph.D. dissertation, KTH Royal Institute of Technology, Stockholm, Sweden, 2025.
 
-\bibitem{li2020pytorchddp} S.~Li et al., ``PyTorch distributed: Experiences on accelerating data parallel training,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~3005--3018, 2020.
+\bibitem{li2020pytorchddp} S.~Li et~al., ``PyTorch distributed: Experiences on accelerating data parallel training,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~3005--3018, 2020.
 
 \bibitem{dettmers2016eightbit} T.~Dettmers, ``8-bit approximations for parallelism in deep learning,'' in \textit{Proc. ICLR}, 2016.
 
 \bibitem{seide2014onebit} F.~Seide, H.~Fu, J.~Droppo, G.~Li, and D.~Yu, ``1-bit stochastic gradient descent and its application to data-parallel distributed training of speech DNNs,'' in \textit{Proc. Interspeech}, 2014, pp.~1058--1062.
 
-\bibitem{douillard2023diloco} A.~Douillard et al., ``DiLoCo: Distributed low-communication training of language models,'' arXiv:2311.08105, 2023.
+\bibitem{douillard2023diloco} A.~Douillard et~al., ``DiLoCo: Distributed low-communication training of language models,'' arXiv:2311.08105, 2023.
 
 \bibitem{lin2020localsgd} T.~Lin, S.~U.~Stich, K.~K.~Patel, and M.~Jaggi, ``Don't use large mini-batches, use local SGD,'' in \textit{Proc. ICLR}, 2020.
 
-\bibitem{termux} Termux, ``Termux: Android terminal emulator and Linux environment.'' [Online]. Available: \url{https://termux.dev}
+\bibitem{termux} Termux, ``Termux: Android terminal emulator and Linux environment,'' 2026. [Online]. Available: \url{https://termux.dev}
 
-\bibitem{proot} PRoot, ``chroot, mount \texttt{-{}-bind}, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
+\bibitem{proot} PRoot, ``chroot, mount \texttt{-{}-bind}, and binfmt\_misc without privilege/setup for Linux,'' 2026. [Online]. Available: \url{https://proot-me.github.io}
 
 \bibitem{anderson2020nat} D.~Anderson, ``How NAT traversal works,'' Tailscale blog, Aug. 2020. [Online]. Available: \url{https://tailscale.com/blog/how-nat-traversal-works}
 
@@ -677,7 +673,7 @@ its submitter and rank~0, and to run a controlled evaluation on more machines.
 
 \bibitem{rfc8446} E.~Rescorla, ``The Transport Layer Security (TLS) protocol version 1.3,'' RFC~8446, IETF, Aug. 2018.
 
-\bibitem{cloudpickle} cloudpickle, ``Extended pickling support for Python objects.'' [Online]. Available: \url{https://github.com/cloudpipe/cloudpickle}
+\bibitem{cloudpickle} cloudpickle, ``Extended pickling support for Python objects,'' 2026. [Online]. Available: \url{https://github.com/cloudpipe/cloudpickle}
 
 \bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Netw.}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
 

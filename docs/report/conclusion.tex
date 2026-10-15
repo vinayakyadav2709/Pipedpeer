@@ -8,35 +8,11 @@
 PipedPeer runs an unmodified Python script on other machines with no cluster to
 configure, reproduces its environment exactly, distributes the parallel work
 inside it without the user touching the source, and joins machines on different
-networks with a single command and no relay. Its six contributions are:
-
-\begin{enumerate}[leftmargin=*, label=\arabic*.]
-  \item \textbf{Peer-to-peer closure distribution.} Pinning an exact package set
-  makes an environment's store path identical on every machine and on any day,
-  so a worker that holds an environment pays nothing for it (0.83\,s warm
-  against 23.4\,s cold), one that holds part of it receives only the paths it
-  lacks (86\% fewer bytes), and signed closures move between peers.
-  \item \textbf{Transparent interception with measured work sharing.} The
-  parallel primitives a script already uses are substituted at import time;
-  parallel maps are divided by a makespan solver over measured peer rates; and
-  numerical work moves only when the cost model says moving it is cheaper than
-  computing it.
-  \item \textbf{Joining across networks without a relay.} An introducer in every
-  daemon that never carries data, router port mapping, a candidate race over one
-  shared socket, a birthday-collision fallback for the hardest NATs, and
-  authenticated QUIC links that the rest of the system sees as ordinary nodes.
-  \item \textbf{Placement without a scheduler.} Filters and a bounded score are
-  evaluated in the submitting client, under a three-phase lease whose expiry is
-  the crash recovery.
-  \item \textbf{A fallback that preserves the result on every distributed path.}
-  Every remote path has a working local path beneath it, so a script with no
-  failure handling never sees a failure.
-  \item \textbf{Speed-weighted data-parallel training through the daemon.}
-  Gradients are averaged by samples in 8-bit with error feedback, batches are
-  sized by measured speed, and exact or fast synchronisation is chosen by ring
-  size; at 32 steps on two ranks, fast synchronisation held accuracy while each
-  rank sent 7.6 to 9.2 times fewer bytes.
-\end{enumerate}
+networks with a single command and no relay. Its six contributions are those
+listed in Chapter~\ref{chap:intro}. In the evaluation, a worker that held an
+environment started a job in 0.83\,s against 23.4\,s cold, one that held part
+of it received 86\% fewer bytes, and at 32 steps on two ranks fast
+synchronisation held accuracy while each rank sent 7.6 to 9.2 times fewer bytes.
 
 The principle that runs through the design is that the cluster is used only when
 a measurement says it will help: work is divided by measured speed rather than
@@ -69,8 +45,9 @@ synchronisation is chosen only for ring sizes where it kept accuracy.
   measured. NAT traversal is evaluated on the two-site testbed on one host and
   over an overlay between real homes.
   \item \textbf{Seed spread.} The 1\% accuracy bar applies to the mean over
-  seeds; single seeds spread wider, from $-3.9\%$ to $+2.2\%$ against one
-  device, so one run can miss the bar while the mean meets it.
+  seeds; single seeds spread wider, from $-3.9\%$ (the lab run at 64 steps) to
+  $+2.2\%$ (in-process at 32 steps) against one device, so one run can miss the
+  bar while the mean meets it.
   \item \textbf{Trust.} Every holder of the cluster secret can run code on every
   node (Section~\ref{sec:security}).
 \end{itemize}
