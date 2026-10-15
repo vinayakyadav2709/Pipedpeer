@@ -24,9 +24,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // mountpoint is the cgroup v2 filesystem root. A variable so tests can point
@@ -76,6 +79,9 @@ func Self() string {
 //     process in the cgroup, and in a shared scope - a desktop app's, say -
 //     that would drag dozens of unrelated processes along with it.
 func Usable() (bool, string) {
+	if android() {
+		return false, androidReason
+	}
 	own := Self()
 	if own == "" {
 		return false, "no cgroup v2 (v1 hierarchy or unreadable /proc/self/cgroup)"
@@ -101,6 +107,23 @@ func Usable() (bool, string) {
 			" unrelated process(es), which the leaf move must not relocate"
 	}
 	return true, ""
+}
+
+const androidReason = "Android/Termux: app processes get no delegated cgroups and no systemd; " +
+	"jobs run without a kernel memory limit (the daemon's watchdog still applies)"
+
+var androidOnce sync.Once
+
+// android reports a phone (GOOS android, or a linux binary inside Termux),
+// where SELinux denies the cgroup tree and systemd does not exist. Said once
+// in the log; every caller then takes its no-cgroup path.
+func android() bool {
+	if runtime.GOOS != "android" && os.Getenv("TERMUX_VERSION") == "" &&
+		!strings.Contains(os.Getenv("PREFIX"), "com.termux") {
+		return false
+	}
+	androidOnce.Do(func() { log.Info().Msg("cgroups: " + androidReason) })
+	return true
 }
 
 // foreignProcs counts members of cg that are neither this process nor one of
