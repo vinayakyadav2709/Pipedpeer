@@ -52,35 +52,62 @@ case_() {
 		return
 	fi
 
-	local backup="$work/$(echo "$name" | tr -c 'a-zA-Z0-9' '_').bak"
-	cp "$file" "$backup"
-	restore_map["$file"]="$backup"
+	# Code moves between files (main.go split by command, the shim split into
+	# modules), so the named file is where to look first, not the only place:
+	# the first non-test source file under its directory that the mutation
+	# changes is the one broken. A mutation that changes nothing anywhere is a
+	# broken case, never a pass.
+	local target
+	target="$(python3 - "$file" <<PY
+import glob, os, sys
+named = sys.argv[1]
+root = named if os.path.isdir(named) else os.path.dirname(named)
+cands = ([named] if os.path.isfile(named) else []) + sorted(
+    p for p in glob.glob(root + "/**/*", recursive=True)
+    if p.endswith((".go", ".py")) and not p.endswith("_test.go") and "/tests/" not in p and p != named)
+for p in cands:
+    s = open(p).read()
+    before = s
+    try:
+$(sed 's/^/        /' <<<"$mutation")
+    except Exception:
+        continue
+    if s != before:
+        print(p)
+        break
+PY
+)"
+	if [[ -z "$target" ]]; then
+		printf '%-46s %s\n' "$name" "BROKEN CASE: the mutation applies to no file under $file"
+		failed+=("$name (mutation did not apply)")
+		fail=$((fail + 1))
+		return
+	fi
+	[[ "$target" == "$file" ]] || printf '%-46s %s\n' "$name" "(code now in $target)"
 
-	if ! python3 - "$file" <<PY
+	local backup="$work/$(echo "$name" | tr -c 'a-zA-Z0-9' '_').bak"
+	cp "$target" "$backup"
+	restore_map["$target"]="$backup"
+
+	python3 - "$target" <<PY
 import sys
 p = sys.argv[1]
 s = open(p).read()
-before = s
 $mutation
-if s == before:
-    sys.stderr.write("mutation changed nothing\n")
-    sys.exit(3)
 open(p, "w").write(s)
 PY
-	then
-		printf '%-46s %s\n' "$name" "BROKEN CASE: the mutation did not apply"
-		failed+=("$name (mutation did not apply)")
-		fail=$((fail + 1))
-		cp "$backup" "$file"
-		return
-	fi
+	file="$target"
 
 	local out
 	out="$(cd src && go test "$pkg" -run "$tests" -count=1 2>&1)"
 	local rc=$?
 	cp "$backup" "$file"
 
-	if [[ $rc -ne 0 ]]; then
+	if grep -q 'no tests to run' <<<"$out"; then
+		printf '%-46s %s\n' "$name" "BROKEN CASE: no test matches $tests in $pkg"
+		failed+=("$name (its tests are gone)")
+		fail=$((fail + 1))
+	elif [[ $rc -ne 0 ]]; then
 		printf '%-46s %s\n' "$name" "red — the test catches it"
 		pass=$((pass + 1))
 	else

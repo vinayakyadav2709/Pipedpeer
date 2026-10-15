@@ -8,7 +8,8 @@ tmp_output="$(mktemp)"
 trap 'rm -f "$tmp_output"' EXIT
 
 set +e
-PIPEDPEER_INTEGRATION=1 go test -v -run TestConcurrentJobsAndSharedNumpyCache -timeout 3m ./... 2>&1 | tee "$tmp_output"
+# Both integration tests (they share the lab compose stack, so -p 1).
+PIPEDPEER_INTEGRATION=1 go test -v -count=1 -p 1 -run '^(TestConcurrentJobsAndSharedNumpyCache|TestIntegrationFullSyncAndExecute)$' -timeout 15m . 2>&1 | tee "$tmp_output"
 test_exit=${PIPESTATUS[0]}
 set -e
 

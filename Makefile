@@ -1,7 +1,7 @@
-.PHONY: build install test test-integration fmt lint lab-up lab-down lab-fail lab-nat
+.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down
 
 build:
-	./scripts/build.sh
+	cd src && CGO_ENABLED=0 go build -o ../bin/pipedpeer .
 
 install:
 	./scripts/install-pipedpeer.sh
@@ -12,11 +12,15 @@ test:
 test-integration:
 	./scripts/test-integration.sh
 
+# Network scenarios (E1-E5) against a fresh build; needs docker.
+test-net: build
+	PIPEDPEER=$(CURDIR)/bin/pipedpeer ./scripts/lab-net.sh
+
 fmt:
-	./scripts/fmt.sh
+	cd src && gofmt -w .
 
 lint:
-	./scripts/lint.sh
+	cd src && go vet ./... && test -z "$$(gofmt -l .)"
 
 lab-up:
 	./scripts/lab-up.sh
@@ -29,3 +33,9 @@ lab-fail:
 
 lab-nat:
 	./scripts/lab-nat.sh
+
+lab-emu-up: build
+	PIPEDPEER=$(CURDIR)/bin/pipedpeer ./scripts/lab-emu.sh up
+
+lab-emu-down:
+	./scripts/lab-emu.sh down

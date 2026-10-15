@@ -9,7 +9,7 @@
 # thing it was meant to verify. A checkout is the authority on what the binary
 # should be; only when there is no source does an existing binary win.
 #
-# And the token probe, `tok=$(pipedpeer auth show | head -1)`, is a pipeline
+# And the old token probe, `tok=$(pipedpeer auth show | head -1)`, was a pipeline
 # under `set -o pipefail`. When the binary does not know the `auth` command
 # the pipeline fails, the assignment fails, `set -e` fires, and the script
 # dies before its first echo - exit 1, zero bytes of output, on a run that
@@ -24,9 +24,9 @@ pp_resolve_cli() {
 	if [[ -n "${PIPEDPEER:-}" ]]; then
 		# Explicitly pointed at a binary: that is the user's call, use it.
 		PP_CLI="$PIPEDPEER"
-	elif [[ -d "$repo_root/src" && -x "$repo_root/scripts/build.sh" ]]; then
+	elif [[ -f "$repo_root/src/go.mod" ]]; then
 		echo "building binary from $repo_root/src..." >&2
-		"$repo_root/scripts/build.sh" >&2 || return 1
+		(cd "$repo_root/src" && CGO_ENABLED=0 go build -o "$repo_root/bin/pipedpeer" .) >&2 || return 1
 		PP_CLI="$repo_root/bin/pipedpeer"
 	else
 		PP_CLI="$repo_root/bin/pipedpeer"
@@ -39,14 +39,14 @@ pp_resolve_cli() {
 	return 0
 }
 
-# pp_read_token [cli] - never fails, whatever the binary does.
+# pp_read_token - never fails. PIPEDPEER_TOKEN wins, else the token in
+# cluster.json (the one config file; the `auth` command is gone).
 pp_read_token() {
-	local cli="${1:-$PP_CLI}" out
-	out="$("$cli" auth show 2>/dev/null | head -1 || true)"
-	case "$out" in
-	*"no token set"* | *"unknown command"* | *Error*) out="" ;;
-	esac
-	PP_TOKEN="$out"
+	local cfg="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/cluster.json"
+	PP_TOKEN="${PIPEDPEER_TOKEN:-}"
+	if [[ -z "$PP_TOKEN" && -r "$cfg" ]]; then
+		PP_TOKEN="$(grep -o '"token" *: *"[^"]*"' "$cfg" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' || true)"
+	fi
 }
 
 pp_curl() {

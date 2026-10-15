@@ -17,7 +17,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-port="${PIPEDPEER_PORT:-38080}"
+port="${PIPEDPEER_PORT:-4242}"
 
 # Best-effort: an absent token is a normal answer. Reading it inline used to
 # be a pipeline under `set -o pipefail`, so a binary that did not know the

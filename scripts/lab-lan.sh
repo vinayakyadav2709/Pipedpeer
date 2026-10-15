@@ -2,18 +2,15 @@
 # The demo venue, in containers: one LAN (docker bridge 10.88.0.0/24), this
 # laptop on it as LAPTOP-A at 10.88.0.1, and four college PCs (lab/lan/compose.yml).
 #
-#   scripts/lab-lan.sh up                 fresh pcs, setup -y on each, not joined
-#   scripts/lab-lan.sh join <pc...|all>   auth set <this laptop's token> + join 10.88.0.1
+#   scripts/lab-lan.sh up                 fresh pcs, setup -y on each, not connected
+#   scripts/lab-lan.sh connect <pc...|all> each pc runs this laptop's `invite` line
 #   scripts/lab-lan.sh x <pc> <cmd...>    run a command on a pc, in /work (a copy
 #                                         of pipedpeer-demo/); pc4 runs it as `pp`
 #   scripts/lab-lan.sh logs               daemon logs -> ~/.local/state/pipedpeer/lab-lan/<time>/
 #   scripts/lab-lan.sh down               remove the pcs and the network
 #
-# This laptop plays LAPTOP-A with its own daemon and rendezvous, as at the
-# venue. Before `join`, on this laptop:
-#   pipedpeer auth set                    (once; the pcs get the same token)
-#   pipedpeer rendezvous                  (in its own terminal)
-#   pipedpeer join 10.88.0.1
+# This laptop plays LAPTOP-A with its own daemon, as at the venue. Before
+# `connect`, on this laptop: pipedpeer setup (once; creates the cluster).
 # PIPEDPEER picks this laptop's binary (default bin/pipedpeer, else PATH).
 set -euo pipefail
 
@@ -70,7 +67,7 @@ x() {
 	docker exec "${flags[@]}" "$(ctr "$pc")" "$@"
 }
 root() { local pc="$1"; shift; docker exec "$(ctr "$pc")" "$@"; }
-healthy() { root "$1" curl -sf --max-time 5 "http://127.0.0.1:38080/health"; }
+healthy() { root "$1" curl -sf --max-time 5 "http://127.0.0.1:4242/health"; }
 
 check_pc() {
 	case "$1" in pc[1-4]) ;; *) fail "no such pc: $1 (pc1-pc4)" ;; esac
@@ -129,17 +126,8 @@ cmd_up() {
 	compose up -d --build >"$logdir/compose-up.log" 2>&1 ||
 		{ tail -30 "$logdir/compose-up.log"; fail "compose up (log: $logdir/compose-up.log)"; }
 
-	# New containers carry new certificates; this laptop's pins for their
-	# addresses are stale by design. Only the lab's addresses are forgotten.
-	if [[ -n "$cli" ]]; then
-		for pc in "${all_pcs[@]}"; do
-			"$cli" auth forget "$(ip_of "$pc"):38080" >/dev/null 2>&1 ||
-				echo "warn: could not forget the pin for $(ip_of "$pc"):38080" >&2
-		done
-	else
-		echo "warn: no pipedpeer on this laptop (set PIPEDPEER); skipped forgetting old pins" >&2
-	fi
-
+	# New containers carry new keys; pins are keyed by node id, so a new
+	# machine at an old lab address needs no forgetting.
 	for pc in "${all_pcs[@]}"; do copy_work "$pc"; done
 	setup_pc4 "$logdir"
 
@@ -148,30 +136,28 @@ cmd_up() {
 			docker logs "$(ctr "$pc")" 2>&1 | tail -20
 			fail "$pc's daemon never answered on /health"
 		}
-		echo "  $pc up at $(ip_of "$pc") (not joined)"
+		echo "  $pc up at $(ip_of "$pc") (not connected)"
 	done
-	echo "next: scripts/lab-lan.sh join all   (or leave one out for the live join)"
+	echo "next: scripts/lab-lan.sh connect all   (or leave one out for the live connect)"
 }
 
-cmd_join() {
+cmd_connect() {
 	(($#)) || usage
 	local pcs=("$@") token pc
 	[[ "$1" == all ]] && pcs=("${all_pcs[@]}")
 	for pc in "${pcs[@]}"; do check_pc "$pc"; done
 	[[ -n "$cli" ]] || fail "no pipedpeer on this laptop (set PIPEDPEER)"
-	token="$("$cli" auth show)"
-	[[ -n "$token" && "$token" != "no token set"* ]] ||
-		fail "this laptop has no cluster token; run: $cli auth set"
-	if ! ss -Hlun "sport = :38445" 2>/dev/null | grep -q .; then
-		echo "warn: nothing listens on udp 38445 here; start the rendezvous: $cli rendezvous" >&2
-	fi
+	# This laptop is the first machine: its invite carries the secret and its
+	# addresses (10.88.0.1 among them); every daemon introduces.
+	local code
+	code="$("$cli" invite | awk '$2 == "connect" { print $3; exit }')"
+	[[ -n "$code" ]] || fail "this laptop printed no invite; run: $cli setup"
 	for pc in "${pcs[@]}"; do
 		echo "== $pc"
-		x "$pc" pipedpeer auth set "$token" </dev/null >/dev/null
-		x "$pc" pipedpeer join "$host_ip" </dev/null || echo "warn: join on $pc exited non-zero" >&2
+		x "$pc" pipedpeer connect "$code" </dev/null || echo "warn: connect on $pc exited non-zero" >&2
 	done
 	echo "== this laptop sees:"
-	"$cli" nodes
+	"$cli" status
 }
 
 cmd_x() {
@@ -203,12 +189,12 @@ cmd_logs() {
 
 cmd_down() {
 	compose down --remove-orphans
-	echo "this laptop is still joined to $host_ip; at the venue: pipedpeer join <real rendezvous IP>"
+	echo "this laptop is still in the lab cluster; at the venue run the real invite line"
 }
 
 case "$cmd" in
 up) cmd_up ;;
-join) cmd_join "$@" ;;
+connect) cmd_connect "$@" ;;
 x) cmd_x "$@" ;;
 logs) cmd_logs ;;
 down) cmd_down ;;

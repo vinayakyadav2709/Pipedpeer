@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Measures the split policy itself, which the general pool benchmark cannot.
 #
-# Run against an uneven cluster - scripts/lab-hetero.sh brings one up with 8,
-# 2 and 1 CPU workers. On a uniform cluster this measures nothing, because
+# Run against an uneven cluster: `LAB_CPUS="1 8 2 1" LAB_WORK=scripts
+# scripts/lab-emu.sh up 4` brings one up (container 1 submits), then
+# `LAB_EXEC_DIR=/work scripts/lab-emu.sh exec 1 env PIPEDPEER=/usr/local/bin/pipedpeer
+# bash bench-split.sh`. On a uniform cluster this measures nothing, because
 # splitting by headcount and splitting by throughput give the same answer.
 #
 # Measured on a 16-core machine with an 8:2:1 cluster, five runs each:

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # The 2-GPU DDP rehearsal: gpu1 and gpu2 share this laptop's one GPU (docker +
 # CDI), sub1 has no GPU and submits (lab/gpu/compose.yml, 10.89.0.0/24).
-# gpu1 also runs the rendezvous. This laptop's own daemon is not involved.
+# gpu1 starts the cluster and invites the others. This laptop's own daemon is not involved.
 #
-#   scripts/lab-gpu.sh up                 fresh nodes, setup -y on each, not joined
-#   scripts/lab-gpu.sh join <node...|all> auth set + join the rendezvous in gpu1
+#   scripts/lab-gpu.sh up                 fresh nodes, setup -y on each, not connected
+#   scripts/lab-gpu.sh connect <node...|all> gpu1 starts the cluster, the others connect
 #   scripts/lab-gpu.sh x <node> <cmd...>  run a command on a node, in /work
 #   scripts/lab-gpu.sh logs               daemon logs -> ~/Downloads/pipedpeer-work/evidence/gpulab/<time>/
 #   scripts/lab-gpu.sh down               remove the nodes and the network
@@ -51,7 +51,7 @@ x() {
 	docker exec "${flags[@]}" "$(ctr "$n")" "$@"
 }
 root() { local n="$1"; shift; docker exec "$(ctr "$n")" "$@"; }
-healthy() { root "$1" curl -sf --max-time 5 "http://127.0.0.1:38080/health"; }
+healthy() { root "$1" curl -sf --max-time 5 "http://127.0.0.1:4242/health"; }
 check_node() {
 	case "$1" in gpu1 | gpu2 | sub1) ;; *) fail "no such node: $1 (gpu1 gpu2 sub1)" ;; esac
 }
@@ -79,14 +79,14 @@ cmd_up() {
 			docker logs "$(ctr "$n")" 2>&1 | tail -20
 			fail "$n's daemon never answered on /health"
 		}
-		echo "  $n up at $(ip_of "$n") (not joined)"
+		echo "  $n up at $(ip_of "$n") (not connected)"
 	done
 	echo "GPU as gpu1 sees it:"
 	x gpu1 nvidia-smi -L || echo "warn: gpu1 cannot run nvidia-smi" >&2
-	echo "next: scripts/lab-gpu.sh join all"
+	echo "next: scripts/lab-gpu.sh connect all"
 }
 
-cmd_join() {
+cmd_connect() {
 	(($#)) || usage
 	local nodes=("$@") token n
 	[[ "$1" == all ]] && nodes=("${all_nodes[@]}")
@@ -96,19 +96,23 @@ cmd_join() {
 		od -An -tx1 -N16 /dev/urandom | tr -d ' \n' >"$tokenfile"
 	fi
 	token="$(<"$tokenfile")"
-	# The rendezvous lives in gpu1, started once (ignore "already running").
-	if ! root gpu1 pgrep -f 'pipedpeer rendezvous' >/dev/null 2>&1; then
-		x gpu1 pipedpeer auth set "$token" </dev/null >/dev/null
-		docker exec -d "$(ctr gpu1)" pipedpeer rendezvous
-		sleep 2
+	# gpu1 starts the cluster (token in cluster.json) and hands out the invite;
+	# every daemon introduces, so no separate introducer process.
+	if ! root gpu1 curl -sf --max-time 3 http://127.0.0.1:4242/health >/dev/null 2>&1; then
+		root gpu1 sh -c "mkdir -p \"\${XDG_DATA_HOME:-\$HOME/.local/share}/pipedpeer\" && umask 077 &&
+			printf '{\"token\":\"%s\"}\n' '$token' >\"\${XDG_DATA_HOME:-\$HOME/.local/share}/pipedpeer/cluster.json\""
+		x gpu1 pipedpeer start </dev/null >/dev/null
 	fi
+	local code
+	code="$(x gpu1 pipedpeer invite </dev/null | awk '$2 == "connect" { print $3; exit }')"
+	[[ -n "$code" ]] || { echo "gpu1 printed no invite" >&2; exit 1; }
 	for n in "${nodes[@]}"; do
+		[[ "$n" == gpu1 ]] && continue
 		echo "== $n"
-		x "$n" pipedpeer auth set "$token" </dev/null >/dev/null
-		x "$n" pipedpeer join "$rdv_ip" </dev/null || echo "warn: join on $n exited non-zero" >&2
+		x "$n" pipedpeer connect "$code" </dev/null || echo "warn: connect on $n exited $?" >&2
 	done
 	echo "== sub1 sees:"
-	x sub1 pipedpeer nodes </dev/null
+	x sub1 pipedpeer status </dev/null
 }
 
 cmd_x() {
@@ -136,7 +140,7 @@ cmd_down() { compose down --remove-orphans; }
 
 case "$cmd" in
 up) cmd_up ;;
-join) cmd_join "$@" ;;
+connect) cmd_connect "$@" ;;
 x) cmd_x "$@" ;;
 logs) cmd_logs ;;
 down) cmd_down ;;

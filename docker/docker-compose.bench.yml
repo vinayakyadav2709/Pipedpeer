@@ -1,8 +1,0 @@
-# CPU-only benchmark overlay: no NVIDIA runtime on this host, so drop gpus,
-# give each "machine" its own 3 cores, and fit the memory limits into 15 GB.
-#   export COMPOSE_FILE=docker-compose.yml:docker-compose.bench.yml
-services:
-  worker1: { gpus: !reset [], cpuset: "0-2",  mem_limit: 3500m, memswap_limit: 5g }
-  worker2: { gpus: !reset [], cpuset: "3-5",  mem_limit: 3500m, memswap_limit: 5g }
-  worker3: { gpus: !reset [], cpuset: "6-8",  mem_limit: 3500m, memswap_limit: 5g }
-  orchestrator: { cpuset: "9-11", mem_limit: 3g, memswap_limit: 4g }

@@ -24,12 +24,12 @@ pp_resolve_cli "$repo_root" || exit 2
 cli="$PP_CLI"
 pp_read_token
 
-port="${PIPEDPEER_PORT:-38080}"
+port="${PIPEDPEER_PORT:-4242}"
 rawlog="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/daemon.log"
 want_peer="${1:-}"
 
 # The daemon logs with ANSI colour, and the first run of this script proved
-# what that does to naive greps: the rendezvous host came out as
+# what that does to naive greps: the introducer host came out as
 # "\e[0m35.234..." - which ssh cannot dial - and the route pattern missed
 # "punched-in" entirely (a hyphen, absent from [a-z]*), so the script picked
 # a STALE forwarder port from before the last restart and reported a working
@@ -46,15 +46,21 @@ say
 say "Direct connections, checked from $(hostname)"
 say "==========================================="
 
-# 1. Is internet mode even on? Answering "everything passed" on a daemon that
-#    never joined is the failure this project keeps finding.
-if ! grep -aq "internet mode enabled" "$log" 2>/dev/null; then
-	bad "this daemon never enabled internet mode, so there is nothing to check."
-	say "      Start it with: pipedpeer start --rendezvous <host>:38445"
+# 1. Is there an introducer at all? Answering "everything passed" on a daemon
+#    that never joined is the failure this project keeps finding.
+#    The daemon lists its introducers and when each last answered.
+introducers="$(curl -sf --max-time 5 -H "X-Pipedpeer-Token: ${PP_TOKEN:-}" "http://127.0.0.1:$port/v1/introducers" 2>/dev/null)"
+introducer="$(printf '%s' "$introducers" | python3 -c 'import json,sys
+try: rows = json.load(sys.stdin) or []
+except Exception: rows = []
+rows = [r for r in rows if not r.get("last_err")] or rows
+print(rows[0]["addr"] if rows else "")' 2>/dev/null)"
+if [[ -z "$introducer" ]]; then
+	bad "this daemon has no introducer, so there is nothing to check."
+	say "      Join a cluster first: pipedpeer connect <code from pipedpeer invite>"
 	exit 1
 fi
-rendezvous="$(grep -ao 'rendezvous=[^ ]*' "$log" | tail -1 | cut -d= -f2)"
-say "introducer: ${rendezvous:-unknown}"
+say "introducer: $introducer"
 
 # 2. Which peers are connected, and by what route. The daemon logs the route
 #    when a link comes up; anything else is guesswork.
@@ -93,12 +99,13 @@ say
 say "stopping the introducer for the duration of the transfer..."
 # NET_VERIFY_SSH names the ssh destination for the introducer's machine when
 # the raw IP is not one (a config alias carrying the right user, usually).
-# Without it this half of the check degrades gracefully and says so.
-rv_host="${NET_VERIFY_SSH:-${rendezvous%%:*}}"
+# Without it this half of the check degrades gracefully and says so. The
+# introducer lives inside that machine's daemon, so the daemon is paused.
+rv_host="${NET_VERIFY_SSH:-${introducer%%:*}}"
 killed=0
 if [[ -n "$rv_host" ]] && command -v ssh >/dev/null; then
 	if timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 -o RemoteCommand=none \
-		-o RequestTTY=no "$rv_host" 'pkill -STOP -f "pipedpeer rendezvous"' 2>/dev/null; then
+		-o RequestTTY=no "$rv_host" 'pkill -STOP -f "pipedpeer __daemon__"' 2>/dev/null; then
 		killed=1
 		say "  introducer suspended"
 	fi
@@ -115,7 +122,7 @@ end="$(date +%s.%N)"
 
 if (( killed )); then
 	timeout 20 ssh -o BatchMode=yes -o ConnectTimeout=8 -o RemoteCommand=none \
-		-o RequestTTY=no "$rv_host" 'pkill -CONT -f "pipedpeer rendezvous"' 2>/dev/null
+		-o RequestTTY=no "$rv_host" 'pkill -CONT -f "pipedpeer __daemon__"' 2>/dev/null
 	say "  introducer resumed"
 fi
 

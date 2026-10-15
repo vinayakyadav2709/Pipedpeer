@@ -1,33 +1,60 @@
+# The plain lab: three workers on one bridge, each in its own network
+# namespace, so every daemon uses the default port 4242 and 127.0.0.1 inside
+# a container is that container's daemon. scripts/lab-up.sh sets LAB_TOKEN so
+# the three form one cluster by LAN discovery. It proves work crosses nodes,
+# never speedup (that is scripts/lab-emu.sh).
 services:
   worker1:
     build: .
     container_name: pipedpeer-lab-1
+    hostname: lab-1
     privileged: true
-    network_mode: host
+    networks:
+      lab:
+        ipv4_address: 10.87.0.11
+    mem_limit: 1536m
+    memswap_limit: 1536m
     volumes:
       - ./pipedpeer:/usr/local/bin/pipedpeer:ro
     environment:
       - XDG_DATA_HOME=/var/lib/pipedpeer
-    command: ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38081 && echo 'Worker-1 online :38081' && exec sleep infinity"]
-
+      - LAB_TOKEN=${LAB_TOKEN:-}
+      - PIPEDPEER_TOKEN=${LAB_TOKEN:-}
   worker2:
     build: .
     container_name: pipedpeer-lab-2
+    hostname: lab-2
     privileged: true
-    network_mode: host
+    networks:
+      lab:
+        ipv4_address: 10.87.0.12
+    mem_limit: 1536m
+    memswap_limit: 1536m
     volumes:
       - ./pipedpeer:/usr/local/bin/pipedpeer:ro
     environment:
       - XDG_DATA_HOME=/var/lib/pipedpeer
-    command: ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38082 && echo 'Worker-2 online :38082' && exec sleep infinity"]
-
+      - LAB_TOKEN=${LAB_TOKEN:-}
+      - PIPEDPEER_TOKEN=${LAB_TOKEN:-}
   worker3:
     build: .
     container_name: pipedpeer-lab-3
+    hostname: lab-3
     privileged: true
-    network_mode: host
+    networks:
+      lab:
+        ipv4_address: 10.87.0.13
+    mem_limit: 1536m
+    memswap_limit: 1536m
     volumes:
       - ./pipedpeer:/usr/local/bin/pipedpeer:ro
     environment:
       - XDG_DATA_HOME=/var/lib/pipedpeer
-    command: ["sh", "-c", "/usr/local/bin/pipedpeer setup -y --port 38083 && echo 'Worker-3 online :38083' && exec sleep infinity"]
+      - LAB_TOKEN=${LAB_TOKEN:-}
+      - PIPEDPEER_TOKEN=${LAB_TOKEN:-}
+
+networks:
+  lab:
+    ipam:
+      config:
+        - subnet: 10.87.0.0/24
