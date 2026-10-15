@@ -121,7 +121,7 @@ func TestAMultiUserNodeTrustsTheSignerBeforeImporting(t *testing.T) {
 	defer func() { signedImport = old }()
 
 	s := New("test-node")
-	if err := s.importSignedClosure(bytes.NewReader(manifestArchive(t, narpack.Manifest{
+	if err := s.importSignedClosure(context.Background(), bytes.NewReader(manifestArchive(t, narpack.Manifest{
 		Signer: sender.Fingerprint(), SignerKey: key,
 	})), "/nix/store/aaaa-root"); err != nil {
 		t.Fatal(err)
@@ -144,7 +144,7 @@ func TestWithoutTheHelperTheImportIsRefusedWithTheHint(t *testing.T) {
 	defer func() { signedImport = old }()
 
 	s := New("test-node")
-	err := s.importSignedClosure(bytes.NewReader(manifestArchive(t, narpack.Manifest{
+	err := s.importSignedClosure(context.Background(), bytes.NewReader(manifestArchive(t, narpack.Manifest{
 		Signer: sender.Fingerprint(), SignerKey: nixsign.PublicKey(sender),
 	})), "/nix/store/aaaa-root")
 	if err == nil || !strings.Contains(err.Error(), "pipedpeer trust") {

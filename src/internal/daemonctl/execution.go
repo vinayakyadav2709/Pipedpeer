@@ -3,13 +3,17 @@ package daemonctl
 import (
 	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
@@ -149,13 +153,13 @@ func UploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 		// CLI exits right after a cancel, and their nix-store children write
 		// into a pipe of this process, so they die with it. Thread ctx into
 		// seedClosure/ExportNAR if a long-lived caller ever cancels uploads.
-		fmt.Println("      Upload stopped: cancelled")
+		say.Println("      Upload stopped: cancelled")
 		return nil, fmt.Errorf("upload cancelled: %w", ctx.Err())
 	}
 }
 
 func uploadJob(ctx context.Context, host string, port int, workspacePath, narPath, storePath, scriptPath string, o UploadOptions) (*UploadResponse, error) {
-	// Export the NAR only when the target daemon lacks the closure: a gzip
+	// Export the NAR only when the target daemon lacks the closure: an
 	// export of a multi-GB store is seconds-to-minutes of wasted work when a
 	// shared store (or a prior fan-out task) already gave every node a copy.
 	//
@@ -170,11 +174,12 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 	// they take.
 	result := UploadResponse{Closure: "on-node"}
 	var sendNAR bool
+	started := time.Now()
 	switch {
 	case narPath == "":
 		// Nothing to ship: the caller relies on a store the node shares.
 	case !o.Cold && storeCached(host, port, storePath):
-		fmt.Println("      Closure already on the node; nothing to send")
+		say.Println("      Closure already on the node; nothing to send")
 	default:
 		sendNAR = true
 		// sent > 0, not merely ok: the node reporting no missing paths while
@@ -184,7 +189,7 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 		// missing bin/run.
 		seedFn := seedClosure
 		if o.Cold {
-			fmt.Println("      Cold run: sending the whole closure even if the node has it")
+			say.Println("      Cold run: sending the whole closure even if the node has it")
 			seedFn = seedWhole
 		}
 		sr, ok := seedFn(ctx, host, port, storePath)
@@ -195,7 +200,7 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 		}
 		if ok && sr.sent > 0 {
 			// The node now has every path, so the job needs no archive.
-			fmt.Printf("      Sent %d of %d store paths: %s in %s\n",
+			say.Printf("      Sent %d of %d store paths: %s in %s\n",
 				sr.sent, sr.total, humanize.Bytes(uint64(sr.bytes)), secs(sr.sendTime))
 			sendNAR = false
 			result.Closure, result.SentPaths, result.TotalPaths = "partial", sr.sent, sr.total
@@ -204,7 +209,7 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 			}
 			result.SentBytes, result.SendTime = sr.bytes, sr.sendTime
 		} else {
-			fmt.Println("      Sending the whole closure (the node shares none of it)")
+			say.Println("      Sending the whole closure (the node shares none of it)")
 		}
 	}
 	var narSize int64
@@ -214,8 +219,11 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 			return nil, fmt.Errorf("nix store export failed: %v", err)
 		}
 		narSize = fileSize(narPath)
-		fmt.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(narSize)), secs(time.Since(t0)))
+		say.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(narSize)), secs(time.Since(t0)))
 	}
+
+	wsSend, fromCAS, wsCleanup := workspaceDelta(host, port, workspacePath)
+	defer wsCleanup()
 
 	pr, pw := io.Pipe()
 	mp := multipart.NewWriter(pw)
@@ -230,7 +238,14 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 			if o.LeaseID != "" {
 				mp.WriteField("lease_id", o.LeaseID)
 			}
-			if err := addFile(mp, "workspace", "workspace.tar", workspacePath, nil); err != nil {
+			if len(fromCAS) > 0 {
+				b, err := json.Marshal(fromCAS)
+				if err != nil {
+					return err
+				}
+				mp.WriteField("workspace_cas", string(b))
+			}
+			if err := addFile(mp, "workspace", "workspace.tar", wsSend, nil); err != nil {
 				return err
 			}
 			mp.WriteField("store_path", storePath)
@@ -281,7 +296,7 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 	}
 	if sendNAR {
 		result.Closure, result.SentBytes, result.SendTime = "full", narSize, narTime
-		fmt.Printf("      Sent closure: %s in %s (%s)\n",
+		say.Printf("      Sent closure: %s in %s (%s)\n",
 			humanize.Bytes(uint64(narSize)), secs(narTime), rate(narSize, narTime))
 	}
 	// Peers that refused the environment: without this the run just stays
@@ -289,7 +304,21 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 	for _, w := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "      Warning: %s\n", w)
 	}
+	recordEnvSend(host, port, started, result.SentBytes+fileSize(wsSend))
 	return &result, nil
+}
+
+// recordEnvSend adds the run record's env_send step: closure and workspace
+// from this machine to the node at host:port.
+func recordEnvSend(host string, port int, started time.Time, bytes int64) {
+	machine := ""
+	if me, err := identity.GetOrCreate(); err == nil {
+		machine = me.NodeID
+	} else {
+		fmt.Fprintf(os.Stderr, "      warning: env_send step has no machine id: %v\n", err)
+	}
+	runrec.Add(runrec.Step{Machine: machine, Node: fmt.Sprintf("%s:%d", host, port), Chunk: -1, Name: "env_send",
+		StartNS: started.UnixNano(), DurNS: time.Since(started).Nanoseconds(), Bytes: bytes})
 }
 
 // storeCached asks the daemon whether it already has a closure for storePath.
@@ -602,8 +631,10 @@ func ExportNAR(ctx context.Context, storePath, destPath string) error {
 	}
 	defer f.Close()
 
-	gz := gzip.NewWriter(f)
-	defer gz.Close()
+	gz, err := tarcodec.Writer(f)
+	if err != nil {
+		return err
+	}
 
 	// Signed before it leaves, so the far side can require a signature
 	// instead of being configured to stop asking for one.
@@ -617,7 +648,11 @@ func ExportNAR(ctx context.Context, storePath, destPath string) error {
 	defer ecleanup()
 	export.Stdout = gz
 	export.Stderr = os.Stderr
-	return export.Run()
+	if err := export.Run(); err != nil {
+		gz.Close()
+		return err
+	}
+	return gz.Close()
 }
 
 // ignoreExcludes turns one .pipedpeerignore line into tar exclude flags.
@@ -743,4 +778,170 @@ type RemoteExitError struct {
 
 func (e *RemoteExitError) Error() string {
 	return fmt.Sprintf("remote job exited with code %d", e.Code)
+}
+
+// casEntry is a workspace file left out of the upload because the node's
+// workspace CAS already holds it (wire twin of daemonapi's casEntry).
+type casEntry struct {
+	Name string `json:"name"`
+	SHA  string `json:"sha256"`
+	Mode int64  `json:"mode"`
+}
+
+// workspaceHashes hashes every regular file in a workspace archive, in
+// archive order.
+// ponytail: re-hashes from the archive each run; add the (path, size, mtime,
+// inode) -> sha256 index under userdir.Data() if hashing shows up in profiles.
+func workspaceHashes(tarPath string) ([]string, error) {
+	f, err := os.Open(tarPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	in, closeIn, err := tarcodec.Reader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer closeIn()
+	tr := tar.NewReader(in)
+	var out []string
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, tr); err != nil {
+			return nil, err
+		}
+		out = append(out, hex.EncodeToString(h.Sum(nil)))
+	}
+}
+
+// missingFiles asks the node which of these file hashes its workspace CAS
+// lacks. ok is false when the node does not understand the question (an older
+// build answers without missing_files) or cannot be asked.
+func missingFiles(host string, port int, shas []string) (map[string]bool, bool) {
+	body, err := json.Marshal(map[string]any{"paths": []string{}, "files": shas})
+	if err != nil {
+		return nil, false
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Post(fmt.Sprintf("http://%s:%d/v1/store/missing", host, port), "application/json", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: workspace check on %s:%d failed (%v); sending every file\n", host, port, err)
+		return nil, false
+	}
+	defer resp.Body.Close()
+	var out struct {
+		MissingFiles *[]string `json:"missing_files"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&out) != nil || out.MissingFiles == nil {
+		return nil, false
+	}
+	m := make(map[string]bool, len(*out.MissingFiles))
+	for _, h := range *out.MissingFiles {
+		m[h] = true
+	}
+	return m, true
+}
+
+// writeDeltaTar copies the workspace archive at src to dst, leaving out the
+// regular files whose hash (shas, in archive order) the node already holds,
+// and returns those as entries for the node to fill from its CAS.
+func writeDeltaTar(src, dst string, shas []string, missing map[string]bool) ([]casEntry, error) {
+	f, err := os.Open(src)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	in, closeIn, err := tarcodec.Reader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer closeIn()
+	out, err := os.Create(dst)
+	if err != nil {
+		return nil, err
+	}
+	defer out.Close()
+	zw, err := tarcodec.Writer(out)
+	if err != nil {
+		return nil, err
+	}
+	tr, tw := tar.NewReader(in), tar.NewWriter(zw)
+	var skipped []casEntry
+	i := 0
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			if i >= len(shas) {
+				return nil, fmt.Errorf("workspace archive changed while uploading")
+			}
+			sha := shas[i]
+			i++
+			if !missing[sha] {
+				skipped = append(skipped, casEntry{Name: hdr.Name, SHA: sha, Mode: hdr.Mode})
+				continue
+			}
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return nil, err
+		}
+		if _, err := io.Copy(tw, tr); err != nil {
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return skipped, out.Close()
+}
+
+// workspaceDelta prepares the smallest workspace upload the node accepts: the
+// archive to send and the files the node fills from its CAS. Any failure
+// falls back to the whole archive, with a warning. cleanup removes the delta.
+func workspaceDelta(host string, port int, workspacePath string) (send string, fromCAS []casEntry, cleanup func()) {
+	cleanup = func() {}
+	shas, err := workspaceHashes(workspacePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: cannot hash the workspace (%v); sending every file\n", err)
+		return workspacePath, nil, cleanup
+	}
+	missing, ok := missingFiles(host, port, shas)
+	if !ok {
+		return workspacePath, nil, cleanup
+	}
+	if len(missing) >= len(shas) {
+		return workspacePath, nil, cleanup
+	}
+	dir, err := userdir.Scratch("wsdelta-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: no scratch dir for the workspace delta (%v); sending every file\n", err)
+		return workspacePath, nil, cleanup
+	}
+	cleanup = func() { os.RemoveAll(dir) }
+	dst := filepath.Join(dir, "workspace.tar")
+	skipped, err := writeDeltaTar(workspacePath, dst, shas, missing)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: workspace delta failed (%v); sending every file\n", err)
+		return workspacePath, nil, cleanup
+	}
+	say.Printf("      Workspace: sending %d of %d files (the node has the rest)\n", len(shas)-len(skipped), len(shas))
+	return dst, skipped, cleanup
 }
