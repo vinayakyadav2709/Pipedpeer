@@ -286,6 +286,7 @@ func runDDP(o ddpRunOptions) error {
 				// Names for the start barrier's "waiting for rank 1 on gpu1".
 				"PIPEDPEER_DDP_HOSTS="+ddpHostList(ring),
 			)
+			rankEnvs = append(rankEnvs, ddpThreadEnv(o.Envs, ring, i)...)
 			if o.MaxRanks >= 2 {
 				// --ddp N: the user chose the ring, so the shim never shrinks
 				// it or changes the sync interval on its own (C2).
@@ -448,6 +449,57 @@ func runDDP(o ddpRunOptions) error {
 		say.Printf("[ddp] hint: sync runs on the lead daemon at %s:%d — check that every rank can reach that address\n", masterAddr, rank0.DaemonPort)
 	}
 	return firstErr
+}
+
+// ddpThreadVars cap a rank's CPU threads. torch sizes its intra-op pool
+// from OMP_NUM_THREADS, so no torch call is needed.
+var ddpThreadVars = []string{"OMP_NUM_THREADS", "MKL_NUM_THREADS"}
+
+// ddpThreadEnv gives ring member i an equal share of its machine's cores:
+// max(1, cores / ranks on that machine). Without it every rank on a shared
+// machine starts torch/OpenMP/MKL with all cores and they oversubscribe (M3:
+// ranks-per-node exponent 1.21 where 1.0 was expected). A variable the user
+// set with --env is left alone; a node reporting no core count gets nothing.
+//
+// ponytail: cores = the node's reported CPU count, which ignores a cgroup
+// quota (only the node's daemon sees that, as PIPEDPEER_CPU_LIMIT). Have the
+// daemon divide its limit too if capped multi-rank nodes matter.
+func ddpThreadEnv(user []string, ring []registry.NodeRecord, i int) []string {
+	n := ring[i]
+	cores := n.Load.TotalCPUs
+	if cores <= 0 {
+		cores, _ = strconv.Atoi(n.Capabilities["cpu_cores"])
+	}
+	if cores <= 0 {
+		return nil
+	}
+	machine := func(m registry.NodeRecord) string {
+		if k := m.Capabilities[heartbeat.MachineCapability]; k != "" {
+			return k
+		}
+		return m.NodeID
+	}
+	here := 0
+	for _, m := range ring {
+		if machine(m) == machine(n) {
+			here++
+		}
+	}
+	threads := strconv.Itoa(max(1, cores/here))
+	var out []string
+	for _, v := range ddpThreadVars {
+		set := false
+		for _, e := range user {
+			if strings.HasPrefix(e, v+"=") {
+				set = true
+				break
+			}
+		}
+		if !set {
+			out = append(out, v+"="+threads)
+		}
+	}
+	return out
 }
 
 // ddpNativeMasterPort is MASTER_PORT for scripts that start torch.distributed
