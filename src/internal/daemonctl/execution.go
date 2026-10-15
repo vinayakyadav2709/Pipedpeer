@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 
 	"github.com/gorilla/websocket"
@@ -94,6 +95,9 @@ type UploadOptions struct {
 	// breaks (the submitter was killed mid-transfer) frees the slot at once
 	// instead of after the running-lease TTL. Older daemons ignore the field.
 	LeaseID string
+	// Recipe lets the node have peers of another system build this job's
+	// environment for themselves. Older daemons ignore the field.
+	Recipe *nixgen.Recipe
 }
 
 // UploadResponse is the daemon's answer plus what this side measured about

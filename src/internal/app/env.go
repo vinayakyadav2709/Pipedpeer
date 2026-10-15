@@ -38,6 +38,9 @@ type Environment struct {
 	ProjectRoot  string
 	ScriptRel    string
 	FlakeContent string
+	// Recipe is what FlakeContent was generated from; the node sends it to
+	// peers of another system, which build their own flake from it.
+	Recipe nixgen.Recipe
 	// Stages is how long each build step took. Every run made from this
 	// environment starts its timeline with them.
 	Stages []jobhistory.Stage
@@ -162,6 +165,7 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 
 	stage(3, "Generating flake.nix...")
 	env.FlakeContent = nixgen.GenerateFlake(nixPkgs, opts.PythonVersion, opts.GPU)
+	env.Recipe = nixgen.Recipe{Pkgs: nixPkgs, Python: opts.PythonVersion, GPU: opts.GPU}
 	flakePath := filepath.Join(tmpDir, "flake.nix")
 	if err := os.WriteFile(flakePath, []byte(env.FlakeContent), 0644); err != nil {
 		env.Close()

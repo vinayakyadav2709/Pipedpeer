@@ -144,6 +144,13 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 			if o.SkipBroadcast {
 				mp.WriteField("skip_broadcast", "1")
 			}
+			if o.Recipe != nil {
+				b, err := json.Marshal(o.Recipe)
+				if err != nil {
+					return err
+				}
+				mp.WriteField("env_recipe", string(b))
+			}
 			if sendNAR {
 				t0 := time.Now()
 				wrap := func(r io.Reader) (io.Reader, func()) {

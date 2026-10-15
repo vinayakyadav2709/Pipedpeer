@@ -71,10 +71,16 @@ everyone down.
 - A laptop's job never runs whole on a phone: its environment is built for
   x86_64. A job submitted on the phone builds its environment there with Nix
   (aarch64, mostly fetched from cache.nixos.org) and runs on aarch64 nodes.
-- Pool chunks from a laptop run on the phone's pinned Python (full node) or
-  Termux's Python (pool-only). The phone takes a chunk only when that Python
-  can import every module the chunk uses; otherwise the chunk goes to another
-  machine and the phone's daemon log names the module.
+- Pool chunks from a laptop run, on a full node, in the job's own environment
+  built on the phone: the laptop's node sends the job's package list, the
+  phone builds it for aarch64 with Nix (cached, by flake hash, under
+  `~/.local/share/pipedpeer/foreign-envs`) and takes the job's chunks once the
+  build is done; until then its log says "not runnable here yet". A laptop on
+  an older build sends no package list, and then the phone's pinned Python
+  runs the chunks. A pool-only phone runs them on Termux's Python. Either
+  way the phone takes a chunk only when its Python can import every module
+  the chunk uses; otherwise the chunk goes to another machine and the
+  phone's daemon log names the module.
 - A function sent as source runs on any Python version. A function pickled by
   value (lambdas, closures) needs the submitter's minor version. The full
   node's Python is the jobs' own pin, so it matches the laptops'.

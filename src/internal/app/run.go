@@ -276,7 +276,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	uploadStart := time.Now()
 	uploadResp, err := daemonctl.UploadJob(ctx, opts.DaemonHost, opts.DaemonPort,
 		env.WorkspaceTar, env.NarPath, env.StorePath, env.ScriptRel,
-		daemonctl.UploadOptions{SkipBroadcast: opts.SkipBroadcast, Cold: opts.Cold, LeaseID: opts.LeaseID})
+		daemonctl.UploadOptions{SkipBroadcast: opts.SkipBroadcast, Cold: opts.Cold, LeaseID: opts.LeaseID, Recipe: &env.Recipe})
 	uploadDur := time.Since(uploadStart)
 	if err != nil {
 		timeline.Add("upload", node, uploadStart, uploadDur)
