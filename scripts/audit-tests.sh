@@ -132,7 +132,7 @@ case_ "equal step counts across shares" src/internal/nixgen/shim \
 	./internal/nixgen/ "TestEqualStepsAcrossUnevenShares"
 
 case_ "each rank owns its own shard" src/internal/nixgen/shim \
-	's = s.replace("            self._owned = (self.epoch, owners[self.rank])", "            self._owned = (self.epoch, owners[0])", 1)' \
+	's = s.replace("            mine = owners[self.rank]", "            mine = owners[0]", 1)' \
 	./internal/nixgen/ "TestWeightedShardsPartitionTheDataset"
 
 case_ "one shuffle seed for every rank" src/internal/nixgen/shim \
