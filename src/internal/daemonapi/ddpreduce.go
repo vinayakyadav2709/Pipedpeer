@@ -192,24 +192,46 @@ func (a *ddpAccumulator) addFlat(payload []byte, scale float64, weight float64) 
 	return nil
 }
 
-// meanSegmented is mean with a scale per tensor.
+// meanSegmented is mean with a scale per segment.
 func (a *ddpAccumulator) meanSegmented() ([]byte, []float64, error) {
-	if a.dtype != ddpI8 || len(a.segments) <= 1 {
+	return a.meanResidual(nil)
+}
+
+// meanResidual is meanSegmented with downlink error feedback: res (one value
+// per element, or nil) is added to the mean before int8 quantisation and left
+// holding what this reply's rounding dropped, for the next round to add back.
+// Without it the reply's rounding is a second, uncorrected compression on top
+// of the ranks' own (R1 #3). Other dtypes ignore res.
+func (a *ddpAccumulator) meanResidual(res []float64) ([]byte, []float64, error) {
+	if a.dtype != ddpI8 {
 		b, sc, err := a.mean()
 		return b, []float64{sc}, err
 	}
 	if a.count == 0 {
 		return nil, nil, fmt.Errorf("no ranks contributed")
 	}
+	if res != nil && len(res) != len(a.sum) {
+		res = nil
+	}
+	segs := a.segments
+	if len(segs) == 0 {
+		segs = []int{len(a.sum)}
+	}
 	inv := 1 / a.weight
 	out := make([]byte, len(a.sum))
-	scales := make([]float64, len(a.segments))
-
+	scales := make([]float64, len(segs))
+	val := func(j int) float64 {
+		v := a.sum[j] * inv
+		if res != nil {
+			v += res[j]
+		}
+		return v
+	}
 	off := 0
-	for i, n := range a.segments {
+	for i, n := range segs {
 		peak := 0.0
-		for j := 0; j < n; j++ {
-			if m := math.Abs(a.sum[off+j] * inv); m > peak {
+		for j := off; j < off+n; j++ {
+			if m := math.Abs(val(j)); m > peak {
 				peak = m
 			}
 		}
@@ -218,14 +240,14 @@ func (a *ddpAccumulator) meanSegmented() ([]byte, []float64, error) {
 			sc = peak / 127
 		}
 		scales[i] = sc
-		for j := 0; j < n; j++ {
-			q := math.Round(a.sum[off+j] * inv / sc)
-			if q > 127 {
-				q = 127
-			} else if q < -127 {
-				q = -127
+		for j := off; j < off+n; j++ {
+			v := val(j)
+			// Clamp rather than wrap: a wrapped gradient flips sign.
+			q := min(max(math.Round(v/sc), -127), 127)
+			out[j] = byte(int8(q))
+			if res != nil {
+				res[j] = v - q*sc
 			}
-			out[off+j] = byte(int8(q))
 		}
 		off += n
 	}

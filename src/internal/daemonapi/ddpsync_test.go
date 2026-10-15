@@ -657,7 +657,9 @@ func TestARoundCompletesWhenARankNeverArrives(t *testing.T) {
 
 // TestALateRankGetsTheSameResult. A rank excluded for being slow must receive
 // the identical average the others applied, or it walks away with a different
-// model and every later step compounds the difference.
+// model and every later step compounds the difference. Three ranks: a round
+// that closes on one rank alone is a dead ring, not a slow rank
+// (TestEveryPeerGoneAbortsTheSurvivor).
 func TestALateRankGetsTheSameResult(t *testing.T) {
 	old := ddpPartialAfter
 	ddpPartialAfter = 300 * time.Millisecond
@@ -667,21 +669,25 @@ func TestALateRankGetsTheSameResult(t *testing.T) {
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
-	done := make(chan []float32, 1)
-	go func() {
-		_, _, vals := ddpReduceFull(t, ts, "g", 1, 0, 2, []float32{10, 20})
-		done <- vals
-	}()
+	done := make(chan []float32, 2)
+	for _, r := range []int{0, 1} {
+		go func(rank int) {
+			_, _, vals := ddpReduceFull(t, ts, "g", 1, rank, 3, []float32{10, 20})
+			done <- vals
+		}(r)
+	}
 
 	var early []float32
-	select {
-	case early = <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("the first rank never completed")
+	for i := 0; i < 2; i++ {
+		select {
+		case early = <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the first ranks never completed")
+		}
 	}
 
 	// The straggler turns up after the round was closed.
-	code, _, late := ddpReduceFull(t, ts, "g", 1, 1, 2, []float32{999, 999})
+	code, _, late := ddpReduceFull(t, ts, "g", 1, 2, 3, []float32{999, 999})
 	if code != http.StatusOK {
 		t.Fatalf("a late rank got status %d instead of the round's result", code)
 	}

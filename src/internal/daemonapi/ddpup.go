@@ -80,6 +80,13 @@ func (s *Server) ddpJoin(req ddpJoinRequest) (string, bool) {
 	if r == nil || r.lastSeq == 0 {
 		return "the ring has not synced yet", false
 	}
+	if r.aborted != "" {
+		return "the ring stopped: " + r.aborted, true
+	}
+	if r.released {
+		return "the ring finishes on one rank (one machine alone was faster than the split), " +
+			"so it takes no new ranks", true
+	}
 	if !r.sharded {
 		return "this script does not train from a DataLoader the shim can reshard " +
 			"(it slices its own tensors), so a rank cannot join mid-run", true

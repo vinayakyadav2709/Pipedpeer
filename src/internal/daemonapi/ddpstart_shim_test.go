@@ -56,7 +56,7 @@ print("DONE")
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=0",
 			"PIPEDPEER_DDP=1", fmt.Sprintf("PIPEDPEER_RANK=%d", rank), "PIPEDPEER_WORLD_SIZE=2",
-			"PIPEDPEER_DDP_BACKEND=daemon", "PIPEDPEER_DDP_SYNC="+ts.URL+"/v1/ddp/sync",
+			"PIPEDPEER_VERBOSE=1", "PIPEDPEER_DDP_SYNC="+ts.URL+"/v1/ddp/sync",
 			"PIPEDPEER_DDP_GROUP=g", "PIPEDPEER_DDP_HOSTS=laptop,gpu1", "PIPEDPEER_DDP_START_WAIT=120")
 		cmd.Stdout, cmd.Stderr = out, out
 		if err := cmd.Start(); err != nil {

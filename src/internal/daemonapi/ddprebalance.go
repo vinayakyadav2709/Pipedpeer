@@ -2,7 +2,10 @@ package daemonapi
 
 import (
 	"fmt"
+	"math"
 	"sort"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Mid-run rebalancing: shares chosen from what the ring is actually doing,
@@ -125,6 +128,12 @@ func planRebalance(reports map[int]rankReport, current []float64, world int) reb
 // away. It is worth it when the exchange saved is larger than the compute
 // added.
 //
+// The exchange saved is the rank's marginal share of the sync, not all of
+// it: every rank's gradient crosses the lead's link, so the measured sync
+// carries N-1 ranks' traffic and one rank fewer saves about sync/(N-1).
+// Crediting the whole sync to one rank dropped ranks that paid their way
+// (F40).
+//
 // Only the slowest rank is ever a candidate: if the slowest earns its place
 // then so does everyone above it, and dropping a fast rank to save its sync
 // is never the better trade at these ratios.
@@ -161,14 +170,80 @@ func worstFreeloader(rates []float64, totalRate, stepSamples, syncSec float64, w
 	computeNow := stepSamples / totalRate
 	computeAfter := stepSamples / remaining
 	added := computeAfter - computeNow
-	if added >= syncSec {
+	saved := syncSec / float64(world-1)
+	if added >= saved {
 		return -1, ""
 	}
 	return slowest, fmt.Sprintf(
 		"rank %d contributes %.0f%% of the ring's throughput but costs a "+
 			"gradient exchange every step. Dropping it adds %.0f ms of compute "+
 			"per step and saves %.0f ms of sync, so the ring is faster without it",
-		slowest, 100*slowRate/totalRate, 1000*added, 1000*syncSec)
+		slowest, 100*slowRate/totalRate, 1000*added, 1000*saved)
+}
+
+// ddpSoloMargin is how much faster one rank alone must look before the ring
+// is given up: step times wobble by a few percent, and a switch on noise is
+// a switch the run cannot take back.
+const ddpSoloMargin = 1.10
+
+// planSolo is D2's comparison: the measured split step against the fastest
+// rank doing the whole step alone. It returns that rank, or -1, with both
+// times in milliseconds.
+//
+// split is what a step costs the ring now: compute plus this rank's share of
+// one sync (sync/H at an interval of H). Each rank's own figure includes its
+// wait for the slowest, so they agree; the smallest is taken, which leans
+// towards keeping the ring. solo is the fastest rank's measured rate applied
+// to the ring's whole step: linear in samples, which overstates a GPU's time
+// for a bigger batch, so that too leans towards keeping the ring.
+func planSolo(reports map[int]rankReport, live, syncEvery int) (int, float64, float64) {
+	if live < 2 || len(reports) < live {
+		return -1, 0, 0
+	}
+	h := float64(max(1, syncEvery))
+	fast, fastRate := -1, 0.0
+	var samples float64
+	split := math.MaxFloat64
+	for rank, rep := range reports {
+		r := rep.rate()
+		if r <= 0 || rep.SyncMillis <= 0 {
+			return -1, 0, 0 // a rank not measured yet: no verdict
+		}
+		samples += float64(rep.Samples)
+		if r > fastRate {
+			fast, fastRate = rank, r
+		}
+		split = min(split, rep.StepMillis+rep.SyncMillis/h)
+	}
+	solo := 1000 * samples / fastRate
+	if solo*ddpSoloMargin >= split {
+		return -1, solo, split
+	}
+	return fast, solo, split
+}
+
+// soloFor decides D2 for a ring the user did not size: when the fastest rank
+// alone beats the split, every other rank is released at the next epoch
+// boundary (they exit 77) and that rank takes the whole dataset, syncing
+// nothing. Only for a hash-sharded DataLoader ring - the only kind whose data
+// can move to one rank - and never under --ddp N, during a join, or twice.
+// Returns the note fragment, or "". Caller holds the board lock.
+func (b *ddpBoard) soloFor(group string, r *ddpRun, world int) string {
+	if r.fixed || r.released || !r.sharded || r.join != nil || r.loading != nil {
+		return ""
+	}
+	live := world - b.dropsBelow(group, world)
+	keep, solo, split := planSolo(r.reports, live, r.syncEvery)
+	if keep < 0 {
+		return ""
+	}
+	r.released = true
+	r.weights = make([]float64, world)
+	r.weights[keep] = 1
+	log.Info().Str("group", group).Int("keep", keep).Float64("solo_ms", solo).
+		Float64("split_ms", split).Msg("ddp: one rank alone is faster than the split; releasing the others")
+	return ringFragment(r) + fmt.Sprintf(`, "release": %d, "solo_ms": %.0f, "split_ms": %.0f, "release_ranks": %d`,
+		keep, solo, split, live)
 }
 
 // shiftedEnough reports whether the new shares differ from the ones in use by

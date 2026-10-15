@@ -114,11 +114,7 @@ func (b *ddpBoard) markRankDownLocked(group string, rank, world int, why string)
 		e.expected = expected
 		switch {
 		case e.acc != nil && e.acc.count > 0 && liveIn(b, group, e.seen) >= expected:
-			e.result, e.resultScales, e.err = e.acc.meanSegmented()
-			if len(e.resultScales) > 0 {
-				e.resultScale = e.resultScales[0]
-			}
-			e.acc = nil
+			b.finishLocked(group, e)
 		case e.acc == nil && liveIn(b, group, e.blobs) >= expected:
 		default:
 			continue
