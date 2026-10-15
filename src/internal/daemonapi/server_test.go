@@ -668,7 +668,7 @@ func TestCompleteOnReservedLeaseReleasesIt(t *testing.T) {
 func TestRewriteHostKeepsUserAndPort(t *testing.T) {
 	for _, tc := range []struct{ in, host, want string }{
 		{"root@192.168.0.201:22", "100.67.24.101", "root@100.67.24.101:22"},
-		{"192.168.0.201:38080", "100.67.24.101", "100.67.24.101:38080"},
+		{"192.168.0.201:4242", "100.67.24.101", "100.67.24.101:4242"},
 		{"root@192.168.0.201", "100.67.24.101", "root@100.67.24.101"},
 		{"", "100.67.24.101", ""},                              // nothing to rewrite
 		{"root@192.168.0.201:22", "", "root@192.168.0.201:22"}, // no better answer

@@ -92,13 +92,15 @@ func main() {
 	}
 	rootCmd.CompletionOptions.DisableDefaultCmd = true
 
-	// New commands (invite, connect, doctor, uninstall) are added by their
-	// own units; join, trust, auth and the network probes are gone.
 	rootCmd.AddCommand(
 		newStartCmd(),
 		newStopCmd(),
 		newStatusCmd(),
 		newSetupCmd(),
+		newInviteCmd(),
+		newConnectCmd(),
+		newDoctorCmd(),
+		newUninstallCmd(),
 		newRunCmd(),
 		newDashboardCmd(),
 		newJobsCmd(),

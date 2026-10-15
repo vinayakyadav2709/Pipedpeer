@@ -17,14 +17,10 @@ which python3 >/dev/null || { echo "python3 required"; exit 1; }
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
-# Extract the embedded sitecustomize.py so we can put it on PYTHONPATH.
-python3 - "$workdir" <<'PY'
-import re, sys
-src = open("src/internal/nixgen/shim.go").read()
-m = re.search(r"ShimSitecustomize = `(.*)`\n\n// WriteShim", src, re.S)
-assert m, "could not extract ShimSitecustomize"
-open(sys.argv[1] + "/sitecustomize.py", "w").write(m.group(1))
-PY
+# The shim's sources (sitecustomize.py + pipedpeer_shim/) go on PYTHONPATH,
+# copied so the run leaves no __pycache__ in the source tree.
+cp -r src/internal/nixgen/shim/sitecustomize.py src/internal/nixgen/shim/pipedpeer_shim "$workdir/"
+rm -rf "$workdir/pipedpeer_shim/__pycache__"
 
 cat > "$workdir/workmod.py" <<'PY'
 def double(x):

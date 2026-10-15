@@ -46,9 +46,9 @@ func TestSelectsLeastLoadedNode(t *testing.T) {
 	// Fake mDNS discovery returns two nodes
 	fakeLAN := func() []registry.NodeRecord {
 		return []registry.NodeRecord{
-			{NodeID: "node-heavy", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+			{NodeID: "node-heavy", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 4242,
 				Load: registry.LoadInfo{CPUPercent: 80, MemPercent: 70, ActiveJobs: 5}, HealthScore: 0.8, State: "healthy"},
-			{NodeID: "node-light", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 38080,
+			{NodeID: "node-light", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 4242,
 				Load: registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0}, HealthScore: 1.0, State: "healthy"},
 		}
 	}
@@ -182,7 +182,7 @@ func TestCoordinatorRejectsInsufficientMemory(t *testing.T) {
 	fakeLAN := func() []registry.NodeRecord {
 		return []registry.NodeRecord{
 			{
-				NodeID: "low-mem-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+				NodeID: "low-mem-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 4242,
 				Load: registry.LoadInfo{
 					CPUPercent: 10, MemPercent: 90,
 					AvailableMemBytes: 500 * 1024 * 1024, // 500MB
@@ -191,7 +191,7 @@ func TestCoordinatorRejectsInsufficientMemory(t *testing.T) {
 				HealthScore: 1.0, State: "healthy",
 			},
 			{
-				NodeID: "high-mem-node", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 38080,
+				NodeID: "high-mem-node", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 4242,
 				Load: registry.LoadInfo{
 					CPUPercent: 50, MemPercent: 40,
 					AvailableMemBytes: 8 * 1024 * 1024 * 1024, // 8GB
@@ -237,7 +237,7 @@ func TestCoordinatorNoMemReqSkipsFilter(t *testing.T) {
 	fakeLAN := func() []registry.NodeRecord {
 		return []registry.NodeRecord{
 			{
-				NodeID: "tiny-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+				NodeID: "tiny-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 4242,
 				Load: registry.LoadInfo{
 					CPUPercent: 10, AvailableMemBytes: 100 * 1024 * 1024, // 100MB
 				},
@@ -332,7 +332,7 @@ func TestCoordinatorAllNodesRejectedNoneChosen(t *testing.T) {
 
 func gpuNode(id, gpuType string) registry.NodeRecord {
 	return registry.NodeRecord{
-		NodeID: id, SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+		NodeID: id, SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 4242,
 		Capabilities: map[string]string{"gpu": gpuType, "gpu_count": "1"},
 		Load:         registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
 		HealthScore:  1.0, State: "healthy",
@@ -341,7 +341,7 @@ func gpuNode(id, gpuType string) registry.NodeRecord {
 
 func cpuNode(id string) registry.NodeRecord {
 	return registry.NodeRecord{
-		NodeID: id, SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 38080,
+		NodeID: id, SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 4242,
 		Load:        registry.LoadInfo{CPUPercent: 10, MemPercent: 20, ActiveJobs: 0},
 		HealthScore: 1.0, State: "healthy",
 	}
@@ -505,8 +505,8 @@ func TestNoSelfExcludesLocalNodeFromAnySource(t *testing.T) {
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{
 				// The local machine also announces itself on the LAN.
-				{NodeID: "self-node-uuid", SSHEndpoint: "root@localhost:22", DaemonPort: 38080, State: "healthy"},
-				{NodeID: "remote-node", SSHEndpoint: "root@10.0.1.7:22", DaemonPort: 38080, State: "healthy"},
+				{NodeID: "self-node-uuid", SSHEndpoint: "root@localhost:22", DaemonPort: 4242, State: "healthy"},
+				{NodeID: "remote-node", SSHEndpoint: "root@10.0.1.7:22", DaemonPort: 4242, State: "healthy"},
 			}
 		},
 	})
@@ -534,12 +534,12 @@ func TestNoSelfExcludesLocalNodeFromAnySource(t *testing.T) {
 func TestDaemonNodesRejectedUnlessHealthy(t *testing.T) {
 	daemon := fakeDaemon(t,
 		storedNode{NodeRecord: registry.NodeRecord{
-			NodeID: "live-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
+			NodeID: "live-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 4242,
 			Load:        registry.LoadInfo{CPUPercent: 5, MemPercent: 10, AvailableMemBytes: 8 << 30},
 			HealthScore: 1.0, State: "healthy",
 		}, Source: "discovery"},
 		storedNode{NodeRecord: registry.NodeRecord{
-			NodeID: "ghost-node", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 38080,
+			NodeID: "ghost-node", SSHEndpoint: "root@10.0.1.6:22", DaemonPort: 4242,
 			Load:        registry.LoadInfo{CPUPercent: 0, MemPercent: 0, AvailableMemBytes: 64 << 30},
 			HealthScore: 1.0, State: "stale",
 		}, Source: "discovery"},

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -509,7 +511,7 @@ func (s *Server) EnablePoolSpill() {
 		}
 		return ""
 	}
-	s.pool.SetPeerFn(func(storePath, submitter string) []string {
+	s.pool.SetPeerFn(func(storePath, submitter string, need http.Header) []string {
 		s.peersMu.RLock()
 		defer s.peersMu.RUnlock()
 		type cand struct {
@@ -528,7 +530,7 @@ func (s *Server) EnablePoolSpill() {
 			// Only forward to peers that already imported this closure, else
 			// the remote POST fails with a missing-store 400. Checking the
 			// store endpoint is cheap (local cache) and keeps spill correct.
-			if !s.peerHasStore(ph, storePath) {
+			if !s.peerHasStore(ph, storePath, need) {
 				continue
 			}
 			out = append(out, cand{peer: fmt.Sprintf("%s:%d", ph.Host, ph.Port), activeJobs: ph.ActiveJobs, availMem: ph.AvailableMem})
@@ -550,10 +552,20 @@ func (s *Server) EnablePoolSpill() {
 // peerHasStore asks a peer whether it can actually run the given closure: the
 // store must be materialised (<storePath>/bin/run exists), not merely have its
 // NAR cached — a cached but un-imported closure would fail at pool-map time.
-func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
-	url := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", ph.Host, ph.Port, url.QueryEscape(storePath))
+// need (phone.Need, may be nil) lets a pool-only phone answer for its host
+// python instead of a closure.
+func (s *Server) peerHasStore(ph *PeerHealth, storePath string, need http.Header) bool {
+	u := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", ph.Host, ph.Port, url.QueryEscape(storePath))
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", ph.Host).Msg("cannot build the runnable check")
+		return false
+	}
+	for k, v := range need {
+		req.Header[k] = v
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(url)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
@@ -603,6 +615,9 @@ func (s *Server) broadcastClosure(storePath string) []string {
 		s.pollAllNodes()
 		targets, known = s.healthyPeers()
 	}
+	// A pool-only phone runs chunks on its host python and has no Nix to
+	// import a closure into.
+	targets = slices.DeleteFunc(targets, func(ph PeerHealth) bool { return ph.Role == heartbeat.RolePoolOnly })
 	if len(targets) == 0 {
 		// Usually a timing problem: the health poller has not run since the
 		// peers were added, so they are known but not yet marked healthy.
@@ -634,7 +649,7 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	// then sent to nobody, because no peer had a GPU.
 	var need []PeerHealth
 	for i := range targets {
-		if !s.peerHasStore(&targets[i], storePath) {
+		if !s.peerHasStore(&targets[i], storePath, nil) {
 			need = append(need, targets[i])
 		}
 	}
@@ -1273,8 +1288,9 @@ func (s *Server) buildRouter() {
 	r.Post("/v1/ddp/join", s.handleDDPJoin)
 	r.Post("/v1/ddp/snapshot", s.handleDDPSnapshotPut)
 	r.Get("/v1/ddp/snapshot", s.handleDDPSnapshotGet)
-	r.Post("/v1/nodes", s.handleNodesAdd)
-	r.Delete("/v1/nodes/{host}", s.handleNodesRemove)
+	r.Get("/v1/introducers", s.handleIntroducers)
+	r.Get("/v1/addresses", s.handleAddresses)
+	r.Get("/v1/history", s.handleHistory)
 
 	s.router = r
 }
@@ -1561,7 +1577,7 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 		if available < 0 {
 			available = 0
 		}
-		if available < req.RequiredMemBytes {
+		if !resourceest.Admit(req.RequiredMemBytes, available, len(s.leases) == 0 && roommates == 0, "this node") {
 			s.mu.Unlock()
 			reason := fmt.Sprintf("insufficient memory: need %d bytes, available %d bytes",
 				req.RequiredMemBytes, available)

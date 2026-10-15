@@ -223,7 +223,7 @@ func TestMemoryCeilingCanBeLifted(t *testing.T) {
 // unrestartable. systemd refuses a transient unit whose name it already
 // knows, and --collect does not always reach a scope whose processes were
 // killed rather than exited - so after one hard kill, every subsequent
-// `pipedpeer start` failed with "Unit pipedpeer-daemon-38080.scope was
+// `pipedpeer start` failed with "Unit pipedpeer-daemon-4242.scope was
 // already loaded or has a fragment file" and no daemon came up at all.
 func TestStaleScopeIsClearedBeforeStarting(t *testing.T) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {

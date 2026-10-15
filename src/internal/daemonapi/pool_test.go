@@ -329,7 +329,7 @@ func TestMultiNodeSpill(t *testing.T) {
 	runPath := filepath.Join(storePath, "bin", "run")
 
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
-	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{peerHost} })
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{peerHost} })
 
 	// 16 items: >= minSplit, so it fans out local + peer.
 	var items []json.RawMessage
@@ -395,7 +395,7 @@ func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
 	defer s.StopWarmWorkers()
 	// Point at an address that refuses connections.
 	const deadPeer = "127.0.0.1:1"
-	s.pool.SetPeerFn(func(_, _ string) []string { return []string{deadPeer} })
+	s.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{deadPeer} })
 
 	var items []json.RawMessage
 	for i := 1; i <= 16; i++ {
@@ -631,7 +631,7 @@ func TestClosureBroadcastEnablesSpill(t *testing.T) {
 	s1.peerHealths = map[string]*PeerHealth{peerHost: peer}
 	s1.peersMu.Unlock()
 
-	if s1.peerHasStore(peer, storePath) {
+	if s1.peerHasStore(peer, storePath, nil) {
 		t.Fatal("peer must not be runnable for the closure before the broadcast")
 	}
 
@@ -675,7 +675,7 @@ func TestClosureBroadcastEnablesSpill(t *testing.T) {
 	if _, cached := s2.narCache.narFileFor(storePath); !cached {
 		t.Fatal("broadcast never pushed the NAR to a peer that lacked the closure")
 	}
-	if !s1.peerHasStore(peer, storePath) {
+	if !s1.peerHasStore(peer, storePath, nil) {
 		t.Fatal("peer cached the closure but cannot run it: spill would 400 on every chunk")
 	}
 
@@ -761,7 +761,7 @@ func TestClosureBroadcastPushesToLackingPeer(t *testing.T) {
 	if _, err := s1.narCache.store(storePath, bytes.NewReader(closureNAR(t, storePath))); err != nil {
 		t.Fatalf("cache nar on s1: %v", err)
 	}
-	if s1.peerHasStore(peer, storePath) {
+	if s1.peerHasStore(peer, storePath, nil) {
 		t.Fatal("s2 must not be runnable for an absent store path")
 	}
 
@@ -774,7 +774,7 @@ func TestClosureBroadcastPushesToLackingPeer(t *testing.T) {
 	if _, cached := s2.narCache.narFileFor(storePath); !cached {
 		t.Fatal("broadcast did not push the closure to a peer lacking it")
 	}
-	if !s1.peerHasStore(peer, storePath) {
+	if !s1.peerHasStore(peer, storePath, nil) {
 		t.Fatal("peer holds the NAR but cannot run the closure: pool spill would 400 on it")
 	}
 	importsMu.Lock()
@@ -883,7 +883,7 @@ sys.stdout.write(json.dumps(out))
 
 	s1 := New("node-" + strings.Repeat("x", 8))
 	defer s1.StopWarmWorkers()
-	s1.pool.SetPeerFn(func(_, _ string) []string {
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string {
 		return []string{strings.TrimPrefix(peerSrv.URL, "http://")}
 	})
 
@@ -1069,7 +1069,7 @@ sys.stdout.write(json.dumps(out))
 
 	s1 := New("node-" + strings.Repeat("x", 8))
 	defer s1.StopWarmWorkers()
-	s1.pool.SetPeerFn(func(_, _ string) []string { return hosts })
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return hosts })
 
 	// 4 items over 3 peers: part 0→peer0, part 1→peer1, part 2→peer2,
 	// part 3 wraps to peer0 (3 % 3 == 0).
@@ -1139,7 +1139,7 @@ sys.stdout.write(json.dumps(out))
 	keys := []string{"chunk-a", "chunk-b", "chunk-c", "chunk-d"}
 
 	calls := 0
-	s1.pool.SetPeerFn(func(_, _ string) []string {
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string {
 		calls++
 		if calls%2 == 0 {
 			// A different load ranking, same three peers.
@@ -1208,7 +1208,7 @@ func TestPoolSpillNextBestOnFailure(t *testing.T) {
 
 	alivePeer := strings.TrimPrefix(srv2.URL, "http://")
 	// Best first, but the best is dead (port 1 refuses connections).
-	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{"127.0.0.1:1", alivePeer} })
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{"127.0.0.1:1", alivePeer} })
 
 	var items []json.RawMessage
 	for i := 1; i <= 16; i++ {
@@ -1329,9 +1329,9 @@ sys.stdout.write(str(pickle.loads(open(sys.argv[1], "rb").read())))
 // TestSinkPeerLast keeps the submitting machine eligible but last in spill
 // order — an idle orchestrator must never outrank real workers.
 func TestSinkPeerLast(t *testing.T) {
-	peers := []string{"10.0.0.5:38080", "10.0.0.1:38080", "10.0.0.9:38080"}
-	got := sinkPeerLast(peers, "10.0.0.1:38080")
-	want := []string{"10.0.0.5:38080", "10.0.0.9:38080", "10.0.0.1:38080"}
+	peers := []string{"10.0.0.5:4242", "10.0.0.1:4242", "10.0.0.9:4242"}
+	got := sinkPeerLast(peers, "10.0.0.1:4242")
+	want := []string{"10.0.0.5:4242", "10.0.0.9:4242", "10.0.0.1:4242"}
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
@@ -1340,8 +1340,8 @@ func TestSinkPeerLast(t *testing.T) {
 		t.Fatalf("empty submitter must be a no-op, got %v", got)
 	}
 
-	alone := sinkPeerLast([]string{"10.0.0.1:38080"}, "10.0.0.1:38080")
-	if len(alone) != 1 || alone[0] != "10.0.0.1:38080" {
+	alone := sinkPeerLast([]string{"10.0.0.1:4242"}, "10.0.0.1:4242")
+	if len(alone) != 1 || alone[0] != "10.0.0.1:4242" {
 		t.Fatalf("submitter-only pool must stay intact, got %v", alone)
 	}
 
@@ -1472,8 +1472,8 @@ sys.stdout.write("\n".join(base64.b64encode(pickle.dumps(v)).decode() for v in (
 // A peer that took a forwarded request reports its share as "local"; passed
 // through unchanged, the submitter read that as work done on the origin.
 func TestRelabelForwardedReceipt(t *testing.T) {
-	body := []byte(`{"results_frames": 2, "receipt": {"node": "peer-node", "parts": [{"where": "local", "items": 1, "ms": 3}, {"where": "peer:10.0.0.3:38080", "items": 1, "ms": 4}]}}` + "\n" + "\x00\x00\x00\x01a")
-	out := relabelForwardedReceipt(body, "10.0.0.2:38080")
+	body := []byte(`{"results_frames": 2, "receipt": {"node": "peer-node", "parts": [{"where": "local", "items": 1, "ms": 3}, {"where": "peer:10.0.0.3:4242", "items": 1, "ms": 4}]}}` + "\n" + "\x00\x00\x00\x01a")
+	out := relabelForwardedReceipt(body, "10.0.0.2:4242")
 
 	nl := bytes.IndexByte(out, '\n')
 	var hdr struct {
@@ -1489,7 +1489,7 @@ func TestRelabelForwardedReceipt(t *testing.T) {
 		t.Errorf("results_frames = %d, want 2", hdr.ResultsFrames)
 	}
 	got := []string{hdr.Receipt.Parts[0].Where, hdr.Receipt.Parts[1].Where}
-	want := []string{"peer:10.0.0.2:38080", "peer:10.0.0.3:38080"}
+	want := []string{"peer:10.0.0.2:4242", "peer:10.0.0.3:4242"}
 	if got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("parts = %v, want %v", got, want)
 	}
@@ -1541,7 +1541,7 @@ func TestSlowPeerEndsThePeerWalk(t *testing.T) {
 	s := New("slowpeer-node-xxxxxxxx")
 	defer s.StopWarmWorkers()
 	peers := []string{p1.Listener.Addr().String(), p2.Listener.Addr().String()}
-	s.pool.SetPeerFn(func(_, _ string) []string { return peers })
+	s.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return peers })
 
 	ch := &chunk{funcSrc: doubleSrc, funcName: "double", items: []json.RawMessage{json.RawMessage(`21`)}, force: true}
 	results, err := s.pool.runChunk(runPath, storePath, ch, "")
@@ -1594,7 +1594,7 @@ func TestSlowPeerWinsTheRace(t *testing.T) {
 
 	s := New("racepeer-node-xxxxxxxx")
 	defer s.StopWarmWorkers()
-	s.pool.SetPeerFn(func(_, _ string) []string { return []string{peer.Listener.Addr().String()} })
+	s.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{peer.Listener.Addr().String()} })
 
 	const slowSrc = "import time\ndef slow(x):\n    time.sleep(30)\n    return x * 2\n"
 	ch := &chunk{funcSrc: slowSrc, funcName: "slow", items: []json.RawMessage{json.RawMessage(`21`)}, force: true}
@@ -1663,7 +1663,7 @@ func TestFlightBookHoldsANodeToItsDepth(t *testing.T) {
 // cluster whatever its size.
 func TestPoolStatsPacesTheShim(t *testing.T) {
 	s := New("pace-node-xxxxxxxx")
-	s.pool.SetPeerFn(func(store, submitter string) []string {
+	s.pool.SetPeerFn(func(store, submitter string, _ http.Header) []string {
 		if store != "/nix/store/x" {
 			return nil
 		}

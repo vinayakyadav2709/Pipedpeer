@@ -9,7 +9,7 @@ func TestReceiptSummaryAndRendering(t *testing.T) {
 	dir := t.TempDir()
 	raw := `{"remote_items": 60, "local_items": 20, "dispatched_items": 60,
 	  "parts": [{"kind": "pool", "items": 60, "ok": true, "ms": 1500, "ran_elsewhere": 60,
-	             "ran_on_origin": 0, "peers": {"10.0.0.2:38080": 40, "10.0.0.3:38080": 20}}],
+	             "ran_on_origin": 0, "peers": {"10.0.0.2:4242": 40, "10.0.0.3:4242": 20}}],
 	  "decisions": [{"op": "pool.map", "shipped": true, "why": "60 items x 0.1s"},
 	                {"op": "numpy.matmul", "shipped": false, "why": "here ~0.02s", "mb": 33}]}`
 	if err := SaveReceipt(dir, []byte(raw)); err != nil {
@@ -25,7 +25,7 @@ func TestReceiptSummaryAndRendering(t *testing.T) {
 	var b strings.Builder
 	WriteReceipt(&b, r)
 	out := b.String()
-	for _, want := range []string{"Items: 80 total", "10.0.0.2:38080", "shipped     pool.map",
+	for _, want := range []string{"Items: 80 total", "10.0.0.2:4242", "shipped     pool.map",
 		"kept local  numpy.matmul", "(33 MB)"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("receipt lacks %q:\n%s", want, out)

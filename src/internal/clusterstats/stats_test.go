@@ -58,7 +58,7 @@ func TestNodeFromAPIParsesTheHost(t *testing.T) {
 		"me@[::1]:22":      "[::1]", // bracketed, so http://[::1]:port works
 		"":                 "127.0.0.1",
 	} {
-		n := NodeFromAPI("id", endpoint, 38080, "healthy", "mdns", nil, registry.LoadInfo{})
+		n := NodeFromAPI("id", endpoint, 4242, "healthy", "mdns", nil, registry.LoadInfo{})
 		if n.Host != want {
 			t.Errorf("NodeFromAPI(%q).Host = %q, want %q", endpoint, n.Host, want)
 		}

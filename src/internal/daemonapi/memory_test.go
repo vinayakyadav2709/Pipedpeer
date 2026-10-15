@@ -239,7 +239,7 @@ func TestPoolMapForwardToPeer(t *testing.T) {
 	defer s2.StopWarmWorkers()
 
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
-	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{peerHost} })
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{peerHost} })
 
 	var items []any
 	for i := 1; i <= 40; i++ {
@@ -390,7 +390,7 @@ func TestAForwardedReceiptNamesThePeer(t *testing.T) {
 	defer s2.StopWarmWorkers()
 
 	peerHost := strings.TrimPrefix(srv2.URL, "http://")
-	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{peerHost} })
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{peerHost} })
 
 	status, rec, vals := postFramesPoolMap(t, srv1.URL, storePath, 40, 300*1024*1024)
 	if status != http.StatusOK {

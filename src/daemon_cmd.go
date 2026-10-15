@@ -301,6 +301,7 @@ func runDaemon(args []string) {
 		<-sig
 		stopInternet()
 		server.StopWarmWorkers()
+		server.SavePoolStats()
 		advertiser.Stop()
 		os.Exit(0)
 	}()

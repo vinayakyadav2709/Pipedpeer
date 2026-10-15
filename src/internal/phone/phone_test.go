@@ -98,6 +98,13 @@ func TestCanRun(t *testing.T) {
 			t.Errorf("pool-only, header %q: got %v want %v", v, got, want)
 		}
 	}
+	// func_src is re-compiled on the phone: a minor mismatch is fine.
+	if !CanRun(missing, Need("3.14", true)) || !CanRun(missing, Need("", true)) {
+		t.Error("pool-only must take a func_src chunk from another minor version")
+	}
+	if CanRun(missing, Need("3.14", false)) {
+		t.Error("pool-only must refuse by-value bytecode from another minor version")
+	}
 }
 
 // TestTermuxPython runs only inside Termux (the termux-docker image under

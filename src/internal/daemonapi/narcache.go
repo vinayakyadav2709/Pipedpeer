@@ -25,6 +25,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -418,7 +419,7 @@ func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	path, cached := s.narCache.narFileFor(storePath)
 	if r.URL.Query().Get("runnable") == "1" {
-		cached = pathExists(filepath.Join(storePath, "bin", "run"))
+		cached = phone.CanRun(storePath, r.Header)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cached": cached, "nar_path": path})
 }

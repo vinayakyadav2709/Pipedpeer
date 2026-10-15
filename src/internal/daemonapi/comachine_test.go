@@ -109,8 +109,8 @@ func TestAPeerOnAnotherMachineIsNotSubtracted(t *testing.T) {
 		// start a poller, which would go looking for real peers on the LAN.
 		s.peerHealths = map[string]*PeerHealth{}
 	}
-	s.peerHealths["10.0.0.5:38080"] = &PeerHealth{
-		Host: "10.0.0.5", Port: 38080, NodeID: "elsewhere",
+	s.peerHealths["10.0.0.5:4242"] = &PeerHealth{
+		Host: "10.0.0.5", Port: 4242, NodeID: "elsewhere",
 		Status: "healthy", Machine: "a-different-boot-id", ReservedMem: 8 << 30,
 	}
 	s.peersMu.Unlock()
@@ -137,8 +137,8 @@ func TestUnknownMachineIsNotAssumedToBeThisOne(t *testing.T) {
 		// start a poller, which would go looking for real peers on the LAN.
 		s.peerHealths = map[string]*PeerHealth{}
 	}
-	s.peerHealths["10.0.0.6:38080"] = &PeerHealth{
-		Host: "10.0.0.6", Port: 38080, NodeID: "older-build",
+	s.peerHealths["10.0.0.6:4242"] = &PeerHealth{
+		Host: "10.0.0.6", Port: 4242, NodeID: "older-build",
 		Status: "healthy", Machine: "", ReservedMem: 8 << 30,
 	}
 	s.peersMu.Unlock()
@@ -383,7 +383,7 @@ func TestSelfRowShowsWhatThisDaemonMayGrant(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	s.store = store
-	s.SetSelfInfo("root@127.0.0.1:22", 38080, map[string]string{})
+	s.SetSelfInfo("127.0.0.1", 4242, map[string]string{})
 
 	s.peersMu.Lock()
 	if s.peerHealths == nil {

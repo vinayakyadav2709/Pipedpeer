@@ -144,7 +144,7 @@ class Handler(BaseHTTPRequestHandler):
             # Stand in for a daemon that fanned the whole chunk to a peer, so
             # the shim's "ran elsewhere" accounting is exercised.
             receipt = json.dumps({"node": "fake-daemon", "parts": [
-                {"where": "peer:198.51.100.7:38080", "items": len(results), "ms": 1}]})
+                {"where": "peer:198.51.100.7:4242", "items": len(results), "ms": 1}]})
             head = '{"results_frames": %d, "receipt": %s}\n' % (len(results), receipt)
             return head.encode() + out
         return json.dumps({"results": [{"pickle": base64.b64encode(pickle.dumps(r)).decode()} for r in results]}).encode()

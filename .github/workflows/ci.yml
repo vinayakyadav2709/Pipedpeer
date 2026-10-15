@@ -46,6 +46,13 @@ jobs:
       - name: Test (race)
         run: go test -race -count=1 ./...
 
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10
+
+      - name: Shim lint and unit tests
+        working-directory: ${{ github.workspace }}
+        run: ./scripts/shim-check.sh
+
       # The shim is supposed to cost nothing when a job never touches an
       # interceptable library. Nothing enforced that, and it regressed to 21x
       # by importing torch at startup. Gate it here.

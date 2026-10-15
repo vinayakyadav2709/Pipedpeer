@@ -215,8 +215,8 @@ func registerWith(t *testing.T, s *Server, cluster, node, from string, cands []s
 func TestCandidatesReachTheOtherPeer(t *testing.T) {
 	s := NewServer(time.Minute)
 	registerWith(t, s, "c1", "alice", "203.0.113.1:5000",
-		[]string{"lan:192.168.0.10:38447", "mapped:203.0.113.1:38447"})
-	resp := registerWith(t, s, "c1", "bob", "198.51.100.2:6000", []string{"lan:10.0.0.5:38447"})
+		[]string{"lan:192.168.0.10:4243", "mapped:203.0.113.1:4243"})
+	resp := registerWith(t, s, "c1", "bob", "198.51.100.2:6000", []string{"lan:10.0.0.5:4243"})
 
 	if len(resp.Peers) != 1 {
 		t.Fatalf("bob sees %d peers, want 1", len(resp.Peers))
@@ -228,7 +228,7 @@ func TestCandidatesReachTheOtherPeer(t *testing.T) {
 	if len(got.Candidates) != 2 {
 		t.Fatalf("alice's candidates = %v, want both of them", got.Candidates)
 	}
-	if got.Candidates[0] != "lan:192.168.0.10:38447" || got.Candidates[1] != "mapped:203.0.113.1:38447" {
+	if got.Candidates[0] != "lan:192.168.0.10:4243" || got.Candidates[1] != "mapped:203.0.113.1:4243" {
 		t.Errorf("candidates = %v, want the LAN and mapped addresses alice registered", got.Candidates)
 	}
 	// The reflexive address must still travel: it is what the punch aims at.
@@ -242,7 +242,7 @@ func TestCandidatesReachTheOtherPeer(t *testing.T) {
 // is worth pinning down.
 func TestConnectForwardsToThePeerAndNobodyElse(t *testing.T) {
 	s := NewServer(time.Minute)
-	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", []string{"lan:192.168.0.10:38447"})
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", []string{"lan:192.168.0.10:4243"})
 	registerWith(t, s, "c1", "bob", "198.51.100.2:6000", nil)
 
 	body, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "alice", Peer: "bob", Nonce: "n1"})
@@ -265,7 +265,7 @@ func TestConnectForwardsToThePeerAndNobodyElse(t *testing.T) {
 		t.Errorf("punch says from=%s nonce=%s, want alice/n1", p.From, p.Nonce)
 	}
 	// Alice's candidates must ride along, or bob has nothing to aim at.
-	if len(p.Candidates) != 1 || p.Candidates[0] != "lan:192.168.0.10:38447" {
+	if len(p.Candidates) != 1 || p.Candidates[0] != "lan:192.168.0.10:4243" {
 		t.Errorf("punch candidates = %v, want alice's registration", p.Candidates)
 	}
 	// And bob learns its own address free, saving a round trip.
@@ -280,7 +280,7 @@ func TestConnectForwardsToThePeerAndNobodyElse(t *testing.T) {
 // repeat one machine's claims about another.
 func TestConnectUsesRegisteredCandidatesNotClaimedOnes(t *testing.T) {
 	s := NewServer(time.Minute)
-	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", []string{"lan:192.168.0.10:38447"})
+	registerWith(t, s, "c1", "alice", "203.0.113.1:5000", []string{"lan:192.168.0.10:4243"})
 	registerWith(t, s, "c1", "bob", "198.51.100.2:6000", nil)
 
 	body, _ := json.Marshal(request{

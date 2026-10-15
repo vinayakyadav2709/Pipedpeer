@@ -46,7 +46,7 @@ func TestOffloadNeverPicksTheExcludedMachine(t *testing.T) {
 	defer func() { selfMachine = old }()
 
 	pm := newPoolManager()
-	pm.SetPeerFn(func(_, _ string) []string { return peers })
+	pm.SetPeerFn(func(_, _ string, _ http.Header) []string { return peers })
 	pm.machineFn = func(p string) string { return machineOf[p] }
 
 	for _, tc := range []struct {

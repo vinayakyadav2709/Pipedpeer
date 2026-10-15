@@ -35,7 +35,7 @@ func TestLocalBroadcastsReturnsAddresses(t *testing.T) {
 func TestServiceInfoRoundTrip(t *testing.T) {
 	info := ServiceInfo{
 		NodeID:     "test-node-uuid",
-		DaemonPort: 38080,
+		DaemonPort: 4242,
 		Arch:       "x86_64-linux",
 		Hostname:   "test-host",
 		CPUPercent: 25.5,
@@ -51,7 +51,7 @@ func TestServiceInfoRoundTrip(t *testing.T) {
 func TestAdvertiserStartStop(t *testing.T) {
 	adv := NewAdvertiser(ServiceInfo{
 		NodeID:     "test-node",
-		DaemonPort: 38080,
+		DaemonPort: 4242,
 	})
 
 	// Start should not panic even if port is in use
