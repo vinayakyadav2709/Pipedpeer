@@ -305,6 +305,13 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	if opts.Submitter != "" {
 		opts.Envs = append(opts.Envs, "PIPEDPEER_SUBMITTER="+opts.Submitter)
 	}
+	// The address above is the one our LAN knows; an internet peer knows
+	// this machine only as a forwarder port, so the daemon matches the id.
+	if me, err := identity.GetOrCreate(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read this node's identity; the remote node may not recognise this machine as the submitter: %v\n", err)
+	} else {
+		opts.Envs = append(opts.Envs, "PIPEDPEER_SUBMITTER_NODE="+me.NodeID)
+	}
 
 	stage(7, "Executing on remote...")
 	jobhistory.UpdateStage(historyDir, "executing")

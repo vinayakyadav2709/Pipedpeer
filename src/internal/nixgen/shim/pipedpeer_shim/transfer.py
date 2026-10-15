@@ -10,7 +10,7 @@ import time
 
 from pipedpeer_shim import core
 from pipedpeer_shim.core import (
-    _OFFLOAD, _SUBMITTER, _TOKEN, _log, _offload_warn, _spill_min,
+    _OFFLOAD, _SUBMITTER, _SUBMITTER_NODE, _TOKEN, _log, _offload_warn, _spill_min,
 )
 from pipedpeer_shim.stats import (
     _WHY, _decide,
@@ -242,6 +242,7 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None, opener=N
                                  headers={"Content-Type": "application/vnd.pipedpeer.frames",
                                           "X-Pipedpeer-Store": core._STORE,
                                           "X-Pipedpeer-Submitter": _SUBMITTER,
+                                          "X-Pipedpeer-Submitter-Node": _SUBMITTER_NODE,
                                           "X-Pipedpeer-Offload": _OFFLOAD})
     t0 = time.perf_counter()
     try:
