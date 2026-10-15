@@ -8,8 +8,9 @@
 #   - the lab: scripts/lab-emu.sh brings up N equal containers (same --cpus,
 #     same --memory) on a shaped bridge. Speedup is 1 container against N of
 #     the same size, never against the 15-core host.
-#   - the bench lock: a timed run holds ~/.cache/pipedpeer-bench.lock for its
-#     whole life, so two recorded runs never share the CPU.
+#   - the bench lock: each timed run holds ~/.cache/pipedpeer-bench.lock only
+#     while it runs (not while a lab comes up or warms), so two recorded runs
+#     never share the CPU.
 #   - result capture: one CSV row per run, every row labelled emulated=1.
 #     Medians and markdown tables come from bl_table.
 #
@@ -24,6 +25,7 @@
 #                   shared with the functional tests' default "emu" lab)
 #   BL_REPS         timed repetitions per cell (3)
 #   BL_RUN_TIMEOUT  seconds before one run counts as failed (600)
+#   BL_LAB_WAIT     seconds to wait for other labs to free the memory cap (3600)
 #   BL_OUT          results directory (~/.local/state/pipedpeer/bench)
 
 BL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -49,11 +51,9 @@ bl_init() {
 	BL_RT="$PP_RUNTIME"
 	command -v python3 >/dev/null || bl_die "python3 required on the host (result parsing)"
 	mkdir -p "$BL_OUT/$BL_SUITE/logs" "$(dirname "$BL_LOCK")"
+	# The lock is taken per timed run (bl_run), never while a lab comes up or
+	# warms, so other timed units are not queued behind a lab waiting for RAM.
 	exec 9>"$BL_LOCK"
-	if ! flock -n 9; then
-		bl_log "another timed run holds $BL_LOCK; waiting for it"
-		flock 9
-	fi
 	BL_CSV="$BL_OUT/$BL_SUITE/results.csv"
 	[[ -f "$BL_CSV" ]] || echo "suite,case,variant,binary,rev,profile,loss,nodes,rep,status,wall_s,script_s,step_s,sync_s,world,loss_val,steps,emulated,when,log" > "$BL_CSV"
 	trap 'bl_lab_down' EXIT
@@ -100,8 +100,19 @@ bl_lab_up() {
 	[[ -x "$BL_EMU" ]] || bl_die "$BL_EMU missing (U23's emulation rig)"
 	bl_lab_down
 	bl_log "lab up: $n x (2 cpu, $mem), profile $profile, loss $loss%, $(basename "$bin")"
-	LAB_MEM="$mem" LAB_PROFILE="$profile" LAB_LOSS="$loss" LAB_CPUS=2 PIPEDPEER="$bin" \
-		LAB_API_PORT="$BL_API_PORT" LAB_NAME="$BL_LAB_NAME" "$BL_EMU" up "$n" >&2 || bl_die "lab-emu.sh up failed"
+	# Other labs (functional tests) may hold the memory cap for a while:
+	# lab-emu refuses, we wait and retry, up to BL_LAB_WAIT seconds.
+	local out="$BL_OUT/$BL_SUITE/lab-up.log" waited=0
+	until LAB_MEM="$mem" LAB_PROFILE="$profile" LAB_LOSS="$loss" LAB_CPUS=2 PIPEDPEER="$bin" \
+		LAB_API_PORT="$BL_API_PORT" LAB_NAME="$BL_LAB_NAME" "$BL_EMU" up "$n" > "$out" 2>&1; do
+		cat "$out" >&2
+		grep -q "refusing to start" "$out" || bl_die "lab-emu.sh up failed"
+		((waited < ${BL_LAB_WAIT:-3600})) || bl_die "memory cap still full after ${waited}s"
+		bl_log "memory cap full (other labs running); retrying in 60 s (waited ${waited}s)"
+		sleep 60
+		waited=$((waited + 60))
+	done
+	cat "$out" >&2
 	BL_NODES_UP="$n"
 	BL_PROFILE="$profile"
 	BL_LOSS="$loss"
@@ -264,11 +275,16 @@ bl_run() {
 	local log="$BL_OUT/$BL_SUITE/logs/${case}_${variant}_${binlabel}_${BL_PROFILE}_n${BL_NODES_UP}_r${rep}.log"
 	local status=ok t0 t1 rc=0
 	bl_exec 1 touch /bench/.mark
+	if ! flock -n 9; then
+		bl_log "another timed run holds $BL_LOCK; waiting for it"
+		flock 9
+	fi
 	t0="$(date +%s.%N)"
 	timeout "$BL_RUN_TIMEOUT" "$BL_RT" exec -w /bench "${BL_EMU_PREFIX}1" \
 		pipedpeer run "$@" "$script" > "$log" 2>&1 || rc=$?
-	if ((rc == 124)); then status=timeout; elif ((rc != 0)); then status=fail; fi
 	t1="$(date +%s.%N)"
+	flock -u 9
+	if ((rc == 124)); then status=timeout; elif ((rc != 0)); then status=fail; fi
 	# The newest run record on the submitter, if this binary writes one.
 	local steps="$log.steps.json"
 	rm -f "$steps"
