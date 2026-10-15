@@ -2,6 +2,7 @@ package gpu
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,13 @@ type Info struct {
 	// ComputeCap is the CUDA compute capability ("8.9") for NVIDIA, or the
 	// gfx target ("gfx1100") for AMD. Empty when unknown.
 	ComputeCap string `json:"compute_cap,omitempty"`
+	// GPUs lists every PCI display device found in sysfs, usable or not, each
+	// with the reason. Empty when sysfs showed none (the vendor-tool fallback).
+	GPUs []Device `json:"gpus,omitempty"`
+	// Best is the runtime index (nvidia-smi / ROCR order) of the device a job
+	// should use, -1 when there is none. Name, MemoryBytes and ComputeCap
+	// describe this device.
+	Best int `json:"best"`
 }
 
 type Usage struct {
@@ -72,107 +80,115 @@ func refreshCache() {
 	// Vendor must default to VendorNone, not the zero string: callers gate GPU
 	// admission on `Vendor != VendorNone`, so a zero value would make a
 	// CPU-only node advertise a GPU it does not have.
-	gpuCache = &cachedGPU{time: time.Now(), info: Info{Vendor: VendorNone}}
+	gpuCache = &cachedGPU{time: time.Now(), info: Info{Vendor: VendorNone, Best: -1}}
 
-	// Try each vendor in order of likelihood. First one found provides all stats.
+	if pci := enumeratePCI(); len(pci) > 0 {
+		gpuCache.info, gpuCache.usage, gpuCache.devs = fromSysfs(pci)
+		return
+	}
+
+	// No display device in sysfs (WSL, odd containers): ask the vendor tools.
 	if info, usage, devs := refreshNVIDIA(); info.Vendor != VendorNone {
-		gpuCache.info = info
-		gpuCache.usage = usage
-		gpuCache.devs = devs
+		gpuCache.info, gpuCache.usage, gpuCache.devs = info, usage, devs
 		return
 	}
 	if info, usage, devs := refreshAMD(); info.Vendor != VendorNone {
-		gpuCache.info = info
-		gpuCache.usage = usage
-		gpuCache.devs = devs
-		return
+		gpuCache.info, gpuCache.usage, gpuCache.devs = info, usage, devs
 	}
 }
 
+// nvidiaSMI is the tool name; tests point it at a fake.
+var nvidiaSMI = "nvidia-smi"
+
+// nvRow is one line of the single nvidia-smi query.
+type nvRow struct {
+	index      int
+	busID      string // normalised to sysfs form, "0000:01:00.0"
+	name       string
+	total      int64
+	used       int64
+	free       int64
+	util       float64
+	computeCap string
+}
+
+// queryNVIDIA runs one nvidia-smi call for everything we need. compute_cap is
+// unknown to drivers older than ~510, which fail the whole query; retry
+// without it.
+func queryNVIDIA() ([]nvRow, error) {
+	fields := "index,pci.bus_id,name,memory.total,memory.used,memory.free,utilization.gpu"
+	out, err := exec.Command(nvidiaSMI, "--query-gpu="+fields+",compute_cap", "--format=csv,noheader,nounits").Output()
+	if err != nil {
+		out, err = exec.Command(nvidiaSMI, "--query-gpu="+fields, "--format=csv,noheader,nounits").Output()
+		if err != nil {
+			return nil, err
+		}
+	}
+	var rows []nvRow
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		p := strings.Split(line, ", ")
+		if len(p) < 7 {
+			continue
+		}
+		r := nvRow{name: p[2]}
+		r.index, _ = strconv.Atoi(p[0])
+		r.busID = normaliseBusID(p[1])
+		r.total = parseInt64(p[3]) * 1024 * 1024
+		r.used = parseInt64(p[4]) * 1024 * 1024
+		r.free = parseInt64(p[5]) * 1024 * 1024
+		r.util = parseFloat(p[6])
+		if len(p) >= 8 {
+			r.computeCap = strings.TrimSpace(p[7])
+		}
+		rows = append(rows, r)
+	}
+	return rows, nil
+}
+
+// normaliseBusID turns nvidia-smi's "00000000:01:00.0" into sysfs's
+// "0000:01:00.0".
+func normaliseBusID(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if len(s) > 12 {
+		s = s[len(s)-12:]
+	}
+	return s
+}
+
+func nvidiaDeviceNodes() []DeviceNode {
+	var nodes []DeviceNode
+	for _, name := range []string{"nvidia0", "nvidiactl", "nvidia-modeset", "nvidia-uvm", "nvidia-uvm-tools"} {
+		if node := statDevice(filepath.Join(devRoot, name)); node != nil {
+			nodes = append(nodes, *node)
+		}
+	}
+	return nodes
+}
+
+// refreshNVIDIA is the fallback used only when sysfs shows no display device.
 func refreshNVIDIA() (Info, Usage, []DeviceUsage) {
-	if _, err := exec.LookPath("nvidia-smi"); err != nil {
-		return Info{Vendor: VendorNone}, Usage{}, nil
+	if _, err := exec.LookPath(nvidiaSMI); err != nil {
+		return Info{Vendor: VendorNone, Best: -1}, Usage{}, nil
 	}
-
-	var info Info
-	var usage Usage
-	info.Vendor = VendorNVIDIA
-
-	// Query GPU info
-	if out, err := exec.Command("nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader").Output(); err == nil {
-		parts := strings.SplitN(strings.TrimSpace(string(out)), ", ", 2)
-		if len(parts) >= 2 {
-			info.Name = parts[0]
-			memStr := strings.Fields(parts[1])[0]
-			memBytes, _ := strconv.ParseInt(memStr, 10, 64)
-			info.MemoryBytes = memBytes * 1024 * 1024
-		}
+	rows, err := queryNVIDIA()
+	if err != nil || len(rows) == 0 {
+		return Info{Vendor: VendorNone, Best: -1}, Usage{}, nil
 	}
-
-	// GPU count
-	if countOut, err := exec.Command("nvidia-smi", "--query-gpu=count", "--format=csv,noheader").Output(); err == nil {
-		if c, err := strconv.Atoi(strings.TrimSpace(string(countOut))); err == nil && c > 0 {
-			info.Count = c
-		}
+	info := Info{
+		Vendor: VendorNVIDIA, Devices: nvidiaDeviceNodes(), Count: len(rows), Best: rows[0].index,
+		Name: rows[0].name, MemoryBytes: rows[0].total, ComputeCap: rows[0].computeCap,
 	}
-	if info.Count == 0 {
-		info.Count = 1
+	usage := Usage{MemoryUsedBytes: rows[0].used, MemoryFreeBytes: rows[0].free, UtilizationGPU: rows[0].util}
+	var devs []DeviceUsage
+	for _, r := range rows {
+		devs = append(devs, DeviceUsage{Index: r.index, Name: r.name, MemoryTotalBytes: r.total,
+			MemoryUsedBytes: r.used, MemoryFreeBytes: r.free, UtilizationGPU: r.util})
 	}
-
-	// Compute capability ("8.9"). Reported per device; the first line is enough
-	// since mixed-architecture hosts are not something we schedule across.
-	if ccOut, err := exec.Command("nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader").Output(); err == nil {
-		if line := strings.TrimSpace(string(ccOut)); line != "" {
-			info.ComputeCap = strings.TrimSpace(strings.SplitN(line, "\n", 2)[0])
-		}
-	}
-
-	// Device nodes
-	nvidiaNames := []string{"nvidia0", "nvidiactl", "nvidia-modeset", "nvidia-uvm", "nvidia-uvm-tools"}
-	for _, name := range nvidiaNames {
-		if node := statDevice(filepath.Join("/dev", name)); node != nil {
-			info.Devices = append(info.Devices, *node)
-		}
-	}
-
-	// Usage and per-device stats (single nvidia-smi call)
-	if out, err := exec.Command("nvidia-smi",
-		"--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu",
-		"--format=csv,noheader,nounits").Output(); err == nil {
-		var devs []DeviceUsage
-		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			parts := strings.Split(line, ", ")
-			if len(parts) < 6 {
-				continue
-			}
-			idx, _ := strconv.Atoi(parts[0])
-			total, _ := strconv.ParseInt(parts[2], 10, 64)
-			used, _ := strconv.ParseInt(parts[3], 10, 64)
-			free, _ := strconv.ParseInt(parts[4], 10, 64)
-			utilGPU, _ := strconv.ParseFloat(parts[5], 64)
-			devs = append(devs, DeviceUsage{
-				Index:            idx,
-				Name:             parts[1],
-				MemoryTotalBytes: total * 1024 * 1024,
-				MemoryUsedBytes:  used * 1024 * 1024,
-				MemoryFreeBytes:  free * 1024 * 1024,
-				UtilizationGPU:   utilGPU,
-			})
-			// Aggregate usage from first GPU
-			if idx == 0 {
-				usage = Usage{
-					MemoryUsedBytes: used * 1024 * 1024,
-					MemoryFreeBytes: free * 1024 * 1024,
-					UtilizationGPU:  utilGPU,
-				}
-			}
-		}
-		return info, usage, devs
-	}
-	return Info{Vendor: VendorNone}, Usage{}, nil
+	return info, usage, devs
 }
 
 // refreshAMD detects AMD GPUs via rocm-smi and reads live VRAM/utilisation.
+// Fallback only, as refreshNVIDIA.
 //
 // Scheduling on AMD is best-effort: rocm-smi output is not as stable across
 // versions as nvidia-smi's CSV, so a parse failure degrades to detection-only
@@ -180,7 +196,7 @@ func refreshNVIDIA() (Info, Usage, []DeviceUsage) {
 func refreshAMD() (Info, Usage, []DeviceUsage) {
 	info := detectAMD()
 	if info.Vendor != VendorAMD {
-		return Info{Vendor: VendorNone}, Usage{}, nil
+		return Info{Vendor: VendorNone, Best: -1}, Usage{}, nil
 	}
 
 	devs := perDeviceAMD()
@@ -256,13 +272,21 @@ func perDeviceAMD() []DeviceUsage {
 	return devs
 }
 
+// firstField is s's first whitespace-separated word, "" when there is none.
+func firstField(s string) string {
+	if f := strings.Fields(s); len(f) > 0 {
+		return f[0]
+	}
+	return ""
+}
+
 func parseInt64(s string) int64 {
-	v, _ := strconv.ParseInt(strings.TrimSpace(strings.Fields(s + " ")[0]), 10, 64)
+	v, _ := strconv.ParseInt(firstField(s), 10, 64)
 	return v
 }
 
 func parseFloat(s string) float64 {
-	v, _ := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(strings.Fields(s + " ")[0], "%")), 64)
+	v, _ := strconv.ParseFloat(strings.TrimSuffix(firstField(s), "%"), 64)
 	return v
 }
 
@@ -272,10 +296,10 @@ func ComputeCapability() string {
 	return Detect().ComputeCap
 }
 
-func getCache() *cachedGPU {
+func getCache(fresh bool) *cachedGPU {
 	cacheMu.Lock()
 	defer cacheMu.Unlock()
-	if gpuCache == nil || time.Since(gpuCache.time) > cacheTTL {
+	if fresh || gpuCache == nil || time.Since(gpuCache.time) > cacheTTL {
 		refreshCache()
 	}
 	return gpuCache
@@ -283,25 +307,32 @@ func getCache() *cachedGPU {
 
 // Detect returns GPU hardware info. Results are cached for 5 seconds.
 func Detect() Info {
-	return getCache().info
+	return getCache(false).info
+}
+
+// DetectFresh bypasses the 5 s cache, for job admission: a dGPU switched off
+// or an eGPU unplugged since the last look must not be leased. It still never
+// wakes a suspended GPU.
+func DetectFresh() Info {
+	return getCache(true).info
 }
 
 func DetectUsage() Usage {
-	return getCache().usage
+	return getCache(false).usage
 }
 
 func PerDevice() []DeviceUsage {
-	return getCache().devs
+	return getCache(false).devs
 }
 
 func detectAMD() Info {
 	if _, err := exec.LookPath("rocm-smi"); err != nil {
-		return Info{Vendor: VendorNone}
+		return Info{Vendor: VendorNone, Best: -1}
 	}
 
 	out, err := exec.Command("rocm-smi", "--showproductname", "--showmeminfo", "vram").Output()
 	if err != nil {
-		return Info{Vendor: VendorNone}
+		return Info{Vendor: VendorNone, Best: -1}
 	}
 
 	var name string
@@ -321,18 +352,23 @@ func detectAMD() Info {
 		}
 	}
 
-	devices := scanDevices("dri", []string{"card0", "card1"}, []int{128})
-	// AMD also needs /dev/kfd
-	if node := statDevice("/dev/kfd"); node != nil {
-		devices = append(devices, *node)
-	}
 	return Info{
 		Vendor:      VendorAMD,
-		Devices:     devices,
+		Devices:     amdDeviceNodes(),
 		Name:        name,
 		MemoryBytes: memBytes,
 		ComputeCap:  amdGFXTarget(),
+		Best:        0,
 	}
+}
+
+func amdDeviceNodes() []DeviceNode {
+	devices := scanDevices("dri", []string{"card0", "card1"}, []int{128})
+	// AMD also needs /dev/kfd
+	if node := statDevice(filepath.Join(devRoot, "kfd")); node != nil {
+		devices = append(devices, *node)
+	}
+	return devices
 }
 
 // amdGFXTarget returns the ISA target ("gfx1100") reported by rocminfo.
@@ -358,7 +394,7 @@ func amdGFXTarget() string {
 }
 
 func scanDevices(subdir string, exactNames []string, renderMinors []int) []DeviceNode {
-	dir := filepath.Join("/dev", subdir)
+	dir := filepath.Join(devRoot, subdir)
 	var devices []DeviceNode
 
 	for _, name := range exactNames {
@@ -394,3 +430,6 @@ func statDevice(path string) *DeviceNode {
 		Minor: minor,
 	}
 }
+
+// logf is the package's warning sink; detection runs in the daemon and the CLI.
+func logf(format string, args ...any) { log.Printf("gpu: "+format, args...) }
