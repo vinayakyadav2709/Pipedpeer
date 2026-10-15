@@ -100,9 +100,14 @@ class _Fast:
             out = orig(*sa, **skw)
             if st.started:
                 return out          # tightened to exact for the end of the run
-            if done < _diloco_warmup(total):
-                if drift is not None:
-                    _push_window(st.refs, drift, _DILOCO_REF_WINDOW)
+            warm = done < _diloco_warmup(total)
+            if drift is not None and (warm or not st.refs):
+                # A mid-run switch (auto) starts here past the warm-up, its
+                # exact steps not collected: this exact round is its reference.
+                # ponytail: one round, not a window; feed the exact path's
+                # drifts in if the adaptive H (PIPEDPEER_DILOCO_H=0) wobbles.
+                _push_window(st.refs, drift, _DILOCO_REF_WINDOW)
+            if warm:
                 return out
             # The post-local switch, made once.
             if st.ref is None and st.refs:
@@ -117,8 +122,8 @@ class _Fast:
             st.begin(params, h, done)
             self.sync_tuned = h
             if st.ref is None:
-                _log("ddp: the lead daemon reports no drift between ranks (an older "
-                     "build), so DiLoCo keeps syncing every %d steps" % h)
+                _log("ddp: no drift between ranks measured during the exact steps, "
+                     "so DiLoCo keeps syncing every %d steps" % h)
             _log("ddp: exact sync warm-up done after %d steps (drift reference %s); "
                  "training locally, syncing every %d steps"
                  % (done, "%.3g" % st.ref if st.ref is not None else "none", h))
