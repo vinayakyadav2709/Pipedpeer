@@ -2,8 +2,10 @@ package resourceest
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
@@ -189,12 +191,10 @@ func TestTier1HistoricalEstimation(t *testing.T) {
 		t.Fatalf("expected tier=historical, got %s", req.Tier)
 	}
 
-	// max(peaks) = 3GB × 1.2 = 3.6GB
-	maxPeak := int64(3 * GB)
-	expectedMin := int64(float64(maxPeak) * 1.15) // with some tolerance
-	expectedMax := int64(float64(maxPeak) * 1.25)
-	if req.MemBytes < expectedMin || req.MemBytes > expectedMax {
-		t.Fatalf("expected ~3.6GB (3GB × 1.2), got %d", req.MemBytes)
+	// Newest first: 1, 3, 2 GiB; the 3 GiB run is one run old, so it counts
+	// 0.8x: 2.4 GiB x 1.2 headroom.
+	if want := hist(3 * GB * peakDecay); req.MemBytes != want {
+		t.Fatalf("expected %d (3 GiB x 0.8 x 1.2), got %d", want, req.MemBytes)
 	}
 }
 
@@ -220,3 +220,87 @@ func TestQueryPeakMemNoMatch(t *testing.T) {
 		t.Fatalf("expected 0 peaks for non-matching script, got %d", len(peaks))
 	}
 }
+
+// writeRuns writes history records for script, oldest first, each with args
+// and a peak.
+func writeRuns(t *testing.T, script string, runs []jobhistory.Record) {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	for i, r := range runs {
+		r.ID = fmt.Sprintf("2000000%03d", i)
+		r.ScriptPath = script
+		dir := filepath.Join(tmp, "pipedpeer", "jobs", r.ID)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(filepath.Join(dir, "metadata.json"), b, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// W10-EST: one big-argv run used to set the estimate for every argv of the
+// script (HEAD: 1.2 x 8 GiB = 9.6 GiB for a 200 MiB run).
+func TestHistoricalKeysOnArgs(t *testing.T) {
+	script := "/abs/train.py"
+	small := []string{"--rows", "1000"}
+	writeRuns(t, script, []jobhistory.Record{
+		{Args: small, PeakMemBytes: 200 * MB},
+		{Args: small, PeakMemBytes: 200 * MB},
+		{Args: []string{"--rows", "1e9"}, PeakMemBytes: 8 * GB},
+	})
+	before := int64(float64(slices.Max(jobhistory.QueryPeakMem(script, maxHistoryRuns))) * historyBuffer)
+	got := Estimate(EstimateOpts{ScriptPath: script, Args: small})
+	t.Logf("small-argv estimate: before %s, after %s", FormatBytes(before), FormatBytes(got.MemBytes))
+	if got.Tier != "historical" || got.MemBytes != 240*MB {
+		t.Fatalf("small argv: got %s (%s), want 240 MiB historical", FormatBytes(got.MemBytes), got.Tier)
+	}
+	big := Estimate(EstimateOpts{ScriptPath: script, Args: []string{"--rows", "1e9"}})
+	if want := hist(8 * GB); big.MemBytes != want {
+		t.Fatalf("big argv: got %d, want %d", big.MemBytes, want)
+	}
+	// An argv never seen falls back to every run of the script, decayed:
+	// newest 8 GiB counts in full.
+	other := Estimate(EstimateOpts{ScriptPath: script, Args: []string{"--rows", "5"}})
+	if want := hist(8 * GB); other.MemBytes != want {
+		t.Fatalf("unseen argv: got %d, want %d", other.MemBytes, want)
+	}
+}
+
+func TestHistoricalPeaksDecay(t *testing.T) {
+	script := "/abs/etl.py"
+	writeRuns(t, script, []jobhistory.Record{
+		{PeakMemBytes: 10 * GB}, // oldest of four: counts 0.8^3 = 0.512
+		{PeakMemBytes: 1 * GB},
+		{PeakMemBytes: 1 * GB},
+		{PeakMemBytes: 1 * GB}, // newest
+	})
+	got := Estimate(EstimateOpts{ScriptPath: script})
+	want := hist(10 * GB * 0.512)
+	if d := got.MemBytes - want; d < -MB || d > MB {
+		t.Fatalf("got %s, want ~%s", FormatBytes(got.MemBytes), FormatBytes(want))
+	}
+}
+
+func TestAdmitIdleFallback(t *testing.T) {
+	cases := []struct {
+		req, avail int64
+		idle, want bool
+	}{
+		{0, 1, false, true},
+		{1 * GB, 2 * GB, false, true},
+		{4 * GB, 2 * GB, false, false}, // busy node: the estimate holds
+		{4 * GB, 2 * GB, true, true},   // idle node: admit, the cap catches overruns
+		{4 * GB, 0, true, false},       // nothing free at all
+	}
+	for _, c := range cases {
+		if got := Admit(c.req, c.avail, c.idle, "test"); got != c.want {
+			t.Errorf("Admit(%d, %d, %v) = %v, want %v", c.req, c.avail, c.idle, got, c.want)
+		}
+	}
+}
+
+// hist is the historical estimate for a decayed peak of p bytes.
+func hist(p float64) int64 { return int64(p * historyBuffer) }

@@ -215,6 +215,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	historyRecord.Candidates = opts.Candidates
 	historyRecord.EstimatedMemBytes = opts.EstimatedMemBytes
 	historyRecord.EstimationTier = opts.EstimationTier
+	historyRecord.Args = opts.ScriptArgs
 	historyRecord.StorePath = env.StorePath
 	_ = jobhistory.SaveRecord(historyDir, historyRecord)
 

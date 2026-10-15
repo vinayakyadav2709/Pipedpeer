@@ -1,9 +1,10 @@
 package resourceest
 
 import (
+	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/dustin/go-humanize"
@@ -47,6 +48,7 @@ const (
 	fileMultiplier  = 3        // data files expand ~3x in memory
 	historyBuffer   = 1.2      // 20% headroom over historical peak
 	maxHistoryRuns  = 5        // look at last N runs
+	peakDecay       = 0.8      // each older run's peak counts 0.8x the next newer one
 )
 
 // Estimate returns the estimated resource requirements for a job.
@@ -57,15 +59,13 @@ func Estimate(opts EstimateOpts) ResourceReq {
 		return ResourceReq{MemBytes: opts.UserMemBytes, Tier: "user"}
 	}
 
-	// Tier 1: Historical peak from previous runs of same script
+	// Tier 1: Historical peak from previous runs of the same script, with the
+	// same arguments when there are any (`train.py --rows 1e6` and
+	// `train.py --rows 1e3` are different jobs); runs with other arguments
+	// only when this argv has never run.
 	if opts.ScriptPath != "" {
-		peaks := queryHistoricalPeaks(opts.ScriptPath)
-		if len(peaks) > 0 {
-			maxPeak := peaks[len(peaks)-1] // sorted ascending
-			estimated := int64(float64(maxPeak) * historyBuffer)
-			if estimated > 0 {
-				return ResourceReq{MemBytes: estimated, Tier: "historical"}
-			}
+		if est := historicalEstimate(opts.ScriptPath, opts.Args); est > 0 {
+			return ResourceReq{MemBytes: est, Tier: "historical"}
 		}
 	}
 
@@ -94,6 +94,7 @@ func Estimate(opts EstimateOpts) ResourceReq {
 // EstimateOpts configures the estimator.
 type EstimateOpts struct {
 	ScriptPath    string   // path to the script (for historical lookup)
+	Args          []string // the script's argv after the script path
 	DataFilePaths []string // paths to data files being synced
 	Imports       []string // detected Python imports
 	UserMemBytes  int64    // user-provided override (0 = auto)
@@ -101,9 +102,15 @@ type EstimateOpts struct {
 
 // EstimateFromScript is a convenience that scans imports automatically.
 func EstimateFromScript(scriptPath string, dataFiles []string, userMem int64) ResourceReq {
+	return EstimateForRun(scriptPath, nil, dataFiles, userMem)
+}
+
+// EstimateForRun is EstimateFromScript keyed on the script's arguments too.
+func EstimateForRun(scriptPath string, args, dataFiles []string, userMem int64) ResourceReq {
 	imports := pythondeps.ExtractImports(scriptPath)
 	return Estimate(EstimateOpts{
 		ScriptPath:    scriptPath,
+		Args:          args,
 		DataFilePaths: dataFiles,
 		Imports:       imports,
 		UserMemBytes:  userMem,
@@ -157,17 +164,63 @@ func dirSize(path string) int64 {
 	return total
 }
 
-// queryHistoricalPeaks returns the peak memory values from the last N runs
-// of the same script, sorted ascending.
-func queryHistoricalPeaks(scriptPath string) []int64 {
+// historicalEstimate is 1.2x the largest decayed peak of the last runs of
+// scriptPath with exactly these args, or of any args when none match; 0 when
+// the script never recorded a peak. Older peaks decay by run (newest counts
+// in full, each older one peakDecay times less), so one heavy run long ago
+// stops holding every later run to its size.
+func historicalEstimate(scriptPath string, args []string) int64 {
 	absPath, err := filepath.Abs(scriptPath)
 	if err != nil {
+		log.Printf("resourceest: no absolute path for %s (%v); looking up history by it as given", scriptPath, err)
 		absPath = scriptPath
 	}
+	// The last 50 runs of the script: enough to find this argv's last few
+	// among other argvs, bounded so a long history stays cheap to scan.
+	runs := jobhistory.QueryRuns(absPath, 50)
+	var same, anyArgs []int64
+	for _, r := range runs {
+		if len(same) < maxHistoryRuns && slices.Equal(r.Args, args) {
+			same = append(same, r.PeakMemBytes)
+		}
+		if len(anyArgs) < maxHistoryRuns {
+			anyArgs = append(anyArgs, r.PeakMemBytes)
+		}
+	}
+	peaks := same
+	if len(peaks) == 0 {
+		peaks = anyArgs
+	}
+	return int64(decayedPeak(peaks) * historyBuffer)
+}
 
-	peaks := jobhistory.QueryPeakMem(absPath, maxHistoryRuns)
-	sort.Slice(peaks, func(i, j int) bool { return peaks[i] < peaks[j] })
-	return peaks
+// decayedPeak is max over newest-first peaks of peak_k * peakDecay^k.
+func decayedPeak(newestFirst []int64) float64 {
+	var best float64
+	w := 1.0
+	for _, p := range newestFirst {
+		best = max(best, float64(p)*w)
+		w *= peakDecay
+	}
+	return best
+}
+
+// Admit reports whether a job estimated at required bytes may start where
+// available bytes are free. An estimate that does not fit is still admitted
+// when nothing else runs there (idle) and some memory is free: the estimate is a forecast that can
+// overshoot, and refusing an idle node stalls a job that may well fit, while
+// the job's memory cap catches a real overrun. where names the node for the
+// log line.
+func Admit(required, available int64, idle bool, where string) bool {
+	if required <= 0 || available >= required {
+		return true
+	}
+	if !idle || available <= 0 {
+		return false
+	}
+	log.Printf("resourceest: admitting a job estimated at %s on idle %s with %s available: estimates overshoot, the job's memory cap still holds",
+		FormatBytes(required), where, FormatBytes(available))
+	return true
 }
 
 // ParseMemString parses a human-readable memory string like "10G", "512M", "2048K".

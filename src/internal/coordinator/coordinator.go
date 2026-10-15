@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 )
 
 // NodeSource describes where candidate nodes came from.
@@ -302,20 +304,12 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	}
 
 	// 7. Resource filter — reject nodes that cannot handle the load right now
+	var idleShort []int // memory was the only reason, and the node runs nothing
 	for i := range candidates {
 		if candidates[i].Rejected {
 			continue
 		}
 		n := candidates[i].Node
-
-		if c.requiredMemBytes > 0 && n.Load.AvailableMemBytes > 0 &&
-			n.Load.AvailableMemBytes < c.requiredMemBytes {
-			candidates[i].Rejected = true
-			candidates[i].RejectReason = fmt.Sprintf(
-				"insufficient memory: need %s, available %s",
-				humanize.IBytes(uint64(c.requiredMemBytes)), humanize.IBytes(uint64(n.Load.AvailableMemBytes)))
-			continue
-		}
 
 		if c.requiredCores > 0 {
 			if free := freeCores(n); free > 0 && free < float64(c.requiredCores) {
@@ -333,6 +327,28 @@ func (c *Coordinator) FindNode() PlacementDecision {
 					"insufficient VRAM: need %s, best free %s",
 					humanize.IBytes(uint64(c.requiredGPUMem)), humanize.IBytes(uint64(bestFreeVRAM(n))))
 				continue
+			}
+		}
+
+		if c.requiredMemBytes > 0 && n.Load.AvailableMemBytes > 0 &&
+			n.Load.AvailableMemBytes < c.requiredMemBytes {
+			candidates[i].Rejected = true
+			candidates[i].RejectReason = fmt.Sprintf(
+				"insufficient memory: need %s, available %s",
+				humanize.IBytes(uint64(c.requiredMemBytes)), humanize.IBytes(uint64(n.Load.AvailableMemBytes)))
+			if n.Load.ActiveJobs == 0 {
+				idleShort = append(idleShort, i)
+			}
+		}
+	}
+	// The memory need is an estimate. When it fits nowhere, an idle node
+	// takes the job instead of it waiting for memory that an idle node will
+	// not free (W10-EST); the job's memory cap still catches a real overrun.
+	if len(idleShort) > 0 && !slices.ContainsFunc(candidates, func(s ScoredNode) bool { return !s.Rejected }) {
+		for _, i := range idleShort {
+			n := candidates[i].Node
+			if resourceest.Admit(c.requiredMemBytes, n.Load.AvailableMemBytes, true, "node "+n.NodeID) {
+				candidates[i].Rejected, candidates[i].RejectReason = false, ""
 			}
 		}
 	}

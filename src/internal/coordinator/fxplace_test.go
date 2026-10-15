@@ -132,7 +132,7 @@ func TestFindNodeWithinReportsProgress(t *testing.T) {
 		NoSelf:           true,
 		DiscoverFn: func() []registry.NodeRecord {
 			return []registry.NodeRecord{{NodeID: "busy-node-uuid", Capabilities: map[string]string{"hostname": "pc1"},
-				Load: registry.LoadInfo{AvailableMemBytes: 1 << 30}, State: "healthy"}}
+				Load: registry.LoadInfo{AvailableMemBytes: 1 << 30, ActiveJobs: 1}, State: "healthy"}}
 		},
 	})
 	var lines []string

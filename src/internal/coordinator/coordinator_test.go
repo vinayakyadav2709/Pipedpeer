@@ -270,14 +270,15 @@ func TestCoordinatorNoMemReqSkipsFilter(t *testing.T) {
 	}
 }
 
-// All remote nodes AND self rejected → no candidate chosen (task should queue)
+// All remote nodes AND self rejected → no candidate chosen (task should queue).
+// Every node runs a job: an idle one would take it (W10-EST).
 func TestCoordinatorAllNodesRejectedNoneChosen(t *testing.T) {
 	fakeLAN := func() []registry.NodeRecord {
 		return []registry.NodeRecord{
 			{
 				NodeID: "small-node", SSHEndpoint: "root@10.0.1.5:22",
 				Load: registry.LoadInfo{
-					CPUPercent: 10, AvailableMemBytes: 100 * 1024 * 1024, // 100MB
+					CPUPercent: 10, AvailableMemBytes: 100 * 1024 * 1024, ActiveJobs: 1, // 100MB
 				},
 				HealthScore: 1.0, State: "healthy",
 			},
@@ -288,8 +289,8 @@ func TestCoordinatorAllNodesRejectedNoneChosen(t *testing.T) {
 		SelfIdentity:     testIdentity(),
 		SelfSSH:          "root@localhost:22",
 		SelfDaemon:       fakeDaemon(t),
-		SelfLoad:         registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 50 * 1024 * 1024}, // self also low
-		RequiredMemBytes: 10 * 1024 * 1024 * 1024,                                                // need 10GB, nobody has it
+		SelfLoad:         registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 50 * 1024 * 1024, ActiveJobs: 1}, // self also low
+		RequiredMemBytes: 10 * 1024 * 1024 * 1024,                                                               // need 10GB, nobody has it
 		DiscoverFn:       fakeLAN,
 	})
 
@@ -564,5 +565,29 @@ func TestDaemonNodesRejectedUnlessHealthy(t *testing.T) {
 		if cand.Node.NodeID == "ghost-node" {
 			t.Fatalf("a stale node must not be a placement candidate: %+v", cand)
 		}
+	}
+}
+
+// W10-EST: a memory estimate that fits no node still lands on an idle one
+// instead of waiting for memory an idle node will never free; a busy node
+// keeps refusing it.
+func TestCoordinatorIdleNodeTakesOverEstimate(t *testing.T) {
+	fakeLAN := func() []registry.NodeRecord {
+		return []registry.NodeRecord{
+			{NodeID: "busy-node", SSHEndpoint: "root@10.0.1.5:22", HealthScore: 1.0, State: "healthy",
+				Load: registry.LoadInfo{AvailableMemBytes: 3 << 30, ActiveJobs: 2}},
+			{NodeID: "idle-node", SSHEndpoint: "root@10.0.1.6:22", HealthScore: 1.0, State: "healthy",
+				Load: registry.LoadInfo{AvailableMemBytes: 2 << 30}},
+		}
+	}
+	c := New(Config{
+		SelfIdentity:     testIdentity(),
+		SelfDaemon:       fakeDaemon(t),
+		NoSelf:           true,
+		RequiredMemBytes: 4 << 30,
+		DiscoverFn:       fakeLAN,
+	})
+	if got := c.FindNode().ChosenNode.NodeID; got != "idle-node" {
+		t.Fatalf("chose %q, want idle-node", got)
 	}
 }

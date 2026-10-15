@@ -206,7 +206,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			}
 
 			userMem := resourceest.ParseMemString(memOverride)
-			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
+			resReq := resourceest.EstimateForRun(scriptPath, args, nil, userMem)
 			say.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
 
