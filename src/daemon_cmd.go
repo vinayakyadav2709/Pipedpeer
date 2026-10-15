@@ -24,9 +24,11 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/internet"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/rs/zerolog/log"
 )
 
 // rememberEvery is how often the introducers that answered are written back
@@ -56,6 +58,9 @@ func daemonRole(cfg clustercfg.Config) string {
 		return heartbeat.RoleIntroducerOnly
 	case cfg.PoolOnly:
 		return heartbeat.RolePoolOnly
+	case phone.InProot():
+		log.Warn().Msg(phone.ChunksOnlyNote)
+		return heartbeat.RoleChunksOnly
 	}
 	return ""
 }

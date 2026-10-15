@@ -82,9 +82,47 @@ func Launch(args []string) {
 	os.Exit(forward(args))
 }
 
-// forward runs `pipedpeer args` in the Debian. /data/data/com.termux is bound
-// there by default, so this binary and the user's working directory keep
-// their paths.
+// loginArgs starts `proot-distro login` for the full node. --minimal, because
+// the default mode binds the host's /proc/self/fd onto /dev/fd, which proot
+// resolves once to proot-distro's own fds, so every <(...) in a Nix builder
+// fails ("/dev/fd/63: No such file or directory", proot-distro 5.3) and no
+// local Nix build works. --minimal keeps --link2symlink (Nix needs it) and
+// leaves /dev as the host's, whose /dev/fd -> /proc/self/fd proot resolves per
+// process. The binds below are the default mode's, minus /dev/fd and storage:
+// /data/data/com.termux keeps this binary and the user's working directory at
+// their paths, /apex /system /vendor /linkerconfig let Android's linker start
+// this binary (a GOOS=android build), and the fake /proc files stand in for
+// the ones Android hides. Lost: proot's SysV IPC emulation (POSIX shm via
+// /dev/shm still works) and the fake kernel release. --minimal also sets no
+// HOME or USER (Go then takes /sdcard as home on Android), so they are set.
+func loginArgs() []string {
+	args := []string{"login", "--minimal", "-e", "HOME=/root", "-e", "USER=root"}
+	bind := func(host, guest string) {
+		if exists(host) {
+			args = append(args, "--bind="+host+":"+guest)
+		}
+	}
+	for _, p := range []string{"/apex", "/odm", "/product", "/system", "/vendor", "/linkerconfig/ld.config.txt", "/data/data/com.termux"} {
+		bind(p, p)
+	}
+	bind("/dev/urandom", "/dev/random")
+	bind(filepath.Join(Rootfs(), "tmp"), "/dev/shm")
+	sysdata := filepath.Join(filepath.Dir(Rootfs()), "sysdata")
+	for name, guest := range map[string]string{
+		"loadavg": "/proc/loadavg", "stat": "/proc/stat", "uptime": "/proc/uptime",
+		"version": "/proc/version", "vmstat": "/proc/vmstat",
+		"sysctl_entry_cap_last_cap":       "/proc/sys/kernel/cap_last_cap",
+		"sysctl_inotify_max_user_watches": "/proc/sys/fs/inotify/max_user_watches",
+		"sysctl_kernel_overflowuid":       "/proc/sys/kernel/overflowuid",
+		"sysctl_kernel_overflowgid":       "/proc/sys/kernel/overflowgid",
+	} {
+		bind(filepath.Join(sysdata, name), guest)
+	}
+	return args
+}
+
+// forward runs `pipedpeer args` in the Debian, where this binary and the
+// user's working directory keep their paths (loginArgs).
 func forward(args []string) int {
 	exe, err := termuxexec.Executable()
 	if err != nil {
@@ -96,7 +134,7 @@ func forward(args []string) int {
 		fmt.Fprintf(os.Stderr, "pipedpeer: %v\n", err)
 		return 1
 	}
-	login := []string{"login", "-e", ctlEnv + "=3", "-e", "PATH=" + guestPath}
+	login := append(loginArgs(), "-e", ctlEnv+"=3", "-e", "PATH="+guestPath)
 	// proot-distro starts from a clean environment; pipedpeer's own knobs
 	// are meant for the command, so they go along.
 	for _, kv := range os.Environ() {
@@ -144,10 +182,29 @@ func serveDetach(r io.Reader) {
 			fmt.Fprintf(os.Stderr, "pipedpeer: bad detach request %q: %v\n", sc.Text(), err)
 			continue
 		}
-		login := append([]string{"login", "--detach", "-e", "PATH=" + guestPath, Distro, "--"}, argv...)
-		if out, err := termuxexec.Command("proot-distro", login...).CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "pipedpeer: could not start %s in the phone's Debian: %v %s\n", argv[0], err, tail(out))
+		// proot-distro 5 has no --detach: --no-kill-on-exit keeps the session
+		// up while the command runs, and its own session keeps it from dying
+		// with this launcher. Its output goes to launcher.log.
+		login := append(append(loginArgs(), "--no-kill-on-exit", "-e", "PATH="+guestPath, Distro, "--"), argv...)
+		cmd := termuxexec.Command("proot-distro", login...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		logPath := filepath.Join(userdir.State(), "launcher.log")
+		_ = os.MkdirAll(filepath.Dir(logPath), 0o700) // OpenFile reports the failure
+		f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err == nil {
+			cmd.Stdout, cmd.Stderr = f, f
+		} else {
+			fmt.Fprintf(os.Stderr, "pipedpeer: %s's output is lost: %v\n", argv[0], err)
 		}
+		err = cmd.Start()
+		if f != nil {
+			f.Close()
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pipedpeer: could not start %s in the phone's Debian: %v\n", argv[0], err)
+			continue
+		}
+		cmd.Process.Release()
 	}
 }
 
@@ -176,6 +233,13 @@ func Route() string {
 	}
 	return ""
 }
+
+// ChunksOnlyNote is the doctor and daemon-start line for a full-node phone.
+// Tried on an S20 FE (Play-Store Termux, proot 5.1.107.80): Termux's proot
+// started inside the proot-distro session cannot start any program (its
+// loader is embedded and started from memory, which the outer proot cannot
+// follow), so the whole-job sandbox (SandboxShell) never runs there.
+const ChunksOnlyNote = "phone: takes pool and torch chunks only; whole jobs and DDP ranks need a nested proot sandbox, which this Termux's proot can't start"
 
 // SandboxNote is the doctor and log line for the phone sandbox.
 const SandboxNote = "phone sandbox: proot filesystem view (job dir + /nix only), memory rlimit, low CPU priority; weaker than crun (no namespaces or cgroups without root)"
@@ -237,11 +301,11 @@ func hostEnvPkgs() string {
 
 // ProotSetup runs inside the Debian during setup: it builds the pinned python
 // stack (from the public aarch64 cache) that other architectures' pool chunks
-// run with, and says what the sandbox is. A failed build leaves a node that
-// takes whole jobs and same-arch chunks only.
+// run with, and says what it takes. A failed build leaves a node that takes
+// same-arch chunks only.
 func ProotSetup(w io.Writer, nixpkgs string) {
 	term.OK(w, "this phone is a %s", Route())
-	term.Warn(w, "%s", SandboxNote)
+	term.Warn(w, "%s", ChunksOnlyNote)
 	pkgs := hostEnvPkgs()
 	expr := fmt.Sprintf(`(builtins.getFlake "%s").legacyPackages.${builtins.currentSystem}.python3.withPackages (ps: with ps; [ %s ])`, nixpkgs, pkgs)
 	fmt.Fprintf(w, "fetching python with %s for other machines' pool work (about 1.5 GB with torch, from the Nix cache)...\n", pkgs)

@@ -77,7 +77,7 @@ func newDoctorCmd() *cobra.Command {
 				FreeBytes: doctor.Statfs,
 			}
 			if phone.InProot() {
-				m.PhoneBox = phone.SandboxNote
+				m.PhoneBox = phone.ChunksOnlyNote
 			}
 
 			out := cmd.OutOrStdout()
