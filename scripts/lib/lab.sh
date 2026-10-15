@@ -46,6 +46,9 @@ pp_running_mem() {
 pp_lab_mem_check() {
 	local want="$1" label="${2:-lab}" gib=1073741824
 	local total running cap avail why waited=0 limit="${LAB_MEM_WAIT:-600}"
+	# Every lab container has a memory cap, so a short spare only risks the
+	# lab OOMing, never the host; 4 GB is the default for a desktop in use.
+	local spare="${LAB_MEM_SPARE:-4}"
 	total="$(pp_meminfo MemTotal)"
 	cap=$((total - 5 * gib))
 	if ((want > cap)); then
@@ -60,8 +63,8 @@ pp_lab_mem_check() {
 		if ((running + want > cap)); then
 			why="$(printf '%.1f GB wanted + %.1f GB in running containers > %.1f GB cap (host RAM - 5 GB)' \
 				"$(bc_g "$want")" "$(bc_g "$running")" "$(bc_g "$cap")")"
-		elif ((avail - 4 * gib < want)); then
-			why="$(printf '%.1f GB wanted, MemAvailable %.1f GB (needs 4 GB spare)' "$(bc_g "$want")" "$(bc_g "$avail")")"
+		elif ((avail - spare * gib < want)); then
+			why="$(printf '%.1f GB wanted, MemAvailable %.1f GB (needs %d GB spare; LAB_MEM_SPARE)' "$(bc_g "$want")" "$(bc_g "$avail")" "$spare")"
 		fi
 		[[ -z "$why" ]] && return 0
 		if ((waited >= limit)); then
