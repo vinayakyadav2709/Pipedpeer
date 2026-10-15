@@ -44,28 +44,39 @@ def _int8_encode(flat, counts):
 
     Returns (q, scales, dequant): the bytes to send, each block's scale
     (peak/127, or 1 for an all-zero block) and what the receiver will decode,
-    so the caller can carry flat - dequant forward as error feedback."""
+    so the caller can carry flat - dequant forward as error feedback.
+
+    float32 throughout, one model-sized temporary: the float64 version made
+    four model-sized float64 arrays a step (FIX-DDPCOPY, ~8.9M params). The
+    scales are float32 values, so the receiver's q*scale (float64) rounds to
+    exactly the dequant returned here and the carried error stays exact."""
     import numpy as _np
     if not flat.size:
         return flat.astype(_np.int8), [], flat.astype(_np.float32)
     starts = _np.concatenate(([0], _np.cumsum(counts)[:-1])).astype(_np.intp)
-    peak = _np.maximum.reduceat(_np.abs(flat), starts).astype(_np.float64)
-    scales = _np.where(peak > 0, peak / 127.0, 1.0)
+    peak = _np.maximum.reduceat(_np.abs(flat), starts)
+    scales = _np.where(peak > 0, peak / _np.float32(127), _np.float32(1)).astype(_np.float32)
     per = _np.repeat(scales, counts)
-    q = _np.clip(_np.round(flat / per), -127, 127).astype(_np.int8)
-    return q, scales.tolist(), (q.astype(_np.float64) * per).astype(_np.float32)
+    tmp = _np.divide(flat, per, dtype=_np.float32)
+    _np.rint(tmp, out=tmp)
+    _np.clip(tmp, -127, 127, out=tmp)
+    q = tmp.astype(_np.int8)
+    tmp *= per                          # the dequantised values, in place
+    return q, scales.tolist(), tmp
 
 
 def _int8_decode(raw, scales, counts):
     """The float32 values int8 bytes stand for: one scale per block when the
-    sender gave one per block, else a single scale for everything."""
+    sender gave one per block, else a single scale for everything. float32
+    throughout (FIX-DDPCOPY); every rank decodes the same bytes the same way,
+    so the ranks still hold identical models."""
     import numpy as _np
-    vals = raw.astype(_np.float64)
+    vals = raw.astype(_np.float32)
     if scales and len(scales) == len(counts):
-        vals *= _np.repeat(_np.asarray(scales, dtype=_np.float64), counts)
+        vals *= _np.repeat(_np.asarray(scales, dtype=_np.float32), counts)
     else:
-        vals *= float(scales[0]) if scales else 1.0
-    return vals.astype(_np.float32)
+        vals *= _np.float32(scales[0]) if scales else _np.float32(1)
+    return vals
 
 
 def _read_frames(buf, count):
@@ -1428,7 +1439,9 @@ def _install_ddp():
         import json
         import struct
         import urllib.request
-        body = _header(kind, **fields) + b"\n" + struct.pack(">I", len(payload)) + payload
+        # payload: any contiguous buffer; joined once, never copied twice.
+        payload = memoryview(payload).cast("B")
+        body = b"".join((_header(kind, **fields), b"\n", struct.pack(">I", payload.nbytes), payload))
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
         if _TOKEN:
@@ -1475,7 +1488,7 @@ def _install_ddp():
             if _local_on(kind, opening):
                 url = _LOCAL_URL + "/v1/ddp/sync"
                 fields = dict(fields, local=_LOCAL, upstream=_SYNC_URL)
-            reply, raw, sent, recv = _reduce_post(url, kind, fields, flat.tobytes(), opening)
+            reply, raw, sent, recv = _reduce_post(url, kind, fields, flat, opening)
             return (reply, _np_ddp.frombuffer(raw, dtype=flat.dtype), reply.get("scales"),
                     sent, recv)
 
@@ -1484,7 +1497,7 @@ def _install_ddp():
             f = dict(fields, count=int(hi - lo), shard=k, shards=_WORLD)
             if scales is not None:
                 f.update(scales=scales[blo:bhi], counts=blocks[blo:bhi], scale=scales[blo])
-            part = flat[lo:hi].tobytes()
+            part = flat[lo:hi]
             if k == 0 or k in _PEER_DEAD:
                 return _reduce_post(_SYNC_URL, kind, f, part)
             try:
@@ -1535,13 +1548,16 @@ def _install_ddp():
             q = _np_ddp.zeros(flat.size, dtype="int8")
             scales = [1.0] * len(counts)
         else:
-            flat = flat.astype("float32", copy=True)
+            # Our own buffer, written in place below: _pack's concatenation
+            # already is one; a lone tensor's array is the gradient itself.
+            flat = flat.astype("float32", copy=len(arrs) == 1)
             prev = _ERR.get(key)
             if prev is not None and prev.shape == flat.shape:
                 flat += prev
             q, scales, dequant = _int8_encode(flat, counts)
             # Whatever quantisation lost: carried to the next step.
-            _ERR[key] = flat - dequant
+            flat -= dequant
+            _ERR[key] = flat
 
         _SYNC_THREAD.drain()
         _t0 = time.monotonic()
@@ -1588,23 +1604,26 @@ def _install_ddp():
         if half is None:
             half = _FP16_GRADS
         arrs = [t.detach().cpu().numpy() for t in tensors]
-        wire = arrs
-        if half:
-            # Only float32; float64 tensors keep their range, and integer
-            # buffers would be corrupted outright.
-            wire = [a.astype("float16") if a.dtype == _np_ddp.float32 else a for a in arrs]
+        # Only float32 narrows to float16; float64 tensors keep their range,
+        # and integer buffers would be corrupted outright.
+        f16 = _np_ddp.dtype("float16")
         # Reduce mode when the payload is uniform enough for the daemon to
         # average it, which is the ordinary case: one dtype across every
         # gradient. Anything mixed falls back to the blackboard, where the
         # daemon does not need to understand what it is holding.
-        wire_dtypes = {a.dtype for a in wire}
+        wire_dtypes = {f16 if half and a.dtype == _np_ddp.float32 else a.dtype for a in arrs}
         if _INT8_GRADS and kind == "grads" and len(wire_dtypes) == 1:
+            # Checked before any float16 copy is made: int8 never uses one
+            # (it cost ~0.25 s a step at 8.9M params, FIX-DDPCOPY).
             means = _daemon_reduce_int8(arrs, key=key if key is not None else id(tensors[0]),
                                         **more)
             for i, t in enumerate(tensors):
                 t.data.copy_(_th.from_numpy(
-                    _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
+                    _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype, copy=False))))
             return
+        wire = arrs
+        if half:
+            wire = [a.astype("float16") if a.dtype == _np_ddp.float32 else a for a in arrs]
         if len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
                 "float16", "float32", "float64"):
             means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind, manifest, **more)
