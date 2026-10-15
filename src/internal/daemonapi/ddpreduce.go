@@ -126,46 +126,60 @@ func (a *ddpAccumulator) add(payload []byte, scale float64) error {
 // addSegmented folds one rank's payload in, decoding each tensor with its own
 // scale, and weighting it by the number of samples that produced it.
 //
-// weight <= 0 is read as 1: a rank that does not say how many samples it
-// trained on is one running the equal-batch code, and equal weights reproduce
-// the plain average exactly.
+// weight is read by sampleWeight: 0 (not reported) counts as 1, negative (a
+// pad step) as nothing.
 func (a *ddpAccumulator) addSegmented(payload []byte, scales []float64, weight float64) error {
-	if weight <= 0 {
-		weight = 1
+	if a.dtype != ddpI8 || len(a.segments) <= 1 {
+		// addFlat reads the raw count itself: mapped here first, a pad's 0
+		// would be read again there as "not reported" and count as 1.
+		return a.addFlat(payload, scales[0], weight)
 	}
-	if a.dtype == ddpI8 && len(a.segments) > 1 {
-		if len(scales) != len(a.segments) {
-			return fmt.Errorf("%d scale(s) for %d segment(s)", len(scales), len(a.segments))
-		}
-		want := len(a.sum)
-		if len(payload) != want {
-			return fmt.Errorf("payload is %d bytes, want %d int8 values", len(payload), want)
-		}
-		off, sq := 0, 0.0
-		for i, n := range a.segments {
-			sc := scales[i]
-			if sc <= 0 {
-				return fmt.Errorf("segment %d has a non-positive scale", i)
-			}
-			for j := 0; j < n; j++ {
-				v := float64(int8(payload[off+j])) * sc
-				a.sum[off+j] += v * weight
-				sq += v * v
-			}
-			off += n
-		}
-		a.count++
-		a.weight += weight
-		a.sumSq += sq * weight
-		return nil
+	weight = sampleWeight(weight)
+	if len(scales) != len(a.segments) {
+		return fmt.Errorf("%d scale(s) for %d segment(s)", len(scales), len(a.segments))
 	}
-	return a.addFlat(payload, scales[0], weight)
+	want := len(a.sum)
+	if len(payload) != want {
+		return fmt.Errorf("payload is %d bytes, want %d int8 values", len(payload), want)
+	}
+	off, sq := 0, 0.0
+	for i, n := range a.segments {
+		sc := scales[i]
+		if sc <= 0 {
+			return fmt.Errorf("segment %d has a non-positive scale", i)
+		}
+		for j := 0; j < n; j++ {
+			v := float64(int8(payload[off+j])) * sc
+			a.sum[off+j] += v * weight
+			sq += v * v
+		}
+		off += n
+	}
+	a.count++
+	a.weight += weight
+	a.sumSq += sq * weight
+	return nil
+}
+
+// sampleWeight is how much a contribution counts in the mean, from the
+// sample count its rank reported. 0 is a rank that did not say - one running
+// the equal-batch code - and equal weights reproduce the plain average
+// exactly. Negative is a pad step: a rank with no sample in the epoch's last
+// partial step repeats one so the step counts stay equal, and it must not
+// count at all, or the last step is not the mean over the remainder that one
+// machine computes.
+func sampleWeight(w float64) float64 {
+	switch {
+	case w < 0:
+		return 0
+	case w == 0:
+		return 1
+	}
+	return w
 }
 
 func (a *ddpAccumulator) addFlat(payload []byte, scale float64, weight float64) error {
-	if weight <= 0 {
-		weight = 1
-	}
+	weight = sampleWeight(weight)
 	want := len(a.sum) * a.dtype.size()
 	if len(payload) != want {
 		return fmt.Errorf("payload is %d bytes, want %d for %d %s values",
@@ -218,7 +232,10 @@ func (a *ddpAccumulator) drift() (float64, bool) {
 	if a.count < 2 || a.weight <= 0 {
 		return 0, false
 	}
-	inv := 1 / a.weight
+	inv := 0.0 // only pads contributed: nothing to average, zeros out
+	if a.weight > 0 {
+		inv = 1 / a.weight
+	}
 	m2 := 0.0
 	for _, s := range a.sum {
 		m := s * inv
@@ -261,7 +278,10 @@ func (a *ddpAccumulator) meanResidual(res []float64) ([]byte, []float64, error) 
 	if len(segs) == 0 {
 		segs = []int{len(a.sum)}
 	}
-	inv := 1 / a.weight
+	inv := 0.0 // only pads contributed: nothing to average, zeros out
+	if a.weight > 0 {
+		inv = 1 / a.weight
+	}
 	out := make([]byte, len(a.sum))
 	scales := make([]float64, len(segs))
 	val := func(j int) float64 {
@@ -308,7 +328,10 @@ func (a *ddpAccumulator) mean() ([]byte, float64, error) {
 	if a.count == 0 {
 		return nil, 0, fmt.Errorf("no ranks contributed")
 	}
-	inv := 1 / a.weight
+	inv := 0.0 // only pads contributed: nothing to average, zeros out
+	if a.weight > 0 {
+		inv = 1 / a.weight
+	}
 	out := make([]byte, len(a.sum)*a.dtype.size())
 	switch a.dtype {
 	case ddpF16:

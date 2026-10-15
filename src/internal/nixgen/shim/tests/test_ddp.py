@@ -297,3 +297,49 @@ def test_pass_end_fires_once_and_passes_through():
     with pytest.raises(StopIteration):
         next(it)
     assert fired == [1]
+
+
+@pytest.mark.parametrize("n,weights,base", [
+    (70, [0.5, 0.5], 8),        # 6 left: 3 + 3
+    (65, [0.5, 0.5], 8),        # 1 left: one rank pads
+    (4001, [1 / 3] * 3, 32),    # 1 left over three ranks: two pad
+    (1003, [0.7, 0.2, 0.1], 32),
+    (5, [0.5, 0.5], 8),         # less than one step: a single partial one
+])
+def test_every_sample_once_including_the_last_partial_batch(n, weights, base):
+    seen, total, pads = [], set(), 0
+    for rank in range(len(weights)):
+        s = ddp._WeightedShardSampler(n, weights, rank, False, base, len(weights))
+        idx = list(s)
+        assert len(idx) == len(s)
+        if s.pad:
+            pads += 1
+            idx = idx[:-1]          # the repeat, weighed as nothing
+        assert s.tail <= s.batch    # the remainder stays one batch
+        seen.extend(idx)
+        total.add(s.total_steps)
+    assert sorted(seen) == list(range(n)), "not every sample exactly once"
+    assert total == {-(-n // base)}, "steps differ from one machine's %d" % -(-n // base)
+    left = n % base
+    assert pads == max(0, len(weights) - left) if left else pads == 0
+
+
+def test_drop_last_drops_like_the_script():
+    s = ddp._WeightedShardSampler(70, [0.5, 0.5], 0, False, 8, 2, drop_last=True)
+    assert s.total_steps == 8 and s.tail == 0 and not s.pad and len(s) == 32
+
+
+def test_syncs_land_on_the_epoch_end():
+    # 29 steps an epoch: after step 20 of it at most 9 more, so the epoch's
+    # last step (and with it the run's) is a sync even with no run length.
+    assert ddp._diloco_epoch_cap(16, 20, 29) == 9
+    assert ddp._diloco_epoch_cap(4, 20, 29) == 4
+    assert ddp._diloco_epoch_cap(64, 29, 29) == 29   # the step that ended one
+    assert ddp._diloco_epoch_cap(8, 28, 29) == 1
+    assert ddp._diloco_epoch_cap(8, 3, None) == 8
+    n, h, ends = 0, 2, []
+    while n < 29 * 3:
+        h = ddp._diloco_epoch_cap(min(64, h * 2), n % 29 if n % 29 else (29 if n else 0), 29)
+        n += h
+        ends.append(n)
+    assert 29 in ends and 58 in ends and 87 in ends

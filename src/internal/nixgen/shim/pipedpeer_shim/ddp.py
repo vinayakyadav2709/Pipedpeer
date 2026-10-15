@@ -16,6 +16,11 @@ _EXIT_MISSED_START = 75
 _EXIT_ABORTED = 76
 _EXIT_RELEASED = 77
 
+# The "samples" a pad step reports: a repeated sample that only keeps the
+# step counts equal, weighed as nothing by the daemon (0 still means "not
+# reported", read as 1).
+_PAD_SAMPLES = -1
+
 # int8 gradients get one scale per block of this many values, never spanning
 # two tensors (R1 #3, the block size SparseLoCo/INTELLECT-1 use): a scale per
 # tensor lets one large value flatten the rest of a big layer to a few levels.
@@ -187,13 +192,35 @@ class _PassEnd:
 # how far the ranks drift apart (AdaComm-style, Wang & Joshi 2019), then back
 # to exact over the last tenth of the run when its length is known. The
 # script's batch, learning rate and epochs are never touched.
-_DILOCO_OUTER_LR = 0.7        # the paper's defaults (user, Decisions)
-_DILOCO_MOMENTUM = 0.9
+
+
+def _env_num(name, default, kind=float):
+    """A numeric tuning variable, or default (with a log line) when unset
+    or not a number."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return kind(raw)
+    except ValueError:
+        sys.stderr.write("[pipedpeer] %s=%r is not a number; using %r\n" % (name, raw, default))
+        return default
+
+
+# The paper's defaults (user, Decisions). Tuning variables, for the DiLoCo
+# benchmark (scripts/bench-diloco.sh): PIPEDPEER_DILOCO_OUTER_LR,
+# PIPEDPEER_DILOCO_MOMENTUM, PIPEDPEER_DILOCO_H (a fixed interval instead of
+# the adaptive one; 0 = adaptive) and PIPEDPEER_DILOCO_UNWEIGHTED=1 (average
+# the ranks as equals instead of by samples).
+_DILOCO_OUTER_LR = _env_num("PIPEDPEER_DILOCO_OUTER_LR", 0.7)
+_DILOCO_MOMENTUM = _env_num("PIPEDPEER_DILOCO_MOMENTUM", 0.9)
+_DILOCO_FIXED_H = _env_num("PIPEDPEER_DILOCO_H", 0, int)
+_DILOCO_UNWEIGHTED = os.environ.get("PIPEDPEER_DILOCO_UNWEIGHTED") == "1"
 _DILOCO_H_MAX = 64
 # The local phase starts here and doubles or halves at each sync; H=1 is
 # exact sync, which only the warm-up and the final tightening use, so every
 # local phase ends with a round that also syncs the optimizer state.
-_DILOCO_H_START = 2
+_DILOCO_H_START = _DILOCO_FIXED_H or 2
 _DILOCO_H_FLOOR = 2
 # Every Kth outer step the inner optimizer's state (Adam's exp_avg and
 # exp_avg_sq, SGD's momentum) is averaged in the same round as the weights.
@@ -236,7 +263,9 @@ def _diloco_cap(n, total):
 def _diloco_next_interval(h, drift, ref, n, total):
     """The interval until the next sync, decided after a sync that ended
     step n with the given drift (None: not measured this round)."""
-    if drift is not None and ref is not None:
+    if _DILOCO_FIXED_H:
+        h = _DILOCO_FIXED_H
+    elif drift is not None and ref is not None:
         if ref > 0:
             excess = drift / ref
         else:
@@ -245,9 +274,23 @@ def _diloco_next_interval(h, drift, ref, n, total):
             h = h * 2
         elif excess > _DILOCO_DRIFT_SHRINK:
             h = h // 2
-    h = min(_DILOCO_H_MAX, max(_DILOCO_H_FLOOR, h))
+    h = min(_DILOCO_H_MAX, max(1 if _DILOCO_FIXED_H else _DILOCO_H_FLOOR, h))
     cap = _diloco_cap(n, total)
     return h if cap is None else min(h, cap)
+
+
+def _diloco_epoch_cap(h, step_in_epoch, epoch_steps):
+    """h capped so a sync lands on the epoch's last step. A run ends at an
+    epoch's end, so it ends synced: every rank holds the global model, even
+    when the run length is unknown. Without this the last interval (up to 64
+    steps, a third of a short run) trained each rank on its own shard alone.
+    epoch_steps None or 0: not known, h unchanged."""
+    if not epoch_steps:
+        return h
+    left = epoch_steps - step_in_epoch
+    if left <= 0:
+        left = epoch_steps    # the step that ended an epoch: the next one
+    return max(1, min(h, left))
 
 
 def _diloco_note(total):
@@ -400,15 +443,20 @@ class _WeightedShardSampler:
     alone gives shards of only roughly the right size, and the step count
     needs them exact.
 
-    The remainder below one global batch is dropped, as drop_last does in any
-    DDP setup, and shuffling makes it a different remainder each epoch.
+    The remainder below one global batch is trained, as one machine trains
+    its last partial batch (unless the script's loader says drop_last): it
+    is one extra step, split by share (_split_tail). A live rank with no
+    sample in it repeats one of its own as a pad, so every rank still takes
+    the same number of steps, and reports it as weighing nothing
+    (_PAD_SAMPLES), so the sample-weighted average over that step is exactly
+    the mean over the remainder - what one machine computes.
 
     Shuffling is seeded from the epoch alone, so every rank computes the same
     owners and their shards stay disjoint - the same contract
     DistributedSampler keeps, and the reason set_epoch exists.
     """
 
-    def __init__(self, n, weights, rank, shuffle, base_batch, world):
+    def __init__(self, n, weights, rank, shuffle, base_batch, world, drop_last=False):
         if n <= 0:
             raise ValueError("empty dataset")
         self.n = n
@@ -421,16 +469,24 @@ class _WeightedShardSampler:
         self.batches = _weighted_batches(weights, base_batch, world)
         self.batch = self.batches[rank]
         self.steps = n // sum(self.batches)
-        if self.steps < 1:
+        if self.steps < 1 and drop_last:
             raise ValueError(
                 "%d samples do not make one step of %d across the ring"
                 % (n, sum(self.batches)))
+        self.drop_last = drop_last
+        left = 0 if drop_last else n - self.steps * sum(self.batches)
+        self.tails, pads = _split_tail(self.weights, self.batches, left)
+        self.tail = self.tails[rank]
+        # This rank's last batch of an epoch is a pad (one repeated sample
+        # that weighs nothing); total_steps counts the partial step.
+        self.pad = rank in pads
+        self.total_steps = self.steps + (1 if left else 0)
 
     def set_epoch(self, epoch):
         self.epoch = epoch
 
     def __len__(self):
-        return self.steps * self.batch
+        return self.steps * self.batch + self.tail + (1 if self.pad else 0)
 
     def __iter__(self):
         # torch is imported per-function everywhere in this file, never as a
@@ -443,10 +499,44 @@ class _WeightedShardSampler:
                 g = _th_local.Generator()
                 g.manual_seed(self.epoch)
                 order = _th_local.randperm(self.n, generator=g).tolist()
-            quotas = [self.steps * b for b in self.batches]
+            quotas = [self.steps * b + t for b, t in zip(self.batches, self.tails)]
             owners = _hash_owners(self.n, self.weights, quotas, order)
-            self._owned = (self.epoch, owners[self.rank])
+            mine = owners[self.rank]
+            if self.pad:
+                mine = mine + [mine[0] if mine else 0]
+            self._owned = (self.epoch, mine)
         return iter(self._owned[1])
+
+
+def _split_tail(weights, batches, left):
+    """Split the last partial step's left samples between the live ranks.
+
+    Returns (per-rank counts, the ranks that pad). By share, each piece no
+    larger than the rank's full batch so it stays a single batch (the
+    excess moves to ranks with room; the full batches total more than left,
+    so there always is). With fewer samples than live ranks, the largest
+    shares take one each and the rest pad. Every rank computes the same
+    answer from the same shares."""
+    tails = [0] * len(weights)
+    live = [r for r, w in enumerate(weights) if w > 0]
+    if left <= 0 or not live:
+        return tails, set()
+    by_share = sorted(live, key=lambda r: (-weights[r], r))
+    if left >= len(live):
+        tails = _weighted_batches(weights, left, len(weights))
+        extra = 0
+        for r in live:
+            if tails[r] > batches[r]:
+                extra += tails[r] - batches[r]
+                tails[r] = batches[r]
+        for r in by_share:
+            take = min(batches[r] - tails[r], extra)
+            tails[r] += take
+            extra -= take
+    else:
+        for r in by_share[:left]:
+            tails[r] = 1
+    return tails, {r for r in live if tails[r] == 0}
 
 
 def _hash_owners(n, weights, quotas, order=None):
@@ -650,6 +740,8 @@ def _install_ddp():
     # ring change happens at one of these, and a rank joining mid-run skips
     # exactly the ones the ring had already done.
     _ITERS = [0]
+    # [the sampler of the loader being iterated, steps taken this epoch].
+    _EPOCH = [None]
     # Set when a loader is sharded by hash: only such a ring can take a rank
     # mid-run, and the daemon is told so with every sync.
     _SHARDED_HASH = [False]
@@ -1435,14 +1527,20 @@ def _install_ddp():
         this is usable rather than merely smaller.
         """
         flat, shapes, sizes = _pack(arrs)
-        flat = flat.astype("float32", copy=True)
-        prev = _ERR.get(key)
-        if prev is not None and prev.shape == flat.shape:
-            flat += prev
         counts = _int8_blocks(sizes)
-        q, scales, dequant = _int8_encode(flat, counts)
-        # Whatever quantisation lost: carried to the next step.
-        _ERR[key] = flat - dequant
+        if int(more.get("samples", _BATCH_N[0])) < 0:
+            # A pad step weighs nothing: send zeros and keep the carried
+            # error for the next real gradient.
+            q = _np_ddp.zeros(flat.size, dtype="int8")
+            scales = [1.0] * len(counts)
+        else:
+            flat = flat.astype("float32", copy=True)
+            prev = _ERR.get(key)
+            if prev is not None and prev.shape == flat.shape:
+                flat += prev
+            q, scales, dequant = _int8_encode(flat, counts)
+            # Whatever quantisation lost: carried to the next step.
+            _ERR[key] = flat - dequant
 
         _SYNC_THREAD.drain()
         _t0 = time.monotonic()
@@ -1545,6 +1643,8 @@ def _install_ddp():
         if _DROPPED[0] or _live_ranks() <= 1:
             return None
         _DRIFT[0] = None
+        if _DILOCO_UNWEIGHTED:
+            samples = 0         # the daemon weighs a rank that gives none as 1
         if extras or not _INT8_GRADS:
             err = _ERR.pop("delta", None)
             wire, off = [], 0
@@ -1560,6 +1660,12 @@ def _install_ddp():
         else:
             means = _daemon_reduce_int8(deltas, "delta", "delta", samples=int(samples))
         return means, _DRIFT[0]
+
+    def _fast_epoch_cap(h):
+        ep = _EPOCH[0]
+        if ep is None:
+            return h
+        return _diloco_epoch_cap(h, ep[1], int(getattr(ep[0], "total_steps", 0) or 0))
 
     def _fast_step(opt, params, n, orig, sa, skw):
         """Step n of opt under --ddp-sync fast: exact sync through the
@@ -1590,7 +1696,9 @@ def _install_ddp():
                 st.ref = sum(st.refs) / len(st.refs)
             cap = _diloco_cap(done, total)
             h = _DILOCO_H_START if cap is None else min(_DILOCO_H_START, cap)
-            if h <= 1:
+            if h > 1:
+                h = _fast_epoch_cap(h)
+            if h <= 1 and cap is not None and cap <= 1:
                 st.started = True   # too near the end to train locally
                 return out
             st.begin(params, h, done)
@@ -1603,7 +1711,7 @@ def _install_ddp():
                  % (done, "%.3g" % st.ref if st.ref is not None else "none", h))
             return out
         out = orig(*sa, **skw)
-        st.samples += int(_BATCH_N[0])
+        st.samples += max(0, int(_BATCH_N[0]))  # a pad step adds no samples
         if done < st.next_sync:
             return out
         cap = _diloco_cap(done, total)
@@ -1614,7 +1722,7 @@ def _install_ddp():
             _SYNC_TUNED[0] = 1
             _log("ddp: DiLoCo back to exact sync for the last %d step(s)" % max(0, total - done))
             return out
-        h = _diloco_next_interval(st.h, drift, st.ref, done, total)
+        h = _fast_epoch_cap(_diloco_next_interval(st.h, drift, st.ref, done, total))
         if h != st.h:
             _log("ddp: DiLoCo syncs every %d steps now (was %d; drift %s against %s)"
                  % (h, st.h, "%.3g" % drift if drift is not None else "not measured",
@@ -1823,6 +1931,14 @@ def _install_ddp():
                         _warn("training with DiLoCo, sync every %d-%d steps after %d "
                               "exact ones — --ddp-sync exact for per-step sync"
                               % (_DILOCO_H_START, _DILOCO_H_MAX, _diloco_warmup(_TOTAL[0])))
+            ep = _EPOCH[0]
+            if ep is not None:
+                ep[1] += 1
+                if ep[0].pad and ep[1] == ep[0].total_steps:
+                    # This rank's last batch of the epoch is a repeated sample
+                    # standing in so every rank takes the same number of
+                    # steps: it weighs nothing in the average.
+                    _BATCH_N[0] = _PAD_SAMPLES
             _now = time.monotonic()
             if _STEP_MARK[0] is not None:
                 _elapsed = _now - _STEP_MARK[0]
@@ -1927,7 +2043,8 @@ def _install_ddp():
             else:
                 try:
                     sampler = _WeightedShardSampler(
-                        len(ds), _WEIGHTS, _RANK, shuffle, bs.batch_size, _WORLD)
+                        len(ds), _WEIGHTS, _RANK, shuffle, bs.batch_size, _WORLD,
+                        drop_last=bool(getattr(bs, "drop_last", False)))
                 except Exception as e:
                     _log("ddp: cannot shard this dataset by measured share (%s); "
                          "falling back to equal shards" % e)
@@ -1950,7 +2067,8 @@ def _install_ddp():
         if can_rebatch:
             try:
                 sampler = _WeightedShardSampler(
-                    len(ds), [1.0 / _WORLD] * _WORLD, _RANK, shuffle, bs.batch_size, _WORLD)
+                    len(ds), [1.0 / _WORLD] * _WORLD, _RANK, shuffle, bs.batch_size, _WORLD,
+                    drop_last=bool(getattr(bs, "drop_last", False)))
             except Exception as e:
                 _log("ddp: cannot shard this dataset by hash (%s); using "
                      "DistributedSampler, so a rank that dies loses its data" % e)
@@ -2306,7 +2424,8 @@ def _install_ddp():
                 bs = getattr(self, "batch_sampler", None)
                 try:
                     reshared = _WeightedShardSampler(
-                        sampler.n, new, _RANK, sampler.shuffle, sampler.base, _WORLD)
+                        sampler.n, new, _RANK, sampler.shuffle, sampler.base, _WORLD,
+                        drop_last=sampler.drop_last)
                 except Exception as e:
                     sampler.gen = _RING_GEN[0]
                     _log("ddp: cannot take the ring's new shares (%s); keeping "
@@ -2324,6 +2443,11 @@ def _install_ddp():
             if hasattr(sampler, "set_epoch"):
                 sampler.set_epoch(_EPOCHS.get(self, 0))
                 _EPOCHS[self] = _EPOCHS.get(self, 0) + 1
+            # Steps are counted from here, to know when this epoch's last
+            # (possibly pad) batch is the one being stepped.
+            # ponytail: one counter, for the loader iterated last; a loop that
+            # interleaves two sharded loaders' steps would need one each.
+            _EPOCH[0] = [sampler, 0] if isinstance(sampler, _WeightedShardSampler) else None
         return _ORIG_ITER(self)
 
     def _ddp_init(self, *a, **kw):

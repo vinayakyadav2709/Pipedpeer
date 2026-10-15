@@ -67,19 +67,21 @@ for n, weights, base in cases:
         steps = []
         for rank in range(3):
             s = ddp._WeightedShardSampler(n, weights, rank, False, base, 3)
-            seen.extend(list(s))
-            steps.append(s.steps)
+            idx = list(s)
+            if s.pad:
+                idx = idx[:-1]  # the last partial step's repeat, weighed as nothing
+            seen.extend(idx)
+            steps.append(s.total_steps)
         assert len(set(seen)) == len(seen), (
             "n=%d weights=%s duplicated samples" % (n, weights))
         assert len(set(steps)) == 1, (
             "n=%d weights=%s gave step counts %s - every step ends at a "
             "barrier, so ranks that finish early are left waiting"
             % (n, weights, steps))
-        dropped = n - len(seen)
-        globalbatch = sum(ddp._weighted_batches(weights, base, 3))
-        assert dropped < globalbatch, (
-            "n=%d weights=%s dropped %d samples, more than one global batch "
-            "of %d" % (n, weights, dropped, globalbatch))
+        # The last partial batch is trained too (FIX-PARTIAL), as one
+        # machine trains it: nothing is dropped.
+        assert len(seen) == n, (
+            "n=%d weights=%s trained %d of %d samples" % (n, weights, len(seen), n))
 print("WROUND-OK")
 `, "WROUND-OK")
 }

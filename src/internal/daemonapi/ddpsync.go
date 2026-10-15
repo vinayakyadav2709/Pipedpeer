@@ -683,8 +683,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		e.syncEvery = req.SyncEvery
 	}
 	for _, rep := range reports {
-		if !lead || rep.StepMillis <= 0 {
-			continue
+		if !lead || rep.StepMillis <= 0 || rep.Samples < 0 {
+			continue // a pad step's sample count says nothing about speed
 		}
 		if e.stepMillis == nil {
 			e.stepMillis = map[int]float64{}
@@ -1038,6 +1038,9 @@ func (s *Server) ddpForwardLocal(key string, lr *ddpLocalRound) {
 	hdr.Local = nil // the lead takes it as an ordinary contribution; ddpPostUpstream drops Upstream
 	hdr.StepMillis, hdr.SyncMillis, hdr.Data = 0, 0, ""
 	hdr.Samples = int(math.Round(lr.acc.weight))
+	if lr.acc.weight <= 0 {
+		hdr.Samples = -1 // every rank here padded: the machine weighs nothing
+	}
 	hdr.Scale, hdr.Scales = 0, nil
 	if lr.acc.dtype == ddpI8 && len(scales) > 0 {
 		hdr.Scale, hdr.Scales = scales[0], scales
