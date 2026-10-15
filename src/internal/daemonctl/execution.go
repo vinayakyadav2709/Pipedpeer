@@ -113,6 +113,7 @@ type UploadOptions struct {
 type UploadResponse struct {
 	JobID     string   `json:"job_id"`
 	StorePath string   `json:"store_path"`
+	NodeID    string   `json:"node_id,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
 	// SeedMs is the part of the upload the daemon spent giving the closure to
 	// its peers.
@@ -304,20 +305,23 @@ func uploadJob(ctx context.Context, host string, port int, workspacePath, narPat
 	for _, w := range result.Warnings {
 		fmt.Fprintf(os.Stderr, "      Warning: %s\n", w)
 	}
-	recordEnvSend(host, port, started, result.SentBytes+fileSize(wsSend))
+	recordEnvSend(host, port, result.NodeID, started, result.SentBytes+fileSize(wsSend))
 	return &result, nil
 }
 
 // recordEnvSend adds the run record's env_send step: closure and workspace
 // from this machine to the node at host:port.
-func recordEnvSend(host string, port int, started time.Time, bytes int64) {
+func recordEnvSend(host string, port int, nodeID string, started time.Time, bytes int64) {
+	if nodeID == "" {
+		say.Printf("      %s:%d did not name its node id (older build); env_send has no receiver\n", host, port)
+	}
 	machine := ""
 	if me, err := identity.GetOrCreate(); err == nil {
 		machine = me.NodeID
 	} else {
 		fmt.Fprintf(os.Stderr, "      warning: env_send step has no machine id: %v\n", err)
 	}
-	runrec.Add(runrec.Step{Machine: machine, Node: fmt.Sprintf("%s:%d", host, port), Chunk: -1, Name: "env_send",
+	runrec.Add(runrec.Step{Machine: machine, Node: nodeID, Chunk: -1, Name: "env_send",
 		StartNS: started.UnixNano(), DurNS: time.Since(started).Nanoseconds(), Bytes: bytes})
 }
 
