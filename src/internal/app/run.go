@@ -13,7 +13,7 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
-	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/runrec"
 	"github.com/pipedpeer/pipedpeer/internal/say"
@@ -488,12 +488,19 @@ func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart 
 		}
 		steps = append(steps, r.Steps...)
 	}
-	self := heartbeat.Machine()
-	host, _ := os.Hostname()
+	// Machine ids are node ids (key fingerprints), never addresses.
+	me, err := identity.GetOrCreate()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read this node's identity for the run record: %v\n", err)
+	}
 	ranHere := opts.PlacementSource == "self"
-	rec := runrec.Record{RunID: runID, TotalNS: time.Since(started).Nanoseconds(), Steps: steps}
+	rec := runrec.Record{RunID: runID, TotalNS: time.Since(started).Nanoseconds(), Steps: steps,
+		Names: map[string]string{}}
+	if me.NodeID != "" {
+		rec.Names[me.NodeID] = me.Hostname
+	}
 	if !scriptStart.IsZero() {
-		machine := self
+		machine := me.NodeID
 		if !ranHere {
 			machine = opts.TargetID
 		}
@@ -501,14 +508,24 @@ func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart 
 		rec.Steps = append(rec.Steps, runrec.Step{Machine: machine, Node: opts.TargetID, Chunk: -1, Name: "script",
 			StartNS: scriptStart.UnixNano(), DurNS: rec.ScriptNS})
 	}
+	left := !ranHere
+	var known map[string]string
+	for _, s := range rec.Steps {
+		if s.Machine == "" || s.Machine == me.NodeID {
+			continue
+		}
+		left = true
+		if _, ok := rec.Names[s.Machine]; !ok {
+			if known == nil {
+				known = nodeNames(opts.DaemonHost, opts.DaemonPort)
+			}
+			if name, ok := known[s.Machine]; ok {
+				rec.Names[s.Machine] = name
+			}
+		}
+	}
 	if err := runrec.Save(historyDir, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not save the run record in %s: %v\n", historyDir, err)
-	}
-	left := !ranHere
-	for _, s := range rec.Steps {
-		if s.Machine != "" && s.Machine != self && s.Machine != host {
-			left = true
-		}
 	}
 	if left {
 		runrec.WriteSimple(os.Stderr, runrec.Simple(rec))
@@ -516,6 +533,27 @@ func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart 
 	if say.Verbose {
 		runrec.WriteDetailed(os.Stderr, rec)
 	}
+}
+
+// nodeNames maps node id to hostname for every node the daemon at host:port
+// knows, itself included.
+func nodeNames(host string, port int) map[string]string {
+	names := map[string]string{}
+	var nodes []struct {
+		NodeID       string            `json:"node_id"`
+		Capabilities map[string]string `json:"capabilities"`
+	}
+	url := fmt.Sprintf("http://%s/v1/nodes", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err := getJSON(url, &nodes); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not list %s's nodes for the run record's names: %v\n", host, err)
+		return names
+	}
+	for _, n := range nodes {
+		if name := n.Capabilities["hostname"]; n.NodeID != "" && name != "" {
+			names[n.NodeID] = name
+		}
+	}
+	return names
 }
 
 // noEstimateMemLimit caps a job that came with no memory estimate. Generous
