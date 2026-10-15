@@ -133,8 +133,17 @@ var (
 	localAddrs = interfaceAddrs
 	// newKeeper asks the router for a port; tests stub it rather than map a
 	// port on whatever router the test machine sits behind.
-	newKeeper = portmap.NewKeeper
+	newKeeper = func(ctx context.Context, port uint16, log func(string, ...any)) portMapper {
+		return portmap.NewKeeper(ctx, port, log)
+	}
 )
+
+// portMapper is what the manager needs of a portmap.Keeper; a seam so tests
+// can use a slow or granting fake instead of the machine's real router.
+type portMapper interface {
+	Current() portmap.Mapping
+	Close()
+}
 
 const (
 	// hintTTL is how long a gossiped address stays worth trying. Gossip
@@ -155,7 +164,8 @@ const (
 type Manager struct {
 	cfg      Config
 	endpoint *direct.Endpoint
-	keeper   *portmap.Keeper
+	// keeper is nil until mapPort has asked the router.
+	keeper portMapper
 
 	mu sync.Mutex
 	// ctx is Run's, for work started from outside it (Hint).
@@ -333,14 +343,6 @@ func (m *Manager) Run(ctx context.Context) {
 		m.serveIntroducer(ctx)
 	}
 
-	// Ask the router for a port. When it grants one this node is reachable
-	// without any punching at all, which is the best case and the cheapest.
-	m.keeper = newKeeper(ctx, ep.Port(), m.cfg.Log)
-	defer m.keeper.Close()
-	if mp := m.keeper.Current(); mp.Kind != portmap.KindNone {
-		m.cfg.Log("router granted %s", mp)
-	}
-
 	m.mu.Lock()
 	m.ctx = ctx
 	m.mu.Unlock()
@@ -349,6 +351,7 @@ func (m *Manager) Run(ctx context.Context) {
 	// socket as everything else, so one reader dispatches them.
 	go m.readIntroducer(ctx)
 	go m.watchInterfaces(ctx)
+	go m.mapPort(ctx, ep.Port())
 
 	ticker := time.NewTicker(m.cfg.Poll)
 	defer ticker.Stop()
@@ -362,6 +365,27 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// mapPort asks the router for a port, in the background, and re-registers
+// when one is granted so peers learn the mapped address.
+//
+// In the background because UPnP and NAT-PMP discovery take about seven
+// seconds on a router that speaks neither, and while it ran nothing read the
+// introducer's replies: connecting took 8.2 s where 3 s was the target
+// (FIX-E2). A granted port is the best path there is - reachable with no
+// punching at all - but it is a later improvement, not a precondition.
+func (m *Manager) mapPort(ctx context.Context, port uint16) {
+	k := newKeeper(ctx, port, m.cfg.Log)
+	defer k.Close()
+	m.mu.Lock()
+	m.keeper = k
+	m.mu.Unlock()
+	if mp := k.Current(); mp.Kind != portmap.KindNone && ctx.Err() == nil {
+		m.cfg.Log("router granted %s", mp)
+		m.sync(ctx)
+	}
+	<-ctx.Done()
 }
 
 // serveIntroducer runs this cluster's address book inside the daemon.
@@ -675,10 +699,13 @@ func (m *Manager) Hint(node string, candidates []string) {
 func (m *Manager) sync(ctx context.Context) {
 	m.mu.Lock()
 	reflex := m.reflex
+	keeper := m.keeper
 	m.mu.Unlock()
 
 	var mapped netip.AddrPort
-	if mp := m.keeper.Current(); mp.Kind != portmap.KindNone && mp.Public {
+	if keeper == nil {
+		// Still asking the router (mapPort); register without a mapping.
+	} else if mp := keeper.Current(); mp.Kind != portmap.KindNone && mp.Public {
 		// The router's word, checked against what a public server actually
 		// sees. A range check catches the obvious double-NAT cases, and not
 		// this one: a phone tether here granted a UPnP mapping on
