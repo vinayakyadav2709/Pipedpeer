@@ -27,6 +27,8 @@ for _ in range(60):
 print("RANK-OK")
 `
 
+var driftRef = regexp.MustCompile(`drift reference [0-9]`)
+
 var switchedAt = regexp.MustCompile(`switching to DiLoCo after (\d+) optimizer step`)
 
 // TestShimAutoSwitchesToDiLoCoAtTheSameStep: with --ddp-sync unset, the
@@ -43,9 +45,10 @@ func TestShimAutoSwitchesToDiLoCoAtTheSameStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The auto ring, and --ddp 2 (FIX-AUTOSYNC: a fixed ring never switched).
+	// A 2-step warm-up puts the switch past it, as on a real run (FIX-AUTOSYNC2).
 	for _, env := range [][]string{
 		{"PIPEDPEER_VERBOSE=1"},
-		{"PIPEDPEER_VERBOSE=1", "PIPEDPEER_DDP_FIXED=1"},
+		{"PIPEDPEER_VERBOSE=1", "PIPEDPEER_DDP_FIXED=1", "PIPEDPEER_DILOCO_WARMUP=2"},
 	} {
 
 		outs, errs := ddpRing(t, run, env, env)
@@ -59,6 +62,10 @@ func TestShimAutoSwitchesToDiLoCoAtTheSameStep(t *testing.T) {
 				t.Fatalf("rank %d never switched to DiLoCo:\n%s", rank, out)
 			}
 			at[rank] = m[1]
+			// FIX-AUTOSYNC2: the switch step's exact round is the drift reference.
+			if !driftRef.MatchString(out) || strings.Contains(out, "no drift between ranks") {
+				t.Errorf("rank %d switched without a drift reference:\n%s", rank, out)
+			}
 			// The lead's interval for a ring of two (DILOCO-MANY), not the shim's own.
 			if !strings.Contains(out, fmt.Sprintf("training locally, syncing every %d steps", dilocoEvery(2))) {
 				t.Errorf("rank %d switched but never trained locally:\n%s", rank, out)
