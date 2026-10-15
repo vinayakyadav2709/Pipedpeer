@@ -7,6 +7,7 @@ package clusterstats
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -86,13 +87,15 @@ type NodeStats struct {
 
 // JobStats is one of this machine's recent runs.
 type JobStats struct {
-	ID         string                 `json:"id"`
-	Script     string                 `json:"script"`
-	Status     string                 `json:"status"`
-	Stage      string                 `json:"stage,omitempty"`
-	RunHost    string                 `json:"run_host,omitempty"`
-	TargetID   string                 `json:"target_id,omitempty"`
-	StartedAt  string                 `json:"started_at"`
+	ID        string `json:"id"`
+	Script    string `json:"script"`
+	Status    string `json:"status"`
+	Stage     string `json:"stage,omitempty"`
+	RunHost   string `json:"run_host,omitempty"`
+	TargetID  string `json:"target_id,omitempty"`
+	StartedAt string `json:"started_at"`
+	// Origin is the hostname of the machine the run was started on.
+	Origin     string                 `json:"origin,omitempty"`
 	TotalMs    int64                  `json:"total_ms"`
 	Stages     []jobhistory.Stage     `json:"stages,omitempty"`
 	Receipt    *jobhistory.Receipt    `json:"receipt,omitempty"`
@@ -108,6 +111,12 @@ type Snapshot struct {
 	At    time.Time   `json:"at"`
 	Nodes []NodeStats `json:"nodes"`
 	Jobs  []JobStats  `json:"jobs"`
+}
+
+// History is a node's answer to GET /v1/history?limit=N: its own recent runs.
+type History struct {
+	Origin string     `json:"origin"`
+	Jobs   []JobStats `json:"jobs"`
 }
 
 // Collect asks every listed node for its pool counters and running leases,
@@ -146,6 +155,23 @@ func Collect(nodes []Node, jobLimit int, client *http.Client) Snapshot {
 			}
 		}(&out[i])
 	}
+	wg.Wait() // reachability is known before the history round
+	hist := make([]History, len(out))
+	for i := range out {
+		ns := &out[i]
+		if ns.Source == "self" || !ns.Reachable {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, ns *NodeStats) {
+			defer wg.Done()
+			url := fmt.Sprintf("http://%s:%d/v1/history?limit=%d", ns.Host, ns.Port, jobLimit)
+			if err := getJSON(client, url, &hist[i]); err != nil {
+				warnHistoryOnce(ns.Host, err)
+				hist[i] = History{}
+			}
+		}(i, ns)
+	}
 	wg.Wait()
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Source == "self" || out[j].Source == "self" {
@@ -153,7 +179,41 @@ func Collect(nodes []Node, jobLimit int, client *http.Client) Snapshot {
 		}
 		return out[i].Hostname < out[j].Hostname
 	})
-	return Snapshot{At: time.Now(), Nodes: out, Jobs: RecentJobs(jobLimit)}
+	jobs := RecentJobs(jobLimit)
+	for i := range out {
+		if out[i].Source == "self" {
+			for j := range jobs {
+				jobs[j].Origin = out[i].Hostname
+			}
+		}
+	}
+	for _, h := range hist {
+		for _, j := range h.Jobs {
+			j.Origin = h.Origin
+			jobs = append(jobs, j)
+		}
+	}
+	return Snapshot{At: time.Now(), Nodes: out, Jobs: MergeJobs(jobs, jobLimit)}
+}
+
+// MergeJobs orders runs from several machines by start time, newest first,
+// and keeps the newest limit.
+func MergeJobs(jobs []JobStats, limit int) []JobStats {
+	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].StartedAt > jobs[j].StartedAt })
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
+	}
+	return jobs
+}
+
+// warned remembers which hosts already got a history warning: Collect runs
+// about once a second, and a peer on an older build would fill the log.
+var warned sync.Map
+
+func warnHistoryOnce(host string, err error) {
+	if _, dup := warned.LoadOrStore(host, true); !dup {
+		log.Printf("clusterstats: no run history from %s (its runs are left out): %v", host, err)
+	}
 }
 
 // RecentJobs reads this machine's newest runs, with their timelines and

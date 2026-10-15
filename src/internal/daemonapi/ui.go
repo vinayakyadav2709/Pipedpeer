@@ -2,12 +2,16 @@ package daemonapi
 
 import (
 	_ "embed"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/clusterstats"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 )
 
 // uiPage is the cluster page served at /ui: one self-contained file with no
@@ -82,4 +86,43 @@ func toStatsNodes(nodes []nodeResp) []clusterstats.Node {
 			n.State, n.Source, n.Capabilities, n.Load))
 	}
 	return out
+}
+
+// handleHistory (C16) serves this machine's own runs. Without id it is a
+// clusterstats.History the other nodes' pages merge; with ?id=<job> it is that
+// job's detailed run record (steps.json beside the receipt, C24), sent as
+// stored so the daemon needs no knowledge of its fields.
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	if id := r.URL.Query().Get("id"); id != "" {
+		if id != filepath.Base(id) || id == "." || id == ".." {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad job id"})
+			return
+		}
+		_, dir, err := jobhistory.ReadRecord(id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such run: " + id})
+			return
+		}
+		b, err := os.ReadFile(filepath.Join(dir, "steps.json"))
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "this run has no detailed steps"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+		return
+	}
+	limit := 15
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v <= 100 {
+		limit = v
+	}
+	origin, err := os.Hostname()
+	if err != nil {
+		log.Printf("daemonapi: /v1/history cannot read the hostname, runs are sent without an origin: %v", err)
+	}
+	jobs := clusterstats.RecentJobs(limit)
+	for i := range jobs {
+		jobs[i].Origin = origin
+	}
+	writeJSON(w, http.StatusOK, clusterstats.History{Origin: origin, Jobs: jobs})
 }

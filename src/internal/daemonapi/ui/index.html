@@ -61,12 +61,12 @@ html, body { margin: 0; }
 body {
   background: var(--page);
   color: var(--ink);
-  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 17px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
-.wrap { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+.wrap { max-width: 1500px; margin: 0 auto; padding: 20px 16px 48px; }
 
 header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
-header h1 { font-size: 18px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+header h1 { font-size: 26px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
 header .sub { color: var(--muted); font-size: 13px; }
 header .spacer { flex: 1; }
 .live { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; }
@@ -82,18 +82,18 @@ button:focus-visible, tr:focus-visible, input:focus-visible { outline: 2px solid
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 18px; }
 .tile { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 12px 14px; }
-.tile .k { color: var(--ink-2); font-size: 12px; }
-.tile .v { font-size: 26px; font-weight: 650; margin-top: 2px; letter-spacing: -0.02em; }
+.tile .k { color: var(--ink-2); font-size: 14px; }
+.tile .v { font-size: 34px; font-weight: 650; margin-top: 2px; letter-spacing: -0.02em; }
 .tile .v small { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 4px; }
 
 .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; margin-bottom: 18px; }
-.card > h2 { font-size: 14px; font-weight: 650; margin: 0; padding: 12px 14px 0; }
+.card > h2 { font-size: 19px; font-weight: 650; margin: 0; padding: 12px 14px 0; }
 .card > .note { color: var(--muted); font-size: 12px; padding: 2px 14px 0; margin: 0; }
 .scroll { overflow-x: auto; padding: 6px 4px 8px; }
 
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px 10px; white-space: nowrap; border-bottom: 1px solid var(--grid); }
-td { padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 14px; padding: 6px 10px; white-space: nowrap; border-bottom: 1px solid var(--grid); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
 tr:last-child td { border-bottom: 0; }
 td.num, th.num { text-align: right; }
 td .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-2); }
@@ -125,7 +125,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
 .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 
 .gantt { position: relative; }
-.gantt .row { display: grid; grid-template-columns: 150px 80px minmax(0, 1fr) 64px; align-items: center; gap: 8px; height: 26px; }
+.gantt .row { display: grid; grid-template-columns: 150px 80px minmax(0, 1fr) 64px; align-items: center; gap: 8px; height: 28px; }
 .gantt .name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gantt .where { color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; }
 .gantt .lane { position: relative; height: 26px; border-left: 1px solid var(--axis); }
@@ -138,22 +138,22 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
 .gantt .axis .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 .gantt .total { margin-top: 6px; color: var(--ink-2); font-size: 13px; }
 
-.hbar { display: grid; grid-template-columns: 170px minmax(0, 1fr) 56px; gap: 8px; align-items: center; height: 24px; }
+.hbar { display: grid; grid-template-columns: 200px minmax(0, 1fr) 70px; gap: 8px; align-items: center; height: 24px; }
 .hbar .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--ink-2); }
-.hbar .track { height: 10px; position: relative; }
+.hbar .track { height: 14px; position: relative; }
 .hbar .track span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 0 4px 4px 0; background: var(--there); min-width: 2px; }
 .hbar .n { text-align: right; font-variant-numeric: tabular-nums; }
 
 .big-split { display: flex; height: 14px; gap: 2px; margin: 4px 0 6px; }
 .big-split span { border-radius: 3px; }
-.headline { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+.headline { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; }
 .headline small { font-size: 13px; font-weight: 500; color: var(--ink-2); margin-left: 6px; }
 
-.tag { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--ring); color: var(--ink-2); }
-.tag.ship::before { content: "↗"; color: var(--there); font-weight: 700; }
-.tag.keep::before { content: "●"; color: var(--here); font-size: 9px; }
-.why { color: var(--ink-2); white-space: normal; }
 
+.sbars .mach { font-weight: 650; margin: 12px 0 4px; }
+.sbars .mach small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+.sbars .hbar { grid-template-columns: 120px minmax(0, 1fr) 90px; }
+.sbars .hbar .label { font-family: inherit; font-size: 14px; }
 #tip {
   position: fixed; pointer-events: none; z-index: 10; display: none;
   background: var(--surface); color: var(--ink); border: 1px solid var(--ring);
@@ -201,13 +201,10 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
 
   <section class="card" aria-labelledby="nodesH">
     <h2 id="nodesH">Nodes</h2>
-    <p class="note">Pool counters are since each daemon started.</p>
     <div class="scroll">
       <table>
         <thead><tr>
-          <th>Node</th><th>Host</th><th>State</th><th class="num">Cores</th><th>CPU</th>
-          <th class="num">Free memory</th><th class="num">Tasks</th>
-          <th class="num">Items run</th><th class="num">From peers</th><th class="num">Sent to peers</th><th class="num">Failed</th>
+          <th>Name</th><th>Path</th><th>State</th><th>GPU</th><th>Load</th><th class="num">Tasks</th>
         </tr></thead>
         <tbody id="nodes"></tbody>
       </table>
@@ -215,12 +212,12 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
   </section>
 
   <section class="card" aria-labelledby="runsH">
-    <h2 id="runsH">Recent runs from this machine</h2>
-    <p class="note">Select a run to see where its time went, where its work ran, and why that node.</p>
+    <h2 id="runsH">Recent runs, every machine</h2>
+    <p class="note">Select a run to see where its time went and where its work ran.</p>
     <div class="scroll">
       <table>
         <thead><tr>
-          <th>Started</th><th>Script</th><th>Status</th><th>Node</th><th class="num">Total</th><th>Slowest stage</th><th>Distributed</th>
+          <th>Started</th><th>Script</th><th>Status</th><th>Started on</th><th class="num">Total</th><th>Slowest stage</th><th>Ran elsewhere</th>
         </tr></thead>
         <tbody id="runs" class="clickable"></tbody>
       </table>
@@ -298,6 +295,19 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     store.set("pp-theme", next); applyTheme(next);
   });
 
+  // ---- token from `pipedpeer ui` ----
+  // The CLI opens /ui#token=<secret>: keep it, then drop it from the address
+  // bar so it is not shown, bookmarked or shared. The form below appears only
+  // when the daemon still answers 401.
+  (() => {
+    const m = location.hash.match(/(?:^#|&)token=([^&]+)/);
+    if (!m) return;
+    let tok = m[1];
+    try { tok = decodeURIComponent(tok); } catch (e) { console.warn("pipedpeer: token in the address is not valid percent-encoding, using it as is", e); }
+    store.set("pp-token", tok);
+    history.replaceState(null, "", location.pathname + location.search);
+  })();
+
   // ---- state ----
   const fromHash = () => (location.hash.match(/^#run=([\w-]+)/) || [])[1];
   let snap = null, selected = fromHash() || store.get("pp-run"), paused = false, lastOk = 0, timer = null;
@@ -324,7 +334,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     const tok = store.get("pp-token");
     if (tok) headers["X-Pipedpeer-Token"] = tok;
     try {
-      const r = await fetch("/v1/stats", { headers, cache: "no-store" });
+      const r = await fetch("/v1/stats?jobs=6", { headers, cache: "no-store" });
       if (r.status === 401) {
         store.del("pp-token");
         $("auth").style.display = "block";
@@ -374,25 +384,23 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
   function renderNodes() {
     const rows = (snap.nodes || []).map((n) => {
       const cpu = Math.max(0, Math.min(100, n.load?.cpu_percent || 0));
-      const p = n.pool;
       const self = n.source === "self";
       const reason = n.capabilities?.unreachable_reason;
-      const state = `<span class="status ${stateClass(n.state)}"${reason ? ` data-tip="<b>No direct path</b><br><span class='m'>${esc(esc(reason))}</span>"` : ""}>${esc(n.state)}${self ? " · this machine" : ""}</span>`;
-      const poolCells = p
-        ? `<td class="num">${p.items_executed_here}</td><td class="num">${p.chunks_from_peers}</td><td class="num">${p.parts_sent_to_peers}</td><td class="num">${p.parts_failed}</td>`
-        : `<td class="num dim" colspan="4">${n.state === "healthy" ? "did not answer" : "–"}</td>`;
+      const state = `<span class="status ${stateClass(n.state)}"${reason ? ` data-tip="<b>No direct path</b><br><span class='m'>${esc(esc(reason))}</span>"` : ""}>${esc(n.state)}</span>`;
+      const name = n.hostname || n.host;
+      const gpu = n.capabilities?.gpu_name
+        ? esc(n.capabilities.gpu_name) + (n.capabilities.gpu_count > 1 ? " ×" + esc(n.capabilities.gpu_count) : "")
+        : `<span class="dim">none</span>`;
       return `<tr>
-        <td><span class="id">${esc(short(n.node_id))}</span></td>
-        <td>${esc(n.hostname || n.host)}</td>
+        <td><b>${esc(name)}</b>${self ? ` <span class="dim">(this machine)</span>` : ""} <span class="id">${esc(short(n.node_id))}</span></td>
+        <td>${esc(self ? "self" : (n.path || n.source || "–"))}</td>
         <td>${state}</td>
-        <td class="num">${esc(n.capabilities?.cpu_cores || "–")}</td>
-        <td><span class="meter" data-tip="<b>${esc(esc(n.hostname || n.host))}</b><br><span class='m'>CPU ${cpu.toFixed(0)}% · memory ${(n.load?.memory_percent || 0).toFixed(0)}%</span>"><span class="track"><span class="fill" style="width:${cpu}%"></span></span>${cpu.toFixed(0)}%</span></td>
-        <td class="num">${esc(fmtBytes(n.load?.available_mem_bytes))}</td>
+        <td>${gpu}</td>
+        <td><span class="meter" data-tip="<b>${esc(esc(name))}</b><br><span class='m'>CPU ${cpu.toFixed(0)}% · memory ${(n.load?.memory_percent || 0).toFixed(0)}% · ${esc(fmtBytes(n.load?.available_mem_bytes))} free</span>"><span class="track"><span class="fill" style="width:${cpu}%"></span></span>${cpu.toFixed(0)}%</span></td>
         <td class="num">${(n.leases || []).length}</td>
-        ${poolCells}
       </tr>`;
     });
-    $("nodes").innerHTML = rows.join("") || `<tr><td colspan="11" class="dim">No nodes known yet.</td></tr>`;
+    $("nodes").innerHTML = rows.join("") || `<tr><td colspan="6" class="dim">No nodes known yet.</td></tr>`;
   }
 
   const slowest = (stages) => (stages || []).reduce((a, s) => (!a || s.ms > a.ms ? s : a), null);
@@ -414,12 +422,12 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
              <span style="flex:${c.elsewhere};background:var(--there)"></span><span style="flex:${c.here};background:var(--here)"></span>
            </span>${c.elsewhere}/${c.total}</span>`
         : `<span class="dim">–</span>`;
-      const node = j.target_id ? short(j.target_id) : (j.run_host || "–");
+      const node = j.origin || j.run_host || "–";
       return `<tr tabindex="0" data-id="${esc(j.id)}" class="${j.id === selected ? "sel" : ""}" aria-selected="${j.id === selected}">
         <td>${esc(ago(j.started_at))}</td>
         <td>${esc(j.script)}</td>
         <td><span class="status ${statusClass(j.status)}">${esc(j.status)}${j.status === "running" && j.stage ? " · " + esc(j.stage) : ""}</span></td>
-        <td><span class="id">${esc(node)}</span></td>
+        <td>${esc(node)}</td>
         <td class="num">${esc(fmtMs(j.total_ms))}</td>
         <td>${sl ? esc(sl.name) + ` <span class="dim">${esc(fmtMs(sl.ms))}</span>` : "–"}</td>
         <td>${dist}</td>
@@ -440,7 +448,60 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     const j = (snap.jobs || []).find((x) => x.id === selected);
     if (!j) { $("detail").innerHTML = `<div class="empty">No run selected.</div>`; $("detailH").textContent = "Run"; return; }
     $("detailH").innerHTML = `Run <span class="id">${esc(j.id)}</span> · ${esc(j.script)} · <span class="status ${statusClass(j.status)}">${esc(j.status)}</span>`;
-    $("detail").innerHTML = `<div class="pane">${timelineHTML(j)}${receiptHTML(j)}${placementHTML(j)}</div>`;
+    $("detail").innerHTML = `<div class="pane">${timelineHTML(j)}${receiptHTML(j)}${stepsHTML(j)}</div>`;
+  }
+
+  // ---- detailed steps (/v1/history?id=): kept by the machine the run started on ----
+  const steps = {}; // id -> record | "loading" | "none" | "remote"
+  const selfName = () => ((snap.nodes || []).find((n) => n.source === "self") || {}).hostname;
+  const pickf = (o, a, b) => (o[a] !== undefined ? o[a] : o[b]);
+  function loadSteps(j) {
+    if (steps[j.id]) return;
+    if (j.origin && selfName() && j.origin !== selfName()) { steps[j.id] = "remote"; return; }
+    steps[j.id] = "loading";
+    const headers = {}, tok = store.get("pp-token");
+    if (tok) headers["X-Pipedpeer-Token"] = tok;
+    fetch("/v1/history?id=" + encodeURIComponent(j.id), { headers, cache: "no-store" })
+      .then((r) => {
+        if (r.status === 404) { steps[j.id] = "none"; return null; }
+        if (!r.ok) throw new Error(r.status + " " + r.statusText);
+        return r.json();
+      })
+      .then((rec) => { if (rec) steps[j.id] = rec; renderDetail(); })
+      .catch((err) => { console.warn("pipedpeer: cannot load the steps of run " + j.id, err); steps[j.id] = "none"; renderDetail(); });
+  }
+  function stepsHTML(j) {
+    loadSteps(j);
+    const rec = steps[j.id];
+    const h = `<h3>Detailed steps</h3>`;
+    if (rec === "loading") return h + `<p class="dim">Loading…</p>`;
+    if (rec === "remote") return h + `<p class="dim">Kept on ${esc(j.origin)}: open this page there to see every step.</p>`;
+    if (!rec || rec === "none") return h + `<p class="dim">No detailed steps were recorded for this run.</p>`;
+    const list = (pickf(rec, "Steps", "steps") || []).map((s) => ({
+      machine: s.machine || s.node || "this machine", chunk: s.chunk == null ? -1 : s.chunk,
+      name: s.step || s.name || "?", dur: (s.dur_ns || 0) / 1e6,
+    }));
+    if (!list.length) return h + `<p class="dim">The record has no steps.</p>`;
+    const by = {}; // machine -> step -> ms
+    const chunks = {}; // machine/chunk -> ms
+    for (const s of list) {
+      const m = (by[s.machine] = by[s.machine] || {});
+      m[s.name] = (m[s.name] || 0) + s.dur;
+      if (s.chunk >= 0) chunks[s.machine + " · chunk " + s.chunk] = (chunks[s.machine + " · chunk " + s.chunk] || 0) + s.dur;
+    }
+    const max = Math.max(...Object.values(by).flatMap((m) => Object.values(m)), 1);
+    let html = h + `<p class="dim">Time added up per step, per machine (steps can overlap, so the sums can exceed the wall time).</p><div class="sbars">`;
+    for (const [mach, m] of Object.entries(by)) {
+      html += `<div class="mach">${esc(mach)}</div>` + Object.entries(m).sort((a, b) => b[1] - a[1]).map(([name, ms]) =>
+        `<div class="hbar"><div class="label">${esc(name)}</div><div class="track"><span style="width:${(ms / max) * 100}%" data-tip="${esc("<b>" + esc(name) + "</b><br><span class='m'>" + esc(mach) + " · " + fmtMs(ms) + "</span>")}"></span></div><div class="n">${esc(fmtMs(ms))}</div></div>`).join("");
+    }
+    html += `</div>`;
+    const slow = Object.entries(chunks).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (slow.length) {
+      html += `<h3>Slowest chunks</h3><div class="sbars">` + slow.map(([k, ms]) =>
+        `<div class="hbar" style="grid-template-columns:260px minmax(0,1fr) 90px"><div class="label">${esc(k)}</div><div class="track"><span style="width:${(ms / slow[0][1]) * 100}%"></span></div><div class="n">${esc(fmtMs(ms))}</div></div>`).join("") + `</div>`;
+    }
+    return html;
   }
 
   function niceStep(span) {
@@ -483,7 +544,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     if (!rc) return `<h3>Where the work ran</h3><p class="dim">No receipt: the run was not intercepted, or it ran before receipts were kept.</p>`;
     const c = receiptCounts(rc);
     let html = `<h3>Where the work ran</h3>`;
-    if (!c && !(rc.decisions || []).length) return html + `<p class="dim">The shim intercepted nothing: no pool, joblib, numpy or pandas call was big enough to consider.</p>`;
+    if (!c) return html + `<p class="dim">The shim intercepted nothing: no pool, joblib, numpy or pandas call was big enough to consider.</p>`;
     if (c) {
       const raced = rc.mapped_items > 0 ? Math.max(0, rc.remote_items + rc.local_items - rc.mapped_items) : 0;
       html += `<div class="headline">${c.elsewhere} of ${c.total} items<small>ran on other machines (${Math.round((c.elsewhere / c.total) * 100)}%)</small></div>
@@ -503,44 +564,8 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
            <div class="track"><span style="width:${(peers[n] / max) * 100}%" data-tip="<b>${esc(esc(n))}</b><br><span class='m'>${peers[n]} items run there</span>"></span></div>
            <div class="n">${peers[n]}</div></div>`).join("");
     }
-    const ds = rc.decisions || [];
-    if (ds.length) {
-      html += `<h3>Cost model decisions</h3><div class="scroll"><table><thead><tr><th>Decision</th><th>Operation</th><th>Why</th><th class="num">Size</th></tr></thead><tbody>` +
-        ds.map((d) => `<tr><td><span class="tag ${d.shipped ? "ship" : "keep"}">${d.shipped ? "shipped" : "kept local"}</span></td>
-          <td>${esc(d.op)}</td><td class="why">${esc(d.why)}</td><td class="num">${d.mb ? esc(d.mb.toFixed(0)) + " MB" : "–"}</td></tr>`).join("") +
-        `</tbody></table></div>` + (rc.decisions_dropped ? `<p class="dim">…and ${rc.decisions_dropped} more not recorded.</p>` : "");
-    }
     if (rc.remote_failures) html += `<p><span class="status warn">${rc.remote_failures} dispatch(es) failed and were redone locally</span></p>`;
     return html;
-  }
-
-  function placementHTML(j) {
-    const cs = j.candidates || [];
-    if (!cs.length) {
-      const why = (!j.placement_source || j.placement_source === "self")
-        ? "Ran on this machine: no placement was made. Pool work could still spill to peers, as shown above."
-        : j.placement_source === "explicit"
-          ? "The node was given with --host, so nothing was chosen."
-          : "No candidate list was recorded for this run.";
-      return `<h3>Why this node</h3><p class="dim">${esc(why)}</p>`;
-    }
-    const rows = [...cs].sort((a, b) => (b.chosen - a.chosen) || ((a.rejected ? 1 : 0) - (b.rejected ? 1 : 0)) || ((b.score || 0) - (a.score || 0)));
-    return `<h3>Why this node</h3>
-      <p class="dim">${cs.length} node(s) considered, ${cs.filter((c) => !c.rejected).length} eligible. ${j.placement_reason ? "Chosen: " + esc(j.placement_reason) + "." : ""}
-      The score is mostly headroom (idle CPU and memory, fewer running jobs), then capability (cores, clock, free memory), times health.</p>
-      <div class="scroll"><table><thead><tr><th></th><th>Node</th><th>Host</th><th class="num">Score</th><th class="num">CPU</th><th class="num">Memory</th><th class="num">Jobs</th><th class="num">Free cores</th><th class="num">Free memory</th><th>Note</th></tr></thead><tbody>` +
-      rows.map((c) => `<tr>
-        <td>${c.chosen ? "→" : ""}</td>
-        <td><span class="id">${esc(short(c.node_id))}</span></td>
-        <td>${esc(c.host)}</td>
-        <td class="num">${c.rejected ? "–" : (c.score || 0).toFixed(3)}</td>
-        <td class="num">${(c.cpu_percent || 0).toFixed(0)}%</td>
-        <td class="num">${(c.mem_percent || 0).toFixed(0)}%</td>
-        <td class="num">${c.active_jobs || 0}</td>
-        <td class="num">${c.cores ? (c.free_cores || 0).toFixed(1) + " / " + c.cores : "–"}</td>
-        <td class="num">${esc(fmtBytes(c.avail_mem_bytes))}</td>
-        <td>${c.chosen ? `<span class="status good">chosen</span>` : c.rejected ? `<span class="status crit">rejected: ${esc(c.reason)}</span>` : ""}</td>
-      </tr>`).join("") + `</tbody></table></div>`;
   }
 
   setInterval(() => { if (snap) renderRuns(); }, 15000); // keep "x ago" fresh while paused

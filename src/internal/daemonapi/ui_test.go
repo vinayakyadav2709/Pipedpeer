@@ -5,11 +5,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
+	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 )
 
 // The page itself must load on a cluster with a secret - a browser cannot
@@ -101,5 +104,52 @@ func TestUIPageCatchesLog(t *testing.T) {
 func TestUIPageCountsUnshippableOnce(t *testing.T) {
 	if m := regexp.MustCompile(`local_items\s*\+\s*\(?\s*rc\.unshippable`).FindString(string(uiPage)); m != "" {
 		t.Fatalf("page adds unshippable on top of local_items: %s", m)
+	}
+}
+
+// The page takes the token from #token= and drops it from the address bar.
+func TestUIPageTakesTheTokenFromTheFragment(t *testing.T) {
+	page := string(uiPage)
+	for _, want := range []string{"token=([^&]+)", `store.set("pp-token"`, "history.replaceState"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("page lacks %q", want)
+		}
+	}
+}
+
+func TestHistoryServesTheStepsRecordAndRefusesBadIDs(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	dir := filepath.Join(jobhistory.BaseDir(), "job1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"id":"job1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := New("node-hist")
+	get := func(q string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.handleHistory(w, httptest.NewRequest("GET", "/v1/history"+q, nil))
+		return w
+	}
+	if w := get("?id=job1"); w.Code != http.StatusNotFound {
+		t.Errorf("run without steps.json: %d, want 404", w.Code)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "steps.json"), []byte(`{"Steps":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w := get("?id=job1"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "Steps") {
+		t.Errorf("steps: %d %s", w.Code, w.Body.String())
+	}
+	if w := get("?id=../job1"); w.Code != http.StatusBadRequest {
+		t.Errorf("path traversal id: %d, want 400", w.Code)
+	}
+	w := get("?limit=3")
+	var h struct {
+		Origin string            `json:"origin"`
+		Jobs   []json.RawMessage `json:"jobs"`
+	}
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &h) != nil || h.Origin == "" || len(h.Jobs) != 1 {
+		t.Errorf("list: %d %s", w.Code, w.Body.String())
 	}
 }
