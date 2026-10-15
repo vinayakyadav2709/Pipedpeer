@@ -314,3 +314,49 @@ func TestASlowRouterDoesNotDelayConnecting(t *testing.T) {
 		return false
 	})
 }
+
+// TestTheIntroducerRedialsAPeerThatOnlyPunchedIn (FIX-E3B). A peer that
+// reached the introducing daemon through a gossip hint is in no introducer
+// listing there. When that daemon's address changed it redials its accepted
+// links - and found "no known address to redial", so the peer waited out the
+// 90 s idle timeout. The address the connection came from is enough.
+func TestTheIntroducerRedialsAPeerThatOnlyPunchedIn(t *testing.T) {
+	stubKeeper(t)
+	portA := freeUDPPort(t)
+	a := run(t, "A", Config{Key: newKey(t), DirectPort: portA,
+		ServeIntroducer: true, IntroducerPort: freeUDPPort(t)})
+	// B uses no introducer of A's: it finds A by a hint alone.
+	b := run(t, "B", Config{Key: newKey(t), DirectPort: freeUDPPort(t),
+		ServeIntroducer: true, IntroducerPort: freeUDPPort(t)})
+	waitFor(t, 5*time.Second, "B is running", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.ctx != nil
+	})
+	b.Hint(a.node(), []string{net.JoinHostPort("127.0.0.1", itoa(portA))})
+	waitFor(t, 10*time.Second, "B links to A by the hint", func() bool { return linked(a, b) })
+
+	a.mu.Lock()
+	inbound := a.peers[b.node()]
+	oldConn, wasDialled := inbound.conn, inbound.dialled
+	listed := len(a.cands[b.node()])
+	inbound.since = time.Now().Add(-time.Minute)
+	ctx := a.ctx
+	a.mu.Unlock()
+	// Both ends' link is old, as it would be by the time a machine moves.
+	b.mu.Lock()
+	b.peers[a.node()].since = time.Now().Add(-time.Minute)
+	b.mu.Unlock()
+	if wasDialled || listed != 0 {
+		t.Fatalf("rig: want an inbound link from an unlisted peer (dialled=%v, listed=%d)", wasDialled, listed)
+	}
+
+	// What A's address watcher does when its address changes.
+	a.moveLinks(ctx)
+	waitFor(t, 5*time.Second, "A redials B and the new connection replaces the inbound one", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		l := a.peers[b.node()]
+		return l != nil && l.conn != oldConn && l.dialled && l.alive()
+	})
+}
