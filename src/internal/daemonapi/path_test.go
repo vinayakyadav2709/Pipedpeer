@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 )
@@ -221,4 +223,35 @@ func TestRemovePeerDropsOnlyThatPath(t *testing.T) {
 	if len(paths) != 1 || paths[0].Host != "10.9.9.9" {
 		t.Fatalf("paths after RemovePeer = %+v, want only the lan one", paths)
 	}
+}
+
+// A new peer whose first /health gets EOF is retried within a second or two,
+// not at the next 10 s poll (test-net e2).
+func TestAddPeerRetriesSoonAfterEOF(t *testing.T) {
+	s := nodeTestServer(t, "me")
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close() // EOF for the first probe
+			}
+			return
+		}
+		_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok", NodeID: "late"})
+	}))
+	t.Cleanup(ts.Close)
+	host, port := splitAddr(t, ts.Listener.Addr().String())
+
+	start := time.Now()
+	if err := s.AddPeer(host, port); err != nil {
+		t.Fatal(err)
+	}
+	for time.Since(start) < 3*time.Second {
+		if ps, err := s.store.Paths("late"); err == nil && len(ps) == 1 && ps[0].Active {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("peer not adopted within 3 s after an EOF first probe (%d probes)", calls.Load())
 }
