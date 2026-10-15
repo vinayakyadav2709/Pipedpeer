@@ -24,14 +24,14 @@ different networks meet through an introducer that every daemon provides, then
 connect directly over authenticated QUIC links after port mapping or hole
 punching; no relay carries job data and no central server exists.
 
-\noindent On a container laboratory, a job whose environment is already in place
+\noindent In a container lab, a job whose environment is already in place
 starts in a median of 0.83\,s against 23.4\,s for its first submission. Between
-two laptops in different homes, a mixed CPU script finished in 13.3--14.6\,s
-against 17.4--18.1\,s on one laptop. On a two-rank training ring, synchronising
+two laptops in different homes, a mixed CPU script finished in about 14\,s
+against 18\,s on one laptop. On a two-rank training ring, synchronising
 every few steps instead of every step kept the validation loss no more than 1\%
-above one device's on every test model while sending 9 to 15 times fewer bytes. Of 829 tests,
-822 pass and none fail, and a mutation audit that disables 95 features one at a
-time is caught in every case.
+above one device's on every test model while sending 9 to 16 times fewer bytes. A
+mutation audit that disables each of 95 features in turn is caught by the tests
+every time.
 
 \vspace{0.6cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal,

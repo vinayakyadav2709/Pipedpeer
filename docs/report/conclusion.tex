@@ -14,8 +14,8 @@ networks with one command and no relay. Its contributions are:
   \item \textbf{The store path as cache key and unit of transfer.} Pinning an
   exact package set makes an environment's content-addressed name identical on
   every machine and on any day, so a worker that holds an environment pays
-  nothing for it (0.83\,s warm against 23.41\,s cold) and one that holds part of
-  it receives only the paths it lacks (7 of 43 paths, 86\% fewer bytes).
+  nothing for it (0.83\,s warm against 23.4\,s cold) and one that holds part of
+  it receives only the paths it lacks (86\% fewer bytes).
   \item \textbf{Transparent interception with work shared by measurement.} The
   parallel primitives a script already uses are substituted at import time;
   kernels travel as source or by value; parallel maps are divided by a makespan
@@ -39,7 +39,7 @@ networks with one command and no relay. Its contributions are:
 The principle that runs through the design is that the cluster is used only when
 a measurement says it will help: work is divided by measured speed rather than
 by headcount, dense matrix products stay local on a CPU cluster, a training ring
-is released when one GPU is faster, and fast synchronisation is chosen
+whose size the user did not fix is released when one GPU is faster, and fast synchronisation is chosen
 automatically only within the ring sizes where it was shown to keep accuracy.
 
 \section{Limitations}
@@ -63,9 +63,9 @@ automatically only within the ring sizes where it was shown to keep accuracy.
   with the host's network and no seccomp filter, and isolation is skipped with a
   warning on a node lacking \texttt{crun} or user namespaces.
   \item \textbf{Measurement.} Speedup comes from containers with fixed processor
-  quotas and a few real machines, not a controlled multi-machine experiment; not
-  measured are hole-punch success rates across many networks, two GPUs in one
-  machine, and fast synchronisation at five to seven ranks.
+  quotas and a few real machines; hole-punch success across many networks, two
+  GPUs in one machine and fast synchronisation at five to seven ranks are not
+  measured.
 \end{itemize}
 
 \section{Security}

@@ -1,22 +1,22 @@
 // Figure 4.6 - Closure transfer: the store path is the cache key, and the
 // store path is also the unit of transfer.
 digraph ClosureCache {
-  rankdir=TB; bgcolor="white"; nodesep=0.40; ranksep=0.42;
+  rankdir=TB; newrank=true; bgcolor="white"; nodesep=0.25; ranksep=0.30;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
   edge [fontname="Helvetica", fontsize=14, color="#555555"];
 
-  pin  [label="Pinned package set\nthe same inputs give the same store path\non every machine, on any day",
+  pin  [label="Pinned package set\nsame inputs, same store path,\nevery machine, any day",
         fillcolor="#fdf6e3", color="#8a6d1f"];
-  bld  [label="Build the closure locally"];
+  bld  [label="Build the closure"];
   ask  [label="Can the target\nrun it already?", shape=diamond,
         fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
-  skip [label="Ship nothing but the workspace"];
-  diff [label="Ask which store paths it lacks\nsend only those, or everything\nif it shares none"];
-  imp  [label="Import on the worker\n(a partial import is never\ncached as the closure)"];
-  bcast[label="Push to peers that cannot run it\nsigned with the node key\nso they can receive spilled work"];
-  bg   [label="Upload waits at most 60 s\na slow peer finishes in the background\nand joins the pool; a send is cut\nonly after 60 s with no bytes moving", style="rounded,filled,dashed"];
-  prune[label="Prune caches least-recently-used\n8 GiB each by default", style="rounded,filled,dashed"];
+  skip [label="Ship only\nthe workspace"];
+  diff [label="Ask which store paths\nit lacks; send only those"];
+  imp  [label="Import on the worker\n(a partial import is\nnever cached whole)"];
+  bcast[label="Push to peers that\ncannot run it, signed,\nso they can share work"];
+  bg   [label="Upload waits at most 60 s;\na slow peer finishes in the\nbackground, cut only after\n60 s with no bytes moving", style="rounded,filled,dashed"];
+  prune[label="Prune caches LRU\n8 GiB each", style="rounded,filled,dashed"];
   run  [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
   pin -> bld -> ask;
@@ -28,4 +28,7 @@ digraph ClosureCache {
   skip -> run;
   bcast -> run;
   { rank=same; skip; diff; }
+  { rank=same; pin; bld; }
+  { rank=same; imp; bcast; }
+  { rank=same; bg; prune; run; }
 }

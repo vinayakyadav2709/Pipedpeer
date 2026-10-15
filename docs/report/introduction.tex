@@ -38,6 +38,17 @@ direct path through their routers, with an introducer that only tells each
 machine where the others are. No machine is a head node: coordination is done
 per job by the machine that submits it.
 
+The two words of the title are used in a precise sense. Coordination is
+\emph{decentralised}: every daemon serves the introducer for its own cluster,
+placement is computed in the submitting client, and a training ring's lead is
+simply the node that runs rank~0 of that job, so no machine holds a role that
+the others depend on. It is \emph{recursive} in that division repeats at each
+level: the node that holds a parallel map splits it among its peers, and each
+part is split again across the cores of the node that runs it. A node that
+cannot hold a map forwards it whole, once, to a peer that can, and that peer
+makes the split; a part already split off is never split across machines or
+forwarded again (Section~\ref{sec:intercept}).
+
 \section{Objectives}
 
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
@@ -77,12 +88,21 @@ and any incentive mechanism for contributing capacity.
 
 \section{Technologies Used}
 
+PipedPeer is written in Go, so that the client, the daemon and the coordinator
+ship as one static binary with no runtime to install, and it relies on
+established components for everything that is not specific to the problem:
+Nix for reproducible environments, \texttt{crun} and cgroups for isolation,
+QUIC and TLS for transport and security, and SQLite for the address book. The
+interception shim is written in Python, the language it intercepts.
+Table~\ref{tab:tech} lists each technology and its purpose.
+
 \begin{table}[!htbp]
 \centering
 \caption{Technologies used in PipedPeer}
 \label{tab:tech}
-\renewcommand{\arraystretch}{1.2}
+\renewcommand{\arraystretch}{1.1}
 \rowcolors{2}{}{rowgray}
+\small
 \begin{tabularx}{\textwidth}{L{4.3cm} L{2.4cm} X}
 \toprule
 \textbf{Technology} & \textbf{Category} & \textbf{Purpose} \\

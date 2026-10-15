@@ -3,39 +3,38 @@
 // figure, and the queue path leaves from the bottom rather than looping back
 // over the decision spine.
 digraph Placement {
-  rankdir=TB; bgcolor="white"; nodesep=0.34; ranksep=0.40;
+  rankdir=TB; newrank=true; bgcolor="white"; nodesep=0.22; ranksep=0.36;
   node [fontname="Helvetica", fontsize=14, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.10"];
   edge [fontname="Helvetica", fontsize=13, color="#555555"];
 
-  gather [label="Gather candidates\nnode store, discovery, self;\nnodes with a role are never offered a job"];
-  f1 [label="Architecture matches?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
-  f2 [label="GPU present, if required?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
-  f3 [label="Memory, cores, VRAM enough?", shape=diamond, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.04"];
+  gather [label="Gather candidates\nnode store, discovery, self"];
+  f1 [label="Architecture\nmatches?", shape=hexagon, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
+  f2 [label="GPU present\nif required?", shape=hexagon, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
+  f3 [label="Memory, cores,\nVRAM enough?", shape=hexagon, fillcolor="#fdf6e3", color="#8a6d1f", margin="0.02"];
   rej [label="Rejected\nreason recorded", fillcolor="#fbe9e9", color="#a33333"];
 
-  score [label="Score the survivors\nload penalties, hardware bonuses"];
-  lease [label="Reserve a lease on the best node\naccept, then commit"];
+  score [label="Score the survivors\nload, then hardware"];
+  lease [label="Lease the best node\naccept, then commit"];
   run   [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
-  wait  [label="Nothing eligible\nqueue, retry every 30 s;\na job no node could ever fit fails at once", fillcolor="#fbe9e9", color="#a33333"];
+  wait  [label="Nothing eligible: queue\nand gather again every 30 s;\na job no node fits fails", fillcolor="#fbe9e9", color="#a33333"];
 
   gather -> f1;
   f1 -> f2 [label=" yes "];
   f2 -> f3 [label=" yes "];
   f3 -> score [label=" yes "];
-  score -> lease [label=" highest score "];
+  score -> lease [label="best"];
   lease -> run [label=" committed "];
 
   // All three rejections land on one collector, kept level with the filters.
   f1 -> rej [label=" no "];
   f2 -> rej [label=" no "];
   f3 -> rej [label=" no "];
-  { rank=same; f2; rej; }
+  { rank=same; f1; f2; f3; }
 
-  score -> wait [label=" none survived ", color="#a33333", fontcolor="#a33333"];
-  wait -> gather [label=" retry ", style=dashed, color="#a33333", fontcolor="#a33333"];
+  score -> wait [label="none", color="#a33333", fontcolor="#a33333"];
 
-  lease -> score [label=" refused: next candidate ", style=dashed, color="#a33333", fontcolor="#a33333"];
-  run -> score [label=" failed: untried node first, backoff,\l at most three runs\l ", style=dashed, color="#a33333", fontcolor="#a33333"];
-  { rank=same; score; wait; }
+  lease -> score [label="refused:\lnext\l", style=dashed, color="#a33333", fontcolor="#a33333"];
+  run -> score [label="failed:\lrun again,\lat most 3\l", style=dashed, color="#a33333", fontcolor="#a33333"];
+  { rank=same; lease; wait; }
 }

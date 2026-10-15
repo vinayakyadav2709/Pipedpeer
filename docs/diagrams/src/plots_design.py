@@ -50,7 +50,7 @@ def fig_sequence():
         ax.add_patch(FancyBboxPatch((x[i] - 1.32, top + 0.02), 2.64, 0.80,
                      boxstyle="round,pad=0.04", facecolor="#eef3fb",
                      edgecolor=BLUE, linewidth=1.2))
-        ax.text(x[i], top + 0.42, a, ha="center", va="center", fontsize=13)
+        ax.text(x[i], top + 0.42, a, ha="center", va="center", fontsize=14)
         ax.plot([x[i], x[i]], [top, top + dy * (len(steps) + 1.2)],
                 color=GREY, linewidth=0.9, linestyle=(0, (4, 4)), zorder=0)
     for k, (src, dst, label, back) in enumerate(steps):
@@ -61,7 +61,7 @@ def fig_sequence():
                     [y, y, y - 0.20, y - 0.20], color=GOLD, linewidth=1.3)
             ax.annotate("", xy=(x[src] + 0.04, y - 0.20), xytext=(x[src] + 0.22, y - 0.20),
                         arrowprops=dict(arrowstyle="-|>", color=GOLD, linewidth=1.3))
-            ax.text(x[src] + w + 0.16, y - 0.10, label, va="center", fontsize=13,
+            ax.text(x[src] + w + 0.16, y - 0.10, label, va="center", fontsize=14,
                     color=GOLD, zorder=6,
                     bbox=dict(facecolor="white", edgecolor="none", pad=1.4))
         else:
@@ -70,7 +70,7 @@ def fig_sequence():
                         arrowprops=dict(arrowstyle="-|>", color=colour, linewidth=1.4,
                                         linestyle="--" if back else "-"))
             ax.text((x[src] + x[dst]) / 2, y + 0.09, label, ha="center",
-                    va="bottom", fontsize=13, color=colour, zorder=6,
+                    va="bottom", fontsize=14, color=colour, zorder=6,
                     bbox=dict(facecolor="white", edgecolor="none", pad=1.4))
     ax.set_xlim(-1.9, x[-1] + 1.7); ax.set_ylim(top + dy * (len(steps) + 1.4), 1.05)
     ax.axis("off")
@@ -92,7 +92,7 @@ def fig_scoring():
                  color=(RED if b <= 0 else GREEN), alpha=0.75,
                  edgecolor="white", linewidth=0.8)
     axl.axvline(0, color="#333333", linewidth=1.0)
-    axl.set_yticks(y); axl.set_yticklabels(terms, fontsize=13)
+    axl.set_yticks(y); axl.set_yticklabels(terms, fontsize=14)
     axl.tick_params(which="both", length=0)
     axl.set_xlabel("contribution to the score")
     axl.set_title("Range of each term", fontsize=17, loc="left")
@@ -116,7 +116,7 @@ def fig_scoring():
                      textcoords="offset points", xytext=(-6, 14 if colour == GREEN else 16),
                      ha="right", fontsize=14, color=colour)
     axr.set_xticks(np.arange(len(labels) - 1))
-    axr.set_xticklabels(["base", "CPU", "mem", "jobs", "h/w"], fontsize=13)
+    axr.set_xticklabels(["base", "CPU", "mem", "jobs", "h/w"], fontsize=14)
     axr.tick_params(which="both", length=0)
     axr.set_ylabel("running score"); axr.set_ylim(0, 1.45)
     axr.set_title("Two nodes scored", fontsize=17, loc="left")
@@ -183,32 +183,33 @@ def fig_cost_model():
     spill &= nb >= MIN_BYTES
     spill &= ~((F < LOW_F) & (nb <= LOW_CAP))
 
-    fig, ax = plt.subplots(figsize=(8.6, 5.4))
+    # Sized for one IEEE column (3.5 in): text prints at about 8 pt there.
+    plt.rcParams["font.size"] = 16
+    fig, ax = plt.subplots(figsize=(6.4, 4.8))
     ax.contourf(MB, F, spill.astype(float), levels=[-0.5, 0.5, 1.5],
                 colors=["#f6e7e7", "#e2f0e8"])
     ax.contour(MB, F, spill.astype(float), levels=[0.5], colors=[GREEN], linewidths=1.8)
 
-    ax.text(55, 2.5, "kept local", color=RED, fontsize=18, weight="bold",
+    ax.text(11, 2.0, "kept local", color=RED, fontsize=16, weight="bold",
             ha="center", va="center",
             bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
-    ax.text(150, 700, "distributed", color=GREEN, fontsize=18, weight="bold", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
-    ax.annotate("payload below 32 MB", xy=(20, 60), fontsize=13, color=RED, rotation=90,
+    ax.text(150, 700, "distributed", color=GREEN, fontsize=16, weight="bold", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+    ax.annotate("below 32 MB", xy=(17, 60), fontsize=16, color=RED, rotation=90,
                 ha="center", va="center", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
-    ax.annotate("under 8 flop/byte and up to 512 MB:\ntoo little work per byte moved",
-                xy=(4.6, 0.60), fontsize=13, color=RED, va="bottom", ha="left", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
     for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 4, 300)):
         ax.plot(mbv, fv, "o", color="#1e50a0", markersize=7, zorder=5)
-        off = {"pandas join": (12, -5), "pandas groupby": (12, -5)}[name]
+        off = {"pandas join": (8, -22), "pandas groupby": (8, 4)}[name]
         ax.annotate(name, (mbv, fv), textcoords="offset points", xytext=off,
-                    ha="left", fontsize=13, color="#1e50a0", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+                    ha="left", fontsize=16, color="#1e50a0", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("payload size (MB, log scale)")
-    ax.set_ylabel("arithmetic intensity (flop per byte, log scale)")
+    ax.set_xlabel("payload (MB)")
+    ax.set_ylabel("flop per byte")
     ax.set_xlim(4, 9000); ax.set_ylim(0.5, 2000)
     ax.grid(alpha=0.2, which="both")
     fig.savefig(OUT / "fig_4.11_cost_model.png"); plt.close(fig)
+    plt.rcParams["font.size"] = 15
 
 
 if __name__ == "__main__":

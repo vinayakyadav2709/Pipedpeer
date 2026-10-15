@@ -1,13 +1,12 @@
-// Figure 3.4 - Use case diagram.
-// The system-boundary label sits at the bottom: at the top an association line
-// from the User ran straight through it.
+// Figure 3.4 - Use cases. People on the left, machines on the right, so the
+// use cases sit in two columns and the text prints at 8 pt or more.
 digraph UseCase {
-  rankdir=LR; bgcolor="white"; nodesep=0.30; ranksep=1.9;
-  node [fontname="Helvetica", fontsize=16];
-  edge [fontname="Helvetica", fontsize=14, color="#666666", arrowhead=none];
+  rankdir=LR; newrank=true; bgcolor="white"; nodesep=0.12; ranksep=0.55;
+  node [fontname="Helvetica", fontsize=14];
+  edge [color="#666666", arrowhead=none];
 
   node [shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.6,
-        width=1.7, height=0.9];
+        width=1.2, height=0.7];
   user  [label="User"];
   admin [label="Node\noperator"];
   peer  [label="Peer\ndaemon"];
@@ -15,29 +14,31 @@ digraph UseCase {
   intro [label="Hosted\nintroducer"];
 
   subgraph cluster_sys {
-    label="PipedPeer"; labelloc=b; labeljust=l; fontsize=18; fontname="Helvetica";
+    label="PipedPeer"; labelloc=b; labeljust=c; fontsize=15; fontname="Helvetica";
     style="rounded"; color="#1e50a0"; penwidth=1.8; bgcolor="#fbfcff"; fontcolor="#1e50a0";
-    margin="30,26";
+    margin="12,10";
     node [shape=ellipse, style=filled, fillcolor="#e7eefa", color="#3b6ea5",
-          penwidth=1.2, width=0, height=0];
-    u1 [label="Run a script on the cluster"];
-    u2 [label="Ask for a GPU or a memory floor"];
-    u3 [label="Train with data parallelism\n(exact, fast or auto sync)"];
-    u4 [label="Inspect jobs and nodes"];
-    u5 [label="Accept and lease work"];
-    u12 [label="Introduce its cluster's peers"];
-    u6 [label="Serve a signed closure to peers"];
-    u7 [label="Execute parallel chunks"];
-    u13 [label="Join under proot and Nix"];
-    u8 [label="Set up the machine"];
-    u9 [label="Invite a machine"];
-    u10 [label="Connect with an invite code"];
-    u11 [label="Register nodes, forward punches"];
+          penwidth=1.2, width=0, height=0, margin="0.06,0.03"];
+    u1 [label="Run a script\non the cluster"];
+    u2 [label="Ask for a GPU\nor a memory floor"];
+    u3 [label="Train with data\nparallelism"];
+    u4 [label="Inspect jobs\nand nodes"];
+    u8 [label="Set up the\nmachine"];
+    u9 [label="Invite a\nmachine"];
+    u10 [label="Connect with\nan invite code"];
+    u5 [label="Accept and\nlease work"];
+    u6 [label="Serve a signed\nclosure"];
+    u7 [label="Execute\nparallel chunks"];
+    u12 [label="Introduce its\ncluster's peers"];
+    u13 [label="Join under\nproot and Nix"];
+    u11 [label="Register nodes,\nforward punches"];
+    u1 -> u5 [style=invis]; u2 -> u6 [style=invis]; u3 -> u7 [style=invis];
+    u4 -> u12 [style=invis]; u8 -> u13 [style=invis]; u9 -> u11 [style=invis];
   }
 
   user -> u1; user -> u2; user -> u3; user -> u4;
   admin -> u8; admin -> u9; admin -> u10;
-  peer -> u5; peer -> u6; peer -> u7; peer -> u12;
-  phone -> u7; phone -> u13;
-  intro -> u11;
+  u5 -> peer; u6 -> peer; u7 -> peer; u12 -> peer;
+  u7 -> phone; u13 -> phone;
+  u11 -> intro;
 }

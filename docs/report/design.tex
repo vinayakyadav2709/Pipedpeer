@@ -5,13 +5,14 @@
 
 \section{System Architecture}
 
-PipedPeer follows a \textbf{daemon, not CLI} architecture. Every machine runs
-one long-lived daemon that handles discovery, admission, execution and result
-delivery; the \texttt{pipedpeer} command is a short-lived client of it.
+PipedPeer is built around a long-lived \textbf{daemon} on every machine, which
+handles discovery, admission, execution and result delivery; the
+\texttt{pipedpeer} command is a short-lived client of it, and no state lives in
+the command.
 
 The property that distinguishes the system from the frameworks of
 Chapter~\ref{chap:lit} is that \textbf{the coordinator is a library linked into
-the client, not a service}. There is no scheduler process, no head node and no
+the client, not a service} (Figure~\ref{fig:architecture}). There is no scheduler process, no head node and no
 master. A machine is submitter and worker at once, and the same binary does
 both; each job is coordinated by the machine that submits it, and a training
 ring's synchronisation by the daemon of its lead rank, chosen per job. A new
@@ -26,7 +27,7 @@ server that runs nothing.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.78\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.1_system_design.png}}
+    \includegraphics[width=150mm]{\figpath{fig_3.1_system_design.png}}
     \caption[PipedPeer system design]{PipedPeer system design. The submitting side builds the environment
     and places the job; the worker admits it, caches the closure and runs it
     sandboxed under a memory ceiling. Both roles are the same binary. Peers on
@@ -79,7 +80,7 @@ packages under \texttt{src/internal/}; the remainder are supporting code
 \subsection*{Level 0 --- Context Diagram}
 \addcontentsline{toc}{subsection}{Level 0 --- Context Diagram}
 
-At the highest level the system has three external entities: the
+At the highest level (Figure~\ref{fig:dfd0}) the system has three external entities: the
 \textbf{user}, who submits a script and receives output and result files;
 \textbf{peer nodes}, which supply capacity and return computed results; and an
 optional \textbf{introducer}, which exchanges candidate addresses so that peers
@@ -87,7 +88,7 @@ on other networks can reach one another.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.2_dfd_level0.png}}
+    \includegraphics[width=150mm]{\figpath{fig_3.2_dfd_level0.png}}
     \caption[Level 0 DFD (context diagram)]{Level 0 DFD --- context diagram. The introducer is dashed because
     the system works without it on one network.}
     \label{fig:dfd0}
@@ -98,10 +99,12 @@ on other networks can reach one another.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.3_dfd_level1.png}}
+    \includegraphics[width=146mm]{\figpath{fig_3.3_dfd_level1.png}}
     \caption[Level 1 DFD]{Level 1 DFD --- seven processes over four data stores.}
     \label{fig:dfd1}
 \end{figure}
+
+Figure~\ref{fig:dfd1} decomposes the system into seven processes:
 
 \begin{itemize}[leftmargin=*]
   \item \textbf{1 Resolve environment.} Scan the script's imports, generate a
@@ -126,9 +129,12 @@ identity and trust store (node key, pinned certificates, trusted Nix keys).
 
 \section{Use Case Diagram}
 
+Figure~\ref{fig:usecase} shows who uses the system and for what; machines are
+actors as well as people.
+
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.4_use_case.png}}
+    \includegraphics[width=129mm]{\figpath{fig_3.4_use_case.png}}
     \caption[Use case diagram]{Use cases. A peer daemon is an actor in its own right, because
     every node serves closures, executes chunks and introduces its cluster's
     peers; a phone executes chunks; a hosted introducer only registers nodes
@@ -140,10 +146,12 @@ identity and trust store (node key, pinned certificates, trusted Nix keys).
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.5_sequence.png}}
+    \includegraphics[width=120mm]{\figpath{fig_3.5_sequence.png}}
     \caption[Sequence diagram of one job]{End-to-end execution of one job.}
     \label{fig:sequence}
 \end{figure}
+
+Figure~\ref{fig:sequence} follows one job from submission to results:
 
 \begin{enumerate}[leftmargin=*]
   \item The user runs \texttt{pipedpeer run script.py}.
@@ -159,7 +167,7 @@ identity and trust store (node key, pinned certificates, trusted Nix keys).
   which store paths are missing and sends only those, then uploads the
   workspace.
   \item The worker pushes the closure to peers that lack it, so that they can
-  take spilled parallel work.
+  take a share of the parallel work.
   \item Execution proceeds inside a sandbox under a per-job memory ceiling, with
   output streamed back as it is written.
   \item If the script uses a parallel primitive, the shim distributes it subject
