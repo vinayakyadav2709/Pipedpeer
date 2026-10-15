@@ -1,6 +1,7 @@
 package authtoken
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
@@ -249,6 +250,9 @@ func TestTheTokenIsNeverSentToAHostThatCannotProve(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "could not prove it holds the cluster token; not sending it") {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
+	if !Unproven(err) {
+		t.Fatalf("err = %v: something answered, want Unproven", err)
+	}
 	// A token the caller set by hand is held to the same rule.
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/anything", nil)
 	req.Header.Set(Header, "s3cret")
@@ -355,5 +359,17 @@ func TestTheChallengeIsAnsweredWithNothingElse(t *testing.T) {
 		if tc.want == http.StatusNoContent && (rec.Header().Get(ProofHeader) == "" || rec.Body.Len() != 0) {
 			t.Fatalf("challenge answer: proof %q, body %q", rec.Header().Get(ProofHeader), rec.Body.String())
 		}
+	}
+}
+
+// Nothing listening is not a refusal: connect must not blame the secret for it.
+func TestNoAnswerIsNotUnproven(t *testing.T) {
+	withToken(t, "s3cret")
+	srv := remoteServer(t, http.NotFoundHandler(), false)
+	addr := srv.Listener.Addr().String()
+	srv.Close()
+	err := prove(context.Background(), http.DefaultTransport, "http", addr, Current())
+	if err == nil || Unproven(err) || !strings.Contains(err.Error(), "did not answer") {
+		t.Fatalf("err = %v, want a no-answer that is not Unproven", err)
 	}
 }

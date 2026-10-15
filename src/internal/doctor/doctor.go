@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/say"
 	"github.com/pipedpeer/pipedpeer/internal/term"
 )
@@ -92,6 +93,16 @@ type node struct {
 	Path         string            `json:"path"`
 	Reason       string            `json:"reason"`
 	Capabilities map[string]string `json:"capabilities"`
+	Paths        []nodePath        `json:"paths"`
+}
+
+type nodePath struct {
+	Kind   string `json:"kind"`
+	Host   string `json:"host"`
+	Port   int    `json:"port"`
+	Active bool   `json:"active"`
+	OK     bool   `json:"ok"`
+	Err    string `json:"err"`
 }
 
 type unreachable struct {
@@ -152,8 +163,22 @@ func (c Cluster) Run(ctx context.Context) []Check {
 			"pipedpeer stop && pipedpeer start"})
 	}
 	out = append(out, Check{Level: OK, What: "daemon running at " + c.API})
-	out = append(out, c.introducers(ctx)...)
-	return append(out, c.peers(ctx)...)
+	peers, reached := c.peers(ctx)
+	intros := c.introducers(ctx)
+	if reached {
+		// The introducer is how machines join and re-find each other; with a
+		// peer answering now the cluster works, so its silence is a warning
+		// (e6: doctor ran seconds after Wi-Fi came back, before the next
+		// registration).
+		for i := range intros {
+			if intros[i].Level == Fail {
+				intros[i].Level = Warn
+				intros[i].What += "; peers still answer, but new machines cannot join through it"
+			}
+		}
+	}
+	out = append(out, intros...)
+	return append(out, peers...)
 }
 
 func (c Cluster) introducers(ctx context.Context) []Check {
@@ -202,19 +227,21 @@ func (c Cluster) introducers(ctx context.Context) []Check {
 	return out
 }
 
-func (c Cluster) peers(ctx context.Context) []Check {
+// peers checks every other machine; reached is whether one answers now.
+func (c Cluster) peers(ctx context.Context) (out []Check, reached bool) {
 	var nodes []node
 	if err := c.get(ctx, "/v1/nodes", &nodes); err != nil {
-		return []Check{{Fail, "could not list peers: " + err.Error(), "pipedpeer stop && pipedpeer start"}}
+		return []Check{{Fail, "could not list peers: " + err.Error(), "pipedpeer stop && pipedpeer start"}}, false
 	}
-	var out []Check
 	peers := 0
 	for _, n := range nodes {
 		if n.Source == "self" || n.Path == "self" {
 			continue
 		}
 		peers++
-		out = append(out, c.peer(ctx, n)...)
+		checks := c.peer(ctx, n)
+		reached = reached || (n.State == "healthy" && !failed(checks))
+		out = append(out, checks...)
 	}
 	var unr []unreachable
 	if err := c.get(ctx, "/v1/peers/unreachable", &unr); err == nil {
@@ -228,7 +255,16 @@ func (c Cluster) peers(ctx context.Context) []Check {
 	if peers == 0 {
 		out = append(out, Check{Warn, "no other machines found", connectFix})
 	}
-	return out
+	return out, reached
+}
+
+func failed(checks []Check) bool {
+	for _, c := range checks {
+		if c.Level == Fail {
+			return true
+		}
+	}
+	return false
 }
 
 func (n node) name() string {
@@ -257,8 +293,43 @@ func (n node) host() string {
 	return ep
 }
 
+// working is the node's path that answers now: the active one when it does,
+// else any verified one.
+func (n node) working() (nodePath, bool) {
+	var best nodePath
+	found := false
+	for _, p := range n.Paths {
+		if p.OK && (!found || p.Active) {
+			best, found = p, true
+		}
+	}
+	return best, found
+}
+
+// strangers warns about a node's candidate addresses where a machine outside
+// the cluster answered, while another path works: a network that reuses the
+// node's subnet (E6). Not a fault; the daemon drops them.
+func (n node) strangers(w nodePath) []Check {
+	var out []Check
+	for _, p := range n.Paths {
+		if p.OK || !strings.Contains(p.Err, authtoken.UnprovenPhrase) {
+			continue
+		}
+		at := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+		out = append(out, Check{Warn, n.name() + ": a different machine answers at " + at +
+			" on this network; using the " + w.Kind + " path", ""})
+	}
+	return out
+}
+
 func (c Cluster) peer(ctx context.Context, n node) []Check {
-	addr := net.JoinHostPort(n.host(), strconv.Itoa(n.DaemonPort))
+	host, port := n.host(), n.DaemonPort
+	var out []Check
+	if w, ok := n.working(); ok {
+		host, port = w.Host, w.Port
+		out = n.strangers(w)
+	}
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	dctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	conn, err := c.Dial(dctx, "tcp", addr)
 	cancel()
@@ -267,18 +338,17 @@ func (c Cluster) peer(ctx context.Context, n node) []Check {
 		if lan {
 			// Its discovery packets reached us, so UDP crosses; TCP does not.
 			// The college-router case (experiments E5d).
-			return []Check{{Fail, n.name() + " at " + addr + ": TCP blocked but UDP passes (a router between the subnets forwards only UDP)",
-				"link over UDP instead: " + connectFix + "; or ask the network admin to allow TCP between the subnets"}}
+			return append(out, Check{Fail, n.name() + " at " + addr + ": TCP blocked but UDP passes (a router between the subnets forwards only UDP)",
+				"link over UDP instead: " + connectFix + "; or ask the network admin to allow TCP between the subnets"})
 		}
 		why := err.Error()
 		if n.Reason != "" {
 			why = n.Reason
 		}
-		return []Check{{Fail, n.name() + " at " + addr + " unreachable: " + why,
-			"check that machine is on and running (`pipedpeer start` there), then run `pipedpeer doctor` on it"}}
+		return append(out, Check{Fail, n.name() + " at " + addr + " unreachable: " + why,
+			"check that machine is on and running (`pipedpeer start` there), then run `pipedpeer doctor` on it"})
 	}
 	conn.Close()
-	var out []Check
 	if n.State != "healthy" {
 		what := n.name() + " is " + n.State
 		if n.Reason != "" {

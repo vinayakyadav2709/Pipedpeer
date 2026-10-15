@@ -100,20 +100,42 @@ func short8(id string) string {
 
 // fixFor turns a peer's reason into what to do about it.
 func fixFor(reason string) string {
-	r := strings.ToLower(reason)
 	switch {
-	case strings.Contains(r, "token") || strings.Contains(r, "401") || strings.Contains(r, "secret"):
-		return "this machine and that one hold different secrets: run `pipedpeer invite` on a connected machine and `pipedpeer connect` again here"
-	case strings.Contains(r, "deadline") || strings.Contains(r, "timeout") || strings.Contains(r, "no route") ||
-		strings.Contains(r, "refused"):
+	case noAnswer(reason):
 		return "the machines cannot reach each other on 4242/tcp: run `pipedpeer doctor` on both (router or firewall between them)"
+	case secretRejected(reason):
+		return "this machine and that one hold different secrets: run `pipedpeer invite` on a connected machine and `pipedpeer connect` again here"
 	}
 	return "run `pipedpeer doctor` on both machines"
 }
 
-func secretRejected(reason string) bool {
+// noAnswer: the reason says nothing answered. A timeout inside the token
+// check is one too: its text names the token, but no one refused anything
+// (the real laptops: no introducer reachable, connect blamed the secret).
+func noAnswer(reason string) bool {
 	r := strings.ToLower(reason)
-	return strings.Contains(r, "token") || strings.Contains(r, "401") || strings.Contains(r, "secret")
+	for _, s := range []string{"deadline", "timeout", "timed out", "no route", "refused", "did not answer",
+		"unreachable", "no reply", "no answer", "network is down"} {
+		if strings.Contains(r, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// secretRejected: something answered and refused this machine's secret (401)
+// or could not prove it holds it. Never when nothing answered.
+func secretRejected(reason string) bool {
+	if noAnswer(reason) {
+		return false
+	}
+	r := strings.ToLower(reason)
+	for _, s := range []string{"401", "could not prove", "proof does not match", "carried no proof", "secret"} {
+		if strings.Contains(r, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // classify decides connected / partly / failed from one snapshot.
@@ -184,12 +206,14 @@ func classify(s connSnapshot) connResult {
 		res.why = "the cluster rejected this machine's secret"
 		res.fix = "run `pipedpeer invite` on a connected machine and `pipedpeer connect <new code>` here"
 	case !replied:
-		res.why = "nobody answered: no introducer replied (" + strings.Join(addrs, ", ") + ")"
+		res.why = "no introducer answered (tried " + strings.Join(addrs, ", ") + ")"
 		if len(errs) > 0 {
 			res.why += "; " + strings.Join(errs, "; ")
 		}
-		res.fix = "check the inviting machine is on and its daemon runs (`pipedpeer status` there), " +
-			"that both are on a network that lets 4244/udp through, then run connect again"
+		res.fix = "check the inviting machine is on and its daemon runs (`pipedpeer status` there). " +
+			"If either machine is behind a NAT that cannot be opened (UPnP failing, double NAT), give one machine " +
+			"a public address or forward 4244/udp to it (`pipedpeer setup --public-address <addr>`), " +
+			"or put both on Tailscale; `pipedpeer doctor` names which. Then run connect again"
 	case members <= 1 && len(res.problems) == 0:
 		res.why = "the introducer answered, but no other machine has joined it yet"
 		res.fix = "run `pipedpeer status` on the inviting machine; if it is down, `pipedpeer start` there"
