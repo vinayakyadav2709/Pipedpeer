@@ -1,9 +1,12 @@
 package daemonapi
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/schedule"
 )
 
 // TestFitSeparatesRoundTripFromPerItemCost is the measurement the share split
@@ -125,5 +128,33 @@ func TestMeasurementOverridesThePrior(t *testing.T) {
 	if devices[0].Rate > 10 {
 		t.Errorf("rate = %.1f; the 64-core advertisement is still being believed "+
 			"over the measurement", devices[0].Rate)
+	}
+}
+
+// TestLostPartsTeachTheSlowPeer: a peer whose every part loses (a copy here
+// wins, or the shim finishes first) is still measured, so its share shrinks;
+// a part cancelled before its predicted time teaches nothing.
+func TestLostPartsTeachTheSlowPeer(t *testing.T) {
+	pm := newPoolManager()
+	pm.rates.observe("fast", 10, time.Second) // 10 items/s
+	// Before: the slow peer has only the prior (here: as fast as local).
+	before := pm.planShares(&chunk{items: make([]json.RawMessage, 20)}, []string{"fast", "slow"}, false)
+	exp := pm.expectedSec("slow", "", 5)
+	pm.observeLost("slow", "", 5, 100*time.Millisecond, exp) // cancelled early: no evidence
+	if _, _, ok := pm.rates.fit("slow"); ok {
+		t.Fatal("a part cancelled before its predicted time was recorded")
+	}
+	pm.observeLost("slow", "", 5, 5*time.Second, exp) // 1 item/s at best
+	after := pm.planShares(&chunk{items: make([]json.RawMessage, 20)}, []string{"fast", "slow"}, false)
+	share := func(sh []schedule.Share) int {
+		for _, s := range sh {
+			if s.Device.ID == "slow" {
+				return s.Items
+			}
+		}
+		return 0
+	}
+	if share(after) >= share(before) || share(after) > 2 {
+		t.Errorf("slow peer share %d -> %d of 20; want at most 2 once it lost a part", share(before), share(after))
 	}
 }
