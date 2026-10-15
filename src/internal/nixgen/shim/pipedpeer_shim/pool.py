@@ -396,18 +396,9 @@ class _ClusterPool:
         # serial bubble in front of every intercepted map.
         head_n = max(self._measure_items, min(self._procs, len(items) // 2))
         head, tail = items[:head_n], items[head_n:]
-        t0 = time.monotonic()
-        head_results = self._local(func, head, starmap, catch)
-        wall = time.monotonic() - t0
+        head_results, cost = self._measure(func, head, starmap, catch)
         if not tail:
             return head_results
-        # Per-item cost comes from the batch we just ran, not from executing an
-        # item a third time. The batch occupied min(items, procs) lanes, so the
-        # wall clock covers that many items at once.
-        lanes = max(1, min(len(head), self._procs))
-        cost = wall * lanes / max(len(head), 1)
-        if cost <= 0:
-            return head_results + self._local(func, tail, starmap, catch)
 
         payload = _func_payload(func) or _func_pickle(func)
         if payload is not None and payload.get("pickled"):
@@ -456,6 +447,22 @@ class _ClusterPool:
                  "runs on threads; the cluster still runs it in parallel"
                  % getattr(func, "__name__", "?"))
         return self._threads
+
+    def _measure(self, func, items, starmap, catch):
+        """Run the head locally; return (results, per-item cost in seconds).
+
+        Each item is timed inside the worker, around the call alone. The
+        batch's wall clock used to be the measure, and it counted pool
+        dispatch, pickling and scheduler waits as work: on a loaded laptop
+        a trivial x + 1 measured 14-20 ms per item and shipped. The cost is
+        the 25th percentile of the samples, so one item that waited on a
+        busy core does not set the estimate either."""
+        _log("local %d items" % len(items))
+        _record_local(len(items))
+        pairs = self._local_ctx(func).starmap(
+            _timed, [(func, v, starmap, catch) for v in items])
+        secs = sorted(dt for _, dt in pairs)
+        return [r for r, _ in pairs], (secs[len(secs) // 4] if secs else 0.0)
 
     def _local(self, func, items, starmap, catch=False):
         _log("local %d items" % len(items))
@@ -1233,6 +1240,18 @@ def _apply_catching(func, item):
         return _apply(func, item)
     except Exception as e:
         return _Raised(e)
+
+
+def _timed(func, item, starmap, catch):
+    """One item the way _local runs it, and the seconds the call took."""
+    t0 = time.perf_counter()
+    if catch:
+        r = _apply_catching(func, item)
+    elif starmap:
+        r = func(*item)
+    else:
+        r = func(item)
+    return r, time.perf_counter() - t0
 
 
 def _adaptive_chunk(per_item_cost):
