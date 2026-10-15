@@ -4,7 +4,6 @@ imports without them (they are imported lazily)."""
 import importlib
 import pickle
 
-import pytest
 
 from pipedpeer_shim import core, numpy_ops, pool, transfer
 

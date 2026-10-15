@@ -24,7 +24,7 @@ func TestStartStopStatusLifecycle(t *testing.T) {
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
 
 	out := runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
-	if !strings.Contains(out, "started daemon") && !strings.Contains(out, "daemon already running") {
+	if !strings.Contains(out, "daemon running") && !strings.Contains(out, "daemon already running") {
 		t.Fatalf("expected daemon start output, got: %s", out)
 	}
 
@@ -73,15 +73,20 @@ func TestRunCheckOnlyAutoStartsDaemon(t *testing.T) {
 	_ = runCLIWithEnv(t, stateDir, xdg, "start", "--port", fmt.Sprintf("%d", port))
 
 	_ = runCLIWithEnv(t, stateDir, xdg, "stop")
+	defer func() { _ = runCLIWithEnv(t, stateDir, xdg, "stop") }()
+	// Stop removed the port file and run has no --port: without this the
+	// auto-start would take the real daemon's 4242.
+	if err := os.WriteFile(filepath.Join(stateDir, "daemon.port"), []byte(fmt.Sprint(port)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	out := runCLIWithEnv(t,
 		stateDir, xdg,
 		"run",
-		scriptPath,
 		"--host", fmt.Sprintf("127.0.0.1:%d", port),
 		"--check-only",
-		"-v", // "started daemon" is a verbose-only line
-
+		"-v",       // "started daemon" is a verbose-only line
+		scriptPath, // flags after the script are the script's own
 	)
 
 	if !strings.Contains(out, "started daemon") {
@@ -112,9 +117,9 @@ func TestRemoteRunFailsWhenNoEligibleNode(t *testing.T) {
 	_, errOut, err := runCLIEWithEnv(t,
 		stateDir, xdg,
 		"run",
-		scriptPath,
 		"--remote",
 		"--check-only",
+		scriptPath,
 	)
 	if err == nil {
 		t.Fatalf("expected error when no eligible remote node, got none")
@@ -355,9 +360,9 @@ func TestAutoPlacementSelectsSelf(t *testing.T) {
 	out := runCLIWithEnv(t,
 		stateDir, xdg,
 		"run",
-		scriptPath,
 		"--check-only",
 		"-v", // [coordinator] lines are verbose-only
+		scriptPath,
 	)
 
 	if !strings.Contains(out, "[coordinator]") {

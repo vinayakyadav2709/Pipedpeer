@@ -181,6 +181,10 @@ func TestHistoryProxiesAnotherNodesSteps(t *testing.T) {
 		SSHEndpoint: "root@" + host + ":22", State: "healthy", Source: "manual"}); err != nil {
 		t.Fatal(err)
 	}
+	// UpsertNode no longer stores an address; the node's path does.
+	if err := store.PathOK("peer1", nodestore.PathLAN, host, port); err != nil {
+		t.Fatal(err)
+	}
 	get := func(q string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
 		s.handleHistory(w, httptest.NewRequest("GET", "/v1/history"+q, nil))

@@ -58,7 +58,7 @@ func newStartCmd() *cobra.Command {
 				}
 				fmt.Println("starts at boot (turn off: pipedpeer stop --boot)")
 			}
-			port := daemonctl.DefaultPort
+			port, _ := cmd.Flags().GetInt("port")
 			st := daemonctl.Status()
 			switch {
 			case st.Running && !restart:
@@ -83,6 +83,9 @@ func newStartCmd() *cobra.Command {
 	cmd.Flags().Bool("introducer-only", false, "introduce other machines but take no jobs (public server)")
 	cmd.Flags().Int("max-concurrent", 0,
 		"Maximum tasks this node accepts at once (0 = unlimited)")
+	// Hidden: tests start throwaway daemons off the default port.
+	cmd.Flags().Int("port", daemonctl.DefaultPort, "daemon API port")
+	_ = cmd.Flags().MarkHidden("port")
 	return cmd
 }
 
