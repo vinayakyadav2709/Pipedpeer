@@ -138,6 +138,7 @@ done
 fi
 bl_lab_down
 
+[[ "${BL_DRY:-}" == 1 ]] && exit 0
 bl_table
 # Did the matrix contain both outcomes? Compare split vs solo medians per cell.
 python3 - "$BL_CSV" "$mode" <<'PY'
