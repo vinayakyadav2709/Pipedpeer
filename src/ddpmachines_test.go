@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -236,5 +237,25 @@ func TestANodeWithARoleTakesNoRank(t *testing.T) {
 	}
 	if ddpExcluded(ddpRunOptions{}, registry.NodeRecord{NodeID: "pc"}) {
 		t.Error("a full node was excluded")
+	}
+}
+
+// TestRanksSharingANodeSplitItsCores: two ranks on a 4-core node get 2
+// threads each, a rank alone gets all 4, and a value set with --env wins.
+func TestRanksSharingANodeSplitItsCores(t *testing.T) {
+	box := registry.NodeRecord{NodeID: "box", Load: registry.LoadInfo{TotalCPUs: 4}}
+	solo := registry.NodeRecord{NodeID: "solo", Load: registry.LoadInfo{TotalCPUs: 4}}
+	ring := []registry.NodeRecord{box, box, solo}
+	want := []string{"OMP_NUM_THREADS=2", "MKL_NUM_THREADS=2"}
+	for _, i := range []int{0, 1} {
+		if got := ddpThreadEnv(nil, ring, i); strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Errorf("rank %d env %v, want %v", i, got, want)
+		}
+	}
+	if got := ddpThreadEnv(nil, ring, 2); strings.Join(got, " ") != "OMP_NUM_THREADS=4 MKL_NUM_THREADS=4" {
+		t.Errorf("a rank alone on its node got %v, want all 4 cores", got)
+	}
+	if got := ddpThreadEnv([]string{"OMP_NUM_THREADS=8"}, ring, 0); strings.Join(got, " ") != "MKL_NUM_THREADS=2" {
+		t.Errorf("the user's OMP_NUM_THREADS was overridden: %v", got)
 	}
 }
