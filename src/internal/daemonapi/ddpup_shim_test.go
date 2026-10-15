@@ -146,6 +146,10 @@ if __name__ == "__main__":
 			break
 		}
 		if time.Now().After(deadline) {
+			for _, r := range ranks { // the buffers are safe to read once the writers stop
+				_ = r.cmd.Process.Kill()
+				_ = r.cmd.Wait()
+			}
 			t.Fatalf("the ring never synced:\n%s\n%s", ranks[0].out.String(), ranks[1].out.String())
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -177,7 +181,11 @@ if __name__ == "__main__":
 			if err != nil {
 				t.Fatalf("rank %d failed: %v\n%s", i, err, r.out.String())
 			}
-		case <-time.After(120 * time.Second):
+		// Under -race the three modes run nine torch processes at once and
+		// take ~110 s on an idle laptop; 120 s timed out under load (VERIFY-5).
+		case <-time.After(300 * time.Second):
+			_ = r.cmd.Process.Kill()
+			<-done // the copy goroutines still write r.out until Wait returns
 			t.Fatalf("rank %d never finished:\n%s", i, r.out.String())
 		}
 	}
