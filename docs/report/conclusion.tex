@@ -1,0 +1,81 @@
+% ============================================================
+\chapter{Conclusion}
+\label{chap:conclusion}
+% ============================================================
+
+\section{Conclusion}
+
+PipedPeer runs an unmodified Python script on other machines with no cluster to
+configure, reproduces its environment exactly, distributes the parallel work
+inside it without the user touching the source, and joins machines on different
+networks with one command and no relay. Its contributions are:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{The store path as cache key and unit of transfer.} Pinning an
+  exact package set makes an environment's content-addressed name identical on
+  every machine and on any day, so a worker that holds an environment pays
+  nothing for it (0.83\,s warm against 23.41\,s cold) and one that holds part of
+  it receives only the paths it lacks (7 of 43 paths, 86\% fewer bytes).
+  \item \textbf{Transparent interception with work shared by measurement.} The
+  parallel primitives a script already uses are substituted at import time;
+  kernels travel as source or by value; parallel maps are divided by a makespan
+  solver over measured peer rates; and numerical work moves only when the cost
+  model says moving it is cheaper than computing it.
+  \item \textbf{Data-parallel training over the daemon port.} Gradients are
+  reduced by the lead daemon in 8-bit with error feedback, the ring is chosen,
+  resized and released by measurement, and infrequent synchronisation by plain
+  averaging holds accuracy on rings of two to four machines while sending an
+  order of magnitude fewer bytes.
+  \item \textbf{Joining across networks without a relay or a server.} An
+  introducer in every daemon that never carries data, router port mapping, a
+  candidate race over one shared socket, a birthday-collision fallback for the
+  hardest NATs, and authenticated QUIC links that the rest of the system sees as
+  ordinary nodes.
+  \item \textbf{Placement without a scheduler, and a tested fallback.} Placement
+  runs in the submitting client under a three-phase lease, and every remote path
+  has a working local path beneath it.
+\end{enumerate}
+
+The principle that runs through the design is that the cluster is used only when
+a measurement says it will help: work is divided by measured speed rather than
+by headcount, dense matrix products stay local on a CPU cluster, a training ring
+is released when one GPU is faster, and fast synchronisation is chosen
+automatically only within the ring sizes where it was shown to keep accuracy.
+
+\section{Limitations}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{No relay.} Two machines between which no direct path exists ---
+  for example two carrier networks that both allocate a new port per
+  destination --- cannot work together; such a peer is reported and routed
+  around.
+  \item \textbf{Python and Linux only}, with NVIDIA GPUs in practice; phones
+  take parallel chunks only.
+  \item \textbf{Submitter and lead.} A parallel script runs on its submitter,
+  which must survive the job, and a training ring needs rank 0's machine.
+  \item \textbf{Fast synchronisation for small rings.} From five ranks no
+  synchronisation interval kept accuracy, so automatic mode keeps such rings
+  exact.
+  \item \textbf{Interception gaps.} Only \texttt{map} of a process-pool executor
+  is intercepted, the \texttt{@} operator is not, and numerical work under
+  32\,MB never leaves the node, by design.
+  \item \textbf{A partial sandbox.} The job runs as user 0 inside the container
+  with the host's network and no seccomp filter, and isolation is skipped with a
+  warning on a node lacking \texttt{crun} or user namespaces.
+  \item \textbf{Measurement.} Speedup comes from containers with fixed processor
+  quotas and a few real machines, not a controlled multi-machine experiment; not
+  measured are hole-punch success rates across many networks, two GPUs in one
+  machine, and fast synchronisation at five to seven ranks.
+\end{itemize}
+
+\section{Security}
+\label{sec:security}
+
+Section~\ref{sec:trust} describes the protections: a secret on every route,
+pinned TLS, authenticated QUIC links and signed closures. Their limits are
+significant. Every holder of the secret can run code on every node, and jobs can
+read the secret. TLS on a local network is trust on first use and can be
+downgraded by an attacker who can break the handshake. The list of keys trusted
+to sign closures includes nodes found by unauthenticated LAN discovery, and the
+submitter's own upload is imported without a signature check. PipedPeer suits
+machines whose owners trust one another, over networks they need not trust.

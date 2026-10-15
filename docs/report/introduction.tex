@@ -1,0 +1,140 @@
+% ============================================================
+\chapter{Introduction}
+\label{chap:intro}
+% ============================================================
+
+\section{Problem Statement}
+
+A developer with a laptop, a laboratory workstation and a spare desktop has a
+considerable amount of idle computing capacity and no practical way to use it.
+The frameworks that exist for distributed computation --- Apache Spark
+\cite{zaharia2010spark}, Ray \cite{moritz2018ray}, Dask \cite{rocklin2015dask}
+--- presuppose a cluster that somebody has already configured: a head node,
+matching software on every worker, a scheduler process, and a network on which
+every machine can reach every other. Ordinary machines fail the last of these,
+since each sits behind its own home or campus router and accepts no inbound
+connection. The alternative, \texttt{ssh} with \texttt{rsync}, means reproducing
+the environment by hand on every machine and receiving no scheduling, isolation
+or fault tolerance in return.
+
+Three distinct problems sit underneath this:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{The environment problem.} A script needs a particular
+  interpreter and a particular set of libraries, and making a remote machine
+  match the local one is the bulk of the work.
+  \item \textbf{The code problem.} Even with a matching environment, using more
+  than one machine normally means rewriting the program against a cluster API.
+  \item \textbf{The reachability problem.} Machines on different networks cannot
+  open a connection to one another without a VPN, port forwarding, or a relay
+  that carries every byte between them.
+\end{enumerate}
+
+\textbf{PipedPeer} addresses all three without asking the user to change the
+program. The environment is reproduced exactly by shipping a Nix closure; the
+program is distributed without modification by intercepting the parallel
+primitives it already uses; and machines on different networks are joined by a
+direct path through their routers, with an introducer that only tells each
+machine where the others are. No machine is a head node: coordination is done
+per job by the machine that submits it.
+
+\section{Objectives}
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item To run an unmodified Python script on the best available machine, with
+  results appearing in the user's working directory as though the script had
+  run locally.
+  \item To reproduce the script's environment exactly on that machine, sending
+  only the store paths that machine does not already hold.
+  \item To choose the machine from live capacity, treating architecture and GPU
+  availability as hard requirements and load, memory and hardware as a ranking.
+  \item To distribute the parallel work inside the script with no code changes,
+  only when doing so is expected to be faster than running it locally, and in
+  proportion to each machine's measured throughput.
+  \item To join machines on different networks into one cluster with a single
+  command, with no VPN, no port forwarding and no relay in the data path.
+  \item To authenticate every request, encrypt traffic between machines, isolate
+  each job, and survive the loss of any worker without losing the run.
+  \item To require no manual installation on a new machine: one binary, whose
+  set-up command installs what else is needed, without root if necessary.
+\end{enumerate}
+
+\section{Scope}
+
+Within scope and implemented are a Go daemon and CLI in one binary; discovery
+on the local subnet and an address book of every path to every node; joining
+across networks by an introducer in every daemon, router port mapping, hole
+punching and QUIC links; a shared secret, pinned TLS and signed closures;
+reproducible Nix environments transferred as a path-level difference; placement
+by hard filters and a score, with a three-phase lease; per-job \texttt{crun}
+sandboxes under memory ceilings, with GPU passthrough and without root;
+transparent interception of \texttt{multiprocessing.Pool}, pandas, NumPy,
+\texttt{joblib} and scikit-learn, and torch data-parallel training; and Android
+phones as workers for parallel chunks. Out of scope are per-user authorisation (a cluster shares one secret;
+Section~\ref{sec:security}), runtimes other than Python, relaying traffic for a
+peer that no direct path can reach (such a peer is reported and routed around),
+and any incentive mechanism for contributing capacity.
+
+\section{Technologies Used}
+
+\begin{table}[!htbp]
+\centering
+\caption{Technologies used in PipedPeer}
+\label{tab:tech}
+\renewcommand{\arraystretch}{1.2}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{4.3cm} L{2.4cm} X}
+\toprule
+\textbf{Technology} & \textbf{Category} & \textbf{Purpose} \\
+\midrule
+Go 1.25 & Core language & Daemon, CLI and coordinator in one static binary \\
+\texttt{go-chi/chi} & HTTP & Routing for the daemon API \\
+\texttt{gorilla/websocket} & Streaming & Live output from a running job \\
+\texttt{quic-go} & Transport & Encrypted, multiplexed peer links over the punched UDP socket \\
+\texttt{crypto/tls}, Ed25519 & Security & Pinned TLS on the daemon port; node identity and signing keys \\
+Nix (pinned) & Environments & Content-addressed closures; the store path is the cache key \\
+\texttt{crun} & Sandboxing & OCI container per job, including GPU device passthrough \\
+cgroup v2, \texttt{systemd-run} & Resources & Memory ceilings for the daemon and for each job \\
+zstd (\texttt{klauspost/compress}) & Compression & Workspace, results and request bodies \\
+\texttt{modernc.org/sqlite} & Storage & Address book, in pure Go so the binary stays static \\
+\texttt{gopsutil} & Metrics & CPU, memory and process-tree measurements \\
+Cobra; Bubble Tea, Lip Gloss & CLI, TUI & Command structure; live dashboard \\
+\texttt{zerolog} & Logging & Structured, levelled logging \\
+Python, cloudpickle & Interception & The shim, embedded in the binary; shipping closures by value \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Assumptions and Constraints}
+
+\begin{itemize}[leftmargin=*]
+  \item Every participating machine runs the same binary.
+  \texttt{pipedpeer setup} installs Nix and \texttt{crun} when they are missing,
+  and can do so without root by using a private Nix store.
+  \item Workers run Linux, since \texttt{crun}, cgroups and the Nix store are
+  Linux-specific; phones run Linux user space under Termux.
+  \item Machines in a cluster share one secret, created by the first machine's
+  set-up and carried to the others by an invite code.
+  \item Joining across networks needs one reachable member or public
+  introducer. Introducers carry no job data.
+  \item Two machines between which no direct path exists cannot work together.
+  \item The submitting process holds the lease of a parallel script and must
+  remain alive for its duration; a single remote job can be detached.
+\end{itemize}
+
+\section{Layout of the Report}
+
+\begin{itemize}[leftmargin=*]
+  \item Chapter~\ref{chap:lit} surveys the work PipedPeer draws on.
+  \item Chapter~\ref{chap:arch} gives the design: architecture, data flow, use
+  cases and the sequence of a run.
+  \item Chapter~\ref{chap:design} describes the implementation of each
+  mechanism, from discovery and joining across networks to interception,
+  training and fault tolerance.
+  \item Chapter~\ref{chap:results} sets out the evaluation and its results.
+  \item Chapter~\ref{chap:conclusion} concludes, with limitations and security.
+  \item Chapter~\ref{sec:future} lists future scope, and
+  Chapter~\ref{chap:pub} summarises the research paper drawn from this work.
+  \item Appendix~\ref{app:extra} holds the implementation's size and further
+  measurements.
+\end{itemize}

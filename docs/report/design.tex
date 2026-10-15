@@ -1,0 +1,172 @@
+% ============================================================
+\chapter{Design}
+\label{chap:arch}
+% ============================================================
+
+\section{System Architecture}
+
+PipedPeer follows a \textbf{daemon, not CLI} architecture. Every machine runs
+one long-lived daemon that handles discovery, admission, execution and result
+delivery; the \texttt{pipedpeer} command is a short-lived client of it.
+
+The property that distinguishes the system from the frameworks of
+Chapter~\ref{chap:lit} is that \textbf{the coordinator is a library linked into
+the client, not a service}. There is no scheduler process, no head node and no
+master. A machine is submitter and worker at once, and the same binary does
+both; each job is coordinated by the machine that submits it, and a training
+ring's synchronisation by the daemon of its lead rank, chosen per job. A new
+participant runs \texttt{pipedpeer connect} with the one-line code another
+member's \texttt{pipedpeer invite} printed; on one network the machines also
+find each other unaided. Across networks they meet through an
+\textbf{introducer}, an address book that tells machines where to find each
+other and carries no job data. Every daemon is an introducer for its own
+cluster. Two optional roles exist: \texttt{chunks-only}, for a phone that takes
+parallel chunks but not whole jobs, and \texttt{introducer-only}, for a hosted
+server that runs nothing.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.78\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.1_system_design.png}}
+    \caption[PipedPeer system design]{PipedPeer system design. The submitting side builds the environment
+    and places the job; the worker admits it, caches the closure and runs it
+    sandboxed under a memory ceiling. Both roles are the same binary. Peers on
+    other networks are reached over direct QUIC links that an introducer helps
+    establish but never carries; every daemon is an introducer for its own
+    cluster. Phones take parallel chunks.}
+    \label{fig:architecture}
+\end{figure}
+
+The principal subsystems are listed in Table~\ref{tab:subsystems}. All are
+packages under \texttt{src/internal/}; the remainder are supporting code
+(process management, set-up, paths, logging).
+
+\begin{table}[!htbp]
+\centering
+\caption{Subsystems and their responsibilities}
+\label{tab:subsystems}
+\renewcommand{\arraystretch}{1.2}
+\rowcolors{2}{}{rowgray}
+\small
+\begin{tabularx}{\textwidth}{L{3.2cm} X}
+\toprule
+\textbf{Package} & \textbf{Responsibility} \\
+\midrule
+\texttt{coordinator} & Filters, scores and selects a node; takes the lease; retries on failure \\
+\texttt{daemonapi} & HTTP and WebSocket surface, lease manager, sandbox, pool executor, gradient reduction, closure caches, node poller and address gossip \\
+\texttt{schedule} & Makespan-optimal division of a chunk across measured devices \\
+\texttt{ddpplace} & Choosing the ranks of a training ring by measured throughput \\
+\texttt{discovery} & UDP multicast and broadcast probes, TCP health sweep fallback \\
+\texttt{internet} & Peer manager across networks: register with every introducer, punch, link, migrate, forward; the in-daemon introducer \\
+\texttt{direct} & Shared UDP socket, candidate race, birthday-collision fallback, QUIC links \\
+\texttt{rendezvous} & The introducer's address book and punch-request forwarding \\
+\texttt{portmap} & Router port mapping by PCP, NAT-PMP and UPnP-IGD \\
+\texttt{authtoken}, \texttt{tlsid} & Shared-secret middleware; certificate from the node key, pins by node id, TLS and HTTP on one port \\
+\texttt{clustercfg}, \texttt{invite} & The one configuration file (secret, introducers, role); the invite code \\
+\texttt{identity}, \texttt{nixsign} & Ed25519 node key, whose fingerprint is the node id; signing closures and the trusted-key list \\
+\texttt{narpack}, \texttt{nixstore} & Signed closure archives and cache pruning; system or private (rootless) Nix store \\
+\texttt{cgroups} & Memory ceilings for the daemon and for each job \\
+\texttt{nodestore} & SQLite address book: every path to every node, last observed capacity \\
+\texttt{nixgen}, \texttt{pythondeps} & Flake generation, wheel pins and the interception shim; import scanning and resolution \\
+\texttt{resourceest}, \texttt{runrec} & Tiered memory estimate; the run record of timed steps \\
+\texttt{heartbeat}, \texttt{gpu} & Capability and load reporting; vendor GPU detection \\
+\texttt{service}, \texttt{warmup}, \texttt{doctor}, \texttt{phone} & Autostart unit; background environment builds; diagnostics; phone worker \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Data Flow Diagram}
+
+\subsection*{Level 0 --- Context Diagram}
+\addcontentsline{toc}{subsection}{Level 0 --- Context Diagram}
+
+At the highest level the system has three external entities: the
+\textbf{user}, who submits a script and receives output and result files;
+\textbf{peer nodes}, which supply capacity and return computed results; and an
+optional \textbf{introducer}, which exchanges candidate addresses so that peers
+on other networks can reach one another.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.2_dfd_level0.png}}
+    \caption[Level 0 DFD (context diagram)]{Level 0 DFD --- context diagram. The introducer is dashed because
+    the system works without it on one network.}
+    \label{fig:dfd0}
+\end{figure}
+
+\subsection*{Level 1 --- System Decomposition}
+\addcontentsline{toc}{subsection}{Level 1 --- System Decomposition}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.3_dfd_level1.png}}
+    \caption[Level 1 DFD]{Level 1 DFD --- seven processes over four data stores.}
+    \label{fig:dfd1}
+\end{figure}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{1 Resolve environment.} Scan the script's imports, generate a
+  flake, build the closure.
+  \item \textbf{2 Find and link peers.} Probe the subnet; across networks,
+  publish candidates to the introducer, punch, and register each direct link as a
+  node.
+  \item \textbf{3 Place task.} Apply hard filters, score the survivors, reserve
+  a lease on the best.
+  \item \textbf{4 Transfer.} Upload the workspace, and of the closure only the
+  store paths the worker lacks; signed between daemons.
+  \item \textbf{5 Execute.} Run inside a \texttt{crun} sandbox under a memory
+  ceiling, streaming output back as it is written.
+  \item \textbf{6 Distribute parallel work.} Share chunks among peers by
+  measured throughput, subject to the cost model.
+  \item \textbf{7 Return results.} Send back changed files and a deletion
+  manifest.
+\end{itemize}
+
+The four stores are the address book, the closure cache, job history, and the
+identity and trust store (node key, pinned certificates, trusted Nix keys).
+
+\section{Use Case Diagram}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.4_use_case.png}}
+    \caption[Use case diagram]{Use cases. A peer daemon is an actor in its own right, because
+    every node serves closures, executes chunks and introduces its cluster's
+    peers; a phone executes chunks; a hosted introducer only registers nodes
+    and forwards punch requests.}
+    \label{fig:usecase}
+\end{figure}
+
+\section{Sequence Diagram}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.36\textheight,keepaspectratio]{\figpath{fig_3.5_sequence.png}}
+    \caption[Sequence diagram of one job]{End-to-end execution of one job.}
+    \label{fig:sequence}
+\end{figure}
+
+\begin{enumerate}[leftmargin=*]
+  \item The user runs \texttt{pipedpeer run script.py}.
+  \item The client scans imports, builds a Nix closure locally, and estimates
+  the job's memory requirement.
+  \item It asks its own daemon for the healthy peers, including peers on other
+  networks, reached through local forwarders onto direct links.
+  \item The coordinator filters and scores them and sends \texttt{accept} to the
+  best candidate, which checks its capacity and reserves it.
+  \item The client sends \texttt{commit}, which turns the reservation into a
+  running lease.
+  \item It asks whether the worker can already run the closure; if not, it asks
+  which store paths are missing and sends only those, then uploads the
+  workspace.
+  \item The worker pushes the closure to peers that lack it, so that they can
+  take spilled parallel work.
+  \item Execution proceeds inside a sandbox under a per-job memory ceiling, with
+  output streamed back as it is written.
+  \item If the script uses a parallel primitive, the shim distributes it subject
+  to the cost model.
+  \item On exit, changed files and a deletion manifest return as a compressed
+  archive and are extracted into the user's directory.
+\end{enumerate}
+
+Every request in this sequence carries the cluster's shared secret and travels
+over pinned TLS on a local network or inside a QUIC link across networks.

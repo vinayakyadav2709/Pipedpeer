@@ -1,0 +1,33 @@
+% ============================================================
+\chapter{Research Publication}
+\label{chap:pub}
+% ============================================================
+
+\section[\projecttitle]{\raggedright\projecttitle}
+
+A research paper drawn from this work, ``\projecttitle'', is written in the IEEE
+conference format by \candone, \candtwo\ and \candthree, with \guidename\ and
+\mentorname\ of the \department, \institute. Status: \publicationstatus.
+
+The paper presents PipedPeer for a systems readership and is organised as
+follows.
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Abstract and Introduction} state the three obstacles to using
+  nearby idle machines --- the environment, the code and the network --- and the
+  paper's contributions.
+  \item \textbf{Related Work} places PipedPeer against cluster frameworks for
+  Python, volunteer computing, environment reproduction, NAT traversal, and
+  communication-efficient data-parallel training.
+  \item \textbf{Design} sets out the design goals and the architecture of
+  Chapter~\ref{chap:arch}: one daemon per machine, coordination by the submitting
+  machine, and an introducer in every daemon.
+  \item \textbf{Implementation} summarises the mechanisms of
+  Chapter~\ref{chap:design}: content-addressed environments and path-level
+  transfer, transparent interception with measured work sharing and the cost
+  model, training synchronised through the daemon, and joining across networks.
+  \item \textbf{Evaluation} states its questions and answers them with the
+  measurements of Chapter~\ref{chap:results}, in the order of setup,
+  microbenchmarks, end-to-end runs and training.
+  \item \textbf{Limitations and Conclusion} close the paper.
+\end{itemize}

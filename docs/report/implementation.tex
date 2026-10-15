@@ -1,0 +1,754 @@
+% ============================================================
+\chapter{Implementation}
+\label{chap:design}
+% ============================================================
+
+\section{Node Discovery and the Address Book}
+\label{sec:discovery}
+
+Three sources feed one table, and none blocks the others.
+
+\textbf{UDP probes.} The daemon opens two sockets on UDP port \texttt{4242}, one
+joined to multicast group \texttt{239.255.0.99} and one bound for broadcast,
+both with address and port reuse. The probe is a fixed magic string and the
+reply carries a JSON node descriptor; it is a bare request-response probe, not
+mDNS. The multicast socket exists because a UDP broadcast to a shared port is
+delivered by the kernel to only one socket, so two daemons on one host would
+never see each other; multicast with port reuse reaches all of them.
+
+\textbf{TCP fallback.} Access points with client isolation drop broadcast
+traffic without error. When the UDP probe returns nothing, the daemon sweeps
+each local interface's prefix (container and VPN interfaces skipped) with
+concurrent health probes, 64 at a time with a 700\,ms timeout each, and stops
+once any daemon answers. A reply's host is taken from the packet's source
+address, never from the address the peer advertised at start-up.
+
+\textbf{The address book.} The node store keeps every node under its node id,
+the fingerprint of its key, together with every \emph{path} to it: its kind
+(LAN, internet, gossip, self), host, port, and when it was last seen, last
+worked and last failed. A sighting only adds a candidate. A path becomes the
+active one only after the poller has reached it and the certificate's key
+matched the node id; an active path that still answers is kept, and a verified
+LAN path beats a verified internet path. Members also gossip their own
+addresses, signed with their node keys, over the authenticated API; a gossiped
+address is a candidate, never a fact.
+
+The poller runs every 10\,s, trying the active path first; a node with no
+verified path for 15 minutes is removed, and a sighting alone never refreshes
+it.
+
+% ------------------------------------------------------------
+\section{Joining Across Networks}
+\label{sec:nat}
+
+A broadcast cannot leave the local network, and a machine behind another router
+accepts no inbound connection. Figure~\ref{fig:nat} shows how two such machines
+come to share a direct, encrypted link without either opening a port by hand and
+without any machine relaying their traffic.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.9\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.1_nat_traversal.png}}
+    \caption[Joining across networks]{Joining across networks. The introducer exchanges candidate
+    addresses and forwards one punch request; the two nodes then race their
+    candidate pairs over a single UDP socket, fall back to a birthday collision
+    when one NAT allocates a port per destination, and carry everything over a
+    mutually authenticated QUIC link exposed locally as an ordinary node.}
+    \label{fig:nat}
+\end{figure}
+
+\textbf{One command per machine.} \texttt{pipedpeer invite} prints a single
+line, \texttt{pipedpeer connect <code>}, whose code carries the cluster secret
+and up to six introducer addresses with a checksum, so a mistyped code is
+refused as damaged rather than tried. \texttt{connect} saves both, restarts the
+daemon once, waits up to a minute, and ends with one of three results:
+connected, naming the machines (exit 0); partly connected, giving each missing
+machine's reason and fix (exit 2); or failed, with what to do (exit 1).
+
+\textbf{An introducer in every daemon.} Every daemon holding a secret serves the
+introducer for its own cluster on UDP 4244 and refuses other clusters. A node
+registers with every introducer it knows --- those in its invite code and
+members it has verified, at most eight --- every 30\,s and at once when its own
+address changes, so the cluster survives the loss or readdressing of any one
+member. A public server can join as an introducer that takes no jobs. Nodes
+register their candidates under a cluster identifier derived from the secret by
+hashing, so an introducer never holds the secret itself. A \texttt{connect}
+request makes it forward a single punch datagram to the target, carrying only
+the candidates the caller itself registered, rate-limited to four requests per
+second per source. It carries no job data.
+
+\textbf{Candidates.} Each node offers three kinds of address: its LAN addresses;
+a port its router agreed to forward, requested by PCP \cite{rfc6887}, NAT-PMP
+\cite{rfc6886} or UPnP-IGD \cite{upnpigd} for two hours and renewed at half the
+lifetime granted; and the reflexive address the introducer observed, in the
+manner of STUN \cite{rfc8489}. A router mapping is withheld when its external
+address differs from the reflexive one: behind a second layer of NAT, such as a
+phone tether, the router that answers is not the one facing the internet.
+
+\textbf{One socket.} Punch probes, introducer messages and QUIC share one UDP
+socket on port 4243. This is the mechanism, not a convenience: a router's
+mapping belongs to the socket that created it \cite{ford2005p2p}, so the
+connection must arrive on the socket the probes left from. Datagrams are
+separated by content --- probes by four magic bytes, introducer messages by a
+leading brace, everything else handed to QUIC.
+
+\textbf{The race.} Both sides probe every pairing of their candidates every
+250\,ms for fifteen seconds, rather than trying candidates in turn, which would
+add a timeout for every address that cannot work. When one side's NAT allocates
+a fresh external port for every destination there is no address to publish, and
+the \textbf{birthday collision} \cite{anderson2020nat} runs: that side opens 256
+sockets toward the peer, the other sends 600 probes to random ports, and the
+socket that is hit is kept, since its mapping is the reachable one.
+
+\textbf{The link.} The winning path carries QUIC \cite{rfc9000} with TLS~1.3.
+Inside it each side sends a hello signed with its Ed25519 node key, and each
+checks that the key's fingerprint is the node it meant to reach and that the
+cluster identifier matches. The hello signs the session's exported keying
+material \cite{rfc5705} and proves the cluster secret with an HMAC
+\cite{rfc2104} over the same value, so it is valid for one session and one
+cluster only and cannot be replayed to a third node. The link is exposed to the
+rest of the daemon as a TCP forwarder on a loopback port, recorded as that
+node's internet path, and each local connection becomes one QUIC stream to the
+peer's daemon. Placement, closure transfer and gradient exchange therefore work
+over the link unchanged.
+
+\textbf{Roaming.} A hello from a key that already has a link replaces that link
+at once. The daemon checks its interfaces every 5\,s; on a change it migrates
+the QUIC connections it dialled to the new address, redials those it accepted,
+and registers again with every introducer.
+
+\textbf{No relay.} A relay carries every byte of every job and becomes the
+cluster's bottleneck and its cost, so none is in the data path. A peer with no
+direct path is logged with the reason, never offered to the scheduler, and
+retried after a back-off; \texttt{pipedpeer status} lists it with that reason.
+
+% ------------------------------------------------------------
+\section{Security and Identity}
+\label{sec:trust}
+
+Security has three layers (Figure~\ref{fig:trust}).
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.9\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.2_trust.png}}
+    \caption[The three layers of trust]{The three layers of trust: a shared secret on every API route,
+    pinned TLS (or QUIC across networks) on the wire, and the node key that
+    makes the certificate, authenticates links and signs closures.}
+    \label{fig:trust}
+\end{figure}
+
+\textbf{The shared secret.} The first machine's set-up stores 32 random bytes,
+readable only by the user, before its daemon first starts; \texttt{connect}
+stores the secret from the invite code. Every route on the daemon,
+\texttt{/health} included, requires it, compared in constant time, and outbound
+requests carry it automatically. Loopback is not exempt, since peers across
+networks arrive through loopback forwarders. The secret is attached only to a
+host that has proved it holds it, by returning an HMAC over a challenge. Jobs
+receive it so that the shim can reach its own daemon, and the web page receives
+it in the URL fragment opened by \texttt{pipedpeer ui}, which a browser never
+sends to a server.
+
+\textbf{Pinned TLS.} Each daemon's self-signed certificate is made from its
+Ed25519 node key. TLS and plain HTTP share the daemon port; the listener inspects
+the first byte of each connection. Clients try TLS first, and the pin is keyed
+by node id rather than by address: a certificate whose key matches the expected
+node id is accepted wherever the node now is, and a different key for a known
+node id is refused. The scheme is trust on first use and opportunistic: a
+handshake that fails for a reason other than a pin mismatch makes the client
+remember that peer as plain HTTP. Traffic across networks is encrypted by QUIC.
+
+\textbf{Node keys and signed closures.} Each node holds one Ed25519 key
+\cite{bernstein2012ed25519} whose fingerprint is its node id everywhere. The same
+key authenticates QUIC links, makes the TLS certificate, signs gossiped
+addresses, and signs closures as a Nix signing key. Nodes publish the public half
+in their heartbeat, each daemon keeps a list of the keys of the nodes it knows,
+and \texttt{setup}, with consent, adds them to the system Nix configuration as
+trusted keys; it never disables Nix's signature requirement. A closure sent
+between daemons in the signed format is imported under the receiver's own
+signature policy.
+
+A worker learns a new peer's key before Nix does, so the import passes the
+cluster's keys to that one copy operation, after checking the archive's named
+signer against the signer's published identity. Because a multi-user Nix daemon
+ignores keys passed by an untrusted user, set-up also installs a root-owned
+helper that can do nothing but add or remove keys of the cluster's fixed form.
+The limits of this design are set out in Section~\ref{sec:security}.
+
+% ------------------------------------------------------------
+\section{Placement and Scoring}
+\label{sec:placement}
+
+Candidates are merged from the address book, live discovery and the local node,
+deduplicated by node id; a node with a role is never offered a job. Five hard
+filters run in order: architecture must match the closure; a GPU must be present
+if one was required; and free memory, free cores and free VRAM must each satisfy
+the request. Every rejection records a reason, shown by
+\texttt{pipedpeer jobs <id> -{}-explain}.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.3_placement_flow.png}}
+    \caption[Placement flow]{Placement: gather, filter, score, lease, retry. A task is never
+    dropped; when nothing is eligible it is queued and retried.}
+    \label{fig:placement}
+\end{figure}
+
+Survivors are scored. Writing $u_{\text{cpu}}$ and $u_{\text{mem}}$ for CPU and
+memory utilisation in percent, $n_{\text{jobs}}$ for the count of running jobs,
+and $\hat{c}, \hat{f}, \hat{m}, \hat{r}$ for the core count, clock speed, free
+memory and free-core ratio each normalised onto $[0,1]$:
+
+\begin{equation}
+\label{eq:score}
+S = \Bigl(1 - \tfrac{u_{\text{cpu}}}{200} - \tfrac{u_{\text{mem}}}{200}
+    - 0.05\,n_{\text{jobs}}
+    + 0.10(\hat{c}-\tfrac12) + 0.06(\hat{f}-\tfrac12)
+    + 0.10(\hat{m}-\tfrac12) + 0.10(\hat{r}-\tfrac12)\Bigr)\cdot H
+\end{equation}
+
+where $H$ is the node's health score. Two properties matter more than the
+individual coefficients. \textbf{Load dominates hardware}: the two load terms can
+subtract $1.0$, while the four hardware terms together move the score by at most
+$0.36$, so a fast but busy machine loses to a slower idle one, as it should on
+workstations that people are also using. \textbf{Missing telemetry is neutral}:
+normalisation returns the midpoint $0.5$ for an absent value, so a node that does
+not report its clock speed is neither rewarded nor punished.
+
+When a GPU is requested, a second function adds up to $0.8$, drawn from total
+VRAM, device count, free VRAM on the best device and compute capability, less a
+utilisation penalty. The free memory a node advertises is what it can actually
+\emph{grant}: its own budget less the reservations of every daemon on the same
+machine (Section~\ref{sec:sandbox}).
+
+A node that refuses the job's signed closure is left out for the rest of the
+run, and the client prints the command that fixes it on that node.
+
+% ------------------------------------------------------------
+\section{The Lease Protocol}
+\label{sec:lease}
+
+Placement is a three-phase handshake, and its state machine is where crash
+recovery lives (Figure~\ref{fig:lease}).
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.5_lease_fsm.png}}
+    \caption[Lease states]{Lease states. Recovery is a consequence of expiry rather than a
+    separate mechanism.}
+    \label{fig:lease}
+\end{figure}
+
+An \texttt{accept} reserves capacity for 30 seconds with a 5 second grace; a
+\texttt{commit} promotes the reservation to running, renewed every 30 seconds
+and reaped after 5 minutes without renewal; \texttt{complete} releases it. A
+sweeper runs every 2 seconds. The submitter renews while the environment builds
+and uploads, so a long build never outlives its lease, and a lease bound to a
+running job is kept past its expiry.
+
+Two details carry the correctness argument. The concurrency and memory checks
+and the lease insertion happen \textbf{under a single lock}, so two submitters
+racing for the last slot cannot both succeed. And the concurrency limit counts
+reserved and running leases together, so a burst of submitters cannot slip
+through the window between accept and commit.
+
+Recovery then needs no further machinery. A submitter that dies stops renewing,
+and the sweeper reclaims its slot. A worker that dies stops answering health
+checks and its in-flight connection fails, which the coordinator treats as a
+failed attempt and reschedules, with back-off doubling from 2 seconds to a
+2 minute ceiling. Waiting for room never drops a task, while a job that
+\emph{fails} is run at most three times, on untried nodes first. From the
+submitter a dead node and a lost network look the same, but the first means run
+the job elsewhere and the second means wait; the client therefore runs three
+probes at once, two seconds each and none needing root --- another peer's health
+endpoint, a registration with the introducer, and a TCP connection to the
+default gateway --- and if any answers, the node is the one gone.
+
+% ------------------------------------------------------------
+\section{Reproducing the Environment}
+\label{sec:env}
+
+\textbf{Import scanning.} The client extracts imports with a line-oriented
+parser: it strips comments, takes the module from \texttt{from X import \ldots},
+and splits \texttt{import a, b as c} into every module named. It does not see an
+import performed through \texttt{importlib}. Each name is classified as a local
+file, a standard-library module, or an external dependency, and external names
+are resolved through a mapping table (\texttt{sklearn} to
+\texttt{scikit-learn}, for example) and otherwise looked up as a package of the
+same name in the pinned package set, with one evaluation for all of them. The
+scan follows the script's own modules, with a visited set so that import cycles
+end; a \texttt{requirements.txt} beside the script is read, and a
+\texttt{uv.lock} file or an explicit \texttt{-{}-pkg} flag override detection.
+Only what is still unresolved is reported, before anything runs, with the flag
+that would add it.
+
+\textbf{The keystone.} Nix \cite{dolstra2004nix} names every build output by a
+hash of its inputs. The generated flake pins an \emph{exact} nixpkgs revision,
+not a branch. A branch resolves at build time, so two nodes building the same
+script on different days would produce different store paths and the system
+would re-ship a multi-hundred-megabyte archive for every job. Pinning makes the
+store path a stable, content-derived name for an environment, identical across
+machines and across time, and therefore a cluster-wide cache key
+(Section~\ref{sec:res-cache}).
+
+Every environment also contains \texttt{cloudpickle} \cite{cloudpickle}, so that
+parallel kernels with no source can be shipped by value. On x86\_64 Linux,
+scikit-learn is pinned to a specific wheel, and torch with CUDA is fetched as a
+pinned wheel set inside a \emph{fixed-output derivation} with a recorded hash,
+because building it from source takes hours. The CUDA build is used when a GPU
+is requested, which is the default when a script imports torch.
+
+\textbf{Common packages built ahead of time.} Environments share Nix store
+paths, and a transfer sends only the paths a peer lacks. After
+\texttt{connect}, every machine builds in the background one environment
+importing the usual scientific set (numpy, pandas, scikit-learn, scipy,
+matplotlib, seaborn, tqdm and CUDA torch), so a script seen for the first time
+shares those paths and builds only what it adds.
+
+% ------------------------------------------------------------
+\section{Closure Transfer and Cache Reuse}
+\label{sec:cache}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.6_closure_cache.png}}
+    \caption[Closure cache and transfer]{The store path is the cluster-wide cache key. Most submissions ship
+    no environment at all, and a related environment ships only the store paths
+    the receiver lacks. The upload never waits more than 60\,s for a slow peer.}
+    \label{fig:closure}
+\end{figure}
+
+Before uploading, the client asks the target whether it can already run the
+closure, and only on a negative answer does anything cross the wire. Two
+questions are needed: whether the archive is in the node's cache, and whether the
+closure is \emph{materialised}, that is, whether its entry point exists on disk.
+A deployment with a shared store volume has the closure present without ever
+having cached an archive, while on a per-node store the entry point appears only
+after an import; either predicate alone is wrong for one of the layouts.
+
+\textbf{Path-level difference.} A closure is a set of store paths, and two
+environments that differ by one package share most of them. The client lists the
+closure's paths and asks the target which it lacks; if some but not all are
+missing, only those are sent, as a partial import that the receiver never caches
+as the whole closure. A fresh node may instead fetch public paths from the Nix
+binary cache; if that download has not finished 30 seconds after the sender's
+archive arrived, it is abandoned and the sender sends every missing path itself.
+
+\textbf{Signed transfer between daemons.} After an upload, the worker pushes the
+closure to peers that cannot yet run it. Parallel work is spilled only to peers
+that can run the closure, so this push is what makes the cluster usable for the
+distribution of Section~\ref{sec:intercept}. A peer that advertises the signed
+format receives one archive containing a signed binary cache --- the signature
+records for every path and the compressed archives for the paths it lacks ---
+produced and imported by Nix's own copy mechanism.
+
+\textbf{Not waiting for the slowest peer.} The upload waits at most 60 seconds
+for these pushes. A peer still importing finishes in the background and joins
+the pool by itself, since each parallel chunk asks afresh which peers can run
+it; meanwhile it reports ``importing'', so no second send starts. A background
+send is cut only when it stops moving, after 60 seconds with no bytes sent.
+Both closure caches are pruned least-recently-used to 8\,GiB each, and workspace
+and results archives are compressed with Zstandard \cite{rfc8878}.
+
+% ------------------------------------------------------------
+\section{Execution and Isolation}
+\label{sec:sandbox}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.7_sandbox.png}}
+    \caption[The sandbox]{What the job can and cannot see. Shared memory is mounted
+    world-writable because Python's \texttt{multiprocessing} requires it, and
+    the driver libraries are bound file by file so that the host C library
+    cannot shadow the closure's.}
+    \label{fig:sandbox}
+\end{figure}
+
+Jobs run under \texttt{crun} \cite{crun} in an OCI bundle \cite{oci2021} with a
+minimal read-only root: the store read-only, the workspace read-write, a private
+home, and temporary filesystems for scratch space. Shared memory is mounted
+world-writable because Python's \texttt{multiprocessing} maps POSIX shared memory
+for its semaphores. GPU support mounts the device nodes and binds the driver
+libraries \emph{file by file}, because binding the host library directory would
+place the host C library ahead of the closure's, and torch would then fall back
+to the CPU silently.
+
+\textbf{A memory ceiling for every job.} Where the daemon has a usable cgroup v2
+hierarchy, each job runs in its own cgroup with a memory limit, and an equal swap
+limit, of twice its estimated requirement with a 512\,MiB floor, clamped to what
+the node can grant but never below what admission approved; a job with no
+estimate is capped at 4\,GiB. When a job is killed and the cgroup's
+out-of-memory counter has risen, the client says so and how to raise
+\texttt{-{}-mem}.
+
+\textbf{A memory ceiling for the daemon.} Parallel chunks run in warm worker
+processes in the daemon's own cgroup, so \texttt{pipedpeer start} launches the
+daemon in a user \texttt{systemd} scope with a ceiling of half the machine and
+swap refused. A daemon without a user \texttt{systemd}, such as one in a
+container, runs a watchdog instead that measures the daemon's children every
+second and, past the ceiling, kills the largest child and logs it, never the
+daemon. A hard limit is used rather than a throttling one: a 3\,GiB allocation
+under a 1\,GiB soft limit stalled at 998\,MiB with 7,381 throttling events and no
+progress for minutes, which is worse than a failed job. Daemons on one machine,
+recognised by the kernel's boot identifier, subtract one another's reservations,
+so two of them cannot promise the same memory twice.
+
+\textbf{Without root.} On a machine with no system Nix, set-up seeds a private
+store in the user's data directory and mounts it at \texttt{/nix} inside a user
+and mount namespace, and installs \texttt{crun} into the user's own binary
+directory when no package manager supplies it.
+
+\textbf{What the sandbox does not do.} The job runs as user 0 inside the
+container and shares the host's network; the specification sets no seccomp
+filter and no capability list. The namespaces in use are process, IPC and mount,
+plus hostname where the kernel allows it, and a user namespace when \texttt{crun}
+runs without root. A node without \texttt{crun} or user namespaces warns and runs
+the job unisolated, unless it uses a private Nix store, in which case it refuses.
+
+\textbf{Results and output.} Only files created or modified during the run are
+returned, with deletions carried in a manifest, so a job cannot overwrite the
+submitter's own sources; any path that escapes the job's directory is refused on
+both sides. Output is forwarded as each read of up to 4\,KB arrives, so a
+progress bar on a remote node animates on the submitter's terminal.
+
+\textbf{Stopping and detaching.} An interrupt or a closed terminal makes the
+client send one cancel frame; the daemon signals the job's process group, kills
+it two seconds later if it is still alive, and the cancel reaches remote runs,
+parallel chunks on peers and every training rank. A connection that ends
+\emph{without} a cancel frame never kills the job, and background mode builds on
+this: the daemon logs every output frame, a detach closes the channel without a
+cancel, and \texttt{pipedpeer attach} replays the log, follows live, and
+downloads the results at the end. A detached job's directory is pruned 24 hours
+after it ends, and its log is capped at 50\,MB.
+
+\textbf{Phones.} An Android phone joins under Termux \cite{termux} as a worker for
+parallel chunks, running them from a Nix environment inside a Debian under
+\texttt{proot} \cite{proot} where set-up can install one, and otherwise with
+Termux's own Python. Closures go only to peers of the same architecture, so a
+phone receives the job's package list instead, builds its own environment in the
+background, and declines the job until it is ready.
+
+% ------------------------------------------------------------
+\section{Transparent Interception}
+\label{sec:intercept}
+
+\textbf{Delivery.} The shim is a Python package embedded in the binary. It is
+appended to the workspace archive under a hidden directory, so the user's project
+on disk is never modified, and the worker points the interpreter's module path at
+that directory, where a \texttt{sitecustomize} module makes CPython import it
+before the user's first line. Nothing is installed on any node. Nix ships its own
+module of the same name, which adds the environment's package directories; the
+shim performs that work first, since only the first module on the path is
+imported. \texttt{multiprocessing.Pool} and \texttt{ProcessPoolExecutor} are
+patched at start-up, while NumPy, pandas, torch and joblib are patched on their
+first import through an import hook, so a job that never imports torch never pays
+its 1.7\,s import (Section~\ref{sec:res-shim}).
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.8_shim_injection.png}}
+    \caption[Shim injection]{How the shim reaches the interpreter and what it replaces.}
+    \label{fig:shim}
+\end{figure}
+
+\subsection{Parallel Maps}
+
+\texttt{map}, \texttt{starmap}, \texttt{imap} and \texttt{imap\_unordered} go to
+the cluster (\texttt{imap} lazily, in batches), while \texttt{apply} and
+\texttt{apply\_async} stay local. A head of items runs locally first to measure
+the cost of one item, and a map whose remaining work is under half a second stays
+local. The kernel reaches the peer in one of two ways. A module-level function,
+including one defined in the script's \texttt{\_\_main\_\_}, travels as its
+\emph{source}, with the helper functions it calls and a pickle of the module data
+it reads. A lambda, closure, bound method, partial or decorated function travels
+\emph{by value} through \texttt{cloudpickle}. Anything neither can carry is
+counted as unshippable and runs locally. Every run can write a \textbf{receipt}
+counting the items that ran remotely and locally, the parts that failed, and the
+node each part ran on, so a claim about where work ran can be checked.
+
+\textbf{Sharing work by measured speed.} On the daemon, a chunk is divided among
+peers by a makespan solver. Each device is modelled as a set-up time $o_i$ plus a
+throughput $r_i$, fitted by least squares from the last eight parts it returned;
+an unmeasured peer is assumed to be as fast as this node, scaled by its core
+count, since assuming it slow would size its share below anything worth sending.
+The solver finds the finishing time $T$ at which the devices together complete
+the work, allocating $(T - o_i)\,r_i$ items to each, and drops any device whose
+set-up time alone exceeds $T$. On a peer, a chunk fans out across its cores. A
+forwarded part is never split again, so distribution is one hop from the origin.
+
+\textbf{Slow peers.} A part still unfinished past its prediction counts as taking
+at least that long, so a slow peer's estimate can only grow. Three rules act
+before the fit has caught up: a split part waiting for its peer starts on another
+peer with a free slot when that would finish sooner; a part running past its
+prediction gets a copy on the fastest free peer, the first result winning and the
+loser cancelled; and a chunk too small to split goes to the peer predicted to
+finish first. A peer that lost its last three races stops being raced.
+
+\textbf{Transfer.} Each node's chunks in flight follow its measured round trip,
+and chunk size follows the measured transfer cost. Large functions and globals
+cross once per peer, by hash; requests are compressed at a level chosen by the
+measured link speed; and numerical buffers travel outside the serialised
+request. With \texttt{-{}-offload}, every distributed piece goes only to other
+machines, keeping the sender free for its user.
+
+\begin{table}[!htbp]
+\centering
+\caption{Intercepted primitives and their distribution strategies}
+\label{tab:intercept}
+\renewcommand{\arraystretch}{1.2}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{L{5.0cm} X}
+\toprule
+\textbf{Primitive} & \textbf{Strategy} \\
+\midrule
+\texttt{multiprocessing.Pool}, \texttt{ProcessPoolExecutor.map} & Measure a few items locally, then race local against remote chunks shared by measured speed \\
+pandas \texttt{groupby().agg()}, \texttt{merge}, \texttt{join} & Hash shuffle on the key; bucket zero local \\
+pandas \texttt{read\_csv}, \texttt{read\_parquet} & Out-of-core reads in 64\,MB chunks cut at record boundaries \\
+\texttt{numpy.matmul}, \texttt{dot}, \texttt{tensordot} (2-D) & Split into row blocks, concatenated at the origin \\
+\texttt{numpy.linalg.svd}, \texttt{eig} & Whole matrix offloaded to one worker \\
+\texttt{joblib.Parallel}, scikit-learn \texttt{n\_jobs} & Batches of delayed tasks, shared arrays sent once per chunk \\
+torch \texttt{matmul}, \texttt{mm} & Row blocks, gated on size \\
+torch training (\texttt{-{}-ddp}) & Gradients or weights averaged by the lead daemon, weighted by samples \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Interception replaces module functions, so the operator form \texttt{A @ B} is
+not intercepted for NumPy arrays. A \texttt{joblib} call made inside a remote
+task runs inline on that worker. pandas operations are distributed only above
+512\,MB unless forced, because their arithmetic intensity is low.
+
+\textbf{Why the shuffle is exact.} Hash partitioning on the key is the standard
+technique of MapReduce \cite{dean2004mapreduce}; PipedPeer uses only that path,
+never a combiner. Rows are bucketed by a hash of the grouping or join key, so
+equal keys land on the same node and every key is complete on exactly one node.
+Each node's aggregation is therefore a \emph{complete} aggregation, the origin
+combines the partials by concatenation, and \emph{any} aggregation specification
+works, including those with no combiner form. Exactness is of values, not of row
+order: a concatenation of buckets does not reproduce pandas' join ordering, so a
+script that depends on the row order of a \texttt{merge} result can see a
+different order.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.9_hash_shuffle.png}}
+    \caption[Hash shuffle]{Hash shuffle. Correctness follows from key locality, not from
+    combiner algebra.}
+    \label{fig:shuffle}
+\end{figure}
+
+\subsection{Data-Parallel Training}
+\label{sec:ddp}
+
+\textbf{Synchronisation over the daemon port.} Rather than let torch build its
+rank-to-rank mesh \cite{li2020pytorchddp}, which needs direct connections on its
+own ports between every pair of ranks, each rank posts its gradient to the lead
+node's ordinary daemon port, which works wherever the daemon port works,
+including over the links of Section~\ref{sec:nat}. The daemon \emph{reduces}:
+gradients arrive as raw frames, are summed in double precision weighted by the
+number of samples behind each, $\sum_i n_i g_i / \sum_i n_i$, and one averaged
+gradient is returned. Returning every rank's gradient to every rank instead was
+measured 21 times slower on two machines (62.9\,s against 2.9\,s). Gradients
+travel as 8-bit integers with one scale per block of 4096 values, the rounding
+error carried into the next step in both directions (error feedback)
+\cite{dettmers2016eightbit, seide2014onebit}. Three or more ranks reduce in a
+butterfly rather than through one hub, and ranks on one machine average locally
+first.
+
+\textbf{Choosing the ring.} Each candidate's throughput is probed, and the ring
+admitted is the prefix of the fastest that maximises $k \cdot r_k$ --- the ring's
+worth if every rank ran at the slowest admitted rate --- using one device kind
+only, GPUs when any are wanted and present, with the lead on a GPU node. Each
+rank's shard and batch slice are sized by its share, and the slices sum to the
+script's own batch, so the learning rate and the mathematics are the script's.
+Every rank sends a manifest of its parameters to the opening barrier, and a
+mismatch stops every rank with one message. Every 20 synchronisations the daemon
+refits the shares from observed step rates, applying them at the next epoch
+boundary when a share has moved by a tenth or more, and it can drop the slowest
+rank --- never rank 0, never below two --- when that rank adds more
+synchronisation time than computation. A round that a straggler has not joined
+completes without it after 45 seconds.
+
+\textbf{One GPU or a split.} After a warm-up, the lead daemon compares the
+measured step time of the split with that of the fastest rank alone, and either
+keeps the ring or releases every rank but the fastest, which exit with a code
+meaning ``released'' rather than ``failed''. A user who names a ring size fixes
+the number of ranks.
+
+\textbf{Synchronising less often.} \texttt{-{}-ddp-sync fast} synchronises every
+$H$ steps instead of every step, in the manner of DiLoCo
+\cite{douillard2023diloco} and post-local SGD \cite{lin2020localsgd}: ten steps
+of exact synchronisation as a warm-up, then local steps, with the ranks' weights
+averaged by the number of samples each processed, every epoch ending on a
+synchronisation, and the optimiser's moments averaged every tenth round. It never
+adds epochs or changes the batch or the learning rate. The outer step is plain
+averaging (outer learning rate 1, no momentum). DiLoCo's Nesterov outer step,
+momentum 0.9 at an outer learning rate of 0.7, settles at $0.7/(1-0.9) = 7$ times
+the averaged change; at intervals of a few hundred steps that is harmless, but at
+the 2 to 64 steps used here it multiplies the script's learning rate, and it
+failed the accuracy bar at every interval tried. The bar is one-sided: the final
+validation loss may be at most 1\% above one device's, as a mean over three
+seeds, on every test model. The interval depends on the ring's size: the largest
+that passed on every model was 32 steps at two ranks, 16 at three and 4 at four,
+and none passed from five ranks (Section~\ref{sec:res-train}). That table is the
+default; an explicit fast ring beyond four ranks runs at $H=4$ with a warning.
+
+\textbf{Choosing automatically.} By default the lead daemon switches a ring to
+fast synchronisation once, when every rank has reported, the ring is within the
+validated size, and the predicted fast step, inflated by 10\%, beats both the
+exact split and one GPU. Every rank switches at the same step boundary, rank 0
+prints why, and a joining rank adopts the ring's mode; a join that takes an
+automatic fast ring past the validated size returns it to exact synchronisation
+at the next epoch boundary. A rank whose local round runs past four times the
+ring's median step time skips that round's remaining batches but counts them, so
+every rank stays on the same step.
+
+\textbf{Losing and regaining ranks.} When a machine is lost, the client names the
+rank and host, the lead daemon stops waiting for it, and the survivors take new
+shares at the next epoch boundary. Samples are assigned to ranks by a weighted
+rendezvous hash \cite{thaler1998rendezvous}, which keeps each survivor's share
+exact and over 95\% of its samples in place, where hash-modulo routing would move
+most of them. A rank whose script fails stops every rank at once. Losing rank 0's
+machine ends the run, since its daemon holds the synchronisation, and the
+survivors stop within about 30 seconds with that reason. A returning machine or a
+new eligible node joins the ring at the next epoch boundary: it loads the lead's
+model, optimiser and buffer snapshot through the lead daemon, runs one inert
+batch for each epoch it missed so that the script's loop variables exist, and the
+world size and shards grow to include it, moving about $1/n$ of the data. Only
+scripts that use a data loader can be re-spread.
+
+The first synchronisation is a barrier: every rank must reach the opening weight
+broadcast within a configurable wait, five minutes by default, and ranks still
+missing are dropped and named. The torch gloo and NCCL back-ends are not used.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.10_ddp.png}}
+    \caption[Training synchronisation over the daemon port]{Synchronisation over the daemon port. The lead daemon averages by
+    samples and returns one average: int8 gradients every step in exact mode,
+    weights every $H$ steps in fast mode; auto switches to fast once.}
+    \label{fig:ddp}
+\end{figure}
+
+% ------------------------------------------------------------
+\section{The Cost Model}
+\label{sec:cost}
+
+Interception is worthwhile only when the cluster wins, so numerical work is
+gated. Writing $b$ for the payload in bytes, $\phi$ for its arithmetic intensity
+in floating-point operations per byte, $\rho$ for the number of times the data
+crosses the link, $B$ for link bandwidth and $K$ for the number of participating
+nodes, divisible work is distributed only when
+
+\begin{equation}
+\label{eq:cost}
+\underbrace{\frac{b\phi}{R}}_{\text{compute locally}}
+\;>\;
+\underbrace{\frac{\rho\, b}{B}}_{\text{move it}}
+\;+\;
+\underbrace{\frac{b\phi}{R' K}\times 1.3}_{\text{compute remotely}}
+\end{equation}
+
+where $R$ is the local throughput, $R'$ the remote throughput, and the factor
+$1.3$ charges 30\% overhead against ideal parallel speedup. Matrix
+multiplication is priced at about 200\,GFLOP/s with $\rho = 5$, pandas work at
+1\,GFLOP/s. Work that cannot be divided --- an SVD or eigendecomposition, priced
+at about 1.5\,GFLOP/s and sent whole to one worker --- moves when the transfer
+costs less than half the local computation, since it frees the origin entirely.
+
+The checks run in order. At least two nodes and 32\,MB of payload are required.
+\textbf{If the working set does not fit in local memory, the work goes to the
+cluster} whatever the transfer costs, and a matrix product the cluster cannot
+take either raises an error naming the size and the remedy rather than exhausting
+the machine. If any peer reports a GPU, $R'$ is six times $R$. The inequality is
+then evaluated at an optimistic 10\,Gbit/s; if offloading loses even there, the
+work stays local without measuring anything. Otherwise bandwidth is
+\emph{measured} by pushing 64\,MB through the real dispatch path, cached for five
+minutes, and a failed probe keeps the work local.
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.11_cost_model.png}}
+    \caption[Cost model decision regions]{Decision regions of Equation~\ref{eq:cost} for the pandas path
+    ($\rho = 1$, $R = R' = 1$\,GFLOP/s) at three nodes on a 500\,MB/s link.
+    Grouped aggregation and joins have low arithmetic intensity, so they are
+    distributed only above 512\,MB.}
+    \label{fig:cost}
+\end{figure}
+
+The consequence for dense matrix multiplication is that it stays local on a CPU
+cluster: local BLAS at about 200\,GFLOP/s outruns what a CPU cluster's transport
+can feed it at practical sizes. Measured against a four-core peer, local won by
+25 to 100 times across four shapes, and the model chose local every time. A
+product ships when it does not fit locally, when a GPU peer makes the model
+favour it, or when forced. Singular value decomposition, two orders of magnitude
+slower locally, does ship.
+
+% ------------------------------------------------------------
+\section{Fault Tolerance}
+\label{sec:ft}
+
+The invariant is that using the cluster is never worse than not using it. Five
+independent layers enforce it for parallel work; a training ring that loses a
+rank continues on the survivors (Section~\ref{sec:ddp}).
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{The race.} Chunks are dealt alternately to the local side and the
+  cluster, and results fill a slot table first-wins. Idle local cores re-run any
+  chunk the cluster has not yet returned, and the call returns only once every
+  item is covered, so a dead cluster degrades to a plain local pool.
+  \item \textbf{Per-primitive fallback.} Every intercepted call is wrapped, and
+  any exception falls back to the original implementation; the one exception is
+  a matrix product that fits neither locally nor on the cluster, which raises.
+  \item \textbf{Peer fallback.} A failed peer is skipped for the rest of that
+  chunk and the next candidate tried; if all fail, the work runs locally. A slow
+  peer is raced by a copy of its part.
+  \item \textbf{Worker respawn.} A dead warm worker is restarted, falling back to
+  a one-shot process if that fails.
+  \item \textbf{Rescheduling.} A failed job is placed again with back-off, on an
+  untried node first and at most three times (Section~\ref{sec:lease}).
+\end{enumerate}
+
+\begin{figure}[!htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.12_race_timeline.png}}
+    \caption[Racing local and remote work]{Racing local and remote work. The local side is always able to
+    finish alone, which is what makes the guarantee unconditional.}
+    \label{fig:race}
+\end{figure}
+
+Memory is bounded at the same time: a parallel-map request larger than a node
+can grant is forwarded to a peer that can, one exceeding 40\% of that memory is
+split into sequential parts, and a request body is capped at the smaller of
+2\,GiB and half the daemon's memory budget.
+
+% ------------------------------------------------------------
+\section{Resource Estimation and Run Reporting}
+\label{sec:observe}
+
+\textbf{Resource estimation.} Tiers are consulted in order, the first that
+yields a value winning: an explicit \texttt{-{}-mem}; 1.2 times the largest peak
+memory of the last five runs of the same script; or per-library baselines plus
+100\,MB for the interpreter. The default when nothing is known is 512\,MB. The
+historical tier closes a feedback loop: the worker samples the job's process tree
+while it runs and records the peak, which sizes the next run's admission request.
+
+\textbf{Commands.} The CLI has thirteen commands, among them set-up, invite,
+connect, run, status, attach, doctor and uninstall. Configuration is one file
+holding the secret, the introducers and the node's role, and the ports are one
+block: 4242 for the daemon API and discovery, 4243 for direct links and 4244 for
+the introducer. \texttt{pipedpeer doctor} checks the daemon, the secret, each
+introducer and each peer (TCP and UDP separately), the firewall, user namespaces,
+\texttt{crun}, Nix, the GPU driver, disk and clock, each with its fix. A plain run
+behaves like Python: it prints the script's own output, passes the script its
+arguments and returns its exit code, adding one line on where the work ran when
+any left the machine.
+
+\textbf{The run record.} Every run keeps one record of timed steps ---
+serialising, sending, queueing, computing and receiving each chunk on each
+machine, building and sending the environment, each synchronisation round, and
+the script itself --- written by the shim, the daemon and the client, and shown
+by \texttt{-v}, the job history, the web page opened by \texttt{pipedpeer ui},
+and as CSV or JSON. \texttt{pipedpeer events} prints in plain language what this
+machine's daemon has done, and a dry run reports, before anything runs, the
+memory estimate, unresolved imports, the parallel calls that can spread, and
+where the job would go.

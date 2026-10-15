@@ -208,8 +208,6 @@ def fig_cost_model():
     ax.set_ylabel("arithmetic intensity (flop per byte, log scale)")
     ax.set_xlim(4, 9000); ax.set_ylim(0.5, 2000)
     ax.grid(alpha=0.2, which="both")
-    ax.set_title("pandas-path model: three nodes, 500 MB/s link, 1 GFLOP/s",
-                 fontsize=17, loc="left")
     fig.savefig(OUT / "fig_4.11_cost_model.png"); plt.close(fig)
 
 
