@@ -275,8 +275,15 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 	// Detached from the caller's deadline for the same reason: the collision
 	// needs a window of its own, and the two sides have to be spraying at the
 	// same moment for it to mean anything.
+	// An explicit cancel still stops it: a kicked attempt restarting, or
+	// shutdown.
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 12*time.Second)
 	defer cancel()
+	defer context.AfterFunc(ctx, func() {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			cancel()
+		}
+	})()
 
 	type found struct {
 		at   netip.AddrPort

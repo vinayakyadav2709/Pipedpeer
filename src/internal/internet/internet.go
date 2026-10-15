@@ -122,6 +122,17 @@ var (
 	raceWindow = 10 * time.Second
 	// ifacePoll is how often this machine's own addresses are checked.
 	ifacePoll = 5 * time.Second
+	// lostAfter is how long a registration may go unanswered before an
+	// introducer that has answered earlier counts as lost. A lost one is
+	// re-registered with every lostAfter instead of every poll, and its next
+	// answer retries every unlinked peer at once (FIX-RELINK: after B's
+	// router came back, B sat out a 20 s poll and a 30 s penalty).
+	lostAfter = 5 * time.Second
+	// kickStale is how old an attempt must be for a sign of life from the
+	// peer to restart it. Younger ones already carry fresh candidates and a
+	// fresh punch request; restarting those on every probe would never let
+	// one finish.
+	kickStale = 5 * time.Second
 	// localAddrs lists this machine's addresses, for noticing a change.
 	localAddrs = interfaceAddrs
 	// newKeeper asks the router for a port; tests stub it rather than map a
@@ -184,6 +195,9 @@ type Manager struct {
 	hints map[string]hint
 	// trying are peers with a connection attempt in flight.
 	trying map[string]bool
+	// inflight are the attempts started by attempt, so a sign of life from
+	// the peer can restart a stale one (kick).
+	inflight map[string]*inflight
 	// observed is the address each peer's last connection came from or went
 	// to. A peer that punched in through a hint may appear in no introducer
 	// listing; without this, its link could not be redialled after this
@@ -211,6 +225,14 @@ type introducer struct {
 	peers     map[string]bool
 	// silent is set once "has not answered" has been logged.
 	silent bool
+}
+
+// inflight is one attempt started by attempt.
+type inflight struct {
+	cancel  context.CancelFunc
+	started time.Time
+	// kicked: cancelled by kick, to be started again rather than penalised.
+	kicked bool
 }
 
 type hint struct {
@@ -278,6 +300,7 @@ func New(cfg Config) *Manager {
 		cands:    map[string][]string{},
 		hints:    map[string]hint{},
 		trying:   map[string]bool{},
+		inflight: map[string]*inflight{},
 		observed: map[string]string{},
 	}
 	seen := map[string]bool{}
@@ -325,6 +348,8 @@ func (m *Manager) Run(ctx context.Context) {
 				m.cfg.Log("could not use the connection from %s: %v", short(node), err)
 			}
 		},
+		// A peer punching at us is reachable again: drop its penalty.
+		OnProbe: func(from string) { m.probedBy(ctx, from) },
 	})
 	if err != nil {
 		m.cfg.Log("cannot listen for direct connections: %v", err)
@@ -354,16 +379,42 @@ func (m *Manager) Run(ctx context.Context) {
 
 	ticker := time.NewTicker(m.cfg.Poll)
 	defer ticker.Stop()
+	fast := time.NewTicker(lostAfter)
+	defer fast.Stop()
 	defer m.closeAll()
 
 	for {
 		m.sync(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
+		// Every poll, and every lostAfter while an introducer is lost, so the
+		// first registration after an outage goes out within seconds.
+		for again := false; !again; {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				again = true
+			case <-fast.C:
+				again = m.introducerLost(time.Now())
+			}
 		}
 	}
+}
+
+// introducerLost reports whether an introducer that has answered before is
+// leaving a registration unanswered for lostAfter or more.
+func (m *Manager) introducerLost(now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, in := range m.intros {
+		if in.lostLocked(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func (in *introducer) lostLocked(now time.Time) bool {
+	return !in.hidden && !in.lastReply.IsZero() && !in.waiting.IsZero() && now.Sub(in.waiting) >= lostAfter
 }
 
 // mapPort asks the router for a port, in the background, and re-registers

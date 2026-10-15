@@ -30,17 +30,82 @@ func (m *Manager) attempt(ctx context.Context, node string) {
 		m.mu.Unlock()
 		return
 	}
+	actx, cancel := context.WithCancel(ctx)
+	a := &inflight{cancel: cancel, started: now}
 	m.trying[node] = true
+	m.inflight[node] = a
 	m.mu.Unlock()
 
 	go func() {
-		defer m.doneTrying(node)
-		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		if err := m.connect(cctx, node, cands); err != nil {
+		cctx, stop := context.WithTimeout(actx, 20*time.Second)
+		err := m.connect(cctx, node, cands)
+		stop()
+		cancel()
+		m.mu.Lock()
+		kicked := a.kicked
+		if m.inflight[node] == a {
+			delete(m.inflight, node)
+		}
+		delete(m.trying, node)
+		m.mu.Unlock()
+		switch {
+		case err == nil:
+		case kicked && ctx.Err() == nil:
+			// Restarted by kick: the failure belongs to the outage, not to
+			// the peer, so it earns no penalty.
+			m.attempt(ctx, node)
+		default:
 			m.noPath(node, err, candKey(cands))
 		}
 	}()
+}
+
+// kick retries node now, because something says its packets flow again: an
+// introducer that had gone quiet answers, the peer asked us to punch, or its
+// probe reached us. Its penalty was earned during the outage and says nothing
+// now. With restart, an attempt in flight for kickStale or longer - begun in
+// the outage, its punch request lost - is cancelled and started again with
+// fresh candidates and a fresh punch request (FIX-RELINK).
+func (m *Manager) kick(ctx context.Context, node, why string, restart bool) {
+	m.mu.Lock()
+	if m.peers[node].alive() {
+		m.mu.Unlock()
+		return
+	}
+	_, penalised := m.backoff[node]
+	delete(m.backoff, node)
+	a := m.inflight[node]
+	restart = restart && a != nil && !a.kicked && time.Since(a.started) >= kickStale
+	if restart {
+		a.kicked = true
+	}
+	m.mu.Unlock()
+	if penalised || restart {
+		m.cfg.Log("%s; retrying %s now", why, short(node))
+	}
+	if restart {
+		a.cancel() // its goroutine starts the new attempt
+		return
+	}
+	m.attempt(ctx, node)
+}
+
+// probedBy kicks the penalised peer whose fingerprint starts with prefix.
+// Probes arrive four times a second per candidate while a peer races, so
+// only a penalised peer is looked up, and nothing in flight is restarted.
+func (m *Manager) probedBy(ctx context.Context, prefix string) {
+	m.mu.Lock()
+	var node string
+	for n := range m.backoff {
+		if short(n) == prefix {
+			node = n
+			break
+		}
+	}
+	m.mu.Unlock()
+	if node != "" {
+		m.kick(ctx, node, "a probe from it reached us", false)
+	}
 }
 
 // candidatesLocked is what to try for node: what it published through an

@@ -201,6 +201,9 @@ type Config struct {
 	// files the connection away and never gives it a local port, while the
 	// far side reconnects forever.
 	OnInbound func(node string, conn *quic.Conn)
+	// OnProbe is told the fingerprint prefix (8 characters) of every other
+	// node whose punch probe reaches us. Called on the read loop: keep it short.
+	OnProbe func(from string)
 	// Log receives progress.
 	Log func(string, ...any)
 }
@@ -234,6 +237,7 @@ func Listen(cfg Config) (*Endpoint, error) {
 		peers:     map[string]*quic.Conn{},
 	}
 	e.prober = NewProber(conn, cfg.Key.Fingerprint())
+	e.prober.onRequest = cfg.OnProbe
 
 	// The transport gets the socket through a wrapper that takes the probes
 	// out of the read stream first. One socket is not tidiness: a router's
