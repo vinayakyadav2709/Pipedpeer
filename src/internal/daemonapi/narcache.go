@@ -3,12 +3,12 @@ package daemonapi
 import (
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"os"
@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -24,6 +25,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -228,7 +230,11 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 		return "", false
 	}
 	defer os.Remove(tmp.Name())
-	gz := gzip.NewWriter(tmp)
+	gz, err := tarcodec.Writer(tmp)
+	if err != nil {
+		tmp.Close()
+		return "", false
+	}
 	// Signed before it leaves, so the far side can require a signature
 	// instead of being configured to stop asking for one.
 	_ = nixsign.EnsureSigned(context.Background(), paths)
@@ -307,7 +313,7 @@ func closureNeedsGPU(paths []string) bool {
 	return false
 }
 
-// exportPaths writes a gzipped NAR carrying exactly the given store paths.
+// exportPaths writes a zstd-compressed NAR carrying exactly the given store paths.
 func exportPaths(paths []string, destPath string) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("nothing to export")
@@ -323,18 +329,24 @@ func exportPaths(paths []string, destPath string) error {
 		return err
 	}
 	defer f.Close()
-	gz := gzip.NewWriter(f)
-	defer gz.Close()
-	cmd.Stdout = gz
+	zw, err := tarcodec.Writer(f)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = zw
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		zw.Close()
+		return err
+	}
+	return zw.Close()
 }
 
 // peerMissingPaths asks a peer which of these store paths it lacks. A peer
 // that does not understand the question (older build, or any error) yields
 // nil and the caller falls back to sending the closure whole.
 func peerMissingPaths(host string, port int, paths []string) ([]string, bool) {
-	body, err := json.Marshal(map[string]any{"paths": paths})
+	body, err := json.Marshal(map[string]any{"paths": paths, "substitute": true})
 	if err != nil {
 		return nil, false
 	}
@@ -369,6 +381,12 @@ func peerMissingPaths(host string, port int, paths []string) ([]string, bool) {
 func (s *Server) handleStoreMissing(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Paths []string `json:"paths"`
+		// Files (additive) are workspace file hashes; the answer's
+		// missing_files lists those the workspace CAS lacks.
+		Files []string `json:"files"`
+		// Substitute (additive): the asker is about to send; leave out what
+		// the binary cache serves and fetch it here instead.
+		Substitute bool `json:"substitute"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -382,7 +400,14 @@ func (s *Server) handleStoreMissing(w http.ResponseWriter, r *http.Request) {
 			missing = append(missing, p)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
+	if req.Substitute {
+		missing = substituteMissing(missing)
+	}
+	resp := map[string]any{"missing": missing}
+	if req.Files != nil {
+		resp["missing_files"] = casMissing(s.casDir(), req.Files)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
@@ -438,7 +463,7 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "store_path required (before nar)"})
 				return
 			}
-			status, body := s.importStoreNAR(part, storePath, partial)
+			status, body := s.importStoreNAR(r.Context(), part, storePath, partial)
 			part.Close()
 			writeJSON(w, status, body)
 			return
@@ -454,7 +479,8 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 
 // importStoreNAR imports one streamed closure archive for handleStoreImport
 // and returns the status and JSON body to answer with.
-func (s *Server) importStoreNAR(nar io.Reader, storePath string, partial bool) (int, any) {
+// ctx is the request's: a submitter that hangs up stops nix mid-import.
+func (s *Server) importStoreNAR(ctx context.Context, nar io.Reader, storePath string, partial bool) (int, any) {
 	fail := func(status int, msg string) (int, any) {
 		return status, map[string]string{"error": msg}
 	}
@@ -462,12 +488,15 @@ func (s *Server) importStoreNAR(nar io.Reader, storePath string, partial bool) (
 	// The two ends are never upgraded in the same instant, and a stream read
 	// as the wrong format fails somewhere deep inside nix with an error
 	// about the archive rather than about the version.
+	// Paths this node chose to fetch itself must land before their
+	// dependents are imported.
+	substituting.Wait()
 	br := bufio.NewReaderSize(nar, 1024)
 	if narpack.IsArchive(br) {
 		// The CLI's own upload arrives this way too, so this is the event
 		// line `pipedpeer events` shows for most imports.
 		start := time.Now()
-		if err := s.importSignedClosure(br, storePath); err != nil {
+		if err := s.importSignedClosure(ctx, br, storePath); err != nil {
 			return fail(http.StatusInternalServerError, err.Error())
 		}
 		logClosureImported(storePath, start, "signed")
@@ -495,7 +524,7 @@ func (s *Server) importStoreNAR(nar io.Reader, storePath string, partial bool) (
 		}
 		tmp.Close()
 		start := time.Now()
-		if err := s.importNARFile(tmp.Name()); err != nil {
+		if err := s.importNARFile(ctx, tmp.Name()); err != nil {
 			return fail(http.StatusInternalServerError, "import: "+err.Error())
 		}
 		logClosureImported(storePath, start, "partial")
@@ -507,7 +536,7 @@ func (s *Server) importStoreNAR(nar io.Reader, storePath string, partial bool) (
 	if _, err := s.narCache.store(storePath, br); err != nil {
 		return fail(http.StatusInternalServerError, "cache nar: "+err.Error())
 	}
-	if err := s.materializeClosure(storePath); err != nil {
+	if err := s.materializeClosureCtx(ctx, storePath); err != nil {
 		return fail(http.StatusInternalServerError, "materialise closure: "+err.Error())
 	}
 	return http.StatusOK, map[string]any{"cached": true}
@@ -558,7 +587,7 @@ func senderKey(m narpack.Manifest) ([]string, error) {
 // goes through the same step the poll uses (warnUntrustedKeys): the root-owned
 // key helper adds it to nix.conf before the copy when setup installed one,
 // else the refusal names `pipedpeer trust`.
-func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
+func (s *Server) importSignedClosure(ctx context.Context, r io.Reader, storePath string) error {
 	dir, err := userdir.Scratch("signedimport-*")
 	if err != nil {
 		return err
@@ -581,7 +610,7 @@ func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
 		return err
 	}
 	s.warnUntrustedKeys(senderKeys)
-	if err := signedImport(context.Background(), dir, roots, senderKeys...); err != nil {
+	if err := signedImport(ctx, dir, roots, senderKeys...); err != nil {
 		return err
 	}
 	log.Info().Str("store", storePath).Int("roots", len(m.Roots)).
@@ -592,6 +621,11 @@ func (s *Server) importSignedClosure(r io.Reader, storePath string) error {
 // materializeClosure imports a cached NAR into the local nix store, skipping
 // the work when the closure's run entrypoint already exists there.
 func (s *Server) materializeClosure(storePath string) error {
+	return s.materializeClosureCtx(context.Background(), storePath)
+}
+
+// materializeClosureCtx is materializeClosure stopped by ctx.
+func (s *Server) materializeClosureCtx(ctx context.Context, storePath string) error {
 	if runEntry := filepath.Join(storePath, "bin", "run"); pathExists(runEntry) {
 		return nil
 	}
@@ -605,7 +639,7 @@ func (s *Server) materializeClosure(storePath string) error {
 	}
 	defer f.Close()
 	start := time.Now()
-	out, err := importNAR(f)
+	out, err := importNAR(ctx, f)
 	if err != nil {
 		return fmt.Errorf("nix-store --import: %v: %s", err, string(out))
 	}
@@ -623,14 +657,289 @@ func logClosureImported(storePath string, start time.Time, how string) {
 // importNARFile imports an archive into the local nix store without caching
 // it. Used for partial archives, which describe only what this node was
 // missing and must never be mistaken for the whole closure.
-func (s *Server) importNARFile(path string) error {
+func (s *Server) importNARFile(ctx context.Context, path string) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if out, err := importNAR(f); err != nil {
+	if out, err := importNAR(ctx, f); err != nil {
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
+}
+
+// Workspace CAS: every workspace file this node has received, stored once by
+// its sha256. A submitter asks which of its files are missing (the "files"
+// field of /v1/store/missing) and tars only those; the rest are copied out of
+// here into the job's work dir. Copied, not hardlinked: a job that edits a
+// file in place must not change what the next job gets.
+
+// casEntry is one workspace file the upload did not carry: where it goes in
+// the work dir and which CAS object fills it. Wire type of the additive
+// "workspace_cas" upload field.
+type casEntry struct {
+	Name string `json:"name"`
+	SHA  string `json:"sha256"`
+	Mode int64  `json:"mode"`
+}
+
+// casMaxBytes bounds the CAS; least recently used objects go first.
+// ponytail: fixed cap, make it a setting if a dataset-heavy node needs more.
+const casMaxBytes int64 = 4 << 30
+
+func (s *Server) casDir() string {
+	return filepath.Join(filepath.Dir(s.narCache.dir), "workspace-cas")
+}
+
+func validSHA(h string) bool {
+	if len(h) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(h)
+	return err == nil
+}
+
+// casMissing lists the hashes the CAS lacks, touching the ones it has so a
+// prune between the question and the upload does not take them.
+func casMissing(dir string, shas []string) []string {
+	missing := make([]string, 0)
+	now := time.Now()
+	for _, h := range shas {
+		if !validSHA(h) {
+			missing = append(missing, h)
+			continue
+		}
+		if err := os.Chtimes(filepath.Join(dir, h), now, now); err != nil {
+			missing = append(missing, h)
+		}
+	}
+	return missing
+}
+
+// casWriter stores one file into the CAS as it is written, by its sha256.
+type casWriter struct {
+	dir string
+	tmp *os.File
+	h   hash.Hash
+}
+
+func newCASWriter(dir string) (*casWriter, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	tmp, err := os.CreateTemp(dir, "incoming-*")
+	if err != nil {
+		return nil, err
+	}
+	return &casWriter{dir: dir, tmp: tmp, h: sha256.New()}, nil
+}
+
+func (c *casWriter) Write(p []byte) (int, error) {
+	c.h.Write(p)
+	return c.tmp.Write(p)
+}
+
+// commit names the object by its hash; abort drops it.
+func (c *casWriter) commit() error {
+	if err := c.tmp.Close(); err != nil {
+		os.Remove(c.tmp.Name())
+		return err
+	}
+	return os.Rename(c.tmp.Name(), filepath.Join(c.dir, hex.EncodeToString(c.h.Sum(nil))))
+}
+
+func (c *casWriter) abort() {
+	c.tmp.Close()
+	os.Remove(c.tmp.Name())
+}
+
+// materializeFromCAS copies the files an upload left out from the CAS into
+// workDir, stamping them as uploaded like extracted ones.
+func materializeFromCAS(casDir, workDir string, entries []casEntry, uploaded map[string]FileStamp) error {
+	cleanWork := filepath.Clean(workDir) + string(os.PathSeparator)
+	for _, e := range entries {
+		target := filepath.Clean(filepath.Join(workDir, e.Name))
+		if !strings.HasPrefix(target, cleanWork) || !validSHA(e.SHA) {
+			return fmt.Errorf("workspace file %q: bad name or hash", e.Name)
+		}
+		if err := copyFileMode(filepath.Join(casDir, e.SHA), target, os.FileMode(e.Mode).Perm()); err != nil {
+			return fmt.Errorf("workspace file %q from the cache: %w", e.Name, err)
+		}
+		now := time.Now()
+		_ = os.Chtimes(filepath.Join(casDir, e.SHA), now, now)
+		if info, err := os.Stat(target); err == nil {
+			uploaded[strings.TrimPrefix(target, cleanWork)] = stampOf(info)
+		}
+	}
+	return nil
+}
+
+func copyFileMode(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// pruneCAS removes least recently used objects until the CAS is under max.
+func pruneCAS(dir string, max int64) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		log.Warn().Err(err).Str("dir", dir).Msg("workspace cache: cannot list for pruning")
+		return
+	}
+	type obj struct {
+		path string
+		size int64
+		used time.Time
+	}
+	var objs []obj
+	var total int64
+	for _, e := range ents {
+		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
+			objs = append(objs, obj{filepath.Join(dir, e.Name()), info.Size(), info.ModTime()})
+			total += info.Size()
+		}
+	}
+	if total <= max {
+		return
+	}
+	sort.Slice(objs, func(i, j int) bool { return objs[i].used.Before(objs[j].used) })
+	for _, o := range objs {
+		if total <= max {
+			break
+		}
+		if err := os.Remove(o.path); err != nil {
+			log.Warn().Err(err).Str("path", o.path).Msg("workspace cache: prune failed")
+			continue
+		}
+		total -= o.size
+	}
+}
+
+// Receiver-side substitution: store paths cache.nixos.org already serves are
+// left out of a /v1/store/missing answer and fetched by this node itself,
+// in parallel with the sender packing and sending the rest. An import waits
+// for those fetches, since nix refuses a path whose references are absent.
+// A failed fetch is logged; the import then fails on the missing reference
+// and the sender falls back to sending the closure whole.
+
+// binaryCache is where substitutable paths are looked up.
+var binaryCache = "https://cache.nixos.org"
+
+// substitutable reports which paths binaryCache serves; a variable so tests
+// need no network.
+var substitutable = narinfoOnCache
+
+// realise fetches paths from the node's substituters; a variable for tests.
+var realise = func(ctx context.Context, paths []string) error {
+	cmd, cleanup, err := nixstore.CmdContext(ctx, "", append([]string{"nix-store", "-r"}, paths...)...)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// substituting tracks fetches in flight; importStoreNAR waits for them.
+// ponytail: one global wait, not per closure; key by root if unrelated
+// imports start waiting on each other's fetches.
+var substituting sync.WaitGroup
+
+// narinfoOnCache asks binaryCache for each path's narinfo, 16 at a time, all
+// within 2 s so an offline node answers the missing question promptly.
+func narinfoOnCache(paths []string) map[string]bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	found := make(map[string]bool)
+	var mu sync.Mutex
+	sem := make(chan struct{}, 16)
+	var wg sync.WaitGroup
+	var failures atomic.Int64
+	for _, p := range paths {
+		hashPart, _, ok := strings.Cut(filepath.Base(p), "-")
+		if !ok || !strings.HasPrefix(p, "/nix/store/") {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem; wg.Done() }()
+			req, err := http.NewRequestWithContext(ctx, http.MethodHead, binaryCache+"/"+hashPart+".narinfo", nil)
+			if err != nil {
+				failures.Add(1)
+				return
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				failures.Add(1)
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				mu.Lock()
+				found[p] = true
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if n := failures.Load(); n > 0 {
+		log.Warn().Int64("paths", n).Str("cache", binaryCache).
+			Msg("binary cache lookup failed; those paths are asked of the sender")
+	}
+	return found
+}
+
+// substituteMissing removes from missing the paths binaryCache serves and
+// starts fetching them, returning what the sender must still send.
+func substituteMissing(missing []string) []string {
+	if len(missing) == 0 {
+		return missing
+	}
+	found := substitutable(missing)
+	if len(found) == 0 {
+		return missing
+	}
+	rest := make([]string, 0, len(missing)-len(found))
+	var fetch []string
+	for _, p := range missing {
+		if found[p] {
+			fetch = append(fetch, p)
+		} else {
+			rest = append(rest, p)
+		}
+	}
+	substituting.Add(1)
+	go func() {
+		defer substituting.Done()
+		start := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		if err := realise(ctx, fetch); err != nil {
+			log.Warn().Err(err).Int("paths", len(fetch)).
+				Msg("fetching paths from the binary cache failed; the import will ask for the whole closure")
+			return
+		}
+		log.Info().Int("paths", len(fetch)).Float64("secs", time.Since(start).Seconds()).
+			Msg("fetched paths from the binary cache instead of the sender")
+	}()
+	return rest
 }

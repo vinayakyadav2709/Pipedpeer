@@ -2,8 +2,7 @@ package daemonapi
 
 import (
 	"archive/tar"
-	"bufio"
-	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -372,6 +371,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var haveWorkspace bool
+	var fromCAS []casEntry
 	uploaded := make(map[string]FileStamp)
 
 	readField := func(p io.Reader) string {
@@ -410,9 +410,16 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 				fail(http.StatusInternalServerError, "cache nar: "+err.Error())
 				return
 			}
+		case "workspace_cas":
+			// Additive: files the submitter left out because this node's
+			// workspace CAS has them (it asked /v1/store/missing first).
+			if err := json.NewDecoder(io.LimitReader(part, 64<<20)).Decode(&fromCAS); err != nil {
+				fail(http.StatusBadRequest, "workspace_cas: "+err.Error())
+				return
+			}
 		case "workspace":
 			haveWorkspace = true
-			if err := extractWorkspaceTar(part, workDir, uploaded); err != nil {
+			if err := extractWorkspaceTar(part, workDir, uploaded, s.casDir()); err != nil {
 				fail(http.StatusInternalServerError, "tar read: "+err.Error())
 				return
 			}
@@ -428,6 +435,11 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, "workspace file required")
 		return
 	}
+	if err := materializeFromCAS(s.casDir(), workDir, fromCAS, uploaded); err != nil {
+		fail(http.StatusConflict, err.Error())
+		return
+	}
+	pruneCAS(s.casDir(), casMaxBytes)
 	if narPath == "" {
 		if cached, _ := s.narCache.narFileFor(storePath); cached == "" && !pathExists(filepath.Join(storePath, "bin", "run")) {
 			fail(http.StatusBadRequest, "nar file required (not cached on this node)")
@@ -480,8 +492,9 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 
 // extractWorkspaceTar unpacks the workspace stream into workDir, refusing
 // entries that escape it, and records a stamp per extracted file so results
-// can later be limited to what the job actually changed.
-func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]FileStamp) error {
+// can later be limited to what the job actually changed. With casDir set,
+// each file is also stored in the workspace CAS so the next upload can skip it.
+func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]FileStamp, casDir string) error {
 	// Sniff rather than require: workspaces are zstd now, were gzip before,
 	// and a submitter on an older build still sends them plain. A cluster is
 	// rarely upgraded all at once and never in one direction, so reading all
@@ -511,12 +524,33 @@ func extractWorkspaceTar(src io.Reader, workDir string, uploaded map[string]File
 			os.MkdirAll(target, os.FileMode(hdr.Mode))
 		case tar.TypeReg:
 			os.MkdirAll(filepath.Dir(target), 0755)
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(hdr.Mode))
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode))
 			if err != nil {
+				log.Warn().Err(err).Str("file", hdr.Name).Msg("workspace: cannot create file; skipped")
 				continue
 			}
-			io.Copy(f, tr)
+			var dst io.Writer = f
+			var cw *casWriter
+			if casDir != "" {
+				if cw, err = newCASWriter(casDir); err != nil {
+					log.Warn().Err(err).Msg("workspace cache: cannot store; the next upload resends this file")
+				} else {
+					dst = io.MultiWriter(f, cw)
+				}
+			}
+			_, cerr := io.Copy(dst, tr)
 			f.Close()
+			if cerr != nil {
+				if cw != nil {
+					cw.abort()
+				}
+				return fmt.Errorf("extract %s: %w", hdr.Name, cerr)
+			}
+			if cw != nil {
+				if err := cw.commit(); err != nil {
+					log.Warn().Err(err).Str("file", hdr.Name).Msg("workspace cache: cannot store")
+				}
+			}
 			if rel, err := filepath.Rel(workDir, cleanTarget); err == nil {
 				if info, err := os.Stat(cleanTarget); err == nil {
 					uploaded[filepath.ToSlash(rel)] = stampOf(info)
@@ -686,7 +720,16 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 		// Import NAR into local Nix store — uses nix multicall binary
 		// invoked as nix-store via argv[0].
-		out, err := importNAR(narFile)
+		importCtx, stopImport := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-cancelCh:
+				stopImport()
+			case <-importCtx.Done():
+			}
+		}()
+		out, err := importNAR(importCtx, narFile)
+		stopImport()
 		if err != nil {
 			fail(fmt.Sprintf("nix-store --import: %v: %s", err, string(out)))
 			return
@@ -722,6 +765,8 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	cfg.Envs = append(cfg.Envs, jobInfoEnv(cfg.Envs, s.nodeID, cpuLimitCores("/sys/fs/cgroup", cgroups.Self()))...)
+
 	// Interception: put the workspace shim on PYTHONPATH and enable it. The
 	// isolated path rebuilds env from scratch below, so this only feeds the
 	// non-isolated branch; both honour cfg.Intercept. The --intercept flag
@@ -733,7 +778,6 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			"PIPEDPEER_SHIM=1",
 			fmt.Sprintf("PIPEDPEER_DAEMON_URL=http://127.0.0.1:%d", s.selfPort),
 			"PIPEDPEER_STORE_PATH="+cfg.StorePath,
-			"PIPEDPEER_NODE_ID="+s.nodeID,
 		)
 		// The shim writes its receipt here at exit and the Done frame carries
 		// it back, so every run's record says what was distributed and why.
@@ -937,7 +981,8 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 		if cfg.GPU {
 			addGPUSysModule(&ociCfg, rootfsDir, jobID)
-			gpuInfo := gpu.Detect()
+			// Fresh, not the 5 s cache: admission must see the device as it is now.
+			gpuInfo := gpu.DetectFresh()
 			for _, d := range gpuInfo.Devices {
 				ociCfg.Linux.Devices = append(ociCfg.Linux.Devices, ociDevice{
 					Path: d.Path, Type: "c",
@@ -964,41 +1009,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 				ociCfg.Process.Env = append(ociCfg.Process.Env,
 					"LD_LIBRARY_PATH="+gpuDriverMountDir)
 			}
-			// Determine which GPU devices to expose
-			gpuDevices := "all"
-			if cfg.GPUDevices != "" {
-				gpuDevices = cfg.GPUDevices
-			} else if gpuInfo.Count > 1 {
-				// With multiple GPUs, use the one the lease reserved for this task
-				// (cfg.GPUDevices is set by the coordinator from the lease); no
-				// reservation means the GPU with most free VRAM.
-				if gpuDevices == "all" {
-					devices := gpu.PerDevice()
-					bestIdx := -1
-					var bestFree int64
-					for _, d := range devices {
-						if d.MemoryFreeBytes > bestFree {
-							bestFree = d.MemoryFreeBytes
-							bestIdx = d.Index
-						}
-					}
-					if bestIdx >= 0 {
-						gpuDevices = strconv.Itoa(bestIdx)
-					}
-				}
-			}
-			switch gpuInfo.Vendor {
-			case gpu.VendorNVIDIA:
-				ociCfg.Process.Env = append(ociCfg.Process.Env,
-					fmt.Sprintf("NVIDIA_VISIBLE_DEVICES=%s", gpuDevices),
-					"NVIDIA_DRIVER_CAPABILITIES=compute,utility",
-				)
-			case gpu.VendorAMD:
-				ociCfg.Process.Env = append(ociCfg.Process.Env,
-					"ROCR_VISIBLE_DEVICES=0",
-					"HSA_OVERRIDE_GFX_VERSION=0",
-				)
-			}
+			ociCfg.Process.Env = append(ociCfg.Process.Env, gpuVisibleEnv(gpuInfo, cfg.GPUDevices)...)
 		}
 
 		data, _ := json.MarshalIndent(ociCfg, "", "  ")
@@ -1192,27 +1203,18 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 // classic `nix-store --import` only learned that flag in some versions and
 // errors out on others. Rather than pin one Nix version, try with the flag and
 // fall back when it is not recognised.
-func importNAR(nar *os.File) ([]byte, error) {
+func importNAR(ctx context.Context, nar *os.File) ([]byte, error) {
 	run := func(args ...string) ([]byte, error) {
 		if _, err := nar.Seek(0, io.SeekStart); err != nil {
 			return nil, fmt.Errorf("rewind nar: %w", err)
 		}
-		var src io.Reader = nar
-		// The NAR is gzipped at export time (torch is a 6.6GB uncompressed
-		// closure); decompress it for nix-store --import. Fall back to raw in
-		// case a peer has a legacy uncompressed copy.
-		br := bufio.NewReader(nar)
-		if magic, err := br.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
-			zr, zerr := gzip.NewReader(br)
-			if zerr != nil {
-				return nil, fmt.Errorf("open gzip nar: %w", zerr)
-			}
-			defer zr.Close()
-			src = zr
-		} else {
-			src = br
+		// zstd now, gzip from older peers, plain from older still: sniffed.
+		src, closeSrc, err := tarcodec.Reader(nar)
+		if err != nil {
+			return nil, fmt.Errorf("open nar: %w", err)
 		}
-		cmd, cleanup, err := nixstore.Cmd("", append([]string{"nix-store"}, args...)...)
+		defer closeSrc()
+		cmd, cleanup, err := nixstore.CmdContext(ctx, "", append([]string{"nix-store"}, args...)...)
 		if err != nil {
 			return nil, err
 		}
@@ -1479,5 +1481,65 @@ func signalContainer(jobID, containerID string, crunPid int) func(syscall.Signal
 			return
 		}
 		group(sig)
+	}
+}
+
+// gpuVisibleEnv picks the device a job sees: the one the lease reserved
+// (leased, set by the coordinator), else the detector's Best. The same index
+// goes to NVIDIA_VISIBLE_DEVICES or ROCR_VISIBLE_DEVICES by vendor.
+func gpuVisibleEnv(info gpu.Info, leased string) []string {
+	dev := leased
+	if dev == "" {
+		if info.Best < 0 {
+			return nil
+		}
+		dev = strconv.Itoa(info.Best)
+	}
+	switch info.Vendor {
+	case gpu.VendorNVIDIA:
+		return []string{"NVIDIA_VISIBLE_DEVICES=" + dev, "NVIDIA_DRIVER_CAPABILITIES=compute,utility"}
+	case gpu.VendorAMD:
+		return []string{"ROCR_VISIBLE_DEVICES=" + dev, "HSA_OVERRIDE_GFX_VERSION=0"}
+	}
+	return nil
+}
+
+// jobInfoEnv is what a job is told about where it runs: this node's id (the
+// shim's run record names machines by it) and, when the node is limited, its
+// CPU limit in cores. The sandbox mounts no /sys, so the shim cannot read the
+// cgroup itself. A value the submitter set wins.
+func jobInfoEnv(envs []string, nodeID string, cpuCores float64) []string {
+	var out []string
+	if nodeID != "" && !envsContain(envs, "PIPEDPEER_NODE_ID=") {
+		out = append(out, "PIPEDPEER_NODE_ID="+nodeID)
+	}
+	if cpuCores > 0 && !envsContain(envs, "PIPEDPEER_CPU_LIMIT=") {
+		out = append(out, "PIPEDPEER_CPU_LIMIT="+strconv.FormatFloat(cpuCores, 'f', -1, 64))
+	}
+	return out
+}
+
+// cpuLimitCores is the tightest cpu.max quota/period on cg and its ancestors
+// under root (cgroup v2), in cores; 0 when none is set. Jobs get no CPU quota
+// of their own, so the daemon's chain is the job's limit.
+func cpuLimitCores(root, cg string) float64 {
+	if cg == "" {
+		return 0
+	}
+	var best float64
+	for dir := filepath.Join(root, cg); ; dir = filepath.Dir(dir) {
+		if b, err := os.ReadFile(filepath.Join(dir, "cpu.max")); err == nil {
+			f := strings.Fields(string(b))
+			if len(f) == 2 && f[0] != "max" {
+				q, qerr := strconv.ParseFloat(f[0], 64)
+				p, perr := strconv.ParseFloat(f[1], 64)
+				if qerr == nil && perr == nil && p > 0 && (best == 0 || q/p < best) {
+					best = q / p
+				}
+			}
+		}
+		if dir == filepath.Clean(root) || dir == filepath.Dir(dir) {
+			return best
+		}
 	}
 }

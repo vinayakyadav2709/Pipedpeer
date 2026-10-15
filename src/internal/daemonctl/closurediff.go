@@ -19,6 +19,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -72,7 +73,7 @@ func seed(ctx context.Context, host string, port int, storePath string, whole bo
 	r := seedResult{total: len(paths)}
 	var missing []string // nil: every path
 	if !whole {
-		m, ok := askMissing(host, port, paths)
+		m, ok := askMissing(host, port, paths, true)
 		if !ok {
 			// An older daemon does not know the question. Sending the whole
 			// closure is what it expects.
@@ -108,7 +109,7 @@ func seed(ctx context.Context, host string, port int, storePath string, whole bo
 		return r, false
 	}
 	r.bytes = fileSize(archive)
-	fmt.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(r.bytes)), secs(time.Since(t0)))
+	say.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(r.bytes)), secs(time.Since(t0)))
 	t0 = time.Now()
 	if err := postPartial(host, port, storePath, archive); err != nil {
 		var refused *ClosureRefusedError
@@ -178,7 +179,7 @@ func ClosureStatus(host string, port int, storePath string) (state string, missi
 	if cached {
 		return "on-node", 0, len(paths)
 	}
-	miss, ok := askMissing(host, port, paths)
+	miss, ok := askMissing(host, port, paths, false)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "      warning: %s:%d did not say which store paths it lacks\n", host, port)
 		return "unknown", 0, len(paths)
@@ -251,9 +252,11 @@ func packSigned(ctx context.Context, storePath string, paths, want []string, des
 
 // askMissing asks a node which of these paths it does not have. A node that
 // cannot answer yields ok=false rather than an empty list, so "no answer" is
-// never mistaken for "has everything".
-func askMissing(host string, port int, paths []string) ([]string, bool) {
-	body, err := json.Marshal(map[string]any{"paths": paths})
+// never mistaken for "has everything". With substitute, a node that can fetch
+// some paths from the binary cache itself leaves them out and starts fetching
+// (only when a send follows: a dry run must not start downloads).
+func askMissing(host string, port int, paths []string, substitute bool) ([]string, bool) {
+	body, err := json.Marshal(map[string]any{"paths": paths, "substitute": substitute})
 	if err != nil {
 		return nil, false
 	}

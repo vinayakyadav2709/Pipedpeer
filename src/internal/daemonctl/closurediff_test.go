@@ -64,7 +64,7 @@ func TestNodeThatCannotAnswerGetsTheWholeArchive(t *testing.T) {
 	host, port, done := n.serve(t)
 	defer done()
 
-	_, ok := askMissing(host, port, []string{"/nix/store/aaa", "/nix/store/bbb"})
+	_, ok := askMissing(host, port, []string{"/nix/store/aaa", "/nix/store/bbb"}, false)
 	if ok {
 		t.Error("a node that refused the question was treated as having answered")
 	}
