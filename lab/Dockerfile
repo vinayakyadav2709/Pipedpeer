@@ -6,4 +6,6 @@ ENV PATH=/usr/local/bin:$PATH
 
 # The cluster token arrives as LAB_TOKEN (scripts/lab-up.sh); written to the
 # one config file before setup so the daemon starts inside that cluster.
-CMD ["sh", "-c", "if [ -n \"$LAB_TOKEN\" ]; then mkdir -p \"$XDG_DATA_HOME/pipedpeer\" && umask 077 && printf '{\"token\":\"%s\"}\\n' \"$LAB_TOKEN\" > \"$XDG_DATA_HOME/pipedpeer/cluster.json\"; fi; /usr/local/bin/pipedpeer setup -y && echo \"Worker $(cat /etc/hostname) online :4242\" && exec sleep infinity"]
+# Each worker gets its own /etc/machine-id (from LAB_NODE): the daemon's
+# machine key hashes it, and identical ids would make the workers one machine.
+CMD ["sh", "-c", "printf %s \"$LAB_NODE\" | md5sum | cut -c1-32 > /etc/machine-id; if [ -n \"$LAB_TOKEN\" ]; then mkdir -p \"$XDG_DATA_HOME/pipedpeer\" && umask 077 && printf '{\"token\":\"%s\"}\\n' \"$LAB_TOKEN\" > \"$XDG_DATA_HOME/pipedpeer/cluster.json\"; fi; /usr/local/bin/pipedpeer setup -y && echo \"Worker $(cat /etc/hostname) online :4242\" && exec sleep infinity"]
