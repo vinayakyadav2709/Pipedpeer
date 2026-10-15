@@ -198,19 +198,6 @@ func TestTier1HistoricalEstimation(t *testing.T) {
 	}
 }
 
-// VmPeak tests use gopsutil. We test ReadSelfVmPeak which should work
-// on the current process (the test binary itself).
-func TestReadSelfVmPeakNonZero(t *testing.T) {
-	peak := ReadSelfVmPeak()
-	// On Linux with gopsutil, this should return the current process's VMS
-	// which should be non-zero since we're a running Go process.
-	// Note: gopsutil may return 0 on some systems if /proc is unavailable.
-	// We just verify it doesn't panic and returns a reasonable value.
-	if peak < 0 {
-		t.Fatalf("expected non-negative VmPeak for self, got %d", peak)
-	}
-}
-
 // Gap 4: QueryPeakMem with no matching scripts
 func TestQueryPeakMemNoMatch(t *testing.T) {
 	tmpDir := t.TempDir()

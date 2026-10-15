@@ -1,135 +1,41 @@
 package heartbeat
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/shirou/gopsutil/v4/cpu"
 
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
-	"github.com/pipedpeer/pipedpeer/internal/logging"
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
-	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
-	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
-// JobCounterFunc returns the current number of active jobs.
-type JobCounterFunc func() int
+// Role says what this node will do for the cluster: "" (a full node),
+// RolePoolOnly or RoleIntroducerOnly. The daemon sets it at start from
+// cluster.json; it travels as the "role" capability, and the coordinator, DDP
+// eligibility and job admission skip any node that has one. Pool spill skips
+// only introducer-only nodes.
+var Role string
 
-// ReservedMemFunc returns the total reserved memory in bytes.
-type ReservedMemFunc func() int64
+// Version is the build this daemon runs (main.version), advertised as the
+// "version" capability so a peer on a different build can be named.
+var Version string
 
-// Transport defines how heartbeats are sent.
-type Transport string
-
+// Roles a node can advertise. Absent means a full node.
 const (
-	TransportHTTP Transport = "http"
-	TransportNATS Transport = "nats"
+	RolePoolOnly       = "pool-only"
+	RoleIntroducerOnly = "introducer-only"
 )
 
-type Client struct {
-	registryURL   string
-	identity      identity.NodeIdentity
-	sshEndpoint   string
-	daemonPort    int
-	interval      time.Duration
-	httpClient    *http.Client
-	stopCh        chan struct{}
-	doneCh        chan struct{}
-	stopOnce      sync.Once
-	jobCounter    JobCounterFunc
-	reservedMemFn ReservedMemFunc
-	transport     Transport
-	bus           *natsbus.Bus
-}
-
-// NewClient creates a heartbeat client using HTTP transport (backwards compatible).
-func NewClient(registryURL string, id identity.NodeIdentity, sshEndpoint string, daemonPort int) *Client {
-	return &Client{
-		registryURL:   registryURL,
-		identity:      id,
-		sshEndpoint:   sshEndpoint,
-		daemonPort:    daemonPort,
-		interval:      10 * time.Second,
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		jobCounter:    func() int { return 0 },
-		reservedMemFn: func() int64 { return 0 },
-		transport:     TransportHTTP,
-	}
-}
-
-// NewNATSClient creates a heartbeat client using NATS transport.
-func NewNATSClient(bus *natsbus.Bus, id identity.NodeIdentity, sshEndpoint string, daemonPort int) *Client {
-	return &Client{
-		identity:      id,
-		sshEndpoint:   sshEndpoint,
-		daemonPort:    daemonPort,
-		interval:      10 * time.Second,
-		stopCh:        make(chan struct{}),
-		doneCh:        make(chan struct{}),
-		jobCounter:    func() int { return 0 },
-		reservedMemFn: func() int64 { return 0 },
-		transport:     TransportNATS,
-		bus:           bus,
-	}
-}
-
-// SetJobCounter sets the function that returns the current active job count.
-func (c *Client) SetJobCounter(fn JobCounterFunc) {
-	c.jobCounter = fn
-}
-
-// SetReservedMemFn sets the function that returns total reserved memory.
-func (c *Client) SetReservedMemFn(fn ReservedMemFunc) {
-	c.reservedMemFn = fn
-}
-
-// Start registers with the registry and begins the heartbeat loop.
-func (c *Client) Start() error {
-	if err := c.register(); err != nil {
-		// Registry may be unavailable — log warning but don't fail.
-		// The daemon can still work via mDNS discovery.
-		log := logging.WithComponent("heartbeat")
-		log.Warn().Err(err).Str("node_id", c.identity.NodeID).Msg("registry registration failed (will retry)")
-	}
-	go c.loop()
-	return nil
-}
-
-// SetInterval changes the heartbeat interval (for testing).
-func (c *Client) SetInterval(d time.Duration) {
-	c.interval = d
-}
-
-// Stop sends a deregister signal and stops the heartbeat loop.
-// Safe to call multiple times.
-func (c *Client) Stop() {
-	c.stopOnce.Do(func() {
-		close(c.stopCh)
-		<-c.doneCh
-	})
-	_ = c.deregister()
-}
-
-// StopWithoutDeregister stops the heartbeat loop without sending deregister.
-// Simulates a node crash. Safe to call multiple times.
-func (c *Client) StopWithoutDeregister() {
-	c.stopOnce.Do(func() {
-		close(c.stopCh)
-		<-c.doneCh
-	})
-}
+// RoleCapability and VersionCapability are where Role and Version travel.
+const (
+	RoleCapability    = "role"
+	VersionCapability = "version"
+)
 
 // NixKeyCapability is where a node publishes the key it signs store paths
 // with. Travels with the node record so a peer can decide to trust this
@@ -153,6 +59,12 @@ func Capabilities(id identity.NodeIdentity) map[string]string {
 	caps := map[string]string{
 		"arch":     id.Arch,
 		"hostname": id.Hostname,
+	}
+	if Role != "" {
+		caps[RoleCapability] = Role
+	}
+	if Version != "" {
+		caps[VersionCapability] = Version
 	}
 	// Which physical machine this is, so a daemon sharing one with a peer can
 	// tell. Hostname will not do: containers get their own.
@@ -220,137 +132,4 @@ func cpuStatic() (int, string, float64) {
 		// so only the model and clock are taken from here.
 	})
 	return cpuStaticCores, cpuStaticModel, cpuStaticMHz
-}
-
-func (c *Client) buildNodeRecord() registry.NodeRecord {
-	return registry.NodeRecord{
-		NodeID:       c.identity.NodeID,
-		SSHEndpoint:  c.sshEndpoint,
-		DaemonPort:   c.daemonPort,
-		Capabilities: Capabilities(c.identity),
-		Load:         CollectLoad(c.jobCounter(), c.reservedMemFn()),
-	}
-}
-
-func (c *Client) register() error {
-	switch c.transport {
-	case TransportNATS:
-		return c.registerNATS()
-	default:
-		return c.registerHTTP()
-	}
-}
-
-func (c *Client) heartbeat() error {
-	switch c.transport {
-	case TransportNATS:
-		return c.heartbeatNATS()
-	default:
-		return c.heartbeatHTTP()
-	}
-}
-
-func (c *Client) deregister() error {
-	switch c.transport {
-	case TransportNATS:
-		return c.deregisterNATS()
-	default:
-		return c.deregisterHTTP()
-	}
-}
-
-// --- HTTP transport ---
-
-func (c *Client) registerHTTP() error {
-	rec := c.buildNodeRecord()
-	body, _ := json.Marshal(rec)
-	resp, err := c.httpClient.Post(c.registryURL+"/v1/register", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("register returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func (c *Client) heartbeatHTTP() error {
-	payload := struct {
-		NodeID string            `json:"node_id"`
-		Load   registry.LoadInfo `json:"load"`
-	}{
-		NodeID: c.identity.NodeID,
-		Load:   CollectLoad(c.jobCounter(), c.reservedMemFn()),
-	}
-	body, _ := json.Marshal(payload)
-	resp, err := c.httpClient.Post(c.registryURL+"/v1/heartbeat", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode == 404 {
-		// Not registered — re-register
-		return c.registerHTTP()
-	}
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("heartbeat returned %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func (c *Client) deregisterHTTP() error {
-	payload := struct {
-		NodeID string `json:"node_id"`
-	}{NodeID: c.identity.NodeID}
-	body, _ := json.Marshal(payload)
-	resp, err := c.httpClient.Post(c.registryURL+"/v1/deregister", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// --- NATS transport ---
-
-func (c *Client) registerNATS() error {
-	rec := c.buildNodeRecord()
-	return c.bus.PublishJSON("pipedpeer.registry.register", rec)
-}
-
-func (c *Client) heartbeatNATS() error {
-	payload := struct {
-		NodeID string            `json:"node_id"`
-		Load   registry.LoadInfo `json:"load"`
-	}{
-		NodeID: c.identity.NodeID,
-		Load:   CollectLoad(c.jobCounter(), c.reservedMemFn()),
-	}
-	return c.bus.PublishJSON("pipedpeer.registry.heartbeat", payload)
-}
-
-func (c *Client) deregisterNATS() error {
-	payload := struct {
-		NodeID string `json:"node_id"`
-	}{NodeID: c.identity.NodeID}
-	return c.bus.PublishJSON("pipedpeer.registry.deregister", payload)
-}
-
-func (c *Client) loop() {
-	defer close(c.doneCh)
-	ticker := time.NewTicker(c.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if err := c.heartbeat(); err != nil {
-				log := logging.WithComponent("heartbeat")
-				log.Warn().Err(err).Str("node_id", c.identity.NodeID).Msg("heartbeat failed")
-			}
-		case <-c.stopCh:
-			return
-		}
-	}
 }

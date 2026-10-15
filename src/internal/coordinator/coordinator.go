@@ -18,7 +18,6 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
-	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 )
 
@@ -26,8 +25,6 @@ import (
 type NodeSource string
 
 const (
-	SourceRegistry  NodeSource = "registry"
-	SourceCache     NodeSource = "cache"
 	SourceDiscovery NodeSource = "discovery"
 	SourceSelf      NodeSource = "self"
 	SourceExplicit  NodeSource = "explicit"
@@ -45,33 +42,34 @@ type ScoredNode struct {
 
 // PlacementDecision records the full decision for diagnostics.
 type PlacementDecision struct {
-	ChosenNode   registry.NodeRecord `json:"chosen_node"`
-	Source       NodeSource          `json:"source"`
-	DegradedMode bool                `json:"degraded_mode"`
-	Candidates   []ScoredNode        `json:"candidates"`
-	Reason       string              `json:"reason"`
+	ChosenNode registry.NodeRecord `json:"chosen_node"`
+	Source     NodeSource          `json:"source"`
+	// DegradedMode is always false since the registry went; kept because
+	// run records and their readers carry it.
+	DegradedMode bool         `json:"degraded_mode"`
+	Candidates   []ScoredNode `json:"candidates"`
+	Reason       string       `json:"reason"`
 }
 
-// DiscoveryFunc is a pluggable function for mDNS or other LAN discovery.
-// Returns discovered nodes. The coordinator calls this per-task.
+// DiscoveryFunc supplies extra candidate nodes per FindNode call. The CLI
+// leaves it nil (the local daemon's /v1/nodes is the source); tests use it to
+// hand the coordinator a cluster.
 type DiscoveryFunc func() []registry.NodeRecord
 
 // Coordinator handles node selection and placement.
 type Coordinator struct {
-	registryURL      string
 	httpClient       *http.Client
-	bus              *natsbus.Bus // optional NATS bus for inter-node transport
 	selfIdentity     identity.NodeIdentity
 	selfSSH          string
 	selfDaemon       int
 	selfLoad         registry.LoadInfo
 	discoverFn       DiscoveryFunc
-	maxCacheAge      time.Duration
 	jobName          string
 	requiredMemBytes int64
 	requiredCores    int
 	requiredGPUMem   int64
 	retryInterval    time.Duration
+	placementWindow  time.Duration
 	execBackoffBase  time.Duration
 	noSelf           bool
 	excludeMachine   string
@@ -82,8 +80,6 @@ type Coordinator struct {
 
 	mu          sync.Mutex
 	onPlacement func(*LeaseResult)
-	cachedNodes []registry.NodeRecord
-	cacheTime   time.Time
 	rrCounter   int // round-robin counter
 	// refused maps a node that refused this job's closure to its fix line:
 	// it would refuse every retry, so placement skips it from then on.
@@ -98,19 +94,17 @@ type Coordinator struct {
 
 // Config for the coordinator.
 type Config struct {
-	RegistryURL      string       // empty = no registry
-	Bus              *natsbus.Bus // optional: NATS bus for inter-node transport (nil = HTTP only)
 	SelfIdentity     identity.NodeIdentity
 	SelfSSH          string              // "root@localhost:22"
 	SelfDaemon       int                 // daemon port
 	SelfLoad         registry.LoadInfo   // current self load (from CollectLoad)
-	DiscoverFn       DiscoveryFunc       // mDNS or nil
-	MaxCacheAge      time.Duration       // default 2m
+	DiscoverFn       DiscoveryFunc       // extra candidates (tests); nil in the CLI
 	JobName          string              // optional job name, surfaced in the cluster task view
 	RequiredMemBytes int64               // estimated memory requirement for this job (0 = no check)
 	RequiredCores    int                 // minimum free CPU cores the node must have (0 = no check)
 	RequiredGPUMem   int64               // minimum free VRAM on a single GPU (0 = no check)
 	RetryInterval    time.Duration       // how long to wait between queue retries (default: 30s)
+	PlacementWindow  time.Duration       // how long PlaceWithRetry keeps retrying before it fails (default: DefaultPlacementWindow)
 	ExecBackoffBase  time.Duration       // first wait after a failed execution, doubling per failure (default: 2s)
 	NoSelf           bool                // exclude self-node from placement
 	ExcludeMachine   string              // run --offload: drop every node with this machine key, a second daemon here included
@@ -133,27 +127,25 @@ type LeaseResult struct {
 
 // New creates a coordinator.
 func New(cfg Config) *Coordinator {
-	if cfg.MaxCacheAge == 0 {
-		cfg.MaxCacheAge = 2 * time.Minute
-	}
 	if cfg.RetryInterval == 0 {
 		cfg.RetryInterval = 30 * time.Second
 	}
+	if cfg.PlacementWindow == 0 {
+		cfg.PlacementWindow = DefaultPlacementWindow
+	}
 	return &Coordinator{
-		registryURL:      cfg.RegistryURL,
 		httpClient:       &http.Client{Timeout: 5 * time.Second},
-		bus:              cfg.Bus,
 		selfIdentity:     cfg.SelfIdentity,
 		selfSSH:          cfg.SelfSSH,
 		selfDaemon:       cfg.SelfDaemon,
 		selfLoad:         cfg.SelfLoad,
 		discoverFn:       cfg.DiscoverFn,
-		maxCacheAge:      cfg.MaxCacheAge,
 		jobName:          cfg.JobName,
 		requiredMemBytes: cfg.RequiredMemBytes,
 		requiredCores:    cfg.RequiredCores,
 		requiredGPUMem:   cfg.RequiredGPUMem,
 		retryInterval:    cfg.RetryInterval,
+		placementWindow:  cfg.PlacementWindow,
 		execBackoffBase:  cfg.ExecBackoffBase,
 		noSelf:           cfg.NoSelf,
 		excludeMachine:   cfg.ExcludeMachine,
@@ -221,7 +213,6 @@ func (d PlacementDecision) RejectionSummary() string {
 // Called per-task — always fetches fresh data.
 func (c *Coordinator) FindNode() PlacementDecision {
 	var candidates []ScoredNode
-	degraded := false
 
 	// 1. The local daemon's node store is the primary source: it is long-lived,
 	//    so it has been discovering and health-checking peers in the background
@@ -232,28 +223,10 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		}
 	}
 
-	// 2. Direct LAN discovery, for the cold-start case where the daemon has
-	//    only just come up and its first poll has not landed yet.
+	// 2. Extra candidates from the caller (tests hand in a cluster here).
 	if c.discoverFn != nil {
 		for _, n := range c.discoverFn() {
 			candidates = mergeNode(candidates, ScoredNode{Node: n, Source: SourceDiscovery})
-		}
-	}
-
-	// 3. Registry, when one is configured. If it is unreachable we are in
-	//    degraded mode and fall back to the last known good response.
-	if c.registryURL != "" {
-		regNodes, err := c.queryRegistry()
-		if err == nil {
-			c.updateCache(regNodes)
-			for _, n := range regNodes {
-				candidates = mergeNode(candidates, ScoredNode{Node: n, Source: SourceRegistry})
-			}
-		} else {
-			degraded = true
-			for _, n := range c.getCachedNodes() {
-				candidates = mergeNode(candidates, ScoredNode{Node: n, Source: SourceCache})
-			}
 		}
 	}
 
@@ -290,6 +263,17 @@ func (c *Coordinator) FindNode() PlacementDecision {
 		}
 	}
 	c.mu.Unlock()
+
+	// 4d. A node with a role (pool-only, introducer-only) takes no jobs.
+	for i := range candidates {
+		if candidates[i].Rejected {
+			continue
+		}
+		if role := candidates[i].Node.Capabilities[heartbeat.RoleCapability]; role != "" {
+			candidates[i].Rejected = true
+			candidates[i].RejectReason = roleReason(role)
+		}
+	}
 
 	// 5. Arch compatibility filter — closure is built for local arch
 	for i := range candidates {
@@ -408,12 +392,16 @@ func (c *Coordinator) FindNode() PlacementDecision {
 	}
 
 	return PlacementDecision{
-		ChosenNode:   chosen,
-		Source:       chosenSource,
-		DegradedMode: degraded,
-		Candidates:   candidates,
-		Reason:       reason,
+		ChosenNode: chosen,
+		Source:     chosenSource,
+		Candidates: candidates,
+		Reason:     reason,
 	}
+}
+
+// roleReason is why a node with a role is never given a job.
+func roleReason(role string) string {
+	return "takes no jobs (" + role + " node)"
 }
 
 // RejectionLine is every turned-down node and why, on one line.
@@ -454,7 +442,8 @@ func (c *Coordinator) neverFits(d PlacementDecision) error {
 	sized := false // some node is too small, rather than unable to run it at all
 	for _, cand := range d.Candidates {
 		n := cand.Node
-		if cand.Rejected && (strings.HasPrefix(cand.RejectReason, "arch mismatch") || c.isRefused(n.NodeID)) {
+		if cand.Rejected && (strings.HasPrefix(cand.RejectReason, "arch mismatch") || c.isRefused(n.NodeID) ||
+			n.Capabilities[heartbeat.RoleCapability] != "") {
 			why = append(why, nodeName(n)+": "+cand.RejectReason)
 			continue
 		}
@@ -496,30 +485,49 @@ func maxVRAM(n registry.NodeRecord) int64 {
 	return best
 }
 
+// DefaultPlacementWindow is how long PlaceWithRetry keeps looking for a node
+// before it gives up: the same ten minutes a --remote run waits for one.
+const DefaultPlacementWindow = 10 * time.Minute
+
 // PlaceWithRetry attempts to place a task on a node with a lease.
 // If no node can accept, it queues the task and retries every RetryInterval
-// until placement succeeds or ctx is cancelled.
+// until placement succeeds, the placement window (cfg.PlacementWindow) passes,
+// or ctx is cancelled. Past the window it returns a plain error naming why
+// each node turned the job down; before, a rescheduled job with no reachable
+// node retried every 30 s forever (FIX-REQUEUE).
 // Returns the lease result including the lease_id and daemon endpoint.
 func (c *Coordinator) PlaceWithRetry(ctx context.Context, cfg Config, statusFn func(string)) (*LeaseResult, error) {
 	retryInterval := cfg.RetryInterval
 	if retryInterval == 0 {
 		retryInterval = 30 * time.Second
 	}
+	window := cfg.PlacementWindow
+	if window == 0 {
+		window = DefaultPlacementWindow
+	}
+	deadline := time.Now().Add(window)
 	submitterNode := cfg.SelfIdentity.NodeID
+	var last PlacementDecision
 
 	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
+			left := time.Until(deadline)
+			if left <= 0 {
+				return nil, fmt.Errorf("no node took this job within %s (%s)", window, rejectionLine(last))
+			}
+			wait := min(retryInterval, left)
 			if statusFn != nil {
-				statusFn(fmt.Sprintf("Queued — retrying in %s (attempt %d)...", retryInterval, attempt+1))
+				statusFn(fmt.Sprintf("Queued — retrying in %s (attempt %d)...", wait.Round(time.Second), attempt+1))
 			}
 			select {
 			case <-ctx.Done():
 				return nil, fmt.Errorf("placement cancelled: %w", ctx.Err())
-			case <-time.After(retryInterval):
+			case <-time.After(wait):
 			}
 		}
 
 		decision := c.FindNode()
+		last = decision
 		if err := c.neverFits(decision); err != nil {
 			return nil, err
 		}
@@ -687,24 +695,11 @@ type acceptResp struct {
 	Reason    string `json:"reason"`
 }
 
-// requestLease sends an accept request to a daemon via NATS (preferred) or HTTP (fallback).
+// requestLease sends an accept request to a daemon.
 func (c *Coordinator) requestLease(daemonURL string, req acceptReq) (string, string, int, error) {
 	var result acceptResp
 	result.GPUIndex = -1
 
-	// Prefer NATS if available
-	if c.bus != nil {
-		subject := fmt.Sprintf("pipedpeer.daemon.%s.accept", req.TargetID)
-		if err := c.bus.RequestJSON(subject, req, &result, 5*time.Second); err != nil {
-			return "", "", -1, fmt.Errorf("nats request: %w", err)
-		}
-		if !result.Accepted {
-			return "", "", -1, fmt.Errorf("rejected: %s", result.Reason)
-		}
-		return result.LeaseID, result.ExpiresAt, result.GPUIndex, nil
-	}
-
-	// Fallback to HTTP
 	body, err := json.Marshal(req)
 	if err != nil {
 		return "", "", -1, fmt.Errorf("encode request: %w", err)
@@ -723,30 +718,14 @@ func (c *Coordinator) requestLease(daemonURL string, req acceptReq) (string, str
 	return result.LeaseID, result.ExpiresAt, result.GPUIndex, nil
 }
 
-// CommitLease sends a commit request via NATS (preferred) or HTTP (fallback).
+// CommitLease sends a commit request. nodeID is accepted and unused (it
+// addressed the removed NATS transport); callers still pass it.
 func (c *Coordinator) CommitLease(daemonURL, leaseID string, nodeID ...string) error {
-	req := struct {
-		LeaseID string `json:"lease_id"`
-	}{leaseID}
-
 	var result struct {
 		Committed bool   `json:"committed"`
 		Reason    string `json:"reason"`
 	}
 
-	// Prefer NATS if available and nodeID is provided
-	if c.bus != nil && len(nodeID) > 0 && nodeID[0] != "" {
-		subject := fmt.Sprintf("pipedpeer.daemon.%s.commit", nodeID[0])
-		if err := c.bus.RequestJSON(subject, req, &result, 5*time.Second); err != nil {
-			return fmt.Errorf("nats commit: %w", err)
-		}
-		if !result.Committed {
-			return fmt.Errorf("commit rejected: %s", result.Reason)
-		}
-		return nil
-	}
-
-	// Fallback to HTTP
 	body := fmt.Sprintf(`{"lease_id":%q}`, leaseID)
 	resp, err := c.httpClient.Post(daemonURL+"/v1/commit", "application/json", strings.NewReader(body))
 	if err != nil {
@@ -769,12 +748,6 @@ func (c *Coordinator) RenewLease(daemonURL, leaseID string, nodeID ...string) er
 	req := struct {
 		LeaseID string `json:"lease_id"`
 	}{leaseID}
-
-	if c.bus != nil && len(nodeID) > 0 && nodeID[0] != "" {
-		var resp map[string]interface{}
-		subject := fmt.Sprintf("pipedpeer.daemon.%s.renew", nodeID[0])
-		return c.bus.RequestJSON(subject, req, &resp, 5*time.Second)
-	}
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -818,43 +791,11 @@ func (c *Coordinator) keepLeaseAlive(daemonURL, leaseID, nodeID string) (stop fu
 // dropped renewals do not cost a live job its slot.
 const leaseRenewInterval = 30 * time.Second
 
-// CompleteLease sends a complete request via NATS (preferred) or HTTP (fallback).
+// CompleteLease sends a complete request (status succeeded, failed or
+// cancelled; a cancel goes this way too). nodeID is accepted and unused.
 func (c *Coordinator) CompleteLease(daemonURL, leaseID, status string, nodeID ...string) error {
-	req := struct {
-		LeaseID string `json:"lease_id"`
-		Status  string `json:"status"`
-	}{leaseID, status}
-
-	if c.bus != nil && len(nodeID) > 0 && nodeID[0] != "" {
-		// Use node-specific subject for targeted delivery
-		subject := fmt.Sprintf("pipedpeer.daemon.%s.complete", nodeID[0])
-		var resp map[string]string
-		return c.bus.RequestJSON(subject, req, &resp, 5*time.Second)
-	}
-
 	body := fmt.Sprintf(`{"lease_id":%q,"status":%q}`, leaseID, status)
 	resp, err := c.httpClient.Post(daemonURL+"/v1/complete", "application/json", strings.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("connect failed: %w", err)
-	}
-	defer resp.Body.Close()
-	return nil
-}
-
-// CancelLease sends a cancel request via NATS or HTTP.
-func (c *Coordinator) CancelLease(daemonURL, leaseID, submitterNode string, nodeID ...string) error {
-	req := struct {
-		LeaseID       string `json:"lease_id"`
-		SubmitterNode string `json:"submitter_node"`
-	}{leaseID, submitterNode}
-
-	if c.bus != nil && len(nodeID) > 0 && nodeID[0] != "" {
-		subject := fmt.Sprintf("pipedpeer.daemon.%s.cancel", nodeID[0])
-		return c.bus.PublishJSON(subject, req)
-	}
-
-	body := fmt.Sprintf(`{"lease_id":%q,"submitter_node":%q}`, leaseID, submitterNode)
-	resp, err := c.httpClient.Post(daemonURL+"/v1/cancel", "application/json", strings.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("connect failed: %w", err)
 	}
@@ -1093,12 +1034,6 @@ func (c *Coordinator) notifyPlacement(r *LeaseResult) {
 	}
 }
 
-// ResolveEndpoint returns the SSH endpoint to use for the chosen node.
-// Uses loopback for self-node to avoid hairpin NAT.
-func (c *Coordinator) ResolveEndpoint(chosen registry.NodeRecord) string {
-	return c.resolveEndpointForNode(chosen)
-}
-
 func (c *Coordinator) resolveEndpointForNode(node registry.NodeRecord) string {
 	if node.NodeID == c.selfIdentity.NodeID {
 		return c.selfSSH
@@ -1201,43 +1136,9 @@ func nodeSource(s string) NodeSource {
 		return SourceSelf
 	case strings.Contains(s, "manual"):
 		return SourceManual
-	case strings.Contains(s, "registry"):
-		return SourceRegistry
 	default:
 		return SourceDiscovery
 	}
-}
-
-func (c *Coordinator) queryRegistry() ([]registry.NodeRecord, error) {
-	resp, err := c.httpClient.Get(c.registryURL + "/v1/nodes?state=healthy")
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("registry returned %d", resp.StatusCode)
-	}
-	var nodes []registry.NodeRecord
-	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
-		return nil, err
-	}
-	return nodes, nil
-}
-
-func (c *Coordinator) updateCache(nodes []registry.NodeRecord) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cachedNodes = nodes
-	c.cacheTime = time.Now()
-}
-
-func (c *Coordinator) getCachedNodes() []registry.NodeRecord {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if time.Since(c.cacheTime) > c.maxCacheAge {
-		return nil // too stale
-	}
-	return c.cachedNodes
 }
 
 // scoreNode ranks a node on current headroom and raw capability.
@@ -1402,18 +1303,16 @@ func minFloat(a, b float64) float64 {
 	return b
 }
 
-// mergeNode adds a node to the list, deduplicating by NodeID.
-// Registry source takes priority over discovery/cache.
+// mergeNode adds a node to the list, deduplicating by NodeID; the more
+// authoritative source wins.
 func mergeNode(list []ScoredNode, newNode ScoredNode) []ScoredNode {
 	for i, existing := range list {
 		if existing.Node.NodeID == newNode.Node.NodeID {
 			// Keep the more authoritative source
 			priority := map[NodeSource]int{
-				SourceRegistry:  5,
-				SourceSelf:      4,
-				SourceManual:    3,
-				SourceDiscovery: 2,
-				SourceCache:     1,
+				SourceSelf:      3,
+				SourceManual:    2,
+				SourceDiscovery: 1,
 			}
 			if priority[newNode.Source] > priority[existing.Source] {
 				list[i] = newNode
@@ -1437,6 +1336,7 @@ func (c *Coordinator) configSnapshot() Config {
 		RequiredCores:    c.requiredCores,
 		RequiredGPUMem:   c.requiredGPUMem,
 		RetryInterval:    c.retryInterval,
+		PlacementWindow:  c.placementWindow,
 		ExecBackoffBase:  c.execBackoffBase,
 		NoSelf:           c.noSelf,
 		ExcludeMachine:   c.excludeMachine,
