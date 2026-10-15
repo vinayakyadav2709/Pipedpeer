@@ -28,6 +28,8 @@
 #                   shared with the functional tests' default "emu" lab)
 #   BL_REPS         timed repetitions per cell (3)
 #   BL_RUN_TIMEOUT  seconds before one run counts as failed (600)
+#   BL_DRY          1 = print the labs and runs a driver would do, run nothing
+#                   (checks an ONLY= list without touching the lab or the CSV)
 #   BL_LAB_WAIT     seconds to wait for other labs to free the memory cap (3600)
 #   BL_OUT          results directory (~/.local/state/pipedpeer/bench)
 
@@ -49,6 +51,11 @@ bl_die() { bl_log "FAIL: $*"; exit 1; }
 # bl_init <suite> - picks the runtime, takes the bench lock, opens the CSV.
 bl_init() {
 	BL_SUITE="$1"
+	if [[ "${BL_DRY:-}" == 1 ]]; then
+		BL_RT=echo BL_CSV=/dev/null
+		trap - EXIT
+		return 0
+	fi
 	source "$BL_ROOT/scripts/lib/runtime.sh"
 	PP_NEED_COMPOSE=0 PP_RUNTIME_ORDER="docker podman" pp_pick_runtime || bl_die "no container runtime"
 	BL_RT="$PP_RUNTIME"
@@ -67,6 +74,7 @@ bl_init() {
 # (BEFORE) or always (AFTER: the checkout moves under it).
 bl_build() {
 	local which="$1" src rev out
+	if [[ "${BL_DRY:-}" == 1 ]]; then BL_BIN="($which binary)" BL_REV=dry BL_API_PORT=0; return 0; fi
 	mkdir -p "$BL_BINDIR"
 	if [[ "$which" == before ]]; then
 		rev="$(git -C "$BL_ROOT" rev-parse --short "$BL_BEFORE_REV")"
@@ -100,6 +108,11 @@ bl_build() {
 # bl_lab_up <nodes> <memory> <profile> <loss%> <binary>
 bl_lab_up() {
 	local n="$1" mem="$2" profile="$3" loss="$4" bin="$5"
+	if [[ "${BL_DRY:-}" == 1 ]]; then
+		echo "lab up: $n x (2 cpu, $mem), $profile, loss $loss%"
+		BL_NODES_UP="$n" BL_PROFILE="$profile" BL_LOSS="$loss"
+		return 0
+	fi
 	[[ -x "$BL_EMU" ]] || bl_die "$BL_EMU missing (U23's emulation rig)"
 	bl_lab_down
 	bl_log "lab up: $n x (2 cpu, $mem), profile $profile, loss $loss%, $(basename "$bin")"
@@ -123,6 +136,7 @@ bl_lab_up() {
 
 # bl_lab_shape <profile> <loss%> - reshape the running lab's links.
 bl_lab_shape() {
+	[[ "${BL_DRY:-}" == 1 ]] && { BL_PROFILE="$1" BL_LOSS="$2"; echo "  shape: $1, loss $2%"; return 0; }
 	[[ "$1" == "${BL_PROFILE:-}" && "$2" == "${BL_LOSS:-}" ]] && return 0
 	LAB_NAME="$BL_LAB_NAME" "$BL_EMU" shape "$1" "$2" >&2 || bl_die "lab-emu.sh shape $1 $2 failed"
 	BL_PROFILE="$1"
@@ -130,6 +144,7 @@ bl_lab_shape() {
 }
 
 bl_lab_down() {
+	[[ "${BL_DRY:-}" == 1 ]] && return 0
 	[[ "$BL_NODES_UP" -gt 0 ]] || return 0
 	LAB_NAME="$BL_LAB_NAME" "$BL_EMU" down >&2 || bl_log "warning: lab-emu.sh down failed; containers ${BL_EMU_PREFIX}* may still run"
 	BL_NODES_UP=0
@@ -149,6 +164,7 @@ bl_exec() {
 # arrive as -e BENCH_*=... on the run command line).
 bl_workloads() {
 	local d="$1"
+	[[ "${BL_DRY:-}" == 1 ]] && return 0
 	mkdir -p "$d"
 	: > "$d/.pipedpeerignore"
 
@@ -265,6 +281,7 @@ PY
 
 # bl_put <node> <dir> - copy a workload dir into a node at /bench.
 bl_put() {
+	[[ "${BL_DRY:-}" == 1 ]] && return 0
 	bl_exec "$1" sh -c 'rm -rf /bench && mkdir -p /bench'
 	"$BL_RT" cp "$2/." "${BL_EMU_PREFIX}$1:/bench/" >/dev/null
 }
@@ -277,6 +294,10 @@ bl_put() {
 bl_run() {
 	local case="$1" variant="$2" binlabel="$3" rep="$4" script="$5"
 	shift 5
+	if [[ "${BL_DRY:-}" == 1 ]]; then
+		echo "  run: $case:$variant rep $rep on $BL_NODES_UP node(s), $BL_PROFILE: pipedpeer run $* $script"
+		return 0
+	fi
 	local log="$BL_OUT/$BL_SUITE/logs/${case}_${variant}_${binlabel}_${BL_PROFILE}_n${BL_NODES_UP}_r${rep}.log"
 	local status=ok t0 t1 rc=0
 	bl_exec 1 touch /bench/.mark
@@ -347,6 +368,7 @@ bl_reps() {
 bl_warm() {
 	local script="$1"
 	shift
+	[[ "${BL_DRY:-}" == 1 ]] && return 0
 	bl_log "warming the environment for $script"
 	timeout "$BL_RUN_TIMEOUT" "$BL_RT" exec -w /bench "${BL_EMU_PREFIX}1" pipedpeer run "$@" "$script" \
 		> "$BL_OUT/$BL_SUITE/logs/warm_${script%.py}_$(date +%s).log" 2>&1 ||
