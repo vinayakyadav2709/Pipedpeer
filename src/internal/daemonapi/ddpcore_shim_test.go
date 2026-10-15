@@ -216,3 +216,62 @@ print("MATCH")
 		}
 	}
 }
+
+// ddpTimedScript trains one epoch of 200 global steps (batch 8 split 4+4),
+// sleeping TEST_SLOW seconds a step, and prints its step count and weights.
+const ddpTimedScript = `
+import os, time, torch
+from torch.utils.data import DataLoader, TensorDataset
+slow = float(os.environ.get("TEST_SLOW", "0"))
+torch.manual_seed(0)
+X, y = torch.randn(1600, 4), torch.randn(1600, 1)
+model = torch.nn.Linear(4, 1)
+opt = torch.optim.SGD(model.parameters(), lr=0.01)
+steps = 0
+for xb, yb in DataLoader(TensorDataset(X, y), batch_size=8, shuffle=True):
+    opt.zero_grad()
+    torch.nn.functional.mse_loss(model(xb), yb).backward()
+    time.sleep(slow)
+    opt.step()
+    steps += 1
+print("STEPS %d" % steps)
+print("W " + " ".join("%.8g" % v for v in model.weight.flatten().tolist()))
+`
+
+// TestShimFastModeTimesRoundsForASlowRank is PHONE-DDP: under --ddp-sync
+// fast, a rank 50x slower than the other runs out of its round budget,
+// skips the round's remaining batches and syncs, so the fast rank is not
+// held for the slow rank's whole interval; the ring stays in step (no
+// aborted round) and ends the epoch with one model on both ranks.
+func TestShimFastModeTimesRoundsForASlowRank(t *testing.T) {
+	dir, run := ddpCoreSetup(t)
+	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(ddpTimedScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Slack 1.25: with two ranks the median is their mean, which the
+	// default stall guard (4x) never trips on.
+	common := []string{"PIPEDPEER_DDP_SYNC_MODE=fast", "PIPEDPEER_DILOCO_H=8", "PIPEDPEER_VERBOSE=1",
+		"PIPEDPEER_DILOCO_ROUND_SLACK=1.25"}
+	outs, errs := ddpRing(t, run, append([]string{"TEST_SLOW=0.001"}, common...),
+		append([]string{"TEST_SLOW=0.05"}, common...))
+	var weights [2]string
+	for rank, err := range errs {
+		if err != nil {
+			t.Fatalf("rank %d: %v\n%s", rank, err, outs[rank])
+		}
+		for _, line := range strings.Split(outs[rank], "\n") {
+			if strings.HasPrefix(line, "W ") {
+				weights[rank] = line
+			}
+		}
+	}
+	if weights[0] == "" || weights[0] != weights[1] {
+		t.Errorf("the ranks ended on different models: %q vs %q\n%s\n%s", weights[0], weights[1], outs[0], outs[1])
+	}
+	if !strings.Contains(outs[1], "over its") || !strings.Contains(outs[1], "skipped") {
+		t.Errorf("the slow rank never cut a round short:\n%s", outs[1])
+	}
+	if strings.Contains(outs[0], "skipping") {
+		t.Errorf("the fast rank skipped batches:\n%s", outs[0])
+	}
+}
