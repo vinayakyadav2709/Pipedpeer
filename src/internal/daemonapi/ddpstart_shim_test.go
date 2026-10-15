@@ -25,7 +25,7 @@ func TestTheStartBarrierIsNotSyncTime(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 not available")
 	}
-	if out, err := exec.Command(python, "-c", "import torch, numpy").CombinedOutput(); err != nil {
+	if out, err := pythonImports(python, "torch, numpy"); err != nil {
 		t.Skipf("torch/numpy not available: %s", out)
 	}
 	dir := t.TempDir()

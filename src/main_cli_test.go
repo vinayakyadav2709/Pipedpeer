@@ -142,8 +142,7 @@ func runCLIWithEnv(t *testing.T, stateDir, xdg string, args ...string) string {
 
 func runCLIEWithEnv(t *testing.T, stateDir, xdg string, args ...string) (string, string, error) {
 	t.Helper()
-	cmd := exec.Command("go", append([]string{"run", "."}, args...)...)
-	cmd.Dir = "."
+	cmd := exec.Command(cliBinary(t), args...)
 	cmd.Env = append(os.Environ(),
 		"PIPEDPEER_DAEMON_STATE_DIR="+stateDir,
 		"XDG_DATA_HOME="+xdg,
@@ -191,12 +190,7 @@ func writeScript(t *testing.T) string {
 
 func TestBinaryBuildsAndRuns(t *testing.T) {
 	// Build binary — this catches compilation, import, and linkage issues
-	binPath := filepath.Join(t.TempDir(), "pipedpeer")
-	build := exec.Command("go", "build", "-buildvcs=false", "-o", binPath, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("binary build failed: %v\n%s", err, out)
-	}
+	binPath := cliBinary(t)
 
 	// Verify binary exists and is executable
 	info, err := os.Stat(binPath)
@@ -290,8 +284,7 @@ func TestJobsListAndJobDetail(t *testing.T) {
 
 func runCLIWithXDG(t *testing.T, stateDir, xdg string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("go", append([]string{"run", "."}, args...)...)
-	cmd.Dir = "."
+	cmd := exec.Command(cliBinary(t), args...)
 	cmd.Env = append(os.Environ(),
 		"PIPEDPEER_DAEMON_STATE_DIR="+stateDir,
 		"XDG_DATA_HOME="+xdg,

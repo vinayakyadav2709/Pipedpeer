@@ -27,6 +27,7 @@ must_run=(
 	TestFanWidthRespectsFreeMemory
 	TestShimDoesNotImportHeavyLibsAtStartup
 	TestShimPatchesOnFirstImport
+	TestShimNumPyInterception
 )
 
 # Not $TMPDIR: /tmp is a tmpfs of limited size on these machines, and a -v

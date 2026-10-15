@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -293,6 +294,25 @@ func requiredPython(src string) []string {
 	return deps
 }
 
+// pythonImportChecks caches pythonImports per interpreter and import list.
+var pythonImportChecks sync.Map
+
+// pythonImports reports whether python can import mods ("torch, numpy"),
+// asking once per test run: each check is a fresh interpreter importing the
+// module (torch alone ~2-4 s), and ~35 tests here used to repeat it.
+func pythonImports(python, mods string) ([]byte, error) {
+	type result struct {
+		out []byte
+		err error
+	}
+	f, _ := pythonImportChecks.LoadOrStore(python+"\x00"+mods, sync.OnceValue(func() result {
+		out, err := exec.Command(python, "-c", "import "+mods).CombinedOutput()
+		return result{out, err}
+	}))
+	r := f.(func() result)()
+	return r.out, r.err
+}
+
 func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...string) {
 	t.Helper()
 	python, err := exec.LookPath("python3")
@@ -307,7 +327,7 @@ func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...stri
 	// and skipping for the wrong reason hides that a machine could have run
 	// it: three of the six skips here needed nothing that was missing.
 	for _, dep := range requiredPython(src) {
-		if _, err := exec.Command(python, "-c", "import "+dep).CombinedOutput(); err != nil {
+		if _, err := pythonImports(python, dep); err != nil {
 			t.Skipf("%s not available, which this script imports: %v", dep, err)
 		}
 	}
@@ -564,15 +584,20 @@ core._STORE = ""
 transfer._BW_CACHE["bw"] = 1e9
 transfer._BW_CACHE["t"] = time.monotonic()
 
+# Honest cost model at realistic BLAS speeds, for a 2048x2048 float64 matrix
+# (pure arithmetic, above the 32 MB spill floor): local dgemm beats the
+# transport for matmul, but svd offloads (LAPACK is ~100x slower per flop).
+N = 2048
+assert not numpy_ops._numpy_should_offload(N * N * 8, max(8, N // 8), 5, True, 200e9)
+assert numpy_ops._numpy_should_offload(N * N * 8, max(8, N // 4), 3, False, 1.5e9)
+
+# The mechanics run on 512x512: forced offload skips the size floor, and the
+# path is the same at any size, while 2048 made svd+eig take ~2 minutes.
 rng = np.random.RandomState(1)
-A = rng.rand(2048, 2048)
-B = rng.rand(2048, 2048)
+A = rng.rand(512, 512)
+B = rng.rand(512, 512)
 b64A = len(base64.b64encode(A.tobytes()))
 
-# Honest cost model at realistic BLAS speeds: local dgemm beats the transport
-# for matmul, but svd offloads (LAPACK is ~100x slower per flop).
-assert not numpy_ops._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
-assert numpy_ops._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
 # Force every offload so the slicing/frames mechanics below are exercised.
 numpy_ops._numpy_should_offload = lambda *a, **k: True
 

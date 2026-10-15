@@ -12,7 +12,7 @@ func TestSecondGPUOnANodeGetsARank(t *testing.T) {
 	cands := []Candidate{
 		{NodeID: "two-gpu", Host: "a", Cores: 16, MemBytes: 32 << 30, HasGPU: true, Slots: 2},
 	}
-	plan := Select(context.Background(), cands, Options{ProbeMillis: 1})
+	plan := Select(noProbes(), cands, Options{ProbeMillis: 1})
 
 	if len(plan.Chosen) != 2 {
 		t.Fatalf("a two-GPU node produced %d rank(s), want 2 (rejections: %v)",
@@ -38,7 +38,7 @@ func TestOneSlotIsUnchangedBehaviour(t *testing.T) {
 		{NodeID: "a", Host: "a", Cores: 16, MemBytes: 16 << 30},
 		{NodeID: "b", Host: "b", Cores: 16, MemBytes: 16 << 30},
 	}
-	plan := Select(context.Background(), cands, Options{ProbeMillis: 1})
+	plan := Select(noProbes(), cands, Options{ProbeMillis: 1})
 	if len(plan.Chosen) != 2 {
 		t.Fatalf("got %d ranks, want 2", len(plan.Chosen))
 	}
@@ -60,7 +60,7 @@ func TestRanksOnOneNodeShareItsMemory(t *testing.T) {
 		{NodeID: "tight", Host: "a", Cores: 16, MemBytes: 12 << 30, HasGPU: true, Slots: 2},
 		{NodeID: "roomy", Host: "b", Cores: 16, MemBytes: 32 << 30, HasGPU: true, Slots: 1},
 	}
-	plan := Select(context.Background(), cands, Options{
+	plan := Select(noProbes(), cands, Options{
 		ProbeMillis:     1,
 		WorkingSetBytes: 8 << 30,
 	})
@@ -80,7 +80,7 @@ func TestCappedRingLeavesTheSpareDeviceIdle(t *testing.T) {
 	cands := []Candidate{
 		{NodeID: "two-gpu", Host: "a", Cores: 16, MemBytes: 32 << 30, HasGPU: true, Slots: 2},
 	}
-	plan := Select(context.Background(), cands, Options{Max: 1, ProbeMillis: 1})
+	plan := Select(noProbes(), cands, Options{Max: 1, ProbeMillis: 1})
 	if len(plan.Chosen) != 1 {
 		t.Fatalf("Max=1 gave %d ranks", len(plan.Chosen))
 	}
@@ -97,7 +97,7 @@ func TestZeroSlotsMeansOne(t *testing.T) {
 		{NodeID: "a", Host: "a", Cores: 8, MemBytes: 8 << 30, Slots: 0},
 		{NodeID: "b", Host: "b", Cores: 8, MemBytes: 8 << 30, Slots: 0},
 	}
-	plan := Select(context.Background(), cands, Options{ProbeMillis: 1})
+	plan := Select(noProbes(), cands, Options{ProbeMillis: 1})
 	if len(plan.Chosen) != 2 {
 		t.Fatalf("Slots=0 placed %d ranks, want 2 (one per node)", len(plan.Chosen))
 	}
@@ -109,4 +109,14 @@ func reasons(p Plan) []string {
 		out = append(out, r.Candidate.NodeID+": "+r.Reason)
 	}
 	return out
+}
+
+// noProbes is a context that is already cancelled, so every bench probe fails
+// at once and Select scores by advertised cores, as when nothing answers. The
+// hosts here ("a", "b") resolve nowhere; probing them cost a ~4 s DNS timeout
+// per candidate on some resolvers.
+func noProbes() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
