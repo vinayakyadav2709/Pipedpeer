@@ -83,7 +83,7 @@ if __name__ == "__main__":
 		r.cmd.Env = append(os.Environ(),
 			"PYTHONPATH="+dir,
 			"PIPEDPEER_SHIM=1",
-			"PIPEDPEER_NUM_SHARDS=0",
+			"PIPEDPEER_CLOSURE_NODES=0",
 			"PIPEDPEER_DDP=1",
 			fmt.Sprintf("PIPEDPEER_RANK=%d", rank),
 			fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", world),

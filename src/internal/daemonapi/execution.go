@@ -243,6 +243,14 @@ func pathExists(p string) bool {
 	return err == nil
 }
 
+// withClosureNodes adds PIPEDPEER_CLOSURE_NODES unless the submitter set it.
+func withClosureNodes(envs []string, nodes int) []string {
+	if envsContain(envs, "PIPEDPEER_CLOSURE_NODES=") {
+		return envs
+	}
+	return append(envs, fmt.Sprintf("PIPEDPEER_CLOSURE_NODES=%d", nodes))
+}
+
 // envsContain reports whether any env entry in envs starts with the given
 // key= prefix, so the daemon never clobbers a submitter-provided variable.
 func envsContain(envs []string, prefix string) bool {
@@ -742,15 +750,12 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			cfg.Envs = append(cfg.Envs, authtoken.EnvVar+"="+tok)
 		}
 
-		// The shim gates remote spill on PIPEDPEER_NUM_SHARDS != "0": the
+		// The shim gates remote spill on PIPEDPEER_CLOSURE_NODES != "0": the
 		// number of nodes that share this closure (1 at first exec, peers
 		// count once broadcastClosure has run). DDP runs set their own
 		// RANK/WORLD_SIZE/MASTER_ADDR/PEERS via cfg.Envs and must not be
 		// overridden here.
-		if !envsContain(cfg.Envs, "PIPEDPEER_NUM_SHARDS=") {
-			cfg.Envs = append(cfg.Envs,
-				fmt.Sprintf("PIPEDPEER_NUM_SHARDS=%d", s.pool.spillPeerCount(cfg.StorePath)+1))
-		}
+		cfg.Envs = withClosureNodes(cfg.Envs, s.pool.spillPeerCount(cfg.StorePath)+1)
 	}
 
 	// Isolation needs crun. If setup never managed to install it, degrade to

@@ -103,7 +103,7 @@ if __name__ == "__main__":
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=", // empty
-		"PIPEDPEER_NUM_SHARDS=0",
+		"PIPEDPEER_CLOSURE_NODES=0",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -153,7 +153,7 @@ print("torch-ok")
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=",
-		"PIPEDPEER_NUM_SHARDS=0",
+		"PIPEDPEER_CLOSURE_NODES=0",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -282,7 +282,7 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 os.environ["PIPEDPEER_SHIM"] = "1"
 os.environ["PIPEDPEER_DAEMON_URL"] = "http://127.0.0.1:%d" % PORT
-os.environ["PIPEDPEER_NUM_SHARDS"] = "3"
+os.environ["PIPEDPEER_CLOSURE_NODES"] = "3"
 os.environ["PIPEDPEER_STORE_PATH"] = ""
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
@@ -632,7 +632,7 @@ W, V = np.linalg.eig(A)
 assert np.allclose(A @ V, V * W, rtol=1e-4)
 print("NUMPY-OK")
 `, "NUMPY-OK",
-		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // TestShimNumPyRespectsTheCostModelsNo is the other half of T8.
@@ -676,7 +676,7 @@ assert np.allclose(U @ np.diag(S) @ Vh, A, rtol=1e-4, atol=1e-4), "svd wrong whi
 assert np.allclose(A @ V, V * W, rtol=1e-4), "eig wrong while local"
 print("NUMPY-LOCAL-OK")
 `, "NUMPY-LOCAL-OK",
-		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // PIPEDPEER_DISTRIBUTE=force must make the spill gates say yes without
@@ -712,7 +712,7 @@ print("FORCE_OK")
 	cmd.Env = append(os.Environ(),
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1", // never dialled: force skips the probe
-		"PIPEDPEER_NUM_SHARDS=2",
+		"PIPEDPEER_CLOSURE_NODES=2",
 		"PIPEDPEER_DISTRIBUTE=force",
 		"PYTHONPATH="+dir,
 	)
@@ -753,7 +753,7 @@ print("LAZY-OK")
 	runShimPythonEnv(t, "lazy_startup", src, "LAZY-OK",
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
-		"PIPEDPEER_NUM_SHARDS=3")
+		"PIPEDPEER_CLOSURE_NODES=3")
 }
 
 // TestShimPatchesOnFirstImport is the other half of that contract: deferring
@@ -772,7 +772,7 @@ print("PATCH-OK")
 	runShimPythonEnv(t, "lazy_patch", src, "PATCH-OK",
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
-		"PIPEDPEER_NUM_SHARDS=3")
+		"PIPEDPEER_CLOSURE_NODES=3")
 }
 
 func TestRequiredPythonSeesTheShimsTorchHelpers(t *testing.T) {

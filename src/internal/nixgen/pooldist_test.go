@@ -286,7 +286,7 @@ func runPoolScriptWith(t *testing.T, python string, files map[string]string, mai
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL="+url,
-		"PIPEDPEER_NUM_SHARDS=3",
+		"PIPEDPEER_CLOSURE_NODES=3",
 		"PIPEDPEER_STORE_PATH=/nix/store/fake",
 		"PIPEDPEER_RECEIPT="+receiptPath,
 		// Each script's own Pool size, not every core here. Local and the
@@ -527,7 +527,7 @@ func TestShimPoolSingleNodeDoesNotDialItself(t *testing.T) {
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL="+url,
-		"PIPEDPEER_NUM_SHARDS=1", // no peers: this node is the whole cluster
+		"PIPEDPEER_CLOSURE_NODES=1", // no peers: this node is the whole cluster
 		"PIPEDPEER_STORE_PATH=/nix/store/fake",
 	)
 	var stdout, stderr strings.Builder
@@ -611,7 +611,7 @@ if __name__ == "__main__":
 		"PYTHONPATH="+dir,
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_RESPECT_POOL_SIZE=1",
-		"PIPEDPEER_NUM_SHARDS=0",
+		"PIPEDPEER_CLOSURE_NODES=0",
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -661,7 +661,7 @@ if __name__ == "__main__":
 	cmd := exec.Command(python, filepath.Join(dir, "job.py"))
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
-		"PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=0",
+		"PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=0",
 		"PIPEDPEER_IMAP_BATCH=4",
 	)
 	done := make(chan struct{})

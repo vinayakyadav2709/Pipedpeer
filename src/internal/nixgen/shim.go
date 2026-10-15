@@ -41,7 +41,7 @@ _ENABLED = os.environ.get("PIPEDPEER_SHIM") == "1"
 _URL = os.environ.get("PIPEDPEER_DAEMON_URL", "")
 _STORE = os.environ.get("PIPEDPEER_STORE_PATH", "")
 _NODE_ID = os.environ.get("PIPEDPEER_NODE_ID", "")
-_NUM_SHARDS = os.environ.get("PIPEDPEER_NUM_SHARDS", "0")
+_NUM_SHARDS = os.environ.get("PIPEDPEER_CLOSURE_NODES", "0")  # closure node count; map shards use PIPEDPEER_NUM_SHARDS
 # PIPEDPEER_DISTRIBUTE=force skips every cost model: any interceptable
 # operation over the size floor ships to the cluster even when local would
 # win. This deliberately breaks the never-slower invariant — it exists to
@@ -2205,7 +2205,7 @@ def _install():
         return
     sys.meta_path.insert(0, _PatchOnImport())
     _defer("numpy", _install_numpy)
-    _defer("torch", _install_ddp, _install_torch)
+    _defer("torch", _install_ddp)
     _defer("pandas", _install_pandas, _install_io)
     _defer("joblib", _install_joblib)
     import multiprocessing
