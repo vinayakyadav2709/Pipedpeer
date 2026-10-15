@@ -90,18 +90,31 @@ assert any(d["op"] == "joblib" and d["shipped"] for d in stats._STATS["decisions
 # slow lives in this script's __main__. A worker's __main__ is its runner, so
 # a task naming __main__.slow failed there with "no attribute 'slow'" (cpu.py's
 # mandel_tile on the lab). Run a chunk as it crossed in a fresh interpreter.
-import pickle, subprocess, sys
-req, g, raw = LAST_FRAMES[0]
-child = subprocess.run([sys.executable, "-S", "-c", (
-    "import pickle, sys\n"
-    "src, g, raw = pickle.load(sys.stdin.buffer)\n"
-    "ns = pickle.loads(g)\n"
-    "exec(src, ns)\n"
-    "print([ns['run'](pickle.loads(r)) for r in raw])\n")],
-    input=pickle.dumps((req["func_src"], g, raw)), capture_output=True)
-assert child.returncode == 0, child.stderr.decode()
-got = eval(child.stdout)
+import functools, pickle, subprocess, sys
+def run_fresh(mark):
+    req, g, raw = next(f for f in reversed(FRAMES) if any(mark in r for r in f[2]))
+    child = subprocess.run([sys.executable, "-S", "-c", (
+        "import pickle, sys\n"
+        "src, g, raw = pickle.load(sys.stdin.buffer)\n"
+        "ns = pickle.loads(g)\n"
+        "exec(src, ns)\n"
+        "print([ns['run'](pickle.loads(r)) for r in raw])\n")],
+        input=pickle.dumps((req["func_src"], g, raw)), capture_output=True)
+    assert child.returncode == 0, child.stderr.decode()
+    return eval(child.stdout)
+got = run_fresh(b"__pp_func__")
 assert got and all(v % 3 == 0 for v in got), got
+
+# delayed(partial(kernel, x)): the partial names __main__.slow_mul the same way.
+def slow_mul(k, i):
+    time.sleep(0.05)
+    return k * i
+os.environ.pop("PIPEDPEER_JB_NESTED", None)
+res = joblib.Parallel(n_jobs=-1)(joblib.delayed(functools.partial(slow_mul, 7))(i) for i in range(60))
+assert res == [7 * i for i in range(60)], res
+assert any(b"__pp_partial__" in r for f in FRAMES for r in f[2]), "the partial call never reached the cluster"
+got = run_fresh(b"__pp_partial__")
+assert got and all(v % 7 == 0 for v in got), got
 
 # A large array every task shares travels once per chunk, in the globals
 # frame, not inside each task.

@@ -138,7 +138,7 @@ MAX_CHUNK = [0]
 # a test: it is a running maximum, so a phase that distributed nothing leaves it
 # untouched and the assertion still passes on the earlier phase's work.
 POOL_CALLS = [0]
-LAST_FRAMES = [None]
+FRAMES = []
 COUNT_LOCK = threading.Lock()
 TMP = tempfile.mkdtemp(prefix="pp-shim-")
 
@@ -183,9 +183,9 @@ class Handler(BaseHTTPRequestHandler):
             if req.get("items_zlib"):
                 import zlib
                 raw = [zlib.decompress(r) for r in raw]
-            # The last frames request as it crossed, for tests that load it
-            # in another process (where this script's __main__ is absent).
-            LAST_FRAMES[0] = (req, g, raw)
+            # Every frames request as it crossed, for tests that load one in
+            # another process (where this script's __main__ is absent).
+            FRAMES.append((req, g, raw))
         else:
             with COUNT_LOCK:
                 POOL_CALLS[0] += 1
