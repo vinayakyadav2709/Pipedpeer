@@ -165,17 +165,10 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 				requireGPU, preferGPU = true, true
 			case "prefer":
 				preferGPU = true
-			case "off":
-			case "":
-				if pythondeps.HasGPUImports(scriptPath) {
-					preferGPU = true
-					say.Println("[coordinator] GPU-accelerated libraries detected — preferring GPU nodes")
-				}
+			case "off", "":
 			default:
 				return fmt.Errorf("invalid --gpu value %q (want force, prefer, or off)", gpuMode)
 			}
-			requestGPU := requireGPU || preferGPU
-			requiredGPUMem := resourceest.ParseMemString(gpuMemStr)
 
 			nodeID, err := identity.GetOrCreate()
 			if err != nil {
@@ -189,6 +182,21 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			if wasStarted {
 				say.Println("started daemon")
 			}
+
+			// Inferred from the imports only when some machine can use a
+			// GPU: otherwise the build would fetch the multi-GB CUDA wheels
+			// for a run that can only ever use a CPU.
+			if gpuMode == "" && pythondeps.HasGPUImports(scriptPath) {
+				nodes, nerr := fetchClusterNodes(daemonPort)
+				if nerr != nil {
+					say.Warnf("could not list the cluster's nodes to see whether any has a GPU (%v); preferring GPU nodes\n", nerr)
+				}
+				var why string
+				preferGPU, why = inferGPU(gpu.Detect().Vendor != gpu.VendorNone, nodes, nerr)
+				say.Println("[coordinator] " + why)
+			}
+			requestGPU := requireGPU || preferGPU
+			requiredGPUMem := resourceest.ParseMemString(gpuMemStr)
 
 			// --offload: distributed pieces (pool/joblib chunks, pandas and
 			// numpy offloads, DDP ranks) keep off this machine, decided by its
@@ -555,6 +563,24 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 	_ = cmd.Flags().MarkHidden("strategy")
 	cmd.Flags().Int("ddp", 0, "Distributed training: run up to this many ranks across the cluster (default: every eligible node joins the ring), DDP init transparently handled by the shim")
 	return cmd
+}
+
+// inferGPU decides whether a script that imports GPU libraries, run without
+// --gpu, prefers GPU nodes: only when this machine or a healthy node reports
+// a usable GPU. A failed node listing (fetchErr) keeps the old preference.
+func inferGPU(localGPU bool, nodes []clusterNode, fetchErr error) (bool, string) {
+	if localGPU {
+		return true, "GPU libraries imported and this machine has a GPU — preferring GPU nodes"
+	}
+	if fetchErr != nil {
+		return true, "GPU libraries imported; node list unavailable — preferring GPU nodes"
+	}
+	for _, n := range nodes {
+		if n.State == "healthy" && nodeHasGPU(n) {
+			return true, "GPU libraries imported and " + nodeLabel(n) + " has a GPU — preferring GPU nodes"
+		}
+	}
+	return false, "GPU libraries imported but no machine in the cluster has a usable GPU — building the CPU environment"
 }
 
 // runDaemonPort is this machine's daemon API port: the one the running (or
