@@ -49,7 +49,7 @@ def fig_closure_cache():
     ax.set_ylim(0, cold * 1.22)
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
-    ax.set_title(f"{cold/np.median(warm):.0f}x cheaper once cached",
+    ax.set_title(f"{cold/np.median(warm):.0f}\u00d7 faster start once cached",
                  fontsize=15, loc="left")
 
     ax2.plot(range(1, len(s) + 1), s, color=BLUE, linewidth=1.4, zorder=1)
@@ -68,7 +68,7 @@ def fig_closure_cache():
 
 def fig_shim_overhead():
     """5.2 - Cost of leaving interception on when it decides not to distribute.
-    Left: the declined 16-item map (N7, 12 October). Bars are the medians
+    Left: the declined 16-item map (N7). Bars are the medians
     results.json records over all five runs; the whiskers leave out the
     enabled side's cold first run (its environment build), which is printed
     instead, as Table tab:shimidle does."""
@@ -96,8 +96,8 @@ def fig_shim_overhead():
     ax.set_title(f"16-item map the cost model declines\n(median of {len(offs)} runs each; line: min-max)",
                  fontsize=15, loc="left")
 
-    # Startup tax before the lazy-patching fix (August, raw/B3) and now (O2).
-    ax2.bar(["eager patching\n(Aug 2026)", "deferred\n(Oct 2026)"], [before, after], color=[RED, GREEN], width=0.5)
+    # Startup tax with libraries patched at start-up (raw/B3) and on first import (O2).
+    ax2.bar(["patched at\nstart-up", "patched on\nfirst import"], [before, after], color=[RED, GREEN], width=0.5)
     ax2.axhline(3.0, color=GOLD, linestyle="--", linewidth=1.5)
     ax2.text(0.5, 5.6, "3x budget", color=GOLD, fontsize=13, ha="center", va="bottom", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     for i, v in enumerate([before, after]):
@@ -135,73 +135,67 @@ def fig_sandbox():
     ax.set_ylim(0, max(cr) * 1.25)
     ax.legend(frameon=True, framealpha=1.0, edgecolor="none",
               fontsize=13, loc="upper left")
-    ax.set_title("Sandbox start cost, median of 20 runs (Aug 2026)",
+    ax.set_title("Sandbox start cost, median of 20 runs",
                  fontsize=15, loc="left")
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
     fig.savefig(OUT / "fig_5.3_sandbox_overhead.png"); plt.close(fig)
 
 
-def fig_comparison():
-    """5.4 - Where PipedPeer sits against the usual alternatives.
+def _md_rows(text, first_cell):
+    """Rows of the markdown table in text whose first cell is first_cell."""
+    out = []
+    for line in text.splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells and cells[0] == first_cell:
+            out.append(cells)
+    return out
 
-    The lower block is the half that matters for honesty: on security,
-    reach, language coverage and maturity PipedPeer is the weakest system
-    in the table, and the figure says so.
-    """
-    systems = ["PipedPeer", "Spark", "Ray", "Dask", "BOINC", "plain ssh"]
-    rows = [
-        # criterion,                          Piped Spark Ray Dask BOINC ssh
-        ("Runs unmodified Python",            [2, 0, 1, 1, 0, 2]),
-        ("No cluster to configure",           [2, 0, 0, 0, 0, 1]),
-        ("No head or master node",            [2, 0, 0, 0, 0, 2]),
-        ("Reproduces the environment",        [2, 1, 1, 1, 1, 0]),
-        ("Joins machines behind NAT, no relay", [2, 0, 0, 0, 0, 0]),
-        ("Survives losing a node",            [2, 2, 2, 2, 2, 0]),
-        ("Authenticated and encrypted",       [1, 2, 1, 1, 2, 2]),
-        ("Sandboxes each job",                [1, 0, 0, 0, 1, 0]),
-        ("Runtimes other than Python",        [0, 2, 1, 0, 2, 2]),
-        ("Proven in production use",          [0, 2, 2, 2, 2, 2]),
-    ]
-    SPLIT = 6            # rows below this are where PipedPeer is behind or partial
-    labels = [r[0] for r in rows]
-    M_ = np.array([r[1] for r in rows])
 
-    fig, ax = plt.subplots(figsize=(8.2, 6.2))
-    cmap = matplotlib.colors.ListedColormap(["#f4dcdc", "#fbf0d5", "#dcefe3"])
-    ax.imshow(M_, cmap=cmap, vmin=0, vmax=2, aspect="auto")
-    for i in range(len(rows)):
-        for j in range(len(systems)):
-            ax.text(j, i, {2: "yes", 1: "partial", 0: "no"}[M_[i, j]],
-                    ha="center", va="center", fontsize=13,
-                    color={2: GREEN, 1: GOLD, 0: RED}[M_[i, j]])
-
-    ax.set_xticks(range(len(systems)))
-    ax.set_xticklabels(systems, fontsize=13, fontweight="bold")
-    ax.xaxis.set_ticks_position("top")
-    ax.set_yticks(range(len(rows)))
-    ax.set_yticklabels(labels, fontsize=13)
-    ax.set_xticks(np.arange(-.5, len(systems), 1), minor=True)
-    ax.set_yticks(np.arange(-.5, len(rows), 1), minor=True)
-    ax.grid(which="minor", color="white", linewidth=2)
-    ax.tick_params(which="both", length=0)
-    for sp in ax.spines.values():
-        sp.set_visible(False)
-
-    # A heavy rule separating what PipedPeer does differently from what it
-    # is simply worse at.
-    ax.plot([-0.5, len(systems) - 0.5], [SPLIT - 0.5] * 2,
-            color="#333333", linewidth=2.4, clip_on=False)
-    # Group labels go in the right margin: on the left they collided with the
-    # criterion text.
-    ax.set_xlim(-0.5, len(systems) - 0.5 + 0.95)
-    ax.text(len(systems) - 0.5 + 0.42, (SPLIT - 1) / 2, "what it does\ndifferently",
-            rotation=270, ha="center", va="center", fontsize=12, color="#333333")
-    ax.text(len(systems) - 0.5 + 0.42, SPLIT + (len(rows) - SPLIT - 1) / 2,
-            "partial, or\nbehind", rotation=270, ha="center", va="center",
-            fontsize=12, color=RED)
-    fig.savefig(OUT / "fig_5.4_comparison.png"); plt.close(fig)
+def fig_sync_modes():
+    """5.4 - Two-rank ring under exact and fast synchronisation against one
+    device (diloco.md). Left: wall time on Wi-Fi from the one-seed wall-time
+    table. Right: mean validation-loss gap of fast sync over three seeds, from
+    the loss table of the plain-averaging defaults."""
+    md = (BENCH / "diloco.md").read_text()
+    models = [("gpu", "MLP-G"), ("ddp04", "MLP-C"), ("tfm", "Transformer")]
+    secs = lambda v: float(v.replace("s", "").strip())
+    wall = {}
+    for key, _ in models:
+        row = [r for r in _md_rows(md, key) if len(r) == 7][-1]   # model | single | exact lan | exact wifi | fast lan | fast wifi | MiB
+        wall[key] = (secs(row[1]), secs(row[3]), secs(row[5]))
+    gaps = {}
+    start = md.index("Every model passes under both profiles") if "Every model passes under both profiles" in md else len(md)
+    loss = md[:start]
+    for key, _ in models:
+        for prof in ("lan", "wifi"):
+            r = [x for x in _md_rows(loss, key) if len(x) > 7 and x[1] == "fast" and x[2] == prof][-1]
+            gaps[(key, prof)] = float(r[7].replace("%", ""))
+    x = np.arange(len(models)); w = 0.26
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(11.6, 4.2), gridspec_kw={"width_ratios": [1.3, 1], "wspace": 0.3})
+    for i, (lab, col) in enumerate([("one device", "#9bb8dd"), ("exact, Wi-Fi", RED), ("fast, Wi-Fi", GREEN)]):
+        vals = [wall[k][i] for k, _ in models]
+        ax.bar(x + (i - 1) * w, vals, w, label=lab, color=col)
+        for j, v in enumerate(vals):
+            ax.text(j + (i - 1) * w, v + 0.8, f"{v:.0f}", ha="center", fontsize=11)
+    ax.set_xticks(x); ax.set_xticklabels([n for _, n in models])
+    ax.set_ylabel("seconds, end to end"); ax.set_ylim(0, max(max(v) for v in wall.values()) * 1.2)
+    ax.legend(frameon=False, fontsize=12, loc="upper right", ncol=1)
+    ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
+    ax.set_title("Wall time, two ranks (one seed)", fontsize=15, loc="left")
+    for i, (prof, col) in enumerate([("lan", BLUE), ("wifi", GREEN)]):
+        vals = [gaps[(k, prof)] for k, _ in models]
+        ax2.bar(x + (i - 0.5) * 0.36, vals, 0.36, label={"lan": "LAN", "wifi": "Wi-Fi"}[prof], color=col)
+    ax2.axhline(1.0, color=GOLD, linestyle="--", linewidth=1.5)
+    ax2.axhline(0.0, color="#333333", linewidth=0.8)
+    ax2.text(2.45, 1.1, "1% bar", color=GOLD, fontsize=12, ha="right", va="bottom")
+    ax2.set_xticks(x); ax2.set_xticklabels([n for _, n in models])
+    ax2.set_ylabel("val. loss vs one device, %"); ax2.set_ylim(-3, 2)
+    ax2.legend(frameon=False, fontsize=12, loc="lower right")
+    ax2.grid(axis="y", alpha=0.25); ax2.set_axisbelow(True)
+    ax2.set_title("Fast sync gap (mean of 3 seeds)", fontsize=15, loc="left")
+    fig.savefig(OUT / "fig_5.4_sync_modes.png"); plt.close(fig)
 
 
 if __name__ == "__main__":
-    fig_closure_cache(); fig_shim_overhead(); fig_sandbox(); fig_comparison()
+    fig_closure_cache(); fig_shim_overhead(); fig_sandbox(); fig_sync_modes()
     print("wrote results figures")

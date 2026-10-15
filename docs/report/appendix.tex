@@ -1,0 +1,59 @@
+% ============================================================
+\chapter{Implementation Size and Further Measurements}
+\label{app:extra}
+% ============================================================
+
+\section{Scale of the Implementation}
+
+\begin{table}[!htbp]
+\centering
+\caption{Implementation size}
+\label{tab:scale}
+\renewcommand{\arraystretch}{1.2}
+\rowcolors{2}{}{rowgray}
+\begin{tabularx}{\textwidth}{X C{5.0cm}}
+\toprule
+\textbf{Measure} & \textbf{Value} \\
+\midrule
+Go source, excluding tests & 42,424 lines across 114 files \\
+Tests & 30,767 lines across 154 files \\
+Packages & 38 (37 internal, plus \texttt{main}) \\
+Tests run & 829 (822 passed, 7 skipped) \\
+Mutations in the test audit & 95, all caught \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{Further Measurements}
+
+Table~\ref{tab:later} lists measurements that support individual mechanisms of
+Chapter~\ref{chap:design} but are not needed for the questions of
+Chapter~\ref{chap:results}. All are from the container laboratories of
+Section~\ref{sec:res-setup} unless stated.
+
+% longtable, not table[H]: a float cannot break across pages.
+{\renewcommand{\arraystretch}{1.2}
+\small
+\begin{longtable}{L{6.0cm} L{7.6cm}}
+\caption{Further measurements}
+\label{tab:later} \\
+\toprule
+\textbf{Measurement} & \textbf{Result} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Measurement} & \textbf{Result} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
+Parallel-map request body for a 100\,MB payload & built in 0.06\,s, for 100 items of 1\,MB and for 1000 items \\
+Workspace re-upload after editing one file (40 files of 200\,KB, two-rank run on two nodes, LAN) & 8.0\,MB stored on the second node on the first run, 200\,KB after the edit (three runs each) \\
+Empty script, environment already on the node & 0.23\,s total overhead \\
+Many-rank remedies for fast synchronisation, in-process, at 4, 8 and 11 ranks & rank-16 PowerSGD with error feedback on exact synchronisation within 1\% on every model (worst mean $+0.18\%$); keeping each rank's batch, with or without learning-rate scaling \cite{goyal2017imagenet, hoffer2017trainlonger, johnson2020adascale} or doubled epochs, SparseLoCo \cite{sarfi2025sparseloco}, top-k \cite{aji2017sparse}, FedProx \cite{li2020fedprox}, rank-4 PowerSGD and outer learning rates of 1.25 or more all failed \\
+Skipping a stalled rank's remaining batches, by a factor of 2 instead of 4 times the median step & 28--30\% less time for 0.3--1.2\% more loss, so the default only guards against a stalled rank \\
+Phone (S20~FE): the CPU script without its pandas step, three runs each & 62.4, 62.8 and 66.0\,s with Nix's Python under \texttt{proot}; 73.1, 80.8 and 72.8\,s with Termux's own Python \\
+Phone runtime closure (Python with numpy, pandas, torch, scikit-learn and joblib, ARM) & 67 paths, about 1.5\,GiB unpacked and 395\,MiB to download, all from the public binary cache \\
+Two daemons on one machine, a host daemon and a container worker & memory promised in total 6.74\,GiB and 1.97\,GiB, each daemon subtracting the other's reservations \\
+A joining machine, time to connect & 0.2--0.4\,s \\
+\end{longtable}}

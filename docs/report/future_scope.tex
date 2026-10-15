@@ -1,0 +1,30 @@
+% ============================================================
+\chapter{Future Scope}
+\label{sec:future}
+% ============================================================
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Closing the security gaps}: binding trusted signing keys to the
+  identities that authenticated a link, requiring TLS rather than preferring it,
+  checking signatures on every import path, and authorisation finer than one
+  shared secret.
+  \item \textbf{A relay of last resort} for the peer pairs that no direct path
+  can join, without making it the default data path.
+  \item \textbf{Locality- and topology-aware placement}: accounting for which
+  node already holds the input data, as iDDS \cite{idds2025} does, and for network
+  distance through a graph-structured view of the cluster \cite{zhao2023}.
+  \item \textbf{Submitter and lead fault tolerance}, so that a parallel script
+  can outlive its submitter and a training ring can outlive rank 0's machine.
+  \item \textbf{A cluster-wide view} merging every machine's events.
+  \item \textbf{More accelerators}: AMD GPUs through ROCm, and phones that run
+  whole jobs.
+  \item \textbf{Memory escalation} on out-of-memory: gradient accumulation,
+  checkpointing and lower precision.
+  \item \textbf{Fast synchronisation for larger rings}: compressed exact
+  synchronisation with PowerSGD, which kept accuracy at 4 to 11 ranks in this
+  work, and synchronising the model in staggered fragments (Streaming DiLoCo
+  \cite{douillard2025streaming}).
+  \item \textbf{Additional runtimes} beyond Python.
+  \item \textbf{A controlled multi-machine evaluation} across separate machines
+  and networks, including a machine with two GPUs.
+\end{itemize}
