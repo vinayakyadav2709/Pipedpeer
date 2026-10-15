@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -173,8 +174,46 @@ func TestSubstitutablePathsNotSent(t *testing.T) {
 	if got := ask(true); len(got) != 1 || got[0] != private {
 		t.Fatalf("missing = %v, want only %s", got, private)
 	}
-	substituting.Wait()
+	if err := awaitFetches(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if len(fetched) != 1 || fetched[0] != onCache {
 		t.Errorf("fetched = %v, want %s", fetched, onCache)
+	}
+}
+
+// A fetch slower than the sender is cancelled once the import has waited
+// substituteWait; the import says errFetchSlow (409) and the next question
+// asks the sender for every missing path.
+func TestSlowFetchCancelledAndSenderAsked(t *testing.T) {
+	onCache := "/nix/store/aaaa-python"
+	oldSub, oldReal, oldWait := substitutable, realise, substituteWait
+	t.Cleanup(func() {
+		substitutable, realise, substituteWait = oldSub, oldReal, oldWait
+		fetches.Lock()
+		fetches.offUntil = time.Time{}
+		fetches.Unlock()
+	})
+	substituteWait = 200 * time.Millisecond
+	substitutable = func(paths []string) map[string]bool { return map[string]bool{onCache: true} }
+	cancelled := make(chan struct{})
+	realise = func(ctx context.Context, _ []string) error {
+		<-ctx.Done() // a download that never finishes
+		close(cancelled)
+		return ctx.Err()
+	}
+	if got := substituteMissing([]string{onCache}); len(got) != 0 {
+		t.Fatalf("first ask = %v, want the path fetched here", got)
+	}
+	if err := awaitFetches(context.Background()); !errors.Is(err, errFetchSlow) {
+		t.Fatalf("await = %v, want errFetchSlow", err)
+	}
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("the slow fetch was not cancelled before the import went on")
+	}
+	if got := substituteMissing([]string{onCache}); len(got) != 1 {
+		t.Fatalf("ask after a slow fetch = %v, want the sender asked for it", got)
 	}
 }

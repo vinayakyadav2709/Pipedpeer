@@ -60,7 +60,25 @@ func seedWhole(ctx context.Context, host string, port int, storePath string) (se
 	return seed(ctx, host, port, storePath, true)
 }
 
+// errNodeFetchSlow is a node's 409: its own binary-cache fetch was slower than
+// this send, so it cancelled the fetch and stopped substituting for a while.
+var errNodeFetchSlow = errors.New("the node's binary cache download was slower than this send")
+
 func seed(ctx context.Context, host string, port int, storePath string, whole bool) (seedResult, bool) {
+	r, ok := seedOnce(ctx, host, port, storePath, whole)
+	if !ok && errors.Is(r.err, errNodeFetchSlow) {
+		// Asked again, the node lists every path it still lacks.
+		say.Println("      The node's own download was slow; sending it every missing path")
+		r, ok = seedOnce(ctx, host, port, storePath, whole)
+	}
+	if errors.Is(r.err, errNodeFetchSlow) {
+		fmt.Fprintf(os.Stderr, "      warning: %v; sending it whole\n", r.err)
+		r.err = nil
+	}
+	return r, ok
+}
+
+func seedOnce(ctx context.Context, host string, port int, storePath string, whole bool) (seedResult, bool) {
 	paths, err := closurePathsLocal(ctx, storePath)
 	if ctx.Err() != nil {
 		// Cancelled (Ctrl+C): stop here, not fall back to the whole archive.
@@ -110,6 +128,9 @@ func seed(ctx context.Context, host string, port int, storePath string, whole bo
 	if err != nil {
 		var refused *ClosureRefusedError
 		switch {
+		case errors.Is(err, errNodeFetchSlow):
+			r.err = err
+			return r, false
 		case errors.As(err, &refused):
 			r.err = err
 			return r, false
@@ -326,6 +347,9 @@ func postPartial(host string, port int, storePath string, pack func(io.Writer) e
 		msg, _ := io.ReadAll(resp.Body)
 		if isRefusal(string(msg)) {
 			return sent.n, &ClosureRefusedError{Reason: jsonError(msg)}
+		}
+		if resp.StatusCode == http.StatusConflict {
+			return sent.n, fmt.Errorf("%w (node said: %s)", errNodeFetchSlow, jsonError(msg))
 		}
 		return sent.n, fmt.Errorf("closure import rejected: %s", strings.TrimSpace(string(msg)))
 	}

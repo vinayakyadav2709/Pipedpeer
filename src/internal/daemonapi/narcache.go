@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -393,11 +394,31 @@ func (s *Server) handleStoreMissing(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	// A store path is immutable once valid, so presence is the whole question
+	// — but a directory alone is not presence: a fetch killed mid-unpack (a
+	// slow substitute cancelled by awaitFetches, an OOM) leaves an invalid
+	// one, and a sender told it is there skips it and breaks the import.
+	var onDisk []string
+	for _, p := range req.Paths {
+		if pathExists(p) && strings.HasPrefix(p, "/nix/store/") {
+			onDisk = append(onDisk, p)
+		}
+	}
+	invalid := map[string]bool{}
+	if len(onDisk) > 0 {
+		bad, err := invalidStorePaths(onDisk)
+		if err != nil {
+			log.Warn().Err(err).Int("paths", len(onDisk)).
+				Msg("cannot ask nix which store paths are valid; asking the sender for all of them")
+			bad = onDisk
+		}
+		for _, p := range bad {
+			invalid[p] = true
+		}
+	}
 	missing := make([]string, 0, len(req.Paths))
 	for _, p := range req.Paths {
-		// A store path is immutable once it exists, so presence is the whole
-		// question — there is no version of it that could be stale.
-		if !pathExists(p) {
+		if !pathExists(p) || invalid[p] {
 			missing = append(missing, p)
 		}
 	}
@@ -490,14 +511,17 @@ func (s *Server) importStoreNAR(ctx context.Context, nar io.Reader, storePath st
 	// as the wrong format fails somewhere deep inside nix with an error
 	// about the archive rather than about the version.
 	// Paths this node chose to fetch itself must land before their
-	// dependents are imported.
-	substituting.Wait()
+	// dependents are imported: each branch waits (awaitFetches) once the
+	// archive is in, and a fetch slower than the sender answers 409.
 	br := bufio.NewReaderSize(nar, 1024)
 	if narpack.IsArchive(br) {
 		// The CLI's own upload arrives this way too, so this is the event
 		// line `pipedpeer events` shows for most imports.
 		start := time.Now()
 		if err := s.importSignedClosure(ctx, br, storePath); err != nil {
+			if errors.Is(err, errFetchSlow) {
+				return fail(http.StatusConflict, err.Error())
+			}
 			return fail(http.StatusInternalServerError, err.Error())
 		}
 		logClosureImported(storePath, start, "signed")
@@ -524,6 +548,9 @@ func (s *Server) importStoreNAR(ctx context.Context, nar io.Reader, storePath st
 			return fail(http.StatusInternalServerError, err.Error())
 		}
 		tmp.Close()
+		if err := awaitFetches(ctx); err != nil {
+			return fail(http.StatusConflict, err.Error())
+		}
 		start := time.Now()
 		if err := s.importNARFile(ctx, tmp.Name()); err != nil {
 			return fail(http.StatusInternalServerError, "import: "+err.Error())
@@ -536,6 +563,9 @@ func (s *Server) importStoreNAR(ctx context.Context, nar io.Reader, storePath st
 	// /v1/pool/map can actually run it (<storePath>/bin/run must exist).
 	if _, err := s.narCache.store(storePath, br); err != nil {
 		return fail(http.StatusInternalServerError, "cache nar: "+err.Error())
+	}
+	if err := awaitFetches(ctx); err != nil {
+		return fail(http.StatusConflict, err.Error())
 	}
 	if err := s.materializeClosureCtx(ctx, storePath); err != nil {
 		return fail(http.StatusInternalServerError, "materialise closure: "+err.Error())
@@ -611,6 +641,9 @@ func (s *Server) importSignedClosure(ctx context.Context, r io.Reader, storePath
 		return err
 	}
 	s.warnUntrustedKeys(senderKeys)
+	if err := awaitFetches(ctx); err != nil {
+		return err
+	}
 	if err := signedImport(ctx, dir, roots, senderKeys...); err != nil {
 		return err
 	}
@@ -839,6 +872,25 @@ func pruneCAS(dir string, max int64) {
 // A failed fetch is logged; the import then fails on the missing reference
 // and the sender falls back to sending the closure whole.
 
+// invalidStorePaths returns which of these on-disk store paths nix does not
+// hold as valid.
+func invalidStorePaths(paths []string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd, cleanup, err := nixstore.CmdContext(ctx, "", append([]string{"nix-store", "--check-validity", "--print-invalid"}, paths...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("nix-store --check-validity: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.Fields(string(out)), nil
+}
+
 // binaryCache is where substitutable paths are looked up.
 var binaryCache = "https://cache.nixos.org"
 
@@ -859,10 +911,66 @@ var realise = func(ctx context.Context, paths []string) error {
 	return nil
 }
 
-// substituting tracks fetches in flight; importStoreNAR waits for them.
-// ponytail: one global wait, not per closure; key by root if unrelated
-// imports start waiting on each other's fetches.
-var substituting sync.WaitGroup
+// fetches are this node's binary-cache downloads in flight; an import waits
+// for them (awaitFetches), at most substituteWait once its own archive is in.
+var fetches struct {
+	sync.Mutex
+	inflight map[chan struct{}]context.CancelFunc
+	offUntil time.Time // no substitution before this (the cache was too slow)
+}
+
+// substituteWait bounds how long an import waits for this node's own fetches
+// after the sender's archive has arrived. The sender holds every path and is
+// usually the faster source (a LAN peer): a cold lab node downloading at
+// 130 KB/s held a 3-node broadcast past the sender's 10-minute timeout (M2
+// cold sweep). substituteOff is how long substitution then stays off.
+// ponytail: fixed bound, not a rate race; compare fetch and link rates if
+// slow-uplink internet peers lose by it.
+var substituteWait, substituteOff = 30 * time.Second, 30 * time.Minute
+
+// errFetchSlow: the import gave up on this node's fetches; answered as 409 so
+// the sender asks again which paths are missing and sends them itself.
+var errFetchSlow = errors.New("fetching from the binary cache was slower than the sender")
+
+// awaitFetches waits for the fetches in flight. Past substituteWait it cancels
+// them (a running fetch holds nix's lock on its paths, so the sender's copies
+// could not be imported), turns substitution off for substituteOff, and
+// returns errFetchSlow.
+func awaitFetches(ctx context.Context) error {
+	fetches.Lock()
+	var dones []chan struct{}
+	for d := range fetches.inflight {
+		dones = append(dones, d)
+	}
+	fetches.Unlock()
+	timer := time.NewTimer(substituteWait)
+	defer timer.Stop()
+	for i, d := range dones {
+		select {
+		case <-d:
+			continue
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+		fetches.Lock()
+		for _, d := range dones[i:] {
+			if cancel, ok := fetches.inflight[d]; ok {
+				cancel()
+			}
+		}
+		fetches.offUntil = time.Now().Add(substituteOff)
+		fetches.Unlock()
+		for _, d := range dones[i:] {
+			<-d
+		}
+		log.Warn().Dur("waited", substituteWait).Dur("off_for", substituteOff).Str("cache", binaryCache).
+			Msg("binary cache fetch still running; cancelled it and asking the sender for those paths instead")
+		return fmt.Errorf("%w: still downloading from %s after %s; send every missing path",
+			errFetchSlow, binaryCache, substituteWait)
+	}
+	return nil
+}
 
 // narinfoOnCache asks binaryCache for each path's narinfo, 16 at a time, all
 // within 2 s so an offline node answers the missing question promptly.
@@ -915,6 +1023,14 @@ func substituteMissing(missing []string) []string {
 	if len(missing) == 0 {
 		return missing
 	}
+	fetches.Lock()
+	off := time.Now().Before(fetches.offUntil)
+	fetches.Unlock()
+	if off {
+		log.Info().Int("paths", len(missing)).Str("cache", binaryCache).
+			Msg("binary cache was slower than the sender recently; asking the sender for every missing path")
+		return missing
+	}
 	found := substitutable(missing)
 	if len(found) == 0 {
 		return missing
@@ -928,12 +1044,23 @@ func substituteMissing(missing []string) []string {
 			rest = append(rest, p)
 		}
 	}
-	substituting.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	done := make(chan struct{})
+	fetches.Lock()
+	if fetches.inflight == nil {
+		fetches.inflight = make(map[chan struct{}]context.CancelFunc)
+	}
+	fetches.inflight[done] = cancel
+	fetches.Unlock()
 	go func() {
-		defer substituting.Done()
+		defer func() {
+			cancel()
+			fetches.Lock()
+			delete(fetches.inflight, done)
+			fetches.Unlock()
+			close(done)
+		}()
 		start := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
 		if err := realise(ctx, fetch); err != nil {
 			log.Warn().Err(err).Int("paths", len(fetch)).
 				Msg("fetching paths from the binary cache failed; the import will ask for the whole closure")
