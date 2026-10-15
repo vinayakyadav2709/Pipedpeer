@@ -68,3 +68,49 @@ func TestNodeFromAPIParsesTheHost(t *testing.T) {
 		t.Fatalf("fields not carried: %+v", n)
 	}
 }
+
+func TestCollectMergesRunsFromEveryNodeByStartTime(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	mk := func(origin string, starts ...string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/pool/stats" {
+				_ = json.NewEncoder(w).Encode(PoolCounters{})
+				return
+			}
+			if r.URL.Path != "/v1/history" {
+				http.NotFound(w, r)
+				return
+			}
+			h := History{Origin: origin}
+			for _, s := range starts {
+				h.Jobs = append(h.Jobs, JobStats{ID: origin + s, StartedAt: s})
+			}
+			_ = json.NewEncoder(w).Encode(h)
+		}))
+	}
+	a := mk("alpha", "2026-10-15T10:00:00Z", "2026-10-15T12:00:00Z")
+	b := mk("beta", "2026-10-15T11:00:00Z")
+	defer a.Close()
+	defer b.Close()
+	node := func(id string, srv *httptest.Server) Node {
+		host, portStr, _ := net.SplitHostPort(srv.Listener.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+		return Node{NodeID: id, Host: host, Port: port, State: "healthy"}
+	}
+	snap := Collect([]Node{node("a", a), node("b", b)}, 2, nil)
+	if len(snap.Jobs) != 2 || snap.Jobs[0].ID != "alpha2026-10-15T12:00:00Z" ||
+		snap.Jobs[1].ID != "beta2026-10-15T11:00:00Z" || snap.Jobs[1].Origin != "beta" {
+		t.Fatalf("merged runs = %+v", snap.Jobs)
+	}
+}
+
+func TestMergeJobsNewestFirstAndLimited(t *testing.T) {
+	got := MergeJobs([]JobStats{
+		{ID: "a1", Origin: "alpha", StartedAt: "2026-10-15T10:00:00Z"},
+		{ID: "b1", Origin: "beta", StartedAt: "2026-10-15T11:00:00Z"},
+		{ID: "a2", Origin: "alpha", StartedAt: "2026-10-15T12:00:00Z"},
+	}, 2)
+	if len(got) != 2 || got[0].ID != "a2" || got[1].ID != "b1" || got[1].Origin != "beta" {
+		t.Fatalf("merge = %+v", got)
+	}
+}
