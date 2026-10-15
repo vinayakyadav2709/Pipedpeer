@@ -23,7 +23,7 @@ func TestDDPGradientsShipAsFloat16(t *testing.T) {
 	if err != nil {
 		t.Skip("python3 not available")
 	}
-	if out, err := exec.Command(python, "-c", "import torch").CombinedOutput(); err != nil {
+	if out, err := pythonImports(python, "torch"); err != nil {
 		t.Skipf("torch not available: %s", out)
 	}
 	dir := t.TempDir()

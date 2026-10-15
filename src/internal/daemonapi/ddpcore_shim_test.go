@@ -32,6 +32,25 @@ torch.save({"w": model.weight.detach(), "g": model.weight.grad.detach()},
 print("RANK-OK")
 `
 
+// pythonImportChecks caches pythonImports per interpreter and import list.
+var pythonImportChecks sync.Map
+
+// pythonImports reports whether python can import mods ("torch, numpy"),
+// asking once per test run: each check is a fresh interpreter importing torch
+// (~2-4 s), and every DDP shim test used to repeat it.
+func pythonImports(python, mods string) ([]byte, error) {
+	type result struct {
+		out []byte
+		err error
+	}
+	f, _ := pythonImportChecks.LoadOrStore(python+"\x00"+mods, sync.OnceValue(func() result {
+		out, err := exec.Command(python, "-c", "import "+mods).CombinedOutput()
+		return result{out, err}
+	}))
+	r := f.(func() result)()
+	return r.out, r.err
+}
+
 // ddpCoreSetup writes the shim and the rank script, and returns the work dir
 // and a runner for one rank.
 func ddpCoreSetup(t *testing.T) (string, func(env ...string) *exec.Cmd) {
@@ -40,7 +59,7 @@ func ddpCoreSetup(t *testing.T) (string, func(env ...string) *exec.Cmd) {
 	if err != nil {
 		t.Skip("python3 not available")
 	}
-	if out, err := exec.Command(python, "-c", "import torch, numpy").CombinedOutput(); err != nil {
+	if out, err := pythonImports(python, "torch, numpy"); err != nil {
 		t.Skipf("torch/numpy not available: %s", out)
 	}
 	dir := t.TempDir()
