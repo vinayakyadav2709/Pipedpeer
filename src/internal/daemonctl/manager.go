@@ -71,8 +71,7 @@ func Status() State {
 }
 
 // Start launches the background daemon. maxConcurrent caps how many tasks this
-// node will accept at once; 0 leaves it unlimited (or governed by
-// PIPEDPEER_MAX_CONCURRENT, which the child inherits).
+// node will accept at once (--max-concurrent); 0 leaves it unlimited.
 func Start(nodeID string, port int, maxConcurrent int) error {
 	st := Status()
 	if st.Running {
@@ -89,7 +88,7 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	if serviceInstalled() {
 		if maxConcurrent > 0 || port != DefaultPort {
 			fmt.Fprintf(os.Stderr, "pipedpeer: the daemon runs as a service on port %d; "+
-				"ignoring port %d / max-concurrent %d (set PIPEDPEER_MAX_CONCURRENT in the unit instead)\n",
+				"ignoring port %d / max-concurrent %d (add --max-concurrent to the unit's ExecStart instead)\n",
 				DefaultPort, port, maxConcurrent)
 		}
 		if err := service.Start(); err != nil {

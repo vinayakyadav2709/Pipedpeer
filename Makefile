@@ -1,4 +1,4 @@
-.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down
+.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check
 
 build:
 	cd src && CGO_ENABLED=0 go build -o ../bin/pipedpeer .
@@ -21,6 +21,10 @@ fmt:
 
 lint:
 	cd src && go vet ./... && test -z "$$(gofmt -l .)"
+
+# ruff + pytest over the job shim's Python; needs uv.
+shim-check:
+	./scripts/shim-check.sh
 
 lab-up:
 	./scripts/lab-up.sh

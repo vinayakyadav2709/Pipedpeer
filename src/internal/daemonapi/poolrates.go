@@ -323,7 +323,7 @@ func (pm *poolManager) pacing(storePath, submitter string) map[string]int64 {
 	pm.mu.Lock()
 	var peers []string
 	if pm.peerFn != nil {
-		peers = pm.peerFn(storePath, submitter)
+		peers = pm.peerFn(storePath, submitter, nil)
 	}
 	pm.mu.Unlock()
 	var inflight, cores int64

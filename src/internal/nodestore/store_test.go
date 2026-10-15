@@ -339,7 +339,7 @@ func TestOldSchemaIsRecreated(t *testing.T) {
 	_, err = db.Exec(`
 		CREATE TABLE nodes (node_id TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL,
 			source TEXT NOT NULL, is_manual INTEGER DEFAULT 0, last_seen INTEGER DEFAULT 0);
-		INSERT INTO nodes (node_id, host, port, source, is_manual) VALUES ('legacy', '10.0.0.9', 38080, 'manual', 1);`)
+		INSERT INTO nodes (node_id, host, port, source, is_manual) VALUES ('legacy', '10.0.0.9', 4242, 'manual', 1);`)
 	must(t, err)
 	db.Close()
 	must(t, os.Chmod(p, 0o644))

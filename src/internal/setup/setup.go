@@ -14,6 +14,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/service"
 	"github.com/pipedpeer/pipedpeer/internal/term"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -662,6 +663,15 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	fmt.Println("  Pipedpeer setup")
 	fmt.Println()
 
+	// A phone in Termux has no Nix, crun, systemd or firewall to set up: it
+	// becomes a pool-only worker on its own python.
+	if phone.IsTermux() {
+		if err := phone.Setup(os.Stdout); err != nil {
+			return 0, fmt.Errorf("phone setup: %w", err)
+		}
+		return startAndReport(daemonPort, false)
+	}
+
 	results := checkAll()
 	allOK := true
 	for _, r := range results {
@@ -706,19 +716,25 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	// to a process exec'd after it is loaded.
 	profileLoaded := allowUserns(noInstall)
 
-	nodeID, err := identity.GetOrCreate()
-	if err != nil {
-		return 0, fmt.Errorf("identity: %w", err)
-	}
-	term.OK(os.Stdout, "this machine is %s", nodeID.ShortID())
-
 	// Before the daemon starts, so the service owns its only start.
 	serviceNew := installService(autoYes, noInstall)
 
 	// Ports before the daemon: peers that find it should be able to reach it.
 	networkReport(autoYes)
 
-	created, err := startDaemon(nodeID.NodeID, daemonPort, profileLoaded || serviceNew)
+	return startAndReport(daemonPort, profileLoaded || serviceNew)
+}
+
+// startAndReport starts the daemon under this machine's identity and prints
+// the invite line when it created the cluster.
+func startAndReport(daemonPort int, mustRestart bool) (int, error) {
+	nodeID, err := identity.GetOrCreate()
+	if err != nil {
+		return 0, fmt.Errorf("identity: %w", err)
+	}
+	term.OK(os.Stdout, "this machine is %s", nodeID.ShortID())
+
+	created, err := startDaemon(nodeID.NodeID, daemonPort, mustRestart)
 	if err != nil {
 		return 0, err
 	}

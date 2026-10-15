@@ -32,7 +32,7 @@ func TestToNodeRespDowngradesStaleHealthy(t *testing.T) {
 			got := toNodeResp(nodestore.Node{
 				NodeID:   "n1",
 				Host:     "10.0.0.5",
-				Port:     38080,
+				Port:     4242,
 				State:    tt.state,
 				LastSeen: time.Now().Add(-tt.age).Unix(),
 			})

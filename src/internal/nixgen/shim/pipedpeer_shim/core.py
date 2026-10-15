@@ -75,8 +75,6 @@ def _spill_min(default=32 * 1024 * 1024):
 # an over-large chunk left chunks[1::2] empty, so nothing shipped and nothing
 # said so. It is now a stated rule with a log line behind it.
 _POOL_MIN_WORK = float(os.environ.get("PIPEDPEER_POOL_MIN_WORK", "0.5"))
-# How many chunks may be in flight to the cluster at once.
-_REMOTE_INFLIGHT = max(1, int(os.environ.get("PIPEDPEER_REMOTE_INFLIGHT", "4")))
 # Where the job was submitted from (host:port of the submitter's daemon).
 # The executing node sinks this peer to the end of its spill order so an
 # idle orchestrator never outranks real workers; empty when unset.

@@ -12,7 +12,7 @@ import (
 )
 
 func TestSummaryRendering(t *testing.T) {
-	rcpt := []byte(`{"remote_items":80,"local_items":40,"by_where":{"local":40,"peer:10.88.0.12:38080":40,"peer:10.88.0.13:38080":40}}`)
+	rcpt := []byte(`{"remote_items":80,"local_items":40,"by_where":{"local":40,"peer:10.88.0.12:4242":40,"peer:10.88.0.13:4242":40}}`)
 	s := summary{
 		Host:       "10.88.0.1",
 		BuildTime:  2100 * time.Millisecond,
@@ -24,7 +24,7 @@ func TestSummaryRendering(t *testing.T) {
 		Files:      &daemonctl.ResultManifest{New: []string{"a"}, Updated: []string{"b", "c"}},
 		Total:      14900 * time.Millisecond,
 	}
-	names := map[string]string{"10.88.0.12:38080": "pc-2", "10.88.0.13:38080": "pc-3"}
+	names := map[string]string{"10.88.0.12:4242": "pc-2", "10.88.0.13:4242": "pc-3"}
 	lines, unresolved := summaryLines(s, "laptop-a", names)
 	got := strings.Join(lines, "\n")
 	want := strings.Join([]string{
@@ -43,8 +43,8 @@ func TestSummaryRendering(t *testing.T) {
 	// V1 rehearsal: 96 mapped items, local cores raced 24 of them, so the work
 	// counters sum to 120. The line counts items once and names the race.
 	s = summary{Host: "127.0.0.1", Total: time.Second, Receipt: []byte(`{"remote_items":36,"local_items":84,"mapped_items":96,"remote_used":36,` +
-		`"by_where":{"local":84,"peer:10.88.0.11:38080":9,"peer:10.88.0.12:38080":9,"peer:10.88.0.13:38080":9,"peer:10.88.0.14:38080":9}}`)}
-	names = map[string]string{"10.88.0.11:38080": "pc1", "10.88.0.12:38080": "pc2", "10.88.0.13:38080": "pc3", "10.88.0.14:38080": "pc4"}
+		`"by_where":{"local":84,"peer:10.88.0.11:4242":9,"peer:10.88.0.12:4242":9,"peer:10.88.0.13:4242":9,"peer:10.88.0.14:4242":9}}`)}
+	names = map[string]string{"10.88.0.11:4242": "pc1", "10.88.0.12:4242": "pc2", "10.88.0.13:4242": "pc3", "10.88.0.14:4242": "pc4"}
 	lines, _ = summaryLines(s, "yeet", names)
 	if got, want := lines[1], "  spread       96 items: 84 on yeet, 36 on 4 others (pc1 9, pc2 9, pc3 9, pc4 9) · 24 computed twice (local cores raced slow chunks)"; got != want {
 		t.Fatalf("raced spread:\ngot  %s\nwant %s", got, want)
@@ -54,7 +54,7 @@ func TestSummaryRendering(t *testing.T) {
 	// was kept. The peers still did the work, and the line must not say 0
 	// beside their counts.
 	s = summary{Host: "127.0.0.1", Total: time.Second, Receipt: []byte(`{"remote_items":48,"local_items":288,"mapped_items":288,"remote_used":0,` +
-		`"by_where":{"local":288,"peer:10.88.0.11:38080":6,"peer:10.88.0.13:38080":18,"peer:10.88.0.14:38080":24}}`)}
+		`"by_where":{"local":288,"peer:10.88.0.11:4242":6,"peer:10.88.0.13:4242":18,"peer:10.88.0.14:4242":24}}`)}
 	lines, _ = summaryLines(s, "yeet", names)
 	if got, want := lines[1], "  spread       288 items: 288 on yeet, 48 on 3 others (pc4 24, pc3 18, pc1 6) · 48 computed twice (local cores raced slow chunks)"; got != want {
 		t.Fatalf("all-raced spread:\ngot  %s\nwant %s", got, want)
@@ -105,12 +105,12 @@ func TestMemLimitAlwaysCaps(t *testing.T) {
 // work four peers did.
 func TestAttachSummaryKeepsPeers(t *testing.T) {
 	dir := t.TempDir()
-	raw := `{"remote_items":8,"local_items":4,"by_where":{"local":4,"peer:10.88.0.11:38080":5,"peer:10.88.0.12:38080":3}}`
+	raw := `{"remote_items":8,"local_items":4,"by_where":{"local":4,"peer:10.88.0.11:4242":5,"peer:10.88.0.12:4242":3}}`
 	if err := jobhistory.SaveReceipt(dir, []byte(raw)); err != nil {
 		t.Fatal(err)
 	}
 	s := recordSummary(dir, jobhistory.Record{}, "h", 1)
-	names := map[string]string{"10.88.0.11:38080": "pc1", "10.88.0.12:38080": "pc2"}
+	names := map[string]string{"10.88.0.11:4242": "pc1", "10.88.0.12:4242": "pc2"}
 	lines, _ := summaryLines(s, "yeet", names)
 	if got := strings.Join(lines, "\n"); !strings.Contains(got, "12 items: 4 on yeet, 8 on 2 others (pc1 5, pc2 3)") {
 		t.Fatalf("got\n%s", got)

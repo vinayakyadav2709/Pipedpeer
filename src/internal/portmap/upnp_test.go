@@ -122,12 +122,12 @@ func TestUPnPAddsTheMappingItWasAskedFor(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	ext, lifetime, err := upnpMap(ctx, 38447, time.Hour, "pipedpeer")
+	ext, lifetime, err := upnpMap(ctx, 4243, time.Hour, "pipedpeer")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ext.String() != "203.0.113.77:38447" {
-		t.Errorf("external = %s, want 203.0.113.77:38447", ext)
+	if ext.String() != "203.0.113.77:4243" {
+		t.Errorf("external = %s, want 203.0.113.77:4243", ext)
 	}
 	if lifetime != time.Hour {
 		t.Errorf("lifetime = %s, want 1h", lifetime)
@@ -135,8 +135,8 @@ func TestUPnPAddsTheMappingItWasAskedFor(t *testing.T) {
 
 	select {
 	case got := <-r.added:
-		if got["external"] != "38447" || got["internal"] != "38447" {
-			t.Errorf("mapped %s -> %s, want 38447 -> 38447", got["external"], got["internal"])
+		if got["external"] != "4243" || got["internal"] != "4243" {
+			t.Errorf("mapped %s -> %s, want 4243 -> 4243", got["external"], got["internal"])
 		}
 		if got["protocol"] != "UDP" {
 			t.Errorf("protocol = %s, want UDP — TCP would forward the wrong thing entirely", got["protocol"])
@@ -166,7 +166,7 @@ func TestUPnPRefusalIsReportedWithItsCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	_, _, err := upnpMap(ctx, 38447, time.Hour, "pipedpeer")
+	_, _, err := upnpMap(ctx, 4243, time.Hour, "pipedpeer")
 	if err == nil {
 		t.Fatal("a refused mapping was reported as success")
 	}
@@ -184,13 +184,13 @@ func TestUPnPGivesThePortBack(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	if err := upnpUnmap(ctx, 38447); err != nil {
+	if err := upnpUnmap(ctx, 4243); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case got := <-r.deleted:
-		if got != "38447" {
-			t.Errorf("deleted port %s, want 38447", got)
+		if got != "4243" {
+			t.Errorf("deleted port %s, want 4243", got)
 		}
 	default:
 		t.Fatal("the router was never asked to delete the mapping")

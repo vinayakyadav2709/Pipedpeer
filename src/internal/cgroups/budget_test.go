@@ -170,12 +170,12 @@ func TestAnAncestorsLimitBinds(t *testing.T) {
 	const container = 1_256_000_000
 
 	v2 := t.TempDir()
-	scopeDir := filepath.Join(v2, "user.slice/user@1000.service/app.slice/pipedpeer-daemon-38080.scope")
+	scopeDir := filepath.Join(v2, "user.slice/user@1000.service/app.slice/pipedpeer-daemon-4242.scope")
 	mk(v2, map[string]string{"memory.max": "1256000000\n", "memory.current": "200000000\n"})
 	mk(filepath.Join(v2, "user.slice"), map[string]string{"memory.max": "max\n"})
 	mk(scopeDir, map[string]string{"memory.max": "7194000000\n", "memory.current": "50000000\n"})
 	mk(filepath.Join(scopeDir, "daemon"), nil)
-	b, ok := limitBudget(v2, "0::/user.slice/user@1000.service/app.slice/pipedpeer-daemon-38080.scope/daemon\n")
+	b, ok := limitBudget(v2, "0::/user.slice/user@1000.service/app.slice/pipedpeer-daemon-4242.scope/daemon\n")
 	if !ok || b.Total != container || b.Used != 200_000_000 || !b.Enforced {
 		t.Errorf("v2: budget %+v (found %v); want the container's %d with its usage", b, ok, int64(container))
 	}

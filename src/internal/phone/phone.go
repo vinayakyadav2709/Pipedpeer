@@ -4,9 +4,10 @@
 // an arm64 phone never holds the laptops' x86 store paths anyway. So it takes
 // only Pool/joblib chunks, run with Termux's own python (`pkg install python
 // python-numpy`), and refuses whole jobs through the pool-only role in
-// cluster.json. The pool runner scripts use the standard library only, so a
-// chunk runs on any python whose minor version matches the submitter's
-// (pickle protocol and bytecode for func_src are minor-version bound).
+// cluster.json. The pool runner scripts use the standard library only. A chunk
+// that ships func_src is re-compiled there and runs on any host python; a
+// by-value pickled function carries bytecode, so it needs the submitter's
+// minor version.
 package phone
 
 import (
@@ -28,6 +29,10 @@ import (
 // PythonHeader carries the submitter's python version ("3.12" or "3.12.4") on
 // a /v1/store?runnable=1 request; only major.minor is compared.
 const PythonHeader = "X-Pipedpeer-Python"
+
+// FuncSrcHeader is "1" on a /v1/store?runnable=1 request whose chunk ships
+// func_src: then any host python will do (Decisions: func_src mismatch rule).
+const FuncSrcHeader = "X-Pipedpeer-Func-Src"
 
 // IsTermux reports whether this process runs inside Termux.
 func IsTermux() bool {
@@ -95,7 +100,8 @@ func PoolRunPath(store string) (string, error) {
 }
 
 // CanRun answers /v1/store?runnable=1: the closure is materialised, or this
-// is a pool-only node whose host python has the submitter's minor version.
+// is a pool-only node with a host python that is either any version (the
+// chunk ships func_src) or the submitter's minor version (by-value bytecode).
 func CanRun(store string, h http.Header) bool {
 	if store != "" && exists(filepath.Join(store, "bin", "run")) {
 		return true
@@ -103,8 +109,9 @@ func CanRun(store string, h http.Header) bool {
 	if !poolOnly() {
 		return false
 	}
+	funcSrc := h.Get(FuncSrcHeader) == "1"
 	want := minor(h.Get(PythonHeader))
-	if want == "" {
+	if want == "" && !funcSrc {
 		return false
 	}
 	_, have, err := hostPython()
@@ -112,7 +119,20 @@ func CanRun(store string, h http.Header) bool {
 		log.Warn().Err(err).Msg("phone: pool-only node answers not runnable")
 		return false
 	}
-	return minor(have) == want
+	return funcSrc || minor(have) == want
+}
+
+// Need is the header a runnable check sends for a chunk: the submitter's
+// python and whether the chunk ships func_src.
+func Need(python string, funcSrc bool) http.Header {
+	h := http.Header{}
+	if python != "" {
+		h.Set(PythonHeader, python)
+	}
+	if funcSrc {
+		h.Set(FuncSrcHeader, "1")
+	}
+	return h
 }
 
 // minor trims "3.12.4" to "3.12"; anything without a dot is "".

@@ -32,13 +32,13 @@ func TestMigratesOldRendezvousAndAuthToken(t *testing.T) {
 	if err := os.MkdirAll(userdir.Data(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(Path(), []byte(`{"rendezvous":"1.2.3.4:38445"}`), 0o600)
+	os.WriteFile(Path(), []byte(`{"rendezvous":"1.2.3.4:4244"}`), 0o600)
 	os.WriteFile(legacyTokenPath(), []byte("sekret\n"), 0o600)
 	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Token != "sekret" || len(c.Introducers) != 1 || c.Introducers[0] != "1.2.3.4:38445" {
+	if c.Token != "sekret" || len(c.Introducers) != 1 || c.Introducers[0] != "1.2.3.4:4244" {
 		t.Fatalf("migrated config = %+v", c)
 	}
 	if _, err := os.Stat(legacyTokenPath()); !os.IsNotExist(err) {

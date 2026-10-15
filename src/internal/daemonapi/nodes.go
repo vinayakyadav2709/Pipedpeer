@@ -777,16 +777,3 @@ func rewriteHost(endpoint, host string) string {
 	}
 	return user + host
 }
-
-// handleNodesAdd and handleNodesRemove answer the retired POST /v1/nodes and
-// DELETE /v1/nodes/{host}: nodes come from discovery, `connect` and gossip
-// now. ponytail: kept only so the package builds until the wiring unit drops
-// both routes from buildRouter; delete them with the routes.
-func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) { nodesRouteGone(w) }
-
-func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) { nodesRouteGone(w) }
-
-func nodesRouteGone(w http.ResponseWriter) {
-	writeJSON(w, http.StatusGone, map[string]string{
-		"error": "adding or removing nodes by hand is gone; machines join with `pipedpeer connect`"})
-}

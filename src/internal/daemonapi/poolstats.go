@@ -347,6 +347,25 @@ func (s *Server) poolStats() *poolStatsStore {
 	return openPoolStats(filepath.Join(userdir.Data(), "poolstats.json"))
 }
 
+// SavePoolStats writes pending pool stats now (daemon stop), instead of
+// losing the last poolStatsSaveLag of a map. No-op when nothing was opened.
+func (s *Server) SavePoolStats() {
+	v, ok := poolStatsStores.Load(filepath.Join(userdir.Data(), "poolstats.json"))
+	if !ok {
+		return
+	}
+	st := v.(*poolStatsStore)
+	st.mu.Lock()
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	st.mu.Unlock()
+	if err := st.save(); err != nil {
+		log.Warn().Err(err).Str("path", st.path).Msg("could not save pool stats on stop")
+	}
+}
+
 // poolHWOf reads a machine's CPU from its heartbeat capabilities: this
 // daemon's own, else the node store's copy. Stats are keyed by node id
 // (identity key fingerprint) only, as the run record is: a second key for

@@ -672,7 +672,7 @@ func TestFindNodeWithinWaitsForALateNode(t *testing.T) {
 				return nil
 			}
 			return []registry.NodeRecord{{
-				NodeID: "late-worker", SSHEndpoint: "root@10.0.0.9:22", DaemonPort: 38080,
+				NodeID: "late-worker", SSHEndpoint: "root@10.0.0.9:22", DaemonPort: 4242,
 				Load:        registry.LoadInfo{CPUPercent: 10, AvailableMemBytes: 8 * 1024 * 1024 * 1024},
 				HealthScore: 1.0, State: "healthy",
 			}}

@@ -127,15 +127,15 @@ case_ "weighted gradient fold" src/internal/daemonapi/ddpreduce.go \
 s = s.replace("\ta.weight += weight", "\ta.weight += 1")' \
 	./internal/daemonapi/ "TestUnequalBatchesAverageBySampleCount"
 
-case_ "equal step counts across shares" src/internal/nixgen/shim.go \
+case_ "equal step counts across shares" src/internal/nixgen/shim \
 	's = s.replace("        self.steps = n // sum(self.batches)", "        self.steps = -(-n // (sum(self.batches) + 1))", 1)' \
 	./internal/nixgen/ "TestEqualStepsAcrossUnevenShares"
 
-case_ "contiguous shards" src/internal/nixgen/shim.go \
+case_ "contiguous shards" src/internal/nixgen/shim \
 	's = s.replace("        start, end = self._bounds()\n        return iter(order[start:end])", "        return iter(order[self.rank::len(self.batches)])", 1)' \
 	./internal/nixgen/ "TestWeightedShardsPartitionTheDataset"
 
-case_ "one shuffle seed for every rank" src/internal/nixgen/shim.go \
+case_ "one shuffle seed for every rank" src/internal/nixgen/shim \
 	's = s.replace("g.manual_seed(self.epoch)", "g.manual_seed(self.epoch * 100 + self.rank)", 1)' \
 	./internal/nixgen/ "TestShuffledShardsStayDisjoint"
 
@@ -159,11 +159,11 @@ case_ "sniffing does not consume" src/internal/tarcodec/tarcodec.go \
 	's = s.replace("func Sniff(br *bufio.Reader) Encoding {", "func Sniff(br *bufio.Reader) Encoding {\n\tbr.Discard(1)", 1)' \
 	./internal/tarcodec/ "TestSniffNamesTheEncoding"
 
-case_ "out-of-memory branch" src/internal/nixgen/shim.go \
+case_ "out-of-memory branch" src/internal/nixgen/shim \
 	's = s.replace("    if not _fits_locally(working_set):", "    if False:", 1)' \
 	./internal/nixgen/ "TestWorkThatDoesNotFitGoesToTheClusterWhateverItCosts"
 
-case_ "GPU peer priced above CPU" src/internal/nixgen/shim.go \
+case_ "GPU peer priced above CPU" src/internal/nixgen/shim \
 	's = s.replace("_GPU_SPEEDUP = 6.0", "_GPU_SPEEDUP = 1.0", 1)' \
 	./internal/nixgen/ "TestAGPUPeerIsNotPricedAsACPU"
 
@@ -196,7 +196,7 @@ case_ "closure fragment marked partial" src/internal/daemonctl/closurediff.go \
 	's = s.replace("\t\tmp.WriteField(\"partial\", \"1\")", "", 1)' \
 	./internal/daemonctl/ "TestFragmentIsMarkedPartial"
 
-case_ "bandwidth probe is skipped" src/internal/nixgen/shim.go \
+case_ "bandwidth probe is skipped" src/internal/nixgen/shim \
 	's = s.replace("    if not _offload_wins(nbytes, flops_per_byte, round_trip, split,\n                         flops_per_sec, K, _OPTIMISTIC_BW, remote_flops):\n        return False\n", "", 1)' \
 	./internal/nixgen/ "TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer"
 
@@ -232,7 +232,7 @@ case_ "a straggler is named" src/internal/daemonapi/ddpsync.go \
 	's = s.replace("\tif slow <= 0 || fast <= 0 || slow/fast < pacedRatio {", "\tif true {", 1)' \
 	./internal/daemonapi/ "TestOneSlowRankIsNamed"
 
-case_ "dead env vars are refused" src/internal/nixgen/shim.go \
+case_ "dead env vars are refused" src/internal/nixgen/shim \
 	's = s.replace("_BW_TTL = 300.0", "_BW_TTL = 300.0\n_DEAD = \"PIPEDPEER_NEVER_READ_BY_ANYTHING\"", 1)' \
 	./internal/nixgen/ "TestEveryEnvVarTheShimNamesIsRead"
 
@@ -368,35 +368,35 @@ case_ "the signing key is not world readable" src/internal/nixsign/nixsign.go \
 	./internal/nixsign/ "TestTheSecretKeyIsNotWorldReadable"
 
 # ---- shipping a kernel that has no source -----------------------------------
-case_ "a kernel with no source ships by value" src/internal/nixgen/shim.go \
+case_ "a kernel with no source ships by value" src/internal/nixgen/shim \
 	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_payload(func)', 1)" \
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
-case_ "source is tried before by-value" src/internal/nixgen/shim.go \
+case_ "source is tried before by-value" src/internal/nixgen/shim \
 	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_pickle(func) or _func_payload(func)', 1)" \
 	./internal/nixgen/ "TestNamedFunctionStillShipsAsSource"
 
-case_ "a lambda has no name a worker can resolve" src/internal/nixgen/shim.go \
+case_ "a lambda has no name a worker can resolve" src/internal/nixgen/shim \
 	"s = s.replace('    if not func.__name__.isidentifier():', '    if False:', 1)" \
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
-case_ "one kernel form per header, never both" src/internal/nixgen/shim.go \
+case_ "one kernel form per header, never both" src/internal/nixgen/shim \
 	's = s.replace("            else:\n                header[\"func_src\"]", "            if True:\n                header[\"func_src\"]", 1)' \
 	./internal/nixgen/ "TestHeaderCarriesOneKernelFormNotBoth"
 
-case_ "an unpicklable kernel runs on local threads" src/internal/nixgen/shim.go \
+case_ "an unpicklable kernel runs on local threads" src/internal/nixgen/shim \
 	"s = s.replace('        if _process_safe(func):\n            return self._ctx', '        if True:\n            return self._ctx', 1)" \
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
-case_ "work that cannot travel is counted, not claimed" src/internal/nixgen/shim.go \
+case_ "work that cannot travel is counted, not claimed" src/internal/nixgen/shim \
 	"s = s.replace('            _record(\"pool\", len(tail), False, \"unshippable\")', '            _record(\"pool\", len(tail), True, \"\")', 1)" \
 	./internal/nixgen/ "TestKernelThatCannotTravelAtAllStaysLocal"
 
-case_ "by-value items counted as sent, not as offered" src/internal/nixgen/shim.go \
+case_ "by-value items counted as sent, not as offered" src/internal/nixgen/shim \
 	"s = s.replace('                _STATS[\"shipped_pickled\"] += len(out)', '                _STATS[\"shipped_pickled\"] += len(out) * 3', 1)" \
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
-case_ "a by-value kernel carries the workspace it reads" src/internal/nixgen/shim.go \
+case_ "a by-value kernel carries the workspace it reads" src/internal/nixgen/shim \
 	"s = s.replace('            if mod is not None and not _is_library_module(mod):', '            if False:', 1)" \
 	./internal/nixgen/ "TestByValueKernelCarriesTheWorkspaceItReads"
 
@@ -461,11 +461,11 @@ case_ "setup with no keys edits nothing" src/internal/setup/setup.go \
 	"s = s.replace('\tif err != nil || trusted == \"\" {', '\tif false {', 1)" \
 	./internal/setup/ "TestSetupWithNoKeysYetChangesNothing"
 
-case_ "every Pool entry point takes a kernel with no source" src/internal/nixgen/shim.go \
+case_ "every Pool entry point takes a kernel with no source" src/internal/nixgen/shim \
 	"s = s.replace('        return self._local_ctx(func).apply(func, args=args, kwds=kwds or {})', '        return self._ctx.apply(func, args=args, kwds=kwds or {})', 1)" \
 	./internal/nixgen/ "TestEveryPoolEntryPointTakesAKernelWithoutSource"
 
-case_ "apply works without keyword arguments" src/internal/nixgen/shim.go \
+case_ "apply works without keyword arguments" src/internal/nixgen/shim \
 	"s = s.replace('kwds=kwds or {})', 'kwds=kwds)', 1)" \
 	./internal/nixgen/ "TestApplyWorksWithoutKeywordArguments"
 

@@ -82,7 +82,7 @@ func newStartCmd() *cobra.Command {
 	cmd.Flags().Bool("boot", false, "also start the daemon at every boot")
 	cmd.Flags().Bool("introducer-only", false, "introduce other machines but take no jobs (public server)")
 	cmd.Flags().Int("max-concurrent", 0,
-		"Maximum tasks this node accepts at once (0 = unlimited; also settable via PIPEDPEER_MAX_CONCURRENT)")
+		"Maximum tasks this node accepts at once (0 = unlimited)")
 	return cmd
 }
 

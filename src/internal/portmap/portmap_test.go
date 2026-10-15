@@ -181,7 +181,7 @@ func TestPCPMappingIsUsedWhenTheRouterSpeaksIt(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ext, granted, err := pcpMap(ctx, gw, 38447, time.Hour)
+	ext, granted, err := pcpMap(ctx, gw, 4243, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,10 +205,10 @@ func TestNATPMPIsTriedWhenPCPIsRefused(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if _, _, err := pcpMap(ctx, gw, 38447, time.Hour); err == nil {
+	if _, _, err := pcpMap(ctx, gw, 4243, time.Hour); err == nil {
 		t.Fatal("PCP succeeded against a router that refuses it")
 	}
-	ext, granted, err := natpmpMap(ctx, gw, 38447, time.Hour)
+	ext, granted, err := natpmpMap(ctx, gw, 4243, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,13 +228,13 @@ func TestAMappingIsGivenBackOnClose(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, _, err := natpmpMap(ctx, gw, 38447, time.Hour); err != nil {
+	if _, _, err := natpmpMap(ctx, gw, 4243, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if f.lastLife.Load() == 0 {
 		t.Fatal("precondition: the mapping request carried a zero lifetime")
 	}
-	if _, _, err := natpmpMap(ctx, gw, 38447, 0); err != nil {
+	if _, _, err := natpmpMap(ctx, gw, 4243, 0); err != nil {
 		t.Fatal(err)
 	}
 	if life := f.lastLife.Load(); life != 0 {
@@ -282,7 +282,7 @@ func TestAWrongNonceIsRefused(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, _, err := pcpMap(ctx, netip.MustParseAddr("127.0.0.1"), 38447, time.Hour); err == nil {
+	if _, _, err := pcpMap(ctx, netip.MustParseAddr("127.0.0.1"), 4243, time.Hour); err == nil {
 		t.Error("a PCP reply with somebody else's nonce was accepted")
 	}
 }
@@ -318,7 +318,7 @@ func TestNoMappingIsNotAFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
-	m, err := Map(ctx, 38447)
+	m, err := Map(ctx, 4243)
 	if err == nil {
 		t.Fatal("a mapping was reported where none was possible")
 	}
@@ -346,7 +346,7 @@ func TestTheGrantedLeaseIsWhatGetsRenewed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	m, err := mapWith(ctx, 38447, 2*time.Hour)
+	m, err := mapWith(ctx, 4243, 2*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestAZeroGrantFallsBackToWhatWasAsked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	m, err := mapWith(ctx, 38447, 90*time.Minute)
+	m, err := mapWith(ctx, 4243, 90*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}

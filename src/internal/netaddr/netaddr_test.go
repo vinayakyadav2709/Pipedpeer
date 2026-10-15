@@ -8,7 +8,7 @@ import (
 func TestSourceForGivesARoutableLocalAddress(t *testing.T) {
 	// A public address we never contact: the kernel still knows which of our
 	// addresses it would use to reach it.
-	got := SourceFor("198.51.100.1:38080")
+	got := SourceFor("198.51.100.1:4242")
 	if got == "" {
 		t.Skip("no route to anywhere; nothing to assert")
 	}
@@ -58,7 +58,7 @@ func TestAdvertisePrefersTheAddressMostPeersReachUsOn(t *testing.T) {
 // and those route to our own address, so they vote for whatever we already
 // publish. Three of them outvoted the one real peer.
 func TestAdvertiseIgnoresSelfReferencingPeers(t *testing.T) {
-	own := SourceFor("198.51.100.1:38080")
+	own := SourceFor("198.51.100.1:4242")
 	if own == "" {
 		t.Skip("no outbound route; nothing to assert")
 	}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/runrec"
 	"github.com/pipedpeer/pipedpeer/internal/schedule"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -198,8 +199,9 @@ type poolManager struct {
 	// closure, ordered best-first for spill. Nil disables spill (single node).
 	// submitter is the requesting job's origin endpoint ("host:port"); the
 	// implementation sinks it to the tail so an idle orchestrator never
-	// outranks real workers (weak-orchestrator: laptop stays flat).
-	peerFn func(storePath, submitter string) []string
+	// outranks real workers (weak-orchestrator: laptop stays flat). need is
+	// the header each peer's runnable check sees (phone.Need; nil = none).
+	peerFn func(storePath, submitter string, need http.Header) []string
 
 	// deadPeers are peers that failed this chunk; later parts skip them and
 	// fall through to the next best candidate. Reset per runChunk so a peer
@@ -434,7 +436,7 @@ func releaseHeapAfterWork() {
 
 // SetPeerFn installs the function that returns peer daemon endpoints eligible
 // to run chunks for a store path. Without it, all work stays local.
-func (pm *poolManager) SetPeerFn(fn func(storePath, submitter string) []string) {
+func (pm *poolManager) SetPeerFn(fn func(storePath, submitter string, need http.Header) []string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.peerFn = fn
@@ -449,7 +451,7 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 	if pm.peerFn == nil {
 		return 0
 	}
-	return len(pm.peerFn(storePath, ""))
+	return len(pm.peerFn(storePath, "", nil))
 }
 
 // handlePoolMap executes a pickled function over a batch of items using the
@@ -585,9 +587,19 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	submitter := r.Header.Get("X-Pipedpeer-Submitter")
 	offload := r.Header.Get("X-Pipedpeer-Offload")
 	python := r.Header.Get("X-Pipedpeer-Python")
-	runPath := filepath.Join(storePath, "bin", "run")
-	if storePath == "" || !pathExists(runPath) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-Pipedpeer-Store header (or invalid store path)"})
+	if storePath == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-Pipedpeer-Store header"})
+		return
+	}
+	// <store>/bin/run, or a pool-only phone's host python; a by-value
+	// function from another python minor is refused (Decisions: func_src rule).
+	runPath, err := phone.PoolRunPath(storePath)
+	if err == nil && !phone.CanRun(storePath, phone.Need(python, req.FuncSrc != "")) {
+		err = fmt.Errorf("by-value function from python %q cannot run on this node's python; ship func_src", python)
+	}
+	if err != nil {
+		log.Printf("[pool] refusing pool/map for %s: %v", storePath, err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cannot run this chunk here: " + err.Error()})
 		return
 	}
 
@@ -618,7 +630,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		available := s.AvailableForJob()
 		if available < req.RequiredMemBytes {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
-				if peer := s.pool.bestPeer(storePath, submitter, offload); peer != "" {
+				if peer := s.pool.bestPeer(storePath, submitter, offload, phone.Need(python, req.FuncSrc != "")); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
 					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload, python) {
 						return
@@ -913,7 +925,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 	var peers []string
 	pm.mu.Lock()
 	if pm.peerFn != nil {
-		peers = pm.peerFn(storePath, submitter)
+		peers = pm.peerFn(storePath, submitter, phone.Need(ch.python, ch.funcSrc != ""))
 	}
 	pm.mu.Unlock()
 	// --offload: none of the parts below may land on the kept-off machine,
@@ -1279,13 +1291,13 @@ func sinkPeerLast(peers []string, submitter string) []string {
 // bestPeer returns the top-ranked healthy peer sharing a store ("" when none),
 // used to forward requests the local node cannot admit (asymmetric
 // orchestrator: 0% heavy compute runs locally when peers exist).
-func (pm *poolManager) bestPeer(storePath, submitter, offload string) string {
+func (pm *poolManager) bestPeer(storePath, submitter, offload string, need http.Header) string {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.peerFn == nil {
 		return ""
 	}
-	ps, _ := pm.offloadPeers(pm.peerFn(storePath, submitter), offload)
+	ps, _ := pm.offloadPeers(pm.peerFn(storePath, submitter, need), offload)
 	for _, p := range ps {
 		if p != submitter {
 			return p

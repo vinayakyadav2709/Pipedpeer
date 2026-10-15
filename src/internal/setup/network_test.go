@@ -62,13 +62,13 @@ func TestAnActiveFirewallIsOpenedForTheDirectPort(t *testing.T) {
 	f := &fakeFirewall{
 		present: map[string]bool{"firewall-cmd": true},
 		replies: map[string]string{
-			"firewall-cmd --state":                "running\n",
-			"firewall-cmd --query-port=38447/udp": "no\n",
+			"firewall-cmd --state":               "running\n",
+			"firewall-cmd --query-port=4243/udp": "no\n",
 		},
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
+	st := openFirewall(context.Background(), []string{"4243/udp"}, true)
 	if !st.open || !st.changed {
 		t.Fatalf("port not opened: %+v", st)
 	}
@@ -77,14 +77,14 @@ func TestAnActiveFirewallIsOpenedForTheDirectPort(t *testing.T) {
 	}
 	// Permanent, or the rule vanishes on reboot and fails in a way nobody
 	// connects to the reboot.
-	if !f.didRun("firewall-cmd --permanent --add-port=38447/udp") {
+	if !f.didRun("firewall-cmd --permanent --add-port=4243/udp") {
 		t.Errorf("the rule was not made permanent; ran %v", f.ran)
 	}
 	if !f.didRun("firewall-cmd --reload") {
 		t.Errorf("firewalld was not reloaded, so the rule is not in effect yet")
 	}
 	// And the user is told how to undo what was done to their machine.
-	if !strings.Contains(st.undo, "remove-port=38447/udp") {
+	if !strings.Contains(st.undo, "remove-port=4243/udp") {
 		t.Errorf("undo = %q, which does not reverse the change", st.undo)
 	}
 }
@@ -95,20 +95,20 @@ func TestAPortThatIsAlreadyOpenIsLeftAlone(t *testing.T) {
 	f := &fakeFirewall{
 		present: map[string]bool{"firewall-cmd": true},
 		replies: map[string]string{
-			"firewall-cmd --state":                "running\n",
-			"firewall-cmd --query-port=38447/udp": "yes\n",
+			"firewall-cmd --state":               "running\n",
+			"firewall-cmd --query-port=4243/udp": "yes\n",
 		},
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
+	st := openFirewall(context.Background(), []string{"4243/udp"}, true)
 	if !st.open {
 		t.Error("an already-open port was reported closed")
 	}
 	if st.changed {
 		t.Error("an already-open port was changed anyway")
 	}
-	if f.didRun("firewall-cmd --permanent --add-port=38447/udp") {
+	if f.didRun("firewall-cmd --permanent --add-port=4243/udp") {
 		t.Errorf("a rule was added that was already there; ran %v", f.ran)
 	}
 }
@@ -119,13 +119,13 @@ func TestNothingIsChangedWithoutConsent(t *testing.T) {
 	f := &fakeFirewall{
 		present: map[string]bool{"firewall-cmd": true},
 		replies: map[string]string{
-			"firewall-cmd --state":                "running\n",
-			"firewall-cmd --query-port=38447/udp": "no\n",
+			"firewall-cmd --state":               "running\n",
+			"firewall-cmd --query-port=4243/udp": "no\n",
 		},
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), []string{"38447/udp"}, false)
+	st := openFirewall(context.Background(), []string{"4243/udp"}, false)
 	if st.changed {
 		t.Error("the firewall was changed without consent")
 	}
@@ -148,11 +148,11 @@ func TestUFWIsHandledToo(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
+	st := openFirewall(context.Background(), []string{"4243/udp"}, true)
 	if st.tool != "ufw" || !st.changed {
 		t.Fatalf("ufw not handled: %+v", st)
 	}
-	if !f.didRun("ufw allow 38447/udp") {
+	if !f.didRun("ufw allow 4243/udp") {
 		t.Errorf("ufw was not asked to allow the port; ran %v", f.ran)
 	}
 	if !strings.Contains(st.undo, "delete allow") {
@@ -173,7 +173,7 @@ func TestAnInactiveFirewallIsNotTouched(t *testing.T) {
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
+	st := openFirewall(context.Background(), []string{"4243/udp"}, true)
 	if st.tool != "" {
 		t.Errorf("tool = %q, want none: neither firewall is running", st.tool)
 	}
@@ -192,14 +192,14 @@ func TestAFailureToOpenIsReportedNotSwallowed(t *testing.T) {
 	f := &fakeFirewall{
 		present: map[string]bool{"firewall-cmd": true},
 		replies: map[string]string{
-			"firewall-cmd --state":                "running\n",
-			"firewall-cmd --query-port=38447/udp": "no\n",
+			"firewall-cmd --state":               "running\n",
+			"firewall-cmd --query-port=4243/udp": "no\n",
 		},
-		fails: map[string]bool{"firewall-cmd --permanent --add-port=38447/udp": true},
+		fails: map[string]bool{"firewall-cmd --permanent --add-port=4243/udp": true},
 	}
 	f.install(t)
 
-	st := openFirewall(context.Background(), []string{"38447/udp"}, true)
+	st := openFirewall(context.Background(), []string{"4243/udp"}, true)
 	if st.err == nil {
 		t.Fatal("a failed rule change was reported as success")
 	}
@@ -211,7 +211,7 @@ func TestAFailureToOpenIsReportedNotSwallowed(t *testing.T) {
 // TestTheReportedPortIsTheOneUsed. A report about a different port than the
 // daemon listens on is worse than none.
 func TestTheReportedPortIsTheOneUsed(t *testing.T) {
-	if DirectPort() != 38447 {
+	if DirectPort() != 4243 {
 		t.Errorf("DirectPort() = %d; it must match internet.DefaultPort, or setup "+
 			"opens a port nothing listens on", DirectPort())
 	}
@@ -223,15 +223,15 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	f := &fakeFirewall{
 		present: map[string]bool{"firewall-cmd": true},
 		replies: map[string]string{
-			"firewall-cmd --state":                "running\n",
-			"firewall-cmd --query-port=38447/udp": "no\n",
+			"firewall-cmd --state":               "running\n",
+			"firewall-cmd --query-port=4243/udp": "no\n",
 		},
 	}
 	f.install(t)
 	geteuid = func() int { return 1000 }
-	openFirewall(context.Background(), []string{"38447/udp"}, true)
+	openFirewall(context.Background(), []string{"4243/udp"}, true)
 	for _, want := range []string{
-		"sudo firewall-cmd --permanent --add-port=38447/udp",
+		"sudo firewall-cmd --permanent --add-port=4243/udp",
 		"sudo firewall-cmd --reload",
 	} {
 		if !f.didRun(want) {
@@ -245,8 +245,8 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	}
 	u.install(t)
 	geteuid = func() int { return 1000 }
-	openFirewall(context.Background(), []string{"38447/udp"}, true)
-	if !u.didRun("sudo ufw allow 38447/udp") {
+	openFirewall(context.Background(), []string{"4243/udp"}, true)
+	if !u.didRun("sudo ufw allow 4243/udp") {
 		t.Errorf("ufw allow not via sudo; ran %v", u.ran)
 	}
 
@@ -256,7 +256,7 @@ func TestFirewallChangesGoThroughSudoWhenNotRoot(t *testing.T) {
 	}
 	d.install(t)
 	geteuid = func() int { return 1000 }
-	openFirewall(context.Background(), []string{"38447/udp"}, false)
+	openFirewall(context.Background(), []string{"4243/udp"}, false)
 	for _, r := range d.ran {
 		if strings.HasPrefix(r, "sudo ") {
 			t.Errorf("diagnosis-only run used sudo: %v", d.ran)

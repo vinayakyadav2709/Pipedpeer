@@ -38,7 +38,7 @@ func TestPoolMapCancelStopsPeerWork(t *testing.T) {
 	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
 	os.MkdirAll(filepath.Join(storePath, "bin"), 0755)
 	os.WriteFile(filepath.Join(storePath, "bin", "run"), []byte("#!/bin/sh\nexec "+python+" \"$@\"\n"), 0755)
-	s1.pool.SetPeerFn(func(_, _ string) []string { return []string{strings.TrimPrefix(srv2.URL, "http://")} })
+	s1.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{strings.TrimPrefix(srv2.URL, "http://")} })
 
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	src := fmt.Sprintf("def slow(x):\n    import os, time\n    open(%q, 'w').write(str(os.getpid()))\n    time.sleep(60)\n    return x\n", pidFile)
