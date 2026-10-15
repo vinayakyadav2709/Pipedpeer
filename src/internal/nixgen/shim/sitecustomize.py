@@ -38,7 +38,7 @@ from pipedpeer_shim.pandas_ops import (
     _install_io, _install_pandas,
 )
 from pipedpeer_shim.pool import (
-    _ClusterPool, _race_items,
+    _ClusterPool, _func_payload, _func_pickle, _is_library_module, _race_items,
 )
 from pipedpeer_shim.ddp import (
     _PENDING_PATCHES, _install_ddp,
@@ -243,15 +243,35 @@ def _install_joblib():
     # whole training set, so a chunk of three trees used to ship X three
     # times - 77 MB for 01_sklearn_rf's 25 MB X - and the transfer, not the
     # trees, set the pace.
+    #
+    # A task function defined in the job's own files (cpu.py's mandel_tile in
+    # __main__) pickles by reference, and a worker's __main__ is its runner
+    # script, so every remote task died with "no attribute mandel_tile". It
+    # travels the way Pool.map's kernel does (ADR-0017): source, else
+    # cloudpickle, once per chunk in the globals frame; the task names it.
     jb_payload = {
-        "src": ("import os\n"
+        "src": ("import os, pickle\n"
                 "def _pp_unshare(x):\n"
                 "    if type(x) is tuple and len(x) == 2 and x[0] == '__pp_shared__':\n"
                 "        return globals()[x[1]]\n"
                 "    return x\n"
+                "def _pp_func(f):\n"
+                "    if not (type(f) is tuple and len(f) == 2 and f[0] == '__pp_func__'):\n"
+                "        return f\n"
+                "    p = globals()[f[1]]\n"
+                "    if type(p) is dict:\n"
+                "        if p.get('pickled'):\n"
+                "            p = pickle.loads(p['pickled'])\n"
+                "        else:\n"
+                "            ns = dict(p['gvars'])\n"
+                "            exec(p['src'], ns)\n"
+                "            p = ns[p['name']]\n"
+                "        globals()[f[1]] = p\n"
+                "    return p\n"
                 "def run(item):\n"
                 "    os.environ['PIPEDPEER_JB_NESTED'] = '1'\n"
                 "    f, a, k = item\n"
+                "    f = _pp_func(f)\n"
                 "    a = tuple(_pp_unshare(x) for x in a)\n"
                 "    k = {n: _pp_unshare(v) for n, v in k.items()}\n"
                 "    return f(*a, **k)\n"),
@@ -273,7 +293,26 @@ def _install_joblib():
                 shared[key] = x
             return ("__pp_shared__", key)
 
-        items = [(i, (f, tuple(ref(x) for x in a), {n: ref(v) for n, v in k.items()}))
+        fkeys = {}
+
+        def fref(f):
+            # ponytail: only f's own module is checked; a partial or wrapper
+            # around a __main__ function still goes by reference and fails
+            # remotely (local covers it).
+            if _is_library_module(sys.modules.get(getattr(f, "__module__", None))):
+                return f
+            key = fkeys.get(id(f))
+            if key is None:
+                p = _func_payload(f) or _func_pickle(f)
+                if p is None:
+                    _log("joblib task %r cannot travel as source or by value; sent by name"
+                         % getattr(f, "__name__", f))
+                    return f
+                key = fkeys[id(f)] = "_pp_func_%d" % len(fkeys)
+                shared[key] = p
+            return ("__pp_func__", key)
+
+        items = [(i, (fref(f), tuple(ref(x) for x in a), {n: ref(v) for n, v in k.items()}))
                  for i, (f, a, k) in chunk]
         return items, shared
 

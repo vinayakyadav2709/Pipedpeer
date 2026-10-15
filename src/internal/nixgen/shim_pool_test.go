@@ -33,24 +33,27 @@ assert p.shape == (5,)
 sklearn_calls = POOL_CALLS[0]
 assert sklearn_calls > 0, "sklearn's joblib batches never reached the cluster"
 
-# A lambda cannot be shipped - it has no importable definition and no source
-# the shim can send - so this phase is expected to stay local. What matters is
-# that it stays *correct*, and that the shim does not claim to have distributed
-# it. The fake daemon ran the forest's tasks in this process, leaving the
-# runner's nesting marker set, which would skip interception and pass this
-# phase without testing it.
+# A lambda has no source the shim can send, so it ships by value with
+# cloudpickle (ADR-0017), like Pool.map's; without cloudpickle it stays local.
+# Either way it must stay *correct*. The fake daemon ran the forest's tasks in
+# this process, leaving the runner's nesting marker set, which would skip
+# interception and pass this phase without testing it.
 import os
 os.environ.pop("PIPEDPEER_JB_NESTED", None)
+try:
+    import cloudpickle
+except ImportError:
+    cloudpickle = None
 before = POOL_CALLS[0]
 res = joblib.Parallel(n_jobs=-1)(joblib.delayed(lambda a, b: a + b)(i, i) for i in range(12))
 assert res == [2 * i for i in range(12)], res
 lambda_calls = POOL_CALLS[0] - before
-assert lambda_calls == 0, (
-    "a lambda was shipped to the cluster (%d call(s)); it has no definition the "
-    "worker could resolve, so this would have failed remotely and fallen back "
-    "silently" % lambda_calls)
-assert any(d["op"] == "joblib" and not d["shipped"] and "pickled" in d["why"]
-           for d in stats._STATS["decisions"]), stats._STATS["decisions"]
+if cloudpickle is None:
+    assert lambda_calls == 0, "a lambda shipped without cloudpickle (%d call(s))" % lambda_calls
+    assert any(d["op"] == "joblib" and not d["shipped"] and "pickled" in d["why"]
+               for d in stats._STATS["decisions"]), stats._STATS["decisions"]
+else:
+    assert lambda_calls > 0, "a lambda did not ship by value"
 
 assert MAX_CHUNK[0] > 0, "no joblib batch reached the cluster"
 print("JOBLIB-OK")
@@ -83,6 +86,22 @@ calls = POOL_CALLS[0] - before
 assert calls > 0, "60 x 50ms of joblib work never reached the cluster"
 assert calls < 30, "%d round trips for 60 tasks: still dispatching one at a time" % calls
 assert any(d["op"] == "joblib" and d["shipped"] for d in stats._STATS["decisions"]), stats._STATS["decisions"]
+
+# slow lives in this script's __main__. A worker's __main__ is its runner, so
+# a task naming __main__.slow failed there with "no attribute 'slow'" (cpu.py's
+# mandel_tile on the lab). Run a chunk as it crossed in a fresh interpreter.
+import pickle, subprocess, sys
+req, g, raw = LAST_FRAMES[0]
+child = subprocess.run([sys.executable, "-S", "-c", (
+    "import pickle, sys\n"
+    "src, g, raw = pickle.load(sys.stdin.buffer)\n"
+    "ns = pickle.loads(g)\n"
+    "exec(src, ns)\n"
+    "print([ns['run'](pickle.loads(r)) for r in raw])\n")],
+    input=pickle.dumps((req["func_src"], g, raw)), capture_output=True)
+assert child.returncode == 0, child.stderr.decode()
+got = eval(child.stdout)
+assert got and all(v % 3 == 0 for v in got), got
 
 # A large array every task shares travels once per chunk, in the globals
 # frame, not inside each task.
