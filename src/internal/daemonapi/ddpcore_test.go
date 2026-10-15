@@ -348,3 +348,33 @@ func TestInt8DownlinkErrorFeedback(t *testing.T) {
 		t.Errorf("with feedback the ranks received %v in total, want %v within one step", fed, want)
 	}
 }
+
+// TestAPadStepWeighsNothing: a rank with no sample in the epoch's last
+// partial step repeats one and reports samples -1; the mean is the real
+// ranks' alone. 0 still means "not reported" and counts as 1.
+func TestAPadStepWeighsNothing(t *testing.T) {
+	a := newDDPAccumulator(ddpF32, 2)
+	if err := a.addSegmented(encodeF32([]float32{2, 4}), []float64{0}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.addSegmented(encodeF32([]float32{100, 100}), []float64{0}, -1); err != nil {
+		t.Fatal(err)
+	}
+	out, _, err := a.meanResidual(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeF32(out); got[0] != 2 || got[1] != 4 {
+		t.Errorf("mean %v, want the real rank's [2 4]", got)
+	}
+	if sampleWeight(0) != 1 {
+		t.Error("an unreported sample count must still count as 1")
+	}
+	only := newDDPAccumulator(ddpF32, 1)
+	if err := only.addSegmented(encodeF32([]float32{7}), []float64{0}, -1); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, err := only.meanResidual(nil); err != nil || decodeF32(out)[0] != 0 {
+		t.Errorf("pads alone gave %v, %v; want zeros, not NaN", decodeF32(out), err)
+	}
+}

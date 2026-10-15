@@ -143,3 +143,76 @@ func TestShimMismatchedModelsExit76(t *testing.T) {
 		}
 	}
 }
+
+// ddpPartialScript runs one epoch at lr 0 over N samples in batches of 8 and
+// prints the step count and sum over steps of (the step's applied gradient x
+// the samples in that step): with the weights held still, that sum is the
+// gradient summed over every sample once, the same on one machine as on the
+// ring if and only if the ring trains every sample once and weighs each
+// step's average by samples - the last partial batch included.
+const ddpPartialScript = `
+import os, torch
+from torch.utils.data import DataLoader, TensorDataset
+N, B = int(os.environ["TEST_N"]), 8
+torch.manual_seed(0)
+X, y = torch.randn(N, 4), torch.randn(N, 1)
+model = torch.nn.Linear(4, 1)
+opt = torch.optim.SGD(model.parameters(), lr=0.0)
+acc, steps = torch.zeros_like(model.weight, dtype=torch.float64), 0
+for k, (xb, yb) in enumerate(DataLoader(TensorDataset(X, y), batch_size=B)):
+    opt.zero_grad()
+    torch.nn.functional.mse_loss(model(xb), yb).backward()
+    opt.step()
+    acc += model.weight.grad.double() * min(B, N - k * B)
+    steps += 1
+print("STEPS %d" % steps)
+print("ACC " + " ".join("%.12g" % v for v in acc.flatten().tolist()))
+`
+
+// TestShimRingTrainsTheLastPartialBatch is FIX-PARTIAL: U31B found exact sync
+// 1.5% off one device on gpu.py because the ring dropped each epoch's last
+// partial batch. N=70 leaves 6 samples past 8 full steps (split 3+3); N=65
+// leaves 1, so one rank pads with a repeat that must weigh nothing.
+func TestShimRingTrainsTheLastPartialBatch(t *testing.T) {
+	dir, run := ddpCoreSetup(t)
+	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(ddpPartialScript), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	field := func(out, prefix string) string {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimPrefix(line, prefix)
+			}
+		}
+		return ""
+	}
+	for _, n := range []int{70, 65} {
+		env := []string{fmt.Sprintf("TEST_N=%d", n), "PIPEDPEER_DDP_INT8=0", "PIPEDPEER_DDP_FP32=1"}
+		alone, err := run(append([]string{"PIPEDPEER_RANK=0"}, env...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("N=%d alone: %v\n%s", n, err, alone)
+		}
+		outs, errs := ddpRing(t, run, env, env)
+		for rank, err := range errs {
+			if err != nil {
+				t.Fatalf("N=%d rank %d: %v\n%s", n, rank, err, outs[rank])
+			}
+			if got, want := field(outs[rank], "STEPS "), field(string(alone), "STEPS "); got != want {
+				t.Errorf("N=%d rank %d took %s steps, one machine %s", n, rank, got, want)
+			}
+			check := exec.Command("python3", "-c", `
+import sys
+a = [float(v) for v in sys.argv[1].split()]
+b = [float(v) for v in sys.argv[2].split()]
+assert len(a) == len(b) and a, (a, b)
+for x, y in zip(a, b):
+    assert abs(x - y) <= 1e-5 * max(1.0, abs(y)), (a, b)
+print("MATCH")
+`, field(outs[rank], "ACC "), field(string(alone), "ACC "))
+			if out, err := check.CombinedOutput(); err != nil {
+				t.Errorf("N=%d rank %d: the ring's summed gradient is not one machine's: %v\n%s\n%s",
+					n, rank, err, out, outs[rank])
+			}
+		}
+	}
+}
