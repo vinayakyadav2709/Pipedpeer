@@ -45,21 +45,23 @@ func gossipPaths(t *testing.T, s *Server, id string) []nodestore.Path {
 
 // A valid record's addresses become candidates: a gossip path (never active
 // until the poller verifies it) and a hint to internet mode. Loopback hosts
-// are skipped: another machine's loopback is ours.
+// are skipped: another machine's loopback is ours. The host is public
+// (TEST-NET-3): a private one off this machine's networks gets no hint (E6),
+// and which ranges those are depends on the machine running the test.
 func TestGossipRecordBecomesCandidates(t *testing.T) {
 	s := nodeTestServer(t, "me")
 	hints := hintLog{}
 	s.SetHinter(hints.hint)
 	k := testKey(t)
 
-	s.learnAddresses("peer", addressesResp{Self: ptr(signedRecord(k, 1, "10.1.2.3", "127.0.0.1"))})
+	s.learnAddresses("peer", addressesResp{Self: ptr(signedRecord(k, 1, "203.0.113.7", "127.0.0.1"))})
 
 	ps := gossipPaths(t, s, k.Fingerprint())
-	if len(ps) != 1 || ps[0].Kind != nodestore.PathGossip || ps[0].Host != "10.1.2.3" || ps[0].Port != 4242 {
-		t.Fatalf("paths = %+v, want one gossip candidate 10.1.2.3:4242", ps)
+	if len(ps) != 1 || ps[0].Kind != nodestore.PathGossip || ps[0].Host != "203.0.113.7" || ps[0].Port != 4242 {
+		t.Fatalf("paths = %+v, want one gossip candidate 203.0.113.7:4242", ps)
 	}
-	if got := hints[k.Fingerprint()]; len(got) != 1 || got[0] != "10.1.2.3:4243" {
-		t.Fatalf("hints = %v, want [10.1.2.3:4243]", got)
+	if got := hints[k.Fingerprint()]; len(got) != 1 || got[0] != "203.0.113.7:4243" {
+		t.Fatalf("hints = %v, want [203.0.113.7:4243]", got)
 	}
 
 	// An older or equal seq changes nothing.
