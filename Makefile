@@ -12,7 +12,7 @@ test:
 test-integration:
 	./scripts/test-integration.sh
 
-# Network scenarios (E1-E5) against a fresh build; needs docker.
+# Network scenarios (E1-E6) against a fresh build; needs docker.
 test-net: build
 	PIPEDPEER=$(CURDIR)/bin/pipedpeer ./scripts/lab-net.sh
 

@@ -12,6 +12,8 @@
 #   e5a  no route to the introducer: connect exits 1 and says it did not answer
 #   e5d  router passes UDP only: doctor names TCP as blocked
 #   e5e  LAN discovery never overwrites a working internet path
+#   e6   the whole demo between two NATed sites that are both 192.168.0.0/24
+#        (scripts/lab-net-e6.sh; nix nodes, ~1 h with cold builds)
 #
 # Rig (experiments file): debian containers with the binary bind-mounted, on
 # docker bridges the host has no address on (inhibit_ipv4), so this machine's
@@ -32,7 +34,7 @@ source "$repo_root/scripts/lib/cli.sh"
 image=pp-net
 mem=256m
 build_dir="${XDG_CACHE_HOME:-$HOME/.cache}/pipedpeer/lab-net"
-all=(e1 e2 e3a e3b e4 e5a e5d e5e)
+all=(e1 e2 e3a e3b e4 e5a e5d e5e e6)
 results=()
 
 pp_lab_runtime || exit 1
@@ -395,6 +397,16 @@ e5e() {
 	else
 		result e5e FAIL "$bad/30" "0" "samples unhealthy or switched to the lan path"
 		dump a b
+	fi
+}
+
+e6() {
+	local t0
+	t0="$(now)"
+	if PIPEDPEER="$build_dir/pipedpeer" "$repo_root/scripts/lab-net-e6.sh"; then
+		result e6 PASS "$(since "$t0")s" - "every demo command (table above)"
+	else
+		result e6 FAIL "$(since "$t0")s" - "see the e6 table above"
 	fi
 }
 
