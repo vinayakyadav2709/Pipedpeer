@@ -1,10 +1,6 @@
-import os
-import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import record  # noqa: E402
+from pipedpeer_shim import record
 
 
 def setup_function():

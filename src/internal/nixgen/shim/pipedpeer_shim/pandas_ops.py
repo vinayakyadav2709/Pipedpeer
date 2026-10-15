@@ -340,10 +340,10 @@ def _install_pandas():
 
 
 # ---- out-of-core reads: chunked parse + partitioned frame ----
-_OOC_CHUNK = int(float(os.environ.get("PIPEDPEER_OOC_CHUNK") or (64 * 1024 * 1024)))
+_OOC_CHUNK = 64 * 1024 * 1024   # bytes of CSV per parsed chunk
 _COMBINE_SAFE = ("sum", "count", "size", "mean", "min", "max", "first",
                  "last", "any", "all")
-_OOC_BATCH_MAX = int(os.environ.get("PIPEDPEER_OOC_BATCH_MAX") or 8)
+_OOC_BATCH_MAX = 8               # most chunks one request carries
 _OOC_BATCH_CACHE = {"t": 0.0, "n": 2}
 
 
@@ -366,7 +366,8 @@ def _ooc_batch():
                 avail = h.get("available_mem") or 0
                 if avail > 0:
                     n = max(1, int(0.4 * avail / (5 * _OOC_CHUNK)))
-        except Exception:
+        except Exception as e:
+            _log("out-of-core: daemon /health unreadable (%s); sending 2 chunks per request" % e)
             n = 2
     n = min(n, _OOC_BATCH_MAX)
     _OOC_BATCH_CACHE["t"] = now

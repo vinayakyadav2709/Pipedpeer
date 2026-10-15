@@ -1,4 +1,4 @@
-"""numpy/torch matmul offload and the numpy offload cost model."""
+"""numpy matmul offload and the numpy offload cost model."""
 import os
 import time
 
@@ -24,7 +24,7 @@ def _np_dispatch(blocks, other):
     try:
         # The worker runs the closure's python with no shim on its path, so the
         # function ships as source (pickling by reference would resolve
-        # sitecustomize._matmul_with to the Nix sitecustomize and fail). The
+        # a shim module the worker cannot import and fail). The
         # fixed right-hand operand rides along as a globals frame the worker
         # unpickles into the namespace before running.
         items = [pickle.dumps(b) for b in blocks]
@@ -48,110 +48,6 @@ def _np_dispatch(blocks, other):
         _log("numpy remote failed (%s); local fallback" % e)
         import numpy as _np
         return [_np.matmul(b, other) for b in blocks]
-
-
-def _matmul_with(block, other):
-    import numpy as _np
-    return _np.matmul(block, other)
-
-
-def _torch_dispatch(blocks, other):
-    """Run [torch.matmul(block, other) for block in blocks] over the cluster.
-    Uses GPU on the worker when available (moves both tensors to cuda before
-    matmul) so ML tensor work utilises remote GPUs fully. Blocks and the fixed
-    operand ship as raw pickle frames. Falls back to local on any failure so an
-    absent cluster never breaks the model."""
-    import pickle
-    try:
-        # Ships by source, not by reference: the worker's closure python has no
-        # shim module on its path (see _np_dispatch). The fixed right-hand
-        # operand rides along as a globals frame the worker unpickles first.
-        items = [pickle.dumps(b) for b in blocks]
-        globals_pickle = pickle.dumps({"_other": other})
-        header = {
-            "func_src": ("import os\nimport torch as _th\n"
-                         "def run(block):\n"
-                         "    os.environ['PIPEDPEER_NUMPY_NESTED'] = '1'\n"
-                         "    if _th.cuda.is_available():\n"
-                         "        block, other = block.cuda(), _other.cuda()\n"
-                         "        return _th.matmul(block, other).cpu()\n"
-                         "    return _th.matmul(block, _other)\n"),
-            "func_name": "run",
-            "items_frames": len(items),
-            "globals": True,
-        }
-        header["required_mem"] = _pool_required(globals_pickle, items)
-        if core._FORCE:
-            header["force"] = True
-        blobs = _pool_send(header, globals_pickle, items, 1200)
-        return [pickle.loads(p) for p in blobs]
-    except Exception as e:
-        _log("torch remote failed (%s); local fallback" % e)
-        return [_torch_matmul_with(b, other) for b in blocks]
-
-
-def _torch_matmul_with(block, other):
-    import torch as _th
-    if _TORCH_ORIG_MATMUL is not None:
-        matmul = _TORCH_ORIG_MATMUL
-    else:
-        matmul = _th.matmul
-    if _th.cuda.is_available():
-        block, other = block.cuda(), other.cuda()
-        return matmul(block, other).cpu()
-    return matmul(block, other)
-
-
-_TORCH_ORIG_MATMUL = None
-_TORCH_ORIG_MM = None
-
-
-def _install_torch():
-    # torch block-row matmul/mm: intercept large 2D tensor ops and split A's
-    # rows across the cluster, each block computed on the worker (on GPU when
-    # the worker has one), results cat'd back. DDP ranks skip this — gradient
-    # sync must not race with offloaded matmul.
-    if os.environ.get("PIPEDPEER_DDP") == "1":
-        return
-    try:
-        import torch as _th
-    except ImportError:
-        return
-
-    _MIN_BYTES = _spill_min()
-
-    _orig_matmul = _th.matmul
-    _orig_mm = _th.mm
-    global _TORCH_ORIG_MATMUL, _TORCH_ORIG_MM
-    _TORCH_ORIG_MATMUL = _orig_matmul
-    _TORCH_ORIG_MM = _orig_mm
-
-    def _matmul(a, b, *args, **kw):
-        import torch as _th
-        if (a.dim() == 2 and b.dim() == 2 and a.shape[1] == b.shape[0]
-                and a.element_size() * a.nelement() >= _MIN_BYTES
-                and a.shape[0] >= 8 and core._URL and core._ENABLED
-                and not os.environ.get("PIPEDPEER_NUMPY_NESTED")):
-            try:
-                n_blocks = max(2, min(64, a.shape[0] // 8))
-                rows = max(1, a.shape[0] // n_blocks)
-                blocks = [a[i:i + rows] for i in range(0, a.shape[0], rows)]
-                return _th.cat(_torch_dispatch(blocks, b), dim=0)
-            except Exception as e:
-                _log("torch matmul fallback (%s)" % e)
-        return _orig_matmul(a, b, *args, **kw)
-
-    def _mm(a, b, *args, **kw):
-        return _matmul(a, b, *args, **kw)
-
-    _th.matmul = _matmul
-    _th.mm = _mm
-    try:
-        _th.Tensor.matmul = _matmul
-        _th.Tensor.mm = _mm
-    except Exception:
-        pass
-    _log("torch matmul/mm interception installed")
 
 
 def _install_numpy():

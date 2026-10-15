@@ -24,9 +24,9 @@ if "NIX_PYTHONPATH" in os.environ:
         functools.reduce(lambda k, p: site.addsitedir(p, k), _nix_paths.split(":"), site._init_pathinfo())
 
 from pipedpeer_shim import core
-from pipedpeer_shim import pool
 from pipedpeer_shim.core import (
     _OFFLOAD_HERE, _POOL_MIN_WORK, _cluster_ready, _log, _offload_warn,
+    _usable_cores, _warn,
 )
 from pipedpeer_shim.stats import (
     _add_stat, _decide, _record_local,
@@ -89,7 +89,9 @@ def _run_patches(name, fns):
         try:
             fn()
         except Exception as exc:
-            _log("%s interception unavailable: %s" % (name, exc))
+            # Not a silent slowdown: B1 (a crash here) went unseen for weeks.
+            _warn("%s interception failed, so this script runs on this "
+                  "machine only: %s" % (name, exc))
 
 
 def _defer(name, *fns):
@@ -318,7 +320,7 @@ def _install_joblib():
 
         n = len(tasks)
         _add_stat("mapped_items", n)
-        width = pool._usable_cores()
+        width = _usable_cores()
         head_n = max(4, min(width, n // 2))
         if _OFFLOAD_HERE and n:
             # --offload: no measuring head here; every task ships.
