@@ -29,6 +29,9 @@
 #   scripts/bench-diloco.sh gpu       # real-GPU single baseline (BL_GPU_PYTHON)
 #   scripts/bench-diloco.sh table     # the per-model verdict as markdown
 #
+# Variants: FAST_VARIANTS="plain=-e PIPEDPEER_DILOCO_OUTER_LR=1 -e PIPEDPEER_DILOCO_MOMENTUM=0|h8=..."
+# adds one fast-mode arm per entry (name=flags, '|'-separated) in the same lab
+# session, with the shim's DiLoCo tuning variables (ddp.py, PIPEDPEER_DILOCO_*).
 # Knobs: MODELS (gpu ddp04 tfm), SEEDS (1 2 3), PROFILES (wifi 5g), ARMS
 # (single exact fast), TRAIN_MEM (2g), DILOCO_BIN + DILOCO_REV (default: built from a
 # git archive of HEAD), BL_LAB_NAME (diloco), TOLERANCE (0.01), UNLOCKED (0; 1 =
@@ -261,7 +264,7 @@ PY
 	exit 0
 	;;
 *)
-	sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+	sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
 	exit 2
 	;;
 esac
@@ -290,10 +293,15 @@ if [[ "$arms" == *" exact "* || "$arms" == *" fast "* ]]; then
 		done
 	fi
 	if [[ "$arms" == *" fast "* ]]; then
+		IFS='|' read -r -a variants <<< "fast=${FAST_VARIANTS:+|$FAST_VARIANTS}"
 		for p in "${profiles[@]}"; do
 			bl_lab_shape "$p" 0
-			for m in "${models[@]}"; do
-				for s in "${seeds[@]}"; do run_one "$m" fast "$s" -v --ddp 2 --ddp-sync fast; done
+			for v in "${variants[@]}"; do
+				[[ -n "$v" ]] || continue
+				for m in "${models[@]}"; do
+					# shellcheck disable=SC2086 # the variant's flags are a list of -e flags
+					for s in "${seeds[@]}"; do run_one "$m" "${v%%=*}" "$s" -v --ddp 2 --ddp-sync fast ${v#*=}; done
+				done
 			done
 		done
 	fi

@@ -396,7 +396,8 @@ def _diloco_round(st, opt, params, reduce, force_state=False):
         for p, t in zip(params, st.theta):
             p.copy_(_th.from_numpy(t).to(p.device, p.dtype))
         for m, v in zip(moments, means[len(deltas):]):
-            m.copy_(_th.from_numpy(_np.ascontiguousarray(v)).to(m.device, m.dtype))
+            # A copy: the reply's bytes are read-only, which torch warns about.
+            m.copy_(_th.from_numpy(_np.array(v, copy=True)).to(m.device, m.dtype))
     return None if with_state else drift
 
 
