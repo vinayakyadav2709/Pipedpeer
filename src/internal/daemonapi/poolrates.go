@@ -372,11 +372,11 @@ type flightBook struct {
 	mu    sync.Mutex
 	next  int64
 	nodes map[string]*nodeFlights
+	wake  chan struct{} // closed and replaced whenever a part leaves any node
 }
 
 type nodeFlights struct {
 	busy map[int64]flight
-	wake chan struct{} // closed and replaced whenever a part leaves
 }
 
 type flight struct {
@@ -390,7 +390,7 @@ func (b *flightBook) node(key string) *nodeFlights {
 	}
 	n := b.nodes[key]
 	if n == nil {
-		n = &nodeFlights{busy: map[int64]flight{}, wake: make(chan struct{})}
+		n = &nodeFlights{busy: map[int64]flight{}}
 		b.nodes[key] = n
 	}
 	return n
@@ -426,31 +426,6 @@ func (b *flightBook) held(key string) int {
 // books one predicted to take pred seconds. release frees it; calling it
 // again is harmless.
 func (b *flightBook) acquire(ctx context.Context, key string, depth int, pred float64) (release func(), err error) {
-	for {
-		b.mu.Lock()
-		n := b.node(key)
-		if len(n.busy) < max(depth, 1) {
-			b.next++
-			id := b.next
-			n.busy[id] = flight{start: time.Now(), pred: pred}
-			b.mu.Unlock()
-			var once sync.Once
-			return func() {
-				once.Do(func() {
-					b.mu.Lock()
-					delete(n.busy, id)
-					close(n.wake)
-					n.wake = make(chan struct{})
-					b.mu.Unlock()
-				})
-			}, nil
-		}
-		wake := n.wake
-		b.mu.Unlock()
-		select {
-		case <-wake:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
+	_, release, err = b.acquireFirst(ctx, []slot{{key: key, depth: depth, pred: pred}})
+	return release, err
 }
