@@ -139,7 +139,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			switch ddpSync, _ := cmd.Flags().GetString("ddp-sync"); ddpSync {
 			case "", "exact":
 			case "fast":
-				envs = append(envs, "PIPEDPEER_DDP_SYNC=fast")
+				envs = append(envs, "PIPEDPEER_DDP_SYNC_MODE=fast")
 			default:
 				return fmt.Errorf("--ddp-sync must be exact or fast, got %q", ddpSync)
 			}
