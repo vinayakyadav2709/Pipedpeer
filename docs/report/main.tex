@@ -85,6 +85,7 @@
 % -- Table helpers -----------------------------------------------------------
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\setlength{\emergencystretch}{2em} % let TeX stretch a line rather than run tt words into the margin
 
 % -- Colours -----------------------------------------------------------------
 \definecolor{headerblue}{RGB}{30,80,160}
@@ -2600,15 +2601,21 @@ more than 0.15 is treated as a defect.
 exported with the one command above. Every figure follows the setup of
 Section~\ref{sec:res-setup}.
 
-\begin{table}[H]
-\centering
+% longtable, not table[H]: this table is taller than a page and a float cannot break.
+{\renewcommand{\arraystretch}{1.25}
+\begin{longtable}{L{5.6cm} L{4.2cm} L{3.0cm}}
 \caption{Results of the address-book phase}
-\label{tab:later}
-\renewcommand{\arraystretch}{1.25}
-\begin{tabularx}{\textwidth}{X L{4.2cm} L{3.0cm}}
+\label{tab:later} \\
 \toprule
 \textbf{Measurement} & \textbf{Result} & \textbf{Source} \\
 \midrule
+\endfirsthead
+\toprule
+\textbf{Measurement} & \textbf{Result} & \textbf{Source} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
 One GPU against a split: a cell where the split wins, and one where one GPU wins & split wins small model, heavy steps, LAN: 9.1 vs 11.8\,s; one wins 9\,MB model, light steps, Wi-Fi: 8.0 vs 80.7\,s (before: 10.6 vs 12.8\,s; 10.4 vs 74.1\,s) & container lab \\
 Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time LAN 1.2--1.4$\times$, Wi-Fi 1.6--3.1$\times$ faster than exact (idle host, one seed) & container lab \\
 The DiLoCo paper's outer step (Nesterov 0.7, momentum 0.9) at our intervals & fails at every interval; small transformer $+21.7\%$ at 156 local steps & container lab \\
@@ -2624,9 +2631,7 @@ Pool time estimate error, before (7--37$\times$) and after & error not recorded 
 Superlinear steps found by the scaling map & none in the numeric sweeps (payload 1\,KB--64\,MB, items 8--2048, cost $10^3$--$3\times10^6$, 2--4 nodes, spread 1--10$\times$); CPU-time growth fits; 4 equal nodes ran a map $2.9\times$ faster than one (2.37 to 0.81\,s, loaded host) & container lab \\
 Introducer address change, time to recover, no commands run & 12.1--12.6\,s over three runs (limit 60\,s); a joining machine connected in 0.2--0.4\,s & container network \\
 Two laptops over Tailscale: CPU, GPU and combined scripts & \todo{tailscale} & real \\
-\bottomrule
-\end{tabularx}
-\end{table}
+\end{longtable}}
 
 \section{Comparative Analysis}
 \label{sec:comparison}
@@ -2940,7 +2945,7 @@ before; it is not suitable for a cluster of mutually untrusting participants.
 \label{chap:pub}
 % ============================================================
 
-\section{\projecttitle}
+\section[\projecttitle]{\raggedright\projecttitle}
 
 A research paper drawn from this work, ``\projecttitle'', written in the IEEE
 conference format, describes the system and its evaluation. Status:
