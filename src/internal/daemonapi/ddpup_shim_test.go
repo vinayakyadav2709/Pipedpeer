@@ -87,7 +87,7 @@ if __name__ == "__main__":
 			"PIPEDPEER_DDP=1",
 			fmt.Sprintf("PIPEDPEER_RANK=%d", rank),
 			fmt.Sprintf("PIPEDPEER_WORLD_SIZE=%d", world),
-			"PIPEDPEER_DDP_BACKEND=daemon",
+			"PIPEDPEER_VERBOSE=1", // the assertions read the shim's -v lines
 			"PIPEDPEER_DDP_SYNC="+ts.URL+"/v1/ddp/sync",
 			"PIPEDPEER_DDP_GROUP=g",
 		)

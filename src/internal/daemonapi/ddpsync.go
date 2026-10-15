@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,6 +89,9 @@ type ddpEntry struct {
 	// holdExpired: this round was held for a join handover past
 	// ddpHandoverHold, and said so.
 	holdExpired bool
+	// held: this round waited on ranks busy with a join handover, so the
+	// ranks it closes without are known to be alive.
+	held bool
 
 	// fingerprint detects ranks doing identical work. Sharding only happens
 	// automatically for DataLoader-based code; a script that slices its
@@ -110,6 +112,10 @@ type ddpEntry struct {
 	// is also the start barrier: it waits up to the start wait for every
 	// rank, and a rank still missing when it closes is dropped.
 	opening bool
+	// manifest is the first opening contribution's parameter list; every
+	// later rank's must match it (manifestRank names whose it is).
+	manifest     *ddpManifest
+	manifestRank int
 }
 
 type ddpBoard struct {
@@ -202,6 +208,21 @@ type ddpRun struct {
 	// loading is a joiner that has its snapshot and is loading it: rounds
 	// still wait for it until its first sync (handoverHolds).
 	loading *ddpJoin
+
+	// aborted is why the ring cannot go on (ranks built different models,
+	// every peer stopped answering). Set once; every later sync of the run
+	// is refused with it, so no rank trains on alone after the ring died.
+	aborted string
+	// fixed: the user chose the ring (--ddp N, PIPEDPEER_DDP_FIXED=1), so
+	// it is never shrunk on its own: no freeloader drop, no one-rank switch.
+	fixed bool
+	// released: the ring was told to finish on one rank (soloFor).
+	released bool
+	// syncEvery is the interval the ranks last proposed (1 = every step).
+	syncEvery int
+	// residual is the int8 reply's rounding error per payload size, carried
+	// into the next round's mean (downlink error feedback).
+	residual map[int][]float64
 }
 
 // run returns a group's run state, creating it. Caller holds the board lock.
@@ -343,6 +364,80 @@ type ddpSyncRequest struct {
 	// rank before the ring starts without the missing ones
 	// (PIPEDPEER_DDP_START_WAIT). Zero: ddpStartWait.
 	StartWait float64 `json:"start_wait,omitempty"`
+	// Manifest describes the parameters behind the opening round, so a ring
+	// whose ranks built different models stops with both described instead
+	// of a byte-count error from the accumulator.
+	Manifest *ddpManifest `json:"manifest,omitempty"`
+	// Fixed: the user chose this ring (--ddp N); never shrink it.
+	Fixed bool `json:"fixed,omitempty"`
+}
+
+// ddpManifest is one rank's view of the model it syncs.
+type ddpManifest struct {
+	Names  []string `json:"names,omitempty"`
+	Shapes [][]int  `json:"shapes"`
+	DTypes []string `json:"dtypes"`
+	Device string   `json:"device,omitempty"`
+	Host   string   `json:"host,omitempty"`
+}
+
+// values is how many numbers the manifest's tensors hold.
+func (m *ddpManifest) values() int {
+	n := 0
+	for _, sh := range m.Shapes {
+		v := 1
+		for _, d := range sh {
+			v *= d
+		}
+		n += v
+	}
+	return n
+}
+
+// who names a rank for a person: "rank 1 on gpu1 (cuda)".
+func (m *ddpManifest) who(rank int) string {
+	s := fmt.Sprintf("rank %d", rank)
+	if m.Host != "" {
+		s += " on " + m.Host
+	}
+	if m.Device != "" {
+		s += " (" + m.Device + ")"
+	}
+	return s
+}
+
+// manifestMismatch returns why two ranks' models cannot be averaged, or "".
+func manifestMismatch(a *ddpManifest, ra int, b *ddpManifest, rb int) string {
+	diff := ""
+	if len(a.Shapes) != len(b.Shapes) {
+		diff = fmt.Sprintf("%d tensors against %d", len(a.Shapes), len(b.Shapes))
+	} else {
+		for i := range a.Shapes {
+			sameShape := fmt.Sprint(a.Shapes[i]) == fmt.Sprint(b.Shapes[i])
+			sameType := i >= len(a.DTypes) || i >= len(b.DTypes) || a.DTypes[i] == b.DTypes[i]
+			if sameShape && sameType {
+				continue
+			}
+			name := fmt.Sprintf("tensor %d", i)
+			if i < len(a.Names) && a.Names[i] != "" {
+				name = a.Names[i]
+			}
+			da, db := "", ""
+			if i < len(a.DTypes) && i < len(b.DTypes) {
+				da, db = " "+a.DTypes[i], " "+b.DTypes[i]
+			}
+			diff = fmt.Sprintf("%s is %v%s against %v%s", name, a.Shapes[i], da, b.Shapes[i], db)
+			break
+		}
+	}
+	if diff == "" {
+		return ""
+	}
+	return fmt.Sprintf("the ranks built different models: %s has %d tensors (%d values), "+
+		"%s has %d tensors (%d values); first difference: %s. Every rank must build the "+
+		"same model - a script that sizes its model by device builds a different one on "+
+		"a CPU than on a GPU",
+		a.who(ra), len(a.Shapes), a.values(), b.who(rb), len(b.Shapes), b.values(), diff)
 }
 
 // ddpMode is how a request wants its payload handled.
@@ -405,6 +500,12 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	opening := req.Kind == "weights" && req.Seq == 1
 
 	s.ddp.mu.Lock()
+	if r := s.ddp.runs[req.Group]; r != nil && r.aborted != "" {
+		why := r.aborted
+		s.ddp.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{"abort": true, "error": why})
+		return
+	}
 	if r := s.ddp.runs[req.Group]; opening && r != nil && r.dropped[req.Rank] {
 		// Missed the start barrier: the ring is training without this rank,
 		// and its model is the untrained one. The shim exits on this (status
@@ -471,6 +572,12 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		if req.Sharded {
 			run.sharded = true
 		}
+		if req.Fixed {
+			run.fixed = true
+		}
+		if req.SyncEvery > 0 {
+			run.syncEvery = req.SyncEvery
+		}
 		if run.loading != nil && run.loading.rank == req.Rank {
 			run.loading = nil // the joiner loaded the model and is syncing
 		}
@@ -525,7 +632,14 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		// Folded in on arrival and the payload dropped: holding every rank's
 		// model until the last one shows up is what made the lead daemon's
 		// memory scale with the ring.
-		if !e.seen[req.Rank] {
+		if req.Manifest != nil && e.opening && !e.seen[req.Rank] {
+			if e.manifest == nil {
+				e.manifest, e.manifestRank = req.Manifest, req.Rank
+			} else if why := manifestMismatch(e.manifest, e.manifestRank, req.Manifest, req.Rank); why != "" {
+				e.err = fmt.Errorf("%s", why)
+			}
+		}
+		if !e.seen[req.Rank] && e.err == nil {
 			// Only worth doing early: ranks that duplicate work do it from
 			// the first step, and hashing every payload forever would put a
 			// pass over the model into every sync.
@@ -553,11 +667,10 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		complete = e.err != nil || liveIn(s.ddp, req.Group, e.seen) >= e.expectedCount()
 		if complete && e.err == nil && e.result == nil {
-			e.result, e.resultScales, e.err = e.acc.meanSegmented()
-			if len(e.resultScales) > 0 {
-				e.resultScale = e.resultScales[0]
-			}
-			e.acc = nil // the sum is no longer needed; let it go now
+			s.ddp.finishLocked(req.Group, e)
+		}
+		if e.err != nil {
+			s.ddp.abortLocked(req.Group, e.err.Error())
 		}
 	} else {
 		e.blobs[req.Rank] = blob
@@ -600,7 +713,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				// turned up: averaging over fewer ranks is a smaller step in the
 				// same direction, and every rank still receives the identical
 				// result, so nobody drifts.
-				if !s.completePartial(req.Group, key) {
+				if !s.completePartial(req.Group, key, req.Rank) {
 					writeJSON(w, http.StatusGatewayTimeout, map[string]string{
 						"error": "ddp sync timed out and too few ranks had arrived to " +
 							"average anything"})
@@ -639,7 +752,10 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		s.ddp.mu.Unlock()
 		if rerr != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": rerr.Error()})
+			// The round cannot be completed for anybody, so the ring is
+			// over: 409 with abort tells every rank to stop (exit 76)
+			// rather than retry or train on alone.
+			writeJSON(w, http.StatusConflict, map[string]any{"abort": true, "error": rerr.Error()})
 			return
 		}
 		body := []byte(fmt.Sprintf(
@@ -775,6 +891,7 @@ func (s *Server) handoverHolds(group, key string) bool {
 	if !busy {
 		return false
 	}
+	e.held = true
 	if time.Since(e.created) > ddpHandoverHold {
 		if !e.holdExpired {
 			e.holdExpired = true
@@ -792,12 +909,16 @@ func (s *Server) handoverHolds(group, key string) bool {
 const ddpHardTimeout = 3 * time.Minute
 
 // completePartial finishes a round with whoever has contributed, and reports
-// whether there was enough to average.
+// whether the round has an answer now (a result, or the ring's abort).
 //
 // Under the lock and idempotent: several ranks reach their deadline at about
 // the same moment, and only the first should compute the result - the others
 // must find it already there rather than averaging a second time.
-func (s *Server) completePartial(group, key string) bool {
+//
+// A later round left with only the asking rank is a ring whose every peer
+// stopped answering without anyone saying so: the run is aborted rather than
+// letting one rank train on its slice alone at one timeout per step.
+func (s *Server) completePartial(group, key string, rank int) bool {
 	s.ddp.mu.Lock()
 	defer s.ddp.mu.Unlock()
 
@@ -811,9 +932,23 @@ func (s *Server) completePartial(group, key string) bool {
 	if e.acc == nil || e.acc.count == 0 {
 		return false
 	}
-	e.result, e.resultScale, e.err = e.acc.mean()
-	e.partial = e.acc.count
-	e.acc = nil
+	if !e.opening && !e.held && e.expectedCount() >= 2 && liveIn(s.ddp, group, e.seen) == 1 && e.seen[rank] {
+		var gone []string
+		run := s.ddp.runs[group]
+		for r := 0; r < e.world; r++ {
+			if !e.seen[r] && (run == nil || !run.dropped[r]) {
+				gone = append(gone, strconv.Itoa(r))
+			}
+		}
+		e.err = fmt.Errorf("every other machine in the ring stopped answering (no sync from rank %s for %s)",
+			strings.Join(gone, ", "), time.Since(e.created).Round(time.Second))
+		e.acc = nil
+		s.ddp.abortLocked(group, e.err.Error())
+	} else {
+		count := e.acc.count
+		s.ddp.finishLocked(group, e)
+		e.partial = count
+	}
 	select {
 	case <-e.done:
 	default:
@@ -822,7 +957,46 @@ func (s *Server) completePartial(group, key string) bool {
 	if e.opening && e.err == nil {
 		s.ddp.dropMissedStart(group, e)
 	}
-	return e.err == nil
+	return true
+}
+
+// finishLocked computes a round's result from its accumulator and lets the
+// sum go. An int8 round adds the previous reply's rounding error for a
+// payload of the same size before quantising, and keeps the new one: the
+// lead's half of R1's error feedback (each rank keeps its own uplink half).
+// Every rank still receives identical bytes, so the models stay identical.
+// Caller holds the board lock.
+// ponytail: residuals keyed by payload size; two optimizers whose gradients
+// have the same element count share one. Key by optimizer if that bites.
+func (b *ddpBoard) finishLocked(group string, e *ddpEntry) {
+	var res []float64
+	if e.acc.dtype == ddpI8 {
+		r := b.run(group)
+		if r.residual == nil {
+			r.residual = map[int][]float64{}
+		}
+		n := len(e.acc.sum)
+		if res = r.residual[n]; res == nil {
+			res = make([]float64, n)
+			r.residual[n] = res
+		}
+	}
+	e.result, e.resultScales, e.err = e.acc.meanResidual(res)
+	if len(e.resultScales) > 0 {
+		e.resultScale = e.resultScales[0]
+	}
+	e.acc = nil
+}
+
+// abortLocked ends a run for good: every later sync is refused with why.
+// Caller holds the board lock.
+func (b *ddpBoard) abortLocked(group, why string) {
+	r := b.run(group)
+	if r.aborted != "" {
+		return
+	}
+	r.aborted = why
+	log.Warn().Str("group", group).Str("why", why).Msg("ddp ring aborted")
 }
 
 // ddpStartWait is how long the opening round waits for every rank. A rank's
@@ -963,8 +1137,8 @@ func rankTimes(steps map[int]float64) string {
 // Often enough that a machine which slows down mid-run is noticed within
 // seconds, rare enough that the ranks are not re-slicing their data
 // constantly - a reshare costs an epoch boundary, which is the only place it
-// can safely happen.
-var rebalanceEvery = envInt("PIPEDPEER_DDP_REBALANCE_EVERY", 20)
+// can safely happen. A var for tests.
+var rebalanceEvery = 20
 
 // rebalanceFor decides whether to tell the ring something, and returns the
 // JSON fragment to append to the reply (empty when there is nothing to say).
@@ -976,11 +1150,17 @@ func (b *ddpBoard) rebalanceFor(group string, world int) string {
 		return ""
 	}
 	r.round++
-	if rebalanceEvery <= 0 || r.round%rebalanceEvery != 0 {
+	if r.released || rebalanceEvery <= 0 || r.round%rebalanceEvery != 0 {
 		return ""
+	}
+	if frag := b.soloFor(group, r, world); frag != "" {
+		return frag
 	}
 
 	plan := planRebalance(r.reports, r.weights, world)
+	if plan.Drop >= 0 && r.fixed {
+		return "" // --ddp N: the user chose the ring; never shrink it
+	}
 	if plan.Drop >= 0 && !r.dropped[plan.Drop] {
 		r.dropped[plan.Drop] = true
 		log.Warn().Str("group", group).Int("rank", plan.Drop).Msg(plan.Why)
@@ -998,14 +1178,4 @@ func (b *ddpBoard) rebalanceFor(group string, world int) string {
 	}
 	return fmt.Sprintf(`, "weights": [%s], "why": %q`,
 		strings.Join(parts, ","), plan.Why)
-}
-
-// envInt reads a positive integer from the environment, or returns def.
-func envInt(name string, def int) int {
-	if v := os.Getenv(name); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			return n
-		}
-	}
-	return def
 }

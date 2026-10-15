@@ -60,7 +60,6 @@ if __name__ == "__main__":
 			"PIPEDPEER_DDP=1",
 			"PIPEDPEER_RANK="+rank,
 			"PIPEDPEER_WORLD_SIZE=2",
-			"PIPEDPEER_DDP_BACKEND=daemon",
 			// No sync endpoint: this is about which samples a rank reads,
 			// not about gradient exchange.
 			"PIPEDPEER_DDP_SYNC=",

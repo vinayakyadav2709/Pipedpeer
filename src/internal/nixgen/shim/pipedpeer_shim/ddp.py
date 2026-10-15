@@ -1,22 +1,81 @@
 """Transparent PyTorch DDP: batch weights, shard sampler, sync."""
 import os
 import sys
+import time
 import weakref
 
+from pipedpeer_shim import record
 from pipedpeer_shim.core import (
-    _TOKEN, _log,
+    _TOKEN, _log, _warn,
 )
+
+# C3 exit codes a rank ends with (the CLI reads them): the start barrier
+# missed, the ring aborted or its lead lost, a rank released because one
+# machine alone is faster (normal, not a failure).
+_EXIT_MISSED_START = 75
+_EXIT_ABORTED = 76
+_EXIT_RELEASED = 77
+
+# int8 gradients get one scale per block of this many values, never spanning
+# two tensors (R1 #3, the block size SparseLoCo/INTELLECT-1 use): a scale per
+# tensor lets one large value flatten the rest of a big layer to a few levels.
+_INT8_BLOCK = 4096
+
+
+def _int8_blocks(sizes, block=_INT8_BLOCK):
+    """Block lengths for int8 scales: each tensor cut into block-sized
+    pieces, the last one shorter. Empty tensors contribute nothing."""
+    out = []
+    for n in sizes:
+        n = int(n)
+        out.extend([block] * (n // block))
+        if n % block:
+            out.append(n % block)
+    return out
+
+
+def _int8_encode(flat, counts):
+    """Quantise a float32 vector to int8, one scale per block in counts.
+
+    Returns (q, scales, dequant): the bytes to send, each block's scale
+    (peak/127, or 1 for an all-zero block) and what the receiver will decode,
+    so the caller can carry flat - dequant forward as error feedback."""
+    import numpy as _np
+    if not flat.size:
+        return flat.astype(_np.int8), [], flat.astype(_np.float32)
+    starts = _np.concatenate(([0], _np.cumsum(counts)[:-1])).astype(_np.intp)
+    peak = _np.maximum.reduceat(_np.abs(flat), starts).astype(_np.float64)
+    scales = _np.where(peak > 0, peak / 127.0, 1.0)
+    per = _np.repeat(scales, counts)
+    q = _np.clip(_np.round(flat / per), -127, 127).astype(_np.int8)
+    return q, scales.tolist(), (q.astype(_np.float64) * per).astype(_np.float32)
+
+
+def _int8_decode(raw, scales, counts):
+    """The float32 values int8 bytes stand for: one scale per block when the
+    sender gave one per block, else a single scale for everything."""
+    import numpy as _np
+    vals = raw.astype(_np.float64)
+    if scales and len(scales) == len(counts):
+        vals *= _np.repeat(_np.asarray(scales, dtype=_np.float64), counts)
+    else:
+        vals *= float(scales[0]) if scales else 1.0
+    return vals.astype(_np.float32)
 
 
 def _weighted_batches(weights, base_batch, world):
-    """Each rank's per-step batch, together adding up to the ring's.
+    """Each rank's per-step batch, together adding up to the script's.
 
-    The ring processes base_batch*world samples per step however the shares
-    fall; only the split between ranks changes. Rounding is absorbed by the
-    largest rank so the total is exact - let it drift and the step counts
-    drift with it.
+    The script's batch is the ring's batch: the ranks split it by share, so a
+    step averages over the same samples one machine would have, at the
+    script's learning rate and with the script's step count (Decisions:
+    training keeps the user's maths). Every live rank takes at least one
+    sample, so a batch smaller than the ring grows to one per rank. Rounding
+    is absorbed by the largest rank so the total is exact - let it drift and
+    the step counts drift with it.
     """
-    total = max(world, int(base_batch) * world)
+    live = sum(1 for w in weights if w > 0) or world
+    total = max(live, int(base_batch))
     # A zero share is a rank that has left the ring: no batch at all.
     b = [max(1, int(round(w * total))) if w > 0 else 0 for w in weights]
     drift = total - sum(b)
@@ -63,6 +122,7 @@ class _WeightedShardSampler:
         self.shuffle = shuffle
         self.epoch = 0
         self.weights = list(weights)
+        self.base = base_batch  # the script's batch, kept for a reshare
         self._owned = None  # (epoch, indices) cache
         self.batches = _weighted_batches(weights, base_batch, world)
         self.batch = self.batches[rank]
@@ -232,12 +292,13 @@ def _parse_weights(raw, world):
 
 # ---- transparent PyTorch DDP (PIPEDPEER_DDP=1) ----
 # pipedpeer run --ddp K starts K ranks, each with PIPEDPEER_RANK /
-# PIPEDPEER_WORLD_SIZE / MASTER_ADDR / MASTER_PORT / PIPEDPEER_DDP=1 set, so
-# plain single-process training code runs data-parallel with zero changes:
-# the shim initialises the process group on first optimizer.step, averages the
-# weights once, averages gradients every step, broadcasts buffers on first
-# forward, and drives DistributedSampler epochs. Native torch DDP (the user
-# wraps the model themselves) is detected and left to its own sync.
+# PIPEDPEER_WORLD_SIZE / PIPEDPEER_DDP_SYNC (the lead daemon's sync URL) /
+# PIPEDPEER_DDP=1 set, so plain single-process training code runs
+# data-parallel with zero changes: at the first optimizer.step the ranks
+# compare their models and average the weights once, then average gradients
+# every step through the lead daemon, broadcast buffers on first forward, and
+# split the script's batch and dataset between them. Native torch DDP (the
+# user wraps the model themselves) is detected and left to its own sync.
 def _install_ddp():
     if os.environ.get("PIPEDPEER_DDP") != "1":
         return
@@ -245,7 +306,6 @@ def _install_ddp():
         import torch as _th
     except ImportError:
         return
-    import torch.distributed as _dist
 
     _NATIVE_DDP = []
     import numpy as _np_ddp
@@ -257,6 +317,10 @@ def _install_ddp():
     # Each rank's share of a step, measured by placement. Equal shares are the
     # same thing as no shares, and are treated as such.
     _WEIGHTS = _parse_weights(os.environ.get("PIPEDPEER_DDP_WEIGHTS", ""), _WORLD)
+    # --ddp N (C2): the user sized the ring, so the lead never shrinks it.
+    _FIXED = os.environ.get("PIPEDPEER_DDP_FIXED") == "1"
+    # Each rank's machine name, by rank, for messages.
+    _HOSTS = os.environ.get("PIPEDPEER_DDP_HOSTS", "").split(",")
 
     def _live_ranks(weights=None, world=None):
         """Ranks still training. _WORLD is the rank-id space: a dead rank
@@ -312,11 +376,9 @@ def _install_ddp():
     # Set when the daemon has told this rank the ring is better off without
     # it.
     _DROPPED = [False]
-    # daemon (default): every sync is one POST to the lead rank's daemon on
-    # the same port every other byte of pipedpeer traffic uses — no sockets
-    # of our own, no MASTER_PORT, nothing new to firewall. gloo/nccl remain
-    # as an escape hatch for clusters where torch's own mesh is preferable.
-    _BACKEND = os.environ.get("PIPEDPEER_DDP_BACKEND", "daemon")
+    # Every sync is one POST to the lead rank's daemon on the same port every
+    # other byte of pipedpeer traffic uses: no sockets of our own, no
+    # MASTER_PORT, nothing new to firewall (ADR-0010).
     _SYNC_URL = os.environ.get("PIPEDPEER_DDP_SYNC", "")
     _GROUP = os.environ.get("PIPEDPEER_DDP_GROUP", "ddp")
     # 1 = average gradients every step (exact DDP semantics). N>1 = local
@@ -333,10 +395,6 @@ def _install_ddp():
     # sync, and counted as sync it advised averaging every 32 steps (V4 80).
     _DDP_STATS = {"syncs": 0, "sync_sec": 0.0, "sent_bytes": 0, "recv_bytes": 0,
                   "barrier_sec": 0.0}
-    # Server-side averaging. Off with PIPEDPEER_DDP_BLACKBOARD=1, which falls
-    # back to every rank receiving every rank's payload - needed only against
-    # a daemon too old to average.
-    _REDUCE_OK = os.environ.get("PIPEDPEER_DDP_BLACKBOARD", "") != "1"
     # The start barrier: the opening weight broadcast waits this long (seconds)
     # for every rank, then the ring starts without the ranks still missing.
     try:
@@ -360,8 +418,8 @@ def _install_ddp():
     # A 10x speed-up that quietly makes the model worse is exactly the kind of
     # result this project exists to stop shipping. So the default stays exact,
     # the diagnosis is printed either way, and the user decides.
-    _SYNC_BUDGET = float(os.environ.get("PIPEDPEER_DDP_SYNC_BUDGET", "0.25"))
-    _SYNC_EVERY_MAX = int(os.environ.get("PIPEDPEER_DDP_SYNC_EVERY_MAX", "32"))
+    _SYNC_BUDGET = 0.25
+    _SYNC_EVERY_MAX = 32
     _SYNC_TUNED = [None if _SYNC_AUTO else _SYNC_EVERY]
     _WARNED_SYNC_BOUND = [False]
     # Said once. The condition holds for every step of the run, and a warning
@@ -375,9 +433,10 @@ def _install_ddp():
     # on a link where bytes are the whole cost. What quantisation drops is
     # carried forward in _ERR and added to the next step's gradient, so the
     # error is delayed rather than discarded - which is what keeps this from
-    # being a slow bias towards zero. Off by default because it is still a
-    # change to the arithmetic; PIPEDPEER_DDP_INT8=1 turns it on.
-    _INT8_GRADS = os.environ.get("PIPEDPEER_DDP_INT8", "") == "1"
+    # being a slow bias towards zero; the lead does the same for its reply.
+    # On by default (R1 #1: 8-bit with error feedback is a mild compressor
+    # that keeps per-step semantics); PIPEDPEER_DDP_INT8=0 sends fp16.
+    _INT8_GRADS = os.environ.get("PIPEDPEER_DDP_INT8", "") != "0"
     _ERR = {}
     # Compute time is measured as the interval between consecutive optimizer
     # steps minus whatever was spent syncing in it - not as the duration of
@@ -411,6 +470,9 @@ def _install_ddp():
             _log("ddp: ignoring a ring size the daemon sent as %r; keeping %d"
                  % (reply.get("world"), _WORLD))
             world = _WORLD
+        if reply.get("release") is not None:
+            _take_release(reply, w, world)
+            return
         if w and len(w) == world and world >= _WORLD:
             try:
                 w = [float(x) for x in w]
@@ -445,6 +507,32 @@ def _install_ddp():
             _log("ddp: leaving the ring — %s. This rank finishes its own work "
                  "locally; the others carry on without waiting for it."
                  % reply.get("why", "the ring is faster without this rank"))
+
+    def _take_release(reply, w, world):
+        """D2: one rank alone beats the split. Every rank takes the change at
+        the next epoch boundary (_ring_switch): the kept rank's share becomes
+        the whole dataset and it stops syncing, the others exit 77. Rank 0
+        says so in one plain line, since it is the output the user watches."""
+        try:
+            keep = int(reply["release"])
+            w = [float(x) for x in w]
+        except (TypeError, ValueError, KeyError) as e:
+            _log("ddp: ignoring a release note the daemon sent as %r (%s)" % (reply, e))
+            return
+        if len(w) != world or keep < 0 or keep >= world or sum(w) <= 0:
+            _log("ddp: ignoring a release note with shares %r for a ring of %d" % (w, world))
+            return
+        total = sum(w)
+        _PENDING[0] = {"weights": [x / total for x in w], "world": world, "release": keep}
+        if _RANK == 0:
+            who = _HOSTS[keep] if keep < len(_HOSTS) and _HOSTS[keep] else "rank %d" % keep
+            n = int(reply.get("release_ranks") or _live_ranks())
+            # Shown without -v: it changes where the run trains.
+            _warn("one machine is faster alone: %s takes about %.0f ms a step by itself "
+                  "against %.0f ms split across %d machines, so it trains on alone from "
+                  "the next epoch. To keep the split: --ddp %d"
+                  % (who, float(reply.get("solo_ms") or 0), float(reply.get("split_ms") or 0),
+                     n, n))
 
     def _mean_sync_ms():
         """What one sync has cost this rank on average, in milliseconds.
@@ -583,17 +671,19 @@ def _install_ddp():
         else:
             _log("ddp: the ring did NOT pay for itself — %.1fs of compute and "
                  "%.1fs of sync across %d ranks, against about %.1fs for THIS "
-                 "machine alone. Syncing costs more than the extra machines save.%s"
-                 % (compute, sync_total, live, alone,
-                    "" if _INT8_GRADS else
-                    " PIPEDPEER_DDP_INT8=1 halves the bytes on the wire."))
+                 "machine alone. Syncing costs more than the extra machines save."
+                 % (compute, sync_total, live, alone))
 
     import atexit as _atexit_ddp
     _atexit_ddp.register(_ddp_report)
     _SEQ = [0]
     _STEPN = {}
-    if _BACKEND == "daemon" and not _SYNC_URL:
-        _BACKEND = "gloo"  # no sync endpoint handed down; old transport
+    _WARNED_NO_SYNC = [False]
+    # When the sync now in flight started (monotonic), 0 when none is: the
+    # lead watch probes only while a rank is waiting on the lead.
+    _INFLIGHT = [0.0]
+    _WATCHING = [False]
+    _LEAD_PROBE_SEC = 8
 
     def _count_sync(sec, sent, recv):
         """Book one sync round trip. The first is the opening round, which is
@@ -604,8 +694,168 @@ def _install_ddp():
         else:
             _DDP_STATS["syncs"] += 1
             _DDP_STATS["sync_sec"] += sec
+            record.step("ddp_sync", sec, sent + recv)
         _DDP_STATS["sent_bytes"] += sent
         _DDP_STATS["recv_bytes"] += recv
+
+    def _lead_name():
+        if _HOSTS and _HOSTS[0]:
+            return _HOSTS[0]
+        import urllib.parse
+        return urllib.parse.urlparse(_SYNC_URL).hostname or "(unknown)"
+
+    def _stop(code, reason):
+        """End this rank now with a C3 code, after the one line that says why.
+
+        os._exit rather than an exception: the ring is gone, and a script's
+        own except/finally could wait on a sync that will never answer. The
+        CLI stops every other rank when it sees 76."""
+        sys.stdout.flush()
+        sys.stderr.write("pipedpeer: training stopped: %s\n" % reason)
+        sys.stderr.flush()
+        os._exit(code)
+
+    def _watch_lead():
+        """Notice a lead that vanished mid-sync within about 30 s.
+
+        A sync may legitimately wait minutes (the start barrier, a slow
+        rank), and a machine that drops off the network never closes the
+        connection, so the POST alone would sit out its whole timeout. While a
+        sync is in flight a thread asks the lead's daemon for the round's
+        status; three unanswered checks in a row end the rank (exit 76)."""
+        if _WATCHING[0]:
+            return
+        _WATCHING[0] = True
+        import threading
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+
+        def run():
+            fails = 0
+            while True:
+                time.sleep(_LEAD_PROBE_SEC)
+                since = _INFLIGHT[0]
+                if not since or time.monotonic() - since < _LEAD_PROBE_SEC:
+                    fails = 0
+                    continue
+                req = urllib.request.Request("%s?group=%s&seq=0" % (
+                    _SYNC_URL, urllib.parse.quote(_GROUP)))
+                if _TOKEN:
+                    req.add_header("X-Pipedpeer-Token", _TOKEN)
+                try:
+                    urllib.request.urlopen(req, timeout=5).close()
+                    fails = 0
+                except urllib.error.HTTPError:
+                    fails = 0  # it answered, whatever it said
+                except Exception as e:
+                    fails += 1
+                    _log("ddp: the lead machine %s did not answer a check (%s), %d of 3"
+                         % (_lead_name(), getattr(e, "reason", e), fails))
+                    if fails >= 3 and _INFLIGHT[0]:
+                        _stop(_EXIT_ABORTED, "the lead machine %s stopped answering (%s)"
+                              % (_lead_name(), getattr(e, "reason", e)))
+        threading.Thread(target=run, daemon=True, name="pipedpeer-ddp-lead").start()
+
+    def _post(req, timeout, opening=False):
+        """Send one sync to the lead daemon and return the reply body.
+
+        A refusal is reported in the daemon's own words: a bare "HTTP 400"
+        hid why the demo's 3-rank run died. 409 with abort is the ring ending
+        for every rank (C3 exit 76); 410 on the opening round is this rank
+        missing the start barrier (exit 75); no answer at all is the lead
+        lost (exit 76)."""
+        import json
+        import urllib.error
+        import urllib.request
+        _watch_lead()
+        _INFLIGHT[0] = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except Exception as re:
+                body = "(no body: %s)" % re
+            try:
+                info = json.loads(body)
+            except ValueError:
+                info = None
+            if not isinstance(info, dict):
+                info = {}
+            why = info.get("error") or body[:300]
+            if e.code == 409 and info.get("abort"):
+                _stop(_EXIT_ABORTED, why)
+            if e.code == 410 and opening:
+                # This rank missed the start rather than failed, so pipedpeer
+                # can start it again as a joiner.
+                _log("ddp: rank %d was not ready when the ring started training, and the "
+                     "ring went on without it; stopping this rank (it can join later)" % _RANK)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os._exit(_EXIT_MISSED_START)
+            raise RuntimeError("ddp sync refused by the lead daemon (HTTP %d): %s"
+                               % (e.code, why)) from None
+        except (urllib.error.URLError, OSError) as e:
+            _stop(_EXIT_ABORTED, "the lead machine %s stopped answering (%s)"
+                  % (_lead_name(), getattr(e, "reason", e)))
+        finally:
+            _INFLIGHT[0] = 0.0
+
+    def _header(kind, **extra):
+        """A sync's JSON header: who this rank is and what it measured."""
+        import json
+        h = {"group": _GROUP, "seq": _SEQ[0], "rank": _RANK, "world": _WORLD,
+             "kind": kind, "sync_every": int(_SYNC_TUNED[0] or 0),
+             "step_ms": _mean_step_ms(), "sync_ms": _mean_sync_ms(),
+             "samples": int(_BATCH_N[0]), "sharded": bool(_SHARDED_HASH[0]),
+             "fixed": _FIXED}
+        h.update(extra)
+        return json.dumps(h).encode()
+
+    def _on_reply(reply, opening):
+        """Everything a reduce reply says besides the numbers."""
+        # Adopt the group's agreed interval. Ranks measure their own link and
+        # arrive at different numbers, and averaging at different points in
+        # each rank's step sequence is not local SGD - it is ranks combining
+        # models that have taken different numbers of local steps, which
+        # shows up as a worse final loss and nothing else.
+        agreed = reply.get("sync_every", 0)
+        if agreed and agreed != _SYNC_TUNED[0]:
+            _SYNC_TUNED[0] = int(agreed)
+        ranks = int(reply.get("ranks", 0) or 0)
+        # Not for the opening round: a rank missing there missed the start
+        # barrier, and the lead's note that follows says so in its own words.
+        if ranks and ranks < _WORLD and _LAST_RANKS[0] != ranks and not opening:
+            _LAST_RANKS[0] = ranks
+            _log("ddp: this step averaged %d of %d ranks — the others did not answer "
+                 "in time. The run continues on the ranks that did; a smaller average "
+                 "is a smaller step in the same direction, and every rank applies the "
+                 "identical result, so nothing drifts." % (ranks, _WORLD))
+        if (_WEIGHTS is not None and not _WEIGHTS_APPLIED[0]
+                and not _WARNED_WEIGHTS_UNUSED[0]):
+            _WARNED_WEIGHTS_UNUSED[0] = True
+            _log("ddp: this run measured unequal shares (%s) but the script "
+                 "splits its own data, so they were not applied - every rank "
+                 "took an equal slice and the ring runs at the slowest rank's "
+                 "pace. To use them: give each rank weights[rank] of the data "
+                 "instead of X[rank::world]."
+                 % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
+        _apply_rebalance(reply)
+        if reply.get("same_work") and not _WARNED_SAME_WORK[0]:
+            _WARNED_SAME_WORK[0] = True
+            _log("ddp: every rank produced the SAME gradients, so every rank is "
+                 "training on the same data. Averaging identical gradients gives "
+                 "exactly the single-process result, so this run is correct and "
+                 "pure overhead - the extra machines are doing the same work "
+                 "twice.\n"
+                 "    Sharding is automatic for a DataLoader. A script that slices "
+                 "its tensors by hand has to do it itself, e.g.\n"
+                 "      import os\n"
+                 "      r = int(os.environ.get('PIPEDPEER_RANK', 0))\n"
+                 "      w = int(os.environ.get('PIPEDPEER_WORLD_SIZE', 1))\n"
+                 "      X, y = X[r::w], y[r::w]")
 
     def _barrier_progress():
         """Say what this rank is waiting for while the start barrier holds it:
@@ -614,7 +864,7 @@ def _install_ddp():
         import threading
         import time as _tw
         done = threading.Event()
-        hosts = os.environ.get("PIPEDPEER_DDP_HOSTS", "").split(",")
+        hosts = _HOSTS
 
         def missing():
             import json
@@ -672,8 +922,7 @@ def _install_ddp():
             headers={"Content-Type": "application/vnd.pipedpeer.ddp"})
         if _TOKEN:
             req.add_header("X-Pipedpeer-Token", _TOKEN)
-        with urllib.request.urlopen(req, timeout=240) as resp:
-            data = resp.read()
+        data = _post(req, 240)
         nl = data.find(b"\n")
         if nl < 0:
             raise RuntimeError("ddp sync returned no header: %r" % data[:200])
@@ -715,27 +964,24 @@ def _install_ddp():
             off += size
         return out
 
-    def _daemon_reduce(arrs, wire_dtype, kind="grads"):
+    def _daemon_reduce(arrs, wire_dtype, kind="grads", manifest=None):
         """One averaged allreduce through the daemon, in reduce mode."""
         import json
         import struct
-        import time as _t
-        import urllib.error
         import urllib.request
         flat, shapes, sizes = _pack(arrs)
         flat = _np_ddp.ascontiguousarray(flat.astype(wire_dtype, copy=False))
-        _t0 = _t.monotonic()
+        _t0 = time.monotonic()
         _SEQ[0] += 1
         opening = kind == "weights" and _SEQ[0] == 1
-        header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
-                             "world": _WORLD, "dtype": wire_dtype.name,
-                             "count": int(flat.size), "kind": kind,
-                             "start_wait": _START_WAIT,
-                             "sync_every": int(_SYNC_TUNED[0] or 0),
-                             "step_ms": _mean_step_ms(),
-                             "sync_ms": _mean_sync_ms(),
-                             "samples": int(_BATCH_N[0]),
-                             "sharded": bool(_SHARDED_HASH[0])}).encode()
+        extra = {"dtype": wire_dtype.name, "count": int(flat.size),
+                 "start_wait": _START_WAIT}
+        if opening and manifest is not None:
+            # The lead compares every rank's parameter list before averaging
+            # anything: ranks that built different models stop together with
+            # both described, instead of a byte count from the accumulator.
+            extra["manifest"] = manifest
+        header = _header(kind, **extra)
         payload = flat.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -747,90 +993,38 @@ def _install_ddp():
         try:
             # The opening round is the start barrier and may wait the whole
             # start wait for a rank whose closure is still arriving.
-            with urllib.request.urlopen(req, timeout=(_START_WAIT + 60 if opening else 240)) as resp:
-                data = resp.read()
-        except urllib.error.HTTPError as e:
-            if e.code != 410 or not opening:
-                raise
-            # Exit status 75 (EX_TEMPFAIL) tells pipedpeer this rank missed the
-            # start rather than failed, so it can be started again as a joiner.
-            _log("ddp: rank %d was not ready when the ring started training, and the "
-                 "ring went on without it; stopping this rank (it can join later)" % _RANK)
-            sys.stdout.flush()
-            sys.stderr.flush()
-            os._exit(75)
+            data = _post(req, _START_WAIT + 60 if opening else 240, opening=opening)
         finally:
             if waiting is not None:
                 waiting.set()
         nl = data.find(b"\n")
         if nl < 0:
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
-        # Adopt the group's agreed interval. Ranks measure their own link and
-        # arrive at different numbers, and averaging at different points in
-        # each rank's step sequence is not local SGD - it is ranks combining
-        # models that have taken different numbers of local steps, which shows
-        # up as a worse final loss and nothing else.
-        _reply = json.loads(data[:nl])
-        agreed = _reply.get("sync_every", 0)
-        if agreed and agreed != _SYNC_TUNED[0]:
-            _SYNC_TUNED[0] = int(agreed)
-        _ranks = int(_reply.get("ranks", 0) or 0)
-        # Not for the opening round: a rank missing there missed the start
-        # barrier, and the lead's note that follows says so in its own words.
-        if _ranks and _ranks < _WORLD and _LAST_RANKS[0] != _ranks and not opening:
-            _LAST_RANKS[0] = _ranks
-            _log("ddp: this step averaged %d of %d ranks — the others did not answer "
-                 "in time. The run continues on the ranks that did; a smaller average "
-                 "is a smaller step in the same direction, and every rank applies the "
-                 "identical result, so nothing drifts." % (_ranks, _WORLD))
-        if (_WEIGHTS is not None and not _WEIGHTS_APPLIED[0]
-                and not _WARNED_WEIGHTS_UNUSED[0]):
-            _WARNED_WEIGHTS_UNUSED[0] = True
-            _log("ddp: this run measured unequal shares (%s) but the script "
-                 "splits its own data, so they were not applied - every rank "
-                 "took an equal slice and the ring runs at the slowest rank's "
-                 "pace. To use them: give each rank weights[rank] of the data "
-                 "instead of X[rank::world]."
-                 % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
-        _apply_rebalance(_reply)
-        if _reply.get("same_work") and not _WARNED_SAME_WORK[0]:
-            _WARNED_SAME_WORK[0] = True
-            _log("ddp: every rank produced the SAME gradients, so every rank is "
-                 "training on the same data. Averaging identical gradients gives "
-                 "exactly the single-process result, so this run is correct and "
-                 "pure overhead - the extra machines are doing the same work "
-                 "twice.\n"
-                 "    Sharding is automatic for a DataLoader. A script that slices "
-                 "its tensors by hand has to do it itself, e.g.\n"
-                 "      import os\n"
-                 "      r = int(os.environ.get('PIPEDPEER_RANK', 0))\n"
-                 "      w = int(os.environ.get('PIPEDPEER_WORLD_SIZE', 1))\n"
-                 "      X, y = X[r::w], y[r::w]")
+        _on_reply(json.loads(data[:nl]), opening)
         rest = data[nl + 1:]
         n = struct.unpack(">I", rest[:4])[0]
         mean = _np_ddp.frombuffer(rest[4:4 + n], dtype=wire_dtype)
-        _count_sync(_t.monotonic() - _t0, len(body), len(data))
+        _count_sync(time.monotonic() - _t0, len(body), len(data))
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
     def _daemon_reduce_int8(arrs, key):
         """Average gradients as signed bytes, carrying the rounding error.
 
-        Each rank scales its own values into [-127, 127] and sends the scale
-        in the header; the daemon decodes, sums in float64 and returns the
-        mean the same way. Every rank gets identical bytes back, so quantising
-        the reply adds noise to the update without letting the ranks drift
-        apart - they still hold exactly the same model, which is the property
-        that matters.
+        Each rank scales its values into [-127, 127], one scale per block of
+        _INT8_BLOCK values, and sends the scales in the header; the daemon
+        decodes, sums in float64 and returns the mean the same way. Every
+        rank gets identical bytes back, so the ranks hold exactly the same
+        model, which is the property that matters.
 
         What rounding drops is kept in _ERR and added to the next step's
-        gradient. Without that, small gradients round to zero every step and
-        never move the model at all; with it they accumulate until they are
-        large enough to survive a round, which is the standard error-feedback
-        trick and the reason this is usable rather than merely smaller.
+        gradient; the lead keeps its reply's rounding the same way. Without
+        that, small gradients round to zero every step and never move the
+        model at all; with it they accumulate until they are large enough to
+        survive a round - the standard error-feedback trick, and the reason
+        this is usable rather than merely smaller.
         """
         import json
         import struct
-        import time as _t
         import urllib.request
 
         flat, shapes, sizes = _pack(arrs)
@@ -838,41 +1032,16 @@ def _install_ddp():
         prev = _ERR.get(key)
         if prev is not None and prev.shape == flat.shape:
             flat += prev
-
-        # A scale per tensor, not one for the model. Layers differ in gradient
-        # magnitude by an order of magnitude or more, so a single scale lets
-        # the largest set the step size for every other: measured on the demo,
-        # hidden layers near 1e-2 alongside an output layer near 3e-1 were left
-        # with four quantisation levels between them, and the final loss went
-        # from 0.087 to 0.127.
-        q = _np_ddp.empty(flat.size, dtype="int8")
-        dequant = _np_ddp.empty(flat.size, dtype="float32")
-        scales = []
-        off = 0
-        for n in sizes:
-            seg = flat[off:off + n]
-            peak = float(_np_ddp.abs(seg).max()) if n else 0.0
-            sc = peak / 127.0 if peak > 0 else 1.0
-            scales.append(sc)
-            qs = _np_ddp.clip(_np_ddp.round(seg / sc), -127, 127).astype("int8")
-            q[off:off + n] = qs
-            dequant[off:off + n] = qs.astype("float32") * sc
-            off += n
-
-        # Whatever quantisation lost, minus nothing: carried to the next step.
+        counts = _int8_blocks(sizes)
+        q, scales, dequant = _int8_encode(flat, counts)
+        # Whatever quantisation lost: carried to the next step.
         _ERR[key] = flat - dequant
 
-        _t0 = _t.monotonic()
+        _t0 = time.monotonic()
         _SEQ[0] += 1
-        header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
-                             "world": _WORLD, "dtype": "int8", "kind": "grads",
-                             "count": int(q.size), "scale": scales[0],
-                             "scales": scales, "counts": [int(n) for n in sizes],
-                             "sync_every": int(_SYNC_TUNED[0] or 0),
-                             "step_ms": _mean_step_ms(),
-                             "sync_ms": _mean_sync_ms(),
-                             "samples": int(_BATCH_N[0]),
-                             "sharded": bool(_SHARDED_HASH[0])}).encode()
+        header = _header("grads", dtype="int8", count=int(q.size),
+                         scale=scales[0] if scales else 1.0,
+                         scales=scales, counts=counts)
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -880,46 +1049,21 @@ def _install_ddp():
             headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
         if _TOKEN:
             req.add_header("X-Pipedpeer-Token", _TOKEN)
-        with urllib.request.urlopen(req, timeout=240) as resp:
-            data = resp.read()
+        data = _post(req, 240)
         nl = data.find(b"\n")
         if nl < 0:
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
         reply = json.loads(data[:nl])
-        agreed = reply.get("sync_every", 0)
-        if agreed and agreed != _SYNC_TUNED[0]:
-            _SYNC_TUNED[0] = int(agreed)
-        if (_WEIGHTS is not None and not _WEIGHTS_APPLIED[0]
-                and not _WARNED_WEIGHTS_UNUSED[0]):
-            _WARNED_WEIGHTS_UNUSED[0] = True
-            _log("ddp: this run measured unequal shares (%s) but the script "
-                 "splits its own data, so they were not applied - every rank "
-                 "took an equal slice and the ring runs at the slowest rank's "
-                 "pace. To use them: give each rank weights[rank] of the data "
-                 "instead of X[rank::world]."
-                 % ", ".join("%.0f%%" % (100 * w) for w in _WEIGHTS))
-        _apply_rebalance(reply)
-        if reply.get("same_work") and not _WARNED_SAME_WORK[0]:
-            _WARNED_SAME_WORK[0] = True
-            _log("ddp: every rank produced the SAME gradients — every rank is "
-                 "training on the same data, so this run is correct and pure "
-                 "overhead. Shard it: X, y = X[rank::world], y[rank::world]")
+        _on_reply(reply, False)
         rest = data[nl + 1:]
         n = struct.unpack(">I", rest[:4])[0]
-        raw_mean = _np_ddp.frombuffer(rest[4:4 + n], dtype="int8").astype("float32")
-        out_scales = reply.get("scales") or [float(reply.get("scale", 1.0)) or 1.0]
-        if len(out_scales) == len(sizes):
-            mean = _np_ddp.empty(raw_mean.size, dtype="float32")
-            off = 0
-            for i, seg_n in enumerate(sizes):
-                mean[off:off + seg_n] = raw_mean[off:off + seg_n] * out_scales[i]
-                off += seg_n
-        else:
-            mean = raw_mean * out_scales[0]
-        _count_sync(_t.monotonic() - _t0, len(body), len(data))
+        raw_mean = _np_ddp.frombuffer(rest[4:4 + n], dtype="int8")
+        mean = _int8_decode(raw_mean, reply.get("scales") or [float(reply.get("scale", 1.0)) or 1.0],
+                            counts)
+        _count_sync(time.monotonic() - _t0, len(body), len(data))
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
-    def _daemon_allreduce(tensors, half=None, kind="grads"):
+    def _daemon_allreduce(tensors, half=None, kind="grads", manifest=None):
         """Average tensors across ranks in place, through the daemon channel.
 
         Gradients cross the wire as float16 by default. This is the dominant
@@ -931,7 +1075,9 @@ def _install_ddp():
         PIPEDPEER_DDP_FP32=1 turns it off; weight broadcasts never use it.
         """
         import pickle
-        if _DROPPED[0]:
+        if _DROPPED[0] or _live_ranks() <= 1:
+            # A ring of one (the others released, or every other share
+            # gone) has nobody to average with: it stops syncing entirely.
             # Told to leave. Posting anyway would have the others average a
             # rank the daemon has stopped expecting; not posting is what lets
             # them complete without waiting. This rank keeps training on its
@@ -951,15 +1097,15 @@ def _install_ddp():
         # gradient. Anything mixed falls back to the blackboard, where the
         # daemon does not need to understand what it is holding.
         wire_dtypes = {a.dtype for a in wire}
-        if _REDUCE_OK and _INT8_GRADS and kind == "grads" and len(wire_dtypes) == 1:
+        if _INT8_GRADS and kind == "grads" and len(wire_dtypes) == 1:
             means = _daemon_reduce_int8(arrs, key=id(tensors[0]))
             for i, t in enumerate(tensors):
                 t.data.copy_(_th.from_numpy(
                     _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
             return
-        if _REDUCE_OK and len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
+        if len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
                 "float16", "float32", "float64"):
-            means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind)
+            means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind, manifest)
             for i, t in enumerate(tensors):
                 t.data.copy_(_th.from_numpy(
                     _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
@@ -1008,7 +1154,7 @@ def _install_ddp():
             return
         mine = _buffer_list()
         if len(mine) != len(theirs) or any(a.shape != b.shape for a, b in zip(mine, theirs)):
-            _log("ddp: the ring's %d buffer(s) do not match this rank's %d; keeping "
+            _warn("ddp: the ring's %d buffer(s) do not match this rank's %d; keeping "
                  "this rank's own (BatchNorm running stats may differ)"
                  % (len(theirs), len(mine)))
             return
@@ -1026,39 +1172,34 @@ def _install_ddp():
     _SHARDED = {}
     import itertools
 
-    def _init_group():
-        backend = os.environ.get("PIPEDPEER_DDP_BACKEND", "gloo")
-        if backend == "nccl" and not _th.cuda.is_available():
-            backend = "gloo"
-        # When the master is a Tailscale address (CGNAT 100.64.0.0/10), the
-        # ranks can only reach each other through the tunnel — but gloo
-        # advertises the default interface's LAN address, which the other
-        # city cannot dial, so the mesh never forms. Pin gloo (and tensor
-        # pipes) to the tunnel interface.
-        master = os.environ.get("MASTER_ADDR", "")
-        try:
-            first, second = (int(x) for x in master.split(".")[:2])
-            is_ts = first == 100 and 64 <= second <= 127
-        except Exception:
-            is_ts = False
-        if is_ts:
-            # if_nameindex works without /sys, which the sandbox doesn't mount.
+    # The modules a step's forward pass starts from (the first module the
+    # pre-hook sees each step), for naming parameters in the manifest.
+    _ROOTS = weakref.WeakSet()
+
+    def _manifest(params):
+        """What the lead compares at the opening barrier: every parameter's
+        name, shape and dtype, and where this rank runs."""
+        names = {}
+        for m in list(_ROOTS):
             try:
-                import socket as _sk
-                names = [n for _, n in _sk.if_nameindex()]
-            except Exception:
-                names = []
-            if "tailscale0" in names:
-                os.environ.setdefault("GLOO_SOCKET_IFNAME", "tailscale0")
-                os.environ.setdefault("TP_SOCKET_IFNAME", "tailscale0")
-        # Bound the rendezvous: torch's default is 30 minutes, which turns a
-        # firewalled master port into a silent infinite hang. Fail in minutes
-        # with a traceback instead; PIPEDPEER_DDP_TIMEOUT overrides (seconds).
-        from datetime import timedelta
-        _timeout = timedelta(seconds=int(os.environ.get("PIPEDPEER_DDP_TIMEOUT", "120")))
-        _dist.init_process_group(backend=backend, init_method="env://",
-                                 rank=_RANK, world_size=_WORLD, timeout=_timeout)
-        _log("ddp process group ready (rank %d/%d, %s)" % (_RANK, _WORLD, backend))
+                for name, p in m.named_parameters():
+                    names.setdefault(id(p), name)
+            except Exception as e:
+                _log("ddp: cannot name the parameters of %s (%s)" % (type(m).__name__, e))
+        device = ""
+        if params:
+            dev = params[0].device
+            device = dev.type
+            if dev.type == "cuda":
+                try:
+                    device = "cuda, " + _th.cuda.get_device_name(dev)
+                except Exception as e:
+                    _log("ddp: cannot name this rank's GPU (%s)" % e)
+        return {"names": [names.get(id(p), "") for p in params],
+                "shapes": [list(p.shape) for p in params],
+                "dtypes": [str(p.dtype).replace("torch.", "") for p in params],
+                "device": device,
+                "host": _HOSTS[_RANK] if _RANK < len(_HOSTS) else ""}
 
     # Patch at Optimizer.__init__ instead of Optimizer.step: the concrete
     # optimizers (SGD, Adam, ...) override step on their own classes, so a
@@ -1079,64 +1220,59 @@ def _install_ddp():
                 # trained: no update, no sync, no step counted.
                 _BATCH_N[0] = 0
                 return None
-            if _BACKEND == "daemon":
-                n = _STEPN.get(id(self), 0)
-                _STEPN[id(self)] = n + 1
-                params = [p for g in self.param_groups for p in g["params"]]
-                if self not in _STEPPED:
-                    _STEPPED.add(self)
-                    # The opening weight broadcast, not a gradient: every rank
-                    # starts from the same seed, so these are identical by
-                    # construction and must not be read as duplicated work.
-                    _daemon_allreduce([p.data for p in params], half=False, kind="weights")
-                    _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
-                         % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
-                import time as _t_step
-                _now = _t_step.monotonic()
-                if _STEP_MARK[0] is not None:
-                    _elapsed = _now - _STEP_MARK[0]
-                    _synced = _DDP_STATS["sync_sec"] - _STEP_MARK[1]
-                    if _elapsed > _synced >= 0:
-                        _STEP_SEC[0] += _elapsed - _synced
-                        _STEP_SEC[1] += 1
-                        _push_window(_STEP_RECENT, _elapsed - _synced, _STEP_WINDOW)
-                _STEP_MARK[0], _STEP_MARK[1] = _now, _DDP_STATS["sync_sec"]
-
-                every = _tuned_sync_every()
-                try:
-                    if every == 1:
-                        grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
-                                 for p in params if p.grad is not None]
-                        if grads:
-                            _daemon_allreduce(grads)
-                        return _orig_step(*sa, **skw)
-                    out = _orig_step(*sa, **skw)
-                    if (n + 1) % every == 0:
-                        _daemon_allreduce([p.data for p in params], kind="weights")
-                    return out
-                finally:
-                    # This step's gradient has been sent with the batch behind
-                    # it; the next forward pass records its own. Left set, the
-                    # first batch of the run would be reported for every step
-                    # and a short final batch never seen.
-                    _BATCH_N[0] = 0
-            if not _dist.is_initialized():
-                _init_group()
+            if not _SYNC_URL:
+                if not _WARNED_NO_SYNC[0]:
+                    _WARNED_NO_SYNC[0] = True
+                    _warn("ddp: no sync endpoint was handed to rank %d, so it trains its "
+                          "own slice without averaging with the others" % _RANK)
+                return _orig_step(*sa, **skw)
+            if _live_ranks() <= 1:
+                # Released down to this rank, or every other share gone: a
+                # ring of one trains like the script alone, syncing nothing.
+                return _orig_step(*sa, **skw)
+            n = _STEPN.get(id(self), 0)
+            _STEPN[id(self)] = n + 1
+            params = [p for g in self.param_groups for p in g["params"]]
             if self not in _STEPPED:
                 _STEPPED.add(self)
-                for g in self.param_groups:
-                    for p in g["params"]:
-                        _dist.all_reduce(p.data, op=_dist.ReduceOp.SUM)
-                        p.data.div_(_WORLD)
-            for g in self.param_groups:
-                for p in g["params"]:
-                    if p.grad is None:
-                        continue
-                    if p.grad.is_sparse:
-                        p.grad = p.grad.coalesce().to_dense()  # ponytail: dense reduce; sparse values differ per rank
-                    _dist.all_reduce(p.grad, op=_dist.ReduceOp.SUM)
-                    p.grad.div_(_WORLD)
-            return _orig_step(*sa, **skw)
+                # The opening weight broadcast, not a gradient: every rank
+                # starts from the same seed, so these are identical by
+                # construction and must not be read as duplicated work.
+                _daemon_allreduce([p.data for p in params], half=False, kind="weights",
+                                  manifest=_manifest(params))
+                _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
+                     % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
+            _now = time.monotonic()
+            if _STEP_MARK[0] is not None:
+                _elapsed = _now - _STEP_MARK[0]
+                _synced = _DDP_STATS["sync_sec"] - _STEP_MARK[1]
+                if _elapsed > _synced >= 0:
+                    _STEP_SEC[0] += _elapsed - _synced
+                    _STEP_SEC[1] += 1
+                    _push_window(_STEP_RECENT, _elapsed - _synced, _STEP_WINDOW)
+            _STEP_MARK[0], _STEP_MARK[1] = _now, _DDP_STATS["sync_sec"]
+
+            every = _tuned_sync_every()
+            try:
+                if every == 1:
+                    grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
+                             for p in params if p.grad is not None]
+                    if grads:
+                        _daemon_allreduce(grads)
+                    return _orig_step(*sa, **skw)
+                out = _orig_step(*sa, **skw)
+                if (n + 1) % every == 0:
+                    # Weights average at full width: a rounding difference in
+                    # a weight compounds over the run instead of averaging
+                    # out as a gradient's does (R1 #2).
+                    _daemon_allreduce([p.data for p in params], half=False, kind="weights")
+                return out
+            finally:
+                # This step's gradient has been sent with the batch behind
+                # it; the next forward pass records its own. Left set, the
+                # first batch of the run would be reported for every step
+                # and a short final batch never seen.
+                _BATCH_N[0] = 0
 
         # A bound method, as the optimizer's own step is: an LR scheduler
         # wraps opt.step through its __func__, and a plain function made
@@ -1145,22 +1281,16 @@ def _install_ddp():
         self.step = _types.MethodType(_step, self)
 
     def _forward(self, *args, **kw):
-        if _WORLD > 1 and not _NATIVE_DDP and not _CATCHUP[0] and self not in _FWD:
-            if _BACKEND == "daemon":
-                # Only sync once training is underway (mirrors the gloo
-                # branch, which waits for the process group): the optimizer's
-                # first step is the rendezvous.
-                if _STEPPED:
-                    _FWD.add(self)
-                    bufs = [b for b in self._buffers.values()
-                            if b is not None and b.is_floating_point() and b.numel()]
-                    if bufs:
-                        _daemon_broadcast(bufs)
-            elif _dist.is_initialized():
+        if (_WORLD > 1 and _SYNC_URL and not _NATIVE_DDP and not _CATCHUP[0]
+                and self not in _FWD and _live_ranks() > 1):
+            # Only sync once training is underway: the optimizer's first
+            # step is the rendezvous.
+            if _STEPPED:
                 _FWD.add(self)
-                for buf in self._buffers.values():
-                    if buf is not None and buf.is_floating_point() and buf.numel():
-                        _dist.broadcast(buf, src=0)
+                bufs = [b for b in self._buffers.values()
+                        if b is not None and b.is_floating_point() and b.numel()]
+                if bufs:
+                    _daemon_broadcast(bufs)
         return _ORIG_FWD(self, *args, **kw)
 
     def _shard(self):
@@ -1342,6 +1472,18 @@ def _install_ddp():
         p, _PENDING[0] = _PENDING[0], None
         world = int(p.get("world") or _WORLD)
         w = p.get("weights")
+        if p.get("release") is not None and p["release"] != _RANK:
+            _log("ddp: rank %d released at this epoch: rank %s trains on alone"
+                 % (_RANK, p["release"]))
+            import atexit
+            try:
+                # The receipt and the ring's report, which os._exit would skip.
+                atexit._run_exitfuncs()
+            except Exception as e:
+                _log("ddp: exit handlers failed while releasing rank %d (%s)" % (_RANK, e))
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(_EXIT_RELEASED)
         if world > _WORLD:
             if p.get("from") == _RANK and p.get("join") is not None:
                 try:
@@ -1548,8 +1690,7 @@ def _install_ddp():
                 bs = getattr(self, "batch_sampler", None)
                 try:
                     reshared = _WeightedShardSampler(
-                        sampler.n, new, _RANK, sampler.shuffle,
-                        sum(sampler.batches) // len(sampler.batches), _WORLD)
+                        sampler.n, new, _RANK, sampler.shuffle, sampler.base, _WORLD)
                 except Exception as e:
                     sampler.gen = _RING_GEN[0]
                     _log("ddp: cannot take the ring's new shares (%s); keeping "
@@ -1596,6 +1737,7 @@ def _install_ddp():
             _BUF_MODS.append(weakref.ref(module))
         if _BATCH_N[0] or _CATCHUP[0]:
             return
+        _ROOTS.add(module)
         for a in args:
             if hasattr(a, "shape") and getattr(a, "ndim", 0) >= 1:
                 try:
@@ -1607,7 +1749,7 @@ def _install_ddp():
     try:
         _th.nn.modules.module.register_module_forward_pre_hook(_batch_pre_hook)
     except Exception as e:
-        _log("ddp: cannot observe batch sizes (%s); gradients will be averaged "
+        _warn("ddp: cannot observe batch sizes (%s); gradients will be averaged "
              "as equals, which is only right when the batches are" % e)
 
     _ORIG_DDP = _th.nn.parallel.DistributedDataParallel.__init__
