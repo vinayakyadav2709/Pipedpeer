@@ -1,6 +1,9 @@
 package daemonapi
 
 import (
+	"bytes"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -138,5 +141,44 @@ func TestAForwardedChunkNeverReturnsToItsForwarder(t *testing.T) {
 	}
 	if n := s2Hits.Load(); n != 1 {
 		t.Fatalf("peer received %d pool/map requests, want 1", n)
+	}
+}
+
+// TestAPartSendsItsOwnRequiredMem: a part carries the shim's per-node estimate
+// over its own items (2 x (globals + callable + largest item)), not the whole
+// chunk's figure, which here is set by a 1 MB item the part does not hold.
+func TestAPartSendsItsOwnRequiredMem(t *testing.T) {
+	got := make(chan int64, 1)
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var hdr struct {
+			RequiredMem int64 `json:"required_mem"`
+		}
+		nl := bytes.IndexByte(body, '\n')
+		if nl < 0 || json.Unmarshal(body[:nl], &hdr) != nil {
+			t.Errorf("bad frames header: %q", body)
+		}
+		got <- hdr.RequiredMem
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer peer.Close()
+
+	whole := int64(2 * (10 + 20 + 1<<20)) // the chunk's estimate, set by its 1 MB item
+	part := &chunk{
+		frames: true, globals: make([]byte, 10), pickledFunc: strings.Repeat("f", 20),
+		items:       []json.RawMessage{make([]byte, 100), make([]byte, 300)},
+		requiredMem: whole,
+	}
+	pm := New("node-" + strings.Repeat("k", 8)).pool
+	_, _, _ = pm.runRemote(strings.TrimPrefix(peer.URL, "http://"), "/nix/store/fake", part, 0)
+	if mem := <-got; mem != 2*(10+20+300) {
+		t.Fatalf("part sent required_mem %d, want %d (its own share, not the chunk's %d)", mem, 2*(10+20+300), whole)
+	}
+
+	// Compressed items are not their real size: the chunk's figure stands.
+	part.itemsZlib = true
+	_, _, _ = pm.runRemote(strings.TrimPrefix(peer.URL, "http://"), "/nix/store/fake", part, 0)
+	if mem := <-got; mem != whole {
+		t.Fatalf("zlib part sent required_mem %d, want the chunk's %d", mem, whole)
 	}
 }

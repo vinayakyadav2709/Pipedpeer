@@ -1433,6 +1433,23 @@ func (pm *poolManager) dropWorker(storePath string, w *poolWorker) {
 // it tries, before it runs locally. A variable so tests can shorten it.
 var remotePartBudget = 5 * time.Minute
 
+// partMem is the required_mem a part sends: the shim's per-node estimate
+// (transfer.py _pool_required: 2 x (globals + callable + largest item)) taken
+// over this part's own items, never more than the chunk's. Sending the whole
+// chunk's figure made a peer refuse a part sized by items it never received.
+// Compressed or out-of-band items are not their real size, so those parts keep
+// the chunk's figure.
+func (ch *chunk) partMem() int64 {
+	if ch.requiredMem <= 0 || len(ch.items) == 0 || ch.itemsZlib || ch.oob {
+		return ch.requiredMem
+	}
+	big := 0
+	for _, it := range ch.items {
+		big = max(big, len(it))
+	}
+	return min(ch.requiredMem, 2*int64(len(ch.globals)+len(ch.pickledFunc)+big))
+}
+
 // runRemote posts a part to one peer and waits up to timeout for its results.
 // computeSec is the peer's own account of its compute time (its receipt), 0
 // when it sent none.
@@ -1444,7 +1461,7 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 		hdr, _ := json.Marshal(map[string]any{
 			"func_src": ch.funcSrc, "func_name": ch.funcName, "func": ch.pickledFunc,
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
-			"required_mem": ch.requiredMem, "no_fanout": true,
+			"required_mem": ch.partMem(), "no_fanout": true,
 			"cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys, "chunk_dir": ch.chunkDir,
 			"items_zlib": ch.itemsZlib, "fn_fp": ch.fnFP, "oob": ch.oob,
 		})
