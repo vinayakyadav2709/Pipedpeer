@@ -192,7 +192,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
 
   <div class="auth" id="auth">
     <p>This cluster has a shared secret. Paste it to view the page — it stays in this browser only.<br>
-       <span class="dim">Show it on a cluster machine with <code>pipedpeer auth show</code>.</span></p>
+       <span class="dim">Or run <code>pipedpeer ui</code> on a cluster machine: it opens this page with the secret filled in.</span></p>
     <form id="authForm"><input id="token" type="password" autocomplete="off" placeholder="cluster secret" aria-label="cluster secret">
       <button type="submit">Use</button></form>
   </div>
@@ -338,7 +338,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
       if (r.status === 401) {
         store.del("pp-token");
         $("auth").style.display = "block";
-        setLive("down", "secret required");
+        setLive("down", tok ? "that secret was not accepted" : "secret required");
         return; // resumes when the form is submitted
       }
       if (!r.ok) throw new Error(r.status + " " + r.statusText);
@@ -478,8 +478,9 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     const h = `<h3>Detailed steps</h3>`;
     if (rec === "loading") return h + `<p class="dim">Loading…</p>`;
     if (!rec || rec === "none") return h + `<p class="dim">No detailed steps were recorded for this run.</p>`;
+    const names = pickf(rec, "Names", "names") || {}; // node id -> hostname
     const list = (pickf(rec, "Steps", "steps") || []).map((s) => ({
-      machine: s.machine || s.node || "this machine", chunk: s.chunk == null ? -1 : s.chunk,
+      machine: names[s.machine || s.node] || s.machine || s.node || "this machine", chunk: s.chunk == null ? -1 : s.chunk,
       name: s.step || s.name || "?", dur: (s.dur_ns || 0) / 1e6,
     }));
     if (!list.length) return h + `<p class="dim">The record has no steps.</p>`;

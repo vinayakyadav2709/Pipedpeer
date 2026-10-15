@@ -310,8 +310,8 @@ func CheckRemoteAcceptance(host string, port int, targetID, jobName, submitterNo
 	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, fmt.Errorf("remote daemon at %s refused the request: HTTP %d. "+
-			"This node's token does not match that daemon's; set the same one on "+
-			"both with `pipedpeer auth set`", url, resp.StatusCode)
+			"This node's token does not match that daemon's; join its cluster: "+
+			"`pipedpeer invite` there, then the printed `pipedpeer connect <code>` here", url, resp.StatusCode)
 	}
 
 	var out AcceptResponse
