@@ -353,3 +353,13 @@ def test_syncs_land_on_the_epoch_end():
         n += h
         ends.append(n)
     assert 29 in ends and 58 in ends and 87 in ends
+
+
+@pytest.mark.parametrize("env,overlap,want", [
+    (None, False, "auto"), ("", False, "auto"),     # --ddp-sync unset
+    ("exact", False, "exact"), (" FAST ", False, "fast"),
+    ("", True, "exact"),                            # overlap never switches
+    ("fast", True, "fast"),
+])
+def test_only_an_unset_mode_lets_the_lead_switch_to_diloco(env, overlap, want):
+    assert ddp._sync_mode(env, overlap) == want

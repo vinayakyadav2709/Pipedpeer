@@ -256,6 +256,17 @@ _DILOCO_REF_WINDOW = 10
 _DILOCO_TIGHTEN = 0.1
 
 
+def _sync_mode(env, overlap):
+    """The rank's sync mode from PIPEDPEER_DDP_SYNC_MODE: "fast" or "exact"
+    when the user named one with --ddp-sync, else "auto" (U32): exact until
+    the lead measures DiLoCo faster and says so. Never "auto" with the opt-in
+    overlap, whose step-late gradient a mid-run switch would strand."""
+    mode = (env or "").strip().lower()
+    if mode in ("fast", "exact"):
+        return mode
+    return "exact" if overlap else "auto"
+
+
 def _diloco_warmup(total):
     """Exact-sync steps before local training: a tenth of the run, between
     10 and 500 steps, when its length is known; else 10 (DILOCO-TUNE: 10
@@ -803,6 +814,8 @@ def _install_ddp():
     # run --ddp-sync fast (C2, Decisions): DiLoCo with an adaptive interval
     # (_DiLoCo, _diloco_round). Replaces the interval above when set.
     _FAST = os.environ.get("PIPEDPEER_DDP_SYNC_MODE", "").strip().lower() == "fast"
+    _AUTO_SYNC = _sync_mode(os.environ.get("PIPEDPEER_DDP_SYNC_MODE"),
+                            os.environ.get("PIPEDPEER_DDP_OVERLAP") == "1") == "auto"
     _DILOCO = {}            # id(optimizer) -> _DiLoCo
     _TOTAL = [None]         # the run's optimizer steps, when a OneCycleLR says
     _DRIFT = [None]         # the last reduce reply's drift, None if it had none
@@ -918,6 +931,8 @@ def _install_ddp():
             _log("ddp: ignoring a ring size the daemon sent as %r; keeping %d"
                  % (reply.get("world"), _WORLD))
             world = _WORLD
+        if reply.get("diloco") and _AUTO_SYNC and not _FAST:
+            _go_fast(reply)
         if reply.get("release") is not None:
             _take_release(reply, w, world)
             return
@@ -955,6 +970,22 @@ def _install_ddp():
             _log("ddp: leaving the ring — %s. This rank finishes its own work "
                  "locally; the others carry on without waiting for it."
                  % reply.get("why", "the ring is faster without this rank"))
+
+    def _go_fast(reply):
+        """U32: the lead measured DiLoCo faster than both the exact split and
+        one rank alone. Every rank reads this note in its reply to the same
+        sync, so every rank's next optimizer step is its first under
+        _fast_step (which still finishes the exact warm-up if the run is too
+        young), with the interval and outer optimizer --ddp-sync fast uses."""
+        nonlocal _FAST
+        _FAST = True
+        _TOLD_FAST[0] = True
+        _log("ddp: switching to DiLoCo after %s optimizer step(s)"
+             % ",".join(str(n) for n in sorted(_STEPN.values())))
+        if _RANK == 0:
+            # Shown without -v, like an explicit --ddp-sync fast.
+            _warn(reply.get("why") or "training with DiLoCo — --ddp-sync exact "
+                  "for per-step sync")
 
     def _take_release(reply, w, world):
         """D2: one rank alone beats the split. Every rank takes the change at
@@ -1267,7 +1298,8 @@ def _install_ddp():
              "kind": kind, "sync_every": int(_SYNC_TUNED[0] or 0),
              "step_ms": _mean_step_ms(), "sync_ms": _mean_sync_ms(),
              "samples": int(_BATCH_N[0]), "sharded": bool(_SHARDED_HASH[0]),
-             "fixed": _FIXED}
+             "fixed": _FIXED,
+             "sync_mode": "fast" if _FAST else "auto" if _AUTO_SYNC else "exact"}
         h.update(extra)
         return json.dumps(h).encode()
 
@@ -2263,7 +2295,7 @@ def _install_ddp():
         shapes in the same order), takes the ring's sync count, size and
         shares, and returns the epoch it joins at.
         """
-        nonlocal _WORLD, _WEIGHTS
+        nonlocal _WORLD, _WEIGHTS, _FAST
         import io
         import json
         import urllib.parse
@@ -2307,6 +2339,8 @@ def _install_ddp():
                 _STEPN[id(o)] = int(stepn)
         for o, d in zip(opts, hdr.get("diloco") or []):
             if d:
+                # The ring runs DiLoCo; an auto ring switched to it (U32).
+                _FAST = _FAST or _AUTO_SYNC
                 st = _DILOCO[id(o)] = _DiLoCo()
                 st.refs = [float(x) for x in d.get("refs") or []]
                 st.ref = d.get("ref")
@@ -2529,7 +2563,7 @@ def _install_ddp():
         _warn("ddp: cannot observe batch sizes (%s); gradients will be averaged "
              "as equals, which is only right when the batches are" % e)
 
-    if _FAST:
+    if _FAST or _AUTO_SYNC:
         # The run length for DiLoCo's final tightening: a OneCycleLR is the
         # one common place a script states it in optimizer steps (a plain
         # epoch loop's count is not observable).
