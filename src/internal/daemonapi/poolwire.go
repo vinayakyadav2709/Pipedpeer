@@ -183,8 +183,9 @@ def run_items(func, items, starmap, req):
             import multiprocessing
             with multiprocessing.get_context("fork").Pool(width, _mute_stdout) as pool:
                 return pool.map(_call_one, items, chunksize=1)
-        except Exception:
-            pass
+        except Exception as e:
+            sys.stderr.write("[pipedpeer] worker pool of %d failed (%r); running %d items single-process\n"
+                             % (width, e, len(items)))
     return [_call_one(item) for item in items]
 `
 
