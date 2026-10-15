@@ -17,21 +17,24 @@
 #   CASES="poolsend zstd" scripts/bench-w10.sh after
 #
 # Knobs: CASES (all), BL_REPS (3), POOL_NODES (3), POOL_MEM (1.5g),
-# TRAIN_MEM (2g), HUB_MEM (1.5g), SPEEDUP (1: also run the one-node baseline).
+# TRAIN_MEM (2g), HUB_MEM (1.5g), SPEEDUP (1: also run the one-node baseline),
+# ONLY ("group:variant ...", e.g. "train:n2 pool:n1 cold:n3", to resume).
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 
 # id | group | script | profile | BEFORE flags | AFTER flags ("=" = same)
 # Groups decide the lab: pool = POOL_NODES x POOL_MEM, train = 2 x TRAIN_MEM,
 # hub = 3 x HUB_MEM, cold = a fresh lab per repetition (nothing warm).
+# Training flags carry --mem 1G: the daemon estimates 2.1 GB for a torch job,
+# more than a 2g node has, and rejects it until the 600 s timeout.
 # PERF-HUNT appends one line per finding here.
 cases_table() {
 	cat <<'EOF'
-int8|train|train.py|wifi|--ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=4 -e BENCH_BATCH=2048|=
-fp32avg|train|train.py|wifi|--ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=8 -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|=
-diloco|train|train.py|wifi|--ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=auto -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|--ddp 2 --ddp-sync fast -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120
-overlap|train|train.py|lan|--ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
-nohub|hub|train.py|lan|--ddp 3 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
+int8|train|train.py|wifi|--mem 1G --ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=4 -e BENCH_BATCH=2048|=
+fp32avg|train|train.py|wifi|--mem 1G --ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=8 -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|=
+diloco|train|train.py|wifi|--mem 1G --ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=auto -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|--mem 1G --ddp 2 --ddp-sync fast -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120
+overlap|train|train.py|lan|--mem 1G --ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
+nohub|hub|train.py|lan|--mem 1G --ddp 3 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
 chunksize|pool|pool.py|wifi|-e BENCH_ITEMS=2000 -e BENCH_SPIN=3000|=
 prefetch|pool|pool.py|5g|-e BENCH_ITEMS=300 -e BENCH_SPIN=60000|=
 tail|pool|pool.py|wifi|-e BENCH_ITEMS=96 -e BENCH_UNEVEN=1 -e BENCH_SPIN=60000|=
@@ -86,6 +89,8 @@ selected() { # selected <group> -> "id|script|profile|flags" lines
 # shellcheck disable=SC2086
 run_group() { # run_group <group> <nodes> <mem> <variant>
 	local group="$1" nodes="$2" mem="$3" variant="$4" lines id script profile flags warmed=""
+	# ONLY="pool:n1 train:n2 ..." runs just those group:variant sets (resume).
+	[[ -z "${ONLY:-}" || " $ONLY " == *" $group:$variant "* ]] || return 0
 	lines="$(selected "$group")"
 	[[ -n "$lines" ]] || return 0
 	bl_lab_up "$nodes" "$mem" lan 0 "$bin"
@@ -98,9 +103,7 @@ run_group() { # run_group <group> <nodes> <mem> <variant>
 			bl_warm "$script" $flags -e BENCH_STEPS=1 -e BENCH_ITEMS=4
 			warmed="$warmed $script"
 		fi
-		for r in $(seq 1 "$BL_REPS"); do
-			bl_run "$id" "$variant" "$mode" "$r" "$script" $flags
-		done
+		bl_reps "$id" "$variant" "$mode" "$script" $flags
 	done <<< "$lines"
 }
 
@@ -120,9 +123,9 @@ while IFS='|' read -r id script profile flags; do
 	for r in $(seq 1 "$BL_REPS"); do
 		bl_lab_up "$pool_nodes" "${POOL_MEM:-1.5g}" "$profile" 0 "$bin"
 		bl_put 1 "$work"
-		bl_run "$id" "n$pool_nodes" "$mode" "$r" "$script" $flags
+		bl_run "$id" "n$pool_nodes" "$mode" "$r" "$script" $flags || break
 	done
-done <<< "$(selected cold)"
+done <<< "$([[ -z "${ONLY:-}" || " $ONLY " == *" cold:"* ]] && selected cold)"
 bl_lab_down
 
 bl_table
