@@ -2,6 +2,7 @@ package daemonapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -723,7 +724,19 @@ var localArchive = (*narCache).ensureLocal
 
 // importStoreOnPeer sends a closure NAR to a peer's /v1/store/import. legacy
 // yields the whole old-format archive, made only if this peer needs it.
+// A peer whose own binary-cache fetch lost to us (409) has cancelled it and
+// stopped substituting, so one more send carries every path it lacks.
 func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath string, legacy func() (string, bool)) error {
+	err := srv.sendClosureOnce(ph, storePath, legacy)
+	if errors.Is(err, errFetchSlow) {
+		log.Warn().Err(err).Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
+			Msg("peer's binary cache fetch was too slow; sending it every missing path")
+		err = srv.sendClosureOnce(ph, storePath, legacy)
+	}
+	return err
+}
+
+func (srv *Server) sendClosureOnce(ph *PeerHealth, storePath string, legacy func() (string, bool)) error {
 	// Send only what this peer lacks. The whole-closure archive is keyed on
 	// the top-level store path, so two environments differing by one package
 	// share none of it and every byte of python, numpy and the interpreter
@@ -815,6 +828,9 @@ func (srv *Server) importStoreOnPeer(ph *PeerHealth, storePath string, legacy fu
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			if resp.StatusCode == http.StatusConflict {
+				return fmt.Errorf("%w (peer said: %s)", errFetchSlow, e.Error)
+			}
 			return fmt.Errorf("import returned %d: %s", resp.StatusCode, e.Error)
 		}
 		return fmt.Errorf("import %s returned %d: %s", url, resp.StatusCode, string(body))
