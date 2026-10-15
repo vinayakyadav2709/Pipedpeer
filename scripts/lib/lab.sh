@@ -91,3 +91,36 @@ pp_lab_net() {
 pp_lab_image() {
 	$rt build -q -t "$1" "$2" >/dev/null
 }
+
+# pp_lab_subnet <name> <second-octet base>: a /24 from a hash of the name,
+# 10.<base..base+63>.<0-255>.0/24, so labs with different names never share
+# a bridge. LAB_SUBNET overrides.
+pp_lab_subnet() {
+	if [[ -n "${LAB_SUBNET:-}" ]]; then
+		echo "$LAB_SUBNET"
+		return
+	fi
+	local h
+	h="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
+	echo "10.$(($2 + h % 64)).$(((h / 64) % 256)).0/24"
+}
+
+# pp_plain_lab_vars: names for the plain lab (lab-up/lab-fail/lab-down) from
+# LAB_NAME. The default name "lab" keeps the compose file's own defaults
+# (containers pipedpeer-lab-<i>, 10.87.0.0/24), which the integration tests use.
+pp_plain_lab_vars() {
+	lab_name="${LAB_NAME:-lab}"
+	[[ "$lab_name" =~ ^[a-z0-9-]+$ ]] || { echo "LAB_NAME must be [a-z0-9-]" >&2; return 2; }
+	if [[ "$lab_name" == lab ]]; then
+		LAB_CTR=pipedpeer-lab
+		LAB_SUBNET="${LAB_SUBNET:-10.87.0.0/24}"
+	else
+		LAB_CTR="pipedpeer-lab-$lab_name"
+		LAB_SUBNET="$(pp_lab_subnet "$lab_name" 192)"
+	fi
+	LAB_BASE="${LAB_SUBNET%.*}"
+	export LAB_CTR LAB_SUBNET LAB_BASE
+	lab_project="pplab-$lab_name"
+	[[ "$lab_name" == lab ]] && lab_project=lab
+	lab_token_file="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/lab-$lab_name.token"
+}

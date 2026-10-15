@@ -52,12 +52,11 @@ net="pp$lab_name"
 prefix="pp$lab_name"
 label="pipedpeer.lab=$lab_name"
 image=pp-emu
-if [[ -n "${LAB_SUBNET:-}" ]]; then
-	subnet="$LAB_SUBNET"
+# "emu" keeps 10.86.0.0/24; other names hash into 10.128-191.x.0/24.
+if [[ "$lab_name" == emu && -z "${LAB_SUBNET:-}" ]]; then
+	subnet=10.86.0.0/24
 else
-	# 10.<128-191>.<0-255>.0/24 from a hash of the name; "emu" stays 10.86.0.0/24.
-	h="$(printf '%s' "$lab_name" | cksum | cut -d' ' -f1)"
-	[[ "$lab_name" == emu ]] && subnet=10.86.0.0/24 || subnet="10.$((128 + h % 64)).$(((h / 64) % 256)).0/24"
+	subnet="$(pp_lab_subnet "$lab_name" 128)"
 fi
 base="${subnet%.*}"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"

@@ -83,7 +83,7 @@ PY
 		fail=$((fail + 1))
 		return
 	fi
-	[[ "$target" == "$file" ]] || printf '%-46s %s\n' "$name" "(code now in $target)"
+	[[ "$target" == "$file" || -d "$file" ]] || printf '%-46s %s\n' "$name" "(code now in $target)"
 
 	local backup="$work/$(echo "$name" | tr -c 'a-zA-Z0-9' '_').bak"
 	cp "$target" "$backup"
@@ -131,8 +131,8 @@ case_ "equal step counts across shares" src/internal/nixgen/shim \
 	's = s.replace("        self.steps = n // sum(self.batches)", "        self.steps = -(-n // (sum(self.batches) + 1))", 1)' \
 	./internal/nixgen/ "TestEqualStepsAcrossUnevenShares"
 
-case_ "contiguous shards" src/internal/nixgen/shim \
-	's = s.replace("        start, end = self._bounds()\n        return iter(order[start:end])", "        return iter(order[self.rank::len(self.batches)])", 1)' \
+case_ "each rank owns its own shard" src/internal/nixgen/shim \
+	's = s.replace("            self._owned = (self.epoch, owners[self.rank])", "            self._owned = (self.epoch, owners[0])", 1)' \
 	./internal/nixgen/ "TestWeightedShardsPartitionTheDataset"
 
 case_ "one shuffle seed for every rank" src/internal/nixgen/shim \
@@ -144,7 +144,7 @@ case_ "rebalance hysteresis" src/internal/daemonapi/ddprebalance.go \
 	./internal/daemonapi/ "TestSmallDriftIsLeftAlone"
 
 case_ "drop weighs sync against compute" src/internal/daemonapi/ddprebalance.go \
-	's = s.replace("\tif added >= syncSec {", "\tif false {", 1)' \
+	's = s.replace("\tif added >= saved {", "\tif false {", 1)' \
 	./internal/daemonapi/ "TestARankThatEarnsItsPlaceIsKept"
 
 case_ "dropped rank is not waited for" src/internal/daemonapi/ddpsync.go \
@@ -197,7 +197,7 @@ case_ "closure fragment marked partial" src/internal/daemonctl/closurediff.go \
 	./internal/daemonctl/ "TestFragmentIsMarkedPartial"
 
 case_ "bandwidth probe is skipped" src/internal/nixgen/shim \
-	's = s.replace("    if not _offload_wins(nbytes, flops_per_byte, round_trip, split,\n                         flops_per_sec, K, _OPTIMISTIC_BW, remote_flops):\n        return False\n", "", 1)' \
+	's = s.replace("    if not _offload_wins(nbytes, flops_per_byte, round_trip, split,\n                         flops_per_sec, K, _OPTIMISTIC_BW, remote_flops):\n        _WHY[\"v\"] += \" (even on a 10 Gbit/s link)\"\n        return False\n", "", 1)' \
 	./internal/nixgen/ "TestShimDoesNotProbeWhenNoLinkWouldChangeTheAnswer"
 
 case_ "a second GPU gets a rank" src/internal/ddpplace/ddpplace.go \
@@ -254,8 +254,8 @@ case_ "the missing-nix error names where it looked" src/internal/nixstore/nixsto
 	./internal/nixstore/ "TestMissingNixSaysWhereItLooked"
 
 case_ "one address holds one node" src/internal/nodestore/store.go \
-	's = s.replace("\tif err := s.forgetOthersAt(host, port, nodeID); err != nil {\n\t\treturn err\n\t}\n", "", 1)' \
-	./internal/nodestore/ "TestReaddingAnAddressReplacesTheOldIdentity"
+	's = s.replace("DELETE FROM paths WHERE host=? AND port=? AND node_id != ?", "DELETE FROM paths WHERE host=? AND port=? AND node_id != ? AND 0", 1)' \
+	./internal/nodestore/ "TestPathOKTakesTheAddressFromOtherNodes"
 
 case_ "the ring counts machines, not ranks" src/main.go \
 	's = s.replace("func ddpDistinctMachines(ring []registry.NodeRecord) int {", "func ddpDistinctMachines(ring []registry.NodeRecord) int {\n\tif true {\n\t\treturn len(ring)\n\t}", 1)' \
@@ -360,7 +360,7 @@ case_ "a key label cannot disagree with its bytes" src/internal/nixsign/nixsign.
 	./internal/nixsign/ "TestAKeyCannotBeOfferedForSomebodyElse"
 
 case_ "a peer that leaves stops being trusted" src/internal/nixsign/nixsign.go \
-	's = s.replace("\ttmp := TrustedKeysFile() + \".tmp\"\n\tif err := os.WriteFile(tmp, []byte(body), 0o644); err != nil {\n\t\treturn err\n\t}\n\treturn os.Rename(tmp, TrustedKeysFile())", "\tf, err := os.OpenFile(TrustedKeysFile(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer f.Close()\n\t_, err = f.WriteString(body)\n\treturn err", 1)' \
+	's = s.replace("\t_, werr := f.WriteString(body)", "\told, _ := os.ReadFile(TrustedKeysFile())\n\t_, werr := f.WriteString(string(old) + body)", 1)' \
 	./internal/nixsign/ "TestTrustedKeysAreRewrittenNotAppended"
 
 case_ "the signing key is not world readable" src/internal/nixsign/nixsign.go \
@@ -369,11 +369,11 @@ case_ "the signing key is not world readable" src/internal/nixsign/nixsign.go \
 
 # ---- shipping a kernel that has no source -----------------------------------
 case_ "a kernel with no source ships by value" src/internal/nixgen/shim \
-	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_payload(func)', 1)" \
+	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_payload(func)')" \
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
 case_ "source is tried before by-value" src/internal/nixgen/shim \
-	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_pickle(func) or _func_payload(func)', 1)" \
+	"s = s.replace('payload = _func_payload(func) or _func_pickle(func)', 'payload = _func_pickle(func) or _func_payload(func)')" \
 	./internal/nixgen/ "TestNamedFunctionStillShipsAsSource"
 
 case_ "a lambda has no name a worker can resolve" src/internal/nixgen/shim \
@@ -381,7 +381,7 @@ case_ "a lambda has no name a worker can resolve" src/internal/nixgen/shim \
 	./internal/nixgen/ "TestKernelsWithoutSourceStillReachAPeer"
 
 case_ "one kernel form per header, never both" src/internal/nixgen/shim \
-	's = s.replace("            else:\n                header[\"func_src\"]", "            if True:\n                header[\"func_src\"]", 1)' \
+	's = s.replace("            if not payload.get(\"pickled\"):\n                header[\"func_src\"]", "            if True:\n                header[\"func_src\"]", 1)' \
 	./internal/nixgen/ "TestHeaderCarriesOneKernelFormNotBoth"
 
 case_ "an unpicklable kernel runs on local threads" src/internal/nixgen/shim \
@@ -446,31 +446,33 @@ case_ "sniffing does not consume the archive" src/internal/narpack/narpack.go \
 	./internal/daemonapi/ "TestTheFormatIsDecidedByTheBytesNotTheClaim"
 
 case_ "a signed archive is never cached as the closure" src/internal/daemonapi/narcache.go \
-	"s = s.replace('\t\twriteJSON(w, http.StatusOK, map[string]any{\"cached\": false, \"imported\": true, \"signed\": true})', '\t\ts.narCache.store(storePath, bytes.NewReader([]byte(\"x\")))\n\t\twriteJSON(w, http.StatusOK, map[string]any{\"cached\": false, \"imported\": true, \"signed\": true})', 1)" \
+	"s = s.replace('\t\treturn http.StatusOK, map[string]any{\"cached\": false, \"imported\": true, \"signed\": true}', '\t\ts.narCache.store(storePath, bytes.NewReader([]byte(\"x\")))\n\t\treturn http.StatusOK, map[string]any{\"cached\": false, \"imported\": true, \"signed\": true}', 1)" \
 	./internal/daemonapi/ "TestASignedClosureIsNeverCachedAsTheClosure"
 
 case_ "a sender cannot materialise something else" src/internal/daemonapi/narcache.go \
 	"s = s.replace('\troots := []string{storePath}', '\troots := m.Roots', 1)" \
 	./internal/daemonapi/ "TestASenderCannotMaterialiseSomethingElse"
 
-case_ "setup never disables signature checking" src/internal/setup/setup.go \
-	"s = s.replace('\treturn fmt.Sprintf(\"echo \\'extra-trusted-public-keys = %s\\' >> %s && systemctl restart nix-daemon\",\n\t\ttrustedKeys, target)', '\treturn fmt.Sprintf(\"echo \\'extra-trusted-public-keys = %s\\' >> %s && echo \\'require-sigs = false\\' >> %s && systemctl restart nix-daemon\",\n\t\ttrustedKeys, target, target)', 1)" \
+case_ "setup never disables signature checking" src/internal/nixtrust/nixtrust.go \
+	's = s.replace("\t\ts += keysSetting + \" = \" + strings.Join(keys, \" \") + \"\\n\"", "\t\ts += keysSetting + \" = \" + strings.Join(keys, \" \") + \"\\nrequire-sigs = false\\n\"", 1)' \
 	./internal/setup/ "TestSetupNeverDisablesSignatureCheckingSystemWide"
 
-case_ "setup with no keys edits nothing" src/internal/setup/setup.go \
-	"s = s.replace('\tif err != nil || trusted == \"\" {', '\tif false {', 1)" \
-	./internal/setup/ "TestSetupWithNoKeysYetChangesNothing"
+case_ "setup with no keys still installs the helper" src/internal/setup/setup.go \
+	's = s.replace("\tif !helperReady() {\n\t\tif err := installHelper(); err != nil {", "\tif false {\n\t\tif err := installHelper(); err != nil {", 1)' \
+	./internal/setup/ "TestSetupWithNoKeysYetInstallsOnlyTheHelper"
 
-case_ "every Pool entry point takes a kernel with no source" src/internal/nixgen/shim \
-	"s = s.replace('        return self._local_ctx(func).apply(func, args=args, kwds=kwds or {})', '        return self._ctx.apply(func, args=args, kwds=kwds or {})', 1)" \
+case_ "every Pool entry point takes a kernel with no source" src/internal/nixgen/shim/pipedpeer_shim/core.py \
+	's = s.replace("                results = self._pool._run(fn, [e[1] for e in group], starmap=True,\n                                          catch=True)", "                raise RuntimeError(\"audit: skip the batch\")", 1)
+s = s.replace("        ctx = self._pool._local_ctx(fn)", "        ctx = self._pool._ctx", 1)' \
 	./internal/nixgen/ "TestEveryPoolEntryPointTakesAKernelWithoutSource"
 
-case_ "apply works without keyword arguments" src/internal/nixgen/shim \
-	"s = s.replace('kwds=kwds or {})', 'kwds=kwds)', 1)" \
+case_ "apply works without keyword arguments" src/internal/nixgen/shim/pipedpeer_shim/pool.py \
+	's = s.replace("        if self._remote and not kwds:", "        if False:", 1)
+s = s.replace("            func, args=args, kwds=kwds or {},", "            func, args=args, kwds=kwds,", 1)' \
 	./internal/nixgen/ "TestApplyWorksWithoutKeywordArguments"
 
 case_ "a dead forwarder releases its peer" src/internal/internet/internet.go \
-	"s = s.replace('\tdefer m.dropLink(node)\n\tfor {', '\tfor {', 1)" \
+	's = s.replace("\tdefer m.dropLinkIf(node, ln)\n\tfor {", "\tfor {", 1)' \
 	./internal/internet/ "TestAForwarderThatStopsAcceptingReleasesItsPeer"
 
 case_ "the forwarder outlives the attempt that made it" src/internal/internet/internet.go \
@@ -507,9 +509,9 @@ case_ "a joined cluster survives a restart" src/internal/clustercfg/clustercfg.g
 	"s = s.replace('\tif s := Rendezvous(); s != \"\" {\n\t\treturn s, \"saved\"\n\t}\n', '', 1)" \
 	./internal/clustercfg/ "TestAJoinedClusterSurvivesARestart"
 
-case_ "what was typed beats what was remembered" src/internal/clustercfg/clustercfg.go \
-	"s = s.replace('\tif s := strings.TrimSpace(flag); s != \"\" {\n\t\treturn s, \"flag\"\n\t}\n', '', 1)" \
-	./internal/clustercfg/ "TestWhatWasTypedBeatsWhatWasRemembered"
+case_ "the newest introducers are the ones kept" src/internal/clustercfg/clustercfg.go \
+	's = s.replace("const maxIntroducers = 8", "const maxIntroducers = 10", 1)' \
+	./internal/clustercfg/ "TestRememberIntroducersDedupesAndKeepsEight"
 
 case_ "a bare host gets the default port" src/internal/clustercfg/clustercfg.go \
 	"s = s.replace('\tif !found {\n\t\treturn addr + \":\" + strconv.Itoa(DefaultPort), nil\n\t}', '\tif !found {\n\t\treturn addr, nil\n\t}', 1)" \
