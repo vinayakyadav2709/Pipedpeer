@@ -25,16 +25,17 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 # id | group | script | profile | BEFORE flags | AFTER flags ("=" = same)
 # Groups decide the lab: pool = POOL_NODES x POOL_MEM, train = 2 x TRAIN_MEM,
 # hub = 3 x HUB_MEM, cold = a fresh lab per repetition (nothing warm).
-# Training flags carry --mem 1G: the daemon estimates 2.1 GB for a torch job,
-# more than a 2g node has, and rejects it until the 600 s timeout.
+# Training flags carry --gpu off (lab containers see the host NVIDIA driver and
+# would fetch the 6.6 GB CUDA wheels) and --mem 1G (the daemon estimates 2.1 GB for a torch job,
+# more than a 2g node has, and rejects it until the 600 s timeout).
 # PERF-HUNT appends one line per finding here.
 cases_table() {
 	cat <<'EOF'
-int8|train|train.py|wifi|--mem 1G --ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=4 -e BENCH_BATCH=2048|=
-fp32avg|train|train.py|wifi|--mem 1G --ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=8 -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|=
-diloco|train|train.py|wifi|--mem 1G --ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=auto -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|--mem 1G --ddp 2 --ddp-sync fast -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120
-overlap|train|train.py|lan|--mem 1G --ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
-nohub|hub|train.py|lan|--mem 1G --ddp 3 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
+int8|train|train.py|wifi|--gpu off --mem 1G --ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=4 -e BENCH_BATCH=2048|=
+fp32avg|train|train.py|wifi|--gpu off --mem 1G --ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=8 -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|=
+diloco|train|train.py|wifi|--gpu off --mem 1G --ddp 2 -e PIPEDPEER_DDP_SYNC_EVERY=auto -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120|--gpu off --mem 1G --ddp 2 --ddp-sync fast -e BENCH_WIDTH=512 -e BENCH_BATCH=2048 -e BENCH_STEPS=120
+overlap|train|train.py|lan|--gpu off --mem 1G --ddp 2 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
+nohub|hub|train.py|lan|--gpu off --mem 1G --ddp 3 -e BENCH_WIDTH=1024 -e BENCH_DEPTH=3 -e BENCH_BATCH=4096|=
 chunksize|pool|pool.py|wifi|-e BENCH_ITEMS=2000 -e BENCH_SPIN=3000|=
 prefetch|pool|pool.py|5g|-e BENCH_ITEMS=300 -e BENCH_SPIN=60000|=
 tail|pool|pool.py|wifi|-e BENCH_ITEMS=96 -e BENCH_UNEVEN=1 -e BENCH_SPIN=60000|=
