@@ -79,6 +79,10 @@ _POOL_MIN_WORK = float(os.environ.get("PIPEDPEER_POOL_MIN_WORK", "0.5"))
 # The executing node sinks this peer to the end of its spill order so an
 # idle orchestrator never outranks real workers; empty when unset.
 _SUBMITTER = os.environ.get("PIPEDPEER_SUBMITTER", "")
+# The submitter's node id. An address means nothing across networks (an
+# internet peer knows the submitter as 127.0.0.1:<forwarder port>), so the
+# daemon matches this first and the address only for older submitters.
+_SUBMITTER_NODE = os.environ.get("PIPEDPEER_SUBMITTER_NODE", "")
 # Shared secret for the daemon API. Empty when the daemon is open; when it is
 # not, an intercepted call without it 401s and the work quietly runs here.
 _TOKEN = os.environ.get("PIPEDPEER_TOKEN", "")

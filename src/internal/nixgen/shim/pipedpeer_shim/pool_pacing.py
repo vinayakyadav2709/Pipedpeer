@@ -6,6 +6,7 @@ import time
 from pipedpeer_shim import core
 from pipedpeer_shim.core import (
     _SUBMITTER,
+    _SUBMITTER_NODE,
     _log,
 )
 from pipedpeer_shim.stats import (
@@ -71,7 +72,8 @@ def _cluster_pacing():
         try:
             req = urllib.request.Request(
                 core._URL + "/v1/pool/stats?store=" + urllib.parse.quote(core._STORE, safe=""),
-                headers={"X-Pipedpeer-Submitter": _SUBMITTER})
+                headers={"X-Pipedpeer-Submitter": _SUBMITTER,
+                         "X-Pipedpeer-Submitter-Node": _SUBMITTER_NODE})
             with _daemon_open(req, 5) as resp:
                 got = json.loads(resp.read())
             if "inflight" in got:

@@ -42,7 +42,7 @@ func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		out["link_bytes_per_sec"] = int64(bw)
 	}
 	if store := r.URL.Query().Get("store"); store != "" {
-		for k, v := range s.pool.pacing(store, r.Header.Get("X-Pipedpeer-Submitter")) {
+		for k, v := range s.pool.pacing(store, s.poolSubmitter(r)) {
 			out[k] = v
 		}
 	}
@@ -145,7 +145,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	storePath := r.Header.Get("X-Pipedpeer-Store")
 	// Where the requesting job was submitted from ("host:port"); sunk to the
 	// tail of spill order so an idle orchestrator never outranks workers.
-	submitter := r.Header.Get("X-Pipedpeer-Submitter")
+	submitter := s.poolSubmitter(r)
 	offload := r.Header.Get("X-Pipedpeer-Offload")
 	python := r.Header.Get("X-Pipedpeer-Python")
 	if storePath == "" {
@@ -483,4 +483,27 @@ func relabelForwardedReceipt(body []byte, peer string) []byte {
 	}
 	out := poolFramesHeader(*hdr.ResultsFrames, hdr.Receipt.Node, hdr.Receipt.Parts)
 	return append(out, body[nl+1:]...)
+}
+
+// poolSubmitter is the requesting job's submitting machine as this daemon's
+// peer list names it ("host:port"), so spill order can sink it.
+//
+// By node id first: the submitter stamps the address it reaches its LAN
+// from, which never matches on an internet peer, where it is a node at
+// 127.0.0.1:<forwarder port> - and the orchestrator got sent work. The
+// address header stays for submitters too old to send the id.
+func (s *Server) poolSubmitter(r *http.Request) string {
+	addr := r.Header.Get("X-Pipedpeer-Submitter")
+	id := r.Header.Get("X-Pipedpeer-Submitter-Node")
+	if id == "" {
+		return addr
+	}
+	s.peersMu.RLock()
+	defer s.peersMu.RUnlock()
+	for _, ph := range s.peerHealths {
+		if ph.NodeID == id && ph.Host != "" && ph.Port != 0 {
+			return fmt.Sprintf("%s:%d", ph.Host, ph.Port)
+		}
+	}
+	return addr
 }
