@@ -110,10 +110,10 @@
 \newcommand{\department}{Department of Computer Engineering}
 \newcommand{\university}{University of Mumbai}
 % Fill these before printing; each shows in red until replaced.
-\newcommand{\submissiondate}{\fillin{month and year of submission}}
-\newcommand{\hodname}{\fillin{Head of Department's name}}
-\newcommand{\principalname}{\fillin{Principal's name}}
-\newcommand{\publicationstatus}{\fillin{conference or journal, and status: submitted / accepted / published}}
+\newcommand{\submissiondate}{}% FILL-AT-SUBMISSION: date
+\newcommand{\hodname}{Dr. Sudhir Dhage}
+\newcommand{\principalname}{Dr. Bhalchandra Chaudhari}
+\newcommand{\publicationstatus}{}% FILL-AT-SUBMISSION: publication status
 % Institute logo: place spitlogo.pdf (or .png) in docs/report.
 \newcommand{\institutelogo}{\IfFileExists{spitlogo.pdf}{\includegraphics[scale=0.8]{spitlogo.pdf}}{\IfFileExists{spitlogo.png}{\includegraphics[width=3cm]{spitlogo.png}}{\fillin{institute logo}}}}
 
@@ -401,7 +401,7 @@ something the runtime papers over. Full native performance is retained.
 \subsection*{Paper 4: Design of Elixir-Based Edge Server for Responsive IoT Applications}
 \addcontentsline{toc}{subsection}{Paper 4}
 \textbf{Authors:} Y.~Li, S.~Fujita \quad
-\textbf{In:} Proc.\ IEEE CANDARW, 2023~\cite{li2023elixir}
+\textbf{In:} Proc.\ IEEE CANDARW, 2022~\cite{li2023elixir}
 
 \noindent\textbf{Summary:} An IoT edge server built on Elixir and OTP, where
 supervisor trees restart failed processes automatically and the system stays
@@ -416,8 +416,8 @@ needs supervising.
 
 \subsection*{Paper 5: A Synergistic Elixir-EDA-MQTT Framework for Smart Transportation}
 \addcontentsline{toc}{subsection}{Paper 5}
-\textbf{Authors:} Y.~Zhou, X.~Chen \quad
-\textbf{In:} Computers, vol.~16, no.~3, 2024~\cite{zhou2024}
+\textbf{Authors:} Y.~Li, S.~Fujita \quad
+\textbf{In:} Future Internet, vol.~16, no.~3, 2024~\cite{zhou2024}
 
 \noindent\textbf{Summary:} Combines Elixir concurrency, event-driven
 architecture and MQTT publish-subscribe, showing lower overhead than REST for
@@ -448,7 +448,7 @@ Wasm supports the decision to ship a native CUDA-capable environment instead.
 \subsection*{Paper 7: Case Study of WebAssembly Runtimes for AI Applications on the Edge}
 \addcontentsline{toc}{subsection}{Paper 7}
 \textbf{Authors:} S.~E.~Khelifa, M.~Bagaa, A.~O.~Messaoud, A.~Ksentini \quad
-\textbf{In:} 2024~\cite{khelifa2024}
+\textbf{In:} Proc.\ GIIS, 2024~\cite{khelifa2024}
 
 \noindent\textbf{Summary:} Compares four Wasm runtimes for AI inference on edge
 devices, finding memory consumption to be the dominant constraint.
@@ -463,19 +463,21 @@ under its own memory ceiling inside a daemon that is itself capped
 
 \subsection*{Paper 8: Programming Models for Failure-Transparent Distributed Systems}
 \addcontentsline{toc}{subsection}{Paper 8}
-\textbf{Authors:} A.~Bergstr\"om \quad
-\textbf{In:} M.S.\ thesis, KTH Royal Institute of Technology, 2025~\cite{kth2025thesis}
+\textbf{Authors:} J.~Spenger \quad
+\textbf{In:} Ph.D.\ dissertation, KTH Royal Institute of Technology, 2025~\cite{kth2025thesis}
 
-\noindent\textbf{Summary:} Surveys abstractions that hide distributed failure
-from application code --- actors, reactive streams, supervision --- handling
-crash and omission failures by retry, replication and migration without exposing
-failure semantics upward.
+\noindent\textbf{Summary:} Gives a definition of failure transparency, masking
+failures fully from the programmer, that does not depend on a particular
+semantics; proves it for a model of stateful dataflow streaming; and builds two
+programming models on that base, one for compositional patterns and one with
+windowed conflict-free replicated data types for global aggregations.
 
-\noindent\textbf{Bearing on this work:} This is the closest match to PipedPeer's
+\noindent\textbf{Bearing on this work:} Failure transparency is PipedPeer's
 central invariant. The user's script contains no failure handling at all, so
-every remote path must degrade to a working local one. Section~\ref{sec:ft} sets
-out the five layers that enforce this, and Section~\ref{sec:res-ft} shows a
-worker being killed mid-computation without affecting the result.
+every remote path must degrade to a working local one. PipedPeer enforces this by
+fallback and tests rather than proof: Section~\ref{sec:ft} sets out the five
+layers, and Section~\ref{sec:res-ft} shows a worker being killed mid-computation
+without affecting the result.
 
 \subsection*{Paper 9: Python Array API Standard}
 \addcontentsline{toc}{subsection}{Paper 9}
@@ -562,7 +564,7 @@ speculative, so an unresponsive remote share costs nothing.
 
 \subsection*{Paper 14: Energy-Efficient Collaborative Task Offloading in MEC}
 \addcontentsline{toc}{subsection}{Paper 14}
-\textbf{Authors:} L.~Chen et al. \quad
+\textbf{Authors:} S.~Wang et al. \quad
 \textbf{In:} Ad Hoc Networks, vol.~169, 2025~\cite{adhoc2025}
 
 \noindent\textbf{Summary:} Devices cooperate by relaying tasks toward edge
@@ -577,7 +579,7 @@ cannot hold to a healthier peer rather than refusing it.
 \subsection*{Paper 15: Blockchain Enabled Task Offloading in Digital Twin Vehicular Edge Networks}
 \addcontentsline{toc}{subsection}{Paper 15}
 \textbf{Authors:} C.~Li, Q.~Chen, M.~Chen, Z.~Su, Y.~Ding, D.~Lan, A.~Taherkordi \quad
-\textbf{In:} J.\ Cloud Comput., vol.~12, no.~120, 2023~\cite{li2023blockchain}
+\textbf{In:} J.\ Cloud Comput., vol.~12, Art.~no.~120, 2023~\cite{li2023blockchain}
 
 \noindent\textbf{Summary:} Smart contracts enforce service agreements between
 task submitters and edge workers, preventing free-riding in an untrusted
@@ -595,7 +597,7 @@ structure resembles the existing three-phase lease.
 \subsection*{Paper 16: Congestion-Aware Distributed Task Offloading Using Graph Neural Networks}
 \addcontentsline{toc}{subsection}{Paper 16}
 \textbf{Authors:} Z.~Zhao, J.~Perazzone, G.~Verma, S.~Segarra \quad
-\textbf{In:} arXiv:2312.02471, 2023~\cite{zhao2023}
+\textbf{In:} Proc.\ IEEE ICASSP, 2024~\cite{zhao2023}
 
 \noindent\textbf{Summary:} Trains a graph neural network to produce distributed
 offloading policies from local neighbourhood observations, outperforming greedy
@@ -925,7 +927,7 @@ NAT allocates a fresh external port for every destination there is no address to
 publish, and an ordinary punch fails: on a phone tether the project's own laptop
 was seen as port 38471 by one reflector and 27486 by the next, and a punch moved
 400 packets each way without any arriving. For that pair the \textbf{birthday
-collision} runs: the side with the port-per-destination NAT opens 256 sockets
+collision} \cite{anderson2020nat} runs: the side with the port-per-destination NAT opens 256 sockets
 toward the peer, the other sends 600 probes to random ports, and the socket that
 is hit is the one kept, since its mapping is the reachable one.
 
@@ -935,7 +937,7 @@ checks that the key's fingerprint is the node it meant to reach and that the
 cluster identifier matches. TLS on this link skips certificate checks, so a
 node's identity rests on the hello. The hello therefore signs the session's
 exported keying material \cite{rfc5705} and proves the cluster secret with an
-HMAC over the same value, so it is valid for one session and one cluster only;
+HMAC \cite{rfc2104} over the same value, so it is valid for one session and one cluster only;
 an earlier hello, which signed only the cluster and a nonce the signer chose,
 could be replayed by a peer to a third node to pass as its sender. A node on an
 older build is refused and told why. The link is then exposed to the rest of the daemon
@@ -1245,7 +1247,7 @@ archive for every job. Pinning an exact revision makes the store path a stable,
 content-derived name for an environment, identical across every machine and
 across time. Section~\ref{sec:res-cache} measures what that buys.
 
-Every generated environment also contains \texttt{cloudpickle}, so that parallel
+Every generated environment also contains \texttt{cloudpickle} \cite{cloudpickle}, so that parallel
 kernels with no source can be shipped by value (Section~\ref{sec:intercept}).
 Two deliberate exceptions to the package set exist, both restricted to x86\_64
 Linux: scikit-learn is pinned to a specific wheel because the package set lags
@@ -1356,7 +1358,7 @@ returns it and the client prints why the peer took no work.
     \label{fig:sandbox}
 \end{figure}
 
-Jobs run under \texttt{crun} in an OCI bundle \cite{oci2021} with a minimal read-only root: the
+Jobs run under \texttt{crun} \cite{crun} in an OCI bundle \cite{oci2021} with a minimal read-only root: the
 store read-only, the workspace read-write, a private home, and temporary
 filesystems for scratch space. Shared memory
 is mounted world-writable specifically because Python's
@@ -1625,7 +1627,7 @@ unaffected, and its tests assert frame equality directly.
 \end{figure}
 
 \textbf{Data-parallel training without a socket mesh.} Rather than let torch
-build its rank-to-rank mesh, which requires direct connections on its own ports
+build its rank-to-rank mesh \cite{li2020pytorchddp}, which requires direct connections on its own ports
 between every pair of ranks, each rank posts its gradient to the lead node's
 ordinary daemon port. That works on any network where the daemon port already
 works, including over the links of Section~\ref{sec:nat}, which is the only
@@ -1640,7 +1642,7 @@ samples behind each, $\sum_i n_i g_i / \sum_i n_i$, and one averaged gradient is
 returned. Gradients travelled in half precision by default, with an 8-bit
 encoding on request; since the address-book phase 8-bit is the default, with
 one scale per block of 4096 values and the rounding error carried into the next
-step in both directions (error feedback). On two machines over a home link, the same training run took 54.9\,s on
+step in both directions (error feedback) \cite{dettmers2016eightbit, seide2014onebit}. On two machines over a home link, the same training run took 54.9\,s on
 one machine, 69.4\,s on two ranks in half precision with 36.2\,s spent
 synchronising, and 56.1\,s on two ranks in 8-bit, with final losses of 0.087495,
 0.087497 and 0.087688. On that link two machines did not beat one: half
@@ -1724,7 +1726,7 @@ added is itself a finding: fast synchronisation helps the two to four machines
 of a small group and not a crowd of phones. In-process measurements of the remedies the
 literature offers --- keeping each rank's batch so the global batch grows,
 drift correction, compressed exact synchronisation, and retuning the interval
-and outer step per ring size --- were measured: of those, only exact synchronisation with rank-16 PowerSGD compression and error feedback kept every model within 1\% of one device at 4, 8 and 11 ranks (worst mean $+0.18\%$), at $3.2\times$ fewer bytes than int8 exact on the perceptrons and with every step synchronised; keeping each rank's batch (with or without learning-rate scaling or doubled epochs), SparseLoCo, top-k, FedProx, rank-4 PowerSGD and outer learning rates of 1.25 or more all failed.
+and outer step per ring size --- were measured: of those, only exact synchronisation with rank-16 PowerSGD \cite{vogels2019powersgd} compression and error feedback kept every model within 1\% of one device at 4, 8 and 11 ranks (worst mean $+0.18\%$), at $3.2\times$ fewer bytes than int8 exact on the perceptrons and with every step synchronised; keeping each rank's batch (with or without learning-rate scaling \cite{goyal2017imagenet, hoffer2017trainlonger, johnson2020adascale} or doubled epochs), SparseLoCo \cite{sarfi2025sparseloco}, top-k \cite{aji2017sparse}, FedProx \cite{li2020fedprox}, rank-4 PowerSGD and outer learning rates of 1.25 or more all failed.
 
 \textbf{Choosing fast synchronisation automatically.} By default a run asks
 for ``auto''. The lead daemon switches a ring to fast synchronisation once,
@@ -2022,7 +2024,7 @@ recent runs from every machine, each run's timeline and where its work ran, and
 a run view with every step of every chunk.
 
 \textbf{Phones as full nodes.} An Android phone first joined as a pool-only
-worker under Termux, running parallel chunks with Termux's own Python. It can
+worker under Termux \cite{termux}, running parallel chunks with Termux's own Python. It can
 now be a full node. A set-up script installs Debian through
 \texttt{proot-distro} and single-user Nix inside it, creating \texttt{/nix}
 itself rather than calling \texttt{sudo}; where that is in place, every
@@ -2031,7 +2033,7 @@ there. At the pinned package set every ARM path of Python with numpy, pandas,
 torch, scikit-learn and joblib is in the public binary cache, so no binary
 cache of the project's own is needed: the runtime closure is 67 paths, about
 1.5\,GiB unpacked and 395\,MiB to download. Jobs run under Termux's own
-\texttt{proot}, since Debian's crashed when nested, with a memory limit of the
+\texttt{proot} \cite{proot}, since Debian's crashed when nested, with a memory limit of the
 job's memory plus 2\,GiB of address space (torch reserves more than it uses)
 and a lower priority; this is a weaker sandbox than \texttt{crun}'s, and
 \texttt{pipedpeer doctor} says so. Termux's \texttt{proot} does not translate
@@ -2155,7 +2157,7 @@ uses CPU training in the containers, with the synchronisation cost measured
 under the same link profiles, and the one GPU gives single-GPU baselines. Real
 hardware appears in two places: the recorded measurements between real machines
 (Section~\ref{sec:res-recorded}), which carry their provenance, and two laptops
-connected over Tailscale, the realistic worst case across the internet.
+connected over Tailscale \cite{anderson2020nat}, the realistic worst case across the internet.
 
 \section{Functional Verification}
 \label{sec:res-tests}
@@ -2625,7 +2627,7 @@ Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.
 Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 137.5\,s, warm 603.7 to 62.4\,s (before: bounded by the 600\,s timeout, measured before the fix; after: idle host) & container lab \\
 Phone as a full node through proot and Nix & \todo{phone run} & real \\
 Parallel map request body, before and after, 100\,MB payload & body build 2.77 to 0.06\,s (100 items of 1\,MB), 18.3 to 0.06\,s (1000 items); lab map of 48 $\times$ 8\,MB 4.07 to 2.00\,s, now kept on one node & container lab \\
-Workspace re-upload after editing one file & \todo{workspace} & container lab \\
+Workspace re-upload after editing one file (40 files of 200\,KB, 2-rank run on 2 nodes, LAN) & workspace bytes stored on the second node: 8.0\,MB on the first run, 200\,KB after editing one file (3 of 3 runs each; wall time 5.00\,s and 4.98\,s, median of 3, the run itself dominates) & container lab \\
 Environment seed to a node holding every path & empty script's total overhead 0.64 to 0.23\,s (warm); cold run 113 vs 116\,s, bound by the download & container lab \\
 Pool time estimate error, before (7--37$\times$) and after & error not recorded by the lab; maps that cross nodes 1.7--2.1$\times$ faster (e.g.\ 2.13 to 1.07\,s), two small maps now stay local (1.82 to 0.57\,s) & container lab \\
 Superlinear steps found by the scaling map & none in the numeric sweeps (payload 1\,KB--64\,MB, items 8--2048, cost $10^3$--$3\times10^6$, 2--4 nodes, spread 1--10$\times$); CPU-time growth fits; 4 equal nodes ran a map $2.9\times$ faster than one (2.37 to 0.81\,s, loaded host) & container lab \\
@@ -2932,7 +2934,7 @@ before; it is not suitable for a cluster of mutually untrusting participants.
   four ranks --- a growing global batch, drift correction, compressed exact
   synchronisation, or retuning the interval and outer step per ring size, offered
   as opt-in tuning levels or as the default where they pass the same bar --- and
-  synchronising the model in staggered fragments (Streaming DiLoCo).
+  synchronising the model in staggered fragments (Streaming DiLoCo \cite{douillard2025streaming}).
   \item \textbf{Additional runtimes} beyond Python.
   \item \textbf{A controlled multi-machine evaluation}, repeating the hand
   measurements of Chapter~\ref{chap:results} as a scripted experiment across
@@ -2968,34 +2970,10 @@ Z.~Yang, W.~Paul, M.~I.~Jordan, and I.~Stoica,
 ``Ray: A distributed framework for emerging AI applications,''
 \textit{Proc. 13th USENIX OSDI}, 2018, pp.~561--577.
 
-\bibitem{anderson2004boinc}
-D.~P.~Anderson,
-``BOINC: A system for public-resource computing and storage,''
-\textit{Proc. 5th IEEE/ACM Workshop on Grid Computing}, 2004, pp.~4--10.
-
 \bibitem{rocklin2015dask}
 M.~Rocklin,
 ``Dask: Parallel computation with blocked algorithms and task scheduling,''
-\textit{Proc. 14th Python in Science Conference (SciPy)}, 2015, pp.~130--136.
-
-\bibitem{dolstra2004nix}
-E.~Dolstra, M.~de~Jonge, and E.~Visser,
-``Nix: A safe and policy-free system for software deployment,''
-\textit{Proc. 18th LISA}, 2004, pp.~79--92.
-
-\bibitem{dean2004mapreduce}
-J.~Dean and S.~Ghemawat,
-``MapReduce: Simplified data processing on large clusters,''
-\textit{Proc. 6th USENIX OSDI}, 2004, pp.~137--150.
-
-\bibitem{oci2021}
-Open Container Initiative,
-``OCI Runtime Specification, v1.0.2,'' 2021. [Online]. Available:
-\url{https://github.com/opencontainers/runtime-spec}.
-
-\bibitem{nats}
-Synadia Communications,
-``NATS: Cloud native messaging.'' [Online]. Available: \url{https://nats.io}.
+\textit{Proc. 14th Python in Science Conference (SciPy)}, 2015, pp.~126--132.
 
 \bibitem{sekigawa2023}
 S.~Sekigawa, C.~Sasaki, and A.~Tagami,
@@ -3015,12 +2993,12 @@ S.~Kakati and M.~Brorsson,
 \bibitem{li2023elixir}
 Y.~Li and S.~Fujita,
 ``Design of Elixir-based edge server for responsive IoT applications,''
-\textit{Proc. IEEE CANDARW}, 2023.
+\textit{Proc. 10th Int. Symp. Computing and Networking Workshops (CANDARW)}, 2022, pp.~185--191.
 
 \bibitem{zhou2024}
-Y.~Zhou and X.~Chen,
+Y.~Li and S.~Fujita,
 ``A synergistic Elixir-EDA-MQTT framework for advanced smart transportation systems,''
-\textit{Computers}, vol.~16, no.~3, 2024.
+\textit{Future Internet}, vol.~16, no.~3, Art.~no.~81, 2024.
 
 \bibitem{bachmeier2025}
 J.~Bachmeier, V.~Yussupov, J.~Hen\ss, and H.~Koziolek,
@@ -3029,22 +3007,23 @@ J.~Bachmeier, V.~Yussupov, J.~Hen\ss, and H.~Koziolek,
 
 \bibitem{khelifa2024}
 S.~E.~Khelifa, M.~Bagaa, A.~O.~Messaoud, and A.~Ksentini,
-``Case study of WebAssembly runtimes for AI applications on the edge,'' 2024.
+``Case study of WebAssembly runtimes for AI applications on the edge,''
+\textit{Proc. Global Information Infrastructure and Networking Symp. (GIIS)}, 2024, pp.~1--6.
 
 \bibitem{kth2025thesis}
-A.~Bergstr\"om,
+J.~Spenger,
 ``Programming models for failure-transparent distributed systems,''
-M.S.\ thesis, KTH Royal Institute of Technology, Stockholm, 2025. [Online]. Available:
+Ph.D.\ dissertation, KTH Royal Institute of Technology, Stockholm, Sweden, 2025. [Online]. Available:
 \url{https://www.diva-portal.org/smash/get/diva2:2013047/FULLTEXT01.pdf}.
 
 \bibitem{arrayapi2023}
-A.~Meurer, S.~Ho\ss{}feld, R.~Gommers, and the Consortium for Python Data API Standards,
+A.~Meurer, A.~Reines, R.~Gommers, Y.-L.~Fang, J.~Kirkham, M.~Barber, S.~Hoyer et al.,
 ``Python array API standard: Toward array interoperability in the scientific Python ecosystem,''
-\textit{Proc. SciPy}, 2023. [Online]. Available:
+\textit{Proc. 22nd Python in Science Conf. (SciPy)}, 2023, pp.~8--17. [Online]. Available:
 \url{https://proceedings.scipy.org/articles/gerudo-f2bc6f59-001}.
 
 \bibitem{idds2025}
-W.~Guan, T.~Maeno, F.~Barreiro Megino, T.~Wenaus, and A.~Klimentov,
+W.~Guan, T.~Maeno, A.~Alekseev, F.~H.~Barreiro~Megino, K.~De, E.~Karavakis, A.~Klimentov et al.,
 ``iDDS: Intelligent distributed dispatch and scheduling for workflow orchestration,''
 arXiv:2510.02930, 2025. [Online]. Available: \url{https://arxiv.org/abs/2510.02930}.
 
@@ -3055,32 +3034,28 @@ Y.~Deng, Z.~Chen, X.~Chen, and Y.~Fang,
 
 \bibitem{he2024}
 H.~He, X.~Yang, X.~Mi, H.~Shen, and X.~Liao,
-``Multi-agent deep reinforcement learning based dynamic task offloading in a device-to-device mobile-edge computing network,''
-\textit{Sensors}, vol.~24, no.~16, 2024.
+``Multi-agent deep reinforcement learning based dynamic task offloading in a device-to-device mobile-edge computing network to minimize average task delay with deadline constraints,''
+\textit{Sensors}, vol.~24, no.~16, Art.~no.~5141, 2024.
 
 \bibitem{yong2023}
 D.~Yong, R.~Liu, X.~Jia, and Y.~Gu,
 ``Joint optimization of multi-user partial offloading strategy and resource allocation strategy in D2D-enabled MEC,''
-\textit{Sensors}, vol.~23, no.~5, 2023.
+\textit{Sensors}, vol.~23, no.~5, Art.~no.~2565, 2023.
 
 \bibitem{adhoc2025}
-L.~Chen, Y.~Wang, H.~Zhang, and J.~Liu,
+S.~Wang, S.~Zhao, H.~Gui, X.~He, Z.~Lu, B.~Chen, Z.~Fan, and S.~Pang,
 ``Energy-efficient collaborative task offloading in multi-access edge computing based on deep reinforcement learning,''
-\textit{Ad Hoc Networks}, vol.~169, 2025.
+\textit{Ad Hoc Networks}, vol.~169, Art.~no.~103743, Mar.\ 2025.
 
 \bibitem{li2023blockchain}
 C.~Li, Q.~Chen, M.~Chen, Z.~Su, Y.~Ding, D.~Lan, and A.~Taherkordi,
 ``Blockchain enabled task offloading based on edge cooperation in the digital twin vehicular edge network,''
-\textit{J.\ Cloud Comput.}, vol.~12, no.~120, 2023.
+\textit{J.\ Cloud Comput.}, vol.~12, Art.~no.~120, 2023.
 
 \bibitem{zhao2023}
 Z.~Zhao, J.~Perazzone, G.~Verma, and S.~Segarra,
 ``Congestion-aware distributed task offloading in wireless multi-hop networks using graph neural networks,''
-arXiv:2312.02471, 2023.
-
-\bibitem{rfc9000} J.~Iyengar and M.~Thomson, ``QUIC: A UDP-based multiplexed and secure transport,'' RFC~9000, Internet Engineering Task Force, May 2021.
-
-\bibitem{rfc8446} E.~Rescorla, ``The Transport Layer Security (TLS) protocol version 1.3,'' RFC~8446, Internet Engineering Task Force, Aug. 2018.
+in \textit{Proc. IEEE ICASSP}, 2024, pp.~8951--8955.
 
 \bibitem{rfc8489} M.~Petit-Huguenin, G.~Salgueiro, J.~Rosenberg, D.~Wing, R.~Mahy, and P.~Matthews, ``Session Traversal Utilities for NAT (STUN),'' RFC~8489, Internet Engineering Task Force, Feb. 2020.
 
@@ -3094,17 +3069,75 @@ arXiv:2312.02471, 2023.
 
 \bibitem{ford2005p2p} B.~Ford, P.~Srisuresh, and D.~Kegel, ``Peer-to-peer communication across network address translators,'' in \textit{Proc. USENIX Annual Technical Conf.}, 2005, pp.~179--192.
 
+\bibitem{rfc9000} J.~Iyengar and M.~Thomson, ``QUIC: A UDP-based multiplexed and secure transport,'' RFC~9000, Internet Engineering Task Force, May 2021.
+
+\bibitem{rfc8446} E.~Rescorla, ``The Transport Layer Security (TLS) protocol version 1.3,'' RFC~8446, Internet Engineering Task Force, Aug. 2018.
+
 \bibitem{bernstein2012ed25519} D.~J.~Bernstein, N.~Duif, T.~Lange, P.~Schwabe, and B.-Y.~Yang, ``High-speed high-security signatures,'' \textit{J. Cryptographic Engineering}, vol.~2, no.~2, pp.~77--89, 2012.
 
 \bibitem{rfc8878} Y.~Collet and M.~Kucherawy, ``Zstandard compression and the `application/zstd' media type,'' RFC~8878, Internet Engineering Task Force, Feb. 2021.
 
-\bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Networking}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
+\bibitem{anderson2020nat} D.~Anderson, ``How NAT traversal works,'' Tailscale blog, Aug.\ 2020. [Online]. Available: \url{https://tailscale.com/blog/how-nat-traversal-works}
 
 \bibitem{rfc5705} E.~Rescorla, ``Keying material exporters for Transport Layer Security (TLS),'' RFC~5705, Internet Engineering Task Force, Mar. 2010.
+
+\bibitem{rfc2104} H.~Krawczyk, M.~Bellare, and R.~Canetti, ``HMAC: Keyed-hashing for message authentication,'' RFC~2104, Internet Engineering Task Force, Feb.\ 1997.
+
+\bibitem{dolstra2004nix}
+E.~Dolstra, M.~de~Jonge, and E.~Visser,
+``Nix: A safe and policy-free system for software deployment,''
+\textit{Proc. 18th LISA}, 2004, pp.~79--92.
+
+\bibitem{cloudpickle} cloudpickle, ``Extended pickling support for Python objects.'' [Online]. Available: \url{https://github.com/cloudpipe/cloudpickle}
+
+\bibitem{crun} crun, ``A fast and lightweight fully featured OCI runtime and C library for running containers.'' [Online]. Available: \url{https://github.com/containers/crun}
+
+\bibitem{oci2021}
+Open Container Initiative,
+``OCI Runtime Specification, v1.0.2,'' 2020. [Online]. Available:
+\url{https://github.com/opencontainers/runtime-spec}.
+
+\bibitem{dean2004mapreduce}
+J.~Dean and S.~Ghemawat,
+``MapReduce: Simplified data processing on large clusters,''
+\textit{Proc. 6th USENIX OSDI}, 2004, pp.~137--150.
+
+\bibitem{li2020pytorchddp} S.~Li, Y.~Zhao, R.~Varma, O.~Salpekar, P.~Noordhuis, T.~Li, A.~Paszke, J.~Smith, B.~Vaughan, P.~Damania, and S.~Chintala, ``PyTorch distributed: Experiences on accelerating data parallel training,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~3005--3018, 2020.
+
+\bibitem{dettmers2016eightbit} T.~Dettmers, ``8-bit approximations for parallelism in deep learning,'' in \textit{Proc. 4th Int. Conf. Learning Representations (ICLR)}, 2016; arXiv:1511.04561.
+
+\bibitem{seide2014onebit} F.~Seide, H.~Fu, J.~Droppo, G.~Li, and D.~Yu, ``1-bit stochastic gradient descent and its application to data-parallel distributed training of speech DNNs,'' in \textit{Proc. Interspeech}, 2014, pp.~1058--1062.
 
 \bibitem{douillard2023diloco} A.~Douillard, Q.~Feng, A.~A.~Rusu, R.~Chhaparia, Y.~Donchev, A.~Kuncoro, M.~Ranzato, A.~Szlam, and J.~Shen, ``DiLoCo: Distributed low-communication training of language models,'' arXiv:2311.08105, 2023.
 
 \bibitem{lin2020localsgd} T.~Lin, S.~U.~Stich, K.~K.~Patel, and M.~Jaggi, ``Don't use large mini-batches, use local SGD,'' in \textit{Proc. 8th Int. Conf. Learning Representations (ICLR)}, 2020; arXiv:1808.07217.
+
+\bibitem{vogels2019powersgd} T.~Vogels, S.~P.~Karimireddy, and M.~Jaggi, ``PowerSGD: Practical low-rank gradient compression for distributed optimization,'' in \textit{Advances in Neural Information Processing Systems (NeurIPS)}, vol.~32, 2019.
+
+\bibitem{goyal2017imagenet} P.~Goyal, P.~Doll\'ar, R.~Girshick, P.~Noordhuis, L.~Wesolowski, A.~Kyrola, A.~Tulloch, Y.~Jia, and K.~He, ``Accurate, large minibatch SGD: Training ImageNet in 1 hour,'' arXiv:1706.02677, 2017.
+
+\bibitem{hoffer2017trainlonger} E.~Hoffer, I.~Hubara, and D.~Soudry, ``Train longer, generalize better: Closing the generalization gap in large batch training of neural networks,'' in \textit{Advances in Neural Information Processing Systems (NeurIPS)}, vol.~30, 2017, pp.~1729--1739.
+
+\bibitem{johnson2020adascale} T.~B.~Johnson, P.~Agrawal, H.~Gu, and C.~Guestrin, ``AdaScale SGD: A user-friendly algorithm for distributed training,'' in \textit{Proc. 37th Int. Conf. Machine Learning (ICML)}, PMLR vol.~119, 2020, pp.~4911--4920.
+
+\bibitem{sarfi2025sparseloco} A.~Sarfi, B.~Th\'erien, J.~Lidin, and E.~Belilovsky, ``Overcoming the communication-performance tradeoff in LLM pretraining,'' arXiv:2508.15706, 2025.
+
+\bibitem{aji2017sparse} A.~F.~Aji and K.~Heafield, ``Sparse communication for distributed gradient descent,'' in \textit{Proc. Conf. Empirical Methods in Natural Language Processing (EMNLP)}, 2017, pp.~440--445.
+
+\bibitem{li2020fedprox} T.~Li, A.~K.~Sahu, M.~Zaheer, M.~Sanjabi, A.~Talwalkar, and V.~Smith, ``Federated optimization in heterogeneous networks,'' in \textit{Proc. Machine Learning and Systems (MLSys)}, vol.~2, 2020, pp.~429--450.
+
+\bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Networking}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
+
+\bibitem{termux} Termux, ``Termux: Android terminal emulator and Linux environment.'' [Online]. Available: \url{https://termux.dev}
+
+\bibitem{proot} PRoot, ``chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
+
+\bibitem{anderson2004boinc}
+D.~P.~Anderson,
+``BOINC: A system for public-resource computing and storage,''
+\textit{Proc. 5th IEEE/ACM Workshop on Grid Computing}, 2004, pp.~4--10.
+
+\bibitem{douillard2025streaming} A.~Douillard, Y.~Donchev, K.~Rush, S.~Kale, Z.~Charles, Z.~Garrett, G.~Teston, D.~Lacey, R.~McIlroy, J.~Shen, A.~Ram\'e, A.~Szlam, M.~Ranzato, and P.~Barham, ``Streaming DiLoCo with overlapping communication: Towards a distributed free lunch,'' arXiv:2501.18512, 2025.
 
 \end{thebibliography}
 

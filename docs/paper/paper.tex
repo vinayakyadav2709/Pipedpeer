@@ -20,7 +20,7 @@
 % Fields the authors fill before submission (red until filled).
 \newcommand{\fillin}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
 \newcommand{\guidename}{Rupali Sawant}
-\newcommand{\guideemail}{\fillin{guide e-mail}}
+\newcommand{\guideemail}{rupali\_sawant@spit.ac.in}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{algorithmic}
 \usepackage{graphicx}
@@ -168,8 +168,8 @@ al.~\cite{yong2023} show partial offloading to beat all-or-nothing, the regime o
 interception operates in; learned policies~\cite{he2024} exceed a deterministic
 rule at the price of a training phase; and topology-aware placement
 \cite{zhao2023} outperforms scalar scoring, a limitation our whole-job placement
-shares. Bergstr\"om~\cite{kth2025thesis} surveys abstractions that hide failure
-from application code, the property Section~\ref{sec:ft} must provide for scripts
+shares. Spenger~\cite{kth2025thesis} defines failure transparency, under which
+application code never observes a failure, and proves it for stateful dataflow; that is the property Section~\ref{sec:ft} must provide for scripts
 that contain no failure handling.
 
 \section{Methodology}
@@ -254,9 +254,9 @@ that import; on a multi-user Nix, whose daemon ignores keys passed per command,
 a root-owned helper installed at set-up can only add or remove keys of the
 cluster's form. Caches are pruned least-recently-used.
 
-A phone can be a full node: under Termux, \texttt{proot-distro} provides a
-Debian root with single-user Nix, and jobs run under \texttt{proot} with a
-memory limit and lower priority --- a weaker sandbox than \texttt{crun}, which
+A phone can be a full node: under Termux~\cite{termux}, \texttt{proot-distro} provides a
+Debian root with single-user Nix, and jobs run under \texttt{proot}~\cite{proot} with a
+memory limit and lower priority --- a weaker sandbox than \texttt{crun}~\cite{crun}, which
 the diagnostics say. Every ARM path of the scientific set is in the public
 cache at the pin (a 395\,MiB download). Termux's \texttt{proot} lacks
 \texttt{fchmodat2} (Linux 6.6+), so on such kernels set-up builds the upstream
@@ -280,10 +280,10 @@ introducer messages and QUIC share one UDP socket, because a router's mapping
 belongs to the socket that opened it. Both sides probe every candidate pair every
 250\,ms for 15\,s. When one side's NAT allocates a new port per destination there
 is no address to publish; that side opens 256 sockets toward the peer while the
-other sends 600 probes to random ports, and the socket that is hit is kept. The
-winning path carries QUIC with a hello signed by each node's Ed25519 key, checked
+other sends 600 probes to random ports, and the socket that is hit is kept~\cite{anderson2020nat}. The
+winning path carries QUIC with a hello signed by each node's Ed25519~\cite{bernstein2012ed25519} key, checked
 against the node it meant to reach; the hello signs the session's exported keying
-material \cite{rfc5705} and proves the cluster secret by an HMAC over it, so it
+material \cite{rfc5705} and proves the cluster secret by an HMAC~\cite{rfc2104} over it, so it
 cannot be replayed on another session. The link is exposed locally as a loopback
 forwarder recorded as one path of that node, so placement, transfer and gradient
 exchange run over it unchanged. A node is its key's fingerprint, never its
@@ -299,7 +299,7 @@ deadline, once adopted; all are fixed.
 
 The daemon API requires the cluster's shared secret on every route when one is
 configured, sends it only to hosts that answer a challenge with an HMAC, and
-serves pinned TLS and HTTP on one port. These protections are optional and
+serves pinned TLS~\cite{rfc8446} and HTTP on one port. These protections are optional and
 partial: without a secret the daemon is open, TLS is trust on first use and can
 fall back to plain text, and the set of keys trusted to sign closures is not yet
 bound to an authenticated identity.
@@ -311,11 +311,11 @@ A Python module embedded in the binary is appended to the workspace archive and
 placed on the interpreter's path, so it is imported before the user's first line;
 libraries are patched on first import. Substituted primitives are parallel maps,
 pandas grouping, joining and chunked reading, NumPy matrix products and
-decompositions, \texttt{joblib}, and data-parallel training.
+decompositions, \texttt{joblib}, and data-parallel training~\cite{li2020pytorchddp}.
 
 A parallel-map kernel travels as \emph{source} when it is a plain module-level
 function, including one defined in \texttt{\_\_main\_\_}, or \emph{by value}
-through cloudpickle when it is a lambda or closure. A chunk is divided among
+through cloudpickle~\cite{cloudpickle} when it is a lambda or closure. A chunk is divided among
 peers by a makespan solver: each device is modelled as a set-up time plus a rate,
 fitted from the parts it has returned, and a device whose set-up alone exceeds
 the makespan is declined. On a lab cluster limited to 8, 2 and 1 CPUs, a
@@ -331,7 +331,7 @@ any aggregation is exact in value with no combiner; row order of joins is not
 preserved. For data-parallel training, ranks post gradients to the lead node's
 daemon port rather than building a rank-to-rank mesh, and the daemon returns one
 sample-weighted average, $\sum_i n_i g_i / \sum_i n_i$, sent as 8-bit values
-with per-block scales and error feedback. The script's batch is split across
+with per-block scales~\cite{dettmers2016eightbit} and error feedback~\cite{seide2014onebit}. The script's batch is split across
 ranks by speed so that its learning rate stays correct, and after a warm-up the
 lead compares the split's step time with the fastest rank alone and keeps the
 ring only if it is faster. Returning every rank's gradient instead had made two machines 21 times
@@ -448,7 +448,7 @@ behaviour. Training accuracy under each synchronisation setting is measured
 in-process, with several ranks trained side by side on one machine and their
 validation loss compared with a single device's. \emph{Real hardware}: figures
 measured by hand during development on two machines over a home link or over
-Tailscale and recorded in the commit each justified, and a run between two
+Tailscale~\cite{anderson2020nat} and recorded in the commit each justified, and a run between two
 laptops over Tailscale. A first host has 12 threads and runs three worker
 daemons; a second has 16 threads
 and one laptop GPU, and its lab is laid out like a college laboratory.
@@ -583,10 +583,10 @@ at four; at eight ranks the transformer failed at every interval down to 2, so
 none is used from five ranks. Accuracy falling with rank count is a finding
 for a system aimed at many small machines; remedies from the literature were
 measured in-process at 4, 8 and 11 ranks. Of those, only exact synchronisation
-with rank-16 PowerSGD compression and error feedback kept every model within
+with rank-16 PowerSGD~\cite{vogels2019powersgd} compression and error feedback kept every model within
 1\% of one device (worst mean $+0.18\%$), sending $3.2\times$ fewer bytes than int8 exact
-on the perceptrons; keeping each rank's batch, linear, square-root or AdaScale
-learning-rate scaling, doubled epochs, SparseLoCo, top-k, FedProx and a larger
+on the perceptrons; keeping each rank's batch, linear~\cite{goyal2017imagenet}, square-root~\cite{hoffer2017trainlonger} or AdaScale~\cite{johnson2020adascale}
+learning-rate scaling, doubled epochs, SparseLoCo~\cite{sarfi2025sparseloco}, top-k~\cite{aji2017sparse}, FedProx~\cite{li2020fedprox} and a larger
 outer learning rate each failed.
 
 \textbf{Slow peers and slow links.} With one peer at a tenth of the CPU, four
@@ -632,41 +632,77 @@ a controlled multi-machine evaluation.
 
 \bibitem{moritz2018ray} P.~Moritz et al., ``Ray: A distributed framework for emerging AI applications,'' in \textit{Proc. 13th USENIX OSDI}, 2018, pp.~561--577.
 
-\bibitem{rocklin2015dask} M.~Rocklin, ``Dask: Parallel computation with blocked algorithms and task scheduling,'' in \textit{Proc. 14th Python in Science Conf.}, 2015, pp.~130--136.
-
-\bibitem{anderson2004boinc} D.~P.~Anderson, ``BOINC: A system for public-resource computing and storage,'' in \textit{Proc. 5th IEEE/ACM Workshop on Grid Computing}, 2004, pp.~4--10.
+\bibitem{rocklin2015dask} M.~Rocklin, ``Dask: Parallel computation with blocked algorithms and task scheduling,'' in \textit{Proc. 14th Python in Science Conf.}, 2015, pp.~126--132.
 
 \bibitem{dolstra2004nix} E.~Dolstra, M.~de~Jonge, and E.~Visser, ``Nix: A safe and policy-free system for software deployment,'' in \textit{Proc. 18th LISA}, 2004, pp.~79--92.
 
-\bibitem{deng2023} Y.~Deng, Z.~Chen, X.~Chen, and Y.~Fang, ``Task offloading in multi-hop relay-aided multi-access edge computing,'' \textit{IEEE Trans. Veh. Technol.}, vol.~72, no.~1, pp.~1372--1376, 2023.
-
-\bibitem{yong2023} D.~Yong, R.~Liu, X.~Jia, and Y.~Gu, ``Joint optimization of multi-user partial offloading strategy and resource allocation in D2D-enabled MEC,'' \textit{Sensors}, vol.~23, no.~5, 2023.
-
-\bibitem{he2024} H.~He, X.~Yang, X.~Mi, H.~Shen, and X.~Liao, ``Multi-agent deep reinforcement learning based dynamic task offloading in a D2D mobile-edge computing network,'' \textit{Sensors}, vol.~24, no.~16, 2024.
-
-\bibitem{zhao2023} Z.~Zhao, J.~Perazzone, G.~Verma, and S.~Segarra, ``Congestion-aware distributed task offloading in wireless multi-hop networks using graph neural networks,'' arXiv:2312.02471, 2023.
-
 \bibitem{petersohn2020modin} D.~Petersohn et al., ``Towards scalable dataframe systems,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~2033--2046, 2020.
 
-\bibitem{kth2025thesis} A.~Bergstr\"om, ``Programming models for failure-transparent distributed systems,'' M.S. thesis, KTH Royal Institute of Technology, 2025.
-
-\bibitem{rfc9000} J.~Iyengar and M.~Thomson, ``QUIC: A UDP-based multiplexed and secure transport,'' RFC~9000, IETF, May 2021.
+\bibitem{anderson2004boinc} D.~P.~Anderson, ``BOINC: A system for public-resource computing and storage,'' in \textit{Proc. 5th IEEE/ACM Workshop on Grid Computing}, 2004, pp.~4--10.
 
 \bibitem{rfc8489} M.~Petit-Huguenin, G.~Salgueiro, J.~Rosenberg, D.~Wing, R.~Mahy, and P.~Matthews, ``Session Traversal Utilities for NAT (STUN),'' RFC~8489, IETF, Feb. 2020.
 
-\bibitem{rfc6886} S.~Cheshire and M.~Krochmal, ``NAT Port Mapping Protocol (NAT-PMP),'' RFC~6886, IETF, Apr. 2013.
-
 \bibitem{rfc6887} D.~Wing, S.~Cheshire, M.~Boucadair, R.~Penno, and P.~Selkirk, ``Port Control Protocol (PCP),'' RFC~6887, IETF, Apr. 2013.
+
+\bibitem{rfc6886} S.~Cheshire and M.~Krochmal, ``NAT Port Mapping Protocol (NAT-PMP),'' RFC~6886, IETF, Apr. 2013.
 
 \bibitem{ford2005p2p} B.~Ford, P.~Srisuresh, and D.~Kegel, ``Peer-to-peer communication across network address translators,'' in \textit{Proc. USENIX Annual Technical Conf.}, 2005, pp.~179--192.
 
+\bibitem{rfc9000} J.~Iyengar and M.~Thomson, ``QUIC: A UDP-based multiplexed and secure transport,'' RFC~9000, IETF, May 2021.
+
+\bibitem{deng2023} Y.~Deng, Z.~Chen, X.~Chen, and Y.~Fang, ``Task offloading in multi-hop relay-aided multi-access edge computing,'' \textit{IEEE Trans. Veh. Technol.}, vol.~72, no.~1, pp.~1372--1376, 2023.
+
+\bibitem{yong2023} D.~Yong, R.~Liu, X.~Jia, and Y.~Gu, ``Joint optimization of multi-user partial offloading strategy and resource allocation strategy in D2D-enabled MEC,'' \textit{Sensors}, vol.~23, no.~5, Art.~no.~2565, 2023.
+
+\bibitem{he2024} H.~He, X.~Yang, X.~Mi, H.~Shen, and X.~Liao, ``Multi-agent deep reinforcement learning based dynamic task offloading in a device-to-device mobile-edge computing network to minimize average task delay with deadline constraints,'' \textit{Sensors}, vol.~24, no.~16, Art.~no.~5141, 2024.
+
+\bibitem{zhao2023} Z.~Zhao, J.~Perazzone, G.~Verma, and S.~Segarra, ``Congestion-aware distributed task offloading in wireless multi-hop networks using graph neural networks,'' in \textit{Proc. IEEE ICASSP}, 2024, pp.~8951--8955.
+
+\bibitem{kth2025thesis} J.~Spenger, ``Programming models for failure-transparent distributed systems,'' Ph.D. dissertation, KTH Royal Institute of Technology, Stockholm, Sweden, 2025.
+
+\bibitem{termux} Termux, ``Termux: Android terminal emulator and Linux environment.'' [Online]. Available: \url{https://termux.dev}
+
+\bibitem{proot} PRoot, ``chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
+
+\bibitem{crun} crun, ``A fast and lightweight fully featured OCI runtime and C library for running containers.'' [Online]. Available: \url{https://github.com/containers/crun}
+
+\bibitem{anderson2020nat} D.~Anderson, ``How NAT traversal works,'' Tailscale blog, Aug. 2020. [Online]. Available: \url{https://tailscale.com/blog/how-nat-traversal-works}
+
+\bibitem{bernstein2012ed25519} D.~J.~Bernstein, N.~Duif, T.~Lange, P.~Schwabe, and B.-Y.~Yang, ``High-speed high-security signatures,'' \textit{J. Cryptogr. Eng.}, vol.~2, no.~2, pp.~77--89, 2012.
+
 \bibitem{rfc5705} E.~Rescorla, ``Keying material exporters for Transport Layer Security (TLS),'' RFC~5705, IETF, Mar. 2010.
+
+\bibitem{rfc2104} H.~Krawczyk, M.~Bellare, and R.~Canetti, ``HMAC: Keyed-hashing for message authentication,'' RFC~2104, IETF, Feb. 1997.
+
+\bibitem{rfc8446} E.~Rescorla, ``The Transport Layer Security (TLS) protocol version 1.3,'' RFC~8446, IETF, Aug. 2018.
+
+\bibitem{li2020pytorchddp} S.~Li et al., ``PyTorch distributed: Experiences on accelerating data parallel training,'' \textit{Proc. VLDB Endowment}, vol.~13, no.~12, pp.~3005--3018, 2020.
+
+\bibitem{cloudpickle} cloudpickle, ``Extended pickling support for Python objects.'' [Online]. Available: \url{https://github.com/cloudpipe/cloudpickle}
+
+\bibitem{dettmers2016eightbit} T.~Dettmers, ``8-bit approximations for parallelism in deep learning,'' in \textit{Proc. ICLR}, 2016.
+
+\bibitem{seide2014onebit} F.~Seide, H.~Fu, J.~Droppo, G.~Li, and D.~Yu, ``1-bit stochastic gradient descent and its application to data-parallel distributed training of speech DNNs,'' in \textit{Proc. Interspeech}, 2014, pp.~1058--1062.
 
 \bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Netw.}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
 
 \bibitem{douillard2023diloco} A.~Douillard et al., ``DiLoCo: Distributed low-communication training of language models,'' arXiv:2311.08105, 2023.
 
 \bibitem{lin2020localsgd} T.~Lin, S.~U.~Stich, K.~K.~Patel, and M.~Jaggi, ``Don't use large mini-batches, use local SGD,'' in \textit{Proc. ICLR}, 2020.
+
+\bibitem{vogels2019powersgd} T.~Vogels, S.~P.~Karimireddy, and M.~Jaggi, ``PowerSGD: Practical low-rank gradient compression for distributed optimization,'' in \textit{Proc. NeurIPS}, 2019.
+
+\bibitem{goyal2017imagenet} P.~Goyal et al., ``Accurate, large minibatch SGD: Training ImageNet in 1 hour,'' arXiv:1706.02677, 2017.
+
+\bibitem{hoffer2017trainlonger} E.~Hoffer, I.~Hubara, and D.~Soudry, ``Train longer, generalize better: Closing the generalization gap in large batch training of neural networks,'' in \textit{Proc. NeurIPS}, 2017, pp.~1729--1739.
+
+\bibitem{johnson2020adascale} T.~B.~Johnson, P.~Agrawal, H.~Gu, and C.~Guestrin, ``AdaScale SGD: A user-friendly algorithm for distributed training,'' in \textit{Proc. 37th ICML}, PMLR vol.~119, 2020, pp.~4911--4920.
+
+\bibitem{sarfi2025sparseloco} A.~Sarfi, B.~Th\'erien, J.~Lidin, and E.~Belilovsky, ``Overcoming the communication-performance tradeoff in LLM pretraining,'' arXiv:2508.15706, 2025.
+
+\bibitem{aji2017sparse} A.~F.~Aji and K.~Heafield, ``Sparse communication for distributed gradient descent,'' in \textit{Proc. EMNLP}, 2017, pp.~440--445.
+
+\bibitem{li2020fedprox} T.~Li, A.~K.~Sahu, M.~Zaheer, M.~Sanjabi, A.~Talwalkar, and V.~Smith, ``Federated optimization in heterogeneous networks,'' in \textit{Proc. MLSys}, vol.~2, 2020, pp.~429--450.
 
 \end{thebibliography}
 
