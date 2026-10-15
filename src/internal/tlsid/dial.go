@@ -52,7 +52,7 @@ func URL(addr, path string) string {
 	return scheme + "://" + addr + path
 }
 
-// Client returns an http.Client that verifies peers by pinned fingerprint.
+// Client returns an http.Client that verifies peers by node key.
 func Client(addr string, base *http.Client) *http.Client {
 	c := &http.Client{}
 	if base != nil {
