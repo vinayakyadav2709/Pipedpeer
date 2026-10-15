@@ -14,7 +14,7 @@ func TestExplainCandidatesMarksTheWinner(t *testing.T) {
 		ChosenNode: win,
 		Candidates: []ScoredNode{
 			{Node: win, Score: 0.9, Source: SourceDiscovery},
-			{Node: registry.NodeRecord{NodeID: "lose", SSHEndpoint: "root@10.0.0.3:22"}, Score: 0.4, Source: SourceRegistry},
+			{Node: registry.NodeRecord{NodeID: "lose", SSHEndpoint: "root@10.0.0.3:22"}, Score: 0.4, Source: SourceManual},
 			{Node: registry.NodeRecord{NodeID: "no"}, Rejected: true, RejectReason: "arch mismatch"},
 		},
 	}

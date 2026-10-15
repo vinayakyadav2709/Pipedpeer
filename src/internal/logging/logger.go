@@ -14,7 +14,6 @@ var Logger zerolog.Logger
 
 func init() {
 	// Default: pretty console output for development.
-	// Can be overridden by calling SetupJSON() for production.
 	// Seconds in the time so `pipedpeer events` can order lines; no colour
 	// when stderr is a file (the daemon writes daemon.log this way).
 	output := zerolog.ConsoleWriter{
@@ -56,11 +55,6 @@ func isTerminal(f *os.File) bool {
 // except the daemon.
 func SetupCLI() {
 	log.Logger = Logger
-}
-
-// SetupJSON switches to JSON-structured logging (for production/daemon mode).
-func SetupJSON() {
-	Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 }
 
 // WithComponent returns a sub-logger with a "component" field set.

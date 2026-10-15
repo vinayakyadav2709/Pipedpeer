@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 )
 
 // --- Lease lifecycle tests ---
@@ -215,63 +217,6 @@ func TestEarlyCommitBeforeExpiry(t *testing.T) {
 	}
 }
 
-func TestCancelReleasesReservation(t *testing.T) {
-	s := NewWithConfig("cancel-node", 5*time.Second, 2*time.Second, 100*time.Millisecond)
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	body := `{"target_id":"cancel-node","job_name":"cancel-job","submitter_node":"submitter-a","required_mem_bytes":536870912}`
-	resp, _ := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(body))
-	var acceptResp acceptResponse
-	json.NewDecoder(resp.Body).Decode(&acceptResp)
-	resp.Body.Close()
-
-	if s.ReservedMem() != 536870912 {
-		t.Fatalf("expected 512MB reserved, got %d", s.ReservedMem())
-	}
-
-	// Cancel by submitter
-	cancelBody := fmt.Sprintf(`{"lease_id":%q,"submitter_node":"submitter-a"}`, acceptResp.LeaseID)
-	resp, _ = http.Post(srv.URL+"/v1/cancel", "application/json", strings.NewReader(cancelBody))
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("cancel should succeed, got %d", resp.StatusCode)
-	}
-	if s.ActiveLeases() != 0 {
-		t.Fatalf("expected 0 leases after cancel, got %d", s.ActiveLeases())
-	}
-	if s.ReservedMem() != 0 {
-		t.Fatalf("expected 0 reserved mem after cancel, got %d", s.ReservedMem())
-	}
-}
-
-func TestCancelByNonSubmitterRejected(t *testing.T) {
-	s := NewWithConfig("auth-node", 5*time.Second, 2*time.Second, 100*time.Millisecond)
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	body := `{"target_id":"auth-node","job_name":"auth-job","submitter_node":"real-submitter"}`
-	resp, _ := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(body))
-	var acceptResp acceptResponse
-	json.NewDecoder(resp.Body).Decode(&acceptResp)
-	resp.Body.Close()
-
-	// Cancel by different node → should be rejected
-	cancelBody := fmt.Sprintf(`{"lease_id":%q,"submitter_node":"imposter"}`, acceptResp.LeaseID)
-	resp, _ = http.Post(srv.URL+"/v1/cancel", "application/json", strings.NewReader(cancelBody))
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("cancel by non-submitter should return 403, got %d", resp.StatusCode)
-	}
-
-	// Lease should still exist
-	if s.ActiveLeases() != 1 {
-		t.Fatalf("lease should not be cancelled by non-submitter, got %d leases", s.ActiveLeases())
-	}
-}
-
 func TestRunningLeaseNotSwept(t *testing.T) {
 	// Lease 30ms, sweep every 10ms — but committed leases should NOT be swept
 	s := NewWithConfig("running-node", 30*time.Millisecond, 10*time.Millisecond, 10*time.Millisecond)
@@ -393,6 +338,41 @@ func TestAcceptRejectsWrongTargetID(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("expected 409 for wrong target, got %d", resp.StatusCode)
+	}
+}
+
+// TestAcceptRefusedOnANodeWithARole: a pool-only or introducer-only node
+// takes no jobs (C5).
+func TestAcceptRefusedOnANodeWithARole(t *testing.T) {
+	heartbeat.Role = heartbeat.RolePoolOnly
+	t.Cleanup(func() { heartbeat.Role = "" })
+	s := New("pool-node")
+	resp, status := s.processAccept(acceptRequest{TargetID: "pool-node"})
+	if resp.Accepted || status != http.StatusServiceUnavailable || !strings.Contains(resp.Reason, "takes no jobs") {
+		t.Fatalf("accept on a pool-only node: %+v (status %d)", resp, status)
+	}
+	if s.ActiveLeases() != 0 {
+		t.Fatalf("a refused accept left %d lease(s)", s.ActiveLeases())
+	}
+}
+
+// TestHealthyPeersSkipsIntroducerOnly: pool spill never sends work to an
+// introducer-only peer, but a pool-only one still gets it (C5).
+func TestHealthyPeersSkipsIntroducerOnly(t *testing.T) {
+	s := New("self")
+	s.peerHealths = map[string]*PeerHealth{
+		"a:1": {Host: "a", Port: 1, Status: "healthy", Role: heartbeat.RoleIntroducerOnly},
+		"b:1": {Host: "b", Port: 1, Status: "healthy", Role: heartbeat.RolePoolOnly},
+		"c:1": {Host: "c", Port: 1, Status: "healthy"},
+	}
+	got, known := s.healthyPeers()
+	if known != 3 || len(got) != 2 {
+		t.Fatalf("healthyPeers = %v (known %d), want b and c of 3", got, known)
+	}
+	for _, ph := range got {
+		if ph.Host == "a" {
+			t.Fatal("introducer-only peer offered pool work")
+		}
 	}
 }
 
@@ -555,31 +535,6 @@ func TestAcceptWithoutResourceReqAlwaysAccepted(t *testing.T) {
 	}
 }
 
-func TestCompleteByJobNameBackwardsCompat(t *testing.T) {
-	s := NewWithConfig("compat-node", 5*time.Second, 2*time.Second, 100*time.Millisecond)
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	body := `{"target_id":"compat-node","job_name":"compat-job"}`
-	resp, _ := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(body))
-	var ar acceptResponse
-	json.NewDecoder(resp.Body).Decode(&ar)
-	resp.Body.Close()
-
-	// Commit
-	commitBody := fmt.Sprintf(`{"lease_id":%q}`, ar.LeaseID)
-	resp, _ = http.Post(srv.URL+"/v1/commit", "application/json", strings.NewReader(commitBody))
-	resp.Body.Close()
-
-	// Complete using job_name instead of lease_id (backwards compat)
-	resp, _ = http.Post(srv.URL+"/v1/complete", "application/json", strings.NewReader(`{"job_name":"compat-job"}`))
-	resp.Body.Close()
-
-	if s.ActiveLeases() != 0 {
-		t.Fatalf("expected 0 leases after complete by job_name, got %d", s.ActiveLeases())
-	}
-}
-
 // --- Edge case tests ---
 
 func TestCommitWithUnknownLeaseID(t *testing.T) {
@@ -630,20 +585,6 @@ func TestCommitWithInvalidJSON(t *testing.T) {
 
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for invalid JSON, got %d", resp.StatusCode)
-	}
-}
-
-func TestCancelNonExistentLease(t *testing.T) {
-	s := New("edge-node")
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	body := `{"lease_id":"ghost-lease","submitter_node":"sub"}`
-	resp, _ := http.Post(srv.URL+"/v1/cancel", "application/json", strings.NewReader(body))
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for non-existent lease, got %d", resp.StatusCode)
 	}
 }
 
@@ -718,19 +659,6 @@ func TestCompleteOnReservedLeaseReleasesIt(t *testing.T) {
 	}
 	if s.ReservedMem() != 0 {
 		t.Fatalf("expected 0 reserved mem, got %d", s.ReservedMem())
-	}
-}
-
-func TestCancelWithInvalidJSON(t *testing.T) {
-	s := New("edge-node")
-	srv := httptest.NewServer(s.Handler())
-	defer srv.Close()
-
-	resp, _ := http.Post(srv.URL+"/v1/cancel", "application/json", strings.NewReader("not-json"))
-	resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("expected 400 for invalid JSON, got %d", resp.StatusCode)
 	}
 }
 

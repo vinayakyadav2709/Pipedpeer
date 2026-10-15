@@ -21,7 +21,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
@@ -30,7 +29,6 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
-	"github.com/pipedpeer/pipedpeer/internal/natsbus"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
@@ -106,9 +104,6 @@ type Server struct {
 	lastJobPrune time.Time
 	jobs         map[string]*JobRecord
 
-	// NATS subscriptions (nil if NATS not configured)
-	natsSubs []*nats.Subscription
-
 	// Round-robin counter for cross-invocation persistence
 	rrCounter atomic.Int64
 	ddp       *ddpBoard
@@ -174,7 +169,7 @@ type PeerHealth struct {
 	Status       string `json:"status"` // "healthy", "unreachable"
 	ActiveJobs   int    `json:"active_jobs"`
 	AvailableMem int64  `json:"available_mem"`
-	Source       string `json:"source"` // "manual", "discovery", "registry"
+	Source       string `json:"source"` // "manual", "discovery", "self"
 	// TotalCPUs is the peer's core count, used only as the prior for how much
 	// pool work to give it before anything has actually been measured there.
 	TotalCPUs int `json:"total_cpus"`
@@ -192,6 +187,15 @@ type PeerHealth struct {
 	// GPU is the peer's GPU vendor ("" when it has none), so a CUDA closure
 	// is not pushed to a node that cannot use it.
 	GPU string `json:"gpu,omitempty"`
+	// Role is the peer's heartbeat.RoleCapability ("" = full node). Pool
+	// spill skips introducer-only peers; the poller fills it from /health.
+	Role string `json:"role,omitempty"`
+}
+
+// takesPoolWork reports whether pool spill may send this peer work: every
+// node but an introducer-only one.
+func (ph *PeerHealth) takesPoolWork() bool {
+	return ph.Role != heartbeat.RoleIntroducerOnly
 }
 
 // TakesSignedClosures reports whether this peer can receive a closure in the
@@ -238,13 +242,7 @@ type commitResponse struct {
 
 type completeRequest struct {
 	LeaseID string `json:"lease_id"`
-	JobName string `json:"job_name"` // backwards compat
-	Status  string `json:"status"`   // "succeeded" or "failed"
-}
-
-type cancelRequest struct {
-	LeaseID       string `json:"lease_id"`
-	SubmitterNode string `json:"submitter_node"`
+	Status  string `json:"status"` // "succeeded", "failed" or "cancelled"
 }
 
 // --- Constructor ---
@@ -325,53 +323,6 @@ func (s *Server) ListenAndServe(port int) error {
 	return (&http.Server{Handler: s.Handler()}).Serve(tlsid.NewListener(ln, &cert))
 }
 
-// BindNATS subscribes to NATS subjects for this node's lease operations.
-// Enables NATS-based transport alongside HTTP.
-func (s *Server) BindNATS(bus *natsbus.Bus) error {
-	prefix := fmt.Sprintf("pipedpeer.daemon.%s", s.nodeID)
-
-	acceptSub, err := bus.Subscribe(prefix+".accept", s.handleNATSAccept)
-	if err != nil {
-		return fmt.Errorf("subscribe accept: %w", err)
-	}
-
-	commitSub, err := bus.Subscribe(prefix+".commit", s.handleNATSCommit)
-	if err != nil {
-		return fmt.Errorf("subscribe commit: %w", err)
-	}
-
-	completeSub, err := bus.Subscribe(prefix+".complete", s.handleNATSComplete)
-	if err != nil {
-		return fmt.Errorf("subscribe complete: %w", err)
-	}
-
-	cancelSub, err := bus.Subscribe(prefix+".cancel", s.handleNATSCancel)
-	if err != nil {
-		return fmt.Errorf("subscribe cancel: %w", err)
-	}
-
-	healthSub, err := bus.Subscribe(prefix+".health", s.handleNATSHealth)
-	if err != nil {
-		return fmt.Errorf("subscribe health: %w", err)
-	}
-
-	renewSub, err := bus.Subscribe(prefix+".renew", s.handleNATSRenew)
-	if err != nil {
-		return fmt.Errorf("subscribe renew: %w", err)
-	}
-
-	s.natsSubs = append(s.natsSubs, acceptSub, commitSub, completeSub, cancelSub, healthSub, renewSub)
-	return nil
-}
-
-// UnbindNATS unsubscribes from all NATS subjects.
-func (s *Server) UnbindNATS() {
-	for _, sub := range s.natsSubs {
-		_ = sub.Unsubscribe()
-	}
-	s.natsSubs = nil
-}
-
 // StartSweeper starts the background goroutine that expires stale leases.
 func (s *Server) StartSweeper() {
 	go func() {
@@ -382,12 +333,15 @@ func (s *Server) StartSweeper() {
 			case <-ticker.C:
 				s.sweepExpired()
 				s.ddp.sweep(10 * time.Minute)
-				// Completed job dirs accumulate on long-lived daemons; prune
-				// them hourly (retention is generous: a dir untouched for
-				// JobRetention is a finished job, whatever its record says).
+				// Finished job dirs accumulate on long-lived daemons; prune
+				// them hourly (see PruneCompletedJobDirs for what goes when).
 				if time.Since(s.lastJobPrune) > time.Hour {
 					s.lastJobPrune = time.Now()
-					if n, err := s.PruneCompletedJobDirs(JobRetention); err == nil && n > 0 {
+					n, err := s.PruneCompletedJobDirs(JobRetention)
+					switch {
+					case err != nil:
+						log.Warn().Err(err).Int("pruned", n).Msg("could not prune old job dirs")
+					case n > 0:
 						log.Info().Int("n", n).Msg("pruned stale job dir(s)")
 					}
 				}
@@ -398,18 +352,27 @@ func (s *Server) StartSweeper() {
 	}()
 }
 
-// JobRetention is how long finished job directories survive on a daemon
-// before the sweeper removes them.
+// JobRetention is how long a job directory with no record (a daemon restarted
+// without its state, or a job from an older build) survives after the newest
+// file in it was last written.
 const JobRetention = 7 * 24 * time.Hour
 
-// DetachedJobRetention is how long a job that was detached from keeps its
-// dir (output log + results for `pipedpeer attach`) after it finished.
-const DetachedJobRetention = 24 * time.Hour
+// FinishedJobRetention is how long a finished job keeps its dir after it
+// finished. Long enough for `pipedpeer attach` to collect a detached job's
+// output and results; a non-detached submitter fetched its results before the
+// job's lease was even released, so its dir is only disk use from then on
+// (Finding 25: 1.3 GiB of finished workspaces after one demo day).
+const FinishedJobRetention = 24 * time.Hour
 
 // PruneCompletedJobDirs removes job directories (and their in-memory records)
-// not touched within olderThan. Dir names are job IDs, so the jobs map can be
-// reconciled by name. A finished detached job goes DetachedJobRetention after
-// it finished instead, whatever its dir's mtime.
+// nobody needs any more:
+//   - a job this daemon still runs (or is importing) is never touched, however
+//     old its dir;
+//   - a finished job goes FinishedJobRetention after it finished;
+//   - a dir with no record goes when the newest file anywhere inside it is
+//     older than olderThan. The dir's own mtime is not that: appending to
+//     output.jsonl does not touch it, so a week-long job lost its dir mid-run
+//     (PRUNE-EDGE).
 //
 // The directory is shared with the submitter's job history and holds the NAR
 // cache, so only entries named like a daemon job ID (a UUID) are candidates;
@@ -431,38 +394,71 @@ func (s *Server) PruneCompletedJobDirs(olderThan time.Duration) (int, error) {
 		if _, err := uuid.Parse(e.Name()); err != nil {
 			continue
 		}
+		dir := filepath.Join(s.jobDir, e.Name())
 		s.jobsMu.Lock()
 		job := s.jobs[e.Name()]
-		detachedDone := job != nil && job.Detached && !job.FinishedAt.IsZero()
 		var finished time.Time
-		if detachedDone {
+		running := false
+		if job != nil {
 			finished = job.FinishedAt
+			running = finished.IsZero() && !jobStatusFinal(job.Status)
 		}
 		s.jobsMu.Unlock()
-		if detachedDone {
-			if time.Since(finished) < DetachedJobRetention {
+		switch {
+		case running:
+			continue
+		case !finished.IsZero():
+			if time.Since(finished) < FinishedJobRetention {
 				continue
 			}
-		} else {
-			info, err := e.Info()
+		default:
+			newest, err := newestModTime(dir)
 			if err != nil {
-				log.Warn().Err(err).Str("dir", e.Name()).Msg("cannot stat job dir; not pruning it")
+				log.Warn().Err(err).Str("dir", e.Name()).Msg("cannot read job dir; not pruning it")
 				continue
 			}
-			if !info.ModTime().Before(cutoff) {
+			if !newest.Before(cutoff) {
 				continue
 			}
 		}
-		if err := os.RemoveAll(filepath.Join(s.jobDir, e.Name())); err != nil {
+		if err := os.RemoveAll(dir); err != nil {
 			return removed, err
 		}
 		s.jobsMu.Lock()
 		delete(s.jobs, e.Name())
 		s.jobsMu.Unlock()
-		jobLogs.Delete(filepath.Join(s.jobDir, e.Name(), jobOutputFile))
+		jobLogs.Delete(filepath.Join(dir, jobOutputFile))
 		removed++
 	}
 	return removed, nil
+}
+
+// jobStatusFinal reports whether a job status is one a job never leaves.
+func jobStatusFinal(status string) bool {
+	switch status {
+	case "done", "failed", "cancelled":
+		return true
+	}
+	return false
+}
+
+// newestModTime is the latest modification time of dir or anything under it.
+func newestModTime(dir string) (time.Time, error) {
+	var newest time.Time
+	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if t := info.ModTime(); t.After(newest) {
+			newest = t
+		}
+		return nil
+	})
+	return newest, err
 }
 
 // StopSweeper stops the background lease sweeper.
@@ -526,7 +522,7 @@ func (s *Server) EnablePoolSpill() {
 			if ph.Status != "healthy" {
 				continue
 			}
-			if ph.Host == "" || ph.Port == 0 {
+			if ph.Host == "" || ph.Port == 0 || !ph.takesPoolWork() {
 				continue
 			}
 			// Only forward to peers that already imported this closure, else
@@ -571,7 +567,8 @@ func (s *Server) peerHasStore(ph *PeerHealth, storePath string) bool {
 	return r.Cached
 }
 
-// healthyPeers returns the peers currently known to be up, and how many peers
+// healthyPeers returns the peers currently known to be up that take pool
+// work (introducer-only peers are left out), and how many peers
 // the poller has any opinion about at all. The second number distinguishes
 // "everyone is down" from "we have not looked yet".
 func (s *Server) healthyPeers() ([]PeerHealth, int) {
@@ -579,7 +576,7 @@ func (s *Server) healthyPeers() ([]PeerHealth, int) {
 	defer s.peersMu.RUnlock()
 	var targets []PeerHealth
 	for _, ph := range s.peerHealths {
-		if ph.Status == "healthy" && ph.Host != "" && ph.Port != 0 {
+		if ph.Status == "healthy" && ph.Host != "" && ph.Port != 0 && ph.takesPoolWork() {
 			targets = append(targets, *ph)
 		}
 	}
@@ -1254,7 +1251,6 @@ func (s *Server) buildRouter() {
 	r.Post("/v1/commit", s.handleCommit)
 	r.Post("/v1/renew", s.handleRenew)
 	r.Post("/v1/complete", s.handleComplete)
-	r.Post("/v1/cancel", s.handleCancel)
 	r.Post("/v1/jobs/upload", s.handleJobUpload)
 	r.Get("/v1/jobs/{id}/exec", s.handleJobExec)
 	r.Get("/v1/jobs/{id}/results", s.handleJobResults)
@@ -1488,7 +1484,7 @@ func (s *Server) warnUntrustedKeys(keys []string) []string {
 	return missing
 }
 
-// --- Core lease logic (shared by HTTP and NATS handlers) ---
+// --- Core lease logic ---
 
 func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	if req.TargetID == "" {
@@ -1496,6 +1492,11 @@ func (s *Server) processAccept(req acceptRequest) (acceptResponse, int) {
 	}
 	if req.TargetID != s.nodeID {
 		return acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: "target_id does not match this node"}, http.StatusConflict
+	}
+	// A pool-only or introducer-only node takes no jobs (heartbeat.Role).
+	if role := heartbeat.Role; role != "" {
+		return acceptResponse{Accepted: false, NodeID: s.nodeID,
+			Reason: "this machine takes no jobs (" + role + " node)"}, http.StatusServiceUnavailable
 	}
 
 	// Host metrics are gathered before the lock: they read the OS and GPU, not
@@ -1723,16 +1724,7 @@ func (s *Server) processCommit(req commitRequest) (commitResponse, int) {
 
 func (s *Server) processComplete(req completeRequest) {
 	s.mu.Lock()
-	// Support both lease_id and job_name for backwards compatibility
 	leaseID := req.LeaseID
-	if leaseID == "" && req.JobName != "" {
-		for id, l := range s.leases {
-			if l.JobName == req.JobName {
-				leaseID = id
-				break
-			}
-		}
-	}
 	_, found := s.leases[leaseID]
 	if leaseID != "" {
 		delete(s.leases, leaseID)
@@ -1742,28 +1734,6 @@ func (s *Server) processComplete(req completeRequest) {
 	if found {
 		log.Info().Str("lease", leaseID).Str("status", req.Status).Msg("lease released")
 	}
-}
-
-func (s *Server) processCancel(req cancelRequest) (map[string]string, int) {
-	s.mu.Lock()
-	lease, ok := s.leases[req.LeaseID]
-	if !ok {
-		s.mu.Unlock()
-		return map[string]string{"error": "lease not found"}, http.StatusNotFound
-	}
-
-	// Only the submitter can cancel
-	if lease.SubmitterNode != "" && req.SubmitterNode != lease.SubmitterNode {
-		s.mu.Unlock()
-		return map[string]string{"error": "only the submitter can cancel"}, http.StatusForbidden
-	}
-
-	delete(s.leases, req.LeaseID)
-	s.mu.Unlock()
-	s.persist()
-	log.Info().Str("lease", req.LeaseID).Str("status", "cancelled").Msg("lease released")
-
-	return map[string]string{"status": "cancelled"}, http.StatusOK
 }
 
 // --- HTTP Handlers ---
@@ -1800,85 +1770,7 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleCancel releases a reservation. Only the original submitter can cancel.
-func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
-	var req cancelRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-	resp, status := s.processCancel(req)
-	writeJSON(w, status, resp)
-}
-
-// --- NATS Handlers (same logic, NATS transport) ---
-
-func (s *Server) handleNATSAccept(msg *nats.Msg) {
-	var req acceptRequest
-	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		natsReply(msg, acceptResponse{Accepted: false, NodeID: s.nodeID, Reason: "invalid request"})
-		return
-	}
-	resp, _ := s.processAccept(req)
-	natsReply(msg, resp)
-}
-
-func (s *Server) handleNATSCommit(msg *nats.Msg) {
-	var req commitRequest
-	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		natsReply(msg, commitResponse{Committed: false, NodeID: s.nodeID, Reason: "invalid request"})
-		return
-	}
-	resp, _ := s.processCommit(req)
-	natsReply(msg, resp)
-}
-
-func (s *Server) handleNATSRenew(msg *nats.Msg) {
-	var req struct {
-		LeaseID string `json:"lease_id"`
-	}
-	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		natsReply(msg, map[string]interface{}{"renewed": false, "reason": "invalid request"})
-		return
-	}
-	resp, _ := s.processRenew(req.LeaseID)
-	natsReply(msg, resp)
-}
-
-func (s *Server) handleNATSComplete(msg *nats.Msg) {
-	var req completeRequest
-	_ = json.Unmarshal(msg.Data, &req)
-	s.processComplete(req)
-	natsReply(msg, map[string]string{"status": "ok"})
-}
-
-func (s *Server) handleNATSCancel(msg *nats.Msg) {
-	var req cancelRequest
-	if err := json.Unmarshal(msg.Data, &req); err != nil {
-		natsReply(msg, map[string]string{"error": "invalid request"})
-		return
-	}
-	resp, _ := s.processCancel(req)
-	natsReply(msg, resp)
-}
-
-func (s *Server) handleNATSHealth(msg *nats.Msg) {
-	natsReply(msg, map[string]interface{}{
-		"status":        "ok",
-		"node_id":       s.nodeID,
-		"active_jobs":   s.ActiveJobs(),
-		"active_leases": s.ActiveLeases(),
-		"reserved_mem":  s.ReservedMem(),
-		"available_mem": s.AvailableForJob(),
-	})
-}
-
 // --- Helpers ---
-
-func natsReply(msg *nats.Msg, body any) {
-	data, _ := json.Marshal(body)
-	_ = msg.Respond(data)
-}
 
 func generateLeaseID() string {
 	return uuid.New().String()

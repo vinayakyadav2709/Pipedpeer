@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
@@ -98,65 +97,17 @@ func TestSelfNodeUsesLoopback(t *testing.T) {
 	})
 
 	selfNode := registry.NodeRecord{NodeID: "self-node-uuid"}
-	endpoint := c.ResolveEndpoint(selfNode)
+	endpoint := c.resolveEndpointForNode(selfNode)
 
 	if endpoint != "root@localhost:22" {
 		t.Fatalf("expected loopback for self, got %s", endpoint)
 	}
 
 	otherNode := registry.NodeRecord{NodeID: "other-node", SSHEndpoint: "root@10.0.1.5:22"}
-	endpoint = c.ResolveEndpoint(otherNode)
+	endpoint = c.resolveEndpointForNode(otherNode)
 
 	if endpoint != "root@10.0.1.5:22" {
 		t.Fatalf("expected remote endpoint, got %s", endpoint)
-	}
-}
-
-func TestRegistryIntegrationAndCacheFallback(t *testing.T) {
-	// Start a real registry
-	reg := registry.New(registry.DefaultConfig())
-	srv := httptest.NewServer(reg.Handler())
-
-	// Register a node in registry
-	reg.Register(registry.NodeRecord{
-		NodeID: "registry-node", SSHEndpoint: "root@10.0.1.100:22", DaemonPort: 38080,
-		Load: registry.LoadInfo{CPUPercent: 5}, HealthScore: 1.0, State: "healthy",
-	})
-
-	// Self has higher load so registry-node wins
-	selfLoad := registry.LoadInfo{CPUPercent: 50, MemPercent: 60, ActiveJobs: 3}
-
-	c := New(Config{
-		RegistryURL:  srv.URL,
-		SelfIdentity: testIdentity(),
-		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   fakeDaemon(t),
-		SelfLoad:     selfLoad,
-		DiscoverFn:   func() []registry.NodeRecord { return nil },
-	})
-
-	// First call: registry is up — should select registry-node (lower load)
-	decision := c.FindNode()
-	if decision.ChosenNode.NodeID != "registry-node" {
-		t.Fatalf("expected registry-node, got %s", decision.ChosenNode.NodeID)
-	}
-	if decision.DegradedMode {
-		t.Fatal("should not be degraded when registry is up")
-	}
-
-	// Shut down registry
-	srv.Close()
-
-	// Second call: registry is down — should use cache
-	decision = c.FindNode()
-	if decision.DegradedMode != true {
-		t.Fatal("should be degraded when registry is down")
-	}
-	if decision.ChosenNode.NodeID != "registry-node" {
-		t.Fatalf("expected registry-node from cache, got %s", decision.ChosenNode.NodeID)
-	}
-	if decision.Source != SourceCache {
-		t.Fatalf("expected cache source, got %s", decision.Source)
 	}
 }
 
@@ -165,20 +116,20 @@ func TestMergeNodeDeduplication(t *testing.T) {
 		{Node: registry.NodeRecord{NodeID: "node-1"}, Source: SourceDiscovery},
 	}
 
-	// Registry version should override discovery
+	// The self version should override discovery
 	list = mergeNode(list, ScoredNode{
 		Node:   registry.NodeRecord{NodeID: "node-1", SSHEndpoint: "updated"},
-		Source: SourceRegistry,
+		Source: SourceSelf,
 	})
 
 	if len(list) != 1 {
 		t.Fatalf("expected 1 after dedup, got %d", len(list))
 	}
-	if list[0].Source != SourceRegistry {
-		t.Fatalf("expected registry source after merge, got %s", list[0].Source)
+	if list[0].Source != SourceSelf {
+		t.Fatalf("expected self source after merge, got %s", list[0].Source)
 	}
 	if list[0].Node.SSHEndpoint != "updated" {
-		t.Fatal("expected updated endpoint from registry version")
+		t.Fatal("expected updated endpoint from the self version")
 	}
 }
 
@@ -205,100 +156,6 @@ func TestDiagnosticsRecordAllCandidates(t *testing.T) {
 	}
 }
 
-func TestStaleCacheReturnsSelf(t *testing.T) {
-	c := New(Config{
-		RegistryURL:  "http://127.0.0.1:1", // unreachable
-		SelfIdentity: testIdentity(),
-		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   fakeDaemon(t),
-		MaxCacheAge:  1 * time.Millisecond, // very short
-		DiscoverFn:   func() []registry.NodeRecord { return nil },
-	})
-
-	// Prime cache
-	c.updateCache([]registry.NodeRecord{
-		{NodeID: "cached-node", SSHEndpoint: "root@10.0.1.5:22", HealthScore: 1.0, State: "healthy"},
-	})
-
-	// Wait for cache to go stale
-	time.Sleep(5 * time.Millisecond)
-
-	decision := c.FindNode()
-
-	// Cache is stale, registry unreachable, discovery returns nothing → self
-	if decision.ChosenNode.NodeID != "self-node-uuid" {
-		t.Fatalf("expected self-node when cache stale, got %s", decision.ChosenNode.NodeID)
-	}
-	if !decision.DegradedMode {
-		t.Fatal("should be degraded when registry down")
-	}
-}
-
-func TestDiscoveryAndRegistryOverlapDedup(t *testing.T) {
-	// Same node found via both mDNS and registry
-	reg := registry.New(registry.DefaultConfig())
-	srv := httptest.NewServer(reg.Handler())
-	defer srv.Close()
-
-	sharedNode := registry.NodeRecord{
-		NodeID: "shared-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
-		Load: registry.LoadInfo{CPUPercent: 10}, HealthScore: 1.0, State: "healthy",
-	}
-	reg.Register(sharedNode)
-
-	fakeLAN := func() []registry.NodeRecord {
-		return []registry.NodeRecord{
-			{NodeID: "shared-node", SSHEndpoint: "root@10.0.1.5:22", DaemonPort: 38080,
-				Load: registry.LoadInfo{CPUPercent: 15}, HealthScore: 0.5, State: "healthy"},
-		}
-	}
-
-	c := New(Config{
-		RegistryURL:  srv.URL,
-		SelfIdentity: testIdentity(),
-		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   fakeDaemon(t),
-		SelfLoad:     registry.LoadInfo{CPUPercent: 90, MemPercent: 90},
-		DiscoverFn:   fakeLAN,
-	})
-
-	decision := c.FindNode()
-
-	// Should have 2 candidates (shared-node deduped + self), not 3
-	if len(decision.Candidates) != 2 {
-		t.Fatalf("expected 2 candidates (deduped), got %d", len(decision.Candidates))
-	}
-
-	// Registry source should win over discovery
-	for _, c := range decision.Candidates {
-		if c.Node.NodeID == "shared-node" && c.Source != SourceRegistry {
-			t.Fatalf("expected registry source for deduped node, got %s", c.Source)
-		}
-	}
-}
-
-func TestRegistryDownNoCacheFallsToSelf(t *testing.T) {
-	c := New(Config{
-		RegistryURL:  "http://127.0.0.1:1", // unreachable
-		SelfIdentity: testIdentity(),
-		SelfSSH:      "root@localhost:22",
-		SelfDaemon:   fakeDaemon(t),
-		DiscoverFn:   func() []registry.NodeRecord { return nil },
-	})
-
-	decision := c.FindNode()
-
-	if decision.ChosenNode.NodeID != "self-node-uuid" {
-		t.Fatalf("expected self when registry down + no cache, got %s", decision.ChosenNode.NodeID)
-	}
-	if !decision.DegradedMode {
-		t.Fatal("should be degraded")
-	}
-	if decision.Source != SourceSelf {
-		t.Fatalf("expected self source, got %s", decision.Source)
-	}
-}
-
 func TestExplicitRemoteBypassesCoordinator(t *testing.T) {
 	// When --remote is provided explicitly, coordinator shouldn't run
 	// This tests the ResolveEndpoint for a non-self node
@@ -312,7 +169,7 @@ func TestExplicitRemoteBypassesCoordinator(t *testing.T) {
 		NodeID:      "explicit-node",
 		SSHEndpoint: "root@192.168.1.100:22",
 	}
-	endpoint := c.ResolveEndpoint(explicit)
+	endpoint := c.resolveEndpointForNode(explicit)
 
 	if endpoint != "root@192.168.1.100:22" {
 		t.Fatalf("explicit node should use its own endpoint, got %s", endpoint)
