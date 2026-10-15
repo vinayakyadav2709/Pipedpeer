@@ -1,4 +1,0 @@
-# 07 has its own workspace, like 03: its data.csv ships only when 07 runs.
-# results/ is what the job writes; it syncs back and never ships out again.
-results/
-__pycache__/
