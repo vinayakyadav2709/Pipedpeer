@@ -44,3 +44,28 @@ func TestWatchdogCeiling(t *testing.T) {
 		t.Errorf("unknown machine size: got %d", got)
 	}
 }
+
+func TestWatchdogKillIsClaimedByItsJobOnce(t *testing.T) {
+	procs := []procMem{
+		{pid: 10, ppid: 1, name: "daemon"},
+		{pid: 11, ppid: 10, name: "crun"},
+		{pid: 12, ppid: 11, name: "python"},
+		{pid: 13, ppid: 12, name: "worker"},
+		{pid: 20, ppid: 1, name: "unrelated"},
+	}
+	tree := treeOf(procs, 10)
+	if len(tree) != 4 {
+		t.Fatalf("tree %v, want daemon, crun, python, worker", tree)
+	}
+	recordKill(WatchdogKill{PID: 13, Ceiling: 7, ancestors: ancestorsOf(tree, 13)})
+	if _, ok := TakeWatchdogKill(20); ok {
+		t.Fatal("an unrelated job claimed the kill")
+	}
+	k, ok := TakeWatchdogKill(11) // the job's crun
+	if !ok || k.PID != 13 || k.Ceiling != 7 {
+		t.Fatalf("job did not claim its kill: %+v %v", k, ok)
+	}
+	if _, ok := TakeWatchdogKill(11); ok {
+		t.Fatal("a kill was claimed twice")
+	}
+}

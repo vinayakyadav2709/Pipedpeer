@@ -3,8 +3,10 @@ package cgroups
 import (
 	"context"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -53,7 +55,11 @@ func StartCeilingWatchdog(ctx context.Context, logf func(format string, args ...
 				logf("memory watchdog: cannot list processes: %v", err)
 				continue
 			}
-			victim, total, over := pickVictim(procs, self, ceiling)
+			tree := treeOf(procs, self)
+			for i := range tree {
+				tree[i].rss = residentShare(tree[i].pid, logf)
+			}
+			victim, total, over := pickVictim(tree, self, ceiling)
 			if !over {
 				continue
 			}
@@ -64,6 +70,8 @@ func StartCeilingWatchdog(ctx context.Context, logf func(format string, args ...
 			}
 			logf("memory watchdog: %s in use is over the %s ceiling; killed pid %d (%s, %s resident)",
 				humanize.IBytes(uint64(total)), humanize.IBytes(uint64(ceiling)), victim.pid, victim.name, humanize.IBytes(uint64(victim.rss)))
+			recordKill(WatchdogKill{PID: victim.pid, Name: victim.name, Bytes: victim.rss,
+				Total: total, Ceiling: ceiling, ancestors: ancestorsOf(tree, victim.pid)})
 		}
 	}()
 	return true
@@ -106,14 +114,122 @@ func parseSystemdBytes(s string) (int64, bool) {
 	return n * mult, true
 }
 
+// WatchdogKill is one process the watchdog killed, kept so the job it
+// belonged to can report "ran out of memory" instead of a bare exit 137.
+type WatchdogKill struct {
+	PID            int32
+	Name           string
+	Bytes          int64 // the victim's PSS
+	Total, Ceiling int64
+	ancestors      []int32
+}
+
+var watchdogKills struct {
+	sync.Mutex
+	list []WatchdogKill
+}
+
+func recordKill(k WatchdogKill) {
+	watchdogKills.Lock()
+	defer watchdogKills.Unlock()
+	// ponytail: a kill nobody claims (its job exited 0) is only dropped by
+	// this bound; 32 is far more than one job's lifetime of kills.
+	if len(watchdogKills.list) >= 32 {
+		watchdogKills.list = watchdogKills.list[1:]
+	}
+	watchdogKills.list = append(watchdogKills.list, k)
+}
+
+// TakeWatchdogKill returns, and forgets, the latest watchdog kill of root or
+// any process under it.
+func TakeWatchdogKill(root int32) (WatchdogKill, bool) {
+	watchdogKills.Lock()
+	defer watchdogKills.Unlock()
+	var found WatchdogKill
+	ok := false
+	kept := watchdogKills.list[:0]
+	for _, k := range watchdogKills.list {
+		if k.PID == root || slices.Contains(k.ancestors, root) {
+			found, ok = k, true
+			continue
+		}
+		kept = append(kept, k)
+	}
+	watchdogKills.list = kept
+	return found, ok
+}
+
+// residentShare is a process's PSS: each shared page split between the
+// processes mapping it. Summing RSS instead counted torch's libraries and
+// fork-shared pages once per Pool worker: 16 workers read as 8.0 GiB "in
+// use" and the watchdog killed a job the kernel's own 4.5 GB cap had let
+// run. Falls back to RSS, said once, when smaps_rollup is unreadable.
+func residentShare(pid int32, logf func(format string, args ...any)) int64 {
+	p := &process.Process{Pid: pid}
+	maps, err := p.MemoryMaps(true)
+	if err == nil && maps != nil && len(*maps) > 0 {
+		return int64((*maps)[0].Pss) * 1024
+	}
+	pssWarnOnce.Do(func() {
+		logf("memory watchdog: cannot read PSS of pid %d (err %v); counting RSS, so shared pages count more than once", pid, err)
+	})
+	if mi, err := p.MemoryInfo(); err == nil {
+		return int64(mi.RSS)
+	}
+	return 0 // exited since the snapshot: it holds nothing now
+}
+
+var pssWarnOnce sync.Once
+
+// treeOf is self and its descendants out of procs.
+func treeOf(procs []procMem, self int32) []procMem {
+	children := map[int32][]procMem{}
+	var out []procMem
+	for _, p := range procs {
+		children[p.ppid] = append(children[p.ppid], p)
+		if p.pid == self {
+			out = append(out, p)
+		}
+	}
+	seen := map[int32]bool{self: true}
+	for queue := []int32{self}; len(queue) > 0; queue = queue[1:] {
+		for _, c := range children[queue[0]] {
+			if !seen[c.pid] {
+				seen[c.pid] = true
+				out = append(out, c)
+				queue = append(queue, c.pid)
+			}
+		}
+	}
+	return out
+}
+
+// ancestorsOf walks pid's parents within tree.
+func ancestorsOf(tree []procMem, pid int32) []int32 {
+	parent := map[int32]int32{}
+	for _, p := range tree {
+		parent[p.pid] = p.ppid
+	}
+	var out []int32
+	for seen := 0; seen < len(tree); seen++ {
+		pp, ok := parent[pid]
+		if !ok {
+			break
+		}
+		out = append(out, pp)
+		pid = pp
+	}
+	return out
+}
+
 type procMem struct {
 	pid, ppid int32
 	rss       int64
 	name      string
 }
 
-// snapshot reads every process's parent and resident size. Processes that
-// vanish or cannot be read mid-scan are skipped: they hold no memory now.
+// snapshot reads every process's parent and name; memory is read later, for
+// the daemon's tree only. Processes that vanish mid-scan are skipped.
 func snapshot() ([]procMem, error) {
 	ps, err := process.Processes()
 	if err != nil {
@@ -125,12 +241,8 @@ func snapshot() ([]procMem, error) {
 		if err != nil {
 			continue
 		}
-		mi, err := p.MemoryInfo()
-		if err != nil {
-			continue
-		}
 		name, _ := p.Name()
-		out = append(out, procMem{pid: p.Pid, ppid: ppid, rss: int64(mi.RSS), name: name})
+		out = append(out, procMem{pid: p.Pid, ppid: ppid, name: name})
 	}
 	return out, nil
 }

@@ -106,8 +106,9 @@ func applyFrame(out outputMessage, res *ExecResult, stdout, stderr io.Writer, ca
 		// Without this the user sees "exited with code 137" and has
 		// no way to know the node protected itself on purpose.
 		return true, fmt.Errorf(
-			"job ran out of memory: the kernel killed it for exceeding its %s limit. "+
-				"Raise it with --mem, or reduce what the script holds in memory at once",
+			"job ran out of memory: its node killed it for exceeding its %s memory limit. "+
+				"Raise it with --mem (a node without a kernel cap holds all its jobs to "+
+				"PIPEDPEER_MEMORY_MAX), or reduce what the script holds in memory at once",
 			humanBytes(out.MemLimitBytes))
 	}
 	if out.ExitCode != 0 {

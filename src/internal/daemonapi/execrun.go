@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -328,6 +329,9 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	var capBytes int64
 	var capParent string
 	var oomBefore int64
+	// The job's root process, for claiming a kill by the daemon's memory
+	// watchdog (cgroups.TakeWatchdogKill).
+	var rootPID int
 
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(phoneBox, runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
@@ -344,6 +348,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.recordJobGroup(job, cmd.Process.Pid)
+		rootPID = cmd.Process.Pid
 
 		procDone := make(chan struct{})
 		go superviseCancel(jobID, cancelCh, procDone, signalGroup(jobID, cmd.Process.Pid))
@@ -452,6 +457,11 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			// job was OOM-killed at some point" into "a kill happened while
 			// this job ran", which is what makes the attribution safe.
 			oomBefore = oomKills(parent)
+			// The sandbox has no /sys, so the shim cannot read this cap and
+			// sized its Pool against the whole machine's free memory: 16
+			// torch-importing workers under a 4.5 GB cap. Same reason as
+			// PIPEDPEER_CPU_LIMIT.
+			ociCfg.Process.Env = append(ociCfg.Process.Env, "PIPEDPEER_MEM_LIMIT="+strconv.FormatInt(limit, 10))
 		} else if !canCap {
 			// One warning per daemon, not per job: the reason never changes
 			// within a process, and a silent unlimited sandbox is exactly the
@@ -513,6 +523,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 			fail("start crun: " + err.Error())
 			return
 		}
+		rootPID = cmd.Process.Pid
 
 		procDone := make(chan struct{})
 		go superviseCancel(jobID, cancelCh, procDone, signalContainer(jobID, containerID, cmd.Process.Pid))
@@ -550,6 +561,21 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	if exitCode == 137 && capBytes > 0 && !cancelled() && oomKills(capParent) > oomBefore {
 		done.OOMKilled = true
 		done.MemLimitBytes = capBytes
+	}
+	// Without a kernel cap on the daemon, its watchdog kills the largest
+	// process in its tree; that is this job running out of the node's memory
+	// ceiling, not a crash, and its exit says only 137.
+	if exitCode != 0 && rootPID > 0 && !cancelled() {
+		if k, ok := cgroups.TakeWatchdogKill(int32(rootPID)); ok && !done.OOMKilled {
+			done.OOMKilled = true
+			done.MemLimitBytes = k.Ceiling
+			msg := fmt.Sprintf("[pipedpeer] out of memory: this node's daemon and its jobs used %s of its %s ceiling, "+
+				"so its memory watchdog killed pid %d (%s, %s)\n",
+				humanize.IBytes(uint64(k.Total)), humanize.IBytes(uint64(k.Ceiling)), k.PID, k.Name, humanize.IBytes(uint64(k.Bytes)))
+			outCh <- OutputMessage{E: msg}
+			log.Warn().Str("job", jobID).Int32("pid", k.PID).Int64("total", k.Total).Int64("ceiling", k.Ceiling).
+				Msg("job killed by the memory watchdog")
+		}
 	}
 	finish(done)
 	releaseHeapAfterWork()
