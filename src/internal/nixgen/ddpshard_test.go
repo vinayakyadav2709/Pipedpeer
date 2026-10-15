@@ -56,7 +56,7 @@ if __name__ == "__main__":
 		cmd.Env = append(os.Environ(),
 			"PYTHONPATH="+dir,
 			"PIPEDPEER_SHIM=1",
-			"PIPEDPEER_NUM_SHARDS=0",
+			"PIPEDPEER_CLOSURE_NODES=0",
 			"PIPEDPEER_DDP=1",
 			"PIPEDPEER_RANK="+rank,
 			"PIPEDPEER_WORLD_SIZE=2",

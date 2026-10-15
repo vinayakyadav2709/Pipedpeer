@@ -59,7 +59,7 @@ assert np.allclose((U * S) @ Vh, A), "svd answer wrong after the fallback"
 assert took < 10, "svd waited %.1fs for a peer that never answered" % took
 assert CLOSED.wait(5), "the timed-out request was left open; the daemon would keep the peer busy"
 print("LINALG-DEADLINE-OK")
-`, "LINALG-DEADLINE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+`, "LINALG-DEADLINE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // TestShimSingleWorkerOffloadUsesPerPeerBandwidth: the bandwidth probe
@@ -78,7 +78,7 @@ shim._NUM_SHARDS = "2"   # one peer has all of it
 shim._BW_CACHE["t"] = time.monotonic()
 assert shim._numpy_should_offload(nbytes, 1024, 3, False, 1.5e9), "svd refused although one peer has the full link"
 print("PERPEER-OK")
-`, "PERPEER-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+`, "PERPEER-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
 
 // TestShimSIGTERMAsPID1ExitsQuietly pins the ~50-line traceback after

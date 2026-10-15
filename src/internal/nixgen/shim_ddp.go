@@ -318,7 +318,9 @@ def _install_ddp():
     # 1 = average gradients every step (exact DDP semantics). N>1 = local
     # SGD: train locally, average weights every Nth step — the knob for
     # high-latency links where a per-step round trip dominates.
-    _SYNC_EVERY = max(1, int(os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "1")))
+    _SYNC_RAW = os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "1").strip().lower()
+    _SYNC_AUTO = _SYNC_RAW == "auto"
+    _SYNC_EVERY = 1 if _SYNC_AUTO else max(1, int(_SYNC_RAW or "1"))
     # A receipt for training, for the same reason pool work has one: a run
     # that distributed nothing and a run that distributed everything look
     # identical from the outside, and so do a fast ring and one that spent
@@ -356,7 +358,6 @@ def _install_ddp():
     # the diagnosis is printed either way, and the user decides.
     _SYNC_BUDGET = float(os.environ.get("PIPEDPEER_DDP_SYNC_BUDGET", "0.25"))
     _SYNC_EVERY_MAX = int(os.environ.get("PIPEDPEER_DDP_SYNC_EVERY_MAX", "32"))
-    _SYNC_AUTO = os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "").lower() == "auto"
     _SYNC_TUNED = [None if _SYNC_AUTO else _SYNC_EVERY]
     _WARNED_SYNC_BOUND = [False]
     # Said once. The condition holds for every step of the run, and a warning

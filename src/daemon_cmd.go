@@ -14,6 +14,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
 	"github.com/pipedpeer/pipedpeer/internal/discovery"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -25,6 +26,13 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
+
+// daemonRendezvous is the introducer the daemon registers with: the flag, then
+// the cluster saved by an earlier join.
+func daemonRendezvous(flag string) string {
+	addr, _ := clustercfg.Effective(flag)
+	return addr
+}
 
 func runDaemon(args []string) {
 	log := logging.WithComponent("daemon")
@@ -75,9 +83,7 @@ func runDaemon(args []string) {
 	if natsURL == "" {
 		natsURL = os.Getenv("PIPEDPEER_NATS_URL")
 	}
-	if rendezvousAddr == "" {
-		rendezvousAddr = os.Getenv("PIPEDPEER_RENDEZVOUS")
-	}
+	rendezvousAddr = daemonRendezvous(rendezvousAddr)
 	if maxConcurrent < 0 {
 		maxConcurrent = 0 // unlimited unless configured
 		if v := os.Getenv("PIPEDPEER_MAX_CONCURRENT"); v != "" {

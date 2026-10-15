@@ -86,7 +86,7 @@ print("RANK-%d-OK" % rank)
 		"PIPEDPEER_TEST_OUT=" + outDir,
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=",
-		"PIPEDPEER_NUM_SHARDS=0",
+		"PIPEDPEER_CLOSURE_NODES=0",
 	}
 	runOnce := func(env ...string) {
 		cmd := exec.Command(python, rankScript)

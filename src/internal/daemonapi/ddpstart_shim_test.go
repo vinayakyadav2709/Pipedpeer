@@ -54,7 +54,7 @@ print("DONE")
 	start := func(rank int, out *bytes.Buffer) *exec.Cmd {
 		cmd := exec.Command(python, filepath.Join(dir, "job.py"))
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=0",
+		cmd.Env = append(os.Environ(), "PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=0",
 			"PIPEDPEER_DDP=1", fmt.Sprintf("PIPEDPEER_RANK=%d", rank), "PIPEDPEER_WORLD_SIZE=2",
 			"PIPEDPEER_DDP_BACKEND=daemon", "PIPEDPEER_DDP_SYNC="+ts.URL+"/v1/ddp/sync",
 			"PIPEDPEER_DDP_GROUP=g", "PIPEDPEER_DDP_HOSTS=laptop,gpu1", "PIPEDPEER_DDP_START_WAIT=120")

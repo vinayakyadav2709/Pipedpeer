@@ -75,7 +75,7 @@ if __name__ == "__main__":
 	}
 	cmd := exec.Command(python, filepath.Join(dir, "job.py"))
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=0")
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir, "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=0")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("probe failed:\n%s\n%v", out, err)

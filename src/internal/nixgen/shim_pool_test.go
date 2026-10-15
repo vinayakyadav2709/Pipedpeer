@@ -56,7 +56,7 @@ print("JOBLIB-OK")
 `, "JOBLIB-OK",
 		// Sixteen trees on 200 rows is milliseconds of work, which the cost
 		// model rightly keeps local; a zero floor makes it ship anyway.
-		"PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
+		"PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1",
 		"PIPEDPEER_POOL_MIN_WORK=0")
 }
 
@@ -111,5 +111,5 @@ mine = shim._STATS["decisions"][before:]
 assert mine and all(d["op"] == "joblib" and not d["shipped"] for d in mine), \
     "microseconds of work were shipped: %r" % mine
 print("JOBLIB-RACE-OK")
-`, "JOBLIB-RACE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_NUM_SHARDS=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
+`, "JOBLIB-RACE-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
