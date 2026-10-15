@@ -7,47 +7,65 @@ import (
 	"testing"
 )
 
-func TestGetOrCreateGeneratesUUID(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", tmp)
+// TestNodeIDIsTheKeyFingerprint: one identity. The id peers know a node by
+// is the fingerprint of the key that proves it, so the two can never name
+// different machines.
+func TestNodeIDIsTheKeyFingerprint(t *testing.T) {
+	isolate(t)
 
 	id, err := GetOrCreate()
 	if err != nil {
 		t.Fatalf("GetOrCreate failed: %v", err)
 	}
-	if id.NodeID == "" {
-		t.Fatal("expected non-empty node ID")
+	key, err := Key()
+	if err != nil {
+		t.Fatal(err)
 	}
-	// UUID v4 format: 8-4-4-4-12
-	parts := strings.Split(id.NodeID, "-")
-	if len(parts) != 5 {
-		t.Fatalf("expected UUID format (5 groups), got: %s", id.NodeID)
+	if id.NodeID != key.Fingerprint() {
+		t.Fatalf("node id %q, key fingerprint %q", id.NodeID, key.Fingerprint())
 	}
 	if id.Arch == "" {
 		t.Fatal("expected non-empty arch")
 	}
-
-	// Verify file was written
-	path := filepath.Join(tmp, "pipedpeer", "node_identity.json")
+	path := filepath.Join(os.Getenv("XDG_DATA_HOME"), "pipedpeer", "node_identity.json")
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("identity file not created: %v", err)
 	}
+	again, err := GetOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.NodeID != id.NodeID {
+		t.Fatalf("id changed between calls: %s then %s", id.NodeID, again.NodeID)
+	}
 }
 
-func TestIdentityStableAcrossCalls(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("XDG_DATA_HOME", tmp)
-
-	id1, err := GetOrCreate()
-	if err != nil {
-		t.Fatalf("first call failed: %v", err)
+// TestOldUUIDIdentityIsMigrated: a file written by an older build holds a
+// UUID; it is replaced by the key fingerprint, and the rest is kept.
+func TestOldUUIDIdentityIsMigrated(t *testing.T) {
+	isolate(t)
+	path := filepath.Join(os.Getenv("XDG_DATA_HOME"), "pipedpeer", "node_identity.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	id2, err := GetOrCreate()
-	if err != nil {
-		t.Fatalf("second call failed: %v", err)
+	old := `{"node_id":"a1b2c3d4-5678-4abc-9def-0123456789ab","hostname":"old-host","arch":"x86_64-linux"}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if id1.NodeID != id2.NodeID {
-		t.Fatalf("expected same ID across calls, got %s and %s", id1.NodeID, id2.NodeID)
+	id, err := GetOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := Key()
+	if id.NodeID != key.Fingerprint() || strings.Contains(id.NodeID, "-") {
+		t.Fatalf("UUID not replaced: %q", id.NodeID)
+	}
+	if id.Hostname != "old-host" {
+		t.Fatalf("hostname lost in migration: %q", id.Hostname)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), key.Fingerprint()) {
+		t.Fatalf("migrated id not written back: %s", b)
 	}
 }
 

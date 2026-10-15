@@ -3,16 +3,16 @@ package identity
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // GPUInfo describes the GPU hardware available on this node.
@@ -24,6 +24,11 @@ type GPUInfo struct {
 }
 
 // NodeIdentity represents a stable node identity that persists across restarts.
+//
+// NodeID is the fingerprint of the node key (Key().Fingerprint()), so the id
+// a peer is known by and the key that proves it are one thing. It used to be
+// a separate random UUID, which let the internet manager (keyed by
+// fingerprint) and the node rows (keyed by UUID) describe one machine as two.
 type NodeIdentity struct {
 	NodeID    string    `json:"node_id"`
 	Hostname  string    `json:"hostname"`
@@ -35,23 +40,37 @@ type NodeIdentity struct {
 // GetOrCreate loads an existing identity from disk or generates a new one.
 // GPU info is automatically detected and persisted if missing or changed.
 func GetOrCreate() (NodeIdentity, error) {
+	key, err := Key()
+	if err != nil {
+		return NodeIdentity{}, err
+	}
+	nodeID := key.Fingerprint()
+
 	p := identityPath()
 	var id NodeIdentity
 	var loaded bool
 
 	if data, err := os.ReadFile(p); err == nil {
-		if err := json.Unmarshal(data, &id); err == nil && id.NodeID != "" {
+		if err := json.Unmarshal(data, &id); err == nil {
 			loaded = true
+		} else {
+			log.Warn().Err(err).Str("path", p).Msg("identity file unreadable; rewriting it")
 		}
 	}
 
 	if !loaded {
-		return create(p)
+		return create(p, nodeID)
+	}
+
+	needsUpdate := false
+	// Files written before the node id became the key fingerprint hold a UUID.
+	if id.NodeID != nodeID {
+		id.NodeID = nodeID
+		needsUpdate = true
 	}
 
 	// Refresh GPU info: existing identity files may lack it, or hardware changed
 	gpuInfo := gpu.Detect()
-	needsUpdate := false
 
 	if gpuInfo.Vendor != gpu.VendorNone {
 		if id.GPU.Vendor != gpuInfo.Vendor ||
@@ -75,18 +94,22 @@ func GetOrCreate() (NodeIdentity, error) {
 	if needsUpdate {
 		data, err := json.MarshalIndent(id, "", "  ")
 		if err == nil {
-			os.WriteFile(p, data, 0600)
+			err = os.WriteFile(p, data, 0600)
+		}
+		if err != nil {
+			// The in-memory identity is still right; only the cached copy is stale.
+			log.Warn().Err(err).Str("path", p).Msg("could not update identity file")
 		}
 	}
 
 	return id, nil
 }
 
-func create(path string) (NodeIdentity, error) {
+func create(path, nodeID string) (NodeIdentity, error) {
 	hostname, _ := os.Hostname()
 	gpuInfo := gpu.Detect()
 	id := NodeIdentity{
-		NodeID:    generateUUID(),
+		NodeID:    nodeID,
 		Hostname:  hostname,
 		Arch:      nixArch(),
 		CreatedAt: time.Now().UTC(),
@@ -112,21 +135,7 @@ func create(path string) (NodeIdentity, error) {
 	return id, nil
 }
 
-func identityPath() string {
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "pipedpeer", "node_identity.json")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(userdir.Data(), "node_identity.json")
-	}
-	return filepath.Join(home, ".local", "share", "pipedpeer", "node_identity.json")
-}
-
-// generateUUID produces a UUID v4 using google/uuid.
-func generateUUID() string {
-	return uuid.New().String()
-}
+func identityPath() string { return filepath.Join(userdir.Data(), "node_identity.json") }
 
 func nixArch() string {
 	arch := runtime.GOARCH

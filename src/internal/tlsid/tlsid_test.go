@@ -1,28 +1,56 @@
 package tlsid
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
+
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 )
 
 func isolate(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_STATE_HOME", dir)
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	pins.mu.Lock()
-	pins.pins = map[string]string{}
+	pins.pins = map[string]pin{}
+	pins.read = false
 	pins.mu.Unlock()
 }
 
-func TestEnsureCertIsStableAcrossCalls(t *testing.T) {
+// newNode makes a node key and its certificate, standing in for another
+// machine.
+func newNode(t *testing.T) (string, []byte) {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := certFor(identity.KeyPair{Public: pub, Private: priv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity.Fingerprint(pub), c.Certificate[0]
+}
+
+func TestEnsureCertIsTheNodeKey(t *testing.T) {
 	isolate(t)
 	a, err := EnsureCert()
 	if err != nil {
@@ -32,37 +60,95 @@ func TestEnsureCertIsStableAcrossCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A daemon that minted a new identity on every start would break every
-	// peer's pin, which is the same signal as an attacker.
 	if Fingerprint(a.Certificate[0]) != Fingerprint(b.Certificate[0]) {
 		t.Error("certificate changed between calls")
 	}
-	if info, err := os.Stat(dir() + "/daemon.key"); err == nil {
-		if perm := info.Mode().Perm(); perm != 0o600 {
-			t.Errorf("private key mode %o; it is the node's identity", perm)
-		}
+	key, err := identity.Key()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(a.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !key.Public.Equal(leaf.PublicKey) {
+		t.Fatal("certificate key is not the node key")
+	}
+	if err := leaf.CheckSignature(leaf.SignatureAlgorithm, leaf.RawTBSCertificate, leaf.Signature); err != nil {
+		t.Fatalf("certificate does not verify against the node key: %v", err)
+	}
+	node, err := NodeOf(a.Certificate[0])
+	if err != nil || node != key.Fingerprint() {
+		t.Fatalf("NodeOf = %q, %v; want %q", node, err, key.Fingerprint())
 	}
 }
 
-func TestPinningAcceptsFirstContactAndRejectsChange(t *testing.T) {
+// TestNewMachineAtAnOldAddressIsAccepted: DHCP hands an old peer's IP to a
+// different machine. Nothing expected that address to be anyone, so the new
+// key is recorded, not refused.
+func TestNewMachineAtAnOldAddressIsAccepted(t *testing.T) {
 	isolate(t)
-	first := []byte("certificate-one")
-	if err := CheckOrPin("peer:38080", first); err != nil {
-		t.Fatalf("first contact rejected: %v", err)
+	nodeA, certA := newNode(t)
+	nodeB, certB := newNode(t)
+	const addr = "192.0.2.10:4242"
+	if err := CheckOrPin(addr, certA); err != nil {
+		t.Fatalf("first contact refused: %v", err)
 	}
-	if err := CheckOrPin("peer:38080", first); err != nil {
-		t.Fatalf("same certificate rejected: %v", err)
+	if got := pins.pins[addr].Node; got != nodeA {
+		t.Fatalf("recorded %q, want %q", got, nodeA)
 	}
-	// A changed certificate is either a reinstall or someone in the middle,
-	// and only the operator can tell those apart — so it must not be
-	// silently accepted.
-	err := CheckOrPin("peer:38080", []byte("certificate-two"))
+	if err := CheckOrPin(addr, certB); err != nil {
+		t.Fatalf("new machine at an old address refused: %v", err)
+	}
+	if got := pins.pins[addr].Node; got != nodeB {
+		t.Fatalf("recorded %q, want %q", got, nodeB)
+	}
+}
+
+// TestExpectRefusesAChangedKey: where the address book says an address is a
+// node, another key there is refused, and the expected key is accepted at
+// any address it is expected at.
+func TestExpectRefusesAChangedKey(t *testing.T) {
+	isolate(t)
+	nodeA, certA := newNode(t)
+	_, certB := newNode(t)
+	Expect("peer:4242", nodeA)
+	err := CheckOrPin("peer:4242", certB)
 	if err == nil {
-		t.Fatal("a changed certificate was accepted silently")
+		t.Fatal("a changed key for an expected node was accepted")
 	}
-	Forget("peer:38080")
-	if err := CheckOrPin("peer:38080", []byte("certificate-two")); err != nil {
-		t.Fatalf("after forgetting the pin, the new certificate should be accepted: %v", err)
+	// dial.go refuses to fall back to plain HTTP on this prefix.
+	if !strings.HasPrefix(err.Error(), "certificate for") {
+		t.Fatalf("error %q lost the prefix the plain-HTTP fallback checks", err)
+	}
+	if err := CheckOrPin("peer:4242", certA); err != nil {
+		t.Fatalf("expected node refused: %v", err)
+	}
+	Expect("10.24.7.5:4242", nodeA)
+	if err := CheckOrPin("10.24.7.5:4242", certA); err != nil {
+		t.Fatalf("expected node refused at its new address: %v", err)
+	}
+	Forget("peer:4242")
+	if err := CheckOrPin("peer:4242", certB); err != nil {
+		t.Fatalf("after forgetting, the new key should be accepted: %v", err)
+	}
+}
+
+// TestOldBuildCertificateIsRefused: a P-256 certificate from an older build
+// is not a node key (hard cut, ADR-0006).
+func TestOldBuildCertificateIsRefused(t *testing.T) {
+	isolate(t)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{SerialNumber: big.NewInt(1), NotAfter: time.Now().Add(time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckOrPin("old:4242", der); err == nil {
+		t.Fatal("an old-build P-256 certificate was accepted")
 	}
 }
 
@@ -126,11 +212,7 @@ func TestListenerServesBothProtocols(t *testing.T) {
 func TestClientConfigRejectsASwappedCertificate(t *testing.T) {
 	isolate(t)
 
-	serve := func() (string, func()) {
-		cert, err := EnsureCert()
-		if err != nil {
-			t.Fatal(err)
-		}
+	serve := func(cert tls.Certificate) (string, func()) {
 		raw, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -141,33 +223,65 @@ func TestClientConfigRejectsASwappedCertificate(t *testing.T) {
 		return raw.Addr().String(), func() { srv.Close() }
 	}
 
-	addr, stop := serve()
+	cert, err := EnsureCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, _ := identity.Key()
+	Expect("pinned-peer", self.Fingerprint())
+	addr, stop := serve(cert)
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: ClientConfig("pinned-peer")}}
 	if _, err := client.Get("https://" + addr); err != nil {
-		t.Fatalf("first contact should pin, not fail: %v", err)
+		t.Fatalf("expected node refused: %v", err)
 	}
 	stop()
 
-	// Same logical peer, different identity. The certificate is regenerated in
-	// place rather than by moving the state directory: the pin file lives
-	// there too, and the pin has to survive for this to be testing anything.
-	freshCert(t)
-	addr2, stop2 := serve()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	other, err := certFor(identity.KeyPair{Public: pub, Private: priv})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr2, stop2 := serve(other)
 	defer stop2()
 	client2 := &http.Client{Transport: &http.Transport{TLSClientConfig: ClientConfig("pinned-peer")}}
 	if _, err := client2.Get("https://" + addr2); err == nil {
-		t.Fatal("a different certificate for a pinned peer was accepted")
+		t.Fatal("a different key for an expected node was accepted")
 	}
 }
 
-// freshCert makes the next EnsureCert mint a new identity, leaving the pin
-// store alone.
-func freshCert(t *testing.T) {
-	t.Helper()
-	for _, name := range []string{"daemon.crt", "daemon.key"} {
-		if err := os.Remove(filepath.Join(dirForTest(), name)); err != nil && !os.IsNotExist(err) {
-			t.Fatalf("removing %s: %v", name, err)
+// TestQUICAcceptsTheNodeCertificate: the direct links (quic-go, TLS 1.3)
+// serve the same ed25519 certificate.
+func TestQUICAcceptsTheNodeCertificate(t *testing.T) {
+	isolate(t)
+	cert, err := EnsureCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{cert}, NextProtos: []string{"t"}, MinVersion: tls.VersionTLS13,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	go func() {
+		if c, err := ln.Accept(ctx); err == nil {
+			<-c.Context().Done()
 		}
+	}()
+	conn, err := quic.DialAddr(ctx, ln.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true, NextProtos: []string{"t"}, MinVersion: tls.VersionTLS13,
+	}, nil)
+	if err != nil {
+		t.Fatalf("quic handshake with the ed25519 certificate failed: %v", err)
+	}
+	defer conn.CloseWithError(0, "")
+	got, err := NodeOf(conn.ConnectionState().TLS.PeerCertificates[0].Raw)
+	key, _ := identity.Key()
+	if err != nil || got != key.Fingerprint() {
+		t.Fatalf("quic peer is %q (%v), want %q", got, err, key.Fingerprint())
 	}
 }
 
@@ -185,14 +299,13 @@ func dirForTest() string { return dir() }
 func TestForgetTakesEffectWithoutARestart(t *testing.T) {
 	isolate(t)
 
-	const peer = "192.0.2.10:38080"
-	first := []byte("certificate-one")
-	if err := CheckOrPin(peer, first); err != nil {
-		t.Fatalf("first contact should pin: %v", err)
-	}
-	// A different certificate for a known peer is refused, as it should be.
-	if err := CheckOrPin(peer, []byte("certificate-two")); err == nil {
-		t.Fatal("a changed certificate was accepted")
+	const peer = "192.0.2.10:4242"
+	nodeA, _ := newNode(t)
+	_, certB := newNode(t)
+	Expect(peer, nodeA)
+	// A different key for an expected node is refused, as it should be.
+	if err := CheckOrPin(peer, certB); err == nil {
+		t.Fatal("a changed key was accepted")
 	}
 
 	// Another process - the CLI - drops the pin. Simulated by writing the
@@ -200,7 +313,7 @@ func TestForgetTakesEffectWithoutARestart(t *testing.T) {
 	// having read it is exactly what must NOT be needed.
 	forgetFromAnotherProcess(t, peer)
 
-	if err := CheckOrPin(peer, []byte("certificate-two")); err != nil {
+	if err := CheckOrPin(peer, certB); err != nil {
 		t.Errorf("still refusing the peer after the pin was dropped on disk: %v\n"+
 			"the daemon is answering from a copy in memory, so the fix it "+
 			"recommends does nothing until it is restarted", err)
@@ -212,12 +325,12 @@ func TestForgetTakesEffectWithoutARestart(t *testing.T) {
 // invocation does.
 func forgetFromAnotherProcess(t *testing.T, peer string) {
 	t.Helper()
-	path := filepath.Join(dirForTest(), "known_peers.json")
+	path := filepath.Join(dirForTest(), "pins.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading the pin file: %v", err)
 	}
-	var onDisk map[string]string
+	var onDisk map[string]json.RawMessage
 	if err := json.Unmarshal(b, &onDisk); err != nil {
 		t.Fatalf("parsing the pin file: %v", err)
 	}
