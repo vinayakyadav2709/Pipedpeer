@@ -346,6 +346,13 @@ func TestLeaseAdmissionHonoursTheSameBoundsAsEverythingElse(t *testing.T) {
 		t.Skip("NOT VERIFIED: this daemon offers nothing to begin with")
 	}
 
+	// An idle daemon admits any estimate (W10-EST): hold a 1-byte lease so
+	// the bounds apply.
+	small := `{"target_id":"bounds-node","job_name":"small","required_mem_bytes":1}`
+	if resp, err := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(small)); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("small lease not admitted: %v %v", resp, err)
+	}
+
 	// Ask for a shade more than the daemon says it has. Admission must refuse
 	// it, whichever bound is the tighter one here.
 	body := fmt.Sprintf(`{"target_id":"bounds-node","job_name":"too-big",`+

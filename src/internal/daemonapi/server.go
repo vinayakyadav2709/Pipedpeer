@@ -1113,6 +1113,32 @@ func (s *Server) AvailableForJob() int64 {
 	return s.grantableFrom(heartbeat.CollectLoad(s.ActiveJobs(), reserved), reserved)
 }
 
+// availableForOwnJob is AvailableForJob for pool work posted by a job running
+// on this node: that job's own lease is the memory the work runs in, so it is
+// not counted against it. Measured before (emulated lab, 1 GB nodes): a 600 MB
+// job lease left no room for its own 104-byte joblib chunks, so the origin
+// forwarded every one away and the peer split parts straight back to it.
+func (s *Server) availableForOwnJob() int64 {
+	reserved := s.ReservedMem() - s.ownJobLease()
+	return s.grantableFrom(heartbeat.CollectLoad(s.ActiveJobs(), reserved), reserved)
+}
+
+// ownJobLease is the reservation of the job whose shim is asking. The shim
+// names no job, so it is the smallest lease bound to a job running here: exact
+// for one job, never more than the asker's own with several.
+// ponytail: smallest bound lease; a job id header from the shim makes it exact.
+func (s *Server) ownJobLease() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var own int64 = -1
+	for _, l := range s.leases {
+		if l.JobID != "" && (own < 0 || l.MemBytes < own) {
+			own = l.MemBytes
+		}
+	}
+	return max(own, 0)
+}
+
 // grantableFrom is AvailableForJob for a load already collected with the
 // given reservations, so a caller that needs the load too reads it once.
 func (s *Server) grantableFrom(load registry.LoadInfo, reserved int64) int64 {

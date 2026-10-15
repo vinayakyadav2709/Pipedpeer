@@ -255,6 +255,12 @@ func TestAdmissionRejectsInsufficientMemory(t *testing.T) {
 	srv := httptest.NewServer(s.Handler())
 	defer srv.Close()
 
+	// An idle node admits any estimate (W10-EST), so hold one small lease first.
+	small := `{"target_id":"mem-node","job_name":"small-job","required_mem_bytes":1}`
+	if resp, err := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(small)); err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("small job not admitted: %v %v", resp, err)
+	}
+
 	// Request 100TB
 	body := `{"target_id":"mem-node","job_name":"huge-job","required_mem_bytes":109951162777600}`
 	resp, _ := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(body))
@@ -271,8 +277,25 @@ func TestAdmissionRejectsInsufficientMemory(t *testing.T) {
 	if !strings.Contains(result.Reason, "insufficient memory") {
 		t.Fatalf("expected insufficient memory reason, got: %s", result.Reason)
 	}
-	if s.ActiveLeases() != 0 {
-		t.Fatalf("no lease should be created on rejection, got %d", s.ActiveLeases())
+	if s.ActiveLeases() != 1 {
+		t.Fatalf("no lease should be created on rejection, got %d leases", s.ActiveLeases())
+	}
+}
+
+// W10-EST: an estimate too big for an idle node is admitted rather than
+// stalling a job that may fit; the job's memory cap catches a real overrun.
+func TestAdmissionIdleNodeAdmitsOverEstimate(t *testing.T) {
+	s := New("idle-node")
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	body := fmt.Sprintf(`{"target_id":"idle-node","job_name":"big","required_mem_bytes":%d}`, s.AvailableForJob()+(1<<30))
+	resp, err := http.Post(srv.URL+"/v1/accept", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || s.ActiveLeases() != 1 {
+		t.Fatalf("idle node refused an over-estimate: status %d, leases %d", resp.StatusCode, s.ActiveLeases())
 	}
 }
 
