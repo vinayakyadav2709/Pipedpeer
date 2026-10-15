@@ -757,56 +757,6 @@ func (c *Coordinator) CommitLease(daemonURL, leaseID string, nodeID ...string) e
 	return nil
 }
 
-// RenewLease tells the holding node this submitter is still alive. Without it
-// the node cannot tell a long-running job from an orchestrator that crashed,
-// and would have to choose between reaping live work or leaking slots forever.
-func (c *Coordinator) RenewLease(daemonURL, leaseID string, nodeID ...string) error {
-	req := struct {
-		LeaseID string `json:"lease_id"`
-	}{leaseID}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return err
-	}
-	resp, err := c.httpClient.Post(daemonURL+"/v1/renew", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("connect failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("renew rejected: %d", resp.StatusCode)
-	}
-	return nil
-}
-
-// keepLeaseAlive renews the lease periodically until the returned stop function
-// is called. Renewals are best-effort: a failed one is not fatal on its own,
-// since the node only reaps after several missed intervals.
-func (c *Coordinator) keepLeaseAlive(daemonURL, leaseID, nodeID string) (stop func()) {
-	done := make(chan struct{})
-	var once sync.Once
-
-	go func() {
-		ticker := time.NewTicker(leaseRenewInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				_ = c.RenewLease(daemonURL, leaseID, nodeID)
-			}
-		}
-	}()
-
-	return func() { once.Do(func() { close(done) }) }
-}
-
-// leaseRenewInterval is well under the node's running-lease TTL, so a few
-// dropped renewals do not cost a live job its slot.
-const leaseRenewInterval = 30 * time.Second
-
 // CompleteLease sends a complete request (status succeeded, failed or
 // cancelled; a cancel goes this way too). nodeID is accepted and unused.
 func (c *Coordinator) CompleteLease(daemonURL, leaseID, status string, nodeID ...string) error {
@@ -883,7 +833,7 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 
 		// 3. Execute, renewing the lease throughout so the node can tell this
 		//    submitter is still alive.
-		stopRenew := c.keepLeaseAlive(daemonURL, result.LeaseID, result.NodeID)
+		stopRenew := daemonctl.KeepLeaseAlive(extractHost(result.Endpoint), result.DaemonPort, result.LeaseID)
 		execErr := executor(extractHost(result.Endpoint), result.DaemonPort, result.NodeID)
 		stopRenew()
 
