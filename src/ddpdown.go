@@ -112,6 +112,8 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 	// fatal is why the run failed while ranks were still going; set once,
 	// by abort, which stops them.
 	var fatal error
+	fatalFirst := false // fatal is the run's first failure
+	var others []string // ranks that failed after firstErr's
 	refused := map[int]bool{}
 	ok := 0
 	abort := func(why error) {
@@ -119,6 +121,7 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 			return
 		}
 		fatal, stopped, grace = why, true, nil
+		fatalFirst = len(others) == 0
 		if running > 0 {
 			fmt.Fprintf(w, "[ddp] the run has failed; stopping the other ranks\n")
 		}
@@ -188,6 +191,8 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("rank %d on %s failed: %w", r.rank, host, r.err)
+			} else {
+				others = append(others, fmt.Sprintf("rank %d on %s", r.rank, host))
 			}
 			if ctx.Err() != nil {
 				continue // a cancel stops every rank; nobody died
@@ -236,12 +241,18 @@ func ddpAwaitRanks(ctx context.Context, w io.Writer, results <-chan ddpRankResul
 	if ctx.Err() != nil {
 		return firstErr
 	}
-	if fatal != nil {
+	// The run's own verdict (fatal) names the cause, unless an earlier
+	// failure left no rank finishing: then the earliest failure is the
+	// cause, and the later ones are named after it.
+	if fatal != nil && (fatalFirst || ok > 0) {
 		return fatal
 	}
 	if ok == 0 {
 		if firstErr == nil {
-			firstErr = errors.New("no rank finished training")
+			return errors.New("no rank finished training")
+		}
+		if len(others) > 0 {
+			return fmt.Errorf("%w (also failed: %s)", firstErr, strings.Join(others, ", "))
 		}
 		return firstErr
 	}
