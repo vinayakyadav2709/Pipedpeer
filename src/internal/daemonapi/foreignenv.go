@@ -37,10 +37,12 @@ func (s *Server) handleForeignEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 // offerRecipes sends storePath's recipe (recorded at upload) to full-node
-// peers of another system, which cannot import the closure. Best-effort and
+// peers that cannot use the closure: peers of another system, or (cpuOnly)
+// peers without a GPU, which get the recipe with GPU off and build the CPU
+// torch of the same version instead of the CUDA wheel set. Best-effort and
 // in the background: such a peer joins the pool once its build is done, as a
 // slow importer does.
-func (s *Server) offerRecipes(storePath string, peers []PeerHealth) {
+func (s *Server) offerRecipes(storePath string, peers []PeerHealth, cpuOnly bool) {
 	v, ok := s.recipes.Load(storePath)
 	if !ok {
 		if len(peers) > 0 {
@@ -49,7 +51,11 @@ func (s *Server) offerRecipes(storePath string, peers []PeerHealth) {
 		}
 		return
 	}
-	body, err := json.Marshal(foreignEnvRequest{Store: storePath, Recipe: v.(nixgen.Recipe)})
+	rec := v.(nixgen.Recipe)
+	if cpuOnly {
+		rec.GPU = false
+	}
+	body, err := json.Marshal(foreignEnvRequest{Store: storePath, Recipe: rec})
 	if err != nil {
 		log.Error().Err(err).Str("store", storePath).Msg("cannot encode the job recipe")
 		return
@@ -58,11 +64,11 @@ func (s *Server) offerRecipes(storePath string, peers []PeerHealth) {
 		go func(ph PeerHealth) {
 			if err := postForeignEnv(ph, body); err != nil {
 				log.Warn().Err(err).Str("peer", ph.addr()).Str("arch", ph.Arch).Str("store", storePath).
-					Msg("peer of another system cannot build this job's environment; it takes none of its chunks")
+					Bool("cpu_build", cpuOnly).Msg("peer cannot build this job's environment; it takes none of its chunks")
 				return
 			}
 			log.Info().Str("peer", ph.addr()).Str("arch", ph.Arch).Str("store", storePath).
-				Msg("sent the job recipe to a peer of another system; it joins the pool once built")
+				Bool("cpu_build", cpuOnly).Msg("sent the job recipe to a peer that cannot use the closure; it joins the pool once built")
 		}(ph)
 	}
 }

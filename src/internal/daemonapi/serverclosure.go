@@ -18,6 +18,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 
+	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
@@ -117,7 +118,7 @@ func (s *Server) broadcastClosure(storePath string) []string {
 		}
 		return ph.Role == heartbeat.RolePoolOnly || other
 	})
-	s.offerRecipes(storePath, foreign)
+	s.offerRecipes(storePath, foreign, false)
 	if len(targets) == 0 {
 		// Usually a timing problem: the health poller has not run since the
 		// peers were added, so they are known but not yet marked healthy.
@@ -134,11 +135,14 @@ func (s *Server) broadcastClosure(storePath string) []string {
 		log.Warn().Err(err).Str("store", storePath).
 			Msg("cannot list the closure to tell whether it needs a GPU; broadcasting to every peer")
 	} else if closureNeedsGPU(paths) {
-		var skipped int
-		targets, skipped = gpuPeersOnly(targets)
-		if skipped > 0 {
-			log.Info().Int("skipped", skipped).Str("store", storePath).
-				Msg("not broadcasting a GPU closure to peers without a GPU")
+		var cpuPeers []PeerHealth
+		targets, cpuPeers = gpuPeersOnly(targets)
+		if len(cpuPeers) > 0 {
+			log.Info().Int("skipped", len(cpuPeers)).Str("store", storePath).
+				Msg("not broadcasting a GPU closure to peers without a GPU; offering them the job's CPU build instead")
+			// They build the CPU variant of the same torch from the recipe
+			// (~1.3 GiB, mostly substituted) and join the pool when done.
+			s.offerRecipes(storePath, cpuPeers, true)
 		}
 		if len(targets) == 0 {
 			return nil
@@ -316,15 +320,17 @@ func (s *Server) isImporting(storePath string) bool {
 	return s.importing[storePath] > 0
 }
 
-// gpuPeersOnly keeps the peers that report a GPU, and says how many it dropped.
-func gpuPeersOnly(peers []PeerHealth) ([]PeerHealth, int) {
-	var keep []PeerHealth
+// gpuPeersOnly keeps the peers that report an NVIDIA GPU (the closure is CUDA
+// torch; an AMD card cannot use it), and returns the others.
+func gpuPeersOnly(peers []PeerHealth) (keep, dropped []PeerHealth) {
 	for _, ph := range peers {
-		if ph.GPU != "" {
+		if ph.GPU == string(gpu.VendorNVIDIA) {
 			keep = append(keep, ph)
+		} else {
+			dropped = append(dropped, ph)
 		}
 	}
-	return keep, len(peers) - len(keep)
+	return keep, dropped
 }
 
 // localArchive is narCache.ensureLocal, as a variable so a test can see

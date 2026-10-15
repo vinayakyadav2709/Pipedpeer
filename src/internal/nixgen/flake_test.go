@@ -200,7 +200,7 @@ func TestTorchFlakeUsesFixedOutputWheelDownload(t *testing.T) {
 
 	// Every requirement must be pinned, or the FOD hash drifts as the index
 	// moves and every torch env build starts failing with a hash mismatch.
-	for _, line := range strings.Split(strings.TrimSpace(torchRequirements), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(torchRequirements+torchCPURequirements), "\n") {
 		if !strings.Contains(line, "==") {
 			t.Fatalf("unpinned requirement %q", line)
 		}
@@ -216,11 +216,16 @@ func TestTorchFlakeUsesFixedOutputWheelDownload(t *testing.T) {
 // are different claims.
 func TestTorchWithoutGPUSkipsCUDAClosure(t *testing.T) {
 	cpu := GenerateFlakeForArch([]string{"torch"}, "", "x86_64-linux", false)
-	if strings.Contains(cpu, "download.pytorch.org") || strings.Contains(cpu, "torchwheels") {
+	if strings.Contains(cpu, "cu126") || strings.Contains(cpu, "nvidia") {
 		t.Error("a CPU job is still fetching the CUDA wheel set")
 	}
-	if !strings.Contains(cpu, "ps.torch") {
-		t.Error("CPU job lost torch entirely; it should come from nixpkgs")
+	// The CPU build of the same torch version, so a ring of GPU and CPU-only
+	// nodes runs one torch.
+	if !strings.Contains(cpu, "torch==2.13.0+cpu") || !strings.Contains(cpu, "outputHash = \""+torchCPUWheelsHash+"\"") {
+		t.Error("CPU job does not get the pinned CPU torch wheel")
+	}
+	if strings.Contains(cpu, "ps.torch") {
+		t.Error("CPU job also pulls nixpkgs' torch, another version")
 	}
 	// The shim's gradient exchange moves tensors through .numpy(), so a DDP
 	// run without numpy trains one step and dies at the first sync. nixpkgs'

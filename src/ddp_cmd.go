@@ -203,23 +203,57 @@ func runDDP(o ddpRunOptions) error {
 	}
 	say.Printf("sync: daemon channel via %s:%d (no extra ports)\n\n", masterAddr, rank0.DaemonPort)
 
-	env, err := app.BuildEnvironment(ctx, absScript, app.EnvOptions{
-		PythonVersion: o.PythonVersion,
-		Pkgs:          o.Pkgs,
-		Intercept:     true, // DDP transparency lives in the sitecustomize shim
-		GPU:           o.RequireGPU || o.PreferGPU,
-		Verbose:       say.Verbose,
-	}, func(step int, title string) {
-		if step == 1 {
-			say.Printf("[%d/7] %s\n", step, title)
-		} else {
-			say.Printf("\n[%d/7] %s\n", step, title)
+	// Each rank gets the environment its node can use: CUDA torch on an
+	// NVIDIA node, the CPU build of the same torch version elsewhere. One
+	// environment for the whole ring shipped the cu126 wheel set (~4 GB) to
+	// every CPU-only rank of a ring a GPU machine leads.
+	rankCUDA := func(n registry.NodeRecord) bool {
+		return o.RequireGPU || (o.PreferGPU && hasCUDA(n.Capabilities))
+	}
+	var envMu sync.Mutex
+	builtEnvs := map[bool]*app.Environment{}
+	defer func() {
+		for _, e := range builtEnvs {
+			e.Close()
 		}
-	})
-	if err != nil {
+	}()
+	envFor := func(cuda bool) (*app.Environment, error) {
+		envMu.Lock()
+		defer envMu.Unlock()
+		if e := builtEnvs[cuda]; e != nil {
+			return e, nil
+		}
+		if len(builtEnvs) > 0 {
+			say.Printf("\n[ddp] building the %s environment for ranks on %s nodes\n",
+				map[bool]string{true: "CUDA", false: "CPU"}[cuda], map[bool]string{true: "NVIDIA", false: "CPU-only"}[cuda])
+		}
+		e, err := app.BuildEnvironment(ctx, absScript, app.EnvOptions{
+			PythonVersion: o.PythonVersion,
+			Pkgs:          o.Pkgs,
+			Intercept:     true, // DDP transparency lives in the sitecustomize shim
+			GPU:           cuda,
+			Verbose:       say.Verbose,
+		}, func(step int, title string) {
+			if step == 1 {
+				say.Printf("[%d/7] %s\n", step, title)
+			} else {
+				say.Printf("\n[%d/7] %s\n", step, title)
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+		builtEnvs[cuda] = e
+		return e, nil
+	}
+	if _, err := envFor(rankCUDA(rank0)); err != nil {
 		return err
 	}
-	defer env.Close()
+	for _, n := range peers {
+		if _, err := envFor(rankCUDA(n)); err != nil {
+			return err
+		}
+	}
 
 	jobSet := ddpGroupName(o.JobName, time.Now())
 
@@ -335,7 +369,7 @@ func runDDP(o ddpRunOptions) error {
 				Isolate:           o.Isolate,
 				Intercept:         true,
 				SkipBroadcast:     true,
-				GPU:               o.PreferGPU || o.RequireGPU,
+				GPU:               rankCUDA(n),
 				GPUDevices:        rankGPUDevices,
 				Mode:              "script",
 				PythonVersion:     o.PythonVersion,
@@ -347,7 +381,13 @@ func runDDP(o ddpRunOptions) error {
 				EstimatedMemBytes: resReq.MemBytes,
 				EstimationTier:    resReq.Tier,
 			}
-			err := ddpRunWatched(ctx, opts.DaemonHost, opts.DaemonPort, o.DaemonPort, func(ctx context.Context) error {
+			env, err := envFor(rankCUDA(n))
+			if err != nil {
+				up.ended(n.NodeID, ctx.Err() == nil, time.Now())
+				errs <- ddpRankResult{rank: i, err: err}
+				return
+			}
+			err = ddpRunWatched(ctx, opts.DaemonHost, opts.DaemonPort, o.DaemonPort, func(ctx context.Context) error {
 				return app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
 			})
 			up.ended(n.NodeID, err != nil && ctx.Err() == nil, time.Now())

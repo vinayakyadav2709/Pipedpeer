@@ -41,3 +41,11 @@ func TestFindEnvReusesCoveringEnvironment(t *testing.T) {
 		t.Error("an environment lacking a package was reused")
 	}
 }
+
+// A CPU-only node must never reuse a recorded CUDA environment: the two
+// flakes differ only in torch's build.
+func TestEnvTemplateSeparatesGPUFromCPU(t *testing.T) {
+	if envTemplate("python3", true) == envTemplate("python3", false) {
+		t.Error("GPU and CPU environments share a template, so one is reused for the other")
+	}
+}

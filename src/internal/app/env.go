@@ -392,8 +392,13 @@ func envIndexPath() string { return filepath.Join(userdir.Data(), "envs.json") }
 
 // envTemplate fingerprints everything but the package list: the python, the
 // GPU choice, the pinned nixpkgs and the flake template of this build.
+//
+// Fingerprinted with torch in: without a package the GPU and CPU flakes are
+// the same text, so a CPU-only node reused a recorded CUDA torch environment
+// (and an older nixpkgs-torch one). torch's build is the only part gpu
+// changes, so this separates them and retires envs of an older torch pin.
 func envTemplate(python string, gpu bool) string {
-	sum := sha256.Sum256([]byte(nixgen.GenerateFlake(nil, python, gpu)))
+	sum := sha256.Sum256([]byte(nixgen.GenerateFlake([]string{"torch"}, python, gpu)))
 	return hex.EncodeToString(sum[:])
 }
 
