@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	"github.com/pipedpeer/pipedpeer/internal/app"
 	"github.com/pipedpeer/pipedpeer/internal/coordinator"
@@ -29,6 +28,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 )
 
 // placementWait is how long a run waits for a node to become able to take
@@ -47,10 +47,10 @@ func placementWait() time.Duration {
 func placementProgress(what string, window time.Duration) func(coordinator.PlacementDecision, time.Duration) {
 	return func(d coordinator.PlacementDecision, waited time.Duration) {
 		if waited == 0 {
-			fmt.Printf("[coordinator] no eligible node %syet; waiting up to %s (%s)\n", what, window, d.RejectionLine())
+			say.Printf("[coordinator] no eligible node %syet; waiting up to %s (%s)\n", what, window, d.RejectionLine())
 			return
 		}
-		fmt.Printf("[coordinator] still waiting for a node %s(%s of %s): %s\n", what, waited, window, d.RejectionLine())
+		say.Printf("[coordinator] still waiting for a node %s(%s of %s): %s\n", what, waited, window, d.RejectionLine())
 	}
 }
 
@@ -72,10 +72,10 @@ func acceptWithin(ctx context.Context, window time.Duration, accept func() (*dae
 			return resp, err
 		}
 		if nextReport.IsZero() {
-			fmt.Printf("[coordinator] %v; waiting up to %s for memory to free...\n", err, window)
+			say.Printf("[coordinator] %v; waiting up to %s for memory to free...\n", err, window)
 			nextReport = time.Now().Add(coordinator.WaitProgressEvery)
 		} else if time.Now().After(nextReport) {
-			fmt.Printf("[coordinator] still waiting (%s of %s): %v\n", time.Since(start).Truncate(time.Second), window, err)
+			say.Printf("[coordinator] still waiting (%s of %s): %v\n", time.Since(start).Truncate(time.Second), window, err)
 			nextReport = time.Now().Add(coordinator.WaitProgressEvery)
 		}
 		select {
@@ -89,25 +89,32 @@ func acceptWithin(ctx context.Context, window time.Duration, accept func() (*dae
 func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <script.py> [args...]",
-		Short: "Submit and execute a task on a remote node",
-		Long: `Submit a Python script for remote execution. Auto-discovers nodes if --host is not specified.
+		Short: "Run a Python script, spreading its work over the cluster",
+		Long: `Run a Python script like python does: its output and exit code are the
+script's own. Pool, joblib, pandas, numpy and torch work spreads to other
+machines when that is faster.
 
-The first argument is the script path; the remaining arguments are passed
-through to the script itself (like python). Use -- to pass flags that start
-with a dash: pipedpeer run train.py -- --lr 0.1`,
+pipedpeer's flags go before the script; everything after the script goes to
+the script itself: pipedpeer run -v train.py --epochs 3`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			scriptPath := args[0]
 			args = args[1:]
+			// First, before any daemon start or placement: a typo must not
+			// travel to three nodes before "file not found" (Findings 3/31).
+			if err := checkScript(scriptPath); err != nil {
+				return err
+			}
+			verbose, _ := cmd.Flags().GetBool("verbose")
+			say.Verbose = verbose
 			daemonHost, _ := cmd.Flags().GetString("host")
-			daemonPort, _ := cmd.Flags().GetInt("port")
+			daemonPort := runDaemonPort()
 			jobName, _ := cmd.Flags().GetString("job-name")
 			isolate, _ := cmd.Flags().GetBool("isolate")
 			checkOnly, _ := cmd.Flags().GetBool("check-only")
 			cold, _ := cmd.Flags().GetBool("cold")
 			detach, _ := cmd.Flags().GetBool("detach")
 			pythonVersion, _ := cmd.Flags().GetString("python")
-			registryURL, _ := cmd.Flags().GetString("registry")
 			memOverride, _ := cmd.Flags().GetString("mem")
 			envs, _ := cmd.Flags().GetStringSlice("env")
 			pkgs, _ := cmd.Flags().GetStringSlice("pkg")
@@ -126,12 +133,21 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			default:
 				return fmt.Errorf("--distribute must be auto or force, got %q", distribute)
 			}
+			if verbose {
+				envs = append(envs, "PIPEDPEER_VERBOSE=1")
+			}
+			switch ddpSync, _ := cmd.Flags().GetString("ddp-sync"); ddpSync {
+			case "", "exact":
+			case "fast":
+				envs = append(envs, "PIPEDPEER_DDP_SYNC=fast")
+			default:
+				return fmt.Errorf("--ddp-sync must be exact or fast, got %q", ddpSync)
+			}
 			gpuMode, _ := cmd.Flags().GetString("gpu")
 			gpuID, _ := cmd.Flags().GetString("gpu-id")
 			gpuMemStr, _ := cmd.Flags().GetString("gpu-mem")
 			requiredCores, _ := cmd.Flags().GetInt("cores")
 			ddpNodes, _ := cmd.Flags().GetInt("ddp")
-			ddpPort, _ := cmd.Flags().GetInt("ddp-port")
 			var targetID string
 			// This machine's daemon endpoint — stamped into job envs so the
 			// executing node can sink the orchestrator behind real workers
@@ -153,7 +169,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			case "":
 				if pythondeps.HasGPUImports(scriptPath) {
 					preferGPU = true
-					fmt.Println("[coordinator] GPU-accelerated libraries detected — preferring GPU nodes")
+					say.Println("[coordinator] GPU-accelerated libraries detected — preferring GPU nodes")
 				}
 			default:
 				return fmt.Errorf("invalid --gpu value %q (want force, prefer, or off)", gpuMode)
@@ -171,7 +187,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				return err
 			}
 			if wasStarted {
-				fmt.Println("started daemon")
+				say.Println("started daemon")
 			}
 
 			// --offload: distributed pieces (pool/joblib chunks, pandas and
@@ -183,7 +199,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			if offload {
 				offloadKey = heartbeat.Machine()
 				if offloadKey == "" {
-					fmt.Fprintln(os.Stderr, "warning: --offload: cannot read this machine's key; distributed work may still run here")
+					say.Warnf("--offload: cannot read this machine's key; distributed work may still run here\n")
 				} else {
 					envs = append(envs, "PIPEDPEER_OFFLOAD="+offloadKey)
 				}
@@ -191,7 +207,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 
 			userMem := resourceest.ParseMemString(memOverride)
 			resReq := resourceest.EstimateFromScript(scriptPath, nil, userMem)
-			fmt.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
+			say.Printf("[coordinator] Resource estimate: %s (tier=%s)\n",
 				resourceest.FormatBytes(resReq.MemBytes), resReq.Tier)
 
 			if checkOnly {
@@ -207,7 +223,6 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					DDPNodes:       ddpNodes,
 					Pkgs:           pkgs,
 					PythonVersion:  pythonVersion,
-					RegistryURL:    registryURL,
 					Strategy:       strategy,
 					JobName:        jobName,
 					NodeID:         nodeID,
@@ -237,7 +252,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				exclude := offloadKey
 				eligible := ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
 				if exclude != "" && eligible == 0 {
-					fmt.Println("[coordinator] warning: --offload: no other machine can take a rank, so this machine trains")
+					say.Warnf("--offload: no other machine can take a rank, so this machine trains\n")
 					exclude = ""
 					eligible = ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
 				}
@@ -248,19 +263,17 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				}
 				if worldSize >= 2 {
 					if detach {
-						fmt.Println("detach is not supported for DDP/map runs; Ctrl+C stops it")
+						say.Warnf("--detach is not supported for DDP runs; Ctrl+C stops it\n")
 					}
 					_, stopSuspend := watchSuspend(ctx, false)
 					err := runDDP(ddpRunOptions{
 						Ctx:            ctx,
 						Nodes:          worldSize,
 						DaemonPort:     daemonPort,
-						MasterPort:     ddpPort,
 						ScriptPath:     scriptPath,
 						ScriptArgs:     args,
 						JobName:        jobName,
 						Isolate:        isolate,
-						RegistryURL:    registryURL,
 						PythonVersion:  pythonVersion,
 						Pkgs:           pkgs,
 						Envs:           envs,
@@ -281,9 +294,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					if !errors.Is(err, errRingNotWorthIt) {
 						return runOutcome(err)
 					}
-					fmt.Printf("[coordinator] running on one node: every ring available measures slower\n")
+					say.Printf("[coordinator] running on one node: every ring available measures slower\n")
 				} else if ddpNodes > 1 {
-					fmt.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
+					say.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
 				}
 			}
 
@@ -301,11 +314,11 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			gpuPlace := requireGPU && !remote && !ddpOffload && daemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
 			if remote || ddpOffload || gpuPlace {
 				if remote {
-					fmt.Println("[coordinator] --remote: discovering a node other than this machine...")
+					say.Println("[coordinator] --remote: discovering a node other than this machine...")
 				} else if ddpOffload {
-					fmt.Println("[coordinator] --offload: placing the training on a node other than this machine...")
+					say.Println("[coordinator] --offload: placing the training on a node other than this machine...")
 				} else {
-					fmt.Println("[coordinator] --gpu force: this machine has no GPU; placing the run on a GPU node...")
+					say.Println("[coordinator] --gpu force: this machine has no GPU; placing the run on a GPU node...")
 				}
 
 				rrFn := func(count int) int {
@@ -321,7 +334,6 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				}
 
 				coord := coordinator.New(coordinator.Config{
-					RegistryURL:      registryURL,
 					SelfIdentity:     nodeID,
 					SelfSSH:          fmt.Sprintf("root@%s:22", detectLocalIP()),
 					SelfDaemon:       daemonPort,
@@ -345,7 +357,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 				decision := coord.FindNodeWithin(ctx, wait, time.Second, placementProgress("", wait))
 				if decision.ChosenNode.NodeID == "" {
 					if why := decision.RejectionSummary(); why != "" {
-						fmt.Print("[coordinator] nodes turned down:\n" + why)
+						fmt.Fprint(os.Stderr, "pipedpeer: nodes turned down:\n"+why)
 					}
 					if ddpOffload {
 						return fmt.Errorf("no other node can take this training — run without --offload to train on this machine")
@@ -414,14 +426,17 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 						LeaseID:           leaseID,
 						QueuedAt:          queuedAt,
 					})
-					if app.IsPermanent(err) {
+					// A results download that failed after the script ran
+					// must not run the script again on another node.
+					var re *app.ResultsError
+					if app.IsPermanent(err) || errors.As(err, &re) {
 						return coordinator.Permanent(err)
 					}
 					return err
 				}
 
 				statusFn := func(msg string) {
-					fmt.Printf("[coordinator] %s\n", msg)
+					say.Printf("[coordinator] %s\n", msg)
 				}
 
 				coord.SetOnPlacement(func(r *coordinator.LeaseResult) {
@@ -434,7 +449,7 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					return runOutcome(err)
 				}
 
-				fmt.Printf("[coordinator] Task completed successfully on node %s\n",
+				say.Printf("[coordinator] Task completed successfully on node %s\n",
 					result.NodeID[:min(8, len(result.NodeID))])
 				return nil
 			}
@@ -460,13 +475,9 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 			if err != nil {
 				return err
 			}
-			fmt.Printf("remote daemon accepted job (lease=%s, expires=%s)\n",
-				acceptResp.LeaseID[:min(8, len(acceptResp.LeaseID))], acceptResp.ExpiresAt)
-
 			if err := daemonctl.CommitLease(daemonHost, daemonPort, acceptResp.LeaseID); err != nil {
 				return fmt.Errorf("lease commit failed: %w", err)
 			}
-			fmt.Println("lease committed — starting execution")
 
 			detachCh, stopSuspend := watchSuspend(ctx, true)
 			defer stopSuspend()
@@ -509,37 +520,66 @@ with a dash: pipedpeer run train.py -- --lr 0.1`,
 					completeStatus = jobhistory.StateFailed
 				}
 				if err := daemonctl.CompleteLease(daemonHost, daemonPort, acceptResp.LeaseID, completeStatus); err != nil {
-					fmt.Fprintf(os.Stderr, "could not complete lease %s: %v\n", acceptResp.LeaseID, err)
+					say.Warnf("could not complete lease %s: %v\n", acceptResp.LeaseID, err)
 				}
 			}
 
 			return runOutcome(runErr)
 		},
 	}
+	// Flags stop at the script: everything after it is the script's own
+	// (pipedpeer run t.py --epochs 3), as with python.
+	cmd.Flags().SetInterspersed(false)
+	cmd.Flags().BoolP("verbose", "v", false, "Show pipedpeer's own progress: placement, build steps, summary and the detailed run record")
+	cmd.Flags().String("ddp-sync", "exact", "Training sync: exact (every step, same maths as one GPU) or fast (local steps with periodic averaging)")
 	cmd.Flags().String("host", "", "Daemon host:port, or a registered node ID")
-	cmd.Flags().Int("port", 38080, "Daemon API port")
 	cmd.Flags().String("job-name", "", "Optional job name")
 	cmd.Flags().Bool("isolate", true, "Run in OCI sandbox (crun)")
+	_ = cmd.Flags().MarkHidden("isolate")
 	cmd.Flags().String("gpu", "", "GPU mode: force (GPU node required), prefer (GPU first, CPU fallback), off (CPU only). Default: infer from script imports")
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
 	cmd.Flags().Int("cores", 0, "Minimum free CPU cores required on the target node")
 	cmd.Flags().Bool("check-only", false, "Check imports, environment, placement and closure without running the script")
 	cmd.Flags().Bool("cold", false, "Send the environment as if the node had none, to time a first run")
+	_ = cmd.Flags().MarkHidden("cold")
 	cmd.Flags().Bool("detach", false, "Start the job, print its id and return; reattach with pipedpeer attach <id>")
 	cmd.Flags().Bool("remote", false, "Run on another machine in the cluster (any node except this one); without this the script runs on this machine")
 	cmd.Flags().Bool("offload", false, "Keep distributed work off this machine; the script itself still runs here. Pool/joblib/executor chunks, pandas and numpy offloads and DDP ranks go to other machines (this machine only when none can take them, with a warning). With --remote, the chosen node's spreading skips this machine too")
 	cmd.Flags().String("python", "", "Python version")
-	cmd.Flags().String("registry", viper.GetString("REGISTRY"), "Registry URL")
 	cmd.Flags().StringSliceP("env", "e", nil, "Environment variables (e.g., -e API_KEY=123)")
 	cmd.Flags().String("distribute", "auto", "Distribution policy: auto (cost model decides, never slower) or force (always ship interceptable ops to the cluster; for demos)")
 	cmd.Flags().StringSlice("pkg", nil, "Packages or requirements.txt")
 	cmd.Flags().String("mem", "", "Memory requirement override")
 	cmd.Flags().String("strategy", "smart", "Placement strategy: smart (default) or round-robin")
-	_ = cmd.Flags().MarkHidden("strategy") // round-robin is only set internally by the python shorthand
+	_ = cmd.Flags().MarkHidden("strategy")
 	cmd.Flags().Int("ddp", 0, "Distributed training: run up to this many ranks across the cluster (default: every eligible node joins the ring), DDP init transparently handled by the shim")
-	cmd.Flags().Int("ddp-port", 0, "DDP rendezvous master port (default: 29500, next free up to +9; pin an exact port to override)")
 	return cmd
+}
+
+// runDaemonPort is this machine's daemon API port: the one the running (or
+// last) daemon recorded, else the default.
+func runDaemonPort() int {
+	if p := daemonctl.Status().Port; p > 0 {
+		return p
+	}
+	return daemonctl.DefaultPort
+}
+
+// checkScript fails a run whose script is missing or a directory, before
+// anything is started or placed.
+func checkScript(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("can't open file %q: no such file", path)
+		}
+		return fmt.Errorf("can't open file %q: %w", path, err)
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("%q is a directory, not a Python script", path)
+	}
+	return nil
 }
 
 // resolveExplicitTarget turns a --host value into (host, port, nodeID).
@@ -585,7 +625,7 @@ func runOutcome(err error) error {
 	case errors.Is(err, daemonctl.ErrDetached):
 		return nil
 	case errors.Is(err, context.Canceled):
-		fmt.Println("cancelled — remote work stopped")
+		fmt.Fprintln(os.Stderr, "cancelled — remote work stopped")
 		return errCancelReported
 	}
 	return err
@@ -609,7 +649,7 @@ func watchSuspend(ctx context.Context, detachable bool) (<-chan struct{}, func()
 			select {
 			case <-sig:
 				if !detachable {
-					fmt.Println("detach is not supported for DDP/map runs; Ctrl+C stops it")
+					fmt.Fprintln(os.Stderr, "detach is not supported for DDP/map runs; Ctrl+C stops it")
 				} else if !closed {
 					closed = true
 					close(detach)

@@ -274,7 +274,11 @@ func collect(ctx context.Context, dir string, note func(string, ...any)) (rec jo
 			resultsDir = filepath.Dir(rec.ScriptPath)
 			note("      Warning: job %s recorded no results directory; using %s\n", jobhistory.ShortID(rec.ID), resultsDir)
 		}
-		syncResults(host, port, rec.RemoteJobID, resultsDir, dir, &rec, note)
+		// A failed download fails the run: the job is recorded failed and
+		// attach exits non-zero, rather than a warning and success.
+		if _, err := syncResults(host, port, rec.RemoteJobID, resultsDir, dir, &rec, note); err != nil {
+			runErr = err
+		}
 	}
 	rec.Collected = true
 	if err := jobhistory.FinalizeAt(dir, rec, runErr, finished); err != nil {

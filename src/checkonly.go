@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -37,7 +38,6 @@ type checkOnlyOptions struct {
 	DDPNodes       int
 	Pkgs           []string
 	PythonVersion  string
-	RegistryURL    string
 	Strategy       string
 	JobName        string
 	NodeID         identity.NodeIdentity
@@ -289,7 +289,6 @@ func runCheckOnly(o checkOnlyOptions) error {
 	gpuPlace := o.RequireGPU && !o.Remote && o.DaemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
 	if o.Remote || gpuPlace {
 		coord := coordinator.New(coordinator.Config{
-			RegistryURL:      o.RegistryURL,
 			SelfIdentity:     o.NodeID,
 			SelfSSH:          fmt.Sprintf("root@%s:22", detectLocalIP()),
 			SelfDaemon:       o.DaemonPort,
@@ -363,12 +362,14 @@ func runCheckOnly(o checkOnlyOptions) error {
 	} else {
 		c.line("environment", "building (first build of a new env takes minutes)")
 		start := time.Now()
-		env, err := buildEnvQuiet(absScript, app.EnvOptions{
+		// Verbose off and no stage callback: the build prints no step lines,
+		// only nix's own progress on stderr.
+		env, err := app.BuildEnvironment(context.Background(), absScript, app.EnvOptions{
 			PythonVersion: o.PythonVersion,
 			Pkgs:          o.Pkgs,
 			Intercept:     true,
 			GPU:           o.RequireGPU || o.PreferGPU,
-		})
+		}, nil)
 		if err != nil {
 			c.block("environment", fmt.Sprintf("build failed: %v", err))
 		} else {
@@ -414,23 +415,6 @@ func resolveUnknown(pkgs, unknown []string, probe func([]string) (map[string]boo
 		}
 	}
 	return pkgs, missing, err
-}
-
-// buildEnvQuiet builds the environment with BuildEnvironment's step lines
-// sent to /dev/null; nix's own progress (stderr) stays visible.
-// ponytail: swaps the process-wide os.Stdout, safe only because check-only
-// is single-threaded; a writer parameter on BuildEnvironment would remove it.
-func buildEnvQuiet(absScript string, opts app.EnvOptions) (*app.Environment, error) {
-	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "check-only: cannot open %s, showing build steps: %v\n", os.DevNull, err)
-		return app.BuildEnvironment(absScript, opts, nil)
-	}
-	defer devnull.Close()
-	saved := os.Stdout
-	os.Stdout = devnull
-	defer func() { os.Stdout = saved }()
-	return app.BuildEnvironment(absScript, opts, nil)
 }
 
 // checkRoundRobin asks the local daemon for the next round-robin index, as
