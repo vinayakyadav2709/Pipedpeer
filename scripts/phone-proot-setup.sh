@@ -8,6 +8,10 @@
 # built. proot has no namespaces, so Nix runs with sandbox = false and no
 # syscall filter (builds are not isolated from each other on the phone).
 #
+# On kernels 6.6+ it may build its own proot into $PREFIX/opt/pipedpeer-proot
+# (see below); whatever runs proot-distro later must then export
+# PD_PROOT_BIN=$PREFIX/opt/pipedpeer-proot/bin/proot.
+#
 #   scripts/phone-proot-setup.sh            install proot-distro, Debian, Nix
 #   scripts/phone-proot-setup.sh smoke      also build the CPU job env at our pin
 #   scripts/phone-proot-setup.sh gaps       list env paths cache.nixos.org lacks
@@ -45,6 +49,44 @@ in_distro() { distro bash -s; }
 
 if ! command -v proot-distro >/dev/null; then
 	pkg install -y proot-distro
+fi
+
+# Kernels 6.6+ have fchmodat2, and glibc 2.39+ (Debian trixie, Nix's glibc)
+# calls it for chmod. termux/proot translates its path only from 7fca80c
+# (2026-10-12); Termux's proot 5.1.107.96 predates it, so the call reaches the
+# kernel with the guest path and fails ("cp: preserving permissions ...: No
+# such file or directory"; the Nix installer dies there). On those kernels,
+# until Termux ships a newer proot, build termux/proot at a fixed commit into
+# our own prefix and point proot-distro at it with PD_PROOT_BIN.
+PROOT_COMMIT=b8c1f5c5c6730dc9d521d5bd5ce1cfeedecde087
+PROOT_DIR=$PREFIX/opt/pipedpeer-proot
+proot_lacks_fchmodat2() {
+	local kernel pkgver
+	kernel=$(uname -r | grep -oE '^[0-9]+\.[0-9]+')
+	[ "$(printf '%s\n' 6.6 "$kernel" | sort -V | head -1)" = 6.6 ] || return 1
+	pkgver=$(proot --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | tail -1)
+	[ -n "$pkgver" ] || return 0
+	[ "$(printf '%s\n' "$pkgver" 5.1.107.96 | sort -V | tail -1)" = 5.1.107.96 ]
+}
+if [ -x "$PROOT_DIR/bin/proot" ]; then
+	export PD_PROOT_BIN=$PROOT_DIR/bin/proot
+elif proot_lacks_fchmodat2; then
+	echo "phone-proot-setup: kernel $(uname -r) has fchmodat2 and this Termux proot cannot translate it; building termux/proot ${PROOT_COMMIT:0:7}" >&2
+	pkg install -y clang make patch libtalloc libandroid-shmem
+	src=$(mktemp -d "$TMPDIR/proot-src.XXXXXX")
+	curl -fsSL "https://codeload.github.com/termux/proot/tar.gz/$PROOT_COMMIT" | tar -xz -C "$src" --strip-components=1
+	# Our patches on top (phone-proot/*.patch next to this script), e.g. no
+	# chmod on procfs: SELinux logs every attempt on /proc/<pid>/ns.
+	for p in "$(dirname "$0")"/phone-proot/*.patch; do
+		if [ -e "$p" ]; then patch -s -d "$src" -p1 < "$p"; fi
+	done
+	# Same flags as Termux's own build (termux-packages packages/proot/build.sh).
+	# make hands CPPFLAGS to a shell, so the quotes around VERSION are escaped.
+	CPPFLAGS="-DARG_MAX=131072 -DVERSION=\\\"5.1.107.96+${PROOT_COMMIT:0:7}\\\"" \
+		make -s -C "$src/src" install PREFIX="$PROOT_DIR" PROOT_WITH_LIBANDROID_SHMEM=true \
+		PROOT_UNBUNDLE_LOADER="$PROOT_DIR/libexec/proot"
+	rm -rf "$src"
+	export PD_PROOT_BIN=$PROOT_DIR/bin/proot
 fi
 
 if ! distro true 2>/dev/null; then

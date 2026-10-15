@@ -1,0 +1,28 @@
+diff --git a/src/extension/fake_id0/fake_id0.c b/src/extension/fake_id0/fake_id0.c
+index b028b78..7474f87 100644
+--- a/src/extension/fake_id0/fake_id0.c
++++ b/src/extension/fake_id0/fake_id0.c
+@@ -26,6 +26,8 @@
+ #include <stdio.h>       /* FILE, fopen(3), fgets(3), sscanf(3), fclose(3), */
+ #include <fcntl.h>       /* O_PATH, */
+ #include <sys/stat.h>    /* chmod(2), stat(2) */
++#include <sys/vfs.h>     /* statfs(2), */
++#include <linux/magic.h> /* PROC_SUPER_MAGIC, */
+ #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
+ #include <unistd.h>      /* get*id(2),  */
+ #include <sys/ptrace.h>  /* linux.git:c0a3a20b  */
+@@ -455,6 +457,14 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
+ 	if (new_mode == (perms.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO)))
+ 		return;
+ 
++	/* procfs refuses chmod(2) anyway, and on SELinux hosts every
++	 * attempt on /proc/<pid>/ns is logged as an AVC denial.  */
++	{
++		struct statfs fs;
++		if (statfs(path, &fs) == 0 && fs.f_type == PROC_SUPER_MAGIC)
++			return;
++	}
++
+ 	node = talloc_zero(tracee->ctx, ModifiedNode);
+ 	if (node == NULL)
+ 		return;
