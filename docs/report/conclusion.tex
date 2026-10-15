@@ -8,8 +8,16 @@
 PipedPeer runs an unmodified Python script on other machines with no cluster to
 configure, reproduces its environment exactly, distributes the parallel work
 inside it without the user touching the source, and joins machines on different
-networks with a single command and no relay. Its six contributions are those
-listed in Chapter~\ref{chap:intro}. In the evaluation, a worker that held an
+networks with a single command and no relay. It ships environments as signed
+Nix closures, sending a peer only the store paths it lacks. It substitutes the
+parallel primitives a script already uses and divides their work by measured
+speed, under a cost model that keeps work local when moving it would be slower.
+It joins machines on different networks through an introducer that every daemon
+serves and that carries no job data. It places each job from the submitting
+client, under a three-phase lease, with no scheduler process. It keeps the
+result of every distributed path by falling back to a local one. It trains
+PyTorch models data-parallel through the daemons, weighting batches by measured
+speed and choosing exact or fast synchronisation by ring size. In the evaluation, a worker that held an
 environment started a job in 0.83\,s against 23.4\,s cold, one that held part
 of it received 86\% fewer bytes, and at 32 steps on two ranks fast
 synchronisation held accuracy while each rank sent 7.6 to 9.2 times fewer bytes.
