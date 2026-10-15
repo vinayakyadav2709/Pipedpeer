@@ -3,16 +3,19 @@ package daemonapi
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
+	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 )
 
 // The page itself must load on a cluster with a secret - a browser cannot
@@ -151,5 +154,42 @@ func TestHistoryServesTheStepsRecordAndRefusesBadIDs(t *testing.T) {
 	}
 	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &h) != nil || h.Origin == "" || len(h.Jobs) != 1 {
 		t.Errorf("list: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestHistoryProxiesAnotherNodesSteps(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/history" || r.URL.Query().Get("id") != "jobX" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"Steps":[{"step":"compute"}]}`))
+	}))
+	defer peer.Close()
+	host, portStr, _ := net.SplitHostPort(peer.Listener.Addr().String())
+	port, _ := strconv.Atoi(portStr)
+
+	s := New("me")
+	store, err := nodestore.NewAt(filepath.Join(t.TempDir(), "nodes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s.store = store
+	if err := store.UpsertNode(nodestore.Node{NodeID: "peer1", Host: host, Port: port,
+		SSHEndpoint: "root@" + host + ":22", State: "healthy", Source: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	get := func(q string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		s.handleHistory(w, httptest.NewRequest("GET", "/v1/history"+q, nil))
+		return w
+	}
+	if w := get("?id=jobX&node=peer1"); w.Code != http.StatusOK || w.Body.String() != `{"Steps":[{"step":"compute"}]}` {
+		t.Errorf("proxied: %d %s", w.Code, w.Body.String())
+	}
+	if w := get("?id=jobX&node=nobody"); w.Code != http.StatusNotFound {
+		t.Errorf("unknown node: %d, want 404", w.Code)
 	}
 }

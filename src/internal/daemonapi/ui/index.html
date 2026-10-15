@@ -451,17 +451,19 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     $("detail").innerHTML = `<div class="pane">${timelineHTML(j)}${receiptHTML(j)}${stepsHTML(j)}</div>`;
   }
 
-  // ---- detailed steps (/v1/history?id=): kept by the machine the run started on ----
-  const steps = {}; // id -> record | "loading" | "none" | "remote"
+  // ---- detailed steps (/v1/history?id=): fetched from the machine the run started on, through the local daemon ----
+  const steps = {}; // id -> record | "loading" | "none"
   const selfName = () => ((snap.nodes || []).find((n) => n.source === "self") || {}).hostname;
   const pickf = (o, a, b) => (o[a] !== undefined ? o[a] : o[b]);
   function loadSteps(j) {
     if (steps[j.id]) return;
-    if (j.origin && selfName() && j.origin !== selfName()) { steps[j.id] = "remote"; return; }
     steps[j.id] = "loading";
     const headers = {}, tok = store.get("pp-token");
     if (tok) headers["X-Pipedpeer-Token"] = tok;
-    fetch("/v1/history?id=" + encodeURIComponent(j.id), { headers, cache: "no-store" })
+    const remote = j.origin && selfName() && j.origin !== selfName();
+    const peer = remote ? (snap.nodes || []).find((n) => n.hostname === j.origin) : null;
+    if (remote && !peer) { steps[j.id] = "none"; return; }
+    fetch("/v1/history?id=" + encodeURIComponent(j.id) + (peer ? "&node=" + encodeURIComponent(peer.node_id) : ""), { headers, cache: "no-store" })
       .then((r) => {
         if (r.status === 404) { steps[j.id] = "none"; return null; }
         if (!r.ok) throw new Error(r.status + " " + r.statusText);
@@ -475,7 +477,6 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     const rec = steps[j.id];
     const h = `<h3>Detailed steps</h3>`;
     if (rec === "loading") return h + `<p class="dim">Loading…</p>`;
-    if (rec === "remote") return h + `<p class="dim">Kept on ${esc(j.origin)}: open this page there to see every step.</p>`;
     if (!rec || rec === "none") return h + `<p class="dim">No detailed steps were recorded for this run.</p>`;
     const list = (pickf(rec, "Steps", "steps") || []).map((s) => ({
       machine: s.machine || s.node || "this machine", chunk: s.chunk == null ? -1 : s.chunk,

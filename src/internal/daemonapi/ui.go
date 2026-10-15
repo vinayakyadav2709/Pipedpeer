@@ -2,8 +2,11 @@ package daemonapi
 
 import (
 	_ "embed"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -98,6 +101,10 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad job id"})
 			return
 		}
+		if node := r.URL.Query().Get("node"); node != "" {
+			s.proxyHistory(w, node, id)
+			return
+		}
 		_, dir, err := jobhistory.ReadRecord(id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such run: " + id})
@@ -125,4 +132,38 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 		jobs[i].Origin = origin
 	}
 	writeJSON(w, http.StatusOK, clusterstats.History{Origin: origin, Jobs: jobs})
+}
+
+// proxyHistory fetches another node's steps.json for the page, which may only
+// talk to its own daemon (CSP connect-src 'self'). The call goes out like
+// Collect's, so the cluster secret rides along as on every peer call. The
+// body is returned unchanged.
+func (s *Server) proxyHistory(w http.ResponseWriter, nodeID, id string) {
+	nodes, err := s.nodeList()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, n := range nodes {
+		if n.NodeID != nodeID {
+			continue
+		}
+		cn := clusterstats.NodeFromAPI(n.NodeID, n.SSHEndpoint, n.DaemonPort, n.State, n.Source, nil, n.Load)
+		u := fmt.Sprintf("http://%s:%d/v1/history?id=%s", cn.Host, cn.Port, url.QueryEscape(id))
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Get(u)
+		if err != nil {
+			log.Printf("daemonapi: /v1/history cannot reach node %s for run %s: %v", nodeID, id, err)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "that node did not answer"})
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			log.Printf("daemonapi: /v1/history copying node %s's steps for run %s: %v", nodeID, id, err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such node: " + nodeID})
 }
