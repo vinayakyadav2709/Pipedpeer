@@ -82,3 +82,15 @@ func TestEnvGPUFollowsTheTarget(t *testing.T) {
 		t.Error("preferred but the target is CPU-only: want the CPU environment")
 	}
 }
+
+// --check builds the environment for the node it placed on, like run: a
+// CPU-only --host target under a GPU preference gets the CPU build.
+func TestEnvGPUForCheckTargets(t *testing.T) {
+	none := map[string]string{"gpu": "none"}
+	if envGPU(false, true, 0, "self", "peer", none) {
+		t.Error("CPU-only placed node under a preference: want the CPU environment")
+	}
+	if !envGPU(true, true, 0, "self", "peer", none) {
+		t.Error("--gpu force: want the GPU environment")
+	}
+}

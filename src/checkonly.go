@@ -282,8 +282,9 @@ func runCheckOnly(o checkOnlyOptions) error {
 	}
 
 	// Placement. targetHost/targetPort are where the closure would go.
-	var targetHost, targetName string
+	var targetHost, targetName, targetNodeID string
 	var targetPort int
+	var targetCaps map[string]string
 	// Run places a --gpu force job like --remote when this machine has no
 	// GPU (main.go, gpuPlace); the check must name the same node.
 	gpuPlace := o.RequireGPU && !o.Remote && o.DaemonHost == "" && gpu.Detect().Vendor == gpu.VendorNone
@@ -349,6 +350,7 @@ func runCheckOnly(o checkOnlyOptions) error {
 					fmt.Fprintf(os.Stderr, "check-only: could not cancel lease %s (it expires on its own): %v\n", acc.LeaseID, err)
 				}
 				targetHost, targetPort, targetName = host, port, nameOf(targetID)
+				targetNodeID = targetID
 			}
 		}
 	}
@@ -368,7 +370,7 @@ func runCheckOnly(o checkOnlyOptions) error {
 			PythonVersion: o.PythonVersion,
 			Pkgs:          o.Pkgs,
 			Intercept:     true,
-			GPU:           o.RequireGPU || o.PreferGPU,
+			GPU:           envGPU(o.RequireGPU, o.PreferGPU, o.DaemonPort, o.NodeID.NodeID, targetNodeID, targetCaps),
 		}, nil)
 		if err != nil {
 			c.block("environment", fmt.Sprintf("build failed: %v", err))
