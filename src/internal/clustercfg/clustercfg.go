@@ -40,6 +40,9 @@ type Config struct {
 	Introducers []string `json:"introducers"`
 	NoJobs      bool     `json:"no_jobs,omitempty"`
 	PoolOnly    bool     `json:"pool_only,omitempty"`
+	// PublicAddress is this machine's address as peers off its network see
+	// it (host or host:port; a 1:1-NAT cloud VM). Invites list it first.
+	PublicAddress string `json:"public_address,omitempty"`
 }
 
 // disk is Config plus the field older builds wrote, read only to migrate it.

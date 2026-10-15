@@ -47,12 +47,31 @@ func InviteCode() (string, error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pipedpeer: could not read %s (%v); the invite lists this machine's addresses only\n", clustercfg.Path(), err)
 	}
-	return invite.Encode(invite.Invite{Secret: tok, Addrs: inviteAddrs(lanIPs(), cfg.Introducers)}), nil
+	own := lanIPs()
+	if publicHint(cfg.PublicAddress, own) {
+		fmt.Fprintln(os.Stderr, "pipedpeer: this machine has only private addresses; peers off this network "+
+			"need `pipedpeer setup --public-address <addr>` here, or Tailscale on every machine")
+	}
+	return invite.Encode(invite.Invite{Secret: tok, Addrs: inviteAddrs(cfg.PublicAddress, own, cfg.Introducers)}), nil
 }
 
-// inviteAddrs joins own IPs (given the introducer port) and known
-// introducers, deduplicated, capped.
-func inviteAddrs(own, known []string) []string {
+// publicHint reports whether no address in the invite can be reached from
+// off this network: no public address set and every own IP private.
+func publicHint(public string, own []string) bool {
+	if public != "" {
+		return false
+	}
+	for _, s := range own {
+		if ip := net.ParseIP(s); ip != nil && !ip.IsPrivate() {
+			return false
+		}
+	}
+	return true
+}
+
+// inviteAddrs joins the public address (first), own IPs (given the
+// introducer port) and known introducers, deduplicated, capped.
+func inviteAddrs(public string, own, known []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(a string) {
@@ -61,6 +80,13 @@ func inviteAddrs(own, known []string) []string {
 		}
 		seen[a] = true
 		out = append(out, a)
+	}
+	if public != "" {
+		if n, err := clustercfg.Normalize(public); err == nil {
+			add(n)
+		} else {
+			fmt.Fprintf(os.Stderr, "pipedpeer: skipping public_address %q: %v\n", public, err)
+		}
 	}
 	for _, ip := range own {
 		add(net.JoinHostPort(ip, strconv.Itoa(clustercfg.DefaultPort)))
@@ -112,4 +138,22 @@ func isVirtual(name string) bool {
 		}
 	}
 	return false
+}
+
+// SetPublicAddress saves this machine's public address (host or host:port)
+// for invites; empty clears it.
+func SetPublicAddress(addr string) error {
+	cfg, err := clustercfg.Load()
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", clustercfg.Path(), err)
+	}
+	if addr != "" {
+		n, err := clustercfg.Normalize(addr)
+		if err != nil {
+			return fmt.Errorf("--public-address %s: %w", addr, err)
+		}
+		addr = n
+	}
+	cfg.PublicAddress = addr
+	return clustercfg.Save(cfg)
 }
