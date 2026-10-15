@@ -2,6 +2,7 @@ package nixgen
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -235,4 +236,34 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
   };
 }
 `, nixSystem, nixSystem, pythonVersion, pkgsList)
+}
+
+// Recipe is what a job's environment is made of. A node of another system
+// cannot run the submitter's closure, and the flake itself names one system
+// and that system's wheel pins, so the node is sent this and generates its
+// own flake (Flake) from it.
+type Recipe struct {
+	Pkgs   []string `json:"pkgs"`
+	Python string   `json:"python,omitempty"`
+	GPU    bool     `json:"gpu,omitempty"`
+}
+
+var (
+	recipePkgRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_'-]*$`)
+	recipePythonRe = regexp.MustCompile(`^python[0-9]*$`)
+)
+
+// Flake is the recipe's flake for nixSystem. It refuses names that are not
+// plain nix attribute names: a recipe arrives from a peer and is pasted into
+// a nix expression.
+func (r Recipe) Flake(nixSystem string) (string, error) {
+	if r.Python != "" && !recipePythonRe.MatchString(r.Python) {
+		return "", fmt.Errorf("bad python attribute %q", r.Python)
+	}
+	for _, p := range r.Pkgs {
+		if !recipePkgRe.MatchString(p) {
+			return "", fmt.Errorf("bad package name %q", p)
+		}
+	}
+	return GenerateFlakeForArch(r.Pkgs, r.Python, nixSystem, r.GPU), nil
 }

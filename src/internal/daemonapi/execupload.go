@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/rs/zerolog/log"
 )
@@ -78,6 +79,15 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 			scriptPath = readField(part)
 		case "skip_broadcast":
 			skipBroadcast = readField(part)
+		case "env_recipe":
+			// Additive: what the closure was built from, for peers of
+			// another system (offerRecipes). store_path precedes it.
+			var rec nixgen.Recipe
+			if err := json.NewDecoder(io.LimitReader(part, 1<<20)).Decode(&rec); err != nil {
+				log.Warn().Err(err).Str("store", storePath).Msg("ignoring an unreadable env_recipe; peers of another system run this job's chunks on their pinned python")
+			} else if storePath != "" {
+				s.recipes.Store(storePath, rec)
+			}
 		case "nar":
 			// The NAR is optional if this node already has the closure cached
 			// (same store path from a previous task in the fan-out).

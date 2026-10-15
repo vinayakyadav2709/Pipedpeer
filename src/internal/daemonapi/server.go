@@ -83,7 +83,11 @@ type Lease struct {
 
 // Server is the daemon API server that manages job leases and resource reservations.
 type Server struct {
-	nodeID          string
+	nodeID string
+	// recipes maps an uploaded store path to its nixgen.Recipe, for peers of
+	// another system (offerRecipes). ponytail: never pruned; a few hundred
+	// bytes per environment.
+	recipes         sync.Map
 	router          chi.Router
 	leaseDuration   time.Duration
 	gracePeriod     time.Duration
@@ -649,9 +653,17 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	// import a closure into.
 	// A peer of another architecture (a phone among laptops) cannot run this
 	// closure; it runs chunks on its own pinned python instead (phone.CanRun).
+	// A full node of another system gets the job's recipe instead and builds
+	// its own env (offerRecipes); older ones run chunks on their pinned python.
+	var foreign []PeerHealth
 	targets = slices.DeleteFunc(targets, func(ph PeerHealth) bool {
-		return ph.Role == heartbeat.RolePoolOnly || (ph.Arch != "" && ph.Arch != identity.System())
+		other := ph.Arch != "" && ph.Arch != identity.System()
+		if other && ph.Role != heartbeat.RolePoolOnly {
+			foreign = append(foreign, ph)
+		}
+		return ph.Role == heartbeat.RolePoolOnly || other
 	})
+	s.offerRecipes(storePath, foreign)
 	if len(targets) == 0 {
 		// Usually a timing problem: the health poller has not run since the
 		// peers were added, so they are known but not yet marked healthy.
@@ -1483,6 +1495,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/store", s.handleStoreCheck)
 	r.Post("/v1/store/missing", s.handleStoreMissing)
 	r.Post("/v1/store/import", s.handleStoreImport)
+	r.Post("/v1/env/foreign", s.handleForeignEnv)
 	r.Post("/v1/pool/map", s.handlePoolMap)
 	r.Get("/v1/pool/stats", s.handlePoolStats)
 	r.Get("/v1/bench", s.handleBench)

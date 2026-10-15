@@ -105,6 +105,12 @@ func PoolRunPath(store string) (string, error) {
 			return run, nil
 		}
 	}
+	if run, why, known := foreignRun(store); known {
+		if run == "" {
+			return "", fmt.Errorf("closure %s is another system's: %s", store, why)
+		}
+		return run, nil
+	}
 	if !hostChunks() {
 		return "", fmt.Errorf("closure %s is not materialised here", store)
 	}
@@ -122,6 +128,14 @@ func PoolRunPath(store string) (string, error) {
 func CanRun(store string, h http.Header) bool {
 	if store != "" && exists(filepath.Join(store, "bin", "run")) {
 		return true
+	}
+	// A job whose recipe was offered runs only in its own env built here
+	// (foreign.go), never on the pinned python below.
+	if run, why, known := foreignRun(store); known {
+		if run == "" {
+			logForeign(store, why)
+		}
+		return run != ""
 	}
 	if !hostChunks() {
 		return false
