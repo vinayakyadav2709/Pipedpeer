@@ -84,3 +84,44 @@ func TestShortIDAndMatchesID(t *testing.T) {
 		t.Fatal("should not match wrong ID")
 	}
 }
+
+func fakeHost(t *testing.T, host, model string) {
+	oldH, oldP := hostname, getprop
+	hostname = func() (string, error) { return host, nil }
+	getprop = func(string) string { return model }
+	t.Cleanup(func() { hostname, getprop = oldH, oldP })
+}
+
+// TestPhoneIsNamedByModel: Android says "localhost" for every phone, which is
+// no name at all in `ran on` lines; the device model is used instead, also
+// for an identity stored before this, and a real hostname always wins.
+func TestPhoneIsNamedByModel(t *testing.T) {
+	isolate(t)
+	fakeHost(t, "localhost", "SM-G781B")
+	path := filepath.Join(os.Getenv("XDG_DATA_HOME"), "pipedpeer", "node_identity.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"hostname":"localhost","arch":"aarch64-linux"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id, err := GetOrCreate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id.Hostname != "SM-G781B" {
+		t.Fatalf("stored localhost not renamed: %q", id.Hostname)
+	}
+
+	for _, c := range []struct{ host, model, want string }{
+		{"yeet", "SM-G781B", "yeet"},
+		{"localhost", "Pixel 7", "Pixel-7"},
+		{"localhost", "", "node-c8789d22"},
+		{"", "", "node-c8789d22"},
+	} {
+		fakeHost(t, c.host, c.model)
+		if got := hostName("c8789d22aa"); got != c.want {
+			t.Errorf("hostName(host %q, model %q) = %q, want %q", c.host, c.model, got, c.want)
+		}
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -63,6 +64,11 @@ func GetOrCreate() (NodeIdentity, error) {
 	}
 
 	needsUpdate := false
+	// Phones set up before names were fixed are stored as "localhost".
+	if name := hostName(nodeID); name != id.Hostname && placeholderName(id.Hostname) {
+		id.Hostname = name
+		needsUpdate = true
+	}
 	// Files written before the node id became the key fingerprint hold a UUID.
 	if id.NodeID != nodeID {
 		id.NodeID = nodeID
@@ -105,8 +111,48 @@ func GetOrCreate() (NodeIdentity, error) {
 	return id, nil
 }
 
+// hostname and getprop are variables so tests can fake an Android phone.
+var (
+	hostname = os.Hostname
+	getprop  = func(name string) string {
+		if _, err := os.Stat("/system/bin/getprop"); err != nil {
+			return ""
+		}
+		out, err := termuxexec.Command("/system/bin/getprop", name).Output()
+		if err != nil {
+			log.Warn().Err(err).Str("property", name).Msg("identity: getprop failed")
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
+)
+
+// placeholderName is a hostname that names no machine: Android reports
+// "localhost" for every phone.
+func placeholderName(h string) bool {
+	h = strings.ToLower(strings.TrimSpace(h))
+	return h == "" || h == "localhost" || strings.HasPrefix(h, "localhost.")
+}
+
+// hostName is the name this node is shown by: the hostname, else on Android
+// the device model (ro.product.model, e.g. "SM-G781B"), else node-<id>.
+func hostName(nodeID string) string {
+	if h, _ := hostname(); !placeholderName(h) {
+		return h
+	}
+	if m := strings.ReplaceAll(getprop("ro.product.model"), " ", "-"); m != "" {
+		return m
+	}
+	short := nodeID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	log.Warn().Str("node", short).Msg("identity: hostname is a placeholder and no device model; naming this node by its id")
+	return "node-" + short
+}
+
 func create(path, nodeID string) (NodeIdentity, error) {
-	hostname, _ := os.Hostname()
+	hostname := hostName(nodeID)
 	gpuInfo := gpu.Detect()
 	id := NodeIdentity{
 		NodeID:    nodeID,

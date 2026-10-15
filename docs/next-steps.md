@@ -60,10 +60,13 @@ real machines:
 - **The two laptops over Tailscale** running `cpu.py`, `gpu.py`, `both.py`, and
   `--ddp 1` against automatic mode (the manual checklist in the worktree's
   `testing-log.md`). TODO(verify).
-- **The phone** (Samsung S20 FE 5G, Snapdragon 865): Termux, the arm64 binary,
-  a Pool chunk on Termux Python, a numpy kernel timed against one laptop core
-  (kill criterion: under 25%). Developed under qemu only, whose timings are not
-  performance numbers.
+- **The phone** (Samsung S20 FE 5G, Snapdragon 865): run on 2026-10-16 with
+  Play Termux, Debian + Nix in proot: pool and torch chunks from laptop A
+  verified (numbers in the report's results table). Still open: a run
+  submitted from the phone fails, because its node list goes stale (Android
+  refuses Go's interface listing, `netlinkrib: invalid argument`, so LAN
+  discovery and address listing fail on the phone); and the numpy kernel
+  against one laptop core.
 - **The college network**: per-lab subnets joined by routers; PC #2 on
   10.10.220.x could not reach 10.10.70.x at the demo. `pipedpeer doctor` names
   the case; the fix is a different network or Tailscale, never a relay.
@@ -97,6 +100,12 @@ Parked by the user on 2026-10-15:
 - Phones beyond the Termux worker (an app without Termux, the Android Linux
   VM).
 - IPv6 (the connection code looks IPv4-only; unverified).
+- Whole jobs on phones: the job sandbox nests Termux's proot inside the
+  proot-distro session, and on Play Termux proot 5.1.107.80 (loader embedded,
+  started from memfd) the inner proot starts nothing. Phones advertise
+  `chunks-only` meanwhile. Tried: none yet. Options: an un-nested per-job proot
+  started at Termux level; an inner proot with a loader file (PROOT_LOADER).
+  F-Droid Termux untested.
 
 Dropped: Optuna interception, NPU support.
 

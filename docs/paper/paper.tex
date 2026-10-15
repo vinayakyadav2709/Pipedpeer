@@ -254,18 +254,25 @@ that import; on a multi-user Nix, whose daemon ignores keys passed per command,
 a root-owned helper installed at set-up can only add or remove keys of the
 cluster's form. Caches are pruned least-recently-used.
 
-A phone can be a full node: under Termux~\cite{termux}, \texttt{proot-distro} provides a
-Debian root with single-user Nix, and jobs run under \texttt{proot}~\cite{proot} with a
-memory limit and lower priority --- a weaker sandbox than \texttt{crun}~\cite{crun}, which
-the diagnostics say. Every ARM path of the scientific set is in the public
-cache at the pin (a 395\,MiB download). Termux's \texttt{proot} lacks
-\texttt{fchmodat2} (Linux 6.6+), so on such kernels set-up builds the upstream
-fix. Closures go only to peers of the same architecture; a peer of another
-architecture receives the job's package list instead, builds its own
-environment once per flake hash, and refuses the job until it has. Without Nix
-the phone stays a Termux worker for parallel chunks, taking one only after
-importing every module it names. The full route has unit tests only and is
-first run on a real phone \todo{phone run}.
+A phone with Nix takes parallel chunks in a Nix environment: under
+Termux~\cite{termux}, \texttt{proot-distro} provides, through
+\texttt{proot}~\cite{proot}, a Debian root with single-user Nix, and the phone advertises itself as taking chunks only. Every
+ARM path of the scientific set is in the public cache at the pin (a 395\,MiB
+download). Termux's \texttt{proot} lacks \texttt{fchmodat2} (Linux 6.6+), so on
+such kernels set-up builds the upstream fix. Closures go only to peers of the
+same architecture; a peer of another architecture receives the job's package
+list instead, builds its own environment once per flake hash, and refuses
+chunks until it has. Without Nix the phone stays a Termux worker for parallel
+chunks, taking one only after importing every module it names. On a Samsung
+Galaxy S20~FE (Android~13, Termux from Google Play) set-up ran end to end. A
+laptop's CPU script, spread over that laptop, a second laptop over the
+internet and the phone, gave the phone 8 of 192 parallel items with an
+unchanged checksum, once the phone had built the job's environment from the
+cache (27\,s); a torch script training 160 small models gave it 6, while with
+32 models the laptops finished before the phone's worker had loaded torch. On
+the phone, Nix's Python inside \texttt{proot} ran the CPU script (without its
+pandas step, which Termux lacks) in 62--66\,s, against 73--81\,s for Termux's
+own Python, three runs each.
 
 \subsection{Joining Across Networks}
 \label{sec:nat}
@@ -672,7 +679,6 @@ a controlled multi-machine evaluation.
 
 \bibitem{proot} PRoot, ``chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
 
-\bibitem{crun} crun, ``A fast and lightweight fully featured OCI runtime and C library for running containers.'' [Online]. Available: \url{https://github.com/containers/crun}
 
 \bibitem{anderson2020nat} D.~Anderson, ``How NAT traversal works,'' Tailscale blog, Aug. 2020. [Online]. Available: \url{https://tailscale.com/blog/how-nat-traversal-works}
 

@@ -650,8 +650,9 @@ network the machines also find each other unaided. Across networks they meet
 through an \textbf{introducer}, an address book that tells machines where to find
 each other and carries no job data. Every daemon is an introducer for its own
 cluster, so the role is no longer asymmetric; two optional roles are:
-\texttt{pool-only} (a phone without Nix, which takes parallel chunks but no
-whole jobs; a phone with Nix is a full node) and
+\texttt{pool-only} (a phone without Nix, which takes parallel chunks with
+Termux's Python; a phone with Nix advertises \texttt{chunks-only} and takes them
+from a Nix environment) and
 \texttt{introducer-only} (a hosted server that runs nothing).
 
 \begin{figure}[H]
@@ -700,7 +701,7 @@ supporting code (process management, set-up, XDG paths, logging and the like).
 \texttt{resourceest} & Tiered memory estimate \\
 \texttt{jobhistory}, \texttt{heartbeat}, \texttt{gpu} & Job records; capability and load reporting; vendor GPU detection \\
 \texttt{runrec} & The run record: timed steps, simple and detailed views, export \\
-\texttt{service}, \texttt{warmup}, \texttt{doctor}, \texttt{phone} & Autostart unit; background environment builds; diagnostics; phone as a full node under \texttt{proot}, or a Termux pool worker \\
+\texttt{service}, \texttt{warmup}, \texttt{doctor}, \texttt{phone} & Autostart unit; background environment builds; diagnostics; phone with Nix under \texttt{proot}, or a Termux pool worker \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -2023,20 +2024,18 @@ secret in the URL fragment, so nothing is typed. The page shows the nodes,
 recent runs from every machine, each run's timeline and where its work ran, and
 a run view with every step of every chunk.
 
-\textbf{Phones as full nodes.} An Android phone first joined as a pool-only
+\textbf{Phones with Nix.} An Android phone first joined as a pool-only
 worker under Termux \cite{termux}, running parallel chunks with Termux's own Python. It can
-now be a full node. A set-up script installs Debian through
+now run them from a Nix environment. A set-up script installs Debian through
 \texttt{proot-distro} and single-user Nix inside it, creating \texttt{/nix}
 itself rather than calling \texttt{sudo}; where that is in place, every
 command is forwarded into the Debian root file system and the daemon runs
 there. At the pinned package set every ARM path of Python with numpy, pandas,
 torch, scikit-learn and joblib is in the public binary cache, so no binary
 cache of the project's own is needed: the runtime closure is 67 paths, about
-1.5\,GiB unpacked and 395\,MiB to download. Jobs run under Termux's own
-\texttt{proot} \cite{proot}, since Debian's crashed when nested, with a memory limit of the
-job's memory plus 2\,GiB of address space (torch reserves more than it uses)
-and a lower priority; this is a weaker sandbox than \texttt{crun}'s, and
-\texttt{pipedpeer doctor} says so. Termux's \texttt{proot} does not translate
+1.5\,GiB unpacked and 395\,MiB to download. The Debian runs under
+\texttt{proot} \cite{proot}, and the phone advertises itself as taking chunks
+only, which \texttt{pipedpeer doctor} states. Termux's \texttt{proot} does not translate
 the \texttt{fchmodat2} system call of Linux 6.6 and later, so the Nix installer
 failed inside it on such kernels; on those kernels set-up builds the upstream
 \texttt{proot} that has the fix, with a local patch that skips a chmod on
@@ -2052,9 +2051,28 @@ Termux pool worker and logs why; that worker now also carries Termux's torch
 and scipy, and takes a chunk only after importing every module the chunk names,
 so a module that is installed but fails to load sends the chunk elsewhere.
 With an ARM Termux image run under qemu, a laboratory daemon sent a
-two-item torch training chunk to the Termux worker, which trained it. The full
-route --- \texttt{proot}, Nix and a per-job environment --- is covered by unit
-tests only and is first run on a real phone \todo{phone run}.
+two-item torch training chunk to the Termux worker, which trained it.
+
+On a real phone, a Samsung Galaxy S20~FE (Android~13, kernel 4.19, Termux from
+Google Play), the route needed three fixes before it ran. Termux from Google
+Play starts every program through Android's linker, which runs only
+position-independent binaries and changes the program's argument list, and a
+Go program's own process starts are refused outright; the phone therefore gets
+an Android build of the binary, which undoes the argument change and starts
+every program through the linker. \texttt{proot-distro}~5.3 binds its own
+file descriptors over \texttt{/dev/fd}, which broke every local Nix build, so
+the Debian is entered in its minimal mode with the other bindings named
+explicitly; and it has no detached login, so the daemon is started in a
+session of its own. Set-up then ran end to end. A laptop's CPU script, spread
+over that laptop, a second laptop over the internet and the phone, gave the
+phone 8 of 192 parallel items with an unchanged checksum, once the phone had
+built the job's environment from the cache (27\,s). A torch script training
+160 small models gave the phone 6 of them, all converged; with 32 models the
+laptops finished before the phone's worker had loaded torch, so the phone took
+none and the result was unchanged. On the phone, Nix's Python inside
+\texttt{proot} ran the CPU script (without its pandas step, which Termux lacks)
+in 62.4, 62.8 and 66.0\,s, against 73.1, 80.8 and 72.8\,s for Termux's own
+Python 3.13; the full script took 68.4--72.4\,s inside \texttt{proot}.
 
 \textbf{Speed.} Each change below has a before-and-after figure in
 Section~\ref{sec:measure}. Each node's number of chunks in flight follows its
@@ -2625,7 +2643,7 @@ Largest passing fast-sync interval by ring size & 2 ranks: 32; 3: 16; 4: 4; 5 or
 Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & worst mean $+0.18\%$ at 4, 8 and 11 ranks with rank-16 PowerSGD on exact sync; all other remedies fail & in-process \\
 Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.09, 1.08\times$ (were $2.11, 1.35, 1.37, 1.31\times$) & container lab \\
 Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 137.5\,s, warm 603.7 to 62.4\,s (before: bounded by the 600\,s timeout, measured before the fix; after: idle host) & container lab \\
-Phone as a full node through proot and Nix & \todo{phone run} & real \\
+Phone with Nix through \texttt{proot} (S20~FE, Termux from Google Play): parallel chunks of a laptop's scripts, and Nix's Python against Termux's & CPU script: 8 of 192 items on the phone, checksum unchanged, after a 27\,s environment build; torch: 6 of 160 models, 0 of 32; CPU script without pandas 62--66\,s (Nix, \texttt{proot}) against 73--81\,s (Termux), three runs each & real phone and laptops, host shared \\
 Parallel map request body, before and after, 100\,MB payload & body build 2.77 to 0.06\,s (100 items of 1\,MB), 18.3 to 0.06\,s (1000 items); lab map of 48 $\times$ 8\,MB 4.07 to 2.00\,s, now kept on one node & container lab \\
 Workspace re-upload after editing one file (40 files of 200\,KB, 2-rank run on 2 nodes, LAN) & workspace bytes stored on the second node: 8.0\,MB on the first run, 200\,KB after editing one file (3 of 3 runs each; wall time 5.00\,s and 4.98\,s, median of 3, the run itself dominates) & container lab \\
 Environment seed to a node holding every path & empty script's total overhead 0.64 to 0.23\,s (warm); cold run 113 vs 116\,s, bound by the download & container lab \\
@@ -2717,7 +2735,6 @@ Two GPUs in one machine & no available machine has a second usable GPU \\
 Peer discovery latency & containers share the host's loopback, so the figure would not be meaningful \\
 The seven example workloads end to end on separate machines & not run for the October pass; run in containers on 12 October (Section~\ref{sec:res-lablayout}) \\
 Speedup, wireless networks, two physical GPUs and a college network's rules & the laboratory-layout runs used containers on one laptop; these come only from separate machines \\
-A phone as a full node (\texttt{proot}, Nix, per-job environment) & \texttt{proot} cannot run under qemu-user, so the route is first run on a real phone \\
 Fast synchronisation at five to seven ranks & not measured; eight and eleven were, in-process, and failed \\
 \bottomrule
 \end{tabularx}
@@ -2800,10 +2817,10 @@ first cluster with a GPU.
   run with a plain reason.
   \item \textbf{GPUs are NVIDIA only in practice}; AMD devices are detected but
   have no ROCm build of torch, and Intel integrated graphics never count.
-  \item \textbf{Phones are untested as full nodes.} The route through
-  \texttt{proot-distro} and Nix is covered by unit tests only; its sandbox is
-  \texttt{proot} with a memory limit, weaker than \texttt{crun}'s; and a phone
-  builds a job's environment itself, one job at a time, on the CPU.
+  \item \textbf{Phones take parallel chunks only}, and are slow at it: a
+  phone builds a job's environment itself, one job at a time, on the CPU, and
+  on a short torch script the laptops finished before the phone had loaded
+  torch.
   \item \textbf{Fast synchronisation is for small rings.} Synchronising every
   $H$ steps holds accuracy at two to four ranks; from five ranks no interval
   passed in in-process runs, so automatic mode keeps such rings exact.

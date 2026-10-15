@@ -29,6 +29,10 @@ var Version string
 const (
 	RolePoolOnly       = "pool-only"
 	RoleIntroducerOnly = "introducer-only"
+	// RoleChunksOnly is a full-node phone: it has Nix and takes pool and
+	// torch chunks (closures, or recipes from another architecture), but no
+	// whole job or DDP rank (phone.ChunksOnlyNote says why).
+	RoleChunksOnly = "chunks-only"
 )
 
 // RoleCapability and VersionCapability are where Role and Version travel.
