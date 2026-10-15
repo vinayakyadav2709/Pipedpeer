@@ -18,7 +18,8 @@
 #
 # Knobs: CASES (all), BL_REPS (3), POOL_NODES (3), POOL_MEM (1.5g),
 # TRAIN_MEM (2g), HUB_MEM (1.5g), SPEEDUP (1: also run the one-node baseline),
-# ONLY ("group:variant ...", e.g. "train:n2 pool:n1 cold:n3", to resume).
+# ONLY ("group:variant" or "case:variant" tokens, e.g. "train:n2 poolsend:n3
+# poolsend:n1 cold:n3"): rerun exactly those rows (resume, quiet rerun).
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 
@@ -87,12 +88,18 @@ selected() { # selected <group> -> "id|script|profile|flags" lines
 	done
 }
 
+only() { # only <group> <variant>: keep the case lines ONLY selects
+	local id rest
+	while IFS='|' read -r id rest; do
+		[[ -z "${ONLY:-}" || " $ONLY " == *" $1:$2 "* || " $ONLY " == *" $id:$2 "* ]] && echo "$id|$rest"
+	done
+	return 0
+}
+
 # shellcheck disable=SC2086
 run_group() { # run_group <group> <nodes> <mem> <variant>
 	local group="$1" nodes="$2" mem="$3" variant="$4" lines id script profile flags warmed=""
-	# ONLY="pool:n1 train:n2 ..." runs just those group:variant sets (resume).
-	[[ -z "${ONLY:-}" || " $ONLY " == *" $group:$variant "* ]] || return 0
-	lines="$(selected "$group")"
+	lines="$(selected "$group" | only "$group" "$variant")"
 	[[ -n "$lines" ]] || return 0
 	bl_lab_up "$nodes" "$mem" lan 0 "$bin"
 	bl_put 1 "$work"
@@ -126,7 +133,7 @@ while IFS='|' read -r id script profile flags; do
 		bl_put 1 "$work"
 		bl_run "$id" "n$pool_nodes" "$mode" "$r" "$script" $flags || break
 	done
-done <<< "$([[ -z "${ONLY:-}" || " $ONLY " == *" cold:"* ]] && selected cold)"
+done <<< "$(selected cold | only cold "n$pool_nodes")"
 bl_lab_down
 
 bl_table
