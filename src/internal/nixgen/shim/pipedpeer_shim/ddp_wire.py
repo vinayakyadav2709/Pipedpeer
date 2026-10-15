@@ -45,7 +45,10 @@ def _int8_encode(flat, counts):
         return flat.astype(_np.int8), [], flat.astype(_np.float32)
     starts = _np.concatenate(([0], _np.cumsum(counts)[:-1])).astype(_np.intp)
     peak = _np.maximum.reduceat(_np.abs(flat), starts)
-    scales = _np.where(peak > 0, peak / _np.float32(127), _np.float32(1)).astype(_np.float32)
+    # Test the scale, not the peak: a subnormal peak (< ~1.8e-43) over 127
+    # underflows to 0, and a 0 scale is refused by the daemon.
+    scales = (peak / _np.float32(127)).astype(_np.float32)
+    scales = _np.where(scales > 0, scales, _np.float32(1)).astype(_np.float32)
     per = _np.repeat(scales, counts)
     tmp = _np.divide(flat, per, dtype=_np.float32)
     _np.rint(tmp, out=tmp)
