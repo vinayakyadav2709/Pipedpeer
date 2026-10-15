@@ -54,6 +54,14 @@ type ddpEntry struct {
 	result       []byte
 	resultScale  float64
 	resultScales []float64
+	// kind is the first contribution's Kind; every rank in a round must send
+	// the same one (a gradient averaged with a DiLoCo pseudo-gradient is
+	// garbage that trains on silently).
+	kind string
+	// drift is how far the contributions disagreed (ddpAccumulator.drift),
+	// set with result when hasDrift.
+	drift    float64
+	hasDrift bool
 	// seen tracks which ranks have contributed, since acc keeps only a count
 	// and a rank that retried must not be folded in twice.
 	seen map[int]bool
@@ -220,9 +228,12 @@ type ddpRun struct {
 	released bool
 	// syncEvery is the interval the ranks last proposed (1 = every step).
 	syncEvery int
-	// residual is the int8 reply's rounding error per payload size, carried
-	// into the next round's mean (downlink error feedback).
-	residual map[int][]float64
+	// residual is the int8 reply's rounding error per kind and payload size,
+	// carried into the next round's mean (downlink error feedback). Keyed by
+	// kind too: a DiLoCo pseudo-gradient has the gradients' size, and a
+	// gradient's rounding error added to a pseudo-gradient (or back) is off by
+	// the learning rate times the interval.
+	residual map[string][]float64
 }
 
 // run returns a group's run state, creating it. Caller holds the board lock.
@@ -530,6 +541,7 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 			created:   time.Now(),
 			partialAt: time.Now().Add(wait),
 			opening:   opening,
+			kind:      req.Kind,
 		}
 		if mode == ddpModeReduce {
 			if req.Count <= 0 || req.DType.size() == 0 {
@@ -639,6 +651,11 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 				e.err = fmt.Errorf("%s", why)
 			}
 		}
+		if req.Kind != "" && e.kind != "" && req.Kind != e.kind && !e.seen[req.Rank] && e.err == nil {
+			e.err = fmt.Errorf("rank %d sent %s to sync %d while the others sent %s: the "+
+				"ranks' sync schedules disagree, and averaging the two would train on "+
+				"garbage", req.Rank, req.Kind, req.Seq, e.kind)
+		}
 		if !e.seen[req.Rank] && e.err == nil {
 			// Only worth doing early: ranks that duplicate work do it from
 			// the first step, and hashing every payload forever would put a
@@ -736,6 +753,10 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 	if e.acc != nil || e.result != nil || e.err != nil {
 		result, rerr, agreedEvery, rscale := e.result, e.err, e.syncEvery, e.resultScale
 		rscales, _ := json.Marshal(e.resultScales)
+		driftJSON := ""
+		if e.hasDrift {
+			driftJSON = ", \"drift\": " + strconv.FormatFloat(e.drift, 'g', 6, 64)
+		}
 		sameWork := e.checked && e.sameWork && e.fingerprinted > 1
 		// How many ranks the result actually averages. Equal to the world
 		// size unless the round completed short-handed, and the shim says so
@@ -760,8 +781,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		body := []byte(fmt.Sprintf(
 			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"scales\": %s, "+
-				"\"same_work\": %t, \"ranks\": %d%s}\n",
-			agreedEvery, rscale, rscales, sameWork, ranks, rebalanceJSON))
+				"\"same_work\": %t, \"ranks\": %d%s%s}\n",
+			agreedEvery, rscale, rscales, sameWork, ranks, driftJSON, rebalanceJSON))
 		body = putFrame(body, result)
 		w.Header().Set("Content-Type", DDPReduceContentType)
 		w.WriteHeader(http.StatusOK)
@@ -966,19 +987,23 @@ func (s *Server) completePartial(group, key string, rank int) bool {
 // lead's half of R1's error feedback (each rank keeps its own uplink half).
 // Every rank still receives identical bytes, so the models stay identical.
 // Caller holds the board lock.
-// ponytail: residuals keyed by payload size; two optimizers whose gradients
-// have the same element count share one. Key by optimizer if that bites.
+// The round's drift is taken from the sums before they go.
+// ponytail: residuals keyed by kind and payload size; two optimizers whose
+// gradients have the same element count share one. Key by optimizer if that
+// bites.
 func (b *ddpBoard) finishLocked(group string, e *ddpEntry) {
+	e.drift, e.hasDrift = e.acc.drift()
 	var res []float64
 	if e.acc.dtype == ddpI8 {
 		r := b.run(group)
 		if r.residual == nil {
-			r.residual = map[int][]float64{}
+			r.residual = map[string][]float64{}
 		}
 		n := len(e.acc.sum)
-		if res = r.residual[n]; res == nil {
+		k := e.kind + "/" + strconv.Itoa(n)
+		if res = r.residual[k]; res == nil {
 			res = make([]float64, n)
-			r.residual[n] = res
+			r.residual[k] = res
 		}
 	}
 	e.result, e.resultScales, e.err = e.acc.meanResidual(res)

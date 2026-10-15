@@ -63,6 +63,207 @@ def _int8_decode(raw, scales, counts):
     return vals.astype(_np.float32)
 
 
+def _read_frames(buf, count):
+    """count length-prefixed frames (4-byte big-endian length, then the
+    bytes) from buf, as memoryview slices: one pass, no copy per frame.
+    Slicing the remainder after each frame copied it every time, which is
+    quadratic in the ring size on a blackboard reply holding every rank's
+    model."""
+    import struct
+    mv = memoryview(buf)
+    out, off = [], 0
+    for i in range(count):
+        if off + 4 > len(mv):
+            raise RuntimeError("ddp reply ends before frame %d of %d" % (i + 1, count))
+        n = struct.unpack_from(">I", mv, off)[0]
+        off += 4
+        if off + n > len(mv):
+            raise RuntimeError("ddp frame %d of %d claims %d bytes, %d left"
+                               % (i + 1, count, n, len(mv) - off))
+        out.append(mv[off:off + n])
+        off += n
+    return out
+
+
+# DiLoCo (--ddp-sync fast, PIPEDPEER_DDP_SYNC_MODE=fast): each rank trains on
+# its own for H steps, then the ranks average how far they moved (the
+# pseudo-gradient theta_global - theta_local, weighted by the samples each
+# trained on) and every rank applies that average to the last synced model
+# with an outer Nesterov step (Douillard et al. 2023). The schedule: exact
+# per-step sync first (post-local SGD, Lin et al. 2020), then H adapted to
+# how far the ranks drift apart (AdaComm-style, Wang & Joshi 2019), then back
+# to exact over the last tenth of the run when its length is known. The
+# script's batch, learning rate and epochs are never touched.
+_DILOCO_OUTER_LR = 0.7        # the paper's defaults (user, Decisions)
+_DILOCO_MOMENTUM = 0.9
+_DILOCO_H_MAX = 64
+# The local phase starts here and doubles or halves at each sync; H=1 is
+# exact sync, which only the warm-up and the final tightening use, so every
+# local phase ends with a round that also syncs the optimizer state.
+_DILOCO_H_START = 2
+_DILOCO_H_FLOOR = 2
+# Every Kth outer step the inner optimizer's state (Adam's exp_avg and
+# exp_avg_sq, SGD's momentum) is averaged in the same round as the weights.
+_DILOCO_STATE_EVERY = 10
+# Drift = the ranks' pseudo-gradient disagreement (the daemon's relative
+# spread) over the mean gradient disagreement of the warm-up's last rounds.
+# Below GROW the ranks agree better than single steps did: H doubles. Above
+# SHRINK they disagree more than single steps did, so they are drifting into
+# different models: H halves. Calibration knobs: U31B's benchmark tunes them.
+_DILOCO_DRIFT_GROW = 0.7
+_DILOCO_DRIFT_SHRINK = 1.0
+_DILOCO_REF_WINDOW = 10
+_DILOCO_TIGHTEN = 0.1
+
+
+def _diloco_warmup(total):
+    """Exact-sync steps before local training: a tenth of the run, between
+    10 and 500 steps, when its length is known; else 50."""
+    import math
+    if not total:
+        return 50
+    return min(500, max(10, int(math.ceil(_DILOCO_TIGHTEN * total))))
+
+
+def _diloco_cap(n, total):
+    """The largest interval allowed after step n of total: never past the
+    end, and shrinking linearly to 1 over the last tenth. None when the
+    length is unknown."""
+    import math
+    if not total:
+        return None
+    left = max(0, total - n)
+    window = max(1, int(math.ceil(_DILOCO_TIGHTEN * total)))
+    cap = max(1, left)
+    if left <= window:
+        cap = min(cap, max(1, int(_DILOCO_H_MAX * left / window)))
+    return cap
+
+
+def _diloco_next_interval(h, drift, ref, n, total):
+    """The interval until the next sync, decided after a sync that ended
+    step n with the given drift (None: not measured this round)."""
+    if drift is not None and ref is not None:
+        if ref > 0:
+            excess = drift / ref
+        else:
+            excess = 0.0 if drift == 0 else float("inf")
+        if excess < _DILOCO_DRIFT_GROW:
+            h = h * 2
+        elif excess > _DILOCO_DRIFT_SHRINK:
+            h = h // 2
+    h = min(_DILOCO_H_MAX, max(_DILOCO_H_FLOOR, h))
+    cap = _diloco_cap(n, total)
+    return h if cap is None else min(h, cap)
+
+
+def _diloco_note(total):
+    """What the schedule can do near the end, for the log."""
+    if total:
+        return ("ddp: DiLoCo tightens back to exact sync over the last %d of %d steps"
+                % (max(1, int(_DILOCO_TIGHTEN * total + 0.999)), total))
+    return ("ddp: DiLoCo sees no run length (only a OneCycleLR states one), so no "
+            "tightening near the end: the ranks' last sync can be up to the "
+            "interval before the final step")
+
+
+def _outer_nesterov(theta, buf, delta, lr=_DILOCO_OUTER_LR, mu=_DILOCO_MOMENTUM):
+    """torch.optim.SGD(nesterov=True) on one tensor, with the averaged
+    pseudo-gradient as the gradient. Returns the new (theta, buf)."""
+    buf = delta.copy() if buf is None else mu * buf + delta
+    return (theta - lr * (delta + mu * buf)).astype(theta.dtype, copy=False), buf
+
+
+def _opt_moments(opt, params):
+    """The optimizer's per-parameter float state shaped like each parameter
+    (exp_avg, exp_avg_sq, momentum_buffer...), in parameter then key order:
+    the same list on every rank running the same script."""
+    out = []
+    for p in params:
+        st = opt.state.get(p) or {}
+        for k in sorted(st):
+            v = st[k]
+            if (hasattr(v, "is_floating_point") and v.is_floating_point()
+                    and tuple(v.shape) == tuple(p.shape)):
+                out.append(v)
+    return out
+
+
+def _np_copy(t, dtype=None):
+    """A tensor as a numpy array of its own: float64 stays float64, other
+    floats (bfloat16 included, which numpy cannot hold) become float32. Never
+    a view of the tensor - a CPU tensor's .numpy() shares its memory, and a
+    snapshot that moves with training is no snapshot."""
+    import numpy as _np
+    import torch as _th
+    if dtype is None:
+        dtype = _np.float64 if t.dtype == _th.float64 else _np.float32
+    src = t.detach().cpu()
+    if src.dtype not in (_th.float32, _th.float64):
+        src = src.float()
+    return _np.array(src.numpy(), dtype=dtype, copy=True)
+
+
+class _DiLoCo:
+    """One optimizer's DiLoCo state. theta is the model at the last sync
+    (None outside a local phase); every field moves the same way on every
+    rank, from the same replies, which is what keeps their schedules in
+    step."""
+
+    def __init__(self):
+        self.theta = None
+        self.buf = None
+        self.h = 1
+        self.next_sync = 0
+        self.outer = 0
+        self.samples = 0
+        self.refs = []
+        self.ref = None
+        self.started = False
+
+    def begin(self, params, h, done):
+        """Start a local phase after step done: the model now is the global
+        one, the outer momentum starts from zero."""
+        self.theta = [_np_copy(p) for p in params]
+        self.buf = None
+        self.h = h
+        self.next_sync = done + h
+        self.samples = 0
+        self.started = True
+
+
+def _diloco_round(st, opt, params, reduce, force_state=False):
+    """One outer step. reduce(deltas, extras, samples) averages across ranks
+    in one round and returns (means of deltas + extras, drift), or None when
+    this rank is not syncing. Every Kth outer step (or when forced) the
+    optimizer state rides in the same round as extras. Writes the new global
+    model into params and the averaged state into the optimizer; returns the
+    round's drift, or None when it carried state (the spread then mixes in
+    the moments) or did not sync."""
+    import numpy as _np
+    import torch as _th
+    deltas = [g - _np_copy(p, g.dtype) for g, p in zip(st.theta, params)]
+    st.outer += 1
+    with_state = force_state or st.outer % _DILOCO_STATE_EVERY == 0
+    moments = _opt_moments(opt, params) if with_state else []
+    got = reduce(deltas, [_np_copy(m) for m in moments], st.samples)
+    st.samples = 0
+    if got is None:
+        return None
+    means, drift = got
+    bufs = st.buf or [None] * len(deltas)
+    new = [_outer_nesterov(t, b, _np.asarray(d, dtype=t.dtype))
+           for t, b, d in zip(st.theta, bufs, means[:len(deltas)])]
+    st.theta = [t for t, _ in new]
+    st.buf = [b for _, b in new]
+    with _th.no_grad():
+        for p, t in zip(params, st.theta):
+            p.copy_(_th.from_numpy(t).to(p.device, p.dtype))
+        for m, v in zip(moments, means[len(deltas):]):
+            m.copy_(_th.from_numpy(_np.ascontiguousarray(v)).to(m.device, m.dtype))
+    return None if with_state else drift
+
+
 def _weighted_batches(weights, base_batch, world):
     """Each rank's per-step batch, together adding up to the script's.
 
@@ -387,6 +588,13 @@ def _install_ddp():
     _SYNC_RAW = os.environ.get("PIPEDPEER_DDP_SYNC_EVERY", "1").strip().lower()
     _SYNC_AUTO = _SYNC_RAW == "auto"
     _SYNC_EVERY = 1 if _SYNC_AUTO else max(1, int(_SYNC_RAW or "1"))
+    # run --ddp-sync fast (C2, Decisions): DiLoCo with an adaptive interval
+    # (_DiLoCo, _diloco_round). Replaces the interval above when set.
+    _FAST = os.environ.get("PIPEDPEER_DDP_SYNC_MODE", "").strip().lower() == "fast"
+    _DILOCO = {}            # id(optimizer) -> _DiLoCo
+    _TOTAL = [None]         # the run's optimizer steps, when a OneCycleLR says
+    _DRIFT = [None]         # the last reduce reply's drift, None if it had none
+    _TOLD_FAST = [False]
     # A receipt for training, for the same reason pool work has one: a run
     # that distributed nothing and a run that distributed everything look
     # identical from the outside, and so do a fast ring and one that spent
@@ -584,8 +792,8 @@ def _install_ddp():
                 _WARNED_SYNC_BOUND[0] = True
                 _log("ddp: sync-bound — %.0f ms per sync against %.0f ms of compute, "
                      "so %.0f%% of this run is moving gradients. "
-                     "PIPEDPEER_DDP_SYNC_EVERY=auto would average every %d steps "
-                     "instead of every one, which is faster and trains a slightly "
+                     "--ddp-sync fast would train locally and sync about every %d "
+                     "steps (DiLoCo), which is faster and trains a slightly "
                      "different model." % (sync * 1000, step * 1000,
                                            100.0 * sync / (sync + step), n))
             return _SYNC_EVERY
@@ -821,6 +1029,7 @@ def _install_ddp():
         # each rank's step sequence is not local SGD - it is ranks combining
         # models that have taken different numbers of local steps, which
         # shows up as a worse final loss and nothing else.
+        _DRIFT[0] = reply.get("drift")
         agreed = reply.get("sync_every", 0)
         if agreed and agreed != _SYNC_TUNED[0]:
             _SYNC_TUNED[0] = int(agreed)
@@ -927,12 +1136,7 @@ def _install_ddp():
         if nl < 0:
             raise RuntimeError("ddp sync returned no header: %r" % data[:200])
         count = json.loads(data[:nl]).get("blob_frames", 0)
-        rest = data[nl + 1:]
-        out = []
-        for _ in range(count):
-            n = struct.unpack(">I", rest[:4])[0]
-            out.append(rest[4:4 + n])
-            rest = rest[4 + n:]
+        out = _read_frames(memoryview(data)[nl + 1:], count)
         if len(out) != _WORLD:
             raise RuntimeError("ddp sync returned %d of %d blobs" % (len(out), _WORLD))
         # Timed because a training run that is slower distributed than local
@@ -964,8 +1168,9 @@ def _install_ddp():
             off += size
         return out
 
-    def _daemon_reduce(arrs, wire_dtype, kind="grads", manifest=None):
-        """One averaged allreduce through the daemon, in reduce mode."""
+    def _daemon_reduce(arrs, wire_dtype, kind="grads", manifest=None, **more):
+        """One averaged allreduce through the daemon, in reduce mode. more
+        goes into the header (samples= overrides the last batch's count)."""
         import json
         import struct
         import urllib.request
@@ -976,6 +1181,7 @@ def _install_ddp():
         opening = kind == "weights" and _SEQ[0] == 1
         extra = {"dtype": wire_dtype.name, "count": int(flat.size),
                  "start_wait": _START_WAIT}
+        extra.update(more)
         if opening and manifest is not None:
             # The lead compares every rank's parameter list before averaging
             # anything: ranks that built different models stop together with
@@ -1001,13 +1207,11 @@ def _install_ddp():
         if nl < 0:
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
         _on_reply(json.loads(data[:nl]), opening)
-        rest = data[nl + 1:]
-        n = struct.unpack(">I", rest[:4])[0]
-        mean = _np_ddp.frombuffer(rest[4:4 + n], dtype=wire_dtype)
+        mean = _np_ddp.frombuffer(_read_frames(memoryview(data)[nl + 1:], 1)[0], dtype=wire_dtype)
         _count_sync(time.monotonic() - _t0, len(body), len(data))
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
-    def _daemon_reduce_int8(arrs, key):
+    def _daemon_reduce_int8(arrs, key, kind="grads", **more):
         """Average gradients as signed bytes, carrying the rounding error.
 
         Each rank scales its values into [-127, 127], one scale per block of
@@ -1039,9 +1243,9 @@ def _install_ddp():
 
         _t0 = time.monotonic()
         _SEQ[0] += 1
-        header = _header("grads", dtype="int8", count=int(q.size),
+        header = _header(kind, dtype="int8", count=int(q.size),
                          scale=scales[0] if scales else 1.0,
-                         scales=scales, counts=counts)
+                         scales=scales, counts=counts, **more)
         payload = q.tobytes()
         body = header + b"\n" + struct.pack(">I", len(payload)) + payload
         req = urllib.request.Request(
@@ -1055,9 +1259,7 @@ def _install_ddp():
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
         reply = json.loads(data[:nl])
         _on_reply(reply, False)
-        rest = data[nl + 1:]
-        n = struct.unpack(">I", rest[:4])[0]
-        raw_mean = _np_ddp.frombuffer(rest[4:4 + n], dtype="int8")
+        raw_mean = _np_ddp.frombuffer(_read_frames(memoryview(data)[nl + 1:], 1)[0], dtype="int8")
         mean = _int8_decode(raw_mean, reply.get("scales") or [float(reply.get("scale", 1.0)) or 1.0],
                             counts)
         _count_sync(time.monotonic() - _t0, len(body), len(data))
@@ -1131,6 +1333,110 @@ def _install_ddp():
         lead = pickle.loads(blobs[0])
         for i, t in enumerate(tensors):
             t.data.copy_(_th.from_numpy(lead[i]).to(t.device))
+
+    def _diloco_reduce(deltas, extras, samples):
+        """_diloco_round's reduce. Pseudo-gradients go as int8 with error
+        feedback; a round carrying optimizer state goes whole as float32:
+        exp_avg_sq spans orders of magnitude within a block, so int8 would
+        round its small entries to zero (huge Adam steps there) and the
+        reply's error feedback could push them below zero. That round sends
+        the carried int8 error at full width and clears it."""
+        if _DROPPED[0] or _live_ranks() <= 1:
+            return None
+        _DRIFT[0] = None
+        if extras or not _INT8_GRADS:
+            err = _ERR.pop("delta", None)
+            wire, off = [], 0
+            for d in deltas:
+                d = d.astype("float32")
+                if err is not None and err.size >= off + d.size:
+                    d += err[off:off + d.size].reshape(d.shape)
+                off += d.size
+                wire.append(d)
+            wire += [e.astype("float32", copy=False) for e in extras]
+            means = _daemon_reduce(wire, _np_ddp.dtype("float32"), "delta",
+                                   samples=int(samples))
+        else:
+            means = _daemon_reduce_int8(deltas, "delta", "delta", samples=int(samples))
+        return means, _DRIFT[0]
+
+    def _fast_step(opt, params, n, orig, sa, skw):
+        """Step n of opt under --ddp-sync fast: exact sync through the
+        warm-up and after the final tightening, else local steps and a
+        DiLoCo round every H. Every branch depends only on the step count,
+        the run length and reply data, which every rank shares."""
+        st = _DILOCO.get(id(opt))
+        if st is None:
+            st = _DILOCO[id(opt)] = _DiLoCo()
+        done = n + 1
+        total = _TOTAL[0]
+        if st.theta is None:
+            grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
+                     for p in params if p.grad is not None]
+            _DRIFT[0] = None
+            if grads:
+                _daemon_allreduce(grads)
+            drift = _DRIFT[0]
+            out = orig(*sa, **skw)
+            if st.started:
+                return out          # tightened to exact for the end of the run
+            if done < _diloco_warmup(total):
+                if drift is not None:
+                    _push_window(st.refs, drift, _DILOCO_REF_WINDOW)
+                return out
+            # The post-local switch, made once.
+            if st.ref is None and st.refs:
+                st.ref = sum(st.refs) / len(st.refs)
+            cap = _diloco_cap(done, total)
+            h = _DILOCO_H_START if cap is None else min(_DILOCO_H_START, cap)
+            if h <= 1:
+                st.started = True   # too near the end to train locally
+                return out
+            st.begin(params, h, done)
+            _SYNC_TUNED[0] = h
+            if st.ref is None:
+                _log("ddp: the lead daemon reports no drift between ranks (an older "
+                     "build), so DiLoCo keeps syncing every %d steps" % h)
+            _log("ddp: exact sync warm-up done after %d steps (drift reference %s); "
+                 "training locally, syncing every %d steps"
+                 % (done, "%.3g" % st.ref if st.ref is not None else "none", h))
+            return out
+        out = orig(*sa, **skw)
+        st.samples += int(_BATCH_N[0])
+        if done < st.next_sync:
+            return out
+        cap = _diloco_cap(done, total)
+        last = cap is not None and cap <= 1
+        drift = _diloco_round(st, opt, params, _diloco_reduce, force_state=last)
+        if last:
+            st.theta = None
+            _SYNC_TUNED[0] = 1
+            _log("ddp: DiLoCo back to exact sync for the last %d step(s)" % max(0, total - done))
+            return out
+        h = _diloco_next_interval(st.h, drift, st.ref, done, total)
+        if h != st.h:
+            _log("ddp: DiLoCo syncs every %d steps now (was %d; drift %s against %s)"
+                 % (h, st.h, "%.3g" % drift if drift is not None else "not measured",
+                    "%.3g" % st.ref if st.ref is not None else "no reference"))
+        st.h, st.next_sync = h, done + h
+        _SYNC_TUNED[0] = h
+        return out
+
+    def _diloco_settle():
+        """Before the ring changes: end every local phase with a round that
+        also syncs the optimizer state, so every rank holds the same model
+        and optimizer (the snapshot a joiner takes is the ring's), then
+        restart the local phase from there with a fresh outer momentum on
+        every rank, the joiner included."""
+        for o in _live_opts():
+            st = _DILOCO.get(id(o))
+            if st is None or st.theta is None:
+                continue
+            params = [p for g in o.param_groups for p in g["params"]]
+            _diloco_round(st, o, params, _diloco_reduce, force_state=True)
+            st.theta, st.started = None, False
+            _log("ddp: DiLoCo synced model and optimizer state for the ring change")
+
     _STEPPED = weakref.WeakSet()
     # Modules holding buffers (BatchNorm running stats), in first-forward
     # order: the same order on every rank running the same script, which is
@@ -1242,6 +1548,15 @@ def _install_ddp():
                                   manifest=_manifest(params))
                 _log("ddp daemon-channel sync ready (rank %d/%d, every %d step%s)"
                      % (_RANK, _WORLD, _SYNC_EVERY, "" if _SYNC_EVERY == 1 else "s"))
+                if _FAST and not _TOLD_FAST[0]:
+                    _TOLD_FAST[0] = True
+                    _log(_diloco_note(_TOTAL[0]))
+                    if _RANK == 0:
+                        # Shown without -v: the ranks no longer run the
+                        # script's exact arithmetic.
+                        _warn("training with DiLoCo, sync every %d-%d steps after %d "
+                              "exact ones — --ddp-sync exact for per-step sync"
+                              % (_DILOCO_H_START, _DILOCO_H_MAX, _diloco_warmup(_TOTAL[0])))
             _now = time.monotonic()
             if _STEP_MARK[0] is not None:
                 _elapsed = _now - _STEP_MARK[0]
@@ -1252,6 +1567,11 @@ def _install_ddp():
                     _push_window(_STEP_RECENT, _elapsed - _synced, _STEP_WINDOW)
             _STEP_MARK[0], _STEP_MARK[1] = _now, _DDP_STATS["sync_sec"]
 
+            if _FAST:
+                try:
+                    return _fast_step(self, params, n, _orig_step, sa, skw)
+                finally:
+                    _BATCH_N[0] = 0
             every = _tuned_sync_every()
             try:
                 if every == 1:
@@ -1412,6 +1732,12 @@ def _install_ddp():
     def _live_opts():
         return [o for o in (r() for r in _OPTS) if o is not None]
 
+    def _diloco_shared(o):
+        st = _DILOCO.get(id(o))
+        if st is None:
+            return {}
+        return {"refs": list(st.refs), "ref": st.ref, "started": st.started}
+
     def _send_snapshot(join, boundary, world, weights):
         """Hand this rank's model and optimizer to a rank joining the ring.
 
@@ -1432,7 +1758,10 @@ def _install_ddp():
         header = json.dumps({"group": _GROUP, "rank": _RANK, "join": join,
                              "boundary": boundary, "seq": _SEQ[0], "world": world,
                              "weights": weights,
-                             "sync_every": int(_SYNC_TUNED[0] or 0)}).encode()
+                             "sync_every": int(_SYNC_TUNED[0] or 0),
+                             # The DiLoCo schedule's shared state, per
+                             # optimizer, so the joiner decides as the ring.
+                             "diloco": [_diloco_shared(o) for o in opts]}).encode()
         # Header, length and model in one buffer, sent as a view of it: the
         # model used to be copied out of the buffer and then again into the
         # body, three copies of a multi-GB model at the epoch boundary.
@@ -1469,6 +1798,8 @@ def _install_ddp():
     def _ring_switch(call):
         """Take the ring's pending change at this epoch boundary."""
         nonlocal _WORLD, _WEIGHTS
+        if _FAST:
+            _diloco_settle()
         p, _PENDING[0] = _PENDING[0], None
         world = int(p.get("world") or _WORLD)
         w = p.get("weights")
@@ -1512,7 +1843,6 @@ def _install_ddp():
         nonlocal _WORLD, _WEIGHTS
         import io
         import json
-        import struct
         import urllib.parse
         code, reply = _ddp_request(_ddp_base() + "/join", json.dumps(
             {"group": _GROUP, "rank": _RANK, "world": _WORLD}).encode())
@@ -1530,9 +1860,8 @@ def _install_ddp():
                                    % (_RANK, code, data[:300].decode("utf-8", "replace")))
         nl = data.find(b"\n")
         hdr = json.loads(data[:nl])
-        rest = data[nl + 1:]
-        n = struct.unpack(">I", rest[:4])[0]
-        state = _th.load(io.BytesIO(rest[4:4 + n]), map_location="cpu")
+        state = _th.load(io.BytesIO(_read_frames(memoryview(data)[nl + 1:], 1)[0]),
+                         map_location="cpu")
         opts = _live_opts()
         if len(opts) != len(state["opts"]):
             raise RuntimeError(
@@ -1553,6 +1882,12 @@ def _install_ddp():
                 # nobody else makes.
                 _STEPPED.add(o)
                 _STEPN[id(o)] = int(stepn)
+        for o, d in zip(opts, hdr.get("diloco") or []):
+            if d:
+                st = _DILOCO[id(o)] = _DiLoCo()
+                st.refs = [float(x) for x in d.get("refs") or []]
+                st.ref = d.get("ref")
+                st.started = bool(d.get("started"))
         _JOIN_BUFS[0] = state.get("buffers")
         _JOIN_LR[0] = [(weakref.ref(o), [g.get("lr") for g in o.param_groups])
                        for o in opts]
@@ -1751,6 +2086,20 @@ def _install_ddp():
     except Exception as e:
         _warn("ddp: cannot observe batch sizes (%s); gradients will be averaged "
              "as equals, which is only right when the batches are" % e)
+
+    if _FAST:
+        # The run length for DiLoCo's final tightening: a OneCycleLR is the
+        # one common place a script states it in optimizer steps (a plain
+        # epoch loop's count is not observable).
+        _OCL = getattr(_th.optim.lr_scheduler, "OneCycleLR", None)
+        if _OCL is not None:
+            _ORIG_OCL_INIT = _OCL.__init__
+
+            def _ocl_init(self, *a, **kw):
+                _ORIG_OCL_INIT(self, *a, **kw)
+                _TOTAL[0] = int(self.total_steps)
+                _log("ddp: the OneCycleLR says this run is %d steps" % _TOTAL[0])
+            _OCL.__init__ = _ocl_init
 
     _ORIG_DDP = _th.nn.parallel.DistributedDataParallel.__init__
     _th.nn.parallel.DistributedDataParallel.__init__ = _ddp_init
