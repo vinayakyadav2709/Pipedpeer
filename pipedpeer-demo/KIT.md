@@ -58,7 +58,7 @@ pipedpeer connect <CODE>
 | `! partly connected: N machine(s) reachable (<names>), M not`, then `✗ <machine>: <reason> — fix: …` per missing machine | 2 | the printed fix; then Part D |
 | `✗ not connected: <why>` and `ACTION NEEDED: <fix>` | 1 | the ACTION NEEDED line; the whys are below |
 
-The `<why>` after `not connected:` is one of: a damaged code (copy the whole line from `pipedpeer invite` again);
+The `<why>` after `not connected:` is one of: `invite code is damaged (copied wrongly or cut short)` (copy the whole line from `pipedpeer invite` again);
 another build (install the inviting machine's `--version`); `the cluster rejected this machine's secret` (fresh
 `pipedpeer invite`); `nobody answered: no introducer replied (…)` (network, Part D); `the introducer answered, but no
 other machine has joined it yet`; `machines were found but none could be reached` (each machine's fix is printed
@@ -168,7 +168,7 @@ its environment); add `-v` to watch it.
 Between rehearsals nothing needs reconnecting: the cluster is remembered and the daemon starts at boot. The second run
 of a script is much faster than the first (environment already built and shipped). Say so; do not present it as a
 cold start. To clean a college PC afterwards: `pipedpeer uninstall --dry-run` (lists what goes), then
-`pipedpeer uninstall --yes`. Nix stays; the command prints how to remove it.
+`pipedpeer uninstall --yes`. Nix stays (`Nix was kept: … To remove it too, follow <nix.dev link>`).
 
 ## Part D: troubleshooting
 
@@ -189,7 +189,8 @@ Run `pipedpeer doctor` on the machine that misbehaves first; each line is `✓/!
 | First run of a script takes minutes, no output | all `✓` | Normal: its environment is being built and shipped once. Run each demo script once before the audience; `-v` shows progress |
 | `connect` fails with "another build" | (none) | Re-run the curl line with the cluster's `--version <VERSION>` on that machine |
 
-Exit code of `doctor`: 0 when nothing is `✗`, 1 otherwise.
+Exit code of `doctor`: 0 when nothing is `✗`; otherwise 1, ending with `Error: doctor found problems (the ✗ lines
+above, each with its fix)`.
 
 ## Coming: a hosted introducer
 
