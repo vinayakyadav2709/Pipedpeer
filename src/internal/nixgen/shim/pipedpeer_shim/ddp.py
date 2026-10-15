@@ -85,6 +85,99 @@ def _read_frames(buf, count):
     return out
 
 
+def _shard_cuts(counts, n):
+    """The butterfly's shards (rank k's daemon averages shard k): n ranges
+    (lo, hi, block_lo, block_hi) of a flat vector, cut on block boundaries
+    (counts are the int8 blocks) so each shard keeps whole blocks and their
+    scales, and every shard's average is the hub's, value for value. None
+    when there are fewer blocks than shards."""
+    import itertools
+    nb = len(counts)
+    if n < 2 or nb < n:
+        return None
+    ends = [0] + list(itertools.accumulate(int(c) for c in counts))
+    cut = [nb * k // n for k in range(n + 1)]
+    return [(ends[cut[k]], ends[cut[k + 1]], cut[k], cut[k + 1]) for k in range(n)]
+
+
+class _ShardLost(Exception):
+    """A butterfly shard's daemon did not answer."""
+
+
+class _SyncThread:
+    """The one background thread overlapped syncs run on: U26's delayed
+    gradients, and what U33's streaming fragments reuse. Generic over what
+    is sent: submit any callable. Calls run one at a time, in order, so the
+    sync sequence numbers they take are in the same order on every rank."""
+    NAME = "pipedpeer-ddp-sync"
+
+    def __init__(self):
+        self._pool = None
+
+    def submit(self, fn, *a, **kw):
+        if self._pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            self._pool = ThreadPoolExecutor(1, thread_name_prefix=self.NAME)
+        return self._pool.submit(fn, *a, **kw)
+
+    def drain(self):
+        """Wait for everything queued, leaving each result with its future:
+        a sync made outside the thread must not take a sequence number while
+        one inside it is in flight. A no-op on the thread itself."""
+        import threading
+        if self._pool is None or threading.current_thread().name.startswith(self.NAME):
+            return
+        self._pool.submit(lambda: None).result()
+
+
+class _DelayedGrads:
+    """One-step-delayed gradient averaging (hivemind delay_grad_averaging,
+    DiLoCoX's one-step delay): step t's gradients are averaged on the sync
+    thread while step t+1 computes, and step t+1 applies them. Every step's
+    average is applied exactly once - by the next step, or by take() at the
+    end of a loader's pass, so the model after an epoch has every update."""
+
+    def __init__(self, thread):
+        self.thread = thread
+        self.pending = None     # (params, future of the averaged grads)
+
+    def swap(self, params, grads, reduce):
+        """Queue reduce(grads) for these params and return the previous
+        step's (params, averaged grads), or None at a pass's first step."""
+        prev = self.take()
+        self.pending = (params, self.thread.submit(reduce, grads))
+        return prev
+
+    def take(self):
+        p, self.pending = self.pending, None
+        return None if p is None else (p[0], p[1].result())
+
+
+class _PassEnd:
+    """A DataLoader iterator that calls on_end once, when its pass ends."""
+
+    def __init__(self, it, on_end):
+        self._it, self._end = it, on_end
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            end, self._end = self._end, None
+            if end is not None:
+                end()
+            raise
+
+    def __len__(self):
+        return len(self._it)
+
+    def __getattr__(self, name):
+        return getattr(self._it, name)
+
+
 # DiLoCo (--ddp-sync fast, PIPEDPEER_DDP_SYNC_MODE=fast): each rank trains on
 # its own for H steps, then the ranks average how far they moved (the
 # pseudo-gradient theta_global - theta_local, weighted by the samples each
@@ -595,6 +688,34 @@ def _install_ddp():
     _TOTAL = [None]         # the run's optimizer steps, when a OneCycleLR says
     _DRIFT = [None]         # the last reduce reply's drift, None if it had none
     _TOLD_FAST = [False]
+    # The butterfly (U26): every rank's sync URL as this rank reaches it, in
+    # rank order, when the CLI built a ring of 3+ machines that all reach
+    # each other. Shard k of each gradient goes to rank k's daemon (shard 0
+    # to the lead, with the ring's control), so the lead's link carries
+    # 2(N-1)/N of a gradient instead of N-1. A shard whose daemon stops
+    # answering is averaged on the lead from then on (_PEER_DEAD).
+    _PEERS = [u for u in os.environ.get("PIPEDPEER_DDP_PEERS", "").split(",") if u]
+    _PEER_DEAD = set()
+    _SHARD_POOL = []
+    # Ranks sharing this rank's node (multi-GPU, not the lead's node): they
+    # average on their own daemon first, which sends the lead one sync for
+    # the machine.
+    try:
+        _LOCAL = [int(r) for r in os.environ.get("PIPEDPEER_DDP_LOCAL", "").split(",") if r]
+    except ValueError:
+        _warn("ddp: PIPEDPEER_DDP_LOCAL=%r is not a list of ranks; syncing directly with the lead"
+              % os.environ.get("PIPEDPEER_DDP_LOCAL"))
+        _LOCAL = []
+    _LOCAL_URL = os.environ.get("PIPEDPEER_DAEMON_URL", "").rstrip("/")
+    # One-step-delayed overlap (opt-in: each gradient lands a step late):
+    # step t's average travels while step t+1 computes.
+    _OVERLAP = os.environ.get("PIPEDPEER_DDP_OVERLAP") == "1"
+    _SYNC_THREAD = _SyncThread()
+    _DELAYED = {}           # id(optimizer) -> (_DelayedGrads, its own step)
+    _TOLD_OVERLAP = [False]
+    # Seconds this rank's training thread spent blocked on syncs: what a
+    # step's compute time is net of (an overlapped sync costs only its wait).
+    _EXPOSED = [0.0]
     # A receipt for training, for the same reason pool work has one: a run
     # that distributed nothing and a run that distributed everything look
     # identical from the outside, and so do a fast ring and one that spent
@@ -905,6 +1026,9 @@ def _install_ddp():
             record.step("ddp_sync", sec, sent + recv)
         _DDP_STATS["sent_bytes"] += sent
         _DDP_STATS["recv_bytes"] += recv
+        import threading
+        if not threading.current_thread().name.startswith(_SyncThread.NAME):
+            _EXPOSED[0] += sec
 
     def _lead_name():
         if _HOSTS and _HOSTS[0]:
@@ -965,19 +1089,22 @@ def _install_ddp():
                               % (_lead_name(), getattr(e, "reason", e)))
         threading.Thread(target=run, daemon=True, name="pipedpeer-ddp-lead").start()
 
-    def _post(req, timeout, opening=False):
+    def _post(req, timeout, opening=False, lost=False):
         """Send one sync to the lead daemon and return the reply body.
 
         A refusal is reported in the daemon's own words: a bare "HTTP 400"
         hid why the demo's 3-rank run died. 409 with abort is the ring ending
         for every rank (C3 exit 76); 410 on the opening round is this rank
         missing the start barrier (exit 75); no answer at all is the lead
-        lost (exit 76)."""
+        lost (exit 76). lost=True (a butterfly shard's daemon, not the lead):
+        no answer raises _ShardLost instead, and the lead watch is left to
+        the lead's own syncs."""
         import json
         import urllib.error
         import urllib.request
-        _watch_lead()
-        _INFLIGHT[0] = time.monotonic()
+        if not lost:
+            _watch_lead()
+            _INFLIGHT[0] = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read()
@@ -1006,10 +1133,13 @@ def _install_ddp():
             raise RuntimeError("ddp sync refused by the lead daemon (HTTP %d): %s"
                                % (e.code, why)) from None
         except (urllib.error.URLError, OSError) as e:
+            if lost:
+                raise _ShardLost(str(getattr(e, "reason", e))) from None
             _stop(_EXIT_ABORTED, "the lead machine %s stopped answering (%s)"
                   % (_lead_name(), getattr(e, "reason", e)))
         finally:
-            _INFLIGHT[0] = 0.0
+            if not lost:
+                _INFLIGHT[0] = 0.0
 
     def _header(kind, **extra):
         """A sync's JSON header: who this rank is and what it measured."""
@@ -1121,6 +1251,7 @@ def _install_ddp():
         import struct
         import time as _t
         import urllib.request
+        _SYNC_THREAD.drain()
         _t0 = _t.monotonic()
         _SEQ[0] += 1
         header = json.dumps({"group": _GROUP, "seq": _SEQ[0], "rank": _RANK,
@@ -1171,11 +1302,9 @@ def _install_ddp():
     def _daemon_reduce(arrs, wire_dtype, kind="grads", manifest=None, **more):
         """One averaged allreduce through the daemon, in reduce mode. more
         goes into the header (samples= overrides the last batch's count)."""
-        import json
-        import struct
-        import urllib.request
         flat, shapes, sizes = _pack(arrs)
         flat = _np_ddp.ascontiguousarray(flat.astype(wire_dtype, copy=False))
+        _SYNC_THREAD.drain()
         _t0 = time.monotonic()
         _SEQ[0] += 1
         opening = kind == "weights" and _SEQ[0] == 1
@@ -1187,29 +1316,107 @@ def _install_ddp():
             # anything: ranks that built different models stop together with
             # both described, instead of a byte count from the accumulator.
             extra["manifest"] = manifest
-        header = _header(kind, **extra)
-        payload = flat.tobytes()
-        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
-        req = urllib.request.Request(
-            _SYNC_URL, data=body,
-            headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
-        if _TOKEN:
-            req.add_header("X-Pipedpeer-Token", _TOKEN)
         waiting = _barrier_progress() if opening else None
         try:
             # The opening round is the start barrier and may wait the whole
             # start wait for a rank whose closure is still arriving.
-            data = _post(req, _START_WAIT + 60 if opening else 240, opening=opening)
+            reply, mean, _, sent, recv = _reduce_exchange(
+                kind, flat, extra, _int8_blocks(sizes), opening=opening)
         finally:
             if waiting is not None:
                 waiting.set()
+        _on_reply(reply, opening)
+        _count_sync(time.monotonic() - _t0, sent, recv)
+        return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
+
+    def _reduce_post(url, kind, fields, payload, opening=False, lost=False):
+        """One reduce contribution to url. Returns (reply header, mean
+        bytes, bytes sent, bytes received)."""
+        import json
+        import struct
+        import urllib.request
+        body = _header(kind, **fields) + b"\n" + struct.pack(">I", len(payload)) + payload
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
+        if _TOKEN:
+            req.add_header("X-Pipedpeer-Token", _TOKEN)
+        # A shard's daemon answers within the daemon's partial wait (45 s)
+        # when it is up; one that is not should cost the ring that, not 240 s.
+        data = _post(req, _START_WAIT + 60 if opening else (90 if lost else 240),
+                     opening=opening, lost=lost)
         nl = data.find(b"\n")
         if nl < 0:
             raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
-        _on_reply(json.loads(data[:nl]), opening)
-        mean = _np_ddp.frombuffer(_read_frames(memoryview(data)[nl + 1:], 1)[0], dtype=wire_dtype)
-        _count_sync(time.monotonic() - _t0, len(body), len(data))
-        return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
+        return (json.loads(data[:nl]), _read_frames(memoryview(data)[nl + 1:], 1)[0],
+                len(body), len(data))
+
+    def _butterfly_on(kind, opening):
+        """Every rank decides this from shared state alone (the CLI's peer
+        list, the ring's size and shares, the sync mode), so all send a round
+        the same way. Gradients only: DiLoCo's drift needs the whole vector
+        in one place."""
+        return (kind == "grads" and not opening and not _FAST
+                and len(_PEERS) == _WORLD >= 3 and _live_ranks() == _WORLD)
+
+    def _local_on(kind, opening):
+        """Same-machine pre-averaging: gradients only (a forwarded sum hides
+        each rank's spread from DiLoCo's drift), while every local rank is
+        still training."""
+        if kind != "grads" or opening or _FAST or len(_LOCAL) < 2 or not _LOCAL_URL:
+            return False
+        if _RANK not in _LOCAL or max(_LOCAL) >= _WORLD:
+            return False
+        return _WEIGHTS is None or all(r < len(_WEIGHTS) and _WEIGHTS[r] > 0 for r in _LOCAL)
+
+    def _reduce_exchange(kind, flat, fields, blocks, opening=False, scales=None):
+        """Average flat across the ring: one POST to the lead (the hub), one
+        per shard to every rank's daemon (the butterfly), or one to this
+        machine's daemon, which averages the ranks here and sends the lead
+        one sync for the machine. scales: flat is int8 with one scale per
+        block. Returns (the lead's reply header, the mean as flat's dtype,
+        the reply's scales, bytes sent, bytes received)."""
+        fields.setdefault("samples", int(_BATCH_N[0]))
+        cuts = _shard_cuts(blocks, _WORLD) if _butterfly_on(kind, opening) else None
+        if cuts is None:
+            url = _SYNC_URL
+            if _local_on(kind, opening):
+                url = _LOCAL_URL + "/v1/ddp/sync"
+                fields = dict(fields, local=_LOCAL, upstream=_SYNC_URL)
+            reply, raw, sent, recv = _reduce_post(url, kind, fields, flat.tobytes(), opening)
+            return (reply, _np_ddp.frombuffer(raw, dtype=flat.dtype), reply.get("scales"),
+                    sent, recv)
+
+        def shard(k):
+            lo, hi, blo, bhi = cuts[k]
+            f = dict(fields, count=int(hi - lo), shard=k, shards=_WORLD)
+            if scales is not None:
+                f.update(scales=scales[blo:bhi], counts=blocks[blo:bhi], scale=scales[blo])
+            part = flat[lo:hi].tobytes()
+            if k == 0 or k in _PEER_DEAD:
+                return _reduce_post(_SYNC_URL, kind, f, part)
+            try:
+                return _reduce_post(_PEERS[k], kind, f, part, lost=True)
+            except _ShardLost as e:
+                # Every other rank finds the same daemon silent and does the
+                # same, so they meet on the lead under this shard's key.
+                _PEER_DEAD.add(k)
+                _warn("ddp: rank %d's machine did not answer its share of the sync (%s); "
+                      "the lead averages that share from now on" % (k, e))
+                return _reduce_post(_SYNC_URL, kind, f, part)
+
+        if not _SHARD_POOL:
+            from concurrent.futures import ThreadPoolExecutor
+            _SHARD_POOL.append(ThreadPoolExecutor(
+                max(1, _WORLD - 1), thread_name_prefix="pipedpeer-ddp-shard"))
+        futs = [_SHARD_POOL[0].submit(shard, k) for k in range(1, _WORLD)]
+        got = [shard(0)] + [f.result() for f in futs]
+        mean = _np_ddp.concatenate([_np_ddp.frombuffer(g[1], dtype=flat.dtype) for g in got])
+        rscales = None
+        if scales is not None:
+            rscales = []
+            for g in got:
+                rscales.extend(g[0].get("scales") or [float(g[0].get("scale", 1.0)) or 1.0])
+        return (got[0][0], mean, rscales, sum(g[2] for g in got), sum(g[3] for g in got))
 
     def _daemon_reduce_int8(arrs, key, kind="grads", **more):
         """Average gradients as signed bytes, carrying the rounding error.
@@ -1227,10 +1434,6 @@ def _install_ddp():
         survive a round - the standard error-feedback trick, and the reason
         this is usable rather than merely smaller.
         """
-        import json
-        import struct
-        import urllib.request
-
         flat, shapes, sizes = _pack(arrs)
         flat = flat.astype("float32", copy=True)
         prev = _ERR.get(key)
@@ -1241,31 +1444,20 @@ def _install_ddp():
         # Whatever quantisation lost: carried to the next step.
         _ERR[key] = flat - dequant
 
+        _SYNC_THREAD.drain()
         _t0 = time.monotonic()
         _SEQ[0] += 1
-        header = _header(kind, dtype="int8", count=int(q.size),
-                         scale=scales[0] if scales else 1.0,
-                         scales=scales, counts=counts, **more)
-        payload = q.tobytes()
-        body = header + b"\n" + struct.pack(">I", len(payload)) + payload
-        req = urllib.request.Request(
-            _SYNC_URL, data=body,
-            headers={"Content-Type": "application/vnd.pipedpeer.ddp.reduce"})
-        if _TOKEN:
-            req.add_header("X-Pipedpeer-Token", _TOKEN)
-        data = _post(req, 240)
-        nl = data.find(b"\n")
-        if nl < 0:
-            raise RuntimeError("ddp reduce returned no header: %r" % data[:200])
-        reply = json.loads(data[:nl])
+        fields = dict(dtype="int8", count=int(q.size), scale=scales[0] if scales else 1.0,
+                      scales=scales, counts=counts, **more)
+        reply, raw_mean, rscales, sent, recv = _reduce_exchange(
+            kind, q, fields, counts, scales=scales)
         _on_reply(reply, False)
-        raw_mean = _np_ddp.frombuffer(_read_frames(memoryview(data)[nl + 1:], 1)[0], dtype="int8")
-        mean = _int8_decode(raw_mean, reply.get("scales") or [float(reply.get("scale", 1.0)) or 1.0],
-                            counts)
-        _count_sync(time.monotonic() - _t0, len(body), len(data))
+        mean = _int8_decode(raw_mean, rscales or [float(reply.get("scale", 1.0)) or 1.0], counts)
+        _count_sync(time.monotonic() - _t0, sent, recv)
         return _unpack(mean, shapes, sizes, [a.dtype for a in arrs])
 
-    def _daemon_allreduce(tensors, half=None, kind="grads", manifest=None):
+    def _daemon_allreduce(tensors, half=None, kind="grads", manifest=None, key=None,
+                          samples=None):
         """Average tensors across ranks in place, through the daemon channel.
 
         Gradients cross the wire as float16 by default. This is the dominant
@@ -1275,8 +1467,16 @@ def _install_ddp():
         tensor's own dtype, so the loss of precision is confined to transport,
         which is the same trade PyTorch's own fp16 compression hook makes.
         PIPEDPEER_DDP_FP32=1 turns it off; weight broadcasts never use it.
+
+        key: what the int8 rounding error is carried under - the optimizer,
+        not id(tensors[0]): zero_grad(set_to_none=True) makes a new gradient
+        tensor every step, so a tensor's id lost the error each step and left
+        a model-sized array behind in _ERR. samples: the batch behind these
+        gradients, when the caller read it earlier (an overlapped sync runs
+        after the next step has reset _BATCH_N).
         """
         import pickle
+        more = {} if samples is None else {"samples": int(samples)}
         if _DROPPED[0] or _live_ranks() <= 1:
             # A ring of one (the others released, or every other share
             # gone) has nobody to average with: it stops syncing entirely.
@@ -1300,14 +1500,15 @@ def _install_ddp():
         # daemon does not need to understand what it is holding.
         wire_dtypes = {a.dtype for a in wire}
         if _INT8_GRADS and kind == "grads" and len(wire_dtypes) == 1:
-            means = _daemon_reduce_int8(arrs, key=id(tensors[0]))
+            means = _daemon_reduce_int8(arrs, key=key if key is not None else id(tensors[0]),
+                                        **more)
             for i, t in enumerate(tensors):
                 t.data.copy_(_th.from_numpy(
                     _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
             return
         if len(wire_dtypes) == 1 and next(iter(wire_dtypes)).name in (
                 "float16", "float32", "float64"):
-            means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind, manifest)
+            means = _daemon_reduce(wire, next(iter(wire_dtypes)), kind, manifest, **more)
             for i, t in enumerate(tensors):
                 t.data.copy_(_th.from_numpy(
                     _np_ddp.ascontiguousarray(means[i].astype(arrs[i].dtype))).to(t.device))
@@ -1375,7 +1576,7 @@ def _install_ddp():
                      for p in params if p.grad is not None]
             _DRIFT[0] = None
             if grads:
-                _daemon_allreduce(grads)
+                _daemon_allreduce(grads, key=("grads", id(opt)))
             drift = _DRIFT[0]
             out = orig(*sa, **skw)
             if st.started:
@@ -1436,6 +1637,71 @@ def _install_ddp():
             _diloco_round(st, o, params, _diloco_reduce, force_state=True)
             st.theta, st.started = None, False
             _log("ddp: DiLoCo synced model and optimizer state for the ring change")
+
+    def _delayed_step(opt, params, orig, sa, skw):
+        """An exact-mode step with PIPEDPEER_DDP_OVERLAP=1: send this step's
+        gradients on the sync thread and apply the previous step's average,
+        which travelled while this step computed. A pass's first step only
+        sends; _flush_delayed applies the last one when the pass ends."""
+        entry = _DELAYED.get(id(opt))
+        if entry is None:
+            entry = _DELAYED[id(opt)] = (_DelayedGrads(_SYNC_THREAD), orig)
+        with_grad = [p for p in params if p.grad is not None]
+        # Copies, taken now: the script reuses or frees p.grad next step.
+        copies = [(p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad)
+                  .detach().to("cpu", copy=True) for p in with_grad]
+        samples = int(_BATCH_N[0])
+
+        def reduce(grads):
+            _daemon_allreduce(grads, key=("grads", id(opt)), samples=samples)
+            return grads
+        t0 = time.monotonic()
+        prev = entry[0].swap(with_grad, copies, reduce)
+        _EXPOSED[0] += time.monotonic() - t0
+        if not _TOLD_OVERLAP[0]:
+            _TOLD_OVERLAP[0] = True
+            _log("ddp: overlapping each gradient sync with the next step's compute "
+                 "(PIPEDPEER_DDP_OVERLAP=1): every gradient is applied one step late")
+        if prev is None:
+            return None
+        # A parameter with a gradient now but none last step has no average
+        # to apply; left as is, the optimizer would apply its local gradient.
+        had = {id(p) for p in prev[0]}
+        for p in with_grad:
+            if id(p) not in had:
+                p.grad = None
+        return _apply_delayed(prev, orig, sa, skw, restore=False)
+
+    def _apply_delayed(prev, orig, sa, skw, restore):
+        """Run the optimizer's own step with an averaged gradient in .grad.
+        restore: put the script's gradients back afterwards (a flush runs
+        outside the script's step, and its next backward may add to them)."""
+        ps, avg = prev
+        saved = [p.grad for p in ps] if restore else None
+        with _th.no_grad():
+            for p, g in zip(ps, avg):
+                g = g.to(p.device)
+                if p.grad is None or p.grad.is_sparse or p.grad.shape != g.shape:
+                    p.grad = g.to(p.dtype)
+                else:
+                    p.grad.copy_(g)
+        try:
+            return orig(*sa, **skw)
+        finally:
+            if restore:
+                for p, g in zip(ps, saved):
+                    p.grad = g
+
+    def _flush_delayed():
+        """Apply every optimizer's pending average now: at the end of a
+        loader's pass (so the model after the loop has every update), and
+        before an epoch starts or the ring changes."""
+        for d, orig in list(_DELAYED.values()):
+            t0 = time.monotonic()
+            prev = d.take()
+            _EXPOSED[0] += time.monotonic() - t0
+            if prev is not None:
+                _apply_delayed(prev, orig, (), {}, restore=True)
 
     _STEPPED = weakref.WeakSet()
     # Modules holding buffers (BatchNorm running stats), in first-forward
@@ -1560,12 +1826,12 @@ def _install_ddp():
             _now = time.monotonic()
             if _STEP_MARK[0] is not None:
                 _elapsed = _now - _STEP_MARK[0]
-                _synced = _DDP_STATS["sync_sec"] - _STEP_MARK[1]
+                _synced = _EXPOSED[0] - _STEP_MARK[1]
                 if _elapsed > _synced >= 0:
                     _STEP_SEC[0] += _elapsed - _synced
                     _STEP_SEC[1] += 1
                     _push_window(_STEP_RECENT, _elapsed - _synced, _STEP_WINDOW)
-            _STEP_MARK[0], _STEP_MARK[1] = _now, _DDP_STATS["sync_sec"]
+            _STEP_MARK[0], _STEP_MARK[1] = _now, _EXPOSED[0]
 
             if _FAST:
                 try:
@@ -1575,10 +1841,12 @@ def _install_ddp():
             every = _tuned_sync_every()
             try:
                 if every == 1:
+                    if _OVERLAP and _ITERS[0] and not _JOIN[0]:
+                        return _delayed_step(self, params, _orig_step, sa, skw)
                     grads = [p.grad.coalesce().to_dense() if p.grad.is_sparse else p.grad
                              for p in params if p.grad is not None]
                     if grads:
-                        _daemon_allreduce(grads)
+                        _daemon_allreduce(grads, key=("grads", id(self)))
                     return _orig_step(*sa, **skw)
                 out = _orig_step(*sa, **skw)
                 if (n + 1) % every == 0:
@@ -1983,7 +2251,20 @@ def _install_ddp():
         return wrapped
 
     def _iter(self):
+        it = _iter_inner(self)
+        if _OVERLAP and _WORLD > 1 and not _NATIVE_DDP and not _CATCHUP[0]:
+            # The pass's last average lands when the pass ends, not a step
+            # into the next one, so whatever follows the loop (evaluation, a
+            # save) sees the model with every update.
+            return _PassEnd(it, _flush_delayed)
+        return it
+
+    def _iter_inner(self):
         sampler = getattr(self, "sampler", None)
+        if _OVERLAP and _WORLD > 1 and not _NATIVE_DDP:
+            # A loop broken off early never ended its pass: its last average
+            # lands here, before the ring may change below.
+            _flush_delayed()
         if _WORLD > 1 and not _NATIVE_DDP:
             call = _ITERS[0]
             _ITERS[0] += 1

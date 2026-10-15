@@ -154,7 +154,8 @@ func runDDP(o ddpRunOptions) error {
 	// this daemon forwards. Reordering rather than dropping: such a node is
 	// still a good rank, it just cannot be the one everybody syncs to. Slots
 	// and shares move with it: they are per ring position.
-	lead := ddpLeadIndex(ring, ddpSelfMachine(o.DaemonPort))
+	selfMachine := ddpSelfMachine(o.DaemonPort)
+	lead := ddpLeadIndex(ring, selfMachine)
 	if lead < 0 {
 		return fmt.Errorf("no rank in this ring can lead it: every candidate is " +
 			"reached through a local forwarder, so the address they would all " +
@@ -289,6 +290,22 @@ func runDDP(o ddpRunOptions) error {
 				// --ddp N: the user chose the ring, so the shim never shrinks
 				// it or changes the sync interval on its own (C2).
 				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_FIXED=1")
+			}
+			// One sync per machine for ranks sharing a node, or the
+			// butterfly for a ring of 3+ machines (never both: every rank
+			// must agree on where each round goes). A joiner gets neither:
+			// the ring it joins is no longer the one these were built for.
+			if !join {
+				if local := ddpLocalRanks(ring); local[i] != "" {
+					rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_LOCAL="+local[i])
+				} else if peers := ddpPeerURLs(ring, i, selfMachine); peers != "" && len(local) == 0 {
+					rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_PEERS="+peers)
+				}
+			}
+			// One-step-delayed gradient overlap is opt-in until a benchmark
+			// shows its loss (it applies each gradient a step late).
+			if os.Getenv("PIPEDPEER_DDP_OVERLAP") == "1" {
+				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_OVERLAP=1")
 			}
 			if join {
 				rankEnvs = append(rankEnvs, "PIPEDPEER_DDP_JOIN=1")
@@ -662,6 +679,57 @@ func ddpDistinctMachines(ring []registry.NodeRecord) int {
 		n = 1
 	}
 	return n
+}
+
+// ddpLocalRanks maps each rank on a node that hosts two or more ranks, other
+// than the lead's node, to the comma list of that node's ranks: they average
+// on their own daemon first and send the lead one sync per machine (U26).
+// The lead's node needs no such step: its ranks reach the lead's daemon
+// without crossing the network. Empty when no node qualifies.
+func ddpLocalRanks(ring []registry.NodeRecord) map[int]string {
+	byNode := map[string][]string{}
+	for i, n := range ring {
+		if i > 0 && n.NodeID != ring[0].NodeID {
+			byNode[n.NodeID] = append(byNode[n.NodeID], strconv.Itoa(i))
+		}
+	}
+	out := map[int]string{}
+	for i, n := range ring {
+		if ranks := byNode[n.NodeID]; i > 0 && len(ranks) >= 2 {
+			out[i] = strings.Join(ranks, ",")
+		}
+	}
+	return out
+}
+
+// ddpPeerURLs is every rank's sync URL as rank i reaches it, in rank order,
+// for the butterfly reduce: rank k's daemon averages shard k, so the lead's
+// link carries 2(N-1)/N of a gradient instead of N-1 (research R1 #6). Empty
+// below 3 ranks, where the hub costs the same, and when any member is reached
+// only through this machine's forwarder: that address means nothing on
+// another rank, so such a ring stays on the hub.
+func ddpPeerURLs(ring []registry.NodeRecord, i int, selfMachine string) string {
+	if len(ring) < 3 || i < 0 || i >= len(ring) {
+		return ""
+	}
+	urls := make([]string, len(ring))
+	for j, n := range ring {
+		if ddpForwardedLead(n, selfMachine) {
+			return ""
+		}
+		host := ddpExtractHost(n.SSHEndpoint)
+		if host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1" {
+			// This machine: loopback for a rank here, else the address of
+			// ours that routes to that rank (as for the lead).
+			host = "127.0.0.1"
+			if other := ddpExtractHost(ring[i].SSHEndpoint); other != "" && other != "127.0.0.1" &&
+				other != "localhost" && other != "::1" {
+				host = localIPFor(other)
+			}
+		}
+		urls[j] = fmt.Sprintf("http://%s/v1/ddp/sync", net.JoinHostPort(host, strconv.Itoa(n.DaemonPort)))
+	}
+	return strings.Join(urls, ",")
 }
 
 func ddpSharesNode(ring []registry.NodeRecord, i int) bool {

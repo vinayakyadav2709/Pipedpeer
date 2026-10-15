@@ -229,3 +229,71 @@ def test_averaged_moments_are_written_back():
     for p in params:
         assert torch.all(opt.state[p]["exp_avg"] == 0.25)
         assert torch.all(opt.state[p]["exp_avg_sq"] == 0.25)
+
+
+# U26: butterfly shards, the background sync thread, delayed gradients.
+
+@pytest.mark.parametrize("sizes,n", [([10000, 5, 9000], 3), ([4096 * 7], 4), ([1, 1, 1], 3)])
+def test_shard_cuts_cover_the_vector_on_block_boundaries(sizes, n):
+    counts = ddp._int8_blocks(sizes)
+    cuts = ddp._shard_cuts(counts, n)
+    assert len(cuts) == n
+    assert cuts[0][0] == 0 and cuts[-1][1] == sum(sizes)
+    for (lo, hi, blo, bhi), nxt in zip(cuts, cuts[1:] + [None]):
+        assert hi > lo and bhi > blo                      # never an empty shard
+        assert hi - lo == sum(counts[blo:bhi])            # whole blocks only
+        if nxt is not None:
+            assert nxt[0] == hi and nxt[2] == bhi
+
+
+def test_shard_cuts_refuse_fewer_blocks_than_shards():
+    assert ddp._shard_cuts(ddp._int8_blocks([5]), 3) is None
+    assert ddp._shard_cuts(ddp._int8_blocks([5, 5, 5]), 1) is None
+
+
+def test_sync_thread_runs_in_order_and_drain_keeps_results():
+    import threading
+    th = ddp._SyncThread()
+    seen, gate = [], threading.Event()
+    first = th.submit(lambda: (gate.wait(5), seen.append(1), "a")[2])
+    second = th.submit(lambda: (seen.append(2), threading.current_thread().name)[1])
+    gate.set()
+    th.drain()
+    assert seen == [1, 2]
+    assert first.result() == "a"
+    assert second.result().startswith(ddp._SyncThread.NAME)
+    # drain on the thread itself must not wait on itself
+    assert th.submit(th.drain).result(timeout=5) is None
+
+
+def test_delayed_grads_apply_step_t_at_t_plus_1_exactly_once():
+    th = ddp._SyncThread()
+    d = ddp._DelayedGrads(th)
+    applied = []
+    for t in range(5):
+        prev = d.swap(["p"], ["g%d" % t], lambda gs: [g + "-avg" for g in gs])
+        if prev is not None:
+            applied.append(prev[1][0])
+    last = d.take()                     # the pass ends: flush
+    applied.append(last[1][0])
+    assert applied == ["g%d-avg" % t for t in range(5)]
+    assert d.take() is None             # nothing applied twice
+
+
+def test_delayed_grads_surface_a_sync_error_at_the_next_step():
+    d = ddp._DelayedGrads(ddp._SyncThread())
+
+    def boom(_):
+        raise RuntimeError("ddp sync refused")
+    d.swap(["p"], ["g"], boom)
+    with pytest.raises(RuntimeError, match="refused"):
+        d.take()
+
+
+def test_pass_end_fires_once_and_passes_through():
+    fired = []
+    it = ddp._PassEnd(iter([1, 2]), lambda: fired.append(1))
+    assert list(it) == [1, 2]
+    with pytest.raises(StopIteration):
+        next(it)
+    assert fired == [1]
