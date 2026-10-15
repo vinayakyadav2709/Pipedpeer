@@ -154,6 +154,7 @@ func readJSON(r io.Reader, v any) error {
 // the QUIC transport over it, and the prober that punches.
 type Endpoint struct {
 	conn      *net.UDPConn
+	shared    *sharedConn
 	transport *quic.Transport
 	listener  *quic.Listener
 	prober    *Prober
@@ -244,9 +245,8 @@ func Listen(cfg Config) (*Endpoint, error) {
 	// mapping belongs to a socket, so the punch and the connection that uses
 	// it have to come from the same one.
 	e.other = make(chan otherPacket, 64)
-	e.transport = &quic.Transport{
-		Conn: &sharedConn{conn: conn, prober: e.prober, other: e.other},
-	}
+	e.shared = &sharedConn{conn: conn, prober: e.prober, other: e.other}
+	e.transport = &quic.Transport{Conn: e.shared}
 
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{*cfg.Cert},
@@ -355,6 +355,11 @@ func (e *Endpoint) Adopt(ctx context.Context, conn *net.UDPConn) error {
 
 // Prober exposes the punching machinery to the manager that drives it.
 func (e *Endpoint) Prober() *Prober { return e.prober }
+
+// Block discards every datagram read on the shared socket from an address
+// drop accepts - QUIC, probes and introducer traffic alike - as an outage
+// would; nil lifts it. For fault tests.
+func (e *Endpoint) Block(drop func(netip.AddrPort) bool) { e.shared.drop.Store(&drop) }
 
 // Conn is the shared socket, for the introducer traffic that must come from
 // the same mapping as everything else.

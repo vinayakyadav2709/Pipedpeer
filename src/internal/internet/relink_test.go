@@ -1,6 +1,7 @@
 package internet
 
 import (
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -14,13 +15,21 @@ func TestBothSidesRelinkAtOnceAfterAnOutage(t *testing.T) {
 	stubKeeper(t)
 	introPort := freeUDPPort(t)
 	intro := "127.0.0.1:" + itoa(introPort)
-	a := run(t, "A", Config{Key: newKey(t), DirectPort: freeUDPPort(t),
+	portA, portB := freeUDPPort(t), freeUDPPort(t)
+	a := run(t, "A", Config{Key: newKey(t), DirectPort: portA,
 		ServeIntroducer: true, IntroducerPort: introPort})
-	b := run(t, "B", Config{Key: newKey(t), DirectPort: freeUDPPort(t), Introducers: []string{intro}})
+	b := run(t, "B", Config{Key: newKey(t), DirectPort: portB, Introducers: []string{intro}})
 	waitFor(t, 15*time.Second, "A and B link", func() bool { return linked(a, b) })
 
-	// The outage: penalties as long as the cap on both sides, for exactly the
-	// addresses they would retry, then the links go.
+	// The outage: nothing between the two direct ports gets through either
+	// way (the introducer, on its own port, still answers), penalties as
+	// long as the cap on both sides for exactly the addresses they would
+	// retry, then the links go.
+	cut := func(port int) func(netip.AddrPort) bool {
+		return func(from netip.AddrPort) bool { return int(from.Port()) == port }
+	}
+	a.endpoint.Block(cut(portB))
+	b.endpoint.Block(cut(portA))
 	penalise := func(m, peer *Manager) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -29,6 +38,7 @@ func TestBothSidesRelinkAtOnceAfterAnOutage(t *testing.T) {
 	}
 	penalise(a, b)
 	penalise(b, a)
+	a.dropLink(b.node())
 	b.dropLink(a.node())
 	waitFor(t, 5*time.Second, "both links are gone", func() bool {
 		_, ab := a.Peers()[b.node()]
@@ -40,7 +50,10 @@ func TestBothSidesRelinkAtOnceAfterAnOutage(t *testing.T) {
 		t.Fatal("A relinked under its penalty; the test needs both sides penalised")
 	}
 
-	// B's registrations went unanswered for a while, then one is answered.
+	// The outage ends; B's registrations went unanswered for a while, and
+	// one is answered.
+	a.endpoint.Block(nil)
+	b.endpoint.Block(nil)
 	b.mu.Lock()
 	for _, in := range b.intros {
 		if in.addr == intro {

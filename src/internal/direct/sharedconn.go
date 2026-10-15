@@ -3,6 +3,7 @@ package direct
 import (
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,6 +34,9 @@ type sharedConn struct {
 	// this socket because they must: the packet that carries a registration
 	// is also the one that keeps this node's NAT mapping alive.
 	other chan otherPacket
+	// drop, when set, discards datagrams from the addresses it accepts
+	// (Endpoint.Block).
+	drop atomic.Pointer[func(netip.AddrPort) bool]
 }
 
 type otherPacket struct {
@@ -46,6 +50,9 @@ func (s *sharedConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		n, addr, err := s.conn.ReadFromUDPAddrPort(b)
 		if err != nil {
 			return n, nil, err
+		}
+		if d := s.drop.Load(); d != nil && *d != nil && (*d)(addr) {
+			continue
 		}
 		// Consumed here and never passed on: QUIC would otherwise see a
 		// stray datagram on a connection it has no record of.
