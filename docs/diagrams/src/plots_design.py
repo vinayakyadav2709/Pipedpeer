@@ -28,22 +28,23 @@ def fig_sequence():
         (0, 1, "run script.py", False),
         (1, 1, "scan imports, build closure", None),
         (1, 1, "estimate memory need", None),
+        (1, 1, "healthy peers, internet ones via forwarders", None),
         (1, 2, "accept (capacity check)", False),
         (2, 1, "lease granted", True),
         (1, 2, "commit lease", False),
         (1, 2, "which store paths are missing?", False),
         (2, 1, "the paths it lacks", True),
         (1, 2, "upload workspace and missing paths", False),
-        (2, 3, "push signed closure to peers", False),
+        (2, 3, "push signed closure (waits at most 60 s)", False),
         (1, 2, "open execution stream", False),
         (2, 2, "run in sandbox, memory capped", None),
         (2, 3, "parallel work, by measured speed", False),
         (3, 2, "partial results", True),
-        (2, 1, "stdout and stderr, line by line", True),
+        (2, 1, "stdout and stderr, as written", True),
         (2, 1, "changed files, deletion manifest", True),
         (1, 0, "results in the working directory", True),
     ]
-    fig, ax = plt.subplots(figsize=(9.2, 10.8))
+    fig, ax = plt.subplots(figsize=(9.2, 11.4))
     top, dy = 0.0, -0.74
     for i, a in enumerate(actors):
         ax.add_patch(FancyBboxPatch((x[i] - 1.32, top + 0.02), 2.64, 0.80,

@@ -67,18 +67,15 @@ def fig_closure_cache():
 
 
 def fig_shim_overhead():
-    """5.2 - Cost of leaving interception on when it decides not to distribute."""
-    # Runs whose log records an execution failure and a reschedule are not
-    # timings of the job; they are excluded and reported as a defect instead.
-    def clean(label, key):
-        out = []
-        for i, x in enumerate(M[key]["samples"]):
-            log = (BENCH / "raw" / f"{label}_run{i}.log").read_text()
-            if "Execution failed" not in log:
-                out.append(x["seconds"])
-        return out
-    offs, ons = clean("N7_shim_off", "n7_shim_off"), clean("N7_shim_on", "n7_shim_declines")
-    on, off = float(np.median(ons)), float(np.median(offs))
+    """5.2 - Cost of leaving interception on when it decides not to distribute.
+    Left: the declined 16-item map (N7, 12 October). Bars are the medians
+    results.json records over all five runs; the whiskers leave out the
+    enabled side's cold first run (its environment build), which is printed
+    instead, as Table tab:shimidle does."""
+    offs = [x["seconds"] for x in M["n7_shim_off"]["samples"]]
+    ons_all = [x["seconds"] for x in M["n7_shim_declines"]["samples"]]
+    cold, ons = ons_all[0], ons_all[1:]
+    on, off = M["n7_shim_declines"]["median_s"], M["n7_shim_off"]["median_s"]
     rng = [(min(offs), max(offs)), (min(ons), max(ons))]
     b3 = (BENCH / "raw" / "B3_shim_overhead.txt").read_text()
     before = float(re.search(r"ratio: ([0-9.]+)x", b3).group(1))
@@ -91,10 +88,12 @@ def fig_shim_overhead():
     for i, (lo, hi) in enumerate(rng):
         ax.plot([i, i], [lo, hi], color="#333333", linewidth=1.2)
     for i, v in enumerate([off, on]):
-        ax.text(i, v * 0.5, f"{v:.2f} s", ha="center", va="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+        ax.text(i, v * 0.5, f"{v:.3f} s", ha="center", va="center", fontsize=15, bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+    ax.text(1, max(on, off) * 1.12, f"+ one cold first run, {cold:.2f} s", ha="center",
+            fontsize=12, color="#555555")
     ax.set_ylabel("seconds, end to end"); ax.set_ylim(0, max(on, off) * 1.25)
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
-    ax.set_title(f"48-item map, one host; the shim distributed\n(clean runs: {len(offs)} off, {len(ons)} on; line: min-max)",
+    ax.set_title(f"16-item map the cost model declines\n(median of {len(offs)} runs each; line: min-max)",
                  fontsize=15, loc="left")
 
     # Startup tax before the lazy-patching fix (August, raw/B3) and now (O2).

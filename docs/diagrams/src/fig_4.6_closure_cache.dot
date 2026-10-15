@@ -15,6 +15,7 @@ digraph ClosureCache {
   diff [label="Ask which store paths it lacks\nsend only those, or everything\nif it shares none"];
   imp  [label="Import on the worker\n(a partial import is never\ncached as the closure)"];
   bcast[label="Push to peers that cannot run it\nsigned with the node key\nso they can receive spilled work"];
+  bg   [label="Upload waits at most 60 s\na slow peer finishes in the background\nand joins the pool; a send is cut\nonly after 60 s with no bytes moving", style="rounded,filled,dashed"];
   prune[label="Prune caches least-recently-used\n8 GiB each by default", style="rounded,filled,dashed"];
   run  [label="Execute", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
@@ -22,6 +23,7 @@ digraph ClosureCache {
   ask -> skip [label="  yes  "];
   ask -> diff [label="  no  "];
   diff -> imp -> bcast;
+  bcast -> bg [style=dashed, label="  slow peer  "];
   bcast -> prune [style=dashed];
   skip -> run;
   bcast -> run;

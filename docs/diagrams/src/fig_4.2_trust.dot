@@ -1,20 +1,22 @@
-// Figure 4.2 - The three layers of trust, and the one key behind two of them.
+// Figure 4.2 - The three layers of trust, and the one node key behind the wire
+// layers and the closure signatures.
 digraph Trust {
   rankdir=LR; bgcolor="white"; nodesep=0.35; ranksep=0.7;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
   edge [fontname="Helvetica", fontsize=13, color="#555555"];
 
-  tok  [label="Shared secret\n32 random bytes, file mode 0600\nrequired on every route, /health too\n(optional: none set = open)", fillcolor="#fdf6e3", color="#8a6d1f"];
-  tls  [label="On a LAN: pinned TLS\nself-signed ECDSA certificate,\npinned on first contact,\nchanged certificate refused\n(opportunistic: can fall back to HTTP)"];
-  quic [label="Across networks: QUIC, TLS 1.3\nsigned hello checks the\nexpected node's fingerprint"];
-  key  [label="Node key, Ed25519\nfile mode 0600\nfingerprint = node address", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.6];
+  tok  [label="Shared secret\n32 random bytes, file mode 0600,\nset by set-up or the invite code\nrequired on every route, /health too;\nsent only to a host that proved it (HMAC)", fillcolor="#fdf6e3", color="#8a6d1f"];
+  tls  [label="On a LAN: pinned TLS\ncertificate made from the node key,\npinned by node id on first contact,\na different key refused\n(opportunistic: can fall back to HTTP)"];
+  quic [label="Across networks: QUIC, TLS 1.3\nsigned hello bound to the session\nchecks the expected node's fingerprint"];
+  key  [label="Node key, Ed25519\nfile mode 0600\nfingerprint = node id", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.6];
   sig  [label="Closure signatures\nnix signing key pipedpeer-<fp>\nimported under the receiver's policy;\nsetup never disables require-sigs"];
-  api  [label="Daemon API\n22 routes", fillcolor="#efedf7", color="#5b4b8a"];
+  api  [label="Daemon API\nevery route", fillcolor="#efedf7", color="#5b4b8a"];
 
   tok -> api [label="  who may call  "];
   tls -> api [label="  the wire, on a LAN  "];
   quic -> api [label="  the wire, across networks  "];
   key -> quic [label="  authenticates  "];
+  key -> tls [label="  makes the certificate  "];
   key -> sig [label="  signs  "];
 }
