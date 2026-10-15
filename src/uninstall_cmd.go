@@ -74,6 +74,11 @@ func uninstallDeps() doctor.UninstallDeps {
 		Dirs:          []string{userdir.Data(), userdir.State(), userdir.Cache()},
 		RemoveBinary:  removeBinary,
 	}
+	if crun, ours, why := setup.OwnCrun(); ours {
+		d.Crun = crun
+	} else if why != "not present" {
+		d.CrunKeep = crun + ": " + why
+	}
 	if exe, err := os.Executable(); err != nil {
 		say.Warnf("cannot find this binary to delete it: %v\n", err)
 	} else if real, err := filepath.EvalSymlinks(exe); err != nil {

@@ -22,8 +22,12 @@ type UninstallDeps struct {
 	CloseFirewall func() error
 	RemoveRoot    func() error // AppArmor profile, nix key helper, trusted keys
 	Dirs          []string     // userdir Data, State, Cache
-	Binary        string
-	RemoveBinary  func(path string) error
+	// Crun is setup's own crun to delete; CrunKeep, when set instead, is
+	// "<path>: <why it stays>".
+	Crun         string
+	CrunKeep     string
+	Binary       string
+	RemoveBinary func(path string) error
 }
 
 // UninstallPlan lists the steps in order: stop first so nothing rewrites the
@@ -37,6 +41,11 @@ func UninstallPlan(d UninstallDeps) []Step {
 	for _, dir := range d.Dirs {
 		dir := dir
 		steps = append(steps, Step{"delete " + dir, func() error { return os.RemoveAll(dir) }})
+	}
+	if d.Crun != "" {
+		steps = append(steps, Step{"delete " + d.Crun + " (the crun setup installed)", func() error { return os.Remove(d.Crun) }})
+	} else if d.CrunKeep != "" {
+		steps = append(steps, Step{"keep " + d.CrunKeep, func() error { return nil }})
 	}
 	if d.Binary != "" {
 		steps = append(steps, Step{"delete " + d.Binary, func() error { return d.RemoveBinary(d.Binary) }})

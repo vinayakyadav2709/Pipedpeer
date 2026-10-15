@@ -1,6 +1,14 @@
 package setup
 
-import "context"
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
+)
 
 // Read-only views of setup's own checks, for `pipedpeer doctor`. They reuse
 // the exact logic setup acts on, so doctor and setup never disagree about
@@ -16,3 +24,21 @@ func FirewallOpen(ctx context.Context) (tool string, open bool) {
 
 // NixUsable is setup's "can nix build something here" check.
 func NixUsable() bool { return nixUsable() }
+
+// OwnCrun reports the crun in userdir.Bin() and whether it is the one
+// installCrunRelease put there: it must report the pinned crunVersion. When
+// it is not ours (or absent), why says so for uninstall's message.
+func OwnCrun() (path string, ours bool, why string) {
+	path = filepath.Join(userdir.Bin(), "crun")
+	if _, err := os.Stat(path); err != nil {
+		return path, false, "not present"
+	}
+	out, err := exec.Command(path, "--version").Output()
+	if err != nil {
+		return path, false, "it does not run, so it cannot be identified as setup's: " + err.Error()
+	}
+	if !strings.Contains(string(out), crunVersion) {
+		return path, false, "it is not crun " + crunVersion + ", the version setup installs"
+	}
+	return path, true, ""
+}

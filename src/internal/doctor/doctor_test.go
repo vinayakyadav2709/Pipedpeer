@@ -260,6 +260,7 @@ func TestUninstallDryRunListsEverything(t *testing.T) {
 	steps := UninstallPlan(UninstallDeps{
 		StopDaemon: never, CloseFirewall: never, RemoveRoot: never,
 		Dirs:         []string{filepath.Join(dir, "data"), filepath.Join(dir, "state")},
+		Crun:         "/home/u/.local/bin/crun",
 		Binary:       "/usr/local/bin/pipedpeer",
 		RemoveBinary: func(string) error { called = true; return nil },
 	})
@@ -282,12 +283,25 @@ func TestUninstallDryRunListsEverything(t *testing.T) {
 		"would remove the root parts",
 		"would delete " + filepath.Join(dir, "data"),
 		"would delete " + filepath.Join(dir, "state"),
+		"would delete /home/u/.local/bin/crun (the crun setup installed)",
 		"would delete /usr/local/bin/pipedpeer",
 	}
 	for _, w := range want {
 		if !strings.Contains(buf.String(), w) {
 			t.Fatalf("missing %q in:\n%s", w, buf.String())
 		}
+	}
+
+	// A crun that is not setup's stays, with one line saying why.
+	buf.Reset()
+	steps = UninstallPlan(UninstallDeps{StopDaemon: never, CloseFirewall: never, RemoveRoot: never,
+		CrunKeep: "/home/u/.local/bin/crun: it is not crun 1.29.1, the version setup installs"})
+	if err := RunSteps(&buf, steps, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(buf.String(), "would keep /home/u/.local/bin/crun: it is not crun 1.29.1") ||
+		strings.Contains(buf.String(), "delete /home/u/.local/bin/crun") {
+		t.Fatalf("foreign crun handled wrong:\n%s", buf.String())
 	}
 }
 
