@@ -204,6 +204,9 @@ func (f FileStamp) changed(other FileStamp) bool {
 type UploadResponse struct {
 	JobID     string `json:"job_id"`
 	StorePath string `json:"store_path"`
+	// NodeID (additive) is this node's id, so the submitter's run record
+	// names the receiver of env_send by id.
+	NodeID string `json:"node_id,omitempty"`
 	// Warnings are for the submitter's terminal: peers that refused the
 	// closure, and why, so a run that stays local says what kept it there.
 	Warnings []string `json:"warnings,omitempty"`
@@ -486,7 +489,7 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		seed = time.Since(seedStart)
 	}
 
-	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath,
+	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath, NodeID: s.nodeID,
 		Warnings: warnings, SeedMs: seed.Milliseconds()})
 }
 

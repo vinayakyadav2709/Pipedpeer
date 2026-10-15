@@ -3,6 +3,8 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -168,36 +170,43 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 	detail("      Created: %s\n", flakePath)
 
 	stage(4, "Building locally...")
-	nixSystem := nixgen.NixArch()
-	cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, "nix", "build", flakeRef(nixSystem),
-		"--option", "build-users-group", "")
-	if err != nil {
-		env.Close()
-		return nil, err
-	}
-	defer cleanup()
-	var nixOut bytes.Buffer
-	if opts.Verbose {
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	template := envTemplate(opts.PythonVersion, opts.GPU)
+	storePath, reused := findEnv(envIndexPath(), template, nixPkgs)
+	if reused {
+		detail("      Reusing an environment that already has these packages\n")
 	} else {
-		cmd.Stdout, cmd.Stderr = &nixOut, &nixOut
-	}
-	if err := cmd.Run(); err != nil {
-		env.Close()
-		os.Stderr.Write(nixOut.Bytes())
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("nix build stopped: %w", ctx.Err())
+		nixSystem := nixgen.NixArch()
+		cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, "nix", "build", flakeRef(nixSystem),
+			"--option", "build-users-group", "")
+		if err != nil {
+			env.Close()
+			return nil, err
 		}
-		return nil, fmt.Errorf("nix build failed: %v", err)
+		defer cleanup()
+		var nixOut bytes.Buffer
+		if opts.Verbose {
+			cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		} else {
+			cmd.Stdout, cmd.Stderr = &nixOut, &nixOut
+		}
+		if err := cmd.Run(); err != nil {
+			env.Close()
+			os.Stderr.Write(nixOut.Bytes())
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("nix build stopped: %w", ctx.Err())
+			}
+			return nil, fmt.Errorf("nix build failed: %v", err)
+		}
+		detail("      Built successfully\n")
+		storePath, err = os.Readlink(filepath.Join(tmpDir, "result"))
+		if err != nil {
+			env.Close()
+			return nil, fmt.Errorf("failed to readlink result: %v", err)
+		}
+		recordEnv(envIndexPath(), template, nixPkgs, storePath)
 	}
-	detail("      Built successfully\n")
 
 	stage(5, "Exporting closure...")
-	storePath, err := os.Readlink(filepath.Join(tmpDir, "result"))
-	if err != nil {
-		env.Close()
-		return nil, fmt.Errorf("failed to readlink result: %v", err)
-	}
 	env.StorePath = storePath
 	detail("      Store path: %s\n", storePath)
 
@@ -363,4 +372,104 @@ func ProbePythonPackages(names []string) (map[string]bool, error) {
 		return nil, fmt.Errorf("nix eval output: %w", err)
 	}
 	return res, nil
+}
+
+// Environment reuse: a script whose packages an already-built environment
+// covers runs in that one, so it needs no nix build, and a node holding that
+// environment needs nothing sent. The index lives under userdir.Data().
+
+type envEntry struct {
+	Template  string   `json:"template"`
+	Pkgs      []string `json:"pkgs"`
+	StorePath string   `json:"store_path"`
+}
+
+func envIndexPath() string { return filepath.Join(userdir.Data(), "envs.json") }
+
+// envTemplate fingerprints everything but the package list: the python, the
+// GPU choice, the pinned nixpkgs and the flake template of this build.
+func envTemplate(python string, gpu bool) string {
+	sum := sha256.Sum256([]byte(nixgen.GenerateFlake(nil, python, gpu)))
+	return hex.EncodeToString(sum[:])
+}
+
+// heavyPkgs are never brought along as extras: shipping one to a node for a
+// script that never imports it costs more than the build it saves.
+var heavyPkgs = map[string]bool{"torch": true, "tensorflow": true, "jax": true, "jaxlib": true}
+
+// maxExtraPkgs bounds how much bigger a reused environment may be.
+// ponytail: a count, not closure bytes; weigh by size if light extras bloat.
+const maxExtraPkgs = 3
+
+// findEnv returns the smallest recorded environment with the same template
+// whose packages cover want with at most maxExtraPkgs light extras, if its
+// store path is still in the local store.
+func findEnv(index, template string, want []string) (string, bool) {
+	entries := readEnvIndex(index)
+	best, bestExtra := "", maxExtraPkgs+1
+	for _, e := range entries {
+		if e.Template != template {
+			continue
+		}
+		extra, ok := 0, true
+		for _, w := range want {
+			if !slices.Contains(e.Pkgs, w) {
+				ok = false
+				break
+			}
+		}
+		for _, p := range e.Pkgs {
+			if !slices.Contains(want, p) {
+				if heavyPkgs[p] {
+					ok = false
+				}
+				extra++
+			}
+		}
+		if !ok || extra >= bestExtra {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(e.StorePath, "bin", "run")); err != nil {
+			continue
+		}
+		best, bestExtra = e.StorePath, extra
+	}
+	return best, best != ""
+}
+
+// recordEnv adds a built environment to the index, replacing an entry for the
+// same template and packages.
+func recordEnv(index, template string, pkgs []string, storePath string) {
+	sorted := slices.Clone(pkgs)
+	slices.Sort(sorted)
+	entries := slices.DeleteFunc(readEnvIndex(index), func(e envEntry) bool {
+		return e.Template == template && slices.Equal(e.Pkgs, sorted)
+	})
+	entries = append(entries, envEntry{Template: template, Pkgs: sorted, StorePath: storePath})
+	b, err := json.Marshal(entries)
+	if err == nil {
+		err = os.MkdirAll(filepath.Dir(index), 0o755)
+	}
+	if err == nil {
+		err = os.WriteFile(index, b, 0o644)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: cannot record the environment for reuse (%v)\n", err)
+	}
+}
+
+func readEnvIndex(index string) []envEntry {
+	b, err := os.ReadFile(index)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "      warning: cannot read %s (%v); building afresh\n", index, err)
+		}
+		return nil
+	}
+	var entries []envEntry
+	if err := json.Unmarshal(b, &entries); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: %s is unreadable (%v); building afresh\n", index, err)
+		return nil
+	}
+	return entries
 }

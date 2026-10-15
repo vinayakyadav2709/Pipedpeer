@@ -89,18 +89,11 @@ func seed(ctx context.Context, host string, port int, storePath string, whole bo
 		}
 	}
 
-	// On disk, not in $TMPDIR: a partial closure can be gigabytes, and /tmp
-	// is often a tmpfs charged against the RAM the job is about to need.
-	dir, err := userdir.Scratch("closurediff-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "      warning: no temp file for the closure (%v); sending it whole\n", err)
-		return r, false
-	}
-	defer os.RemoveAll(dir)
-	archive := filepath.Join(dir, "closure.tar")
-
+	// Streamed: packed straight into the request, no temp file, so sending
+	// starts with the first archive and nothing waits on a full disk copy.
 	t0 := time.Now()
-	if err := packSigned(ctx, storePath, paths, missing, archive); err != nil {
+	m, cacheDir, err := prepareSigned(ctx, storePath, paths)
+	if err != nil {
 		if ctx.Err() != nil {
 			r.err = ctx.Err()
 			return r, false
@@ -108,17 +101,32 @@ func seed(ctx context.Context, host string, port int, storePath string, whole bo
 		fmt.Fprintf(os.Stderr, "      warning: packing the closure with its signatures failed (%v); sending it whole unsigned\n", err)
 		return r, false
 	}
-	r.bytes = fileSize(archive)
-	say.Printf("      Packed closure: %s in %s\n", humanize.Bytes(uint64(r.bytes)), secs(time.Since(t0)))
-	t0 = time.Now()
-	if err := postPartial(host, port, storePath, archive); err != nil {
+	var packErr error
+	n, err := postPartial(host, port, storePath, func(w io.Writer) error {
+		packErr = narpack.PackSigned(m, cacheDir, []string{storePath}, paths, missing, w)
+		return packErr
+	})
+	r.bytes = n
+	if err != nil {
 		var refused *ClosureRefusedError
-		if errors.As(err, &refused) {
+		switch {
+		case errors.As(err, &refused):
 			r.err = err
 			return r, false
+		case ctx.Err() != nil:
+			r.err = ctx.Err()
+			return r, false
+		case packErr != nil:
+			fmt.Fprintf(os.Stderr, "      warning: packing the closure with its signatures failed (%v); sending it whole unsigned\n", packErr)
+		default:
+			fmt.Fprintf(os.Stderr, "      warning: sending the closure failed (%v); sending it whole\n", err)
 		}
-		fmt.Fprintf(os.Stderr, "      warning: sending the closure failed (%v); sending it whole\n", err)
 		return r, false
+	}
+	say.Printf("      Packed and sent closure: %s in %s\n", humanize.Bytes(uint64(n)), secs(time.Since(t0)))
+	narpack.Touch(cacheDir, paths)
+	if _, err := narpack.Prune(cacheDir, narpack.MaxBytes()); err != nil {
+		fmt.Fprintf(os.Stderr, "      warning: could not bound the closure cache %s: %v\n", cacheDir, err)
 	}
 	r.sent, r.sendTime = len(missing), time.Since(t0)
 	if missing == nil {
@@ -209,12 +217,11 @@ func closurePathsLocal(ctx context.Context, storePath string) ([]string, error) 
 	return strings.Fields(string(out)), nil
 }
 
-// packSigned writes a signed closure archive (narpack) of storePath carrying
-// the NARs of want only (nil: all of paths). The paths are signed with this
-// node's key and published into the same cache directory the daemon sends
-// from (daemonapi closureCacheDir), so a closure both have sent is
-// compressed once.
-func packSigned(ctx context.Context, storePath string, paths, want []string, dest string) error {
+// prepareSigned signs the closure's paths with this node's key, publishes them
+// into the cache directory the daemon also sends from (daemonapi
+// closureCacheDir, so a closure both have sent is compressed once), and
+// returns the manifest naming this node as signer, ready for PackSigned.
+func prepareSigned(ctx context.Context, storePath string, paths []string) (narpack.Manifest, string, error) {
 	// Signed before it is published: the signature is written into the
 	// cache's metadata at publish time.
 	if err := nixsign.EnsureSigned(ctx, paths); err != nil {
@@ -222,7 +229,7 @@ func packSigned(ctx context.Context, storePath string, paths, want []string, des
 	}
 	cacheDir := filepath.Join(userdir.Data(), "closure-cache")
 	if err := narpack.Publish(ctx, cacheDir, []string{storePath}); err != nil {
-		return err
+		return narpack.Manifest{}, "", err
 	}
 	// Named so a node that has not polled this one can still check the
 	// signature.
@@ -232,22 +239,7 @@ func packSigned(ctx context.Context, storePath string, paths, want []string, des
 	} else {
 		fmt.Fprintf(os.Stderr, "      warning: no node key to name in the closure (%v); a node that has not polled this one will refuse it\n", err)
 	}
-	f, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	if err := narpack.PackSigned(m, cacheDir, []string{storePath}, paths, want, f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	narpack.Touch(cacheDir, paths)
-	if _, err := narpack.Prune(cacheDir, narpack.MaxBytes()); err != nil {
-		fmt.Fprintf(os.Stderr, "      warning: could not bound the closure cache %s: %v\n", cacheDir, err)
-	}
-	return nil
+	return m, cacheDir, nil
 }
 
 // askMissing asks a node which of these paths it does not have. A node that
@@ -295,42 +287,59 @@ func jsonError(body []byte) string {
 // partial=1 matters: the receiving side must not file a fragment away as the
 // cache entry for this closure, or it would later forward it to a third node
 // as though it were the whole thing.
-func postPartial(host string, port int, storePath, narPath string) error {
-	f, err := os.Open(narPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
+//
+// pack writes the archive into the request as it is produced. Returns the
+// archive bytes sent. Progress shows bytes only: the size is not known
+// before the pack ends.
+func postPartial(host string, port int, storePath string, pack func(io.Writer) error) (int64, error) {
 	pr, pw := io.Pipe()
 	mp := multipart.NewWriter(pw)
+	var sent countingWriter
+	written := make(chan struct{})
 	go func() {
+		defer close(written)
 		mp.WriteField("store_path", storePath)
 		mp.WriteField("partial", "1")
 		part, err := mp.CreateFormFile("nar", "closure.tar")
 		if err == nil {
-			r, done := withProgress(f, fileSize(narPath), "      Sending missing paths")
-			_, err = io.Copy(part, r)
-			done()
+			sent.w = part
+			err = pack(&sent)
 		}
 		if err == nil {
 			err = mp.Close()
 		}
 		pw.CloseWithError(err)
 	}()
+	say.Println("      Sending missing paths (streamed)")
 
 	url := fmt.Sprintf("http://%s:%d/v1/store/import", host, port)
 	resp, err := http.Post(url, mp.FormDataContentType(), pr)
+	// Unblock the packer if the node answered early, then wait for it so
+	// the byte count and its error are settled.
+	pr.Close()
+	<-written
 	if err != nil {
-		return err
+		return sent.n, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(resp.Body)
 		if isRefusal(string(msg)) {
-			return &ClosureRefusedError{Reason: jsonError(msg)}
+			return sent.n, &ClosureRefusedError{Reason: jsonError(msg)}
 		}
-		return fmt.Errorf("closure import rejected: %s", strings.TrimSpace(string(msg)))
+		return sent.n, fmt.Errorf("closure import rejected: %s", strings.TrimSpace(string(msg)))
 	}
-	return nil
+	return sent.n, nil
+}
+
+// countingWriter counts what passes through to w.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
