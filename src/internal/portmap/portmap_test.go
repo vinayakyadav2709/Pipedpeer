@@ -381,3 +381,31 @@ func TestAZeroGrantFallsBackToWhatWasAsked(t *testing.T) {
 		t.Errorf("Lifetime = %s, want the requested 90m", m.Lifetime)
 	}
 }
+
+// TestRenewalFailuresAreLoggedOnceThenHourly. A router with no UPnP or
+// NAT-PMP fails every renewal; one line per attempt filled the log with the
+// same sentence (runs §5 I).
+func TestRenewalFailuresAreLoggedOnceThenHourly(t *testing.T) {
+	var f failureLog
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	if !f.fail(t0) {
+		t.Fatal("the first failure was not logged")
+	}
+	for i := 1; i < 12; i++ {
+		if f.fail(t0.Add(time.Duration(i) * 5 * time.Minute)) {
+			t.Fatalf("failure %d within the hour was logged again", i)
+		}
+	}
+	if !f.fail(t0.Add(time.Hour)) {
+		t.Fatal("an hour of failures went unmentioned")
+	}
+	if !f.ok() {
+		t.Fatal("the recovery after failures was not reported")
+	}
+	if f.ok() {
+		t.Fatal("a success after a success was reported as a recovery")
+	}
+	if !f.fail(t0.Add(2 * time.Hour)) {
+		t.Fatal("a new run of failures after a recovery was not logged")
+	}
+}

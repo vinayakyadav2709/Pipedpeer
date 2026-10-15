@@ -14,8 +14,9 @@ import (
 // TestReplacedLinksLeaveOneNodeRow (FIX-NAT5). A link that dies while OnPeer
 // is still registering it had its OnPeerGone run first: the leave removed
 // nothing, the join then wrote a row for a forwarder port nobody listens on,
-// and manual rows are never pruned. Ten such rows were seen on one machine.
-// The callbacks here are the daemon's, against a real node store.
+// and manual rows were never pruned. Ten such rows were seen on one machine.
+// The callbacks here stand in for the daemon's, against a real address book:
+// a link is a verified internet path, its release drops that path.
 func TestReplacedLinksLeaveOneNodeRow(t *testing.T) {
 	store, err := nodestore.NewAt(filepath.Join(t.TempDir(), "nodes.db"))
 	if err != nil {
@@ -37,17 +38,14 @@ func TestReplacedLinksLeaveOneNodeRow(t *testing.T) {
 		OnPeer: func(node, addr string) {
 			joining <- struct{}{}
 			<-release
-			// What AddManual writes when the health check through the
-			// forwarder fails: a placeholder row at the forwarder address.
 			host, port := split(addr)
-			if err := store.UpsertNode(nodestore.Node{NodeID: "manual-" + addr, Host: host,
-				Port: port, Source: "manual", IsManual: true}); err != nil {
+			if err := store.PathOK(node, nodestore.PathInternet, host, port); err != nil {
 				t.Error(err)
 			}
 		},
 		OnPeerGone: func(node, addr string) {
 			host, port := split(addr)
-			if _, err := store.RemoveManualAt(host, port); err != nil {
+			if err := store.DropPath(node, host, port); err != nil {
 				t.Error(err)
 			}
 		},
@@ -76,17 +74,17 @@ func TestReplacedLinksLeaveOneNodeRow(t *testing.T) {
 		<-dropped
 	}
 
-	rows, err := store.ListAll()
+	paths, err := store.Paths("peer-a")
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := m.Peers()["peer-a"]
-	if len(rows) != 1 || rows[0].NodeID != "manual-"+want {
-		var ids []string
-		for _, r := range rows {
-			ids = append(ids, r.NodeID)
-		}
-		t.Fatalf("after %d replaced links want one row for the live forwarder %s, got %v",
-			replaced, want, ids)
+	var got []string
+	for _, p := range paths {
+		got = append(got, net.JoinHostPort(p.Host, strconv.Itoa(p.Port)))
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("after %d replaced links want one path, the live forwarder %s; got %v",
+			replaced, want, got)
 	}
 }

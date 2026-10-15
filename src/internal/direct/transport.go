@@ -30,7 +30,11 @@ import (
 // /2: the hello is bound to the TLS session and proves the cluster token. A
 // /1 peer cannot produce either, so it fails at the handshake with a version
 // reason instead of an identity one.
-const ALPN = "pipedpeer-direct/2"
+//
+// /3: the 4242 port block, one identity and signed address gossip ship
+// together as one hard cut (ADR-0006); a /2 build is refused with the version
+// reason rather than half-working against the new ports.
+const ALPN = "pipedpeer-direct/3"
 
 // ekmLabel names the TLS exporter the hello is bound to (RFC 9266 style).
 // Both ends of one session derive the same bytes and no other session can, so
@@ -588,6 +592,34 @@ func (e *Endpoint) Dial(ctx context.Context, node string, at netip.AddrPort) (*q
 		e.mu.Unlock()
 	}()
 	return conn, nil
+}
+
+// Migrate moves a connection this end dialled onto the shared socket's current
+// local address, after the machine's addresses changed.
+//
+// The socket is bound to every interface, so after a change the kernel
+// already sends from the new address; what is missing is the peer agreeing to
+// it. A probed path makes that explicit: the peer answers the challenge from
+// the new address or it does not, and the caller learns which within the
+// timeout instead of waiting out the idle timeout on a dead path. Only the
+// dialling end can migrate (RFC 9000); the accepting end redials instead.
+func (e *Endpoint) Migrate(ctx context.Context, conn *quic.Conn, timeout time.Duration) error {
+	path, err := conn.AddPath(e.transport)
+	if err != nil {
+		return fmt.Errorf("adding a path: %w", err)
+	}
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := path.Probe(pctx); err != nil {
+		if cerr := path.Close(); cerr != nil {
+			e.log("direct: abandoning the unvalidated path to %s: %v", conn.RemoteAddr(), cerr)
+		}
+		return fmt.Errorf("probing the new path: %w", err)
+	}
+	if err := path.Switch(); err != nil {
+		return fmt.Errorf("switching to the new path: %w", err)
+	}
+	return nil
 }
 
 // errAlreadyConnected says the peer already has a link to us and declined a
