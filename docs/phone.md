@@ -23,11 +23,11 @@ Timings from qemu are not performance numbers.
 
    On Android 14 and later, Developer options also has a "Disable child process
    restrictions" toggle that does the same thing.
-3. In Termux, install Python and numpy:
-
-   ```sh
-   pkg install python python-numpy
-   ```
+3. Nothing else to install by hand: `pipedpeer setup` (the installer runs it)
+   installs Termux's `python` and `python-numpy`, then `python-torch` and
+   `python-scipy` for ML chunks, then `cloudpickle` with pip. The ML packages
+   are optional and add about 350 MB of storage (a ~55 MB download); if they fail to install, the
+   phone still takes numpy work.
 
 ## Install and connect
 
@@ -48,13 +48,16 @@ everyone down.
 
 ## What runs where
 
-- The phone answers "runnable" for a pool chunk only when its Python has the
-  same minor version as the submitter's (for example, 3.12). Chunks are
-  pickled, and pickles are tied to the minor version.
-- A chunk runs as `python3 pool_runner.py`, which needs only the standard
-  library. Your function can use what Termux has installed (numpy). If it
-  imports something missing, the chunk fails and the submitter reruns it
-  locally.
+- The phone takes a chunk only when its Python can import every module the
+  chunk uses (numpy, torch, scipy, or anything you `pip install` in Termux).
+  A chunk that needs a missing module goes to another machine, and the phone's
+  daemon log names the module.
+- A function sent as source runs on any Python version. A function pickled by
+  value (lambdas, closures) needs the same minor version as the submitter's
+  (for example, 3.12), because bytecode is tied to it.
+- Small ML training fits: a Pool chunk can build a torch model, train it for a
+  few steps and return the loss. Termux has no scikit-learn or pandas packages
+  (pip would build them from source), so chunks that need those skip the phone.
 - The phone has no kernel memory limit (Android gives apps no cgroups). The
   daemon's memory watchdog still holds it to half the phone's RAM.
 
@@ -63,6 +66,6 @@ everyone down.
 | Symptom | Fix |
 |---|---|
 | Workers die after a few minutes | Phantom process killer is still on: rerun the two `adb` lines |
-| Phone shows but never gets chunks | Python minor differs from the laptops': `python3 -V` on both |
+| Phone shows but never gets chunks | `grep refusing ~/.local/state/pipedpeer/daemon.log` on the phone names the missing module or Python version |
 | Phone drops off when the screen locks | `termux-wake-lock`, keep it charging |
 | LAN discovery doesn't find the phone | Use `pipedpeer connect <code>`; Android filters multicast |

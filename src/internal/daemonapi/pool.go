@@ -61,6 +61,9 @@ type chunk struct {
 	// (X-Pipedpeer-Python); forwarded so a phone can refuse bytecode it
 	// cannot load.
 	python string
+	// modules are the top-level modules the chunk needs (phone.Modules), sent
+	// with every runnable check so a phone without torch is not picked.
+	modules []string
 	// oob mirrors poolRequest.Oob.
 	oob bool
 	// forwardedBy is the node id that forwarded this request whole
@@ -637,8 +640,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	// <store>/bin/run, or a pool-only phone's host python; a by-value
 	// function from another python minor is refused (Decisions: func_src rule).
 	runPath, err := phone.PoolRunPath(storePath)
-	if err == nil && !phone.CanRun(storePath, phone.Need(python, req.FuncSrc != "")) {
-		err = fmt.Errorf("by-value function from python %q cannot run on this node's python; ship func_src", python)
+	modules := chunkModules(&req, globals, items, frames)
+	if err == nil && !phone.CanRun(storePath, phone.Need(python, req.FuncSrc != "", modules...)) {
+		err = fmt.Errorf("this node's python cannot run the chunk (python %q, modules %v; see the daemon log)", python, modules)
 	}
 	if err != nil {
 		log.Printf("[pool] refusing pool/map for %s: %v", storePath, err)
@@ -683,7 +687,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		}
 		if available < req.RequiredMemBytes {
 			if forwardedBy == "" && !req.NoFanout {
-				if peer := s.pool.bestPeer(storePath, submitter, offload, phone.Need(python, req.FuncSrc != "")); peer != "" {
+				if peer := s.pool.bestPeer(storePath, submitter, offload, phone.Need(python, req.FuncSrc != "", modules...)); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
 					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload, python) {
 						return
@@ -710,6 +714,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				offload:     offload,
 				fnFP:        req.FnFP,
 				python:      python,
+				modules:     modules,
 				oob:         req.Oob,
 				forwardedBy: forwardedBy,
 				// originLocal stays unset: setting it here would change
@@ -741,6 +746,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		offload:     offload,
 		fnFP:        req.FnFP,
 		python:      python,
+		modules:     modules,
 		oob:         req.Oob,
 		originLocal: fromLocalShim,
 		forwardedBy: forwardedBy,
@@ -986,7 +992,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 	var peers []string
 	pm.mu.Lock()
 	if pm.peerFn != nil {
-		peers = pm.peerFn(storePath, submitter, phone.Need(ch.python, ch.funcSrc != ""))
+		peers = pm.peerFn(storePath, submitter, phone.Need(ch.python, ch.funcSrc != "", ch.modules...))
 	}
 	pm.mu.Unlock()
 	// --offload: none of the parts below may land on the kept-off machine,
@@ -1990,4 +1996,42 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 		results = append(results, map[string]string{"pickle": r})
 	}
 	return results, nil
+}
+
+// chunkModules lists the modules a pool request needs, from its func_src and
+// pickles (function, globals, and the first few items: items are uniform, and
+// scanning gigabytes per request is not worth it). Compressed items are
+// skipped.
+func chunkModules(req *poolRequest, globals []byte, items []json.RawMessage, frames bool) []string {
+	var pickles [][]byte
+	for _, b64 := range []string{req.Func, req.ExtraB64} {
+		if b64 == "" {
+			continue
+		}
+		b, err := base64.StdEncoding.DecodeString(b64)
+		if err != nil {
+			log.Printf("[pool] module scan: undecodable base64 pickle skipped: %v", err)
+			continue
+		}
+		pickles = append(pickles, b)
+	}
+	pickles = append(pickles, globals)
+	for i, it := range items {
+		if i == 4 {
+			break
+		}
+		switch {
+		case frames && !req.ItemsZlib:
+			pickles = append(pickles, it)
+		case !frames && req.ItemsB64:
+			var s string
+			if json.Unmarshal(it, &s) != nil {
+				continue
+			}
+			if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+				pickles = append(pickles, b)
+			}
+		}
+	}
+	return phone.Modules(req.FuncSrc, pickles...)
 }
