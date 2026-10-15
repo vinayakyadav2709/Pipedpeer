@@ -39,7 +39,11 @@ and the two columns cannot be compared row by row as equal work.
 
 ## BEFORE (c7e2c7f), emulated
 
-TODO(U25): filled by `bench-ddp-switch.sh before`.
+Not run under load (coordinator, 2026-10-15). The other agents put the
+host at load 25-37, so the matrix would have been thrown away. QUIET-RERUN runs
+it on an idle host: `scripts/bench-ddp-switch.sh before`, then `after`, 28 runs
+each. `ONLY="<model>-<compute>:<variant>[:<profile>]"` reruns single rows, and
+`BL_DRY=1` prints them without running.
 
 ## AFTER (tree under test), emulated
 
