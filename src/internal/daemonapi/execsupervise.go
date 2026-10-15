@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +13,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/rs/zerolog/log"
 
@@ -255,14 +256,14 @@ func signalContainer(jobID, containerID string, crunPid int) func(syscall.Signal
 		if sig == syscall.SIGKILL {
 			name = "KILL"
 		}
-		out, err := exec.Command("crun", "kill", "--all", containerID, name).CombinedOutput()
+		out, err := termuxexec.Command("crun", "kill", "--all", containerID, name).CombinedOutput()
 		if err == nil {
 			return
 		}
 		log.Warn().Err(err).Str("job", jobID).Str("output", strings.TrimSpace(string(out))).
 			Msg("crun kill --all failed; falling back")
 		if sig == syscall.SIGKILL {
-			if out, err := exec.Command("crun", "delete", "-f", containerID).CombinedOutput(); err != nil {
+			if out, err := termuxexec.Command("crun", "delete", "-f", containerID).CombinedOutput(); err != nil {
 				log.Warn().Err(err).Str("job", jobID).Str("output", strings.TrimSpace(string(out))).
 					Msg("crun delete -f failed; killing crun's process group")
 				group(sig)

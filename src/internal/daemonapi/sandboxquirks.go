@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"github.com/rs/zerolog/log"
 )
@@ -132,8 +134,8 @@ func runProbe(crun, trueBin string, q quirks) ([]byte, error) {
 	}
 
 	id := "pp-probe-" + filepath.Base(bundle)
-	out, runErr := exec.Command(crun, "run", "--bundle", bundle, id).CombinedOutput()
-	_ = exec.Command(crun, "delete", "-f", id).Run()
+	out, runErr := termuxexec.Command(crun, "run", "--bundle", bundle, id).CombinedOutput()
+	_ = termuxexec.Command(crun, "delete", "-f", id).Run()
 	return out, runErr
 }
 

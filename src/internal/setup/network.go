@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/internet"
@@ -60,7 +62,7 @@ var firewallCmd = func(ctx context.Context, name string, args ...string) (string
 	} else if p, err := lookPath(name); err == nil {
 		name = p
 	}
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := termuxexec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

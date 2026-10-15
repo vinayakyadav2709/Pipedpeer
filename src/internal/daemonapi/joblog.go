@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/dustin/go-humanize"
 	"github.com/rs/zerolog/log"
 	"github.com/shirou/gopsutil/v4/process"
@@ -334,8 +336,8 @@ func (s *Server) failOrphanedJobs() {
 	for _, id := range orphans {
 		if haveCrun == nil {
 			ctr := "pp-" + id
-			if exec.Command("crun", "state", ctr).Run() == nil {
-				if out, err := exec.Command("crun", "delete", "-f", ctr).CombinedOutput(); err != nil {
+			if termuxexec.Command("crun", "state", ctr).Run() == nil {
+				if out, err := termuxexec.Command("crun", "delete", "-f", ctr).CombinedOutput(); err != nil {
 					log.Warn().Err(err).Str("job", id).Str("output", string(out)).Msg("removing a job container left by the previous daemon")
 				}
 			}

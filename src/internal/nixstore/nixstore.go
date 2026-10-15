@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -261,7 +263,7 @@ func cmdFor(ctx context.Context, dir string, argv []string) (*exec.Cmd, func(), 
 			return nil, nil, err
 		}
 		// argv[0] stays nix's multi-call name ("nix-store"), not the path.
-		cmd := exec.CommandContext(ctx, nixPath)
+		cmd := termuxexec.CommandContext(ctx, nixPath)
 		cmd.Args, cmd.Dir = argv, dir
 		return cmd, func() {}, nil
 	}
@@ -302,7 +304,7 @@ func cmdFor(ctx context.Context, dir string, argv []string) (*exec.Cmd, func(), 
 	}
 
 	id := "pipedpeer-nix-" + filepath.Base(bundle)
-	cmd := exec.CommandContext(ctx, crun, "run", "--bundle", bundle, id)
+	cmd := termuxexec.CommandContext(ctx, crun, "run", "--bundle", bundle, id)
 	// crun needs somewhere to keep container state, and a daemon does not
 	// always have XDG_RUNTIME_DIR set.
 	if os.Getenv("XDG_RUNTIME_DIR") == "" {

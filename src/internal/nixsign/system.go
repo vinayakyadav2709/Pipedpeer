@@ -1,8 +1,9 @@
 package nixsign
 
 import (
-	"os/exec"
 	"strings"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 )
@@ -16,7 +17,7 @@ var (
 	// extra-trusted-public-keys from a user it does not list in
 	// trusted-users, so narpack.Import passing the keys is not enough there.
 	multiUserNix = func() bool {
-		out, err := exec.Command("systemctl", "is-active", "nix-daemon").Output()
+		out, err := termuxexec.Command("systemctl", "is-active", "nix-daemon").Output()
 		return err == nil && strings.TrimSpace(string(out)) == "active"
 	}
 
@@ -25,7 +26,7 @@ var (
 		if err != nil {
 			return "", err
 		}
-		out, err := exec.Command(nixPath, "config", "show", name).Output()
+		out, err := termuxexec.Command(nixPath, "config", "show", name).Output()
 		return string(out), err
 	}
 )

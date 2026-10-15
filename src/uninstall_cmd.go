@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/doctor"
@@ -79,7 +80,7 @@ func uninstallDeps() doctor.UninstallDeps {
 	} else if why != "not present" {
 		d.CrunKeep = crun + ": " + why
 	}
-	if exe, err := os.Executable(); err != nil {
+	if exe, err := termuxexec.Executable(); err != nil {
 		say.Warnf("cannot find this binary to delete it: %v\n", err)
 	} else if real, err := filepath.EvalSymlinks(exe); err != nil {
 		say.Warnf("cannot resolve %s, deleting the link itself: %v\n", exe, err)
@@ -98,7 +99,7 @@ func removeBinary(path string) error {
 	if err == nil || !errors.Is(err, fs.ErrPermission) {
 		return err
 	}
-	c := exec.Command("sudo", "rm", "-f", path)
+	c := termuxexec.Command("sudo", "rm", "-f", path)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if rerr := c.Run(); rerr != nil {
 		return fmt.Errorf("sudo rm -f %s: %w", path, rerr)

@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
@@ -72,7 +74,7 @@ var (
 		return exec.LookPath("python3")
 	}
 	pyVersionOf = func(py string) (string, error) {
-		out, err := exec.Command(py, "-c", "import sys; print('%d.%d' % sys.version_info[:2])").Output()
+		out, err := termuxexec.Command(py, "-c", "import sys; print('%d.%d' % sys.version_info[:2])").Output()
 		return strings.TrimSpace(string(out)), err
 	}
 	pyOnce            sync.Once
@@ -170,7 +172,7 @@ var (
 	importable = map[string]bool{}
 	tryImports = func(py string, mods []string) (map[string]bool, error) {
 		var stderr strings.Builder
-		cmd := exec.Command(py, append([]string{"-c",
+		cmd := termuxexec.Command(py, append([]string{"-c",
 			"import importlib, sys\nfor m in sys.argv[1:]:\n    try:\n        importlib.import_module(m)\n        print(m, True)\n    except Exception as e:\n        print(m, False)\n        print('pipedpeer: import %s failed: %r' % (m, e), file=sys.stderr)"},
 			mods...)...)
 		cmd.Stderr = &stderr
@@ -262,7 +264,7 @@ var (
 	requiredPkgs = []string{"python", "python-numpy"}
 	mlPkgs       = []string{"python-torch", "python-scipy"}
 	runCmd       = func(name string, args ...string) ([]byte, error) {
-		return exec.Command(name, args...).CombinedOutput()
+		return termuxexec.Command(name, args...).CombinedOutput()
 	}
 )
 

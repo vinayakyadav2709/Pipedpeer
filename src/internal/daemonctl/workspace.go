@@ -13,10 +13,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
@@ -118,7 +119,7 @@ func CreateWorkspaceTar(projectDir, destPath string, shim fs.FS) error {
 	}
 
 	args = append(args, "-cf", destPath, "-C", projectDir, ".")
-	if err := exec.Command("tar", args...).Run(); err != nil {
+	if err := termuxexec.Command("tar", args...).Run(); err != nil {
 		return err
 	}
 
@@ -149,7 +150,7 @@ func appendShim(destPath string, shim fs.FS) error {
 		return err
 	}
 
-	cmd := exec.Command("tar", "--append", "--file="+destPath, "-C", stageDir, ".pipedpeer")
+	cmd := termuxexec.Command("tar", "--append", "--file="+destPath, "-C", stageDir, ".pipedpeer")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

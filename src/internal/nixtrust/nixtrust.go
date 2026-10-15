@@ -16,12 +16,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"syscall"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
@@ -121,7 +122,7 @@ func Main(args []string) int {
 	// sudo resets the environment, but a root daemon calls this directly.
 	os.Setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
 	err := run(args, KeysFile, func() error {
-		cmd := exec.Command("systemctl", "restart", "nix-daemon")
+		cmd := termuxexec.Command("systemctl", "restart", "nix-daemon")
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		return cmd.Run()
 	})
@@ -193,7 +194,7 @@ func writeAtomic(file, content string) error {
 // in which case main must call Main and nothing else: the sudoers rule lets
 // the user run that file as root with any arguments.
 func IsHelper() bool {
-	self, err := os.Executable()
+	self, err := termuxexec.Executable()
 	if err != nil {
 		return false
 	}
@@ -265,7 +266,7 @@ func Installed() bool {
 var (
 	geteuid = os.Geteuid
 	execute = func(argv []string) ([]byte, error) {
-		return exec.Command(argv[0], argv[1:]...).CombinedOutput()
+		return termuxexec.Command(argv[0], argv[1:]...).CombinedOutput()
 	}
 )
 

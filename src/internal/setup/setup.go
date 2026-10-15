@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
@@ -105,7 +107,7 @@ func createNixStore() error {
 	// store dir, so setup would report nix missing forever and loop.
 	argv = append(argv, root)
 
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := termuxexec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -140,7 +142,7 @@ var (
 		if os.Geteuid() != 0 {
 			argv = append([]string{"sudo"}, argv...)
 		}
-		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd := termuxexec.Command(argv[0], argv[1:]...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Stdin = os.Stdin
@@ -307,7 +309,7 @@ func nixConfTarget() string {
 // installHelper puts the key helper, its sudoers rule and the include line in
 // place, as root (ADR-0018).
 func installHelper() error {
-	src, err := os.Executable()
+	src, err := termuxexec.Executable()
 	if err != nil {
 		return fmt.Errorf("finding this binary to install as the key helper: %w", err)
 	}
@@ -447,7 +449,7 @@ var canBecomeRoot = func() bool {
 	if _, err := exec.LookPath("sudo"); err != nil {
 		return false
 	}
-	if exec.Command("sudo", "-n", "true").Run() == nil {
+	if termuxexec.Command("sudo", "-n", "true").Run() == nil {
 		return true
 	}
 	fi, err := os.Stdin.Stat()
@@ -461,7 +463,7 @@ var (
 	}
 	installDeterminate = func() error {
 		fmt.Println("    → Installing Nix (Determinate Systems installer, needs sudo)...")
-		cmd := exec.Command("sh", "-c",
+		cmd := termuxexec.Command("sh", "-c",
 			`curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm`)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -522,7 +524,7 @@ func getPrereqs() []prereq {
 				if _, err := exec.LookPath(argv[0]); err != nil {
 					continue
 				}
-				cmd := exec.Command(argv[0], argv[1:]...)
+				cmd := termuxexec.Command(argv[0], argv[1:]...)
 				cmd.Stdout = os.Stdout
 				cmd.Stderr = os.Stderr
 				lastErr = cmd.Run()

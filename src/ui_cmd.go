@@ -3,8 +3,9 @@ package main
 import (
 	"fmt"
 	"net/url"
-	"os/exec"
 	"runtime"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/spf13/cobra"
 
@@ -37,7 +38,7 @@ func newUICmd() *cobra.Command {
 			if runtime.GOOS == "darwin" {
 				opener = "open"
 			}
-			if err := exec.Command(opener, withToken).Start(); err != nil {
+			if err := termuxexec.Command(opener, withToken).Start(); err != nil {
 				fmt.Printf("could not open a browser (%v); paste this into one:\n%s\n", err, withToken)
 			}
 			return nil

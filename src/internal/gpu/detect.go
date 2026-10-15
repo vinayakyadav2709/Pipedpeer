@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 )
 
 type Vendor string
@@ -117,9 +119,9 @@ type nvRow struct {
 // without it.
 func queryNVIDIA() ([]nvRow, error) {
 	fields := "index,pci.bus_id,name,memory.total,memory.used,memory.free,utilization.gpu"
-	out, err := exec.Command(nvidiaSMI, "--query-gpu="+fields+",compute_cap", "--format=csv,noheader,nounits").Output()
+	out, err := termuxexec.Command(nvidiaSMI, "--query-gpu="+fields+",compute_cap", "--format=csv,noheader,nounits").Output()
 	if err != nil {
-		out, err = exec.Command(nvidiaSMI, "--query-gpu="+fields, "--format=csv,noheader,nounits").Output()
+		out, err = termuxexec.Command(nvidiaSMI, "--query-gpu="+fields, "--format=csv,noheader,nounits").Output()
 		if err != nil {
 			return nil, err
 		}
@@ -227,7 +229,7 @@ func refreshAMD() (Info, Usage, []DeviceUsage) {
 // perDeviceAMD reads per-device VRAM and utilisation from rocm-smi's JSON
 // output, which is the only rocm-smi format stable enough to parse.
 func perDeviceAMD() []DeviceUsage {
-	out, err := exec.Command("rocm-smi",
+	out, err := termuxexec.Command("rocm-smi",
 		"--showid", "--showproductname", "--showmeminfo", "vram", "--showuse", "--json").Output()
 	if err != nil {
 		return nil
@@ -330,7 +332,7 @@ func detectAMD() Info {
 		return Info{Vendor: VendorNone, Best: -1}
 	}
 
-	out, err := exec.Command("rocm-smi", "--showproductname", "--showmeminfo", "vram").Output()
+	out, err := termuxexec.Command("rocm-smi", "--showproductname", "--showmeminfo", "vram").Output()
 	if err != nil {
 		return Info{Vendor: VendorNone, Best: -1}
 	}
@@ -376,7 +378,7 @@ func amdGFXTarget() string {
 	if _, err := exec.LookPath("rocminfo"); err != nil {
 		return ""
 	}
-	out, err := exec.Command("rocminfo").Output()
+	out, err := termuxexec.Command("rocminfo").Output()
 	if err != nil {
 		return ""
 	}

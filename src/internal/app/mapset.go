@@ -4,14 +4,15 @@ import (
 	"bufio"
 	"encoding/csv"
 	"fmt"
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // MapTask is one unit of work in a fan-out. It differs from a single Task only
@@ -420,7 +421,7 @@ func RunMap(tasks []MapTask, base Options, concurrency int, resultsDir string, e
 }
 
 func runReduce(script, resultsDir string) error {
-	cmd := exec.Command("python", script)
+	cmd := termuxexec.Command("python", script)
 	cmd.Dir = resultsDir
 	cmd.Env = append(os.Environ(), "PIPEDPEER_RESULTS="+resultsDir)
 	cmd.Stdout = os.Stdout

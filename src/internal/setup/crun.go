@@ -5,11 +5,12 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -79,7 +80,7 @@ func installCrunRelease() error {
 	// assets, so the check that matters is that the bytes are an executable
 	// that identifies itself as the version asked for - which a truncated
 	// download, an HTML error page, or a wrong-architecture build all fail.
-	out, err := exec.Command(tmp, "--version").Output()
+	out, err := termuxexec.Command(tmp, "--version").Output()
 	if err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("downloaded crun does not run: %w", err)

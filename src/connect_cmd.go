@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/spf13/cobra"
 
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
@@ -82,7 +84,7 @@ func newConnectCmd() *cobra.Command {
 			res := waitConnected(fmt.Sprintf("http://127.0.0.1:%d", port), connectWait)
 			printConnResult(out, res)
 			if res.outcome != connFailed {
-				exe, err := os.Executable()
+				exe, err := termuxexec.Executable()
 				if err == nil {
 					err = warmup.Start(exe, gpu.Detect().Vendor == gpu.VendorNVIDIA)
 				}
