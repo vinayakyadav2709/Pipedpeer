@@ -624,7 +624,8 @@ network the machines also find each other unaided. Across networks they meet
 through an \textbf{introducer}, an address book that tells machines where to find
 each other and carries no job data. Every daemon is an introducer for its own
 cluster, so the role is no longer asymmetric; two optional roles are:
-\texttt{pool-only} (a phone that takes parallel chunks but no whole jobs) and
+\texttt{pool-only} (a phone without Nix, which takes parallel chunks but no
+whole jobs; a phone with Nix is a full node) and
 \texttt{introducer-only} (a hosted server that runs nothing).
 
 \begin{figure}[H]
@@ -673,7 +674,7 @@ supporting code (process management, set-up, XDG paths, logging and the like).
 \texttt{resourceest} & Tiered memory estimate \\
 \texttt{jobhistory}, \texttt{heartbeat}, \texttt{gpu} & Job records; capability and load reporting; vendor GPU detection \\
 \texttt{runrec} & The run record: timed steps, simple and detailed views, export \\
-\texttt{service}, \texttt{warmup}, \texttt{doctor}, \texttt{phone} & Autostart unit; background environment builds; diagnostics; Termux pool worker \\
+\texttt{service}, \texttt{warmup}, \texttt{doctor}, \texttt{phone} & Autostart unit; background environment builds; diagnostics; phone as a full node under \texttt{proot}, or a Termux pool worker \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -1126,6 +1127,19 @@ period; a \texttt{commit} promotes the reservation to running, renewed every 30
 seconds and reaped after 5 minutes without renewal; \texttt{complete} releases
 it. A sweeper runs every 2 seconds.
 
+Renewal used to be the submitter's job on only one of its two paths. The
+coordinator's remote path renewed and dropped every failed renewal silently;
+the plain run path --- the local default and \texttt{-{}-host} --- committed its
+lease and never renewed it. An environment build plus upload longer than the
+5 minute expiry let the node reap the lease, and the job then ran bound to
+nothing. Both paths now renew every 30 seconds with a 10 second timeout while
+the environment builds and uploads; failures show with \texttt{-v}, and a
+fourth in a row warns without it. As a backstop the node binds a job that names
+an expired lease to a fresh lease with no memory or GPU reservation, and logs a
+warning. In the lab, with one node held to 800\,kbit/s, a 533\,s environment
+build ran with no expired lease and the lease was released when the job ended
+(emulated link).
+
 Two details carry the correctness argument. First, the concurrency and memory
 checks and the lease insertion happen \textbf{under a single lock}, so two
 submitters racing for the last slot cannot both succeed (the cores check runs
@@ -1260,6 +1274,32 @@ path and the compressed archives for the paths it lacks --- produced by Nix's ow
 copy mechanism and imported the same way, so the receiver's signature policy
 applies. Other peers receive the older unsigned export, which is also what a
 submitter uses for its own upload.
+
+\textbf{Not waiting for the slowest peer.} The push used to run inside the
+upload handler and wait for every peer's send, under a 10 minute client
+timeout, so a run started only when its slowest peer had imported the
+closure. The upload now waits at most 60 seconds. A peer still importing
+finishes in the background with a warning and joins the pool by itself, since
+each parallel chunk asks afresh which peers can run it; meanwhile the peer's
+store reports ``importing'', so other nodes do not start a second send to it,
+and two sends of the same closure to one peer are shared. A background send
+is cut only when it stops moving: after 60 seconds with no bytes sent, or 10
+minutes after the full body if the peer never answers, instead of after 10
+minutes in total, which a large closure on a slow link exceeded on every run.
+A restarted send asks again which paths are missing, so it skips what already
+arrived. In an emulated lab of two 768\,MiB nodes with the second held to
+800\,kbit/s, a cold run fell from 1000.9\,s to 256.9\,s (the environment send
+from 641\,s to 60.4\,s), a warm run from 603.7\,s to 67.3\,s, and a later run
+took 2.3\,s with the slow node taking 22 of 64 items; the one background send
+took 905.6\,s, longer than the old limit allowed (emulated link; wall times
+to be repeated on an idle host \todo{bcast quiet}).
+
+A fresh peer can also fetch from the public binary cache the paths it lacks
+instead of taking them from the sender over the local network. That import
+used to wait on the download without limit; it now waits at most 30 seconds
+once the sender's archive is in, then cancels the download, skips the cache
+for 30 minutes and answers so that the sender sends every missing path
+itself.
 
 \textbf{Bounded caches.} Both closure caches are pruned least-recently-used to a
 cap of 8\,GiB each by default, after every send and at daemon start. With the cap
@@ -1480,6 +1520,23 @@ discarding however far it had got; now the peer's copy keeps running, the same
 part starts locally, the first to finish is used, and the loser is cancelled. If
 both fail, the part fails with both errors.
 
+\textbf{Learning a slow peer.} The fit used to learn a peer's speed only from
+parts that peer finished first. A slow peer's parts always lost the race to a
+backup copy or to the script, so it kept a fast estimate, received a share of
+every chunk sized for a fast machine, and, since each reply waits for all its
+parts, the run took about as long as one node alone. A part still unfinished
+past its prediction now counts as taking at least that long, which can only make
+an estimate slower. Within the first run, three further rules act before the fit
+has caught up: a split part waiting for its peer starts on another peer with a
+free slot when that would finish sooner; a part running past its prediction
+gets a copy on the fastest free peer, the first result winning; and a chunk too
+small to split goes to the peer predicted to finish first. In the lab, with one
+peer held to a tenth of the processor against a cluster of equal peers, four
+consecutive runs took 1.60, 1.25, 1.09 and 1.08 times the equal cluster's time,
+where they had taken 2.11, 1.35, 1.37 and 1.31 times; equal clusters were
+unchanged (emulated, ratios from a host loaded to 19--21). Most of the first
+run's remaining gap is starting pool workers on fresh daemons.
+
 \textbf{Keeping the sender free.} Sending a script away does not by itself keep
 the sending machine idle: its node may spread pieces back to it, and a script
 run locally spreads its own work there. With \texttt{-{}-offload} the script and
@@ -1595,14 +1652,70 @@ only when it earns its place: after a warm-up the lead daemon compares the
 measured step time of the split with that of the fastest rank alone, and either
 keeps the ring or releases every rank but the fastest, which exit with a code
 meaning ``released'' rather than ``failed'', with one plain line in rank 0's
-output. A user who names a ring size turns the decision off. An opt-in mode
-synchronises every few steps instead of every step, following DiLoCo: exact
-synchronisation during a warm-up, then an interval adapted to the measured drift
-between ranks that tightens again near the end, pseudo-gradients averaged by the
-samples each rank processed, an outer Nesterov step, and the optimiser's moments
-averaged now and then. It never adds epochs or changes the batch or learning
-rate, and automatic mode may choose it only once its validation loss is within
-1\% of one GPU on every test model (Section~\ref{sec:measure}).
+output. A user who names a ring size turns the decision off.
+
+\textbf{Synchronising less often.} A second mode, \texttt{-{}-ddp-sync fast},
+synchronises every $H$ steps instead of every step, in the manner of DiLoCo
+\cite{douillard2023diloco} and post-local SGD \cite{lin2020localsgd}: ten
+steps of exact synchronisation as a warm-up, then local steps, with the ranks'
+weights averaged by the number of samples each processed, every epoch ending
+on a synchronisation, and the optimiser's moments averaged with the weights
+every tenth round. It never adds epochs or changes the batch or the learning
+rate. The bar for accuracy is one-sided: the final validation loss may be at
+most 1\% higher than one device's, as a mean over three seeds, on every test
+model; a lower held-out loss is a more accurate model, though a gap below
+$-5\%$ is treated as changed training dynamics and looked at rather than
+passed.
+
+The first version followed the DiLoCo paper's outer optimiser, Nesterov
+momentum 0.9 at an outer learning rate of 0.7, and failed that bar. At
+momentum 0.9 the outer step settles at $0.7/(1-0.9) = 7$ times the averaged
+change. The paper synchronises every few hundred steps; over Wi-Fi this system
+synchronises every 2 to 64, so the script's learning rate was in effect
+multiplied by seven, and an interval adapted to drift made it worse, since more
+drift shortened the interval and applied the oversized step more often. The
+paper's settings failed at every interval tried, even at one synchronisation
+per epoch (the small transformer $+21.7\%$ at 156 local steps). Plain averaging
+--- outer learning rate 1, no momentum --- passes. In an emulated lab of two
+containers on the LAN and Wi-Fi profiles, three seeds each, the gap to one
+device was $+0.64\%$ and $+0.61\%$ on the GPU demonstration's network (a four-layer perceptron), $-2.14\%$ and
+$-2.09\%$ on the same perceptron in the training demonstration at its CPU sizing, and $+0.18\%$ and $+0.50\%$ on a
+small transformer, each within the spread of exact synchronisation's own gap;
+each rank sent 9.1, 10.7 and 1.4\,MiB against 81.1, 98.9 and 21.7\,MiB with
+exact synchronisation, nine to fifteen times less. Wall times are to be
+measured on an idle host \todo{diloco}.
+
+The interval depends on the ring's size. Plain averaging every 64 steps passed
+at two and three ranks but failed at eleven. In simulation, on the same three
+models and the same bar, the largest interval that passed on every model was
+32 steps at two ranks, 16 at three and 4 at four; from five ranks no interval
+passed, because at eight ranks the transformer failed at every interval down to
+2 and an outer learning rate below 1 was worse (simulated). That table is the
+default, held identically by the daemon and the shim. An explicit
+\texttt{-{}-ddp-sync fast} beyond four ranks still runs, at $H=4$, and says once
+that the ring is past the validated size. That accuracy falls as ranks are
+added is itself a finding: fast synchronisation helps the two to four machines
+of a small group and not a crowd of phones. Simulations of the remedies the
+literature offers --- keeping each rank's batch so the global batch grows,
+drift correction, compressed exact synchronisation, and retuning the interval
+and outer step per ring size --- are to be added \todo{many-rank table}.
+
+\textbf{Choosing fast synchronisation automatically.} By default a run asks
+for ``auto''. The lead daemon switches a ring to fast synchronisation once,
+only when every rank has reported, the ring is not pinned to a size or in the
+middle of a join, the ring is within the validated size, and the predicted
+fast step, inflated by 10\%, beats both the exact split and one GPU. Every rank
+then switches at the same step boundary after the exact warm-up, at the
+interval for its size, and rank 0 prints one line saying why and that
+\texttt{-{}-ddp-sync exact} turns it off; a joining rank adopts the ring's
+mode. When a join takes an automatic fast ring past the validated size, the
+ring returns to exact synchronisation at the next epoch boundary; an explicit
+fast ring moves to the interval for its new size. A rank whose local round
+runs past four times the ring's median step time skips the round's remaining
+batches but counts them, so every rank stays on the same step, and the round
+is averaged by samples; since in simulation every skipped batch cost accuracy
+(a factor of 2 instead of 4: 28--30\% less time for 0.3--1.2\% more loss),
+the default only guards against a stalled rank.
 
 \textbf{When a rank dies.} Until October one failed rank failed the whole run,
 although the round already closed without it. The client now prints which rank
@@ -1880,9 +1993,40 @@ own time, pipedpeer's overhead and where the work ran
 \textbf{The web page and phones.} \texttt{pipedpeer ui} opens the page with the
 secret in the URL fragment, so nothing is typed. The page shows the nodes,
 recent runs from every machine, each run's timeline and where its work ran, and
-a run view with every step of every chunk. An Android phone joins as a
-pool-only worker under Termux, running parallel chunks with Termux's own Python
-and numpy and refusing whole jobs, without Nix or a sandbox.
+a run view with every step of every chunk.
+
+\textbf{Phones as full nodes.} An Android phone first joined as a pool-only
+worker under Termux, running parallel chunks with Termux's own Python. It can
+now be a full node. A set-up script installs Debian through
+\texttt{proot-distro} and single-user Nix inside it, creating \texttt{/nix}
+itself rather than calling \texttt{sudo}; where that is in place, every
+command is forwarded into the Debian root file system and the daemon runs
+there. At the pinned package set every ARM path of Python with numpy, pandas,
+torch, scikit-learn and joblib is in the public binary cache, so no binary
+cache of the project's own is needed: the runtime closure is 67 paths, about
+1.5\,GiB unpacked and 395\,MiB to download. Jobs run under Termux's own
+\texttt{proot}, since Debian's crashed when nested, with a memory limit of the
+job's memory plus 2\,GiB of address space (torch reserves more than it uses)
+and a lower priority; this is a weaker sandbox than \texttt{crun}'s, and
+\texttt{pipedpeer doctor} says so. Termux's \texttt{proot} does not translate
+the \texttt{fchmodat2} system call of Linux 6.6 and later, so the Nix installer
+failed inside it on such kernels; on those kernels set-up builds the upstream
+\texttt{proot} that has the fix, with a local patch that skips a chmod on
+\texttt{/proc} which always failed, until Termux ships it; with it, Nix inside
+\texttt{proot} built and imported torch and numpy in an x86-64 Termux. Closures go only to
+peers of the same architecture. For a peer of another architecture the node
+sends the job's package list, Python version and GPU flag instead; the phone
+validates the names, writes and builds its own flake in the background, one at
+a time, caches it by the flake's hash, and until it is built answers that it
+cannot run the job, never falling back to a Python without the job's
+libraries. Where \texttt{proot-distro} and Nix are absent the phone stays a
+Termux pool worker and logs why; that worker now also carries Termux's torch
+and scipy, and takes a chunk only after importing every module the chunk names,
+so a module that is installed but fails to load sends the chunk elsewhere.
+Under emulation (an ARM Termux image under qemu) a laboratory daemon sent a
+two-item torch training chunk to the Termux worker, which trained it. The full
+route --- \texttt{proot}, Nix and a per-job environment --- is covered by unit
+tests only and is first run on a real phone \todo{phone run}.
 
 \textbf{Speed.} Each change below has a before-and-after figure in
 Section~\ref{sec:measure}. Each node's number of chunks in flight follows its
@@ -2440,7 +2584,13 @@ the one command above.
 \textbf{Measurement} & \textbf{Result} & \textbf{Source} \\
 \midrule
 One GPU against a split: a cell where the split wins, and one where one GPU wins & \todo{ddp-switch} & emulated \\
-DiLoCo validation loss against one GPU per model, mean of 3 seeds and spread & \todo{diloco} & emulated \\
+Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time \todo{diloco} & emulated \\
+The DiLoCo paper's outer step (Nesterov 0.7, momentum 0.9) at our intervals & fails at every interval; small transformer $+21.7\%$ at 156 local steps & emulated \\
+Largest passing fast-sync interval by ring size & 2 ranks: 32; 3: 16; 4: 4; 5 or more: none & simulated \\
+Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & \todo{many-rank table} & simulated \\
+Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.09, 1.08\times$ (were $2.11, 1.35, 1.37, 1.31\times$) & emulated \\
+Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 256.9\,s, warm 603.7 to 67.3\,s; idle-host rerun \todo{bcast quiet} & emulated \\
+Phone as a full node through proot and Nix & \todo{phone run} & real \\
 Parallel map request body, before and after, 100\,MB payload & \todo{pool body} & emulated \\
 Workspace re-upload after editing one file & \todo{workspace} & emulated \\
 Environment seed to a node holding every path & \todo{seed} & emulated \\
@@ -2535,6 +2685,8 @@ Two GPUs in one machine & no available machine has a second usable GPU \\
 Peer discovery latency & containers share the host's loopback, so the figure would not be meaningful \\
 The seven demonstration workloads end to end & not run for the October pass; rehearsed in containers on 12 October (Section~\ref{sec:res-rehearsal}) \\
 Speedup, wireless networks, two physical GPUs and a college network's rules & the rehearsal ran in containers on one laptop; these come only from the venue \\
+A phone as a full node (\texttt{proot}, Nix, per-job environment) & \texttt{proot} cannot run under qemu-user, so the route is first run on a real phone \\
+Fast synchronisation at five to seven ranks & not simulated; eight and eleven were, and failed \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -2616,7 +2768,13 @@ first cluster with a GPU.
   run with a plain reason.
   \item \textbf{GPUs are NVIDIA only in practice}; AMD devices are detected but
   have no ROCm build of torch, and Intel integrated graphics never count.
-  \item \textbf{Phones take parallel chunks only}, through Termux, on the CPU.
+  \item \textbf{Phones are untested as full nodes.} The route through
+  \texttt{proot-distro} and Nix is covered by unit tests only; its sandbox is
+  \texttt{proot} with a memory limit, weaker than \texttt{crun}'s; and a phone
+  builds a job's environment itself, one job at a time, on the CPU.
+  \item \textbf{Fast synchronisation is for small rings.} Synchronising every
+  $H$ steps holds accuracy at two to four ranks; from five ranks no interval
+  passed in simulation, so automatic mode keeps such rings exact.
   \item \textbf{Dependencies outside the package set.} An import that neither the
   table nor the package set knows is reported before the run rather than dropped
   silently (Section~\ref{sec:env}), but the job still needs the user to name a
@@ -2738,6 +2896,11 @@ before; it is not suitable for a cluster of mutually untrusting participants.
   \item \textbf{Memory escalation} on out-of-memory (gradient accumulation,
   checkpointing, lower precision), and training that survives losing its lead
   machine.
+  \item \textbf{Fast synchronisation for larger rings.} Keeping accuracy past
+  four ranks --- a growing global batch, drift correction, compressed exact
+  synchronisation, or retuning the interval and outer step per ring size, offered
+  as opt-in tuning levels or as the default where they pass the same bar --- and
+  synchronising the model in staggered fragments (Streaming DiLoCo).
   \item \textbf{Additional runtimes} beyond Python.
   \item \textbf{A controlled multi-machine evaluation}, repeating the hand
   measurements of Chapter~\ref{chap:results} as a scripted experiment across
@@ -2892,6 +3055,10 @@ arXiv:2312.02471, 2023.
 \bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Networking}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
 
 \bibitem{rfc5705} E.~Rescorla, ``Keying material exporters for Transport Layer Security (TLS),'' RFC~5705, Internet Engineering Task Force, Mar. 2010.
+
+\bibitem{douillard2023diloco} A.~Douillard, Q.~Feng, A.~A.~Rusu, R.~Chhaparia, Y.~Donchev, A.~Kuncoro, M.~Ranzato, A.~Szlam, and J.~Shen, ``DiLoCo: Distributed low-communication training of language models,'' arXiv:2311.08105, 2023.
+
+\bibitem{lin2020localsgd} T.~Lin, S.~U.~Stich, K.~K.~Patel, and M.~Jaggi, ``Don't use large mini-batches, use local SGD,'' in \textit{Proc. 8th Int. Conf. Learning Representations (ICLR)}, 2020; arXiv:1808.07217.
 
 \end{thebibliography}
 

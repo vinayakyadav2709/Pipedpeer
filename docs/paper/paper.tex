@@ -209,8 +209,12 @@ subtract one another's reservations.
 
 Work is reserved by a three-phase lease. The concurrency and memory checks and
 the insertion occur under one lock, and the concurrency limit counts reserved and running leases together.
-A submitter that dies stops renewing and its slot is reclaimed; a worker that
-dies drops out of the healthy set and its job is rescheduled with back-off.
+The submitter renews every 30\,s, also while the environment builds and
+uploads; the plain run path once never renewed, so a build plus upload longer
+than the 5-minute expiry let the node reap the lease (an emulated 800\,kbit/s node
+now builds for 533\,s without expiry). A submitter that dies stops renewing and
+its slot is reclaimed; a worker that dies drops out of the healthy set and its
+job is rescheduled with back-off.
 
 \subsection{Environment Reproduction}
 \label{sec:env}
@@ -229,13 +233,29 @@ closure. If not, it lists the closure's store paths and asks which are missing,
 sending only those; adding one package to an environment a peer already held sent
 7 of 43 paths, 206.0\,MB reduced to 28.6\,MB. After an upload the worker pushes
 the closure to peers that cannot yet run it, since only those that can are
-offered distributed work. Between daemons the push is a signed binary cache
+offered distributed work. The upload waits for that push at most 60\,s; a peer
+still importing finishes in the background and joins the pool by itself, and a
+background send is cut only after 60\,s without progress rather than after a
+fixed total that a large closure on a slow link always exceeded. Between daemons the push is a signed binary cache
 produced and imported by Nix itself, signed with the sending node's key, so the
 receiver's signature policy applies. The archive names its signer, whose key the
 receiver checks against the signer's published identity before trusting it for
 that import; on a multi-user Nix, whose daemon ignores keys passed per command,
 a root-owned helper installed at set-up can only add or remove keys of the
 cluster's form. Caches are pruned least-recently-used.
+
+A phone can be a full node: under Termux, \texttt{proot-distro} provides a
+Debian root with single-user Nix, and jobs run under \texttt{proot} with a
+memory limit and lower priority --- a weaker sandbox than \texttt{crun}, which
+the diagnostics say. Every ARM path of the scientific set is in the public
+cache at the pin (a 395\,MiB download). Termux's \texttt{proot} lacks
+\texttt{fchmodat2} (Linux 6.6+), so on such kernels set-up builds the upstream
+fix. Closures go only to peers of the same architecture; a peer of another
+architecture receives the job's package list instead, builds its own
+environment once per flake hash, and refuses the job until it has. Without Nix
+the phone stays a Termux worker for parallel chunks, taking one only after
+importing every module it names. The full route has unit tests only and is
+first run on a real phone \todo{phone run}.
 
 \subsection{Joining Across Networks}
 \label{sec:nat}
@@ -291,6 +311,10 @@ fitted from the parts it has returned, and a device whose set-up alone exceeds
 the makespan is declined. On a lab cluster limited to 8, 2 and 1 CPUs, a
 headcount split was 1.6$\times$ slower than not distributing; the measured split
 declined the 1-CPU worker and took 2.87\,s against 3.61\,s.
+A slow peer's parts used to lose every race to a backup copy, so its estimate
+stayed fast; a part unfinished past its prediction now counts as taking at least
+that long, a part waiting or overdue is copied to a free peer, and a chunk too
+small to split goes to the peer predicted to finish first.
 
 Grouping and joining hash rows by key, so each key is complete on one node and
 any aggregation is exact in value with no combiner; row order of joins is not
@@ -311,6 +335,22 @@ the next epoch boundary from the lead's model and optimiser snapshot, fetched
 through the lead daemon, and the rendezvous hash moves about $1/n$ of the
 samples to it; this needs a script that uses a data loader. Training starts
 behind a barrier, so no rank trains while another still receives its closure.
+
+A fast mode synchronises every $H$ steps, after DiLoCo
+\cite{douillard2023diloco} and post-local SGD \cite{lin2020localsgd}: an
+exact warm-up, then local steps whose weights are averaged by samples, with
+optimiser moments averaged every tenth round. It never changes epochs, batch or
+learning rate, and must keep validation loss at most 1\% above one device's
+(mean of three seeds, every test model; lower is not a failure). DiLoCo's
+outer Nesterov step (lr 0.7, momentum 0.9) settles at $0.7/(1-0.9)=7$ times
+the averaged change; tuned for syncs every few hundred steps, it multiplied
+the script's learning rate by seven at our 2--64 and failed at every interval
+tried. Plain averaging (outer lr 1, no momentum) passes, but less well as the
+ring grows, so $H$ follows the ring size (Section~\ref{sec:emulated}) and no
+interval is used past four ranks. By default the lead daemon switches a ring to
+fast mode once, when the predicted fast step with a 10\% margin beats both the
+exact split and one GPU; every rank switches at one step boundary, rank 0 says
+why, and a join past the validated size returns the ring to exact sync.
 
 \subsection{Operating a Run}
 \label{sec:ops}
@@ -478,8 +518,8 @@ on a 54\,Mbit/s link did not beat one machine (fp16 26\% slower, int8 about
 level) --- which the system itself reports at the end of each run, and which
 now leads it to fall back to one machine on its own. Emulated results for the
 changes made after the college demonstration --- the one-GPU-or-split decision
-\todo{ddp-switch}, DiLoCo's loss against one GPU \todo{diloco}, the parallel
-map's request body \todo{pool body}, recovery from an address change
+\todo{ddp-switch}, fast synchronisation's wall time (its accuracy is in
+Section~\ref{sec:emulated}), the parallel map's request body \todo{pool body}, recovery from an address change
 \todo{test-net} --- and real runs between two laptops over Tailscale
 \todo{tailscale} are to be added.
 
@@ -510,6 +550,29 @@ Proven in production       & \textbf{no} & yes & yes & yes & yes \\
 \bottomrule
 \end{tabularx}
 \end{table}
+
+\subsection{Emulated and simulated results}
+\label{sec:emulated}
+
+\textbf{Fast synchronisation.} In two emulated containers on LAN and Wi-Fi
+profiles, three seeds each, plain averaging every 64 steps after a 10-step
+warm-up landed $+0.64/+0.61\%$, $-2.14/-2.09\%$ and $+0.18/+0.50\%$ from one
+device on the GPU demo's perceptron, the training demo's, and a small
+transformer, each within exact sync's own spread, sending 9--15$\times$ fewer
+bytes per rank; wall time is pending \todo{diloco}. With the paper's outer
+step the transformer was $+21.7\%$ even at 156 local steps. In simulation the
+largest interval passing on every model was 32 at two ranks, 16 at three and 4
+at four; at eight ranks the transformer failed at every interval down to 2, so
+none is used from five ranks. Accuracy falling with rank count is a finding
+for a system aimed at many small machines; remedies from the literature are
+simulated in \todo{many-rank table}.
+
+\textbf{Slow peers and slow links.} With one peer at a tenth of the CPU, four
+consecutive runs took 1.60, 1.25, 1.09 and 1.08$\times$ an equal cluster's
+time, against 2.11, 1.35, 1.37 and 1.31$\times$ before. With the second of
+two nodes held to 800\,kbit/s, a cold run fell from 1000.9\,s to 256.9\,s and
+a warm one from 603.7\,s to 67.3\,s once the job no longer waited for the
+slowest closure import; idle-host reruns \todo{bcast quiet}.
 
 \subsection{Threats to validity}
 
@@ -577,6 +640,10 @@ a controlled multi-machine evaluation.
 \bibitem{rfc5705} E.~Rescorla, ``Keying material exporters for Transport Layer Security (TLS),'' RFC~5705, IETF, Mar. 2010.
 
 \bibitem{thaler1998rendezvous} D.~G.~Thaler and C.~V.~Ravishankar, ``Using name-based mappings to increase hit rates,'' \textit{IEEE/ACM Trans. Netw.}, vol.~6, no.~1, pp.~1--14, Feb. 1998.
+
+\bibitem{douillard2023diloco} A.~Douillard et al., ``DiLoCo: Distributed low-communication training of language models,'' arXiv:2311.08105, 2023.
+
+\bibitem{lin2020localsgd} T.~Lin, S.~U.~Stich, K.~K.~Patel, and M.~Jaggi, ``Don't use large mini-batches, use local SGD,'' in \textit{Proc. ICLR}, 2020.
 
 \end{thebibliography}
 
