@@ -125,7 +125,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
 .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 
 .gantt { position: relative; }
-.gantt .row { display: grid; grid-template-columns: 150px 80px minmax(0, 1fr) 64px; align-items: center; gap: 8px; height: 28px; }
+.gantt .row { display: grid; grid-template-columns: 150px 170px minmax(0, 1fr) 64px; align-items: center; gap: 8px; height: 28px; }
 .gantt .name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gantt .where { color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; }
 .gantt .lane { position: relative; height: 26px; border-left: 1px solid var(--axis); }
@@ -133,7 +133,7 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
 .gantt .bar { position: absolute; top: 7px; height: 12px; border-radius: 0 4px 4px 0; min-width: 2px; }
 .gantt .bar.hit::after { content: ""; position: absolute; inset: -7px -4px; }
 .gantt .dur { text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
-.gantt .axis { display: grid; grid-template-columns: 150px 80px minmax(0, 1fr) 64px; gap: 8px; height: 18px; }
+.gantt .axis { display: grid; grid-template-columns: 150px 170px minmax(0, 1fr) 64px; gap: 8px; height: 18px; }
 .gantt .axis .ticks { position: relative; color: var(--muted); font-size: 11px; }
 .gantt .axis .ticks span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 .gantt .total { margin-top: 6px; color: var(--ink-2); font-size: 13px; }
@@ -512,6 +512,15 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     return 10 * p;
   }
 
+  // A stage's `where` is "local" or a node id: show the machine's name, "(this machine)" for self,
+  // and the short id only when no row names it.
+  function whereName(w) {
+    const nodes = snap.nodes || [];
+    const n = w === "local" ? nodes.find((x) => x.source === "self") : nodes.find((x) => w && (x.node_id === w || x.node_id.startsWith(w)));
+    if (!n) return w === "local" ? "this machine" : short(w);
+    return (n.hostname || n.host || short(n.node_id)) + (n.source === "self" ? " (this machine)" : "");
+  }
+
   function timelineHTML(j) {
     const st = (j.stages || []).map((s) => ({ ...s, t: Date.parse(s.at) })).filter((s) => !isNaN(s.t));
     if (!st.length) return `<h3>Where the time went</h3><p class="dim">No timeline recorded for this run.</p>`;
@@ -525,10 +534,10 @@ tbody.clickable tr.sel { background: var(--accent-wash); }
     const rows = st.map((s) => {
       const local = s.where === "local";
       const left = ((s.t - t0) / span) * 100, width = (s.ms / span) * 100;
-      const tipHTML = `<b>${esc(s.name)}</b><br><span class='m'>${local ? "this machine" : "node " + esc(s.where)}<br>starts +${esc(fmtMs(s.t - t0))} · takes ${esc(fmtMs(s.ms))}</span>`;
+      const tipHTML = `<b>${esc(s.name)}</b><br><span class='m'>${esc(whereName(s.where))}<br>starts +${esc(fmtMs(s.t - t0))} · takes ${esc(fmtMs(s.ms))}</span>`;
       return `<div class="row">
         <div class="name">${esc(s.name)}</div>
-        <div class="where">${esc(local ? "local" : s.where)}</div>
+        <div class="where" title="${esc(whereName(s.where))}">${esc(whereName(s.where))}</div>
         <div class="lane">${grid}<span class="bar hit" style="left:${left}%;width:${width}%;background:var(${local ? "--here" : "--there"})" data-tip="${esc(tipHTML)}"></span></div>
         <div class="dur">${esc(fmtMs(s.ms))}</div>
       </div>`;
