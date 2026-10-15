@@ -244,7 +244,7 @@ os.environ["PIPEDPEER_STORE_PATH"] = ""
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc, ddp_sampler
 # pandas and numpy are imported by the scripts that use them, not here. This
 # preamble is shared by every test that needs a fake daemon, and importing them
 # unconditionally made the cost-model and numpy tests skip for want of pandas
@@ -553,7 +553,7 @@ func TestShimNumPyInterception(t *testing.T) {
 import time
 import base64
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc, ddp_sampler
 import numpy as np
 
 core._ENABLED = True
@@ -606,7 +606,7 @@ func TestShimNumPyRespectsTheCostModelsNo(t *testing.T) {
 	runShimPythonEnv(t, "t8b", shimFakeDaemon+`
 import time
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc, ddp_sampler
 import numpy as np
 
 core._ENABLED = True
@@ -657,7 +657,7 @@ func TestShimForceDistributeBypassesCostModel(t *testing.T) {
 	script := filepath.Join(dir, "probe.py")
 	if err := os.WriteFile(script, []byte(`
 import sitecustomize as sc
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc, ddp_sampler
 
 # 1 KB of work with modest flops: auto mode must refuse, force must accept.
 assert transfer._should_spill(1024, 4) is True, "_should_spill ignored force"
@@ -706,7 +706,7 @@ func TestShimDoesNotImportHeavyLibsAtStartup(t *testing.T) {
 import sys
 assert sys.modules.get("sitecustomize") is not None, "shim did not load"
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc, ddp_sampler
 assert core._ENABLED, "shim not enabled; this test would be vacuous"
 for mod in ("torch", "pandas", "numpy", "joblib", "sklearn"):
     assert mod not in sys.modules, mod + " was imported at startup"
@@ -724,7 +724,7 @@ func TestShimPatchesOnFirstImport(t *testing.T) {
 	src := `
 import sys
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pandas_ooc, ddp_sampler
 assert core._ENABLED, "shim not enabled; this test would be vacuous"
 assert "numpy" not in sys.modules, "numpy imported before the script asked"
 import numpy as np
