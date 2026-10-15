@@ -13,6 +13,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/tarcodec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -643,11 +644,11 @@ func ignoreExcludes(line string) []string {
 }
 
 // CreateWorkspaceTar creates a tarball of the project directory at destPath.
-// It writes a sitecustomize.py into .pipedpeer/shim/ inside the archive, so a
-// node that enables the interception shim can put that dir on PYTHONPATH and
-// Python auto-imports it before the user's first line. shimContent empty means
-// no shim is embedded.
-func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
+// It adds the shim's files (sitecustomize.py and its package) under
+// .pipedpeer/shim/ inside the archive, so a node that enables the
+// interception shim can put that dir on PYTHONPATH and Python auto-imports it
+// before the user's first line. A nil shim means no shim is embedded.
+func CreateWorkspaceTar(projectDir, destPath string, shim fs.FS) error {
 	ignoreFile := filepath.Join(projectDir, ".pipedpeerignore")
 
 	args := []string{"--exclude=.git", "--exclude=__pycache__", "--exclude=.venv",
@@ -664,8 +665,8 @@ func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 		return err
 	}
 
-	if shimContent != "" {
-		if err := appendShim(destPath, shimContent); err != nil {
+	if shim != nil {
+		if err := appendShim(destPath, shim); err != nil {
 			return fmt.Errorf("append shim: %w", err)
 		}
 	}
@@ -677,23 +678,21 @@ func CreateWorkspaceTar(projectDir, destPath string, shimContent string) error {
 	return tarcodec.CompressFile(destPath, tarcodec.CompressFloor)
 }
 
-// appendShim adds .pipedpeer/shim/sitecustomize.py as a member of an existing
-// tar archive. It stages the file in a temp dir and uses GNU tar's transform
-// to re-home it, so the user's project directory is never touched.
-func appendShim(destPath, content string) error {
+// appendShim adds the shim's files as .pipedpeer/shim/... members of an
+// existing tar archive. It stages them in a temp dir, so the user's project
+// directory is never touched.
+func appendShim(destPath string, shim fs.FS) error {
 	stageDir, err := userdir.Scratch("shim-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(stageDir)
 
-	stage := filepath.Join(stageDir, "sitecustomize.py")
-	if err := os.WriteFile(stage, []byte(content), 0755); err != nil {
+	if err := os.CopyFS(filepath.Join(stageDir, ".pipedpeer", "shim"), shim); err != nil {
 		return err
 	}
 
-	cmd := exec.Command("tar", "--append", "--file="+destPath,
-		"--transform=s,.*,.pipedpeer/shim/sitecustomize.py,", "-C", stageDir, "sitecustomize.py")
+	cmd := exec.Command("tar", "--append", "--file="+destPath, "-C", stageDir, ".pipedpeer")
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

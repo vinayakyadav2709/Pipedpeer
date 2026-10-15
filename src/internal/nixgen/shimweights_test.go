@@ -12,6 +12,7 @@ import "testing"
 func TestWeightedShardsPartitionTheDataset(t *testing.T) {
 	runShimPython(t, "wshard", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 n = 1000
 weights = [0.5, 0.3, 0.2]
@@ -19,7 +20,7 @@ seen = []
 sizes = []
 steps = []
 for rank in range(3):
-    s = shim._WeightedShardSampler(n, weights, rank, False, 100, 3)
+    s = ddp._WeightedShardSampler(n, weights, rank, False, 100, 3)
     idx = list(s)
     sizes.append(len(idx))
     steps.append(s.steps)
@@ -29,7 +30,7 @@ for rank in range(3):
 # Disjoint, and covering everything but the sub-global-batch remainder that
 # drop_last discards in any DDP setup.
 assert len(set(seen)) == len(seen), "shards overlap"
-assert len(seen) > n - sum(shim._weighted_batches(weights, 100, 3)), (
+assert len(seen) > n - sum(ddp._weighted_batches(weights, 100, 3)), (
     "more than one global batch was dropped: %d of %d" % (len(seen), n))
 assert len(set(steps)) == 1, "ranks run different step counts: %s" % steps
 # Shares are followed: 5:3:2 within a sample of rounding.
@@ -50,6 +51,7 @@ print("WSHARD-OK")
 func TestEqualStepsAcrossUnevenShares(t *testing.T) {
 	runShimPython(t, "wround", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 # The first entry is the case a live run failed on, verbatim: 60000 samples,
 # a 512 batch, and the shares placement measured for a 16/8/2-core ring. It
@@ -64,7 +66,7 @@ for n, weights, base in cases:
         seen = []
         steps = []
         for rank in range(3):
-            s = shim._WeightedShardSampler(n, weights, rank, False, base, 3)
+            s = ddp._WeightedShardSampler(n, weights, rank, False, base, 3)
             seen.extend(list(s))
             steps.append(s.steps)
         assert len(set(seen)) == len(seen), (
@@ -74,7 +76,7 @@ for n, weights, base in cases:
             "barrier, so ranks that finish early are left waiting"
             % (n, weights, steps))
         dropped = n - len(seen)
-        globalbatch = sum(shim._weighted_batches(weights, base, 3))
+        globalbatch = sum(ddp._weighted_batches(weights, base, 3))
         assert dropped < globalbatch, (
             "n=%d weights=%s dropped %d samples, more than one global batch "
             "of %d" % (n, weights, dropped, globalbatch))
@@ -88,20 +90,21 @@ print("WROUND-OK")
 func TestShuffledShardsStayDisjoint(t *testing.T) {
 	runShimPython(t, "wshuffle", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 n = 500
 weights = [0.6, 0.4]
 for epoch in (0, 1, 7):
     seen = []
     for rank in range(2):
-        s = shim._WeightedShardSampler(n, weights, rank, True, 50, 2)
+        s = ddp._WeightedShardSampler(n, weights, rank, True, 50, 2)
         s.set_epoch(epoch)
         seen.extend(list(s))
     assert len(set(seen)) == len(seen), "epoch %d shards overlap" % epoch
 
 # A different epoch must actually reshuffle, or set_epoch is decoration.
-a = shim._WeightedShardSampler(n, weights, 0, True, 50, 2); a.set_epoch(0)
-b = shim._WeightedShardSampler(n, weights, 0, True, 50, 2); b.set_epoch(1)
+a = ddp._WeightedShardSampler(n, weights, 0, True, 50, 2); a.set_epoch(0)
+b = ddp._WeightedShardSampler(n, weights, 0, True, 50, 2); b.set_epoch(1)
 assert list(a) != list(b), "set_epoch did not change the order"
 print("WSHUFFLE-OK")
 `, "WSHUFFLE-OK")
@@ -112,24 +115,25 @@ print("WSHUFFLE-OK")
 func TestEqualSharesAreTreatedAsNoShares(t *testing.T) {
 	runShimPython(t, "wparse", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
-assert shim._parse_weights("", 2) is None
-assert shim._parse_weights("0.5,0.5", 2) is None, "exactly even should be no-op"
-assert shim._parse_weights("0.505,0.495", 2) is None, "within noise should be no-op"
-assert shim._parse_weights("0.5,0.5", 1) is None, "a ring of one has no shares"
+assert ddp._parse_weights("", 2) is None
+assert ddp._parse_weights("0.5,0.5", 2) is None, "exactly even should be no-op"
+assert ddp._parse_weights("0.505,0.495", 2) is None, "within noise should be no-op"
+assert ddp._parse_weights("0.5,0.5", 1) is None, "a ring of one has no shares"
 
-w = shim._parse_weights("0.75,0.25", 2)
+w = ddp._parse_weights("0.75,0.25", 2)
 assert w is not None and abs(w[0] - 0.75) < 1e-9, w
 
 # Unnormalised input is normalised rather than rejected.
-w = shim._parse_weights("3,1", 2)
+w = ddp._parse_weights("3,1", 2)
 assert w is not None and abs(w[0] - 0.75) < 1e-9, w
 
 # Nonsense is refused, never guessed at.
-assert shim._parse_weights("0.5", 2) is None, "wrong count accepted"
-assert shim._parse_weights("0.5,0", 2) is None, "zero share accepted"
-assert shim._parse_weights("0.5,-0.5", 2) is None, "negative share accepted"
-assert shim._parse_weights("half,rest", 2) is None, "non-numeric accepted"
+assert ddp._parse_weights("0.5", 2) is None, "wrong count accepted"
+assert ddp._parse_weights("0.5,0", 2) is None, "zero share accepted"
+assert ddp._parse_weights("0.5,-0.5", 2) is None, "negative share accepted"
+assert ddp._parse_weights("half,rest", 2) is None, "non-numeric accepted"
 print("WPARSE-OK")
 `, "WPARSE-OK")
 }
@@ -139,9 +143,10 @@ print("WPARSE-OK")
 func TestAShareTooSmallForOneSampleIsRefused(t *testing.T) {
 	runShimPython(t, "wtiny", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 try:
-    shim._WeightedShardSampler(10, [0.99, 0.01], 1, False, 512, 2)
+    ddp._WeightedShardSampler(10, [0.99, 0.01], 1, False, 512, 2)
 except ValueError as e:
     assert "do not make one step" in str(e), e
 else:
@@ -219,6 +224,7 @@ print("BATCHHOOK-OK")
 func TestTheReportedStepTimeTracksRecentSteps(t *testing.T) {
 	runShimPython(t, "recentstep", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 WINDOW = 20
 recent = []
@@ -228,16 +234,16 @@ def step(seconds):
     global total, count
     total += seconds
     count += 1
-    shim._push_window(recent, seconds, WINDOW)
+    ddp._push_window(recent, seconds, WINDOW)
 
 for _ in range(200):
     step(0.010)                      # 10 ms a step
-assert abs(shim._recent_mean_ms(recent, total, count) - 10) < 0.5
+assert abs(ddp._recent_mean_ms(recent, total, count) - 10) < 0.5
 
 for _ in range(WINDOW):
     step(0.100)                      # throttled: ten times slower
 
-reported = shim._recent_mean_ms(recent, total, count)
+reported = ddp._recent_mean_ms(recent, total, count)
 cumulative = 1000.0 * total / count
 
 assert abs(reported - 100) < 1, (
@@ -254,17 +260,17 @@ assert reported > cumulative * 3, (
 # And it recovers just as fast, which is the half a cumulative mean never does.
 for _ in range(WINDOW):
     step(0.010)
-assert abs(shim._recent_mean_ms(recent, total, count) - 10) < 1, (
+assert abs(ddp._recent_mean_ms(recent, total, count) - 10) < 1, (
     "a machine that recovered still reports %.1f ms"
-    % shim._recent_mean_ms(recent, total, count))
+    % ddp._recent_mean_ms(recent, total, count))
 
 # The window is bounded, or a long run keeps every step it ever took.
 assert len(recent) == WINDOW, len(recent)
 
 # With nothing recent, the cumulative figure is used rather than zero, which
 # would read as an infinitely fast rank.
-assert abs(shim._recent_mean_ms([], 2.0, 100) - 20) < 1e-9
-assert shim._recent_mean_ms([], 0.0, 0) == 0.0
+assert abs(ddp._recent_mean_ms([], 2.0, 100) - 20) < 1e-9
+assert ddp._recent_mean_ms([], 0.0, 0) == 0.0
 print("RECENTSTEP-OK")
 `, "RECENTSTEP-OK")
 }
@@ -276,13 +282,14 @@ print("RECENTSTEP-OK")
 func TestALeavingRankMovesOnlyItsOwnSamples(t *testing.T) {
 	runShimPython(t, "wleave", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 n, base = 6000, 32
-before = [set(shim._WeightedShardSampler(n, [1/3, 1/3, 1/3], r, False, base, 3)) for r in range(3)]
-after = [set(shim._WeightedShardSampler(n, [0.5, 0.0, 0.5], r, False, base, 3)) if r != 1 else set()
+before = [set(ddp._WeightedShardSampler(n, [1/3, 1/3, 1/3], r, False, base, 3)) for r in range(3)]
+after = [set(ddp._WeightedShardSampler(n, [0.5, 0.0, 0.5], r, False, base, 3)) if r != 1 else set()
          for r in range(3)]
-s1 = shim._WeightedShardSampler(n, [0.5, 0.0, 0.5], 0, False, base, 3)
-s2 = shim._WeightedShardSampler(n, [0.5, 0.0, 0.5], 2, False, base, 3)
+s1 = ddp._WeightedShardSampler(n, [0.5, 0.0, 0.5], 0, False, base, 3)
+s2 = ddp._WeightedShardSampler(n, [0.5, 0.0, 0.5], 2, False, base, 3)
 assert s1.steps == s2.steps, "survivors run different step counts"
 assert not (after[0] & after[2]), "survivor shards overlap"
 for r in (0, 2):
@@ -301,10 +308,11 @@ print("WLEAVE-OK")
 func TestARankJoiningMovesOnlyItsShare(t *testing.T) {
 	runShimPython(t, "wjoin", `
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 n = 6000
-before = [set(shim._WeightedShardSampler(n, [0.5, 0.5], r, False, 50, 2)) for r in range(2)]
-after = [set(shim._WeightedShardSampler(n, [1/3, 1/3, 1/3], r, False, 50, 3)) for r in range(3)]
+before = [set(ddp._WeightedShardSampler(n, [0.5, 0.5], r, False, 50, 2)) for r in range(2)]
+after = [set(ddp._WeightedShardSampler(n, [1/3, 1/3, 1/3], r, False, 50, 3)) for r in range(3)]
 assert not (after[0] & after[1]) and not (after[2] & (after[0] | after[1])), "shards overlap"
 for r in range(2):
     kept = len(after[r] & before[r]) / len(after[r])

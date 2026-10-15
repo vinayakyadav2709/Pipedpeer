@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -49,7 +50,7 @@ type EnvOptions struct {
 	PythonVersion string
 	Pkgs          []string
 	// Intercept embeds the sitecustomize shim into the workspace so parallel
-	// primitives route through the cluster (see nixgen/shim.go).
+	// primitives route through the cluster (see nixgen/shim/).
 	Intercept bool
 	// GPU selects the CUDA build of torch. Off, the closure is several
 	// gigabytes smaller and comes from the binary cache instead of a
@@ -173,11 +174,11 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	// entirely), so a 6GB gzip export doesn't run on every repeated run.
 
 	env.WorkspaceTar = filepath.Join(tmpDir, "workspace.tar")
-	shimContent := ""
+	var shim fs.FS
 	if opts.Intercept {
-		shimContent = nixgen.ShimSitecustomize
+		shim = nixgen.ShimDir()
 	}
-	if err := daemonctl.CreateWorkspaceTar(projectRoot, env.WorkspaceTar, shimContent); err != nil {
+	if err := daemonctl.CreateWorkspaceTar(projectRoot, env.WorkspaceTar, shim); err != nil {
 		env.Close()
 		return nil, fmt.Errorf("workspace tar failed: %v", err)
 	}

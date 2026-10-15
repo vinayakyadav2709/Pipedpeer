@@ -27,7 +27,7 @@ func TestDDPGradientsShipAsFloat16(t *testing.T) {
 		t.Skipf("torch not available: %s", out)
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,6 +41,7 @@ seen = {"bytes": 0, "dtypes": []}
 
 if __name__ == "__main__":
     import sitecustomize as shim
+    from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
     payloads = []
     def fake_exchange(blob):

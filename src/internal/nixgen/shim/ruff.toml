@@ -1,0 +1,3 @@
+# pyflakes + pycodestyle errors only (ruff's default set); no formatter rules.
+[lint]
+select = ["E4", "E7", "E9", "F"]

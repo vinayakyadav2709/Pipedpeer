@@ -13,6 +13,7 @@ func TestHashOwnersMatchesTheGreedyLoop(t *testing.T) {
 import random, time
 import numpy as np
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 def reference(n, weights, quotas, order=None):
     live = [r for r, w in enumerate(weights) if w > 0 and quotas[r] > 0]
@@ -20,7 +21,7 @@ def reference(n, weights, quotas, order=None):
     if not live:
         return owners
     idx = np.arange(n, dtype=np.uint64)
-    scores = np.stack([shim._hash_score(idx, r, weights[r]) for r in live])
+    scores = np.stack([ddp._hash_score(idx, r, weights[r]) for r in live])
     prefs = np.argsort(-scores, axis=0).T.tolist()
     room = [quotas[r] for r in live]
     left = sum(room)
@@ -45,7 +46,7 @@ cases = [
     (100, [0.5, 0.5], 50),
 ]
 for n, weights, base in cases:
-    batches = shim._weighted_batches(weights, base, len(weights))
+    batches = ddp._weighted_batches(weights, base, len(weights))
     steps = n // sum(batches)
     quotas = [steps * b for b in batches]
     for shuffled in (False, True):
@@ -53,7 +54,7 @@ for n, weights, base in cases:
         if shuffled:
             order = list(range(n))
             random.Random(n).shuffle(order)
-        got = shim._hash_owners(n, weights, quotas, order)
+        got = ddp._hash_owners(n, weights, quotas, order)
         want = reference(n, weights, quotas, order)
         assert got == want, (n, weights, base, shuffled)
         assert [len(o) for o in got] == [q if w > 0 else 0 for q, w in zip(quotas, weights)]
@@ -63,7 +64,7 @@ w = [0.25] * 4
 quotas = [n // 4 - 100] * 4
 order = np.random.default_rng(1).permutation(n).tolist()
 t0 = time.monotonic()
-got = shim._hash_owners(n, w, quotas, order)
+got = ddp._hash_owners(n, w, quotas, order)
 took = time.monotonic() - t0
 assert [len(o) for o in got] == quotas
 print("1M samples x 4 ranks: %.2fs" % took)
