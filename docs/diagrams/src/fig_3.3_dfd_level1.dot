@@ -1,49 +1,49 @@
-// Figure 3.3 - Level 1 DFD (decomposition of the daemon).
-// Process 6 is placed before 7 so the numbering matches the reading order, and
-// the peer-facing edges leave from the right so none has to double back.
+// Figure 3.3 - Level 1 DFD: seven processes over four data stores.
+// Laid out as a grid (newrank + rank=same rows) so the text prints at 8 pt or
+// more at text width.
 digraph DFD1 {
-  rankdir=TB; bgcolor="white"; nodesep=0.28; ranksep=0.42;
-  node [fontname="Helvetica", fontsize=19, shape=box, style="rounded,filled",
-        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
-  edge [fontname="Helvetica", fontsize=17, color="#555555"];
+  rankdir=TB; newrank=true; bgcolor="white"; nodesep=0.30; ranksep=0.34;
+  node [fontname="Helvetica", fontsize=14, shape=box, style="rounded,filled",
+        fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.12,0.07"];
+  edge [fontname="Helvetica", fontsize=13, color="#555555"];
 
-  user  [label="User", shape=box, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
+  user  [label="User", style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
   peers [label="Peer nodes\nand phones", shape=box3d, style=filled, fillcolor="#efedf7", color="#5b4b8a", penwidth=1.5];
-  intro [label="Introducer", shape=box, style="filled,dashed", fillcolor="#f5f5f5", color="#888888", penwidth=1.5];
+  intro [label="Introducer", style="filled,dashed", fillcolor="#f5f5f5", color="#888888", penwidth=1.5];
 
   p1 [label="1  Resolve\nenvironment"];
   p2 [label="2  Find and\nlink peers"];
   p3 [label="3  Place task\nfilter, score, lease"];
-  p4 [label="4  Transfer\nmissing paths, workspace"];
+  p4 [label="4  Transfer\nmissing paths"];
   p5 [label="5  Execute\nsandboxed, capped"];
-  p6 [label="6  Distribute\nparallel work, sync\ntraining ranks", fillcolor="#fbe9e9", color="#a33333"];
+  p6 [label="6  Distribute\nparallel work", fillcolor="#fbe9e9", color="#a33333"];
   p7 [label="7  Return\nresults"];
 
-  d1 [label="D1   Node store", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
-  d2 [label="D2   Closure cache", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
-  d3 [label="D3   Job history", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
-  d4 [label="D4   Identity and trust\nnode key, pins, trusted keys", shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
+  node [shape=box, style=filled, fillcolor="#faf3dd", color="#8a6d1f"];
+  d1 [label="D1  Node store"];
+  d2 [label="D2  Closure cache"];
+  d3 [label="D3  Job history"];
+  d4 [label="D4  Keys and pins"];
 
-  user -> p1 [label="  script  "];
-  p1 -> p3 [label="  store path  "];
-  p2 -> d1 [label="  upsert  "];
-  d4 -> p2 [label="  sign hello  ", style=dashed];
-  d1 -> p3 [label="  healthy peers  "];
-  p3 -> p4 [label="  lease  "];
-  p4 -> d2 [label="  import  "];
-  d4 -> p4 [label="  verify  ", style=dashed];
+  { rank=same; user -> p1 -> p2 -> intro [style=invis]; }
+  { rank=same; p3 -> d1 -> d4 [style=invis]; }
+  { rank=same; p4 -> d2 -> peers [style=invis]; }
+  { rank=same; p7 -> p5 -> p6 [style=invis]; }
+
+  user -> p1 [label="script"];
+  p1 -> p3 [label="store path"];
+  p2 -> d1 [label="upsert"];
+  p2 -> intro [label="register", style=dashed];
+  d4 -> p2 [label="sign", style=dashed];
+  d1 -> p3 [label="peers"];
+  p3 -> p4 [label="lease"];
+  p4 -> d2 [label="import"];
+  d4 -> p4 [label="verify", style=dashed];
   p4 -> p5;
-  p5 -> p6 [label="  intercepted calls  ", style=dashed];
-  p6 -> p7 [style=invis];
-  p5 -> p7 [label="  exit  "];
-  p7 -> user [label="  result files  "];
-  p7 -> d3 [label="  record  ", style=dashed];
-
-  // Everything that talks to a peer leaves from the right-hand column.
-  p2 -> intro [label="  register  ", style=dashed];
-  p2 -> peers [label="  probe, punch  ", style=dashed];
-  d2 -> peers [label="  signed closure  ", style=dashed];
-  p6 -> peers [label="  chunks, gradients\l  or weights\l", style=dashed];
-
-  { rank=same; p6; p7; }
+  p5 -> p6 [label="calls", style=dashed];
+  p7 -> p5 [label="exit", dir=back];
+  p7 -> user [label="results", constraint=false];
+  p7 -> d3 [label="record", style=dashed];
+  d2 -> peers [label="closure", style=dashed];
+  p6 -> peers [label="chunks", style=dashed];
 }

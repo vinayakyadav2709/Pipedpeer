@@ -14,7 +14,7 @@
 \usepackage[table]{xcolor}
 \usepackage{graphicx}
 \usepackage{float}
-\usepackage[section]{placeins} % floats stay inside their own section
+\usepackage{placeins} % \FloatBarrier where a float must not drift
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{array}
@@ -37,10 +37,12 @@
 \usepackage{url}
 \usepackage{microtype}
 \usepackage{etoolbox}
+\usepackage{multicol}
 \usepackage{hyperref}
 
 % -- Fields the authors fill before printing (red until filled) --------------
 \newcommand{\fillin}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
 
 % -- Hyperref ----------------------------------------------------------------
 \hypersetup{
@@ -85,7 +87,13 @@
 % -- Table helpers -----------------------------------------------------------
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
-\setlength{\emergencystretch}{2em} % let TeX stretch a line rather than run tt words into the margin
+\setlength{\emergencystretch}{2em}
+% Let a figure share a page with text rather than sit alone on a mostly empty
+% float page.
+\renewcommand{\topfraction}{0.85}
+\renewcommand{\bottomfraction}{0.6}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.75} % let TeX stretch a line rather than run tt words into the margin
 
 % -- Colours -----------------------------------------------------------------
 \definecolor{headerblue}{RGB}{30,80,160}
@@ -115,8 +123,7 @@
 \newcommand{\hodname}{Dr. Sudhir Dhage}
 \newcommand{\principalname}{Dr. Bhalchandra Chaudhari}
 \newcommand{\publicationstatus}{\fillin{publication status}}% FILL-AT-SUBMISSION
-% Institute logo: place spitlogo.pdf (or .png) in docs/report.
-\newcommand{\institutelogo}{\IfFileExists{spitlogo.pdf}{\includegraphics[scale=0.8]{spitlogo.pdf}}{\IfFileExists{spitlogo.png}{\includegraphics[width=3cm]{spitlogo.png}}{\fillin{institute logo}}}}
+\newcommand{\institutelogo}{\includegraphics[scale=0.8]{spitlogo.pdf}}
 
 \newcommand{\figpath}[1]{../diagrams/#1}
 

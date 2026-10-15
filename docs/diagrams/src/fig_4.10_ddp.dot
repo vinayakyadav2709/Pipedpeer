@@ -3,7 +3,7 @@
 // mode (DiLoCo-style) averages weights every H steps; auto switches to fast
 // once when it is predicted faster. The explanatory note lives in the caption.
 digraph DDP {
-  rankdir=TB; bgcolor="white"; nodesep=0.55; ranksep=0.60;
+  rankdir=TB; bgcolor="white"; nodesep=0.35; ranksep=0.45;
   node [fontname="Helvetica", fontsize=15, shape=box, style="rounded,filled",
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
   edge [fontname="Helvetica", fontsize=14, color="#555555"];
@@ -12,10 +12,10 @@ digraph DDP {
   r1 [label="Rank 1\nshard and batch\nsized by its share"];
   r2 [label="Rank 2, on another network\nover the QUIC link\nsized by its share"];
 
-  board [label="Lead node daemon, on the ordinary daemon port\naverages in float64, weighted by samples: sum(n_i x_i) / sum(n_i)\nexact: gradients every step, int8 with error feedback\nfast (DiLoCo): weights every H steps, H by ring size\nauto: exact warm-up, then fast once if predicted faster",
+  board [label=<Lead node daemon, on the ordinary daemon port<br/>averages in float64, weighted by samples: &Sigma;<sub>i</sub> n<sub>i</sub>x<sub>i</sub> / &Sigma;<sub>i</sub> n<sub>i</sub><br/>exact: gradients every step, int8 with error feedback<br/>fast (DiLoCo): weights every <i>H</i> steps, <i>H</i> by ring size<br/>auto: exact warm-up, then fast once if predicted faster>,
          fillcolor="#fdf6e3", color="#8a6d1f", penwidth=1.5];
 
-  avg [label="One average back to every rank\na round closes without a straggler after 45 s;\nevery 20 syncs: refit the shares, or drop a rank\nthat costs more sync than it adds;\nkeep only the fastest rank when the split loses",
+  avg [label="One average back to every rank\na round closes without a straggler after 45 s;\nevery 20 syncs: refit the shares, or drop a rank\nthat costs more sync than it adds;\nkeep only the fastest rank when the split\nloses, unless --ddp N fixed the ring",
        fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.5];
 
   r0 -> board [label="  gradients  \l  or weights  \l"];

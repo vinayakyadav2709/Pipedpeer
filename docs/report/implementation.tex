@@ -48,7 +48,7 @@ without any machine relaying their traffic.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.9\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.1_nat_traversal.png}}
+    \includegraphics[width=124mm]{\figpath{fig_4.1_nat_traversal.png}}
     \caption[Joining across networks]{Joining across networks. The introducer exchanges candidate
     addresses and forwards one punch request; the two nodes then race their
     candidate pairs over a single UDP socket, fall back to a birthday collision
@@ -130,7 +130,7 @@ Security has three layers (Figure~\ref{fig:trust}).
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.9\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.2_trust.png}}
+    \includegraphics[width=144mm]{\figpath{fig_4.2_trust.png}}
     \caption[The three layers of trust]{The three layers of trust: a shared secret on every API route,
     pinned TLS (or QUIC across networks) on the wire, and the node key that
     makes the certificate, authenticates links and signs closures.}
@@ -182,34 +182,34 @@ Candidates are merged from the address book, live discovery and the local node,
 deduplicated by node id; a node with a role is never offered a job. Five hard
 filters run in order: architecture must match the closure; a GPU must be present
 if one was required; and free memory, free cores and free VRAM must each satisfy
-the request. Every rejection records a reason, shown by
+the request (Figure~\ref{fig:placement}). Every rejection records a reason, shown by
 \texttt{pipedpeer jobs <id> -{}-explain}.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.3_placement_flow.png}}
+    \includegraphics[width=150mm]{\figpath{fig_4.3_placement_flow.png}}
     \caption[Placement flow]{Placement: gather, filter, score, lease, retry. A task is never
     dropped; when nothing is eligible it is queued and retried.}
     \label{fig:placement}
 \end{figure}
 
-Survivors are scored. Writing $u_{\text{cpu}}$ and $u_{\text{mem}}$ for CPU and
-memory utilisation in percent, $n_{\text{jobs}}$ for the count of running jobs,
-and $\hat{c}, \hat{f}, \hat{m}, \hat{r}$ for the core count, clock speed, free
-memory and free-core ratio each normalised onto $[0,1]$:
-
+Survivors are scored. Writing $u_{\mathrm{cpu}}$ and $u_{\mathrm{mem}}$ for CPU and
+memory utilisation in percent, $n_{\mathrm{jobs}}$ for the count of running jobs,
+$\hat{c}, \hat{f}, \hat{m}, \hat{r}$ for the core count, clock speed, free
+memory and free-core ratio each normalised onto $[0,1]$, and $h \in [0,1]$ for
+the node's health score, the score is
 \begin{equation}
 \label{eq:score}
-S = \Bigl(1 - \tfrac{u_{\text{cpu}}}{200} - \tfrac{u_{\text{mem}}}{200}
-    - 0.05\,n_{\text{jobs}}
-    + 0.10(\hat{c}-\tfrac12) + 0.06(\hat{f}-\tfrac12)
-    + 0.10(\hat{m}-\tfrac12) + 0.10(\hat{r}-\tfrac12)\Bigr)\cdot H
+\begin{split}
+S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200}
+     - 0.05\,n_{\mathrm{jobs}} + 0.10(\hat{c}-0.5) \\
+    &+ 0.06(\hat{f}-0.5) + 0.10(\hat{m}-0.5) + 0.10(\hat{r}-0.5)\Bigr)\cdot h .
+\end{split}
 \end{equation}
-
-where $H$ is the node's health score. Two properties matter more than the
-individual coefficients. \textbf{Load dominates hardware}: the two load terms can
-subtract $1.0$, while the four hardware terms together move the score by at most
-$0.36$, so a fast but busy machine loses to a slower idle one, as it should on
+Two properties matter more than the individual coefficients. \textbf{Load
+dominates hardware}: the two utilisation terms can subtract $1.0$, while the
+four hardware terms together move the score by at most $\pm0.18$, so a fast but
+busy machine loses to a slower idle one, as it should on
 workstations that people are also using. \textbf{Missing telemetry is neutral}:
 normalisation returns the midpoint $0.5$ for an absent value, so a node that does
 not report its clock speed is neither rewarded nor punished.
@@ -232,7 +232,7 @@ recovery lives (Figure~\ref{fig:lease}).
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.8\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.5_lease_fsm.png}}
+    \includegraphics[width=150mm]{\figpath{fig_4.5_lease_fsm.png}}
     \caption[Lease states]{Lease states. Recovery is a consequence of expiry rather than a
     separate mechanism.}
     \label{fig:lease}
@@ -310,7 +310,7 @@ shares those paths and builds only what it adds.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.6_closure_cache.png}}
+    \includegraphics[width=150mm]{\figpath{fig_4.6_closure_cache.png}}
     \caption[Closure cache and transfer]{The store path is the cluster-wide cache key. Most submissions ship
     no environment at all, and a related environment ships only the store paths
     the receiver lacks. The upload never waits more than 60\,s for a slow peer.}
@@ -318,7 +318,7 @@ shares those paths and builds only what it adds.
 \end{figure}
 
 Before uploading, the client asks the target whether it can already run the
-closure, and only on a negative answer does anything cross the wire. Two
+closure (Figure~\ref{fig:closure}), and only on a negative answer does anything cross the wire. Two
 questions are needed: whether the archive is in the node's cache, and whether the
 closure is \emph{materialised}, that is, whether its entry point exists on disk.
 A deployment with a shared store volume has the closure present without ever
@@ -334,7 +334,7 @@ binary cache; if that download has not finished 30 seconds after the sender's
 archive arrived, it is abandoned and the sender sends every missing path itself.
 
 \textbf{Signed transfer between daemons.} After an upload, the worker pushes the
-closure to peers that cannot yet run it. Parallel work is spilled only to peers
+closure to peers that cannot yet run it. Parallel work is shared only with peers
 that can run the closure, so this push is what makes the cluster usable for the
 distribution of Section~\ref{sec:intercept}. A peer that advertises the signed
 format receives one archive containing a signed binary cache --- the signature
@@ -355,7 +355,7 @@ and results archives are compressed with Zstandard \cite{rfc8878}.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.7_sandbox.png}}
+    \includegraphics[width=130mm]{\figpath{fig_4.7_sandbox.png}}
     \caption[The sandbox]{What the job can and cannot see. Shared memory is mounted
     world-writable because Python's \texttt{multiprocessing} requires it, and
     the driver libraries are bound file by file so that the host C library
@@ -364,7 +364,7 @@ and results archives are compressed with Zstandard \cite{rfc8878}.
 \end{figure}
 
 Jobs run under \texttt{crun} \cite{crun} in an OCI bundle \cite{oci2021} with a
-minimal read-only root: the store read-only, the workspace read-write, a private
+minimal read-only root (Figure~\ref{fig:sandbox}): the store read-only, the workspace read-write, a private
 home, and temporary filesystems for scratch space. Shared memory is mounted
 world-writable because Python's \texttt{multiprocessing} maps POSIX shared memory
 for its semaphores. GPU support mounts the device nodes and binds the driver
@@ -386,9 +386,8 @@ daemon in a user \texttt{systemd} scope with a ceiling of half the machine and
 swap refused. A daemon without a user \texttt{systemd}, such as one in a
 container, runs a watchdog instead that measures the daemon's children every
 second and, past the ceiling, kills the largest child and logs it, never the
-daemon. A hard limit is used rather than a throttling one: a 3\,GiB allocation
-under a 1\,GiB soft limit stalled at 998\,MiB with 7,381 throttling events and no
-progress for minutes, which is worse than a failed job. Daemons on one machine,
+daemon. A hard limit is used rather than a throttling one, because a job held
+at a throttling limit stalls instead of failing. Daemons on one machine,
 recognised by the kernel's boot identifier, subtract one another's reservations,
 so two of them cannot promise the same memory twice.
 
@@ -438,14 +437,14 @@ that directory, where a \texttt{sitecustomize} module makes CPython import it
 before the user's first line. Nothing is installed on any node. Nix ships its own
 module of the same name, which adds the environment's package directories; the
 shim performs that work first, since only the first module on the path is
-imported. \texttt{multiprocessing.Pool} and \texttt{ProcessPoolExecutor} are
+imported (Figure~\ref{fig:shim}). \texttt{multiprocessing.Pool} and \texttt{ProcessPoolExecutor} are
 patched at start-up, while NumPy, pandas, torch and joblib are patched on their
 first import through an import hook, so a job that never imports torch never pays
 its 1.7\,s import (Section~\ref{sec:res-shim}).
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.8_shim_injection.png}}
+    \includegraphics[width=142mm]{\figpath{fig_4.8_shim_injection.png}}
     \caption[Shim injection]{How the shim reaches the interpreter and what it replaces.}
     \label{fig:shim}
 \end{figure}
@@ -472,8 +471,12 @@ an unmeasured peer is assumed to be as fast as this node, scaled by its core
 count, since assuming it slow would size its share below anything worth sending.
 The solver finds the finishing time $T$ at which the devices together complete
 the work, allocating $(T - o_i)\,r_i$ items to each, and drops any device whose
-set-up time alone exceeds $T$. On a peer, a chunk fans out across its cores. A
-forwarded part is never split again, so distribution is one hop from the origin.
+set-up time alone exceeds $T$. On a peer, a part fans out across its cores.
+Division therefore repeats at two levels, machines and then cores, and a part
+already split off is never split across machines or forwarded again. A map too
+large for the node that holds it is the one case of forwarding: it goes whole,
+once, to a peer that can hold it, and that peer makes the split
+(Section~\ref{sec:ft}).
 
 \textbf{Slow peers.} A part still unfinished past its prediction counts as taking
 at least that long, so a slow peer's estimate can only grow. Three rules act
@@ -520,7 +523,8 @@ task runs inline on that worker. pandas operations are distributed only above
 \textbf{Why the shuffle is exact.} Hash partitioning on the key is the standard
 technique of MapReduce \cite{dean2004mapreduce}; PipedPeer uses only that path,
 never a combiner. Rows are bucketed by a hash of the grouping or join key, so
-equal keys land on the same node and every key is complete on exactly one node.
+equal keys land on the same node and every key is complete on exactly one node
+(Figure~\ref{fig:shuffle}).
 Each node's aggregation is therefore a \emph{complete} aggregation, the origin
 combines the partials by concatenation, and \emph{any} aggregation specification
 works, including those with no combiner form. Exactness is of values, not of row
@@ -530,7 +534,7 @@ different order.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.8\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.9_hash_shuffle.png}}
+    \includegraphics[width=117mm]{\figpath{fig_4.9_hash_shuffle.png}}
     \caption[Hash shuffle]{Hash shuffle. Correctness follows from key locality, not from
     combiner algebra.}
     \label{fig:shuffle}
@@ -546,7 +550,7 @@ node's ordinary daemon port, which works wherever the daemon port works,
 including over the links of Section~\ref{sec:nat}. The daemon \emph{reduces}:
 gradients arrive as raw frames, are summed in double precision weighted by the
 number of samples behind each, $\sum_i n_i g_i / \sum_i n_i$, and one averaged
-gradient is returned. Returning every rank's gradient to every rank instead was
+gradient is returned (Figure~\ref{fig:ddp}). Returning every rank's gradient to every rank instead was
 measured 21 times slower on two machines (62.9\,s against 2.9\,s). Gradients
 travel as 8-bit integers with one scale per block of 4096 values, the rounding
 error carried into the next step in both directions (error feedback)
@@ -571,8 +575,9 @@ completes without it after 45 seconds.
 \textbf{One GPU or a split.} After a warm-up, the lead daemon compares the
 measured step time of the split with that of the fastest rank alone, and either
 keeps the ring or releases every rank but the fastest, which exit with a code
-meaning ``released'' rather than ``failed''. A user who names a ring size fixes
-the number of ranks.
+meaning ``released'' rather than ``failed''. A user who names a ring size with
+\texttt{-{}-ddp~$N$} fixes the number of ranks, and the ring is then never
+released or shrunk.
 
 \textbf{Synchronising less often.} \texttt{-{}-ddp-sync fast} synchronises every
 $H$ steps instead of every step, in the manner of DiLoCo
@@ -594,8 +599,10 @@ default; an explicit fast ring beyond four ranks runs at $H=4$ with a warning.
 
 \textbf{Choosing automatically.} By default the lead daemon switches a ring to
 fast synchronisation once, when every rank has reported, the ring is within the
-validated size, and the predicted fast step, inflated by 10\%, beats both the
-exact split and one GPU. Every rank switches at the same step boundary, rank 0
+validated size, and the predicted fast step, inflated by 10\%, beats the exact
+split and, for a ring not fixed by \texttt{-{}-ddp~$N$}, also the fastest rank
+alone. Under \texttt{-{}-ddp~$N$} the ring size is fixed and the automatic
+choice is between the two sync modes only. Every rank switches at the same step boundary, rank 0
 prints why, and a joining rank adopts the ring's mode; a join that takes an
 automatic fast ring past the validated size returns it to exact synchronisation
 at the next epoch boundary. A rank whose local round runs past four times the
@@ -622,7 +629,7 @@ missing are dropped and named. The torch gloo and NCCL back-ends are not used.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.10_ddp.png}}
+    \includegraphics[width=123mm]{\figpath{fig_4.10_ddp.png}}
     \caption[Training synchronisation over the daemon port]{Synchronisation over the daemon port. The lead daemon averages by
     samples and returns one average: int8 gradients every step in exact mode,
     weights every $H$ steps in fast mode; auto switches to fast once.}
@@ -660,14 +667,14 @@ The checks run in order. At least two nodes and 32\,MB of payload are required.
 cluster} whatever the transfer costs, and a matrix product the cluster cannot
 take either raises an error naming the size and the remedy rather than exhausting
 the machine. If any peer reports a GPU, $R'$ is six times $R$. The inequality is
-then evaluated at an optimistic 10\,Gbit/s; if offloading loses even there, the
+then evaluated at an optimistic 10\,Gbit/s (Figure~\ref{fig:cost}); if offloading loses even there, the
 work stays local without measuring anything. Otherwise bandwidth is
 \emph{measured} by pushing 64\,MB through the real dispatch path, cached for five
 minutes, and a failed probe keeps the work local.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.11_cost_model.png}}
+    \includegraphics[width=80mm]{\figpath{fig_4.11_cost_model.png}}
     \caption[Cost model decision regions]{Decision regions of Equation~\ref{eq:cost} for the pandas path
     ($\rho = 1$, $R = R' = 1$\,GFLOP/s) at three nodes on a 500\,MB/s link.
     Grouped aggregation and joins have low arithmetic intensity, so they are
@@ -693,7 +700,7 @@ rank continues on the survivors (Section~\ref{sec:ddp}).
 
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
   \item \textbf{The race.} Chunks are dealt alternately to the local side and the
-  cluster, and results fill a slot table first-wins. Idle local cores re-run any
+  cluster (Figure~\ref{fig:race}), and results fill a slot table first-wins. Idle local cores re-run any
   chunk the cluster has not yet returned, and the call returns only once every
   item is covered, so a dead cluster degrades to a plain local pool.
   \item \textbf{Per-primitive fallback.} Every intercepted call is wrapped, and
@@ -710,7 +717,7 @@ rank continues on the survivors (Section~\ref{sec:ddp}).
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=0.85\textwidth,height=0.32\textheight,keepaspectratio]{\figpath{fig_4.12_race_timeline.png}}
+    \includegraphics[width=150mm]{\figpath{fig_4.12_race_timeline.png}}
     \caption[Racing local and remote work]{Racing local and remote work. The local side is always able to
     finish alone, which is what makes the guarantee unconditional.}
     \label{fig:race}

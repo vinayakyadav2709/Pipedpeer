@@ -3,12 +3,52 @@
 \label{chap:lit}
 % ============================================================
 
-This chapter surveys work in the areas PipedPeer draws on: lightweight
-sandboxing and environment portability at the edge, actor-style fault
-tolerance, failure-transparent programming, portability in the Python
-ecosystem, scheduling, and collaborative task offloading. Each review closes
-with its bearing on the design of Chapters~\ref{chap:arch}
-and~\ref{chap:design}.
+This chapter surveys work in the areas PipedPeer draws on: frameworks for
+distributed Python and low-communication training, lightweight sandboxing and
+environment portability at the edge, actor-style fault tolerance,
+failure-transparent programming, portability in the Python ecosystem,
+scheduling, and collaborative task offloading. Each review closes with its
+bearing on the design of Chapters~\ref{chap:arch} and~\ref{chap:design}.
+
+``Spark: Cluster Computing with Working Sets'' \cite{zaharia2010spark} by
+M.~Zaharia \textit{et al.} keeps a working set in memory across parallel
+operations as resilient distributed datasets, which a lost partition rebuilds
+from its lineage, and runs iterative jobs up to ten times faster than
+MapReduce \cite{dean2004mapreduce}. A program is written against the dataset
+API and runs on a cluster with a master, which is exactly the set-up PipedPeer
+removes; its hash partitioning by key is the technique PipedPeer's dataframe
+shuffle uses (Section~\ref{sec:intercept}).
+
+``Ray: A Distributed Framework for Emerging AI Applications''
+\cite{moritz2018ray} by P.~Moritz \textit{et al.} unifies tasks and actors over
+a distributed scheduler and a sharded control store, and reaches millions of
+tasks per second. Ray offers a drop-in \texttt{multiprocessing.Pool} and a
+\texttt{joblib} back-end, the closest existing answer to PipedPeer's code
+problem, but each needs a changed import and a running cluster with a head
+node on one network. PipedPeer substitutes the same primitives without the
+import and decides per call whether distributing them pays.
+
+``Dask: Parallel Computation with Blocked Algorithms and Task Scheduling''
+\cite{rocklin2015dask} by M.~Rocklin expresses NumPy- and pandas-like
+operations as graphs of blocked tasks run by a dynamic scheduler, so that
+arrays and dataframes larger than memory can be processed in parallel. Its
+interfaces mirror the libraries they replace, yet the program must still be
+written against Dask's collections. PipedPeer's out-of-core \texttt{read\_csv}
+and row-block matrix products follow Dask's blocking idea while leaving the
+original pandas and NumPy calls in place.
+
+``DiLoCo: Distributed Low-Communication Training of Language Models''
+\cite{douillard2023diloco} by A.~Douillard \textit{et al.}, the work closest to
+PipedPeer's training path, trains replicas independently for hundreds of steps
+and merges their parameter changes with an outer Nesterov step, matching
+synchronous training on a language model while communicating about 500 times
+less. PipedPeer's fast synchronisation takes the same structure for links
+between homes, but its intervals are 2 to 64 steps rather than hundreds, and at
+those intervals the outer momentum multiplies the script's learning rate; it
+therefore averages plainly (Section~\ref{sec:ddp}). BOINC
+\cite{anderson2004boinc}, finally, showed that volunteers' idle machines can
+serve real computation, but as a platform for specific projects with their own
+servers rather than a general executor.
 
 ``Web Application-Based WebAssembly Container Platform for Extreme Edge
 Computing'' \cite{sekigawa2023} by S.~Sekigawa \textit{et al.} deploys
