@@ -191,6 +191,11 @@ type Manager struct {
 	hints map[string]hint
 	// trying are peers with a connection attempt in flight.
 	trying map[string]bool
+	// observed is the address each peer's last connection came from or went
+	// to. A peer that punched in through a hint may appear in no introducer
+	// listing; without this, its link could not be redialled after this
+	// machine moved (FIX-E3B: "no known address to redial").
+	observed map[string]string
 }
 
 // introducer is one address book this node registers with.
@@ -273,13 +278,14 @@ func New(cfg Config) *Manager {
 		cfg.Log = func(string, ...any) {}
 	}
 	m := &Manager{
-		cfg:     cfg,
-		peers:   map[string]*peerLink{},
-		backoff: map[string]backoffEntry{},
-		invited: map[string][]string{},
-		cands:   map[string][]string{},
-		hints:   map[string]hint{},
-		trying:  map[string]bool{},
+		cfg:      cfg,
+		peers:    map[string]*peerLink{},
+		backoff:  map[string]backoffEntry{},
+		invited:  map[string][]string{},
+		cands:    map[string][]string{},
+		hints:    map[string]hint{},
+		trying:   map[string]bool{},
+		observed: map[string]string{},
 	}
 	seen := map[string]bool{}
 	for _, a := range cfg.Introducers {
@@ -641,25 +647,43 @@ func (m *Manager) attempt(ctx context.Context, node string) {
 	}()
 }
 
-// candidatesLocked is what to try for node: what it published, then what
-// other members vouched for.
+// candidatesLocked is what to try for node: what it published through an
+// introducer, what it sent with a punch request, where its last connection
+// was seen, then what other members vouched for. One entry per address.
 func (m *Manager) candidatesLocked(node string, now time.Time) []string {
-	out := append([]string(nil), m.cands[node]...)
-	if h, ok := m.hints[node]; ok && now.Sub(h.at) <= hintTTL {
-		seen := map[string]bool{}
-		for _, c := range out {
-			if pc, err := direct.ParseCandidate(c); err == nil {
-				seen[pc.Addr.String()] = true
-			}
-		}
-		for _, c := range h.cands {
+	var out []string
+	seen := map[string]bool{}
+	add := func(list ...string) {
+		for _, c := range list {
 			if pc, err := direct.ParseCandidate(c); err == nil && !seen[pc.Addr.String()] {
 				seen[pc.Addr.String()] = true
 				out = append(out, c)
 			}
 		}
 	}
+	add(m.cands[node]...)
+	add(m.invited[node]...)
+	if o := m.observed[node]; o != "" {
+		add(o)
+	}
+	if h, ok := m.hints[node]; ok && now.Sub(h.at) <= hintTTL {
+		add(h.cands...)
+	}
 	return out
+}
+
+// observeLocked records where a peer's connection is.
+func (m *Manager) observeLocked(node string, conn *quic.Conn) {
+	if conn == nil || m.observed == nil {
+		return
+	}
+	ua, ok := conn.RemoteAddr().(*net.UDPAddr)
+	if !ok {
+		return
+	}
+	ap := ua.AddrPort()
+	ap = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	m.observed[node] = string(direct.KindReflex) + ":" + ap.String()
 }
 
 // Hint offers addresses for node that another member vouched for (signed
@@ -1180,6 +1204,7 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 			return nil
 		}
 		prev := old.conn
+		m.observeLocked(node, conn)
 		old.conn, old.dialled, old.path = conn, dialled, path
 		old.since, old.lastSeen = now, now
 		delete(m.backoff, node)
@@ -1236,6 +1261,7 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 		return m.linkUp(ctx, node, conn, path)
 	}
 	m.peers[node] = link
+	m.observeLocked(node, conn)
 	delete(m.backoff, node)
 	m.mu.Unlock()
 
