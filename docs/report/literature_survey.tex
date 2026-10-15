@@ -4,11 +4,12 @@
 % ============================================================
 
 This chapter surveys work in the areas PipedPeer draws on: frameworks for
-distributed Python and low-communication training, lightweight sandboxing and
-environment portability at the edge, actor-style fault tolerance,
-failure-transparent programming, portability in the Python ecosystem,
-scheduling, and collaborative task offloading. Each review closes with its
-bearing on the design of Chapters~\ref{chap:arch} and~\ref{chap:design}.
+distributed Python, reproducible environments and container runtimes,
+data-parallel training and gradient compression, lightweight sandboxing at the
+edge, fault tolerance and failure-transparent programming, portability in the
+Python ecosystem, scheduling, and collaborative task offloading. Each review
+states its bearing on the design of Chapters~\ref{chap:arch}
+and~\ref{chap:design}.
 
 ``Spark: Cluster Computing with Working Sets'' \cite{zaharia2010spark} by
 M.~Zaharia \textit{et al.} keeps a working set in memory across parallel
@@ -23,7 +24,7 @@ shuffle uses (Section~\ref{sec:intercept}).
 \cite{moritz2018ray} by P.~Moritz \textit{et al.} unifies tasks and actors over
 a distributed scheduler and a sharded control store, and reaches millions of
 tasks per second. Ray offers a drop-in \texttt{multiprocessing.Pool} and a
-\texttt{joblib} back-end, the closest existing answer to PipedPeer's code
+\texttt{joblib} backend, the closest existing answer to PipedPeer's code
 problem, but each needs a changed import and a running cluster with a head
 node on one network. PipedPeer substitutes the same primitives without the
 import and decides per call whether distributing them pays.
@@ -33,93 +34,102 @@ import and decides per call whether distributing them pays.
 operations as graphs of blocked tasks run by a dynamic scheduler, so that
 arrays and dataframes larger than memory can be processed in parallel. Its
 interfaces mirror the libraries they replace, yet the program must still be
-written against Dask's collections. PipedPeer's out-of-core \texttt{read\_csv}
-and row-block matrix products follow Dask's blocking idea while leaving the
-original pandas and NumPy calls in place.
+written against Dask's collections. The out-of-core \texttt{read\_csv} and
+row-block matrix products of Section~\ref{sec:intercept} follow Dask's blocking
+idea while leaving the original pandas and NumPy calls in place.
 
 ``Towards Scalable Dataframe Systems'' \cite{petersohn2020modin} by
 D.~Petersohn \textit{et al.} formalises the dataframe and its algebra, and
 presents Modin, which keeps the pandas API while partitioning the frame and
 running its operations in parallel on Ray or Dask. Modin is the nearest
 precedent for distributing pandas without rewriting it, yet it still needs a
-changed import and a running engine. PipedPeer patches the original pandas in
-place, and distributes grouping and joins by hash partitioning only when the
-cost model says it pays (Section~\ref{sec:cost}).
+changed import and a running engine. BOINC \cite{anderson2004boinc} showed that
+volunteers' idle machines can serve real computation, but as a platform for
+specific projects with their own servers rather than a general executor.
+
+``Nix: A Safe and Policy-Free System for Software Deployment''
+\cite{dolstra2004nix} by E.~Dolstra \textit{et al.} stores every package under
+a path named by a cryptographic hash of all its build inputs, so that versions
+coexist, dependencies are complete by construction, and a package's closure can
+be copied between machines exactly. With the package set pinned, that path
+names an environment identically on every machine, which makes it a
+cluster-wide cache key and lets a transfer send only the paths a peer lacks
+(Section~\ref{sec:cache}). Nix itself decides nothing about where a job should
+run or how it reaches that machine.
+
+The OCI Runtime Specification \cite{oci2021} defines a container as a root
+filesystem plus a configuration of namespaces, mounts, cgroups and devices, and
+\texttt{crun} \cite{crun} implements it in C with a small footprint and a fast
+start. Used directly, without an image format or a container daemon, the
+specification gives each job a minimal read-only root over the Nix store and a
+device model through which a GPU can be passed in (Section~\ref{sec:sandbox}).
+
+Five studies examine WebAssembly as a lighter sandbox at the edge. Sekigawa
+\textit{et al.} \cite{sekigawa2023} run WebAssembly modules as isolated compute
+units without a container daemon; Hoque and Harras \cite{hoque2022} name an
+immature system interface, limited file-system and networking APIs and absent
+GPU support as the blocking gaps; Kakati and Brorsson \cite{kakati2024} report
+70--90\% of native speed across x86\_64, ARM64 and RISC-V; and Bachmeier
+\textit{et al.} \cite{bachmeier2025} and Khelifa \textit{et al.}
+\cite{khelifa2024} find GPU acceleration immature and memory the dominant
+constraint for AI inference. The argument that a lightweight sandbox can replace
+a full container runtime carries over, but CPython with native extensions and
+CUDA libraries cannot run under WebAssembly, so a native environment is shipped
+as a Nix closure and run under an OCI runtime instead, at about 20\,ms per job
+(Section~\ref{sec:res-sandbox}).
+
+``PyTorch Distributed: Experiences on Accelerating Data Parallel Training''
+\cite{li2020pytorchddp} by S.~Li \textit{et al.} describes DDP, which
+replicates the model, buckets gradients and overlaps their all-reduce with the
+backward pass, scaling near-linearly to 256 GPUs. It assumes ranks that open
+connections to one another on their own ports, usually inside one data centre.
+Machines behind different routers cannot, so PipedPeer leaves the model and
+optimiser to the script and routes the gradient exchange through its daemons
+(Section~\ref{sec:ddp}).
+
+``8-Bit Approximations for Parallelism in Deep Learning''
+\cite{dettmers2016eightbit} by T.~Dettmers compresses gradients to 8 bits for
+transfer while keeping model accuracy, and ``1-Bit Stochastic Gradient
+Descent'' \cite{seide2014onebit} by F.~Seide \textit{et al.} quantises them to a
+single bit, carrying each step's quantisation error into the next (error
+feedback) so that convergence stays close to full precision. The two combine in
+PipedPeer's wire format: 8-bit values with one scale per block of 4096 and error
+feedback in both directions, about a quarter of the float32 volume.
+
+``Don't Use Large Mini-Batches, Use Local SGD'' \cite{lin2020localsgd} by
+T.~Lin \textit{et al.} shows that workers taking several local steps between
+averages communicate less and, in post-local SGD, generalise better than
+large-batch training. The observation explains why a periodically averaged ring
+can finish slightly below one device's loss (Section~\ref{sec:res-train}).
 
 ``DiLoCo: Distributed Low-Communication Training of Language Models''
 \cite{douillard2023diloco} by A.~Douillard \textit{et al.}, the work closest to
 PipedPeer's training path, trains replicas independently for hundreds of steps
 and merges their parameter changes with an outer Nesterov step, matching
 synchronous training on a language model while communicating about 500 times
-less. PipedPeer's fast synchronisation takes the same structure for links
-between homes, but its intervals are 2 to 64 steps rather than hundreds, and at
-those intervals the outer momentum multiplies the script's learning rate; it
-therefore averages plainly (Section~\ref{sec:ddp}). BOINC
-\cite{anderson2004boinc}, finally, showed that volunteers' idle machines can
-serve real computation, but as a platform for specific projects with their own
-servers rather than a general executor.
+less. Fast synchronisation takes the same structure for links between homes,
+but at its intervals of 2 to 64 steps the outer momentum multiplies the
+script's learning rate, so the merge is a plain average
+(Section~\ref{sec:ddp}).
 
-``Web Application-Based WebAssembly Container Platform for Extreme Edge
-Computing'' \cite{sekigawa2023} by S.~Sekigawa \textit{et al.} deploys
-WebAssembly modules as isolated compute units on edge nodes, sandboxing and
-executing user-submitted binaries without a container daemon, and shows
-acceptable latency with strong isolation on constrained hardware. Its argument
-that a lightweight sandbox can replace a full container runtime is the one
-PipedPeer follows, but PipedPeer must run arbitrary CPython with native
-extensions, which WebAssembly cannot host, so it uses an OCI runtime
-(\texttt{crun}) directly; Section~\ref{sec:res-sandbox} measures the cost of
-that choice at about 20\,ms per job.
+``PowerSGD: Practical Low-Rank Gradient Compression for Distributed
+Optimization'' \cite{vogels2019powersgd} by T.~Vogels \textit{et al.}
+approximates each gradient matrix by a low-rank product found with one step of
+power iteration, with error feedback, and matches full-precision accuracy at
+high compression. Of ten methods tried for rings past four ranks, rank-16
+PowerSGD on exact synchronisation alone kept every test model within 1\%, yet
+on a small transformer's narrow matrices it sends more bytes than 8-bit values
+(Section~\ref{sec:res-train}), which is why it is not the default.
 
-``WebAssembly for Edge Computing: Potential and Challenges'' \cite{hoque2022}
-by M.~N.~Hoque and K.~A.~Harras weighs WebAssembly's near-native speed and memory
-sandboxing against containers and virtual machines, and identifies an immature
-system interface, limited file-system and networking APIs, and absent GPU support
-as the blocking gaps. These gaps are why PipedPeer ships a complete native
-environment as a Nix closure rather than compiling user code to a portable
-bytecode: a closure carries native dependencies and GPU libraries intact.
-
-``A Cross-Architecture Evaluation of WebAssembly in the Cloud-Edge Continuum''
-\cite{kakati2024} by S.~Kakati and M.~Brorsson benchmarks WebAssembly runtimes
-across x86\_64, ARM64 and RISC-V, reporting 70--90\% of native performance and
-startup under 10\,ms, with I/O-bound workloads suffering most from system-call
-translation. PipedPeer also targets heterogeneous architectures but resolves
-them at build time: the flake generator emits an architecture-specific closure,
-and architecture is a hard filter in placement (Section~\ref{sec:placement}), so
-full native performance is retained.
-
-``Design of Elixir-Based Edge Server for Responsive IoT Applications''
-\cite{li2023elixir} by Y.~Li and S.~Fujita builds an IoT edge server on Elixir and
-OTP, where supervisor trees restart failed processes and the system stays
-available through individual crashes. PipedPeer's retry loop follows the same
-model, placing a failed job again on the next-best node with exponential
-back-off, but it has no supervisor process: recovery follows from lease expiry
-(Section~\ref{sec:lease}), so there is nothing whose own failure needs
-supervising.
-
-``A Synergistic Elixir-EDA-MQTT Framework for Smart Transportation''
-\cite{zhou2024} by the same authors combines Elixir concurrency, an event-driven
-architecture and MQTT publish-subscribe messaging, showing lower overhead than
-REST for high-frequency telemetry. PipedPeer's traffic is of a different kind:
-closures, workspaces and results are bulk transfers that need streaming and
+Li and Fujita build an IoT edge server on Elixir and OTP, where supervisor trees
+restart failed processes \cite{li2023elixir}, and combine Elixir with an
+event-driven architecture and MQTT publish-subscribe messaging for
+high-frequency telemetry \cite{zhou2024}. A failed job in PipedPeer is likewise
+placed again on the next-best node with back-off, but no supervisor process
+exists: recovery follows from lease expiry (Section~\ref{sec:lease}). Closures,
+workspaces and results are bulk transfers that need streaming and
 back-pressure, so dispatch uses plain HTTP with a WebSocket for output rather
 than a message broker.
-
-``WebAssembly with wasi-nn for Edge Machine Learning Inference''
-\cite{bachmeier2025} by J.~Bachmeier \textit{et al.} finds good portability for CPU
-inference under WebAssembly and immaturity for GPU acceleration. Machine
-learning is a primary use case for PipedPeer, which is why torch carries the
-largest entry in its memory estimator and why GPU passthrough is implemented at
-the OCI level; the paper's negative result on GPU support supports shipping a
-native CUDA-capable environment instead.
-
-``Case Study of WebAssembly Runtimes for AI Applications on the Edge''
-\cite{khelifa2024} by S.~E.~Khelifa \textit{et al.} compares four runtimes for AI
-inference on edge devices and finds memory consumption to be the dominant
-constraint. The same assumption underlies PipedPeer's memory estimator and
-admission control: a node refuses a job it cannot hold, a parallel-map request
-that would exceed 40\% of a node's memory is split into sequential parts, and
-every job runs under its own memory ceiling inside a daemon that is itself
-capped (Section~\ref{sec:sandbox}).
 
 ``Programming Models for Failure-Transparent Distributed Systems''
 \cite{kth2025thesis} by J.~Spenger defines failure transparency --- masking
@@ -127,14 +137,14 @@ failures fully from the programmer --- independently of a particular semantics,
 proves it for a model of stateful dataflow streaming, and builds two programming
 models on that base. Failure transparency is PipedPeer's central invariant: the
 user's script contains no failure handling, so every remote path must degrade to
-a working local one. PipedPeer enforces this by layered fallback and tests rather
-than by proof (Sections~\ref{sec:ft} and~\ref{sec:res-ft}).
+a working local one, enforced here by layered fallback and tests rather than by
+proof (Sections~\ref{sec:ft} and~\ref{sec:res-ft}).
 
 ``Python Array API Standard'' \cite{arrayapi2023} by A.~Meurer \textit{et al.}
 standardises an array interface so that the same code runs on NumPy, CuPy or JAX
 without modification. Its goal, portability without code change, is
 PipedPeer's, but the mechanism is the mirror image: the standard asks libraries
-to converge on one interface that users then adopt, while PipedPeer changes
+to converge on one interface that users then adopt, while interception changes
 nothing the user writes and substitutes the implementations behind the
 interfaces the script already uses.
 
@@ -145,48 +155,46 @@ task graph. Its scoring-based assignment is comparable to PipedPeer's placement
 function (Section~\ref{sec:placement}), with two differences: PipedPeer schedules
 whole scripts rather than task graphs, and its scoring runs in the submitting
 client, with no scheduler process. Data locality, which iDDS treats as
-first-class, is future work for PipedPeer.
+first-class, is left to future work.
 
 ``Task Offloading in Multi-Hop Relay-Aided Multi-Access Edge Computing''
 \cite{deng2023} by Y.~Deng \textit{et al.} formulates joint task assignment and
 relay selection to minimise completion time under transmission and energy
 constraints. Its comparison of transmission time against local computation time
-has the same shape as PipedPeer's cost model (Section~\ref{sec:cost}); PipedPeer
-measures link bandwidth at run time rather than assuming a channel model, and for
-parallel maps fits each peer's setup time and throughput from the work it has
-returned.
+has the same shape as PipedPeer's cost model (Section~\ref{sec:cost}), which
+measures link bandwidth at run time rather than assuming a channel model, and
+for parallel maps fits each peer's setup time and throughput from the work it
+has returned.
 
 ``Multi-Agent Deep Reinforcement Learning Based Dynamic Task Offloading''
 \cite{he2024} by H.~He \textit{et al.} lets each device learn an offloading policy
 from local observations without a central coordinator, outperforming centralised
 heuristics on the energy-delay trade-off. A learned policy needs training data
 and a training phase, which is at odds with a tool that a new machine joins by
-running a single binary; PipedPeer therefore uses a deterministic rule-based model,
-and a learned policy is a natural direction once a deployment has history.
+running a single binary; a deterministic rule-based model is used instead, and a
+learned policy is a natural direction once a deployment has history.
 
 ``Joint Optimization of Multi-User Partial Offloading and Resource Allocation''
 \cite{yong2023} by D.~Yong \textit{et al.} optimises the split between locally
 executed and offloaded portions of a task and finds partial offloading
-consistently better than all-or-nothing. PipedPeer offloads partially in this
-sense: interception splits a script's work at the granularity of pool chunks,
-shuffle buckets and matrix row blocks while the rest runs locally, and the split
-is chosen by minimising completion time over measured rates
-(Section~\ref{sec:intercept}).
+consistently better than all-or-nothing. Interception offloads partially in this
+sense: it splits a script's work at the granularity of pool chunks, shuffle
+buckets and matrix row blocks while the rest runs locally, choosing the split
+by minimising completion time over measured rates (Section~\ref{sec:intercept}).
 
 ``Energy-Efficient Collaborative Task Offloading in MEC'' \cite{adhoc2025} by
 S.~Wang \textit{et al.} has devices cooperate by relaying tasks toward edge
 servers, with a learned policy that cuts total energy. Its symmetric model, in
-which every device is both client and server, is PipedPeer's: a single binary, and any
-node may submit or accept work. PipedPeer likewise forwards a parallel-map
-request that a node cannot hold to a peer that can.
+which every device is both client and server, matches a single binary in which
+any node may submit or accept work, and a parallel-map request that a node
+cannot hold is likewise forwarded to a peer that can.
 
-``Blockchain Enabled Task Offloading in Digital Twin Vehicular Edge Networks''
-\cite{li2023blockchain} by C.~Li \textit{et al.} enforces service agreements between
-task submitters and edge workers with smart contracts, preventing free-riding in
-an untrusted network. PipedPeer authenticates who may use a node, with a shared
-secret, encrypted links and signed closures (Section~\ref{sec:trust}), but does
-not address whether an admitted participant behaves well; the paper describes
-the class of mechanism a cluster of mutually untrusting owners would need.
+``Blockchain Enabled Task Offloading'' \cite{li2023blockchain} by C.~Li
+\textit{et al.} enforces service agreements between task submitters and edge
+workers with smart contracts, preventing free-riding among parties that do not
+trust one another. PipedPeer authenticates who may use a node
+(Section~\ref{sec:trust}) but not whether an admitted participant behaves well,
+which a cluster of mutually untrusting owners would need.
 
 ``Congestion-Aware Distributed Task Offloading Using Graph Neural Networks''
 \cite{zhao2023} by Z.~Zhao \textit{et al.} trains a graph neural network to produce
@@ -235,6 +243,13 @@ Rocklin \cite{rocklin2015dask} & 2015 & Blocked task graphs for array and datafr
 Petersohn et al.\ \cite{petersohn2020modin} & 2020 & pandas API over a partitioned, parallel dataframe & Changed import; running Ray or Dask engine \\
 Douillard et al.\ \cite{douillard2023diloco} & 2023 & Local training with an outer Nesterov merge & Intervals of hundreds of steps; outer step fails at short ones \\
 Anderson \cite{anderson2004boinc} & 2004 & Volunteer computing on idle machines & Platform for specific projects, not a general executor \\
+Dolstra et al.\ \cite{dolstra2004nix} & 2004 & Store paths named by a hash of their build inputs & No placement or transfer between machines \\
+OCI \cite{oci2021}, \texttt{crun} \cite{crun} & 2020 & Container runtime specification and a light runtime & Isolation only; no environment or placement \\
+Li et al.\ \cite{li2020pytorchddp} & 2020 & Bucketed all-reduce overlapped with the backward pass & Ranks must reach one another directly \\
+Dettmers \cite{dettmers2016eightbit} & 2016 & 8-bit gradient approximation & Synchronisation still every step \\
+Seide et al.\ \cite{seide2014onebit} & 2014 & 1-bit quantisation with error feedback & Synchronisation still every step \\
+Lin et al.\ \cite{lin2020localsgd} & 2020 & Local steps between averages & Ranks within one cluster \\
+Vogels et al.\ \cite{vogels2019powersgd} & 2019 & Low-rank gradient compression with error feedback & More bytes than 8-bit on small matrices \\
 Sekigawa et al.\ \cite{sekigawa2023} & 2023 & WebAssembly containers at the extreme edge & Cannot host CPython with native extensions \\
 Hoque and Harras \cite{hoque2022} & 2022 & WebAssembly against containers and VMs & Immature system interface; no GPU \\
 Kakati and Brorsson \cite{kakati2024} & 2024 & WebAssembly across three architectures & 70--90\% of native speed \\

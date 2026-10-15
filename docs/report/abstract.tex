@@ -28,10 +28,9 @@ punching; no relay carries job data and no central server exists.
 starts in a median of 0.83\,s against 23.4\,s for its first submission. Between
 two laptops in different homes, a mixed CPU script finished in about 14\,s
 against 18\,s on one laptop. On a two-rank training ring, synchronising
-every few dozen steps instead of every step kept the validation loss no more than 1\%
-above one device's on every test model while sending 9 to 16 times fewer bytes. A
-mutation audit that disables each of 95 features in turn is caught by the tests
-every time.
+every 32 steps instead of every step kept the validation loss no more than 1\%
+above one device's on every test model, and each rank sent 7.6 to 9.2 times
+fewer bytes. Disabling any tested feature makes the test suite fail.
 
 \vspace{0.6cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal,

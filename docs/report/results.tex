@@ -41,8 +41,8 @@ user command is run across it.
 
 \textbf{Training accuracy.} The accuracy of each synchronisation setting is
 measured on three models --- a four-layer perceptron sized for a GPU (MLP-G), the
-same perceptron at a CPU sizing (MLP-C), and a small transformer --- with three
-seeds per cell, against one device trained on the same data: two-rank rings in
+same perceptron at a CPU sizing (MLP-C), and a small transformer --- against
+one device trained on the same data and seeds: two-rank rings in
 the lab, larger rings in-process, with the ranks side by side on a single machine.
 
 \textbf{Real machines.} Two laptops in different homes (RTX~3060 and RTX~3050)
@@ -56,8 +56,11 @@ map, a map over a lambda, scikit-learn with \texttt{joblib}, NumPy linear algebr
 out-of-core pandas, torch data-parallel training and file synchronisation; one
 script combines every kind of intercepted work, and five idiomatic, unoptimised
 user scripts stand in for unseen workloads. Lab
-wall times are medians of three to five runs, and accuracy is the mean of three
-seeds.
+wall times are medians of three to five runs, except training rings, which are
+one seed. Lab accuracy is the mean of three seeds; in-process accuracy is the
+mean of seeds 0--2 and, where run, of seeds 0--5, and both must pass. Sizes in
+KiB, MiB and GiB are binary ($2^{10}$, $2^{20}$ and $2^{30}$ bytes); KB, MB and
+GB are decimal.
 
 \section{Functional Verification}
 \label{sec:res-tests}
@@ -130,10 +133,10 @@ change that raises this ratio above $3\times$.
 \textbf{Work crosses nodes.} With distribution forced, over a third of the
 items of a 48-item parallel map ran on other daemons of the plain lab, with
 results identical to a local run. The NumPy workload moved its 34\,MB singular value decomposition to one
-worker. On one host distribution can only add overhead, and the pool benchmark shows
-how much: plain Python took 0.17\,s, a hand-tuned pool 0.17\,s, and the
-untouched script under PipedPeer 0.24\,s with a quarter of the items on the
-cluster.
+worker. Because the plain lab's containers share the host's processor,
+distribution there can only add overhead, and the pool benchmark shows how
+much: plain Python took 0.17\,s, a hand-tuned pool 0.17\,s, and the untouched
+script under PipedPeer 0.24\,s with a quarter of the items on the cluster.
 
 \textbf{Sharing by measured speed.} On a lab cluster limited to 8, 2 and
 1 CPUs, dividing a map by headcount ran 1.6 times slower than not distributing at
@@ -143,49 +146,59 @@ processor in a cluster of otherwise equal peers, the slowdown against an equal
 cluster fell from 1.6 times on the first run to 1.08 by the fourth, as the fit
 learned the slow peer.
 
-\textbf{Scaling.} A scaling map sweeps one variable at a time with the rest
+\textbf{Scaling.} With each container held to a fixed quota of two processors,
+a scaling map sweeps one variable at a time with the rest
 fixed --- payload from 1\,KB to 64\,MB, 8 to 2048 items, per-item cost from
 $10^3$ to $3\times10^6$ operations, two to four nodes, and a speed spread of up to
 ten times --- and fits each step's growth on a log-log scale from the run
-records. No step grew faster than its expected order, and four equal nodes ran a
-map 2.9 times faster than one (0.81\,s against 2.37\,s).
+records. No step grew faster than its expected order. Four equal nodes ran a
+map 2.9 times faster than one (0.81\,s against 2.37\,s): quotas that together
+stay within the host's processor let this map measure how the cost grows with
+the node count, which the shared plain lab cannot; it is not a speedup between
+physical machines.
 
 \section{Training}
 \label{sec:res-train}
 
-\textbf{One GPU or a split.} The decision between a ring and one GPU matters in
-both directions. In the lab, a small model with heavy steps on a LAN
-trained in 9.1\,s split across two ranks against 11.8\,s on one GPU, while a
-9\,MB model with light steps on Wi-Fi took 80.7\,s split against 8.0\,s on one
-GPU. On a single machine, the same model and batch took 1.5\,s on its GPU and 55.0\,s
-on its CPUs.
+\textbf{One machine or a split.} The decision between a ring and one device
+matters in both directions. In the lab, a small model with heavy steps on a LAN
+trained in 9.1\,s split across two containers of two processors against
+11.8\,s on one such container, while a 9\,MB model with light steps on Wi-Fi
+took 80.7\,s split against 8.0\,s on one container. A GPU widens the gap: the
+training job of Table~\ref{tab:recorded} took 1.5\,s on an RTX~3060
+against 55.0\,s on the same machine's processors.
 
-\textbf{Fast synchronisation.} Table~\ref{tab:fastsync} and
-Figure~\ref{fig:ressync} compare a two-rank ring under exact and fast
-synchronisation every 64 steps with one device. Every model stays within the
-1\% bar on both link profiles, each gap within the spread of exact
-synchronisation's own gap, while each rank sends 9 to 16 times fewer bytes;
-MLP-C's negative gap reflects that periodic averaging can generalise slightly
-better than exact synchronisation \cite{lin2020localsgd}. Fast synchronisation was
-faster than exact on every model and profile, by 1.2--1.4 times on the LAN and
-1.6--3.1 times on Wi-Fi.
+\textbf{Fast synchronisation.} At the default interval for two ranks, 32
+steps, in-process runs kept every model within the 1\% bar: MLP-G $+0.06\%$,
+MLP-C $+0.64\%$ and the transformer $+0.73\%$ over seeds 0--2, and MLP-C
+$+0.35\%$ and the transformer $-1.02\%$ over seeds 0--5. Table~\ref{tab:fastsync}
+gives one lab run of a two-rank ring at that interval: each rank sent 7.6 to
+9.2 times fewer bytes than under exact synchronisation, and the ring finished
+1.2--1.4 times faster than exact on the LAN and 1.6--3.1 times on Wi-Fi. A
+separate lab run at 64 steps, three seeds per cell
+(Figure~\ref{fig:ressync}, right), also stayed within the bar on both
+profiles: MLP-G $+0.64\%$/$+0.61\%$, MLP-C $-2.14\%$/$-2.09\%$ and the
+transformer $+0.18\%$/$+0.50\%$ (LAN/Wi-Fi), each within the spread of exact
+synchronisation's own gap; MLP-C's negative gap reflects that periodic
+averaging can generalise slightly better than exact synchronisation
+\cite{lin2020localsgd}. The default is 32 rather than 64 because in-process the
+transformer failed at 64 on seeds 0--2 ($+2.13\%$).
 
 \begin{table}[!htbp]
 \centering
-\caption{Two-rank ring against one device, fast synchronisation every 64
-steps: validation-loss gap (mean of three seeds), bytes sent per rank, and wall
-time (one seed)}
+\caption{Two-rank ring in the lab at the default interval of 32 steps: bytes
+sent per rank and wall time against one container (one seed)}
 \label{tab:fastsync}
 \renewcommand{\arraystretch}{1.2}
 \rowcolors{2}{}{rowgray}
 \small
-\begin{tabularx}{\textwidth}{X C{2.3cm} C{2.3cm} C{2.6cm} C{2.6cm}}
+\begin{tabularx}{\textwidth}{X C{2.3cm} C{2.6cm} C{2.6cm} C{2.6cm}}
 \toprule
-\textbf{Model} & \textbf{Gap, fast LAN / Wi-Fi} & \textbf{MiB per rank, exact / fast} & \textbf{Seconds, exact LAN / Wi-Fi} & \textbf{Seconds, fast LAN / Wi-Fi} \\
+\textbf{Model} & \textbf{One device, seconds} & \textbf{MiB per rank, exact / fast} & \textbf{Seconds, exact LAN / Wi-Fi} & \textbf{Seconds, fast LAN / Wi-Fi} \\
 \midrule
-MLP-G (one device 27.9\,s) & $+0.64\%$ / $+0.61\%$ & 81.1 / 9.1 & 20.0 / 41.8 & 15.2 / 18.9 \\
-MLP-C (one device 16.9\,s) & $-2.14\%$ / $-2.09\%$ & 98.9 / 10.7 & 14.6 / 43.7 & 10.4 / 14.1 \\
-Transformer (one device 26.7\,s) & $+0.18\%$ / $+0.50\%$ & 21.7 / 1.4 & 22.7 / 35.9 & 19.1 / 22.9 \\
+MLP-G & 27.9 & 81.1 / 10.7 & 20.0 / 41.8 & 15.2 / 18.9 \\
+MLP-C & 16.9 & 98.9 / 10.7 & 14.6 / 43.7 & 10.4 / 14.1 \\
+Transformer & 26.7 & 21.7 / 2.4 & 22.7 / 35.9 & 19.1 / 22.9 \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -194,8 +207,10 @@ Transformer (one device 26.7\,s) & $+0.18\%$ / $+0.50\%$ & 21.7 / 1.4 & 22.7 / 3
     \centering
     \includegraphics[width=150mm]{\figpath{fig_5.4_sync_modes.png}}
     \caption[Exact and fast synchronisation]{Left: wall time of one device and of a two-rank ring under exact and
-    fast synchronisation on Wi-Fi. Right: validation-loss gap to one device under
-    fast synchronisation; the dashed line is the 1\% bar.}
+    fast synchronisation on Wi-Fi, from the run of Table~\ref{tab:fastsync}.
+    Right: validation-loss gap to one device under fast synchronisation every
+    64 steps, mean of three seeds, from the separate three-seed lab run; the
+    dashed line is the 1\% bar.}
     \label{fig:ressync}
 \end{figure}
 
@@ -204,14 +219,13 @@ Transformer (one device 26.7\,s) & $+0.18\%$ / $+0.50\%$ & 21.7 / 1.4 & 22.7 / 3
 leaving the transformer $21.7\%$ above one device even with one synchronisation
 per epoch (156 local steps), the longest interval these runs allow. In-process
 runs on the same three models, on up to six seeds, set the interval $H(n)$ as
-the largest that passed on every model: 32 steps at two ranks (64, which passed
-in the lab above, failed the transformer in this harness on other seeds,
-$+2.13\%$), 16 at three and 4 at four; at eight ranks the transformer failed at
+the largest that passed on every model: 32 steps at two ranks, 16 at three and
+4 at four; at eight ranks the transformer failed at
 every interval down to~2, so no interval is used for five or more ranks. Of ten methods tested at 4, 8 and 11 ranks, only exact synchronisation
 with rank-16 PowerSGD \cite{vogels2019powersgd} compression and error feedback
 kept every model within 1\% (worst mean $+0.18\%$), at $3.2\times$ fewer bytes
-than 8-bit exact synchronisation on the perceptrons
-(Appendix~\ref{app:extra}). Fast synchronisation therefore serves the two to
+than 8-bit exact synchronisation on the perceptrons but $1.7\times$ more on the
+transformer (Table~\ref{tab:later}). Fast synchronisation therefore serves the two to
 four machines of a small group.
 
 \textbf{Adapting the ring.} On a ring of 16, 8 and 2 cores, admission took the 16
@@ -236,7 +250,7 @@ still returns the correct result (Section~\ref{sec:res-tests}).
 \toprule
 \textbf{Drill} & \textbf{Result} \\
 \midrule
-A node stopped during a parallel map & same checksum, \textbf{16.5}\,s against \textbf{17.0}\,s undisturbed \\
+A node stopped during a parallel map & same checksum; \textbf{16.5}\,s against \textbf{17.0}\,s undisturbed, one run each, within noise \\
 A worker killed during a remote job, two machines & node named gone \textbf{16}\,s after the kill \\
 A training rank killed during a run & survivor finished all 80 epochs, \textbf{90.5}\,s \\
 A training rank's machine back during a run & rejoined at the next epoch, \textbf{4}\,s after its daemon started \\
@@ -245,7 +259,6 @@ Terminal closed during a run & stopped everywhere, as an interrupt \\
 Detach, then attach while running and after it finished & followed live; replayed in \textbf{1.0}\,s once finished \\
 Submitter's network removed during a remote job & \textbf{200}\,s outage: job ran once, results back \textbf{15}\,s after reconnect \\
 Introducer's address changed, no commands run & recovered in about \textbf{12}\,s \\
-Introducer suspended & live peer still reached in \textbf{0.03}\,s \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -284,7 +297,6 @@ cached run follows it. The last row ran eight jobs at once on containers with
 \toprule
 \textbf{Step} & \textbf{Cold} & \textbf{Cached} \\
 \midrule
-Live join, until connected & 1.8\,s & --- \\
 Parallel map & 43.5\,s & 17.0\,s \\
 Map over a lambda & 20.5\,s & 4.8\,s \\
 GPU job submitted from a GPU-less node & 264.8\,s & 7.6\,s \\
@@ -371,6 +383,7 @@ small number of times on the machines and links available.
 Parallel map, 20-core machine and 16-core peer over Tailscale, plain Python against PipedPeer & 5.8--6.4\,s against 4.9--5.4\,s; 116 of 256 items on the peer \\
 Training on two machines over a home link of about 54\,Mbit/s: one machine / two ranks fp16 / two ranks int8 & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
 Introducer traffic during a cross-network run & 0.2\,MB, against about 30\,MB between the peers \\
+Introducer suspended during a run & live peer still reached in 0.03\,s \\
 Signed closure on a host that requires signatures & imported when the sender's key was trusted; refused when it was removed \\
 Daemon memory ceiling, 3\,GiB allocation under a 1\,GiB ceiling & child killed in seconds, out-of-memory recorded \\
 \bottomrule
@@ -395,9 +408,9 @@ PipedPeer is partial or the weaker system.}
 \rowcolors{2}{}{rowgray}
 \small
 \setlength{\tabcolsep}{4pt}
-\begin{tabularx}{\textwidth}{X C{1.6cm} C{1.2cm} C{1.2cm} C{1.2cm} C{1.35cm} C{1.35cm}}
+\begin{tabularx}{\textwidth}{X C{1.95cm} C{1.25cm} C{1.25cm} C{1.25cm} C{1.35cm} C{1.25cm}}
 \toprule
-\textbf{Property} & \textbf{Piped\-Peer} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{BOINC} & \textbf{ssh} \\
+\textbf{Property} & \textbf{PipedPeer} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{BOINC} & \textbf{ssh} \\
 \midrule
 \multicolumn{7}{l}{\textit{What it does differently}} \\
 Runs unmodified Python     & yes & no  & partial & partial & no      & yes \\

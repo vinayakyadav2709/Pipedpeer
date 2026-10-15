@@ -3,6 +3,16 @@
 \label{chap:intro}
 % ============================================================
 
+Much everyday computation is already parallel. A parameter sweep, a
+cross-validated model search, a simulation over many seeds or the training of a
+small network is written with \texttt{multiprocessing.Pool}, \texttt{joblib}
+or PyTorch, and runs on one machine because that is where it was written, while
+other machines nearby sit idle: the laptops of a project group, the
+workstations of a college laboratory after hours, a desktop at home. Using them
+is rarely worth the setup, so the work waits instead. This project sets out to
+make that choice free: a script uses other machines when that is faster, and
+runs as before when it is not.
+
 \section{Problem Statement}
 
 A developer with a laptop, a laboratory workstation and a spare desktop has a
@@ -36,7 +46,29 @@ program is distributed without modification by intercepting the parallel
 primitives it already uses; and machines on different networks are joined by a
 direct path through their routers, with an introducer that only tells each
 machine where the others are. No machine is a head node: coordination is done
-per job by the machine that submits it.
+per job by the machine that submits it. The contributions of this work are:
+
+\begin{enumerate}[leftmargin=*, label=\arabic*.]
+  \item \textbf{Peer-to-peer closure distribution.} Building on Nix's
+  content-addressed store paths, signed closures are pushed between peers, only
+  the store paths a receiver lacks are sent, and distributed work is offered
+  only to peers that can run the closure (Sections~\ref{sec:env}
+  and~\ref{sec:cache}).
+  \item \textbf{Transparent interception with measured work sharing.} Parallel
+  primitives are substituted at import time, parallel maps are divided by a
+  makespan solver over measured rates, and numerical work is gated by a cost
+  model (Sections~\ref{sec:intercept} and~\ref{sec:cost}).
+  \item \textbf{Joining across networks without a relay}, through an introducer
+  that only exchanges addresses and that every daemon serves
+  (Section~\ref{sec:nat}).
+  \item \textbf{Placement without a scheduler}: filters and a bounded score
+  evaluated in the submitting client, with a three-phase lease
+  (Sections~\ref{sec:placement} and~\ref{sec:lease}).
+  \item \textbf{A fallback that preserves the result on every distributed path}
+  (Section~\ref{sec:ft}).
+  \item \textbf{Speed-weighted data-parallel training through the daemon}, with
+  exact or fast synchronisation chosen by ring size (Section~\ref{sec:ddp}).
+\end{enumerate}
 
 The two words of the title are used in a precise sense. Coordination is
 \emph{decentralised}: every daemon serves the introducer for its own cluster,
@@ -152,7 +184,7 @@ Python, cloudpickle & Interception & The shim, embedded in the binary; shipping 
   mechanism, from discovery and joining across networks to interception,
   training and fault tolerance.
   \item Chapter~\ref{chap:results} sets out the evaluation and its results.
-  \item Chapter~\ref{chap:conclusion} concludes, with limitations and security.
+  \item Chapter~\ref{chap:conclusion} concludes, with the limitations.
   \item Chapter~\ref{sec:future} lists future scope, and
   Chapter~\ref{chap:pub} summarises the research paper drawn from this work.
   \item Appendix~\ref{app:extra} holds the implementation's size and further
