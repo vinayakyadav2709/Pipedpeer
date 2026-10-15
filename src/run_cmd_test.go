@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -34,5 +35,25 @@ func TestRunMissingScriptFailsFirst(t *testing.T) {
 	}
 	if err := checkScript(t.TempDir()); err == nil || !strings.Contains(err.Error(), "directory") {
 		t.Fatalf("directory: err = %v, want a not-a-script error", err)
+	}
+}
+
+// A torch script without --gpu builds the CUDA closure only when some
+// healthy machine can use a GPU.
+func TestInferGPUNeedsAGPUSomewhere(t *testing.T) {
+	cpu := clusterNode{NodeID: "a", State: "healthy", Capabilities: map[string]string{"gpu": "none"}}
+	deadGPU := clusterNode{NodeID: "b", State: "unreachable", Capabilities: map[string]string{"gpu": "nvidia"}}
+	liveGPU := clusterNode{NodeID: "c", State: "healthy", Capabilities: map[string]string{"gpu": "nvidia"}}
+	if got, _ := inferGPU(false, []clusterNode{cpu, deadGPU}, nil); got {
+		t.Error("no healthy GPU anywhere: want the CPU environment")
+	}
+	if got, _ := inferGPU(false, []clusterNode{cpu, liveGPU}, nil); !got {
+		t.Error("a healthy peer has a GPU: want GPU preferred")
+	}
+	if got, _ := inferGPU(true, nil, nil); !got {
+		t.Error("this machine has a GPU: want GPU preferred")
+	}
+	if got, _ := inferGPU(false, nil, errors.New("down")); !got {
+		t.Error("node list failed: want the old preference kept")
 	}
 }
