@@ -98,6 +98,28 @@ def test_fixed_interval_ignores_drift_and_may_pass_the_adaptive_ceiling(monkeypa
     assert ddp._diloco_next_interval(256, 0.0, 1.0, 150, 200) == 50   # never past the end
 
 
+def test_interval_follows_the_ring_size(monkeypatch):
+    # DILOCO-MANY: each row's H up to its rank count, the last H past it
+    # (not validated), never a longer interval for a bigger ring.
+    monkeypatch.setattr(ddp, "_DILOCO_ENV_H", None)
+    for up_to, h in ddp._DILOCO_RANKS:
+        assert ddp._diloco_every(up_to) == (h, True)
+    last_n, last_h = ddp._DILOCO_RANKS[-1]
+    assert ddp._diloco_every(2) == (ddp._DILOCO_RANKS[0][1], True)
+    assert ddp._diloco_every(last_n + 1) == (last_h, False)
+    hs = [h for _, h in ddp._DILOCO_RANKS]
+    assert hs == sorted(hs, reverse=True)
+    monkeypatch.setattr(ddp, "_DILOCO_ENV_H", 256)   # PIPEDPEER_DILOCO_H wins
+    assert ddp._diloco_every(last_n + 5) == (256, True)
+    monkeypatch.setattr(ddp, "_DILOCO_FIXED_H", 64)
+    monkeypatch.setattr(ddp, "_DILOCO_H_START", 64)
+    ddp._diloco_use_every(8)
+    assert ddp._DILOCO_H_START == 8
+    assert ddp._diloco_next_interval(2, 0.0, 1.0, 100, None) == 8
+    ddp._diloco_use_every(0)                          # adaptive starts at 2
+    assert ddp._DILOCO_H_START == 2
+
+
 def test_interval_grows_on_low_drift_and_shrinks_on_high(monkeypatch):
     monkeypatch.setattr(ddp, "_DILOCO_FIXED_H", 0)    # PIPEDPEER_DILOCO_H=0: adaptive
     assert ddp._diloco_next_interval(4, 0.1, 1.0, 100, None) == 8

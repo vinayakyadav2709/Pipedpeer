@@ -222,23 +222,44 @@ func planSolo(reports map[int]rankReport, live, syncEvery int) (int, float64, fl
 	return fast, solo, split
 }
 
-// dilocoEvery is --ddp-sync fast's interval: DILOCO-TUNE (d82bde9,
-// docs/benchmarks/diloco.md) held every test model within 1% of one GPU with
-// plain averaging at H=64.
-const dilocoEvery = 64
+// dilocoRanks is --ddp-sync fast's interval by ring size (DILOCO-MANY,
+// docs/benchmarks/diloco.md "Ranks"): the largest H that kept every test model
+// within 1% of one device over 3 seeds, for rings of up to upTo ranks. Plain
+// averaging drifts further from one device as ranks are added (each trains
+// on a smaller slice of the batch), so bigger rings sync more often; past
+// the last row nothing passed. The shim holds the same table
+// (_DILOCO_RANKS in shim ddp.py; TestDiLoCoRanksMatchShim).
+var dilocoRanks = []struct{ upTo, every int }{
+	{2, 32},
+	{3, 16},
+	{4, 4},
+}
+
+// dilocoEvery is the validated interval for a ring of n ranks, or 0 when no
+// interval passed at that size: fast sync is then never picked for it.
+func dilocoEvery(n int) int {
+	for _, r := range dilocoRanks {
+		if n <= r.upTo {
+			return r.every
+		}
+	}
+	return 0
+}
 
 // planDiLoCo is U32's comparison: the ring's step under DiLoCo (each rank's
-// compute plus one sync per dilocoEvery steps; the smallest, as in planSolo)
-// against planSolo's split and solo times. DiLoCo trains a slightly
+// compute plus one sync per dilocoEvery(live) steps; the smallest, as in
+// planSolo) against planSolo's split and solo times. DiLoCo trains a slightly
 // different model, so it must beat both by ddpSoloMargin, never tie. No
-// verdict (false) until planSolo has one: every rank measured.
+// verdict (false) until planSolo has one: every rank measured. Never for a
+// ring size no interval passed at.
 func planDiLoCo(reports map[int]rankReport, live int, solo, split float64) (float64, bool) {
-	if live < 2 || len(reports) < live || solo <= 0 || split <= 0 {
+	every := dilocoEvery(live)
+	if every == 0 || live < 2 || len(reports) < live || solo <= 0 || split <= 0 {
 		return 0, false
 	}
 	fast := math.MaxFloat64
 	for _, rep := range reports {
-		fast = min(fast, rep.StepMillis+rep.SyncMillis/dilocoEvery)
+		fast = min(fast, rep.StepMillis+rep.SyncMillis/float64(every))
 	}
 	return fast, fast*ddpSoloMargin < min(split, solo)
 }
@@ -261,12 +282,13 @@ func (b *ddpBoard) soloFor(group string, r *ddpRun, world int) string {
 	if r.autoSync && !r.diloco {
 		if fast, ok := planDiLoCo(r.reports, live, solo, split); ok {
 			r.diloco = true
+			every := dilocoEvery(live)
 			why := fmt.Sprintf("training with DiLoCo, sync every %d steps: about %.0f ms a step "+
 				"against %.0f ms for the exact split and %.0f ms on one rank alone "+
-				"(--ddp-sync exact for per-step sync)", dilocoEvery, fast, split, solo)
+				"(--ddp-sync exact for per-step sync)", every, fast, split, solo)
 			log.Info().Str("group", group).Float64("diloco_ms", fast).Float64("split_ms", split).
 				Float64("solo_ms", solo).Msg("ddp: " + why)
-			return fmt.Sprintf(`, "diloco": %d, "why": %q`, dilocoEvery, why)
+			return fmt.Sprintf(`, "diloco": %d, "why": %q`, every, why)
 		}
 	}
 	if keep < 0 || !r.sharded {

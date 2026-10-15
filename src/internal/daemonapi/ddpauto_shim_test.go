@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -9,7 +10,7 @@ import (
 )
 
 // U32's rank script: a step that computes for ~2 ms, so a loopback sync of
-// a few hundred microseconds or more makes DiLoCo (2 ms + sync/64) beat both
+// a few hundred microseconds or more makes DiLoCo (2 ms + sync/dilocoEvery(2)) beat both
 // the exact split (2 ms + sync) and one rank alone (4 ms) by the margin.
 const ddpAutoScript = `
 import os, time, torch
@@ -53,7 +54,8 @@ func TestShimAutoSwitchesToDiLoCoAtTheSameStep(t *testing.T) {
 			t.Fatalf("rank %d never switched to DiLoCo:\n%s", rank, out)
 		}
 		at[rank] = m[1]
-		if !strings.Contains(out, "training locally, syncing every 64 steps") {
+		// The lead's interval for a ring of two (DILOCO-MANY), not the shim's own.
+		if !strings.Contains(out, fmt.Sprintf("training locally, syncing every %d steps", dilocoEvery(2))) {
 			t.Errorf("rank %d switched but never trained locally:\n%s", rank, out)
 		}
 	}

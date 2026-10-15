@@ -12,6 +12,11 @@ lan and wifi with 9-15x fewer bytes than exact sync. See
 [Tuning](#tuning-diloco-tune-the-new-defaults). The Results and Diagnosis
 sections below are the earlier runs of the paper's defaults.
 
+**More ranks (DILOCO-MANY, 2026-10-15): the interval now depends on the
+ring size** — every 32 steps for 2 ranks, 16 for 3, 4 for 4, and no fast
+sync at all from 5 ranks up (nothing passed at 8). See
+[Ranks](#ranks-diloco-many-the-interval-by-ring-size).
+
 ## Method
 
 - Driver: `scripts/bench-diloco.sh` (runner `scripts/bench-lib.sh`, rig
@@ -213,6 +218,90 @@ Reproduce (one lab session; `single` and `exact` once, then the defaults):
 
 ```sh
 UNLOCKED=1 BL_LAB_NAME=dtune TRAIN_MEM=1g PROFILES="lan wifi" scripts/bench-diloco.sh run
+```
+
+## Ranks (DILOCO-MANY): the interval by ring size
+
+**Result.** Plain averaging lands further from one device as ranks are
+added, and a shorter interval only partly makes up for it. The default
+interval is now a table of ring sizes, the largest H that passed on every
+model, held in the daemon (`dilocoRanks`, ddprebalance.go) and the shim
+(`_DILOCO_RANKS`, ddp.py; a test keeps them equal):
+
+| ranks | H | evidence (worst model) |
+|---|---|---|
+| 2 | 32 | tfm H=64 fails on seeds 0-2 (+2.13%) |
+| 3 | 16 | ddp04 H=32 fails over 6 seeds (+1.44%) |
+| 4 | 4 | ddp04 H=16 fails (+1.56%), tfm H=8 fails on seeds 0-2 (+1.74%) |
+| 5+ | none | at 8, tfm fails at every H down to 2 (+1.03%) and outer lr < 1 is worse |
+
+Auto mode (U32) never picks fast sync for a ring past the table, and its
+reply carries the table's H, which every rank adopts. An explicit
+`--ddp-sync fast` past the table still runs, at the last row's H=4, and
+rank 0 prints one line saying the ring is beyond the validated size.
+`PIPEDPEER_DILOCO_H` overrides the table. The 2-rank interval drops from
+DILOCO-TUNE's 64 to 32: this harness's tfm seeds 0-2 failed at 64 even
+though DILOCO-TUNE's 6 seeds and the lab passed; accuracy outranks the 4
+extra syncs.
+
+**Harness.** DILOCO-TUNE's in-process simulation extended to N equal ranks
+(`scripts/sim-diloco-ranks.py`): same models, data, epochs, batch
+and learning rate as one device; the global batch split evenly over the
+ranks; 10-step exact warm-up; plain sample-weighted averaging (outer lr 1,
+momentum 0), every epoch's end synced, optimizer state averaged every 10th
+round; exact float averaging (no int8 wire). Gap = mean validation loss
+against the same seeds' one-device runs. A cell passes when the mean over
+seeds 0-2 **and**, where run, over seeds 0-5 are both <= +1% (bold).
+Cells read `seeds 0-2 / seeds 0-5`. ddp04's epoch is 29 steps and gpu's 48,
+so H=32 and H=64 are the same run on ddp04.
+
+| model | ranks | H=2 | H=4 | H=8 | H=16 | H=32 | H=64 |
+|---|---|---|---|---|---|---|---|
+| gpu | 2 | - | - | **+0.02** | **+0.04** | **+0.06** | **+0.09** |
+| gpu | 3 | - | - | **+0.03** | **+0.08** | **+0.11** | **+0.16** |
+| gpu | 4 | - | - | **+0.07** | **+0.13** | **+0.21** | **+0.26** |
+| gpu | 8 | - | - | **+0.14** | **+0.32** | **+0.46** | **+0.56** |
+| gpu | 11 | - | - | **+0.24** | **+0.52** | **+0.71** | **+0.87** |
+| gpu | 16 | - | - | **+0.35** | **+0.74** | +1.01 | +1.27 |
+| ddp04 | 2 | - | - | **+0.79 / +0.13** | **+0.85 / +0.63** | **+0.64 / +0.35** | **+0.64 / +0.35** |
+| ddp04 | 3 | - | **-0.13 / -0.25** | **-0.21 / +0.32** | **+0.39 / +0.42** | +0.87 / +1.44 | +0.87 / +1.44 |
+| ddp04 | 4 | - | **-0.61 / -0.24** | **-0.24 / +0.36** | +1.56 / +1.35 | +2.28 / +2.33 | +2.28 / +2.33 |
+| ddp04 | 8 | **-0.88 / -0.03** | **-0.15 / +0.57** | +2.54 / +2.53 | +2.49 / +2.07 | +1.48 / +2.37 | +1.48 / +2.37 |
+| ddp04 | 11 | - | - | +1.39 | +1.17 | +3.23 | +3.23 |
+| ddp04 | 16 | - | - | **+0.27** | **+0.96** | +4.96 | +4.96 |
+| tfm | 2 | - | - | **+0.14 / -1.24** | **+0.35 / -1.13** | **+0.73 / -1.02** | +2.13 / -0.29 |
+| tfm | 3 | - | **+0.25 / -0.27** | **+0.11 / -1.23** | **+0.69 / -0.79** | **+0.48 / -1.15** | +1.17 / -0.68 |
+| tfm | 4 | **+0.91 / -0.68** | **+0.98 / -0.89** | +1.74 / -0.46 | **+0.88 / -0.95** | +1.42 / -0.63 | **+0.86 / -0.73** |
+| tfm | 8 | +1.03 / -0.87 | +1.24 / -0.54 | +1.57 / -0.37 | +1.98 | +2.43 | +2.98 |
+| tfm | 11 | +2.02 | +1.79 | +2.44 | +2.94 | +4.18 | +4.52 |
+| tfm | 16 | +3.26 | +3.39 | +4.17 | +5.70 | +6.13 | +7.03 |
+
+Outer lr below 1 at 8 ranks (tfm, H=4, seeds 0-2): 0.9 gives +1.67%, 0.7
++3.42%, against +1.24% at 1.0. It shrinks every round's progress and does
+nothing for the drift.
+
+What it shows:
+
+- gpu drifts smoothly with ranks x H and passes up to 11 ranks at any H.
+  ddp04 and tfm set the table. Neither is monotone cell by cell: one
+  seed's loss moves +-2% (ddp04) and the one-device runs themselves spread
+  that much (tfm seed 5 lands at 0.294 against 0.271-0.282), so a 3-seed
+  mean is good to about +-1%, which is the bar's own size. The table takes
+  the conservative reading: a cell must pass on seeds 0-2 and on all six.
+- Many ranks, not a small per-rank batch, cause the tfm gap: 2 ranks of 16
+  samples each (global batch 32) land -2.9% (H=8) and -2.8% (H=64) against
+  one device at batch 32, while 16 ranks of 16 (global 256) land +3.3% even
+  at H=2.
+- 5 to 7 ranks were not run; with 8 failing they get no interval. A ring
+  that grows past the table by joins keeps its starting interval.
+
+Reproduce one cell per seed (a few seconds for gpu/ddp04 at 2 ranks, a few
+minutes for tfm at 16); seeds 0-2 for every cell, 3-5 for the ddp04 and tfm
+cells at 2-8 ranks, and `single` for each seed:
+
+```sh
+python3 scripts/sim-diloco-ranks.py tfm 0 eq+H16+W10 N3 src/internal/nixgen/shim
+python3 scripts/sim-diloco-ranks.py tfm 0 single - src/internal/nixgen/shim
 ```
 
 ## Diagnosis (DILOCO-DIAG)

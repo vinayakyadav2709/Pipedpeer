@@ -233,7 +233,9 @@ def _env_num(name, default, kind=float):
 # (average the ranks as equals instead of by samples).
 _DILOCO_OUTER_LR = _env_num("PIPEDPEER_DILOCO_OUTER_LR", 1.0)
 _DILOCO_MOMENTUM = _env_num("PIPEDPEER_DILOCO_MOMENTUM", 0.0)
-_DILOCO_FIXED_H = _env_num("PIPEDPEER_DILOCO_H", 64, int)
+_DILOCO_ENV_H = _env_num("PIPEDPEER_DILOCO_H", None, int)
+# The interval in use; _install_ddp sets it from the ring size (_diloco_every).
+_DILOCO_FIXED_H = 64 if _DILOCO_ENV_H is None else _DILOCO_ENV_H
 _DILOCO_WARMUP = _env_num("PIPEDPEER_DILOCO_WARMUP", 0, int)
 _DILOCO_UNWEIGHTED = os.environ.get("PIPEDPEER_DILOCO_UNWEIGHTED") == "1"
 _DILOCO_H_MAX = 64
@@ -255,6 +257,34 @@ _DILOCO_DRIFT_GROW = 0.7
 _DILOCO_DRIFT_SHRINK = 1.0
 _DILOCO_REF_WINDOW = 10
 _DILOCO_TIGHTEN = 0.1
+# DILOCO-MANY (docs/benchmarks/diloco.md "Ranks"): plain averaging lands
+# further from one device as ranks are added (each trains on a smaller slice
+# of the batch), so the default interval depends on the ring size: rows of
+# (up to this many ranks, H). Past the last row no interval passed: the
+# daemon never picks fast sync there, and an explicit --ddp-sync fast uses
+# the last row's H and says so. Same table as dilocoRanks in the daemon's
+# ddprebalance.go (TestDiLoCoRanksMatchShim).
+_DILOCO_RANKS = ((2, 32), (3, 16), (4, 4))
+
+
+def _diloco_every(world):
+    """(H, validated) for a ring of world ranks: PIPEDPEER_DILOCO_H when set
+    (the user's choice), else the _DILOCO_RANKS row; past the last row its H
+    and validated False."""
+    if _DILOCO_ENV_H is not None:
+        return _DILOCO_ENV_H, True
+    for up_to, h in _DILOCO_RANKS:
+        if world <= up_to:
+            return h, True
+    return _DILOCO_RANKS[-1][1], False
+
+
+def _diloco_use_every(h):
+    """Set the interval every schedule function reads (0 = adaptive). Every
+    rank must hold the same one: they sync at the same steps."""
+    global _DILOCO_FIXED_H, _DILOCO_H_START
+    _DILOCO_FIXED_H = h
+    _DILOCO_H_START = h or 2
 
 
 def _sync_mode(env, overlap):
@@ -865,6 +895,17 @@ def _install_ddp():
     _DRIFT = [None]         # the last reduce reply's drift, None if it had none
     _TOLD_FAST = [False]
     _PACE = [None]          # the last reply's steps_ms (rank -> ms), for round budgets
+    # DILOCO-MANY: the interval for this ring's size. An auto ring takes the
+    # lead's instead when it switches (_go_fast); a joiner takes the ring's
+    # (_join_ring). ponytail: fixed at the start size; a ring that grows
+    # by joins keeps it (no mid-run interval change across ranks).
+    _H_FOR_WORLD, _H_VALIDATED = _diloco_every(_live_ranks())
+    _diloco_use_every(_H_FOR_WORLD)
+    if _FAST and not _H_VALIDATED and _RANK == 0:
+        _warn("ddp: --ddp-sync fast is validated for up to %d ranks and this ring has %d: "
+              "syncing every %d steps, but it may land more than 1%% off one device — "
+              "--ddp-sync exact keeps the script's arithmetic"
+              % (_DILOCO_RANKS[-1][0], _live_ranks(), _H_FOR_WORLD))
     _ROUND_MS = [None]      # a local round's ms per step, sent as its step_ms
     _TOLD_PACE = [False]
     # The butterfly (U26): every rank's sync URL as this rank reaches it, in
@@ -1027,6 +1068,14 @@ def _install_ddp():
         nonlocal _FAST
         _FAST = True
         _TOLD_FAST[0] = True
+        if _DILOCO_ENV_H is None:
+            # The lead's interval for the ring's live size (DILOCO-MANY), the
+            # same number in every rank's reply.
+            try:
+                _diloco_use_every(max(1, int(reply["diloco"])))
+            except (TypeError, ValueError):
+                _log("ddp: the lead sent DiLoCo interval %r; keeping %d"
+                     % (reply.get("diloco"), _DILOCO_FIXED_H))
         _log("ddp: switching to DiLoCo after %s optimizer step(s)"
              % ",".join(str(n) for n in sorted(_STEPN.values())))
         if _RANK == 0:
@@ -2322,7 +2371,8 @@ def _install_ddp():
         st = _DILOCO.get(id(o))
         if st is None:
             return {}
-        return {"refs": list(st.refs), "ref": st.ref, "started": st.started}
+        return {"refs": list(st.refs), "ref": st.ref, "started": st.started,
+                "h": _DILOCO_FIXED_H}
 
     def _send_snapshot(join, boundary, world, weights):
         """Hand this rank's model and optimizer to a rank joining the ring.
@@ -2476,6 +2526,8 @@ def _install_ddp():
                 st.refs = [float(x) for x in d.get("refs") or []]
                 st.ref = d.get("ref")
                 st.started = bool(d.get("started"))
+                if d.get("h") is not None:
+                    _diloco_use_every(int(d["h"]))   # the ring's interval, not this size's
         _JOIN_BUFS[0] = state.get("buffers")
         _JOIN_LR[0] = [(weakref.ref(o), [g.get("lr") for g in o.param_groups])
                        for o in opts]
