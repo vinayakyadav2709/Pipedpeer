@@ -3,53 +3,67 @@ package clustercfg
 import (
 	"os"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
-// A machine that has joined a cluster must still be in it after a restart.
-//
-// The address used to live only in a flag and an environment variable, so a
-// daemon restarted by a reboot, by `pipedpeer stop; pipedpeer start`, or by
-// anything that did not know to repeat the flag came back alone and quietly
-// stopped taking work. Nothing failed; the node simply sat there looking
-// healthy and idle.
 func TestAJoinedClusterSurvivesARestart(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	if got := Rendezvous(); got != "" {
 		t.Fatalf("a fresh machine claims to be in cluster %q", got)
 	}
-	if err := SetRendezvous("35.234.222.177:38445"); err != nil {
+	if err := SetRendezvous("35.234.222.177:4244"); err != nil {
 		t.Fatal(err)
 	}
-	if got := Rendezvous(); got != "35.234.222.177:38445" {
-		t.Errorf("after joining, Rendezvous() = %q", got)
-	}
-	// What the next start sees, with no flag and no environment.
-	os.Unsetenv(EnvVar)
 	addr, source := Effective("")
-	if addr != "35.234.222.177:38445" || source != "saved" {
+	if addr != "35.234.222.177:4244" || source != "saved" {
 		t.Errorf("a later start got (%q, %q), want the saved address", addr, source)
+	}
+	if addr, src := Effective("flag.example:4244"); addr != "flag.example:4244" || src != "flag" {
+		t.Errorf("flag lost: got (%q, %q)", addr, src)
 	}
 }
 
-// A flag is how somebody points one machine at a different cluster, so it has
-// to beat both the environment and what was saved.
-func TestWhatWasTypedBeatsWhatWasRemembered(t *testing.T) {
-	t.Setenv("XDG_DATA_HOME", t.TempDir())
-	if err := SetRendezvous("saved.example:38445"); err != nil {
+func TestMigratesOldRendezvousAndAuthToken(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dir)
+	if err := os.MkdirAll(userdir.Data(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(EnvVar, "env.example:38445")
+	os.WriteFile(Path(), []byte(`{"rendezvous":"1.2.3.4:38445"}`), 0o600)
+	os.WriteFile(legacyTokenPath(), []byte("sekret\n"), 0o600)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Token != "sekret" || len(c.Introducers) != 1 || c.Introducers[0] != "1.2.3.4:38445" {
+		t.Fatalf("migrated config = %+v", c)
+	}
+	if _, err := os.Stat(legacyTokenPath()); !os.IsNotExist(err) {
+		t.Errorf("auth_token should be deleted after a successful save, stat err = %v", err)
+	}
+	b, _ := os.ReadFile(Path())
+	if strings.Contains(string(b), "rendezvous") {
+		t.Errorf("saved file still has rendezvous: %s", b)
+	}
+	if c2, _ := Load(); c2.Token != "sekret" || len(c2.Introducers) != 1 {
+		t.Errorf("second load = %+v", c2)
+	}
+}
 
-	if addr, src := Effective("flag.example:38445"); addr != "flag.example:38445" || src != "flag" {
-		t.Errorf("flag lost: got (%q, %q)", addr, src)
+func TestRememberIntroducersDedupesAndKeepsEight(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	for i := 0; i < 10; i++ {
+		if err := RememberIntroducers("h" + strconv.Itoa(i) + ":4244"); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if addr, src := Effective(""); addr != "env.example:38445" || src != "environment" {
-		t.Errorf("environment lost to the saved value: got (%q, %q)", addr, src)
-	}
-	os.Unsetenv(EnvVar)
-	if addr, src := Effective(""); addr != "saved.example:38445" || src != "saved" {
-		t.Errorf("saved value not used: got (%q, %q)", addr, src)
+	RememberIntroducers("h5:4244")
+	c, _ := Load()
+	if len(c.Introducers) != 8 || c.Introducers[7] != "h5:4244" || c.Introducers[0] != "h2:4244" {
+		t.Errorf("introducers = %v", c.Introducers)
 	}
 }
 
@@ -60,7 +74,7 @@ func TestABareHostGetsTheDefaultPort(t *testing.T) {
 	for in, want := range map[string]string{
 		"35.234.222.177":        "35.234.222.177" + def,
 		"demo.example.com":      "demo.example.com" + def,
-		"35.234.222.177:38445":  "35.234.222.177:38445",
+		"35.234.222.177:4244":   "35.234.222.177:4244",
 		"demo.example.com:9999": "demo.example.com:9999",
 		// Pasted from a browser or a chat message.
 		"http://35.234.222.177": "35.234.222.177" + def,
@@ -85,7 +99,7 @@ func TestABareHostGetsTheDefaultPort(t *testing.T) {
 // Refused rather than saved, because a bad address is only discovered later
 // as a machine that never meets anybody.
 func TestAnUnusableAddressIsRefused(t *testing.T) {
-	for _, in := range []string{"", "   ", ":38445", "host:notaport", "[2001:db8::1"} {
+	for _, in := range []string{"", "   ", ":4244", "host:notaport", "[2001:db8::1"} {
 		if got, err := Normalize(in); err == nil {
 			t.Errorf("Normalize(%q) accepted it as %q", in, got)
 		}
