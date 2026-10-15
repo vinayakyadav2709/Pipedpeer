@@ -39,15 +39,54 @@ and the two columns cannot be compared row by row as equal work.
 
 ## BEFORE (c7e2c7f), emulated
 
-Not run under load (coordinator, 2026-10-15). The other agents put the
-host at load 25-37, so the matrix would have been thrown away. QUIET-RERUN runs
-it on an idle host: `scripts/bench-ddp-switch.sh before`, then `after`, 28 runs
-each. `ONLY="<model>-<compute>:<variant>[:<profile>]"` reruns single rows, and
-`BL_DRY=1` prints them without running.
+QUIET-RERUN, 2026-10-16, idle host (no other lab or agent run; the load
+column is the lab's own daemons). Only the four cells the paper cites: the two
+by-design extremes. Medians of 3, 2-CPU 2 GB containers. Rows in
+`~/.local/state/pipedpeer/bench-quiet/ddp-switch/`.
+
+| cell | variant | profile | nodes | runs ok | wall s | script s | step s | sync s | world | loss | host load |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| small-heavy | solo | lan | 1 | 3/3 | 12.81 | 7.63 | 0.13 | - | 1 | 0.11 | 0.70 |
+| small-heavy | split | lan | 2 | 3/3 | 10.56 | 5.73 | 0.19 | 1.50 | 2 | 0.16 | 1.78 |
+| large-light | solo | lan | 1 | 3/3 | 10.36 | 4.71 | 0.08 | - | 1 | 0.26 | 0.99 |
+| large-light | split | wifi | 2 | 3/3 | 74.08 | 69.41 | 2.31 | 60.60 | 2 | 0.34 | 0.43 |
+
+The split wins small-heavy (10.6 s against 12.8 s). One node wins large-light
+by 7x (10.4 s against 74.1 s): 60.6 s of the split's 69.4 s script is fp16
+sync over wifi. A BEFORE split still trains on the whole batch per rank (see
+above), so its loss is not the same work as solo's.
+
+```sh
+ONLY="small-heavy:solo small-heavy:split:lan large-light:solo large-light:split:wifi" \
+  BL_EMU=scripts/lab-emu-warm.sh LAB_WARM_SET=bench-before scripts/bench-ddp-switch.sh before
+```
 
 ## AFTER (tree under test), emulated
 
-TODO(verify pass): filled by `bench-ddp-switch.sh after`, one heavy run at a time.
+QUIET-RERUN, 2026-10-16, the same session and cells as BEFORE, binary
+90dac09. At 6a24715 the large-light split failed on every run: the int8 codec
+sent a zero scale for a block whose peak was subnormal, and the daemon refused
+it with "segment 498 has a non-positive scale". 90dac09 fixes that. No AFTER log
+(ddp-switch or diloco) has the one-node fallback line ("running on one node",
+"running single-node"): every split formed its ring.
+
+| cell | variant | profile | nodes | runs ok | wall s | script s | step s | world | loss | host load |
+|---|---|---|---|---|---|---|---|---|---|---|
+| small-heavy | solo | lan | 1 | 3/3 | 11.84 | 8.09 | 0.13 | 1 | 0.11 | 1.47 |
+| small-heavy | split | lan | 2 | 3/3 | 9.11 | 5.32 | 0.09 | 2 | 0.11 | 3.00 |
+| large-light | solo | lan | 1 | 3/3 | 7.98 | 4.32 | 0.07 | 1 | 0.26 | 1.64 |
+| large-light | split | wifi | 2 | 3/3 | 80.65 | 77.14 | 1.29 | 2 | 0.21 | 1.05 |
+
+The split wins small-heavy, 9.1 s against 11.8 s (1.3x). One node wins
+large-light, 8.0 s against 80.7 s (10x): the 9 MB sync over wifi costs far
+more than the step it shares. Both outcomes appear, so the script exits 0. The
+AFTER split halves the batch per rank, so it runs twice the steps of BEFORE's
+split: its step is shorter (1.29 s against 2.31 s), but the script is longer.
+
+```sh
+ONLY="small-heavy:solo small-heavy:split:lan large-light:solo large-light:split:wifi" \
+  BL_EMU=scripts/lab-emu-warm.sh LAB_WARM_SET=bench-after scripts/bench-ddp-switch.sh after
+```
 
 ## Single-GPU baseline (real GPU, not emulated)
 

@@ -1310,11 +1310,12 @@ minutes after the full body if the peer never answers, instead of after 10
 minutes in total, which a large closure on a slow link exceeded on every run.
 A restarted send asks again which paths are missing, so it skips what already
 arrived. In a lab of two 768\,MiB nodes with the second held to
-800\,kbit/s, a cold run fell from 1000.9\,s to 256.9\,s (the environment send
-from 641\,s to 60.4\,s), a warm run from 603.7\,s to 67.3\,s, and a later run
-took 2.3\,s with the slow node taking 22 of 64 items; the one background send
-took 905.6\,s, longer than the old limit allowed (wall times
-to be repeated on an idle host \todo{bcast quiet}).
+800\,kbit/s, a cold run fell from 1000.9\,s to 137.5\,s (the environment send
+from 641\,s to 60.1\,s), a warm run from 603.7\,s to 62.4\,s, and a later run
+took 2.1\,s with the slow node taking 23 of 64 items; the one background send
+took 898.9\,s, longer than the old limit allowed. The times before the fix are
+bounded by the 600\,s timeout (measured before the fix); the times after it
+are from an idle host.
 
 A fresh peer can also fetch from the public binary cache the paths it lacks
 instead of taking them from the sender over the local network. That import
@@ -1704,8 +1705,10 @@ device was $+0.64\%$ and $+0.61\%$ on the GPU example's network (a four-layer pe
 $-2.09\%$ on the same perceptron in the training example at its CPU sizing, and $+0.18\%$ and $+0.50\%$ on a
 small transformer, each within the spread of exact synchronisation's own gap;
 each rank sent 9.1, 10.7 and 1.4\,MiB against 81.1, 98.9 and 21.7\,MiB with
-exact synchronisation, nine to fifteen times less. Wall times are to be
-measured on an idle host \todo{diloco}.
+exact synchronisation, nine to fifteen times less. On an idle host (one seed),
+the run took 15.2, 10.4 and 19.1\,s against 20.0, 14.6 and 22.7\,s with
+exact synchronisation on LAN, and 18.9, 14.1 and 22.9\,s against 41.8, 43.7
+and 35.9\,s on Wi-Fi, where one container took 27.9, 16.9 and 26.7\,s.
 
 The interval depends on the ring's size. Plain averaging every 64 steps passed
 at two and three ranks but failed at eleven. In in-process runs, on the same three
@@ -2606,18 +2609,18 @@ Section~\ref{sec:res-setup}.
 \toprule
 \textbf{Measurement} & \textbf{Result} & \textbf{Source} \\
 \midrule
-One GPU against a split: a cell where the split wins, and one where one GPU wins & \todo{ddp-switch} & container lab \\
-Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time \todo{diloco} & container lab \\
+One GPU against a split: a cell where the split wins, and one where one GPU wins & split wins small model, heavy steps, LAN: 9.1 vs 11.8\,s; one wins 9\,MB model, light steps, Wi-Fi: 8.0 vs 80.7\,s (before: 10.6 vs 12.8\,s; 10.4 vs 74.1\,s) & container lab \\
+Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time LAN 1.2--1.4$\times$, Wi-Fi 1.6--3.1$\times$ faster than exact (idle host, one seed) & container lab \\
 The DiLoCo paper's outer step (Nesterov 0.7, momentum 0.9) at our intervals & fails at every interval; small transformer $+21.7\%$ at 156 local steps & container lab \\
 Largest passing fast-sync interval by ring size & 2 ranks: 32; 3: 16; 4: 4; 5 or more: none & in-process \\
 Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & worst mean $+0.18\%$ at 4, 8 and 11 ranks with rank-16 PowerSGD on exact sync; all other remedies fail & in-process \\
 Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.09, 1.08\times$ (were $2.11, 1.35, 1.37, 1.31\times$) & container lab \\
-Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 256.9\,s, warm 603.7 to 67.3\,s; idle-host rerun \todo{bcast quiet} & container lab \\
+Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 137.5\,s, warm 603.7 to 62.4\,s (before: bounded by the 600\,s timeout, measured before the fix; after: idle host) & container lab \\
 Phone as a full node through proot and Nix & \todo{phone run} & real \\
-Parallel map request body, before and after, 100\,MB payload & \todo{pool body} & container lab \\
+Parallel map request body, before and after, 100\,MB payload & body build 2.77 to 0.06\,s (100 items of 1\,MB), 18.3 to 0.06\,s (1000 items); lab map of 48 $\times$ 8\,MB 4.07 to 2.00\,s, now kept on one node & container lab \\
 Workspace re-upload after editing one file & \todo{workspace} & container lab \\
-Environment seed to a node holding every path & \todo{seed} & container lab \\
-Pool time estimate error, before (7--37$\times$) and after & \todo{estimates} & container lab \\
+Environment seed to a node holding every path & empty script's total overhead 0.64 to 0.23\,s (warm); cold run 113 vs 116\,s, bound by the download & container lab \\
+Pool time estimate error, before (7--37$\times$) and after & error not recorded by the lab; maps that cross nodes 1.7--2.1$\times$ faster (e.g.\ 2.13 to 1.07\,s), two small maps now stay local (1.82 to 0.57\,s) & container lab \\
 Superlinear steps found by the scaling map & none in the numeric sweeps (payload 1\,KB--64\,MB, items 8--2048, cost $10^3$--$3\times10^6$, 2--4 nodes, spread 1--10$\times$); CPU-time growth fits; 4 equal nodes ran a map $2.9\times$ faster than one (2.37 to 0.81\,s, loaded host) & container lab \\
 Introducer address change, time to recover, no commands run & 12.1--12.6\,s over three runs (limit 60\,s); a joining machine connected in 0.2--0.4\,s & container network \\
 Two laptops over Tailscale: CPU, GPU and combined scripts & \todo{tailscale} & real \\
