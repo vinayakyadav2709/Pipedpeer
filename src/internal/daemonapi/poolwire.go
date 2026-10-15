@@ -226,6 +226,16 @@ def read_frames(mv, off, n):
     return out, off
 
 
+def load_func(ns, req):
+    # A by-value callable rides in the globals frame as raw bytes under
+    # __pipedpeer_func__ (the shim's _FUNC_KEY); older submitters sent it as
+    # base64 in the header's "func".
+    blob = ns.pop("__pipedpeer_func__", None)
+    if blob is not None:
+        return pickle.loads(blob)
+    return pickle.loads(base64.b64decode(req["func"]))
+
+
 def load_obj(b):
     if bytes(b[:4]) == _OOB_MAGIC:
         nbuf, plen = struct.unpack_from(">II", b, 4)
@@ -311,7 +321,7 @@ if req.get("func_src"):
     exec(req["func_src"], ns)
     func = ns[req.get("func_name", "run")]
 else:
-    func = pickle.loads(base64.b64decode(req["func"]))
+    func = load_func(ns, req)
 starmap = req.get("starmap", False)
 if not frames and req.get("items_b64"):
     items = [pickle.loads(base64.b64decode(i)) for i in items]
@@ -459,7 +469,7 @@ for line in sys.stdin:
             exec(req["func_src"], ns)
             func = ns[req.get("func_name", "run")]
         else:
-            func = pickle.loads(base64.b64decode(req["func"]))
+            func = load_func(ns, req)
         starmap = req.get("starmap", False)
         if not frames and req.get("items_b64"):
             items = [pickle.loads(base64.b64decode(i)) for i in items]
