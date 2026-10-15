@@ -62,9 +62,9 @@ func TestNoPeerFallsBackToTheOldBehaviour(t *testing.T) {
 }
 
 // TestAnUnroutablePeerStillYieldsAnAddress rather than an empty string that
-// would be stamped into a URL as "://:38080".
+// would be stamped into a URL as "://:4242".
 func TestAnUnroutablePeerStillYieldsAnAddress(t *testing.T) {
-	for _, target := range []string{"not a host", "192.0.2.1:38080", ":::::"} {
+	for _, target := range []string{"not a host", "192.0.2.1:4242", ":::::"} {
 		got := localIPFor(target)
 		if got == "" {
 			t.Errorf("target %q produced no address at all", target)
@@ -78,7 +78,7 @@ func TestAnUnroutablePeerStillYieldsAnAddress(t *testing.T) {
 // TestHostPortAndBareHostAgree. Callers pass whichever they have, and the
 // route depends on the host alone.
 func TestHostPortAndBareHostAgree(t *testing.T) {
-	if a, b := localIPFor("1.1.1.1"), localIPFor("1.1.1.1:38080"); a != b {
+	if a, b := localIPFor("1.1.1.1"), localIPFor("1.1.1.1:4242"); a != b {
 		t.Errorf("bare host gave %q and host:port gave %q", a, b)
 	}
 }
