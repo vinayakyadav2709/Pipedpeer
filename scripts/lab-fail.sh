@@ -32,10 +32,13 @@ for sibling in lab-up.sh lab-down.sh; do
 done
 
 source "$repo_root/scripts/lib/runtime.sh"
+source "$repo_root/scripts/lib/lab.sh"
+# LAB_NAME picks the lab (default lab); lab-up/lab-down inherit it.
+pp_plain_lab_vars || exit 2
 pp_pick_runtime || exit 1
 runtime="$PP_RUNTIME"
 
-w() { "$runtime" exec "pipedpeer-lab-$1" sh -c "$2"; }
+w() { "$runtime" exec "$LAB_CTR-$1" sh -c "$2"; }
 api() { w "$1" "curl -sf --max-time 3 -H \"X-Pipedpeer-Token: \$LAB_TOKEN\" http://127.0.0.1:4242$2"; }
 
 # How many chunk requests a worker has served, read inside its own container,
@@ -62,7 +65,7 @@ for idx in 1 2 3; do
 	done
 	if [[ $ok -ne 1 ]]; then
 		echo "FAIL: worker $idx never came up"
-		"$runtime" logs "pipedpeer-lab-$idx" 2>&1 | tail -20
+		"$runtime" logs "$LAB_CTR-$idx" 2>&1 | tail -20
 		exit 1
 	fi
 done
@@ -122,8 +125,8 @@ if __name__ == "__main__":
 PYEOF
 : >"$workdir/.pipedpeerignore"
 w 1 'rm -rf /root/labfail && mkdir -p /root/labfail'
-"$runtime" cp "$workdir/task.py" pipedpeer-lab-1:/root/labfail/task.py
-"$runtime" cp "$workdir/.pipedpeerignore" pipedpeer-lab-1:/root/labfail/.pipedpeerignore
+"$runtime" cp "$workdir/task.py" "$LAB_CTR-1":/root/labfail/task.py
+"$runtime" cp "$workdir/.pipedpeerignore" "$LAB_CTR-1":/root/labfail/.pipedpeerignore
 
 echo "launching intercept run on worker 1..."
 w 1 "cd /root/labfail && pipedpeer run -e PIPEDPEER_RECEIPT=receipt.json -e LAB_ITEMS=${LAB_ITEMS:-80} task.py" >"$runlog" 2>&1 &
@@ -160,7 +163,7 @@ for idx in 2 3; do
 done
 
 echo "killing worker $kill_idx while it holds chunks"
-"$runtime" stop "pipedpeer-lab-$kill_idx" >/dev/null 2>&1 || echo "warn: stopping worker $kill_idx failed" >&2
+"$runtime" stop "$LAB_CTR-$kill_idx" >/dev/null 2>&1 || echo "warn: stopping worker $kill_idx failed" >&2
 
 set +e
 wait $runpid
