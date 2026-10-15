@@ -5,7 +5,7 @@ What a daemon does with a job once it holds the lease: receive the workspace, ru
 ## Language
 
 **Daemon**:
-The long-lived per-machine process (`pipedpeer __daemon__`) that serves the API on port 38080 and runs jobs; the CLI is short-lived.
+The long-lived per-machine process (`pipedpeer __daemon__`) that serves the API on port 4242 (`daemonctl.DefaultPort`) and runs jobs; started by `pipedpeer start` or, when installed, the `pipedpeer.service` user unit; the CLI is short-lived.
 _Avoid_: server, agent, worker
 
 **Submitter**:
@@ -16,10 +16,10 @@ One script run on one node, with its own ID, lease and job dir.
 _Avoid_: task (reserved for `pipedpeer map` units), run
 
 **Workspace**:
-The project directory tarred and uploaded with the job, minus `.pipedpeerignore` matches.
+The project directory minus `.pipedpeerignore` matches; only files the node's content-addressed cache lacks are sent.
 
 **Job dir**:
-The daemon's scratch directory for one job under `<data>/pipedpeer/work/`; completed ones are pruned after `JobRetention` (`server.go` `PruneCompletedJobDirs`).
+The daemon's scratch directory for one job under `<data>/pipedpeer/work/`; a finished job's dir is removed once its results were fetched or after 24 h, a running job's never (`server.go` `PruneCompletedJobDirs`).
 _Avoid_: history dir
 
 **Job history**:
@@ -57,7 +57,7 @@ What the daemon can still promise to a new job: its budget minus what it and its
 
 ## Entry points
 
-- Routes: `daemonapi/server.go` `buildRouter`; daemon start `src/main.go` `runDaemon`.
+- Routes: `daemonapi/server.go` `buildRouter`; daemon start `src/daemon_cmd.go` `runDaemon`.
 - Upload, exec, results: `daemonapi/execution.go` `handleJobUpload`, `handleJobExec`, `handleJobResults`.
 - Sandbox decision and fallback: `handleJobExec` (`sandboxRequired`); quirks `daemonapi/sandboxquirks.go` `probeQuirks`; user namespace probe `userns/userns.go`.
 - GPU: devices from `gpu.Detect()` (`internal/gpu`); driver libraries mounted via `execution.go` `gpuDriverLibDir`, `gpuDriverLibs`.
@@ -65,3 +65,4 @@ What the daemon can still promise to a new job: its budget minus what it and its
 - Persistence: `daemonapi/server.go` `EnablePersistence`, `daemonapi/state.go`.
 - Submitter side: `app/run.go` `Run`, `RunTask`; `daemonctl/execution.go` `UploadJob`, `StreamExecute`, `DownloadResults`; daemon lifecycle `daemonctl/manager.go` `Start`.
 - History: `jobhistory/history.go` `BaseDir`.
+- Run record: `runrec` (`Save`/`Load` steps.json beside the receipt, `WriteSimple`, `WriteDetailed`, `ExportAll`); served by `GET /v1/history?id=<job>` (`daemonapi/ui.go` `handleHistory`).

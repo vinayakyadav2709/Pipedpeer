@@ -5,7 +5,7 @@ import { ParticleField, pulseParticleTypingImpulse } from "@/components/particle
 import dustyFieldSrc from "@/assets/figures/dusty-field.png";
 
 const INSTALL_CMD =
-  "curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --channel nightly";
+  "curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash";
 
 export function EmptyInboxZeroShowcasePage() {
   const [copied, setCopied] = useState(false);
@@ -61,7 +61,7 @@ export function EmptyInboxZeroShowcasePage() {
 
       <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-6 px-6 pb-20 text-center">
         <div className="font-mono text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
-          peer-to-peer pipeline
+          python, on more machines
         </div>
 
         <h1 className="font-sans text-5xl font-bold tracking-tight md:text-6xl">
@@ -69,7 +69,7 @@ export function EmptyInboxZeroShowcasePage() {
         </h1>
 
         <p className="max-w-md text-balance text-muted-foreground text-sm leading-relaxed">
-          Pipe your data anywhere. Install in seconds.
+          Run your Python script on more machines, unchanged. Install in seconds.
         </p>
 
         <div className="mt-2 flex w-full max-w-2xl items-center gap-0 rounded-lg border border-border bg-card/80 backdrop-blur-sm">

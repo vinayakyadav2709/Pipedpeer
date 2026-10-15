@@ -17,8 +17,8 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Observed 5: daemon start-up prunes job history | Each pruner only removes its own entries: the daemon only UUID-named job directories, the history only directories holding a record |
 | Observed 6: a job's output stream closes early | a7bb9a5 waits for both output readers before reaping the job |
 | Pool: `items_zlib` is dropped when the daemon splits work | 049a1aa |
-| Internet: unreachable reasons never reach `pipedpeer nodes` | They are kept by the daemon, served by `/v1/peers/unreachable`, and listed under `nodes` |
-| `--remote` gives up after one look (demo run sheet) | It waits up to 10 min for a node (`PIPEDPEER_REMOTE_WAIT`), says every 30 s why each node is busy, and fails at once when no node could ever hold the job |
+| Internet: unreachable reasons never reach the node list | They are kept on the node's row in the address book, served by `/v1/peers/unreachable` and `/v1/nodes` (`reason`), and listed under `pipedpeer status` |
+| `--remote` gives up after one look (demo run sheet) | It waits up to 10 min for a node, says every 30 s why each node is busy, and fails at once when no node could ever hold the job |
 | Observed 2: three tests fail, not skip, without torch | The shim test gate counts the weighted sampler as needing torch |
 | Pool: `runMicroChunks` answers in JSON; the shim reads frames | Micro-chunked requests answer in the format they were asked in, with a receipt |
 | Pool: forwarded work is recorded as `local` | The forwarding node relabels the peer's `local` parts as `peer:<addr>` before passing the answer on |
@@ -39,6 +39,17 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Found on the rig (Phase 4): more workers do not make a pool map faster | Local and cluster pull from one queue instead of splitting the items in half up front |
 | Found on the rig (Phase 4): sklearn ships the training set once per tree | Arrays the tasks in a chunk share travel once per chunk |
 | Found on the rig (Phase 4): a run straight after another is refused for memory | A run on this machine waits out a memory refusal for up to the placement window (10 min) |
+| Demo 2026-10-14: Intel integrated graphics counted as a GPU, so a CPU-only PC took a training rank | Intel graphics are never a compute GPU (`6fbd06e`); GPUs are enumerated from sysfs without waking a sleeping dGPU |
+| Demo: a mistyped script name was placed on three nodes before "file not found" | The script is checked first, on every path (`--remote`, `--gpu force`, DDP) |
+| Demo: a peer that changed IP, or a changed introducer IP, needed `join` again on every machine | Address book with every path per node id, introducers in every daemon, QUIC migration, link replacement on reconnect ([ADR-0019](adr/0019-address-book.md)) |
+| Demo: a discovered-but-never-joined node stayed as an unknown row | Never-verified nodes are pruned after 2 min; a sighting alone never refreshes a row |
+| Demo: a small training split across two Wi-Fi laptops ran ~9 min instead of ~20 s on one GPU | The ring is kept only when the measured split step beats the fastest rank alone |
+| Demo: a CPU lead built a different model and its weights were refused; the survivor trained alone | The lead is a GPU node whenever one exists; a parameter manifest at the start barrier aborts every rank with one message |
+| Demo: the submitter waited on a dead ring while no machine had jobs | A lost lead stops the survivors (exit 76) and a failed rank cancels every rank |
+| Demo: output noisy, UI asked for the token, daemon did not survive reboot, workspaces kept forever | Clean `run` output (`-v` for details), token passed in the `ui` URL fragment, optional user service, finished job dirs removed after their results are fetched or 24 h |
+| Audit B1: `PIPEDPEER_DDP_SYNC_EVERY=auto` crashed DDP set-up, and the failure was swallowed | Read as `auto` before `int()`; patch failures are always printed |
+| Audit B3: internet peers appeared twice (fingerprint and UUID rows) | One identity: node id = key fingerprint ([ADR-0008](adr/0008-pinned-tls-and-key-addressed-nodes.md)) |
+| Audit B4: a daemon restarted by `run` after a reboot forgot its introducer | The daemon reads `cluster.json` itself |
 
 ## Not bugs, recorded so they are not reported again
 
@@ -68,8 +79,8 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Area | Issue | Where |
 |---|---|---|
 | Pool | The forwarded body lacks `no_fanout`, so the peer can fan out again | `daemonapi/pool.go:983-1001, 894` |
-| Pool | `imap_unordered` returns results in order | `nixgen/shim.go:264-265` |
-| numpy | The `@` operator is not intercepted (only module functions are patched) | `nixgen/shim.go:1159-1163` |
+| Pool | `imap_unordered` returns results in order | `nixgen/shim/pool.py` (`imap_unordered`) |
+| numpy | The `@` operator is not intercepted (only module functions are patched) | `nixgen/shim/numpy_ops.py` |
 | Security | Trusted Nix keys are collected from every node in the node store, and are not bound to an authenticated identity | `daemonapi/server.go:1578-1615` |
 | Security | The legacy closure import uses `--no-check-sigs`, and the submitter's own upload uses that format | `daemonapi/execution.go:1029-1066` |
 | Setup | Keys appended to `nix.conf` are a snapshot; peers added later are not trusted until setup runs again | `setup/setup.go:250-253` |
@@ -78,8 +89,10 @@ Paths are relative to `src/`. Each entry says how it was established:
 
 ## Limitations by design
 
-- **One introducer per cluster.** There is no failover. Joining across networks
-  needs it up, although links that are already live survive it going away.
+- **Joining across networks needs one reachable introducer.** Every daemon is
+  one and a node knows up to 8, but a new machine whose invite names only
+  unreachable members cannot join (`connect` says so and exits 1). Links that
+  are already live survive every introducer going away.
 - **No relay.** A pair of peers with no direct path is not offered work
   (`95e0712`); it would carry every byte of every job.
 - **Two peers both behind per-destination (symmetric) NATs cannot connect.**

@@ -3,7 +3,9 @@
 Source material for the major project report and the conference paper. Written
 against commit `4c91ef3` (2026-09-01) and checked against the code on
 2026-10-02; extended on 2026-10-12 for the leftovers and demo rounds
-(`d2139f2`..`c4f7800`), marked [Oct-12] where a result is new. Every
+(`d2139f2`..`c4f7800`), marked [Oct-12] where a result is new; extended on
+2026-10-15 for the address-book phase after the college demo (4.15, 5.12,
+Appendix B), where numbers still to be measured read **TODO(verify)**. Every
 non-obvious claim carries a file reference relative to `src/`.
 Every number in Chapter 5 traces to a file in `docs/benchmarks/raw/`, or to a
 commit whose message recorded the measurement. `raw/C_commit_measurements.md`
@@ -152,11 +154,10 @@ Out of scope in the current implementation:
 | zstd (`klauspost/compress`) | Workspace and results archives |
 | `modernc.org/sqlite` | Node store; pure Go, so the binary stays static |
 | `gopsutil` | CPU, memory and process metrics |
-| Cobra and Viper | CLI structure and configuration |
+| Cobra | CLI structure |
 | Bubble Tea, Lip Gloss | Dashboard TUI |
-| NATS (embedded) | Optional alternate transport for lease messages |
 | `zerolog` | Structured logging |
-| Python (embedded shim) | The interception layer, 3,822 lines shipped inside the binary |
+| Python (embedded shim) | The interception layer: Python modules under `nixgen/shim/`, embedded with `go:embed` |
 | cloudpickle | Added to every generated environment, to ship lambdas and closures by value |
 
 ### 1.5 Assumptions and constraints
@@ -167,11 +168,13 @@ Out of scope in the current implementation:
 - **Linux workers.** Workers must run Linux, because `crun`, cgroups and the
   Nix store are Linux-specific. The submitting side builds for macOS as a
   client (the CI build matrix covers linux and darwin, amd64 and arm64).
-- **Shared secret.** Machines in a cluster share one secret (`pipedpeer auth
-  set`). It is **optional**: a daemon with no secret configured accepts every
-  request, as earlier versions did (4.3).
-- **Introducer.** Joining across networks needs one machine with a public
-  address to act as introducer. It never carries job data.
+- **Shared secret.** Machines in a cluster share one secret. The first
+  machine's `setup` creates it before the daemon first starts, and
+  `pipedpeer connect <code>` copies it to the others (4.3, 4.15).
+- **Introducer.** Joining across networks needs one reachable introducer.
+  Every daemon is one for its own cluster, so any member that the joining
+  machine can reach will do; a public server can run as an introducer that
+  takes no jobs. It never carries job data.
 - **A direct path must exist.** When two machines have no possible direct path,
   for example two carrier-grade NATs that both allocate a new port per
   destination, they cannot work together. The system says so and routes around
@@ -218,45 +221,48 @@ Every machine runs one long-lived **daemon**. The CLI is short-lived and holds
 no peer-to-peer logic of its own. The **coordinator is a library linked into the
 CLI**, not a service, so there is no scheduler process and no head node anywhere
 in the system. A machine is a submitter and a worker at the same time, and the
-same binary does both. The **introducer** (`pipedpeer rendezvous`) is the one
-role a machine can take that is not symmetric. It is optional: a LAN cluster
-needs none.
+same binary does both. Every daemon is also an **introducer** for its own
+cluster (4.2). Two optional roles break the symmetry: `pool-only` (a phone that
+takes Pool chunks but no whole jobs) and `introducer-only` (a hosted server
+that introduces and runs nothing).
 
 See `fig_3.1_system_design.png`.
 
-The subsystems, all under `src/internal/` (37 packages, plus `main`):
+The subsystems, all under `src/internal/` (plus `main`):
 
 | Package | Responsibility |
 |---|---|
 | `coordinator` | Filter, score and choose a node; take a lease; retry |
-| `daemonapi` | HTTP and WebSocket surface (22 routes), leases, sandbox, pool spill, DDP reduction, closure caches |
+| `daemonapi` | HTTP and WebSocket surface, leases, sandbox, pool spill, DDP reduction and the one-GPU-or-split decision, closure caches, node poller and address gossip |
 | `schedule` | Makespan-optimal division of work across measured devices |
 | `ddpplace` | Choosing the ranks of a training ring by measured throughput |
 | `discovery` | LAN: UDP multicast and broadcast, TCP `/health` sweep fallback |
-| `internet` | Peer manager for joining across networks: publish, punch, link, forward |
+| `internet` | Peer manager for joining across networks: register with every introducer, punch, link, migrate, forward; serves the in-daemon introducer |
 | `direct` | Shared UDP socket, candidate race, birthday-collision fallback, QUIC links |
 | `rendezvous` | Introducer address book and punch-request forwarding |
 | `nattype` | STUN client and NAT mapping and filtering classification (diagnostics) |
 | `portmap` | PCP, NAT-PMP and UPnP-IGD port mapping |
-| `clustercfg` | The remembered introducer address |
+| `clustercfg` | `cluster.json`: token, introducers, roles |
+| `invite` | The `pp1-` invite code (secret + introducer addresses) |
 | `authtoken` | Shared-secret middleware and outbound injection |
-| `tlsid` | Self-signed daemon certificate, pin-on-first-use, TLS and HTTP on one port |
-| `identity` | Node UUID and ed25519 node key |
+| `tlsid` | Daemon certificate made from the node key, pins keyed by node id, TLS and HTTP on one port |
+| `identity` | ed25519 node key; node id = its fingerprint |
 | `nixsign` | Signing closures with the node key; the trusted-key list |
 | `narpack` | Signed closure archives; LRU pruning of closure caches |
 | `nixstore` | System or private (rootless) Nix store |
-| `nodestore` | SQLite table of known peers and their last observed capacity |
-| `nixgen` | Flake generation, wheel pins, and the interception shim as an embedded asset |
+| `nodestore` | SQLite address book: every path per node id, last observed capacity |
+| `nixgen` | Flake generation, wheel pins, and the interception shim (`shim/*.py`) as embedded files |
 | `pythondeps` | Import scanning and import-to-package mapping |
 | `resourceest` | Tiered memory estimate |
 | `cgroups` | Daemon and per-job memory ceilings; the daemon's memory budget |
 | `tarcodec` | zstd, gzip or plain archive sniffing |
 | `heartbeat`, `gpu` | Capability and load reporting; vendor GPU detection |
-| `jobhistory`, `registry` | Per-job records; optional standalone directory |
-| `daemonctl`, `setup`, `userdir`, `userns`, `netaddr`, `relay`, `natsbus`, `logging`, `ping`, `app` | Supporting |
+| `jobhistory`, `runrec` | Per-job records; the run record (timed steps, simple and detailed views, export) |
+| `service`, `warmup`, `doctor`, `phone` | Autostart user unit; background build of common environments; diagnostics with fixes; Termux pool worker |
+| `daemonctl`, `setup`, `userdir`, `userns`, `netaddr`, `logging`, `say`, `term`, `app` | Supporting |
 
-`relay` still exists, and so do the `relay-test` and `relay-connect`
-diagnostics, but the daemon does not import it. No job traffic is relayed
+The relay code, the NATS transport, the standalone registry and the ping
+package were deleted in the address-book phase. No job traffic is relayed
 (4.2).
 
 ### 3.2 Data flow
@@ -264,8 +270,7 @@ diagnostics, but the daemon does not import it. No job traffic is relayed
 **Level 0** (`fig_3.2_dfd_level0.png`) has four external entities:
 - the user;
 - peer nodes;
-- the introducer (optional);
-- the registry (optional).
+- introducers (other members, or an optional hosted one).
 
 **Level 1** (`fig_3.3_dfd_level1.png`) decomposes the daemon into seven
 processes:
@@ -290,8 +295,9 @@ See `fig_3.4_use_case.png`.
 
 - **User:** runs a script, asks for a GPU or a memory floor, trains with data
   parallelism, and inspects jobs and nodes.
-- **Operator:** installs prerequisites, sets the cluster secret, and joins the
-  machine to a cluster.
+- **Operator:** runs the installer (which runs `setup`), prints an invite on the
+  first machine and runs `connect` with it on the others; `doctor` when
+  something is wrong, `uninstall` to clean a machine.
 - **Peer daemon:** accepts and leases work, serves closures to other peers, and
   executes parallel chunks.
 - **Introducer:** registers nodes and forwards punch requests.
@@ -332,7 +338,7 @@ travels over pinned TLS on a LAN, or inside a QUIC link across networks.
 Three sources feed one table, and none of them blocks the others.
 
 **UDP, not mDNS.**
-- `discovery/discovery.go` opens two sockets on port **38099** (:39):
+- `discovery/discovery.go` opens two sockets on port **4242**/udp:
   - one joined to multicast group **239.255.0.99** (:46);
   - one bound for broadcast.
 - Both use `SO_REUSEADDR` and `SO_REUSEPORT`.
@@ -345,20 +351,36 @@ Three sources feed one table, and none of them blocks the others.
   source "broadcast".
 
 **TCP fallback.** Access points with client isolation drop broadcast without
-error. When the UDP probe returns nothing, `discovery/tcp.go` sweeps the first
-254 addresses of each local subnet, with 64 probes in flight and a 700 ms
-`GET /health` per address, and stops issuing probes once any daemon answers
-(:14-20, :34, :46, :60-70, :82).
+error. When the UDP probe returns nothing, `discovery/tcp.go` sweeps each
+local interface's prefix from its network address (docker, veth, bridge and
+tailscale interfaces skipped), with 64 probes in flight and a 700 ms
+`GET /health` per address, and stops issuing probes once any daemon answers.
 
-**Node store.** `nodestore/store.go` keeps peers in SQLite, and a peer poller
-runs every 10 s with a 3 s timeout. A single failed poll marks a node
-unreachable at once (`MarkUnreachable`, `nodestore/store.go:322-324`). Two
-further thresholds apply:
-- a row not refreshed for **45 s**, for example while the local daemon itself
-  was down, is not reported healthy (`daemonapi/server.go:1287`);
-- after **5 min**, an auto-discovered row is deleted (`server.go:1620`). Manual
-  rows, which include peers linked across networks, are never deleted by this
-  rule.
+**The host is the packet's source.** A reply's advertised address was fixed
+when the peer's daemon started, so a peer that moved was reported at its old
+address forever (experiment E4). Discovery now takes the host from the UDP
+source of the reply.
+
+**Address book.** `nodestore/store.go` keeps, in SQLite, every node by node id
+(the fingerprint of its key) and every **path** to it: kind (`lan`, `internet`,
+`gossip`, `self`), host, port, last seen, last success, last error
+([ADR-0019](adr/0019-address-book.md)). A sighting adds a candidate and never
+moves the active path; a path becomes active only after the poller reached it
+and the certificate's key matched the node id, and an active path that still
+answers is kept (a verified LAN path beats a verified internet path). This
+stops the overwrite experiment E5e found, where LAN discovery replaced a
+working internet link with an unreachable LAN address. The poller runs every
+10 s with a 3 s timeout and tries the active path, then the other candidates,
+LAN first. Pruning: a node with no verified path for 15 min goes, a
+never-verified discovery or gossip node after 2 min, LAN paths unseen for
+10 min and internet or gossip paths unseen for 1 h; a sighting alone never
+refreshes a node, so the stale rows of the demo can no longer live forever.
+
+**Signed address gossip.** Each member serves its own addresses at
+`GET /v1/addresses`, signed with its node key and numbered; the poller pulls
+the records from healthy peers at most once a minute. A record is only a
+candidate (and a hole-punching hint), the highest number per node wins, and a
+bad signature is dropped with a log line.
 
 ### 4.2 Joining across networks
 
@@ -366,20 +388,33 @@ A LAN broadcast cannot reach a machine behind another router, and that machine
 will not accept an inbound connection. `fig_4.1_nat_traversal.png` shows how
 two such machines come to share a direct, encrypted link.
 
-**One command.**
-- `pipedpeer join <introducer>` does the following (`main.go:244-310`):
-  - normalises the address (default port 38445);
-  - saves it to `cluster.json` (`clustercfg/clustercfg.go`);
-  - restarts the daemon in internet mode;
-  - waits up to 90 s for peers, then prints the node table.
-- `pipedpeer start --rendezvous` and `PIPEDPEER_RENDEZVOUS` do the same without
-  waiting.
-- A later plain `start` rejoins from the saved address.
+**One command per machine.**
+- `pipedpeer invite` prints one line, `pipedpeer connect <code>`. The code is
+  `pp1-` + base64url of the cluster secret and up to six introducer addresses
+  (this machine's LAN addresses, known introducers, its public mapped address
+  when known) + a CRC-32, so a mistyped code is refused as damaged
+  (`invite/invite.go`).
+- `pipedpeer connect <code>` saves the secret and introducers to
+  `cluster.json` (`clustercfg`), restarts the daemon once, waits up to 60 s on
+  `/v1/introducers` and `/v1/nodes`, and ends with one of three results:
+  connected (with the machines it sees, exit 0), partly (per machine, the
+  reason and the fix, exit 2), or failed (code damaged, no introducer answered,
+  or secret rejected, each with what to do, exit 1).
+- The daemon reads `cluster.json` itself, so a daemon restarted by `run` after
+  a reboot rejoins (audit B4), and it remembers verified member addresses as
+  further introducers (at most 8).
 
-**The introducer is an address book, not a relay.**
-- `pipedpeer rendezvous` runs:
-  - two STUN-style reflectors (UDP 38443, 38444);
-  - an address book on UDP 38445 (`rendezvous/rendezvous.go`).
+**Introducers are address books, not relays, and every daemon is one.**
+- Every daemon with a token serves the introducer on UDP **4244**, answering
+  only its own cluster id (`rendezvous/rendezvous.go`, `ServeIntroducer` in
+  `internet`). A node registers with every introducer it knows every ~30 s and
+  at once after a local address change, and keeps per introducer the last
+  reply, last error and member count (`GET /v1/introducers`); one that has not
+  answered for 60 s is logged once. Before this, one standalone introducer was
+  the cluster's single point of failure: when its IP changed, the cluster never
+  recovered and nothing said why (experiment E3b).
+- A public server can join as `pipedpeer start --introducer-only`: it
+  introduces and takes no jobs ([hosted-introducer.md](hosted-introducer.md)).
 - A node registers its candidate addresses under a cluster ID derived from the
   secret: `sha256("pipedpeer-rendezvous\0" + token)`, first 8 bytes. The
   introducer therefore never holds the secret.
@@ -389,7 +424,6 @@ two such machines come to share a direct, encrypted link.
 - The introducer never carries job data. Over a whole verification run the
   introducer host sent 0.2 MB, while about thirty megabytes crossed between the
   peers (commit `42c2426`).
-- The same command can also serve a relay on 38446. The daemon never uses it.
 
 **Candidates.** Each node offers three kinds of candidate address
 (`direct/direct.go:58-89`):
@@ -408,7 +442,7 @@ published as reachable when it is not.
 
 **One socket.**
 - Punch probes, introducer messages and QUIC all share one UDP socket on port
-  **38447** (`direct/sharedconn.go`).
+  **4243** (`direct/sharedconn.go`).
 - A router's mapping belongs to the socket that opened it, so the connection
   must arrive on the same socket the probes left from.
 - Datagrams are told apart on arrival:
@@ -428,7 +462,7 @@ published as reachable when it is not.
   - the socket that is hit is the one used.
 
 **The link.**
-- The winning path carries QUIC (ALPN `pipedpeer-direct/1`, TLS 1.3).
+- The winning path carries QUIC (ALPN `pipedpeer-direct/3` since the address-book phase, TLS 1.3).
 - Both ends then exchange a hello signed with their ed25519 node key, and each
   checks:
   - that the peer's key fingerprint is the node it meant to reach;
@@ -443,16 +477,20 @@ published as reachable when it is not.
   zero-seeded stream and was the same eight bytes every time, now comes from
   `crypto/rand` (`edba934`).
 - The link is then exposed to the rest of the daemon as a TCP forwarder on
-  `127.0.0.1:<port>`, registered as an ordinary manual node (`internet.go:541`).
+  `127.0.0.1:<port>`, recorded as the `internet` path of that node id.
   Each local connection becomes one QUIC stream to the peer's daemon. The
   scheduler, the closure transfer and the gradient sync therefore all work over
   the link without knowing it exists.
-- `pipedpeer nodes` shows how each peer is reached in a PATH column:
-  - `self`;
-  - `lan`;
-  - `mapped` or `reflex`, for the candidate kind that answered;
-  - `punched`, for a collision hit;
-  - `punched-in`, when the peer dialled us.
+- `pipedpeer status` shows how each peer is reached in a PATH column (`self`,
+  `lan`, `internet`).
+
+**Roaming** (experiments E3a, E3b). A peer that changed IP used to come back
+only after about 3 minutes, because the other side kept the dead link and
+refused the new one as "already connected". Now a hello from a node key that
+already has a link replaces the old link at once. The daemon polls its
+interfaces every 5 s; on a change it migrates the QUIC connections it dialled
+to the new local address (quic-go path probing) and redials the ones it
+accepted, and re-registers with every introducer.
 
 **No relay.**
 - A peer with no direct path is not relayed. It is logged with the reason, never
@@ -461,9 +499,9 @@ published as reachable when it is not.
   (`95e0712`), because it would carry every byte of every job.
 - A live link is never expired because the introducer went away. A peer was
   reached in 0.03 s with the introducer suspended (`42c2426`).
-- `pipedpeer nodes` lists each peer with no direct path under the table, with
+- `pipedpeer status` lists each peer with no direct path under the table, with
   its reason (`8b13704`), including when no peer at all is reachable
-  (`36d4923`).
+  (`36d4923`); the reason lives on the node's row.
 
 **What the NAT lab found** (October 12). Until `lab/nat` (4.13) the punching
 code was exercised only at live demos. The lab showed peers behind NAT rarely
@@ -486,12 +524,13 @@ linking, for four reasons, all fixed:
 ### 4.3 Security and identity
 
 The August design assumed a trusted LAN and had no authentication. The current
-one has three layers, all of them optional in the sense that a node with none
-configured still runs. `fig_4.2_trust.png` shows them.
+one has three layers. `fig_4.2_trust.png` shows them.
 
 **Shared secret** (`authtoken/token.go`).
-- `pipedpeer auth set` generates 32 random bytes, or stores a given secret, at
-  `~/.local/share/pipedpeer/auth_token` with mode 0600.
+- The first machine's `setup` (or `invite`) generates 32 random bytes before
+  the daemon first starts, and `connect <code>` stores the code's secret; both
+  go into `cluster.json` with mode 0600 (`clustercfg`, `authtoken.Set`). An old
+  `auth_token` file migrates on first read.
 - Every route on the daemon, `/health` included, requires it in
   `X-Pipedpeer-Token` or as a bearer token. The comparison is constant-time and
   a mismatch is a 401 (`daemonapi/server.go:1070`).
@@ -504,17 +543,24 @@ configured still runs. `fig_4.2_trust.png` shows them.
   the challenge.
 - Jobs receive it as `PIPEDPEER_TOKEN`, so that the shim can reach its own
   daemon. A consequence is that any job's code can read the secret.
-- **With no secret configured the middleware passes every request**, which is
-  the old open behaviour.
+- The CLI never starts a daemon without a secret, so the old open behaviour no
+  longer happens in practice.
+- `pipedpeer ui` opens the page with the token in the URL fragment
+  (`#token=…`), which browsers never send; the page stores it and removes it
+  from the address bar. There is no loopback exemption, because internet peers
+  reach the daemon through loopback forwarders.
 
 **Pinned TLS on the daemon port** (`tlsid/`).
-- Each daemon creates a self-signed ECDSA P-256 certificate on first start.
+- Each daemon's self-signed certificate is made from its ed25519 node key
+  (it was a separate ECDSA P-256 key before the address-book phase).
 - The same port serves TLS and plain HTTP: the listener peeks at the first byte
   and treats `0x16` as a TLS handshake (`tlsid/listener.go`).
-- Outbound requests to another daemon try TLS first, and pin the peer's
-  certificate fingerprint on first contact in `known_peers.json`.
-- A changed certificate is refused outright, with the command that clears the
-  pin (`pipedpeer auth forget`).
+- Outbound requests to another daemon try TLS first. Pins are keyed by node id
+  (`tlsid.Expect(addr, nodeID)`): a certificate whose key matches the expected
+  node id is accepted at any address, and a changed key for a known node id is
+  refused outright. Pins used to be keyed by `host:port`, so a different
+  machine that later got a peer's old IP was refused
+  ([ADR-0008](adr/0008-pinned-tls-and-key-addressed-nodes.md)).
 - This is trust on first use, and it is **opportunistic**: if TLS fails for any
   reason other than a pin mismatch, the client remembers that peer as plain HTTP
   and falls back. The code says so: an attacker who can break the handshake can
@@ -524,7 +570,10 @@ configured still runs. `fig_4.2_trust.png` shows them.
 
 **Node identity and signed closures** (`identity/key.go`, `nixsign/`).
 - Each node has an ed25519 key with mode 0600. Its fingerprint (first 8 bytes of
-  the SHA-256 of the public key) is the node's address in internet mode.
+  the SHA-256 of the public key, 16 hex) is the node id everywhere: node store,
+  direct links, pins. Before the address-book phase the node store keyed rows by
+  a random UUID while internet links used the fingerprint, which produced
+  phantom duplicate rows (audit B3).
 - Signatures are domain-separated by a context string.
 - The same key signs closures as a Nix signing key named `pipedpeer-<fp>`.
 - Nodes publish the public half in their heartbeat. Each daemon writes the keys
@@ -559,11 +608,9 @@ belief that it does not check signatures; it does.
   removes keys of the form `pipedpeer-<16 hex>:<ed25519 key>`, the name derived
   from the key, each in its own include file, and restarts nix-daemon once per
   change. The daemon calls it with `sudo -n` for a key system Nix does not yet
-  trust, before the import, and retries a failure every 15 minutes. `setup`,
-  `join` and `pipedpeer trust` take the same path; `setup --uninstall` removes
-  it. Which Nix needs what is decided in one place, `nixsign.SystemUntrusted`.
-- A refused import is returned to the submitter and printed, with the
-  `pipedpeer trust` hint where it applies.
+  trust, before the import, and retries a failure every 15 minutes. `setup`
+  and `connect` take the same path; `uninstall` removes it. Which Nix needs what is decided in one place, `nixsign.SystemUntrusted`.
+- A refused import is returned to the submitter and printed.
 - Setup prefers the reliable Nix: one already installed, else the Determinate
   installer when it can get root, else the private store, which fails on arm64
   and under Ubuntu's user-namespace restrictions (`454754a`). Its firewall
@@ -577,15 +624,15 @@ belief that it does not check signatures; it does.
   LAN discovery (`daemonapi/server.go:1578-1615`).
 - **The key helper trusts on the token's word.** With the helper installed,
   anyone holding the cluster token can get signed paths trusted by system Nix
-  on every machine with no human in the loop. That was already true after a
-  manual `pipedpeer trust`; SECURITY.md and ADR-0018 say so.
+  on every machine with no human in the loop. That was already true after the
+  old manual trust step; SECURITY.md and ADR-0018 say so.
 - **One import path skips signature checking.** The older transfer format, which
   the submitter still uses for its own upload, imports with `--no-check-sigs`
   (`daemonapi/execution.go:1132`). Single-user Nix does check signatures on the
   signed path; the belief that it did not was corrected in `8484714`.
-- **The registry and LAN discovery are unauthenticated.** The optional
-  standalone registry has no authentication. Discovery accepts any responder, but
-  the token now goes only to hosts that prove they hold it.
+- **LAN discovery is unauthenticated.** Discovery accepts any responder as a
+  candidate, but the token goes only to hosts that prove they hold it, and a
+  path is used only once the peer's key matches its node id.
 
 ### 4.4 Placement and scoring
 
@@ -593,8 +640,9 @@ Candidates are merged from:
 - the node store;
 - live discovery;
 - internet-linked peers;
-- the optional registry;
 - self.
+
+A node with a `role` (pool-only, introducer-only) is never offered a job.
 
 They are deduplicated by node ID. Then five hard filters run in order
 (`fig_4.3_placement_flow.png`):
@@ -604,7 +652,7 @@ They are deduplicated by node ID. Then five hard filters run in order
 4. free cores must meet the request;
 5. free VRAM must meet the request.
 
-Each rejection records a reason, which surfaces in `pipedpeer job`.
+Each rejection records a reason, which surfaces in `pipedpeer jobs <id> --explain`.
 
 Survivors are scored by `coordinator.scoreNode` (`coordinator.go:942-976`),
 unchanged since August:
@@ -643,15 +691,16 @@ existing reservations (4.8), rather than the machine's free memory.
 
 **Placement within one run** (`1e07d56`).
 - A node that refuses the job's signed closure is left out for the rest of the
-  run, with ``fix: run `pipedpeer trust` on <node>``; the run fails only when no
+  run, naming the node; the run fails only when no
   node is left. A refusal is that node's missing trust, not every node's, so it
   does not count as a failed attempt. A DDP ring still treats it as permanent.
 - This machine's memory ceiling comes from its own daemon's `/health`
   (`mem_ceiling_bytes`), read once per run, instead of being unknown.
-- `--remote` waits up to 10 minutes for a node with room (it was 15 s;
-  `PIPEDPEER_REMOTE_WAIT` still overrides, and 0 takes one look). Every 30 s it
-  prints why each node is busy. A job that can never fit any node still fails at
-  once.
+- `--remote` waits up to 10 minutes for a node with room (it was 15 s). Every
+  30 s it says why each node is busy (under `-v`). A job that can never fit any
+  node, or whose script does not exist, fails at once: the script check now
+  runs first on every path, after a mistyped name was placed on three nodes at
+  the demo.
 
 ### 4.5 Leases
 
@@ -989,7 +1038,7 @@ peer) never failed a detached one.
 
 **Delivery.**
 - The shim is 3,822 lines of Python embedded in the Go binary
-  (`nixgen/shim.go`).
+  (`nixgen/shim/`).
 - It is appended to the workspace archive at
   `.pipedpeer/shim/sitecustomize.py` by a tar transform, so the user's project
   is never touched.
@@ -1112,15 +1161,40 @@ intercepted.
   - they are summed in float64, weighted by the samples behind each one, as
     Σ n_i g_i / Σ n_i;
   - one model is returned.
-- **Encoding.** Gradients travel as float16 by default. int8, with one scale per
-  tensor and the rounding error carried into the next step, is opt-in with
-  `PIPEDPEER_DDP_INT8=1`.
+- **Encoding.** Gradients travel as int8 by default since the address-book
+  phase, with one scale per 4096-value block and the rounding error carried
+  into the next step on both the uplink and the downlink (error feedback); it
+  was float16, with int8 opt-in.
 - **Rank placement.** Ranks are chosen by `ddpplace.Select`:
   - it probes each node's throughput (`/v1/bench`);
   - it admits the prefix that maximises *k·rate_k*;
   - it uses one device kind only: GPUs if any are wanted and present.
   
-  The shim then sizes each rank's shard and batch by its share.
+  The lead is a GPU node whenever any candidate has a GPU, so a CPU-only node
+  never builds the reference model (at the demo a CPU lead built a smaller
+  network and every GPU rank's weights were refused). The shim then sizes each
+  rank's shard and batch slice by its share; since the address-book phase the
+  slices sum to the script's own batch, where each rank used to run the full
+  batch, so the learning rate and the maths stay the script's.
+- **Shape check.** Every rank sends a parameter manifest (names, shapes, dtypes,
+  count) with the opening barrier; a mismatch aborts every rank with one
+  message naming ranks, devices and counts (exit 76).
+- **One GPU or a split** (address-book phase). After warm-up the lead daemon
+  compares the measured split step time with the fastest rank alone, and either
+  keeps the ring or releases every rank but the fastest (exit 77, not a
+  failure), with one plain line in rank 0's output. At the demo a small model
+  split over two Wi-Fi laptops took about 9 minutes against about 20 s on one
+  GPU, because 92% of each step was sync. `--ddp N` (N ≥ 2) fixes the ring and
+  turns the decision off; a ring of one stops syncing entirely.
+- **`--ddp-sync fast` (DiLoCo).** Opt-in: exact per-step sync during warm-up
+  (post-local SGD), then an adaptive interval H in [1, 64] driven by the drift
+  between ranks measured at each sync (AdaComm-style), tightening back toward
+  exact over the last 10% of the steps when the total is known; pseudo-gradients
+  averaged by the samples each rank processed, an outer Nesterov step (learning
+  rate 0.7, momentum 0.9), and the Adam moments averaged every 10 outer steps.
+  It never adds epochs or changes the batch or learning rate. Automatic mode may
+  choose it only once its validation loss is within 1% of one GPU on every test
+  model (5.12).
 - **Refitting.** Every 20 syncs the daemon refits shares from the observed step
   rates, if any share moved by 10% or more. It can drop the slowest rank (never
   rank 0, and never below two) when that rank adds more sync than compute. A
@@ -1148,10 +1222,12 @@ intercepted.
   - The SAME-gradients check marked a round duplicate on its first contribution,
     and nothing undid it when the round closed on rank 0 alone. It now needs two
     matching contributions.
-  - The barrier covers the default daemon sync channel, not the gloo or nccl
-    backends.
 - **A dead rank no longer ends the run** (`8e14b9b`). Until this commit one
   failed rank failed the whole run, although the sync already closed without it.
+  This holds for a lost *machine*; since the address-book phase a rank whose
+  *script* fails stops every rank at once, and a lost lead stops the survivors
+  within about 30 s (exit 76) instead of leaving the submitter waiting, as it
+  did at the demo.
   Now the CLI prints which rank died and on which host, tells the lead daemon,
   which stops waiting for it and finishes any round held on it, and the
   survivors take new shares at the next epoch boundary. The run fails only if
@@ -1194,7 +1270,7 @@ intercepted.
 
 ### 4.10 The cost model
 
-Every intercepted numpy call is gated (`nixgen/shim.go`,
+Every intercepted numpy call is gated (`nixgen/shim/numpy_ops.py`,
 `_numpy_should_offload`). The checks, in order:
 
 1. At least two nodes and at least 32 MB of operands, unless forced.
@@ -1258,7 +1334,7 @@ The first tier that applies wins (`resourceest/estimator.go`):
 3. per-library baselines plus 100 MB.
 
 The estimator also has a tier based on input file sizes (× 3, plus baselines),
-but every caller passes `nil` data files (`main.go:468, 755, 1434`), so that
+but every caller passes `nil` data files (the run, DDP and map paths), so that
 tier is never reached.
 
 With nothing known, the estimate is 512 MB. The worker samples the job's process
@@ -1313,16 +1389,17 @@ host names, repeats are collapsed, and `-f` follows live.
 - The feed is per machine: a sender sees what it sent and to whom, a receiver
   who sent what. There is no cluster-wide merge.
 
-**`nodes` and `dashboard`** (`10afd3d`). The node rows always carried the load
-the heartbeat reports; `nodes` now prints cores and CPU use, free memory, and the
+**`status` and `dashboard`** (`10afd3d`; `nodes` folded into `status` in the
+address-book phase). The node rows always carried the load the heartbeat
+reports; `status` prints cores and CPU use, free memory, and the
 GPU's short name with its utilisation and memory in use. The dashboard has the same columns, the
 last five events, and a status line with the newest one. Peers with no direct
 path are listed under the table with their reason (`8b13704`, `36d4923`), even
 when no peer is reachable.
 
-**Watching a join.** `pipedpeer join` redraws one line, time left and peers found,
-with join and link events printed above it. On timeout it lists the unreachable
-peers and three hints: the network, the firewall, and `pipedpeer net-check`.
+**Watching a connect.** `pipedpeer connect` waits on the introducers and the
+node list, then prints connected, partly or failed with the reason per machine
+and the fix (4.2); `pipedpeer doctor` checks the rest (4.15).
 
 **`--check-only` is a dry run** (`c8eb327`). It used to take a lease and cancel
 it. It now builds the environment when Nix is present, lists imports with no
@@ -1362,6 +1439,82 @@ mid-run gets none). Attach and collect summaries have no usage lines, since no
 CLI was there to take samples. For the same demo point, `04_torch_ddp.py` now
 trains a wider model in bigger batches, long enough for `nvidia-smi` to show the
 load.
+
+### 4.15 After the demo: setup, output and speed
+
+The college demo of 2026-10-14 ran on two laptops, two lab PCs on routed
+subnets and a phone hotspot. It found the address problems of 4.1-4.2, the
+training problems of 4.9, and a list of annoyances. This section covers the
+rest of what changed in answer.
+
+**Commands.** Twenty-eight commands became thirteen: `setup`, `invite`,
+`connect`, `run`, `status`, `dashboard`, `ui`, `jobs`, `attach`, `start`,
+`stop`, `doctor`, `uninstall` (`map` and `events` remain, hidden). Bare
+`pipedpeer` prints help. Configuration is one file, `cluster.json` (token,
+introducers, roles), and the user-facing environment variables shrank to a
+handful.
+
+**Ports.** One block, one hard cut ([ADR-0020](adr/0020-ports-block-hard-cut.md)):
+4242/tcp daemon API, 4242/udp discovery, 4243/udp direct links, 4244/udp
+introducer. The gloo training ports are gone with the gloo backend.
+
+**Install and setup.** Every nightly build is published under its own version
+(`nightly-<version>`), and `install-pipedpeer.sh --version <v>` gives every
+machine the cluster's exact build; the installer verifies the checksum, puts
+the binary in `/usr/local/bin`, and runs `setup`. `setup` creates the secret
+before the daemon first starts, opens the four ports, asks whether to start
+pipedpeer at boot (a systemd user unit plus `loginctl enable-linger`; default
+yes; `start --boot` / `stop --boot` later), and prints colour-coded results
+with explicit ACTION NEEDED lines. After `connect`, the common environments
+build in the background so the first run starts warm; `status` shows the
+warm-up's progress. `pipedpeer doctor` checks the daemon, the token, each
+introducer, each peer (with TCP and UDP reachability told apart, since a router
+that passes UDP but not TCP was the demo's unexplained `unknown` row), the
+firewall, user namespaces and AppArmor, crun, Nix, the NVIDIA driver, disk and
+clock skew, each with its fix. `pipedpeer uninstall` removes the binary, data,
+service, firewall rules and root-owned key helper, and keeps Nix.
+
+**Runs like Python.** Plain `run` prints only the script's own output: stages,
+placement, lease and shim lines appear with `-v` (the shim reads
+`PIPEDPEER_VERBOSE`), and warnings that mean a wrong result or an action print
+always. Flags after the script name go to the script (`run t.py --epochs 3`),
+and the script's exit code is pipedpeer's. When work left this machine, one
+line follows: total time, the script's own time, pipedpeer's overhead and
+where it ran (5.12).
+
+**Web page.** `pipedpeer ui` opens `http://127.0.0.1:4242/ui#token=…` (4.3).
+The page shows nodes, recent runs from every machine (merged through each
+node's `/v1/history`), the run timeline, where the work ran, and a run view
+with every step of every chunk.
+
+**Phones.** An Android phone joins as a `pool-only` worker in Termux: Termux's
+own Python and numpy run Pool chunks, whole jobs are refused, and no Nix or
+crun is needed ([phone.md](phone.md)).
+
+**Speed** (each with a before/after figure in 5.12).
+- *Pool scheduling.* Each node's in-flight depth comes from its measured round
+  trip (at most 3) instead of a global 4; the losing copy of a race is
+  cancelled, and a peer that lost its last 3 races stops being raced (at the
+  demo the fast laptop won all 300 races, wasting the peer's work); chunk size
+  follows the measured transfer cost and round trip and shrinks toward the end;
+  at most one tail backup.
+- *Transfer.* The pool request body was built by repeated concatenation,
+  quadratic in its size; it is built once. Functions and globals of 1 MiB or
+  more go once per peer by hash; requests are zstd-compressed at a level chosen
+  by the measured link speed; numpy buffers travel out of band (pickle 5); the
+  link speed is measured passively from real transfers and feeds the cost
+  models (estimates were 7-37x too high).
+- *Environments.* Only workspace files the node lacks are sent (a content
+  cache on each node); nodes fetch paths cache.nixos.org serves themselves;
+  the per-script environment wrapper is skipped when an existing environment
+  covers the imports; a closure seed to a node that already holds every path
+  takes milliseconds.
+- *Training.* int8 gradients with error feedback by default; gradient upload
+  overlapped with the next step's compute; a butterfly reduce instead of one
+  hub at three ranks or more; ranks on one machine average locally first.
+- *Stats across runs.* Per machine and function, rates and overheads persist
+  across runs (24 h half-life), so the first chunks of a run are sized from
+  history rather than a cold guess.
 
 ---
 
@@ -1601,7 +1754,7 @@ one CPU, so no figure here is a speedup.
 
 | Step | First run (cold) | Cached |
 |---|---|---|
-| Live join, `pipedpeer join` until "connected" | 1.8 s | — |
+| Live join (the old join command) until "connected" | 1.8 s | — |
 | Headline `Pool` script (`00_pool.py`) | 43.5 s | 17.0 s |
 | `06_pool_lambda.py --remote --cold`, then without `--cold` | 20.5 s | 4.8 s |
 | GPU step from a GPU-less node, `04_torch_ddp.py --remote --gpu force` | 264.8 s | 7.6 s |
@@ -1638,6 +1791,52 @@ v2/73-step-2b-cold-pc2.txt; v1/14-pc3-truecold-2b.txt; v1/13-gpu-step.txt; v2/74
 
 <!-- evidence: v1/31-ctrlc-poolwatch.txt, v1/32-sighup*.txt, v1/34-attach.txt, v1/35-detach-attach-live.txt (8e14b9b); v2/64-senderdeath-long-*.txt, v2/65-senderdeath-collected.txt, v2/72-step-9-failover.txt (31b5364); v2/23b-ddp-down-up.txt (GPU lab, 1519952) -->
 
+### 5.12 Measurement method and the address-book phase
+
+**One record, two views.** Every run keeps a record (`internal/runrec`,
+`steps.json` beside the receipt): timed steps (pickle, compress, send, queue,
+compute, receive, unpickle, environment build and send, DDP sync rounds, and
+the script itself) per machine and chunk, written by the shim
+(`shim/record.py`), the daemon and the CLI. Shim work is never folded into the
+script's time; it used to be, which is how the quadratic request body hid.
+- *Simple view*, printed after every run that used another machine:
+  `pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%,
+  fedora 40%`.
+- *Detailed view*: `run -v`, `jobs <id> --steps`, the web run view, and CSV or
+  JSON (`jobs <id> --export`, `jobs --export-all <dir>` for every run).
+
+**Emulated lab.** The plain lab (three containers on one host) proves that
+work crosses nodes, never speedup. Speedup figures come from the emulated lab
+(`scripts/lab-emu.sh`): N containers with equal fixed quotas (2 CPUs, a hard
+memory cap each, the total within the host), links shaped by tc netem to LAN,
+Wi-Fi and 5G profiles plus 0-5% loss; speedup = 1 container against N of the
+same size. Every such figure is labelled *emulated*. Training scaling uses
+CPU-training stand-ins in those containers plus the sync cost measured under
+netem; the one real GPU gives single-GPU baselines only.
+
+**Scaling map.** One variable at a time with the rest fixed: payload 1 KB to
+2 GB, node count 1 to 8, item count and cost per item, bandwidth and latency
+profiles, loss, node speed spread up to 10x, cold and warm environment; for
+training, model size, batch, sync interval, int8, ranks per node. Each step's
+growth is fitted on a log-log scale from the run records, and a step whose
+exponent beats the expected one by more than 0.15 is flagged as a bug.
+
+**Real points.** Two laptops over Tailscale (the real internet worst case) and
+every demo-day run, exported with `pipedpeer jobs --export-all`.
+
+| Result | Value | Source |
+|---|---|---|
+| One GPU vs split: cell where split wins / where solo wins | TODO(verify) | `docs/benchmarks/ddp-switch.md` (emulated) |
+| DiLoCo validation loss gap vs one GPU, per model (mean of 3 seeds, spread) | TODO(verify) | `docs/benchmarks/diloco.md` (emulated) |
+| Pool request body: before / after, 100 MB payload | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
+| Workspace re-upload after editing one file | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
+| Closure seed to a node holding every path | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
+| Pool estimate error, before (7-37x) / after | TODO(verify) | `docs/benchmarks/w10.md` (emulated) |
+| Scaling map: superlinear steps found | TODO(verify) | `docs/benchmarks/scaling.md`, `scaling-train.md` (emulated) |
+| Peer IP change recovered / introducer IP change recovered | TODO(verify) (targets < 30 s / < 60 s) | `make test-net` |
+| Tailscale, two laptops: cpu.py, gpu.py, both.py | TODO(verify) | manual checklist |
+| Demo-day runs | TODO(verify) | `jobs --export-all` |
+
 ---
 
 ## Chapter 6  Conclusion, limitations, future work
@@ -1650,12 +1849,15 @@ configure. It:
   a machine lacks;
 - distributes the parallel work inside the script by measured speed, without
   touching the source;
-- joins machines on different networks with one command and no relay.
+- joins machines on different networks with one command and no relay, and
+  keeps them joined when their addresses change.
 
 The project's recurring discipline is refusing to ship a feature in a form that
 measured worse than doing nothing:
 - the DDP blackboard was replaced by daemon-side reduction;
-- auto-tuned sync intervals stay opt-in because they trained a worse model;
+- infrequent sync stays opt-in: the old auto interval trained a worse model,
+  but that was measured under fp16 averaging and full-batch ranks, so DiLoCo is
+  promoted only if its own benchmark passes (5.12);
 - work is divided by measured speed, because headcount was slower than local;
 - the matmul "never ship" rule was replaced by a check that the choice made was
   not the slower one.
@@ -1670,8 +1872,11 @@ measured worse than doing nothing:
   vanishing and can be attached later (4.8), but a Pool script runs on the
   submitter, so its machine must survive the job.
 - **DDP needs rank 0's machine.** A run continues without any other rank, but
-  rank 0's daemon holds the sync. Re-spreading needs a DataLoader. The start
-  barrier covers the daemon sync channel only, not gloo or nccl.
+  rank 0's daemon holds the sync; losing it stops the run with a plain reason.
+  Re-spreading needs a DataLoader.
+- **GPUs are NVIDIA only in practice.** AMD is detected but has no ROCm torch;
+  Intel integrated graphics never count.
+- **Phones run Pool work only**, through Termux, CPU only.
 - **`--offload` cannot be shown in the container lab.** Containers share the
   host's kernel boot ID, so they count as one machine.
 - **Imports outside the table and nixpkgs fail.** An unknown import is looked up
@@ -1680,7 +1885,7 @@ measured worse than doing nothing:
 - **Only `ProcessPoolExecutor.map` is intercepted**, not `submit`; pandas
   groupby on categorical keys is never split; numpy work under 32 MB never
   ships, by design.
-- **The events feed is per machine.** There is no cluster-wide view.
+- **The events feed is per machine.** The web page's recent runs merge every machine's history, but the event feed does not.
 - **A partial sandbox.** It runs as uid 0 inside, has no network namespace and
   no seccomp, and is skipped on nodes without crun or userns unless the store
   is private.
@@ -1727,7 +1932,10 @@ what has happened to each since (details in `known-issues.md`):
 
 See 4.3. In summary:
 - **What exists.**
-  - An optional shared secret on every route.
+  - A shared secret on every route, created before the first daemon start and
+    carried by the invite code.
+  - One identity per node (key fingerprint), with TLS pinned by node id.
+  - Signed address gossip; introducers answer only their own cluster.
   - Pinned, opportunistic TLS on a LAN.
   - Authenticated QUIC across networks, with the hello bound to its TLS session
     and the cluster secret.
@@ -1739,18 +1947,18 @@ See 4.3. In summary:
   - Mandatory TLS.
   - Identity-bound signing trust for the key list as a whole.
   - Signature checks on the legacy upload path.
-  - Authentication on the registry and discovery.
+  - Authentication on LAN discovery (its answers are only candidates).
 - **`SECURITY.md`** describes the system as it is (`8c83185`), including the key
   helper (ADR-0018).
 
 ### 6.4 Future work
 
 - **Close the security gaps listed in 6.3.**
-- **A relay of last resort.**
+- **A relay of last resort** (still rejected; Tailscale covers the gap).
 - **Placement.** Make it locality-aware and topology-aware.
 - **Submitter fault tolerance** for Pool scripts, and DDP that survives losing
   rank 0's machine.
-- **A cluster-wide events view** and a web page for stats.
+- **A cluster-wide events view.**
 - **Other runtimes.**
 - **A controlled multi-machine evaluation.** Include the fault-injection run and
   a two-GPU machine.
@@ -1768,7 +1976,7 @@ See 4.3. In summary:
 | Shared secret on every route | `authtoken/token.go`; `daemonapi/server.go:1070-1093` |
 | Pinned TLS, opportunistic | `tlsid/dial.go:16-21, 107-114`; `tlsid/listener.go` |
 | Hole punching, birthday collision | `direct/direct.go`, `direct/birthday.go`, `internet/internet.go` |
-| No relay in the data path | `relay` imported only by `netcheck.go` (diagnostic commands), not by the daemon path in `main.go` or `internet/`; commit 95e0712 |
+| No relay in the data path | `internal/relay` deleted; commit 95e0712 removed it from the daemon |
 | Router mapping published only if it matches | `internet/internet.go:340-358` |
 | Placement scoring | `coordinator/coordinator.go:942-976` |
 | Lease constants | `daemonapi/server.go:44-51` |
@@ -1784,9 +1992,9 @@ See 4.3. In summary:
 | Unknown import resolved or reported | `pythondeps/`; `app/env.go:90-106`; commits 15d37b2, 2c91f14, f3b564d |
 | Cancel stops the job everywhere | `daemonapi/execution.go`, `daemonapi/pool.go`, `coordinator/coordinator.go`; commits d961dbb, dcfa6f5, d28c69e |
 | Background mode and attach | `daemonapi/joblog.go`, `daemonapi/attach.go`, `daemonctl/attach.go`, `app/attach.go`; commits ca853bb, 272ca83 |
-| DDP survives a dead rank | `main.go` runDDP; shim sampler; commit 8e14b9b |
+| DDP survives a dead rank | `ddp_cmd.go` runDDP; shim sampler; commit 8e14b9b |
 | Key helper | `setup/`, `nixsign/`; ADR-0018; commit 454754a |
-| `--offload` keeps spread work off this machine | `main.go`, `daemonapi/pool.go`, shim `PIPEDPEER_OFFLOAD`; `offload_test.go`; commit ef68f02 |
+| `--offload` keeps spread work off this machine | `run_cmd.go`, `daemonapi/pool.go`, shim `PIPEDPEER_OFFLOAD`; `offload_test.go`; commit ef68f02 |
 | Usage lines in the summary | `app/selfuse.go`; commits ca70da4, 98e8684 |
 | Closure refusal skips one node; 3 failed runs at most | `coordinator/coordinator.go` `ExecuteWithRetry`; `fxplace_test.go`; commit 1e07d56 |
 | Slow peer raced, not discarded | `daemonapi/pool.go`; commit 8541355 |
@@ -1802,7 +2010,7 @@ See 4.3. In summary:
 | Previous report | Current implementation |
 |---|---|
 | bubblewrap sandbox | `crun` OCI bundle |
-| Push dispatch over NATS | HTTP and WebSocket; NATS embedded on loopback as an optional lease transport |
+| Push dispatch over a message bus | HTTP and WebSocket (the embedded bus was deleted in the address-book phase) |
 | `internal/taskqueue/`, JetStream | Deleted; retry is a loop in the submitting CLI |
 | mDNS discovery | UDP multicast and broadcast, TCP sweep fallback |
 | Python AST import scanner | A hand-written line parser |
@@ -1815,7 +2023,7 @@ See 4.3. In summary:
 | August | Now |
 |---|---|
 | Trusted LAN, no authentication or encryption | Optional shared secret on every route; pinned TLS; authenticated QUIC across networks |
-| Discovery beyond the LAN only via registry or manual peers; NAT traversal as future work | `join` through an introducer; PCP, NAT-PMP and UPnP; hole punching with birthday fallback; direct QUIC; no relay |
+| Discovery beyond the LAN only via registry or manual peers; NAT traversal as future work | Joining through an introducer; PCP, NAT-PMP and UPnP; hole punching with birthday fallback; direct QUIC; no relay |
 | Closure sent whole, unsigned; setup could write `require-sigs = false` | Path-level diff; signed binary-cache transfer between daemons; never disables signature checking |
 | Pool kernels by reference (never worked remotely for `__main__`) | Source tier plus cloudpickle by-value tier; receipts |
 | Even split across peers | Makespan solver over measured rates; slow peers declined |
@@ -1835,7 +2043,7 @@ See 4.3. In summary:
 |---|---|
 | Direct hello signs a signer-chosen nonce; replayable to a third node | Hello signs the TLS exporter value and proves the secret by HMAC (4.2) |
 | Token sent to any host the LAN sweep found | Token sent only after the host proves it holds it (4.3) |
-| A peer with no path only logged | Listed with its reason under `pipedpeer nodes` (4.2) |
+| A peer with no path only logged | Listed with its reason under the node table (4.2) |
 | First closure on a fresh cluster refused by every worker | Keys passed per import; signer named in the archive; root-owned key helper on multi-user Nix (4.3) |
 | Punching exercised only at demos | `lab/nat`; four NAT-link defects found and fixed (4.2) |
 | Unknown import dropped silently; main script scanned only | nixpkgs lookup, `requirements.txt`, local modules followed (4.6) |
@@ -1849,6 +2057,26 @@ See 4.3. In summary:
 | Retried non-permanent failures forever; one refusing node failed the run; `--remote` waited 15 s | 3 failed runs at most; refusing node skipped; 10 min wait with reasons every 30 s (4.4, 4.5) |
 | With two machines, a dead node looked like this machine offline | Gateway and introducer probes decide (4.8) |
 | Ctrl+C left nix-store packing | Nix runs in its own process group and is stopped (4.8) |
-| Daemon activity only in `daemon.log` | `events`, CPU and GPU in `nodes` and `dashboard`, join watch, run summary, real `--check-only` (4.14) |
+| Daemon activity only in `daemon.log` | `events`, CPU and GPU in the node table and `dashboard`, join watch, run summary, real `--check-only` (4.14) |
 | N7 measured distribution, not idle cost | Declined workload: about 0.12 s per job (5.3) |
 | Tests: 617 run | 829 run (822 pass, 7 skip) <!-- evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests) --> |
+
+**Since the October 12 version: the address-book phase (after the 2026-10-14 demo).**
+
+| Before | Now |
+|---|---|
+| One standalone introducer; its IP change broke the cluster | An introducer in every daemon; a node registers with all it knows (4.2) |
+| One address per node, overwritten by every source | Every path per node id; switch only to a verified path; signed gossip (4.1) |
+| Three identities (UUID, key fingerprint, separate TLS key); pins by `host:port` | Node id = key fingerprint; TLS from the node key; pins by node id (4.3) |
+| A moved peer back after ~3 min; manual re-join on every machine | Link replaced on reconnect; QUIC migration; re-register on address change (4.2) |
+| Secret and introducer typed by hand; seven prep scripts | `invite` prints one `connect` line; connect says connected, partly or failed (4.2, 4.15) |
+| Ports 38xxx plus gloo's range | 4242-4244 (4.15) |
+| 28 commands, several config files | 13 commands, `cluster.json` (4.15) |
+| Stage, coordinator and shim lines on every run | The script's output only; `-v` for details; simple view of the run record (4.15, 5.12) |
+| `--epochs` after the script refused as an unknown flag; exit code always 1 | Script flags pass through; the script's exit code (4.15) |
+| Each rank ran the full batch; fp16 gradients; split always kept | Batch split to the script's batch; int8 with error feedback; one GPU or split decided from measured steps (4.9) |
+| Lead could be a CPU node; mismatched models trained on alone | GPU lead when one exists; manifest check aborts every rank (4.9) |
+| Daemon down after a reboot | Optional systemd user unit (4.15) |
+| UI asked for the token | Token in the URL fragment from `pipedpeer ui` (4.3) |
+| Workspace sent whole, job dirs kept 7 days | Only missing files; job dirs removed after results are fetched or 24 h (4.15) |
+| Relay diagnostics, NATS, registry, gloo, torch matmul offload | Deleted |

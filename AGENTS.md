@@ -1,6 +1,6 @@
 # Pipedpeer
 
-`pipedpeer python main.py` runs an unmodified Python script on other machines. Each machine runs one daemon (Go); the CLI builds the script's environment as a Nix closure, picks a node, ships closure and workspace, and runs the job in a crun sandbox. A Python shim injected into the job spreads `Pool`, joblib, pandas, numpy and torch DDP work across nodes when that is faster. Machines on different networks meet through an introducer and then connect directly; nothing is relayed.
+`pipedpeer run main.py` runs an unmodified Python script on other machines. Each machine runs one daemon (Go); the CLI builds the script's environment as a Nix closure, picks a node, ships closure and workspace, and runs the job in a crun sandbox. A Python shim injected into the job spreads `Pool`, joblib, pandas, numpy and torch training work across nodes when that is faster. Machines join with `pipedpeer connect <code>` (from `pipedpeer invite`); on different networks they meet through an introducer (every daemon is one for its own cluster) and then connect directly; nothing is relayed.
 
 ## Find your way
 
@@ -16,7 +16,7 @@ Coming back to the project? Start with [docs/next-steps.md](docs/next-steps.md).
 
 | Path | What |
 |---|---|
-| `src/` | The Go module: CLI and daemon in one binary. `main.go` (commands, `runDaemon`), `netcheck.go` (introducer and network diagnostics) |
+| `src/` | The Go module: CLI and daemon in one binary. `main.go` (root and small commands), `*_cmd.go` one file per command (`run_cmd.go`, `ddp_cmd.go`, `setup_cmd.go`, `daemon_cmd.go` with `runDaemon`, …) |
 | `src/internal/` | Packages, grouped by area in [CONTEXT-MAP.md](CONTEXT-MAP.md) |
 | `bench/` | Sandbox and GPU benchmarks; a separate Go module |
 | `scripts/` | Build, test, lab and benchmark harnesses; `install-pipedpeer.sh` |
@@ -39,18 +39,20 @@ PIPEDPEER_INTEGRATION=1 go test ./...      # or make test-integration; needs pod
 scripts/check-skips.sh                      # fails when the distribution tests skipped
 scripts/test-on-host.sh <ssh-host>          # build tests here, run where the Python deps are
 make lab-up                                 # three worker containers on this host
+make test-net                               # network scenarios (IP change, dead introducer, UDP-only router)
+scripts/shim-check.sh                       # ruff + pytest on the shim modules
 ```
 
 The shim tests need pandas, scikit-learn, joblib and torch; without them they skip and the package still reports `ok`.
 
 ## Traps
 
-- `src/internal/nixgen/shim.go` holds the Python shim as a Go raw string: the Python cannot contain a backtick.
+- The Python shim lives in `src/internal/nixgen/shim/*.py`, embedded with go:embed; keep it importable without torch/numpy/pandas. `scripts/shim-check.sh` runs ruff and pytest on it.
 - Every `PIPEDPEER_*` variable the shim names must be read somewhere; a test fails otherwise.
 - Never name a temp dir: ask `internal/userdir` for paths. `src/tmpfs_guard_test.go` enforces it.
-- An internet peer is a node at `127.0.0.1:<forwarder port>`. Never decide "this machine" from the host; use the machine key.
-- Security-relevant wire changes refuse older builds ([ADR-0006](docs/adr/0006-hard-cuts-for-security-wire-changes.md)); anything else must stay additive.
+- A node is its node id (the node key's fingerprint), never its address: it can have several paths (lan, internet at `127.0.0.1:<forwarder port>`, gossip). Never decide "this machine" from the host; use the machine key.
+- Security-relevant wire changes refuse older builds ([ADR-0006](docs/adr/0006-hard-cuts-for-security-wire-changes.md)); anything else must stay additive. Ports are 4242/tcp API, 4242/udp discovery, 4243/udp direct, 4244/udp introducer ([ADR-0020](docs/adr/0020-ports-block-hard-cut.md)).
 - Write tests that survive a loaded 2-core CI runner: wide expiry windows anchored to recorded timestamps. GPU and host telemetry shell out and are slow when cold.
-- The lab is three containers on one host: it proves work crosses nodes, never speedup.
+- The plain lab (three containers on one host) proves work crosses nodes, never speedup; the quota-plus-netem lab (`scripts/lab-emu.sh`) is the emulation method, and its results are always labelled emulated.
 - With podman, `lab-up.sh` needs `podman pull docker.io/nixos/nix:2.31.3` once.
 - PRs target `dev`; `main` is for tagged releases ([CONTRIBUTING.md](CONTRIBUTING.md)).

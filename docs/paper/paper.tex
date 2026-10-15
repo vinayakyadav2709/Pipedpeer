@@ -16,6 +16,7 @@
 \fi
 
 \usepackage{cite}
+\providecommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{algorithmic}
 \usepackage{graphicx}
@@ -166,8 +167,10 @@ that contain no failure handling.
 Every machine runs one daemon; the command-line client is short-lived. The
 coordinator is a library linked into the client, so there is no scheduler
 process and no head node. A machine is a submitter and a worker at once. On one
-network a participant joins by running the binary; across networks, with
-\texttt{pipedpeer join} and an introducer's address.
+network participants find each other unaided; across networks a participant
+runs \texttt{pipedpeer connect} with a one-line code another member's
+\texttt{pipedpeer invite} printed, which carries the cluster secret and a few
+introducer addresses. Every daemon is an introducer for its own cluster.
 
 \begin{figure}[t]
 \centering
@@ -239,7 +242,8 @@ cluster's form. Caches are pruned least-recently-used.
 
 An introducer keeps an address book, keyed by a hash of the cluster's shared
 secret, and forwards one punch request between two nodes; it carries no job
-data. Each node offers its LAN addresses, a port mapped on its router (published
+data. Every daemon serves one for its own cluster and registers with every
+introducer it knows, so no single machine's address is a point of failure. Each node offers its LAN addresses, a port mapped on its router (published
 only if the router's external address matches what the introducer observed, which
 rules out a router behind a second NAT, once the reflexive address is known), and its reflexive address. Probes,
 introducer messages and QUIC share one UDP socket, because a router's mapping
@@ -251,8 +255,13 @@ winning path carries QUIC with a hello signed by each node's Ed25519 key, checke
 against the node it meant to reach; the hello signs the session's exported keying
 material \cite{rfc5705} and proves the cluster secret by an HMAC over it, so it
 cannot be replayed on another session. The link is exposed locally as a loopback
-forwarder registered as an ordinary node, so placement, transfer and gradient
-exchange run over it unchanged. A peer with no path is reported with its reason
+forwarder recorded as one path of that node, so placement, transfer and gradient
+exchange run over it unchanged. A node is its key's fingerprint, never its
+address: the node store keeps every path to it (LAN, internet, signed gossip
+from other members) and switches only to a path that answered and proved the
+key, QUIC connections migrate when the local address changes, and a reconnecting
+node's hello replaces its dead link, so machines that change network rejoin on
+their own. A peer with no path is reported with its reason
 and routed around, never relayed. A container lab with cone and symmetric
 translators found four defects that kept such links from forming or lasting,
 among them a collision-found socket that stopped listening, and kept a read
@@ -287,8 +296,11 @@ Grouping and joining hash rows by key, so each key is complete on one node and
 any aggregation is exact in value with no combiner; row order of joins is not
 preserved. For data-parallel training, ranks post gradients to the lead node's
 daemon port rather than building a rank-to-rank mesh, and the daemon returns one
-sample-weighted average, $\sum_i n_i g_i / \sum_i n_i$, in half precision by
-default. Returning every rank's gradient instead had made two machines 21 times
+sample-weighted average, $\sum_i n_i g_i / \sum_i n_i$, sent as 8-bit values
+with per-block scales and error feedback. The script's batch is split across
+ranks by speed so that its learning rate stays correct, and after a warm-up the
+lead compares the split's step time with the fastest rank alone and keeps the
+ring only if it is faster. Returning every rank's gradient instead had made two machines 21 times
 slower than one. Samples are assigned to ranks by a weighted rendezvous hash
 \cite{thaler1998rendezvous}, so when a rank dies the lead daemon stops waiting
 for it and the survivors take its share at the next epoch boundary, while over
@@ -317,7 +329,10 @@ at exit; a dry run builds the environment and reports unresolved imports, the
 parallel calls found in the source and the intended placement; and a per-machine
 events feed turns the daemon's log into plain-language lines. An offload flag
 keeps the script here but sends every distributed piece to other machines, and
-the summary shows what each machine spent.
+the summary shows what each machine spent. A plain run prints only the script's
+own output and exits with its code; one closing line splits the total into the
+script's time and pipedpeer's overhead, from a per-run record of timed steps
+that \texttt{-v}, the web page and a CSV export show in full.
 
 \section{The Cost Model}
 \label{sec:cost}
@@ -379,7 +394,10 @@ during development and recorded in the commit that each justified, on two
 machines over a home link or over Tailscale; they were not repeated for this
 paper. A third set comes from a rehearsal of the demonstration on a second host
 (16 threads, one laptop GPU), in containers shaped like a college laboratory;
-it too measures function and cost, not speedup.
+it too measures function and cost, not speedup. \emph{Emulated}: containers
+with equal fixed processor and memory quotas and links shaped by \texttt{tc
+netem} to LAN, Wi-Fi and 5G profiles with loss; speedup is one container
+against $N$ of the same size, and every such figure is labelled emulated.
 
 \subsection{Lab results}
 
@@ -457,7 +475,13 @@ Introducer traffic during verification & 0.2\,MB vs.\ $\sim$30\,MB \\
 Table~\ref{tab:recorded} lists them. They show modest gains and honest losses: a
 parallel map ran faster on two machines than on one, while two-machine training
 on a 54\,Mbit/s link did not beat one machine (fp16 26\% slower, int8 about
-level) --- which the system itself reports at the end of each run.
+level) --- which the system itself reports at the end of each run, and which
+now leads it to fall back to one machine on its own. Emulated results for the
+changes made after the college demonstration --- the one-GPU-or-split decision
+\todo{ddp-switch}, DiLoCo's loss against one GPU \todo{diloco}, the parallel
+map's request body \todo{pool body}, recovery from an address change
+\todo{test-net} --- and real runs between two laptops over Tailscale
+\todo{tailscale} are to be added.
 
 \begin{table}[t]
 \centering
@@ -504,14 +528,15 @@ PipedPeer runs unmodified Python on other machines without configuring a cluster
 by reproducing environments as content-addressed closures that are cached and
 diffed by store path, substituting the parallel primitives a script already uses,
 dividing work by measured speed, and joining machines across networks over
-direct, authenticated links with no relay. The most transferable lesson is the
+direct, authenticated links with no relay that survive address changes. The
+most transferable lesson is the
 discipline of measuring and refusing: several features here exist in their
 current form because the first version measured slower than doing nothing.
 
 Future work is led by closing the remaining security gaps --- binding trusted
 signing keys to authenticated identities, requiring rather than preferring TLS,
-and authorisation finer than one shared secret --- then a relay of last resort for
-peers no direct path can join, locality- and topology-aware placement, a
+and authorisation finer than one shared secret --- then locality- and
+topology-aware placement, AMD accelerators, a
 parallel script and a training ring that survive their submitter and rank 0, and
 a controlled multi-machine evaluation.
 

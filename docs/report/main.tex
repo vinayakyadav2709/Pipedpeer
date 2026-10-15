@@ -37,6 +37,9 @@
 \usepackage{etoolbox}
 \usepackage{hyperref}
 
+% -- Numbers still to be measured (filled in the verify pass) ----------------
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
 % -- Hyperref ----------------------------------------------------------------
 \hypersetup{
   colorlinks=true,
@@ -285,11 +288,10 @@ cgroup v2, \texttt{systemd-run} & Resources & Memory ceilings for the daemon and
 zstd (\texttt{klauspost/compress}) & Compression & Workspace and results archives \\
 \texttt{modernc.org/sqlite} & Storage & Node store, in pure Go so the binary stays static \\
 \texttt{gopsutil} & Metrics & CPU, memory and process-tree measurements \\
-Cobra, Viper & CLI & Command structure and configuration \\
+Cobra & CLI & Command structure \\
 Bubble Tea, Lip Gloss & TUI & Live dashboard of nodes and jobs \\
-NATS (embedded) \cite{nats} & Messaging & Optional alternate transport for lease messages \\
 \texttt{zerolog} & Logging & Structured, levelled logging \\
-Python & Interception & The shim (3,822 lines), embedded in the binary and injected per job \\
+Python & Interception & The shim: Python modules embedded in the binary and injected per job \\
 cloudpickle & Interception & Shipping lambdas and closures by value; added to every environment \\
 \bottomrule
 \end{tabularx}
@@ -303,11 +305,12 @@ cloudpickle & Interception & Shipping lambdas and closures by value; added to ev
   and can do so without root by using a private Nix store.
   \item Workers run Linux, since \texttt{crun}, cgroups and the Nix store are
   Linux-specific. The submitting side also builds for macOS as a client.
-  \item Machines in a cluster share one secret. The secret is optional: a daemon
-  with none configured accepts every request that reaches it
-  (Section~\ref{sec:security}).
-  \item Joining across networks needs one machine with a public address to act
-  as introducer. It carries no job data.
+  \item Machines in a cluster share one secret, created by the first machine's
+  set-up before its daemon first starts and carried to the others by an invite
+  code (Section~\ref{sec:security}).
+  \item Joining across networks needs one reachable introducer. Every daemon is
+  one for its own cluster, and a public server can serve as one that takes no
+  jobs. Introducers carry no job data.
   \item Two machines between which no direct path exists cannot work together;
   the peer is reported and routed around rather than relayed.
   \item The submitting process must remain alive for the duration of a job: it
@@ -589,7 +592,7 @@ extension this survey suggests.
 Joining machines on different networks (Section~\ref{sec:nat}) rests on
 established standards rather than on new mechanisms, and the design follows
 them closely. Address discovery uses the reflexive-address idea of STUN
-\cite{rfc8489}, and the diagnostic \texttt{net-check} command classifies a
+\cite{rfc8489}, and the \texttt{nattype} package classifies a
 router's mapping and filtering behaviour in the terms of RFC~5780
 \cite{rfc5780}. Port mapping requests follow NAT-PMP \cite{rfc6886}, its
 successor PCP \cite{rfc6887}, and UPnP Internet Gateway Device \cite{upnpigd}.
@@ -615,11 +618,14 @@ One consequence is worth stating early because it distinguishes the system from
 every framework in Chapter~2: \textbf{the coordinator is a library linked into
 the client, not a service}. There is no scheduler process, no head node and no
 master anywhere. A machine acts as submitter and worker simultaneously, and the
-same binary does both. A new participant on the same network joins by running
-that binary; one on another network runs \texttt{pipedpeer join} with the
-address of an \textbf{introducer}. The introducer is the one asymmetric role in
-the system, and it is optional: it is an address book that tells machines where
-to find each other, and it carries no job data.
+same binary does both. A new participant runs \texttt{pipedpeer connect} with
+the one-line code another member's \texttt{pipedpeer invite} printed; on the same
+network the machines also find each other unaided. Across networks they meet
+through an \textbf{introducer}, an address book that tells machines where to find
+each other and carries no job data. Every daemon is an introducer for its own
+cluster, so the role is no longer asymmetric; two optional roles are:
+\texttt{pool-only} (a phone that takes parallel chunks but no whole jobs) and
+\texttt{introducer-only} (a hosted server that runs nothing).
 
 \begin{figure}[H]
     \centering
@@ -647,25 +653,27 @@ supporting code (process management, set-up, XDG paths, logging and the like).
 \textbf{Package} & \textbf{Responsibility} \\
 \midrule
 \texttt{coordinator} & Filters, scores and selects a node; takes the lease; retries on failure \\
-\texttt{daemonapi} & HTTP and WebSocket surface (22 routes), lease manager, sandbox, pool executor, gradient reduction, closure caches \\
+\texttt{daemonapi} & HTTP and WebSocket surface, lease manager, sandbox, pool executor, gradient reduction and the one-GPU-or-split decision, closure caches, node poller and address gossip \\
 \texttt{schedule} & Makespan-optimal division of a chunk across measured devices \\
 \texttt{ddpplace} & Choosing the ranks of a training ring by measured throughput \\
 \texttt{discovery} & UDP multicast and broadcast probes, TCP health sweep fallback \\
-\texttt{internet} & Peer manager across networks: publish candidates, punch, link, forward \\
+\texttt{internet} & Peer manager across networks: register with every introducer, punch, link, migrate, forward; the in-daemon introducer \\
 \texttt{direct} & Shared UDP socket, candidate race, birthday-collision fallback, QUIC links \\
 \texttt{rendezvous} & The introducer's address book and punch-request forwarding \\
 \texttt{portmap} & Router port mapping by PCP, NAT-PMP and UPnP-IGD \\
-\texttt{authtoken}, \texttt{tlsid} & Shared-secret middleware; self-signed certificate, pinning, TLS and HTTP on one port \\
-\texttt{identity}, \texttt{nixsign} & Node UUID and ed25519 key; signing closures and the trusted-key list \\
+\texttt{authtoken}, \texttt{tlsid} & Shared-secret middleware; certificate from the node key, pins by node id, TLS and HTTP on one port \\
+\texttt{clustercfg}, \texttt{invite} & The one configuration file (secret, introducers, roles); the invite code \\
+\texttt{identity}, \texttt{nixsign} & Ed25519 node key, whose fingerprint is the node id; signing closures and the trusted-key list \\
 \texttt{narpack} & Signed closure archives and least-recently-used cache pruning \\
 \texttt{nixstore} & System or private (rootless) Nix store \\
 \texttt{cgroups} & Memory ceilings for the daemon and for each job; the daemon's budget \\
-\texttt{nodestore} & SQLite record of known peers and their last observed capacity \\
-\texttt{nixgen} & Flake generation, wheel pins, and the interception shim as an embedded asset \\
+\texttt{nodestore} & SQLite address book: every path to every node, last observed capacity \\
+\texttt{nixgen} & Flake generation, wheel pins, and the interception shim as embedded Python modules \\
 \texttt{pythondeps} & Import scanning and import-to-package resolution \\
 \texttt{resourceest} & Tiered memory estimate \\
 \texttt{jobhistory}, \texttt{heartbeat}, \texttt{gpu} & Job records; capability and load reporting; vendor GPU detection \\
-\texttt{registry} & Optional standalone directory \\
+\texttt{runrec} & The run record: timed steps, simple and detailed views, export \\
+\texttt{service}, \texttt{warmup}, \texttt{doctor}, \texttt{phone} & Autostart unit; background environment builds; diagnostics; Termux pool worker \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -779,7 +787,7 @@ across networks.
 
 Three sources feed one table, and none blocks the others.
 
-\textbf{UDP probes.} The daemon opens two sockets on port \texttt{38099}, one
+\textbf{UDP probes.} The daemon opens two sockets on UDP port \texttt{4242}, one
 joined to multicast group \texttt{239.255.0.99} and one bound for broadcast,
 both with \texttt{SO\_REUSEADDR} and \texttt{SO\_REUSEPORT}. The probe is a
 fixed magic string and the reply carries a JSON node descriptor. The multicast
@@ -794,18 +802,31 @@ dashboard now labels it ``broadcast''.
 
 \textbf{TCP fallback.} Access points with client isolation drop broadcast
 traffic without error. When the UDP probe returns nothing, the daemon sweeps
-the first 254 addresses of each local subnet with concurrent health probes, 64
-at a time with a 700\,ms timeout each, and stops issuing probes once any daemon
-answers.
+each local interface's prefix (container and VPN interfaces skipped) with
+concurrent health probes, 64 at a time with a 700\,ms timeout each, and stops
+issuing probes once any daemon answers. A reply's host is taken from the
+packet's source address, not from the address the peer advertised when its
+daemon started, which a moved peer never corrected.
 
-\textbf{Freshness.} A peer poller runs every 10\,s with a 3\,s timeout, and a
-single failed poll marks a node unreachable at once. Two further thresholds
-apply: a row not refreshed for \textbf{45 seconds} --- for example while the
-local daemon itself was down --- is not reported as healthy, and after
-\textbf{5 minutes} an
-auto-discovered row is deleted outright. Manually added peers, which include the
-peers linked across networks in Section~\ref{sec:nat}, are never removed by the
-second rule.
+\textbf{The address book.} The node store keeps every node under its node id,
+the fingerprint of its key, and every \emph{path} to it: its kind (LAN,
+internet, gossip, self), host, port, when it was last seen, last worked and last
+failed. A sighting only adds a candidate. A path becomes the active one only
+after the poller has reached it and the certificate's key matched the node id,
+and an active path that still answers is kept; a verified LAN path beats a
+verified internet path. Before this, the store held one address per node and
+every source overwrote it: in a container experiment LAN discovery replaced a
+working internet link with an unreachable LAN address, and at the demo a peer
+that changed network stayed at its old address until each machine re-joined by
+hand. Members also gossip their own addresses, signed with their node keys,
+over the token-protected API; a gossiped address is a candidate, never a fact.
+
+\textbf{Freshness.} The poller runs every 10\,s with a 3\,s timeout and tries
+the active path first, then the other candidates. A node with no verified path
+for 15 minutes is removed, a node that was only ever sighted after 2 minutes;
+LAN paths unseen for 10 minutes and internet paths unseen for an hour are
+dropped. A sighting alone never refreshes a node, so a machine that was
+discovered but never joined no longer lingers as an unknown row.
 
 % ------------------------------------------------------------
 \section{Joining Across Networks}
@@ -827,22 +848,33 @@ port by hand and without any machine relaying their traffic.
     \label{fig:nat}
 \end{figure}
 
-\textbf{One command.} \texttt{pipedpeer join <introducer>} normalises the
-address (default port 38445), saves it so that a later \texttt{start} rejoins,
-restarts the daemon in internet mode, and waits up to 90\,s for peers before
-printing the node table. \texttt{pipedpeer start --rendezvous} does the same
-without waiting.
+\textbf{One command per machine.} \texttt{pipedpeer invite} prints a single
+line, \texttt{pipedpeer connect <code>}, where the code carries the cluster
+secret and up to six introducer addresses with a checksum, so a mistyped code is
+refused as damaged rather than tried. \texttt{connect} saves both, restarts the
+daemon once, waits up to a minute, and ends with one of three plain results:
+connected, naming the machines (exit 0); partly connected, giving each missing
+machine's reason and fix (exit 2); or failed --- damaged code, no introducer
+answered, or secret refused --- with what to do (exit 1). The daemon reads its
+configuration itself, so a daemon restarted after a reboot rejoins.
 
-\textbf{The introducer.} \texttt{pipedpeer rendezvous} runs two reflectors
-(UDP 38443 and 38444) that report the address a probe arrived from, in the
-manner of STUN \cite{rfc8489}, and an address book on UDP 38445. Nodes register
+\textbf{Introducers in every daemon.} Every daemon holding a secret serves the
+introducer for its own cluster on UDP 4244 and refuses other clusters. A node
+registers with every introducer it knows --- those in its invite code and
+members it has verified, at most eight --- every 30\,s and at once when its own
+address changes, and keeps each one's last reply and last error, which
+\texttt{status} and \texttt{doctor} show. With one standalone introducer, as
+before, a change of that machine's IP left the cluster unable to recover and
+said nothing about why. A public server can join as an introducer that takes no
+jobs. Nodes register
 their candidate addresses under a cluster identifier derived from the shared
 secret by hashing, so the introducer never holds the secret itself. A
 \texttt{connect} request causes it to forward a single punch datagram to the
 target, carrying only the candidates the caller itself registered; requests are
 rate-limited per source to four per second. It carries no job data. Measured over
 a whole verification run, the introducer's host sent 0.2\,MB while about thirty
-megabytes crossed between the peers.
+megabytes crossed between the peers. The address a probe arrived from is
+reported in the manner of STUN \cite{rfc8489}.
 
 \textbf{Candidates.} Each node offers three kinds of address: its LAN addresses;
 a port its router agreed to forward, requested by PCP \cite{rfc6887}, NAT-PMP
@@ -855,7 +887,7 @@ answers is not the one facing the internet, and publishing its mapping would
 advertise an address nobody can reach.
 
 \textbf{One socket.} Punch probes, introducer messages and QUIC share a single
-UDP socket on port 38447. This is the mechanism, not a convenience: a router's
+UDP socket on port 4243. This is the mechanism, not a convenience: a router's
 mapping belongs to the socket that created it \cite{ford2005p2p}, so the
 connection must arrive on the socket the probes left from. Incoming datagrams are
 separated by content --- probes by four magic bytes, introducer messages by a
@@ -882,18 +914,24 @@ HMAC over the same value, so it is valid for one session and one cluster only;
 an earlier hello, which signed only the cluster and a nonce the signer chose,
 could be replayed by a peer to a third node to pass as its sender. A node on an
 older build is refused and told why. The link is then exposed to the rest of the daemon
-as a TCP forwarder on a loopback port, registered as an ordinary node; each
+as a TCP forwarder on a loopback port, recorded as that node's internet path; each
 local connection becomes one QUIC stream to the peer's daemon. Placement, closure
 transfer and gradient exchange therefore work over the link unchanged.
-\texttt{pipedpeer nodes} reports how each peer is reached: \texttt{self},
-\texttt{lan}, \texttt{mapped}, \texttt{reflex}, \texttt{punched} for a collision,
-or \texttt{punched-in} when the peer dialled.
+\texttt{pipedpeer status} reports how each peer is reached: \texttt{self},
+\texttt{lan} or \texttt{internet}.
+
+\textbf{Roaming.} A peer that changed IP used to return only after about three
+minutes, because the other side kept the dead link and refused the new one as
+already connected. A hello from a key that already has a link now replaces that
+link at once. The daemon checks its interfaces every 5\,s; on a change it
+migrates the QUIC connections it dialled to the new address, redials those it
+accepted, and registers again with every introducer.
 
 \textbf{No relay.} A relay was built and then removed from the data path,
 because a relay carries every byte of every job and becomes the cluster's
 bottleneck and its cost. A peer with no direct path is logged with the reason,
 never offered to the scheduler, and retried after a back-off; \texttt{pipedpeer
-nodes} lists it under the table with that reason. A live link does not depend on
+status} lists it under the table with that reason. A live link does not depend on
 the introducer: with the introducer suspended, a peer was reached in 0.03\,s.
 
 \textbf{What a NAT lab found.} Until a container lab with real translators
@@ -916,9 +954,8 @@ punch was labelled a collision.
 
 The design documented previously assumed a trusted local network and had no
 authentication of any kind. The current design has three layers
-(Figure~\ref{fig:trust}). Each is optional in the sense that a node without it
-still runs, which keeps a single-machine or classroom setup to one command, and
-each is described here together with what it does not cover.
+(Figure~\ref{fig:trust}), each described here together with what it does not
+cover.
 
 \begin{figure}[H]
     \centering
@@ -929,22 +966,26 @@ each is described here together with what it does not cover.
     \label{fig:trust}
 \end{figure}
 
-\textbf{The shared secret.} \texttt{pipedpeer auth set} stores 32 random bytes,
-or a given secret, readable only by the user. Every route on the daemon,
+\textbf{The shared secret.} The first machine's set-up stores 32 random bytes,
+readable only by the user, before its daemon first starts; \texttt{connect}
+stores the secret from the invite code. Every route on the daemon,
 \texttt{/health} included, then requires it, compared in constant time; outbound
 requests carry it automatically. Jobs receive it in their environment so that
-the shim can reach its own daemon, which means a job's code can read it. With no
-secret configured the daemon accepts every request, which is the earlier
-behaviour. The secret is attached only to a host that has proved it holds it:
+the shim can reach its own daemon, which means a job's code can read it. The
+web page receives it in the URL fragment opened by \texttt{pipedpeer ui}, which a
+browser never sends to a server; loopback is not exempt, since peers across
+networks arrive through loopback forwarders. The secret is attached only to a host that has proved it holds it:
 a remote host is first challenged and must return an HMAC over the challenge,
 whereas the LAN sweep once sent the secret in plain HTTP to every host on the
 subnet that answered on the port.
 
-\textbf{Pinned TLS.} Each daemon creates a self-signed ECDSA certificate on first
-start. TLS and plain HTTP share the daemon port; the listener inspects the first
+\textbf{Pinned TLS.} Each daemon's self-signed certificate is made from its
+Ed25519 node key. TLS and plain HTTP share the daemon port; the listener inspects the first
 byte of each connection and treats a TLS handshake record as TLS. Clients try
-TLS first and pin the peer's certificate on first contact; a changed certificate
-is refused, with the command that clears the pin. The scheme is trust on first
+TLS first, and the pin is keyed by node id rather than by address: a
+certificate whose key matches the expected node id is accepted wherever the node
+now is, and a different key for a known node id is refused. Pins keyed by
+address used to refuse a new machine that happened to get an old peer's IP. The scheme is trust on first
 use, and it is opportunistic: a handshake that fails for any reason other than a
 pin mismatch makes the client remember that peer as plain HTTP. The code records
 that an attacker able to break the handshake can therefore force plain text.
@@ -952,8 +993,11 @@ Peers across networks are reached through loopback forwarders, so their traffic
 is encrypted by QUIC rather than by this layer.
 
 \textbf{Node keys and signed closures.} Each node holds an Ed25519 key
-\cite{bernstein2012ed25519}. The same key authenticates QUIC links and signs
-closures as a Nix signing key. Nodes publish the public half in their heartbeat,
+\cite{bernstein2012ed25519} whose fingerprint is its node id everywhere. There
+used to be three identities --- a random identifier in the node store, the key's
+fingerprint on links, a separate TLS key --- and the mismatch produced duplicate
+rows for internet peers. The same key authenticates QUIC links, makes the TLS
+certificate, signs gossiped addresses and signs closures as a Nix signing key. Nodes publish the public half in their heartbeat,
 each daemon keeps a list of the keys of the nodes it knows, and \texttt{setup}
 adds those keys to the system Nix configuration as additional trusted keys, with
 consent. It never disables Nix's signature requirement; an earlier version did,
@@ -988,18 +1032,18 @@ authenticated identity. With the key helper installed, anyone holding the
 cluster secret can get signed paths trusted by system Nix on every machine with
 no human involved, as was already true after a manual trust step. The older
 closure format, which a submitter still uses for its own upload, is imported
-without a signature check. The optional registry and LAN discovery are
-unauthenticated. Section~\ref{sec:security} returns to these.
+without a signature check. LAN discovery is unauthenticated, though its answers
+are only candidates. Section~\ref{sec:security} returns to these.
 
 \section{Placement and Scoring}
 \label{sec:placement}
 
-Candidates are merged from the node store, live discovery, the optional registry
-and the local node, deduplicated by node identifier. Five hard filters then run
+Candidates are merged from the node store, live discovery and the local node,
+deduplicated by node identifier; a node with a role is never offered a job. Five hard filters then run
 in order: architecture must match the closure; a GPU must be present if one was
 required; and free memory, free cores and free VRAM must each satisfy the
 request. Every rejection records a reason, which surfaces in
-\texttt{pipedpeer job}.
+\texttt{pipedpeer jobs <id> --explain}.
 
 \begin{figure}[H]
     \centering
@@ -1512,9 +1556,10 @@ every rank for the shim to average. Measured on two machines, that made training
 carrying the whole ring. The daemon now \emph{reduces}: gradients arrive as raw
 little-endian frames, are summed in double precision weighted by the number of
 samples behind each, $\sum_i n_i g_i / \sum_i n_i$, and one averaged gradient is
-returned. Gradients travel in half precision by default; an 8-bit encoding with
-one scale per tensor and the rounding error carried into the next step is
-available on request. On two machines over a home link, the same training run took 54.9\,s on
+returned. Gradients travelled in half precision by default, with an 8-bit
+encoding on request; since the address-book phase 8-bit is the default, with
+one scale per block of 4096 values and the rounding error carried into the next
+step in both directions (error feedback). On two machines over a home link, the same training run took 54.9\,s on
 one machine, 69.4\,s on two ranks in half precision with 36.2\,s spent
 synchronising, and 56.1\,s on two ranks in 8-bit, with final losses of 0.087495,
 0.087497 and 0.087688. On that link two machines did not beat one: half
@@ -1526,7 +1571,14 @@ itself, counting distinct machines rather than ranks.
 candidate's throughput is probed, and the ring admitted is the prefix of the
 fastest that maximises $k \cdot r_k$ --- the ring's worth if every rank ran at the
 slowest admitted rate --- using one device kind only, GPUs when any are wanted
-and present. Each rank's shard and batch are then sized by its share. On a ring
+and present; the lead is a GPU node whenever any candidate has one, after a CPU
+lead at the demonstration built a smaller model whose shape every GPU rank's
+update then failed to match. Each rank's shard and batch slice are then sized by
+its share, and the slices sum to the script's own batch, so the learning rate and
+the mathematics are the script's; each rank used to run the full batch, which
+multiplied the effective batch by the ring size at an unchanged learning rate.
+Every rank also sends a manifest of its parameters (names, shapes, types) to the
+opening barrier, and a mismatch stops every rank with one message. On a ring
 of 16, 8 and 2 cores, admission took the 16 and the 8, shared the work 66:34, and
 ran in 23.6\,s against 25.4\,s with equal batches. Every 20 synchronisations the
 daemon refits the shares from the step rates actually observed, applying them at
@@ -1535,6 +1587,22 @@ drop the slowest rank --- never rank 0, never below two --- when that rank adds
 more synchronisation time than computation. Throttling one rank from 8 CPUs to 1
 and back moved the shares from 64:36 to 84:16 and then to 70:30. A round that a
 straggler has not joined completes without it after 45 seconds.
+
+\textbf{One GPU or a split.} At the demonstration a small model split across two
+laptops on Wi-Fi trained for about nine minutes, against about twenty seconds on
+one GPU, because 92\% of every step was synchronisation. The ring is now kept
+only when it earns its place: after a warm-up the lead daemon compares the
+measured step time of the split with that of the fastest rank alone, and either
+keeps the ring or releases every rank but the fastest, which exit with a code
+meaning ``released'' rather than ``failed'', with one plain line in rank 0's
+output. A user who names a ring size turns the decision off. An opt-in mode
+synchronises every few steps instead of every step, following DiLoCo: exact
+synchronisation during a warm-up, then an interval adapted to the measured drift
+between ranks that tightens again near the end, pseudo-gradients averaged by the
+samples each rank processed, an outer Nesterov step, and the optimiser's moments
+averaged now and then. It never adds epochs or changes the batch or learning
+rate, and automatic mode may choose it only once its validation loss is within
+1\% of one GPU on every test model (Section~\ref{sec:measure}).
 
 \textbf{When a rank dies.} Until October one failed rank failed the whole run,
 although the round already closed without it. The client now prints which rank
@@ -1545,9 +1613,12 @@ it, and the error names the real rank rather than a loop count. Samples are
 assigned to ranks by a weighted rendezvous hash \cite{thaler1998rendezvous}
 rather than the hash-modulo routing of the parallel map, which would move most
 samples when one rank left; the rendezvous hash keeps each survivor's share
-exact and over 95\% of its samples in place. Losing rank 0's machine still ends
-the run, because its daemon holds the synchronisation, and a script that slices
-its own tensors instead of using a data loader is not re-spread.
+exact and over 95\% of its samples in place. That holds for a lost machine; a
+rank whose script fails now stops every rank at once. Losing rank 0's machine
+still ends the run, because its daemon holds the synchronisation, but the
+survivors now stop within about 30 seconds with that reason, where at the
+demonstration the submitter waited on a ring nobody was running. A script that
+slices its own tensors instead of using a data loader is not re-spread.
 
 \textbf{When a machine comes back.} A rank whose machine returns, or a new
 eligible node, joins the running ring at the next epoch boundary instead of
@@ -1581,8 +1652,7 @@ advice built on a single 2.5 minute wait. A late rank is refused without failing
 the run and can rejoin through a data loader as above. With a 30 second wait and
 the second rank's link throttled to 1\,Mbit/s, rank 0 trained alone after
 30\,s and the late rank was stopped a minute after the ring finished. The
-barrier covers the daemon synchronisation channel, not the gloo or NCCL
-back-ends.
+torch gloo and NCCL back-ends were removed, so this channel is the only one.
 % evidence v4/82-item1-ddp-start-wait-30s.txt, v4/82-item1-ddp-start-wait-30s-drill.txt; the 2.5 min wait: v4/80-item1-ddp-start-barrier-default.txt
 
 \begin{figure}[H]
@@ -1734,9 +1804,9 @@ and to whom, and a receiver who sent what.
 node table and the terminal dashboard now show cores and CPU use, free memory,
 and the GPU's name, utilisation and memory, and the dashboard adds the last few
 events and a status line. A peer with no direct path is listed under the table
-with its reason, even when no peer is reachable. Joining redraws one line with
-the time left and the peers found, prints events above it, and on timeout lists
-the unreachable peers with three hints.
+with its reason, even when no peer is reachable. \texttt{connect} ends with
+connected, partly connected or failed, giving each missing machine's reason and
+fix.
 
 \textbf{A real dry run.} The check-only flag used to take a lease and cancel it.
 It now builds the environment where Nix is present, lists imports with no
@@ -1767,6 +1837,69 @@ RAM +69 MB'' for the sender and ``CPU 31\% avg'' for the node. A training ring
 prints one such line per machine. A sampling failure prints a warning and drops
 the line; it never fails the run.
 % evidence v5/41-item10-usage-pool-pc2.txt (00_pool.py --remote from pc2)
+
+% ------------------------------------------------------------
+\section{After the Demonstration}
+\label{sec:afterdemo}
+
+The project was demonstrated at the college on 14 October 2026 on two laptops,
+two laboratory PCs on routed subnets and a phone hotspot. The demonstration
+found the address problems of Sections~\ref{sec:discovery}--\ref{sec:nat}, the
+training problems of Section~\ref{sec:intercept}, and a list of annoyances.
+This section covers the rest of what changed in answer.
+
+\textbf{Fewer commands, one file, one port block.} Twenty-eight commands became
+thirteen: set-up, invite, connect, run, status, dashboard, web page, jobs,
+attach, start, stop, doctor and uninstall. Configuration is one file holding the
+secret, the introducers and the node's role. The ports moved, in one break
+together with the identity change, to a single block: 4242 for the daemon API
+(TCP) and discovery (UDP), 4243 for direct links and 4244 for the introducer.
+
+\textbf{Set-up.} Every nightly build is published under its own version, and the
+installer takes a version so that every machine in a cluster runs the same
+build; it checks the checksum, installs the binary system-wide and runs
+set-up. Set-up creates the secret before the daemon first starts, opens the four
+ports, offers to start pipedpeer at boot as a systemd user service, and marks
+anything the user must do with a coloured \emph{action needed} line. After
+\texttt{connect}, the common environments build in the background, so the first
+run starts warm. \texttt{pipedpeer doctor} checks the daemon, the secret, each
+introducer and each peer --- telling TCP and UDP reachability apart, since a
+router that passed UDP but not TCP explained the demonstration's unexplained
+``unknown'' row --- the firewall, user namespaces, crun, Nix, the GPU driver,
+disk and clock, each with its fix. \texttt{pipedpeer uninstall} removes
+everything but Nix.
+
+\textbf{Runs like Python.} A plain run prints only the script's own output; the
+stages, placement and interception lines appear with \texttt{-v}, and only
+warnings that mean a wrong result or a needed action always print. Arguments
+after the script go to the script, and the script's exit code is the command's.
+When work left the machine, one line follows giving the total time, the script's
+own time, pipedpeer's overhead and where the work ran
+(Section~\ref{sec:measure}).
+
+\textbf{The web page and phones.} \texttt{pipedpeer ui} opens the page with the
+secret in the URL fragment, so nothing is typed. The page shows the nodes,
+recent runs from every machine, each run's timeline and where its work ran, and
+a run view with every step of every chunk. An Android phone joins as a
+pool-only worker under Termux, running parallel chunks with Termux's own Python
+and numpy and refusing whole jobs, without Nix or a sandbox.
+
+\textbf{Speed.} Each change below has a before-and-after figure in
+Section~\ref{sec:measure}. Each node's number of chunks in flight follows its
+measured round trip instead of a global four; the losing copy of a race is
+cancelled, and a peer that lost its last three races stops being raced (at the
+demonstration the fast laptop won all 300 races, wasting the peer's work); chunk
+size follows the measured transfer cost and shrinks toward the end. The parallel
+map's request body was built by repeated concatenation, quadratic in its size,
+and is now built once; large functions and globals cross once per peer by hash;
+requests are compressed at a level chosen by the measured link speed; numerical
+buffers travel out of band; and the link speed is measured from real transfers,
+where the cost estimates had been 7 to 37 times too high. Only workspace files
+a node lacks are sent; nodes fetch public packages from the Nix binary cache
+themselves; and rates per machine and function persist across runs. In training,
+gradient upload overlaps the next step's computation, three or more ranks reduce
+in a butterfly instead of through one hub, and ranks on one machine average
+locally first.
 
 \section{Test Workloads}
 \label{sec:workloads}
@@ -2261,6 +2394,65 @@ A training rank's machine back during a run & rejoined at the next epoch, \textb
 % rehearsal evidence: v1/31-ctrlc-poolwatch.txt, v1/32-sighup*.txt, v1/34-attach.txt, v1/35-detach-attach-live.txt (8e14b9b);
 % v2/64-senderdeath-long-*.txt + v2/65-senderdeath-collected.txt, v2/72-step-9-failover.txt (31b5364); v2/23b-ddp-down-up.txt (GPU lab, 1519952)
 
+\section{Measurement Method and the Address-Book Phase}
+\label{sec:measure}
+
+\textbf{One record, two views.} Every run now keeps one record of timed steps
+--- serialising, compressing, sending, queueing, computing, receiving and
+deserialising each chunk on each machine, building and sending the environment,
+each training synchronisation round, and the script itself --- written by the
+shim, the daemon and the client into the job's directory. Work done by the shim
+is never counted as the script's time; it used to be, which is how the quadratic
+request body went unnoticed. The simple view is one line printed after a run
+that used another machine; the detailed view is available from \texttt{-v}, the
+job history, the web page, and as CSV or JSON, including a single command that
+exports every run since a date.
+
+\textbf{Emulated laboratory.} The plain laboratory, three containers on one
+host, shows that work crosses nodes and never shows speedup. Speedup figures in
+this section come from an emulated laboratory: containers with equal fixed
+processor and memory quotas whose links are shaped by \texttt{tc netem} to LAN,
+Wi-Fi and 5G profiles with up to 5\% loss, with speedup measured as one container
+against $N$ of the same size. Every such figure is labelled \emph{emulated}.
+Training scaling uses CPU training in those containers with the synchronisation
+cost measured under the same profiles; the one real GPU gives single-GPU
+baselines only.
+
+\textbf{Scaling map.} One variable at a time is swept with the rest fixed:
+payload from 1\,KB to 2\,GB, one to eight nodes, item count and cost per item,
+link profile, loss, a speed spread of up to ten times between nodes, and a cold
+or warm environment; for training, model size, batch, synchronisation interval,
+8-bit encoding and ranks per node. Each step's growth is fitted on a log-log
+scale from the run records, and a step whose exponent exceeds the expected one by
+more than 0.15 is treated as a defect.
+
+\textbf{Real points.} Two laptops connected over Tailscale, the realistic worst
+case across the internet, and every run of the demonstration day, exported with
+the one command above.
+
+\begin{table}[H]
+\centering
+\caption{Results of the address-book phase (to be filled by the verification pass)}
+\label{tab:afterdemo}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\textwidth}{X L{4.2cm} L{3.0cm}}
+\toprule
+\textbf{Measurement} & \textbf{Result} & \textbf{Source} \\
+\midrule
+One GPU against a split: a cell where the split wins, and one where one GPU wins & \todo{ddp-switch} & emulated \\
+DiLoCo validation loss against one GPU per model, mean of 3 seeds and spread & \todo{diloco} & emulated \\
+Parallel map request body, before and after, 100\,MB payload & \todo{pool body} & emulated \\
+Workspace re-upload after editing one file & \todo{workspace} & emulated \\
+Environment seed to a node holding every path & \todo{seed} & emulated \\
+Pool time estimate error, before (7--37$\times$) and after & \todo{estimates} & emulated \\
+Superlinear steps found by the scaling map & \todo{scaling map} & emulated \\
+Peer and introducer address change, time to recover & \todo{test-net} & container network \\
+Two laptops over Tailscale: CPU, GPU and combined scripts & \todo{tailscale} & real \\
+Demonstration-day runs & \todo{demo day} & real \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 \section{Comparative Analysis}
 \label{sec:comparison}
 
@@ -2357,7 +2549,8 @@ Speedup, wireless networks, two physical GPUs and a college network's rules & th
 PipedPeer runs an unmodified Python script on other machines with no cluster to
 configure, reproduces its environment exactly, distributes the parallel work
 inside it without the user touching the source, and joins machines on different
-networks with one command and no relay. The contributions are:
+networks with one command and no relay, keeping them joined when their
+addresses change. The contributions are:
 
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
   \item \textbf{The store path as a cluster-wide cache key, and the store path as
@@ -2395,7 +2588,9 @@ most workloads. The project repeatedly measured its own features and kept them
 off, or changed them, when the measurement disagreed: gradient averaging moved
 into the daemon when the blackboard design made training 21 times slower; a
 coarser synchronisation interval that ran ten times faster stays opt-in because
-it trained a worse model; work is divided by measured speed because dividing by
+it trained a worse model, though that measurement predates fixes to how weights
+were averaged and batches split, so its successor is promoted only on its own
+evidence; work is divided by measured speed because dividing by
 headcount was slower than not distributing; and a rule that dense matrix
 multiplication must never leave the node was replaced by a check that the choice
 made was not the slower one, because the rule would have been wrong on the
@@ -2417,8 +2612,11 @@ first cluster with a GPU.
   must survive the job.
   \item \textbf{A training ring needs rank 0's machine.} A ring continues
   without any other rank, but rank 0's daemon holds the synchronisation, and
-  re-spreading a dead rank's data needs a data loader. The start barrier
-  covers the daemon synchronisation channel only, not gloo or NCCL.
+  re-spreading a dead rank's data needs a data loader; losing rank 0 stops the
+  run with a plain reason.
+  \item \textbf{GPUs are NVIDIA only in practice}; AMD devices are detected but
+  have no ROCm build of torch, and Intel integrated graphics never count.
+  \item \textbf{Phones take parallel chunks only}, through Termux, on the CPU.
   \item \textbf{Dependencies outside the package set.} An import that neither the
   table nor the package set knows is reported before the run rather than dropped
   silently (Section~\ref{sec:env}), but the job still needs the user to name a
@@ -2533,8 +2731,13 @@ before; it is not suitable for a cluster of mutually untrusting participants.
   can already be detached and collected later; a script whose parallel work is
   spread cannot yet outlive its submitter, and a training ring cannot yet
   outlive rank 0's machine.
-  \item \textbf{A cluster-wide view}, merging every machine's events, and a web
-  page for the same statistics.
+  \item \textbf{A cluster-wide view}, merging every machine's events (the web
+  page already merges every machine's runs).
+  \item \textbf{More accelerators}: AMD through ROCm, and a phone worker that
+  needs no Termux.
+  \item \textbf{Memory escalation} on out-of-memory (gradient accumulation,
+  checkpointing, lower precision), and training that survives losing its lead
+  machine.
   \item \textbf{Additional runtimes} beyond Python.
   \item \textbf{A controlled multi-machine evaluation}, repeating the hand
   measurements of Chapter~\ref{chap:results} as a scripted experiment across

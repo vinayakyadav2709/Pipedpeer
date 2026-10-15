@@ -1,219 +1,179 @@
 # Next steps: coming back to Pipedpeer
 
-The project was frozen on 2026-10-12, after the demo round. This file is the
-whole handoff: it assumes a fresh clone and nothing else (no local notes, no
-rehearsal evidence, no access to the second GPU laptop). File:line references
-are from the freeze; re-check them with `grep -n` before you edit.
-
-If `TODO-BEFORE-DEMO.md` still exists at the repo root, the demo-round
-checklist (the Docker walkthrough, the second GPU laptop restore, the venue
-prep; the two-laptop GPU run is deferred) is not finished yet; do it, or delete the file if the demos are over.
+Written for after the address-book phase (October 2026), which followed the
+college demo of 2026-10-14. It assumes a fresh clone and nothing else.
+File:line references drift; re-check them with `grep -n` before you edit.
+Figures marked **TODO(verify)** are filled in by the verification pass of that
+phase; if one is still a TODO, the measurement was not run.
 
 ## 1. Where it stands
 
-**Code.** The freeze is the head of `dev` at the freeze (the demo-round branch `nightly-fixes` was merged into `dev` and deleted on 2026-10-12). The latest
-commit seen while writing this was `aa9f169` ("Describe this round's last
-features in the report, paper and system report"); the guide patches from the
-last rehearsal (V5) land on top of it. `dev` and `main` were not updated.
+**What the phase changed** (details: [system report 4.15](system-report.md#415-after-the-demo-setup-output-and-speed),
+[Appendix B](system-report.md#appendix-b--what-changed)):
 
-**Checks at the freeze.**
+- **Joining.** `pipedpeer invite` prints one `pipedpeer connect <code>` line;
+  `connect` says connected (exit 0), partly (exit 2) or failed (exit 1) and
+  why. Every daemon is an introducer for its own cluster; a public server can
+  be one that takes no jobs ([hosted-introducer.md](hosted-introducer.md)).
+- **Addresses.** One identity (node id = node key fingerprint, TLS from the
+  same key, pins by node id); an address book with every path per node id,
+  switching only to verified paths; signed address gossip; QUIC migration and
+  link replacement when a machine changes network
+  ([ADR-0019](adr/0019-address-book.md), [ADR-0008](adr/0008-pinned-tls-and-key-addressed-nodes.md)).
+- **Ports.** 4242/tcp API, 4242/udp discovery, 4243/udp direct, 4244/udp
+  introducer; one hard cut ([ADR-0020](adr/0020-ports-block-hard-cut.md)).
+- **Commands.** setup, invite, connect, run, status, dashboard, ui, jobs,
+  attach, start, stop, doctor, uninstall (`map`, `events` hidden). One config
+  file, `cluster.json`.
+- **Runs like Python.** Clean output (`-v` for details), script flags pass
+  through, the script's exit code, a one-line simple view of the run record.
+- **Training.** Batch split to the script's batch; int8 with error feedback
+  by default; one GPU or a split decided from measured steps; GPU lead;
+  parameter manifest check; failed script or lost lead stops every rank;
+  gloo/nccl removed; `--ddp-sync fast` = DiLoCo (opt-in until its loss
+  benchmark passes).
+- **Speed.** Per-node in-flight depth, cancelled race losers, chunk sizing
+  from the measured link, the O(n²) request body fixed, globals once per peer,
+  zstd by link speed, pickle-5 buffers, workspace delta, nodes fetching from
+  cache.nixos.org, stats across runs, overlap and butterfly reduce in training.
+- **Setup.** Installer by exact version, autostart user service, background
+  warm-up, `doctor`, `uninstall`. Phones as Termux pool-only workers
+  ([phone.md](phone.md)).
+- **Measurement.** One run record (`internal/runrec`), emulated lab
+  (`scripts/lab-emu.sh`), scaling map, `jobs --export-all`.
+
+**Checks at the end of the phase.**
 
 | Check | Result |
 |---|---|
-| `go test -count=1 -p 1 ./...` (src/) | all 38 packages ok: 829 tests, 822 pass, 7 skip |
-| The 4 narpack signed-closure tests | pass only with nix on PATH, skip otherwise (part of the 7) |
-| `scripts/check-skips.sh` | "all 15 distribution tests ran" |
-| `go vet`, `gofmt -l`, staticcheck | clean |
-
-The distribution tests are the shim tests that prove Pool, joblib, pandas,
-numpy and torch DDP work actually leaves the machine; they skip without
-pandas, scikit-learn, joblib and torch, which is why `check-skips.sh` exists.
-
-**Rehearsals.** Five container rehearsals (V1 to V5) ran the whole demo on one
-laptop. The outputs quoted in the guides are verbatim from these runs; the
-raw evidence files were not kept in the repo.
-
-| Run | Commit | What it proved |
-|---|---|---|
-| V1 | 8e14b9b | the venue lab end to end (lab-lan): join, headline spread, failover, events |
-| V2 | 31b5364, cc56753 | GPU lab: GPU step, `--ddp 2` ring, a rank dying (DDP-DOWN) and rejoining (DDP-UP); signed closure import on multi-user nix; Ctrl+C mid-upload frees the lease; `--gpu force` from a GPU-less PC; `/ui` in a laptop-sized window |
-| V3 | 9949ad0 | GPU run from a GPU-less PC 7.0 s (was 212 s); `07_everything` cold 664.6 s, cached 26.7 s; finale 8/8 ok; ring grows from 1 to 2 |
-| V4 | c567369 | DDP start barrier at 1 Mbit; a late rank dropped with a plain line; attach and reconnect replay; `auth set` restarts the daemon |
-| V5 | ef68f02 | usage lines pass; node-kill only half passes; Ctrl+C during a cold pack unverified; `--offload` blocked by a lab artifact (section 2) |
-
-**Demo guides** (all in `pipedpeer-demo/`):
-
-| File | What it is |
-|---|---|
-| [DEMO-SCRIPT.md](../pipedpeer-demo/DEMO-SCRIPT.md) | the run sheet: live steps 0 to 9 (only repeatable steps), backup steps B1 to B7, "watch out for" per step |
-| [VERIFY.md](../pipedpeer-demo/VERIFY.md) | a user-run guide: each command with the exact output the rehearsal saw |
-| [SETUP.md](../pipedpeer-demo/SETUP.md) | setting up each machine, the lab-visit steps and demo-day steps |
-| `DEMO.md` | the three-network walkthrough |
-
-**Venue** (user, 2026-10-12). Two layouts, both in the guides:
-
-| Layout | Machines | Notes |
-|---|---|---|
-| 1 (likely) | no college lab: LAPTOP-A and LAPTOP-B (Fedora, NVIDIA GPU) and LAPTOP-C (no GPU), all on Wi-Fi | LAPTOP-C is the live join, the GPU sender and the machine stopped in failover; everyone joins the rendezvous by IP (Wi-Fi client isolation); smaller speed-ups, the 1.2× rule decides what stays live |
-| 2 | a college lab: 1–3 Ubuntu PCs on ethernet, plus our laptops on Wi-Fi | mixed subnets, so everyone joins the rendezvous by IP; with fewer PCs the PC roles fold together |
-
-DEMO-SCRIPT.md, "Machines and screens", maps each role to a machine per
-layout; SETUP.md has a "Layout 1" prep; VERIFY.md runs both layouts in Docker
-(pc1 plays LAPTOP-C, pc2 plays LAPTOP-B without a GPU, pc3/pc4 are the
-college PCs). Before demo day the friend runs VERIFY.md in Docker
-(TODO-BEFORE-DEMO.md, section 1); the real two-laptop GPU run is later.
-
-Background: [known-issues.md](known-issues.md),
-[fixes-and-roadmap.md](fixes-and-roadmap.md),
-[capabilities.md](capabilities.md), [system-report.md](system-report.md).
+| `go test -count=1 -p 1 ./...` (src/, capped scope below) | TODO(verify) |
+| `scripts/check-skips.sh` | must say "all 15 distribution tests ran"; TODO(verify) |
+| `scripts/shim-check.sh` (ruff + pytest on the shim) | TODO(verify) |
+| `make test-net` (E1-E5 network scenarios) | TODO(verify) |
+| Benchmarks: `docs/benchmarks/{ddp-switch,w10,diloco,scaling,scaling-train}.md` | TODO(verify) |
 
 ## 2. Not verified on real hardware
 
-Start with VERIFY.md, section "Not re-checked on real machines yet". Those
-features are unit-tested only: the slow-helper race, skipping a node that
-refuses the closure, `--remote` waiting for room, the 3-attempt cap, DDP rejoin
-with `print(loss)` after the loop, `--max-concurrent` surviving `auth set`,
-`--ddp 2` usage lines and the start barrier lines.
+The emulated lab measures overhead growth and emulated speedup; these need
+real machines:
 
-V5's partial results:
-
-| Item | Result |
-|---|---|
-| #13 kill the job's node, two machines | half pass. The node loss was seen in 16 s (gateway probe), but the reschedule then retried every 30 s with no limit and only resumed when the node came back. This is FIX-REQUEUE |
-| #7 Ctrl+C during a cold pack | unverified: the pack finished too fast to interrupt. Ctrl+C mid-upload left no nix processes. Found FIX-BUILDINT instead |
-| `--offload` (ef68f02) | the daemon half works (every part went to peers). The spread line was wrong only because lab containers share the host's boot_id, so the script counted itself as a peer. Needs two physical machines |
-| GPU step from a GPU-less PC | not captured (CUDA download stalled). On the host GPU: training 13.4 s, total 15.1 s, nvidia-smi at 100% for 13 s |
-
-**The two-laptop GPU ring was never completed.** The `--ddp 2` ring across two
-real GPU laptops (RTX 3060 + RTX 3050, a third machine submitting) placed on
-both, then the second GPU laptop dropped off its network after ~1 GB of
-closure over a ~2 MB/s link and the run finished on one rank. The ring logic
-is proven only in the GPU lab (two containers sharing one GPU). Not to be
-done now; later, when both laptops are together (user, 2026-10-12).
-
-**Added after the freeze, never run on real machines** (unit tests or a local
-stand-in only):
-- `pipedpeer setup` applying the AppArmor profile on Ubuntu 24.04+ (00453ec):
-  tested with a fake root, parser and sudo; needs a real Ubuntu 24.04 machine.
-  Check that a job no longer prints "run unisolated".
-- `setup-machine.sh` (11e3455): `--rendezvous` as a systemd user service, the
-  reachability check before joining (and in prep-1), the NVIDIA driver
-  message, the PATH edit, and `join-command.txt`. Only the reach check and the
-  PATH edit were exercised, locally.
-- The macOS builds (3828dc8) only compile: the daemon targets Linux, and
-  nothing was run on macOS.
+- **The two laptops over Tailscale** running `cpu.py`, `gpu.py`, `both.py`, and
+  `--ddp 1` against automatic mode (the manual checklist in the worktree's
+  `testing-log.md`). TODO(verify).
+- **The phone** (Samsung S20 FE 5G, Snapdragon 865): Termux, the arm64 binary,
+  a Pool chunk on Termux Python, a numpy kernel timed against one laptop core
+  (kill criterion: under 25%). Developed under qemu only, whose timings are not
+  performance numbers.
+- **The college network**: per-lab subnets joined by routers; PC #2 on
+  10.10.220.x could not reach 10.10.70.x at the demo. `pipedpeer doctor` names
+  the case; the fix is a different network or Tailscale, never a relay.
+- **Hybrid-laptop dGPU sleep**: the sysfs enumeration should not wake a
+  suspended NVIDIA GPU; confirm `runtime_status` stays `suspended` on an idle
+  laptop.
+- **Demo-day recording**: every run, exported with
+  `pipedpeer jobs --export-all <dir> --since <day>` on each machine, goes into
+  the paper.
 
 ## 3. Known gaps, left by choice
 
-Both were found in V5. The user chose to document them, not fix them, because
-the project was frozen and the demo flow never hits them. They are also listed
-in VERIFY.md under "Known gaps found in V5".
+Parked by the user on 2026-10-15:
 
-| Gap | Where | Size | Fix |
-|---|---|---|---|
-| FIX-REQUEUE: a rescheduled job with no reachable node retries every 30 s forever | `src/internal/coordinator/coordinator.go:503-599` `PlaceWithRetry`; interval at :504-518 | S | bound it by the placement window (`--remote` waits up to 10 min) and fail with a plain message |
-| FIX-BUILDINT: Ctrl+C during `[4/7] Building locally...` of a `--remote` run is ignored until the build ends | `src/internal/app/env.go:66` `BuildEnvironment` takes no ctx; the `nix build` at :146 uses `nixstore.Cmd`; caller `src/internal/app/run.go:117` | S | pass the run's ctx and use `nixstore.CmdContext` (`src/internal/nixstore/nixstore.go:228`) |
+- Removing a member's trust (untrust); expiring or single-use invites.
+- Memory escalation on out-of-memory (allocator setting, gradient
+  accumulation, checkpointing, bf16), and a model too big for one GPU.
+- AMD and Intel GPU support (detection fixes are in; no ROCm torch, no
+  `/dev/kfd`).
+- Training that survives losing its lead machine (DDP-LEAD).
+- Automatic batch sizing (Pollux/AdaScale).
+- A single machine never crashing on huge numpy.
+- Sleep handling (no sleep inhibitor).
+- Web page parity with the CLI (the page is read-only by design).
+- Phones beyond the Termux worker (an app without Termux, the Android Linux
+  VM).
+- IPv6 (the connection code looks IPv4-only; unverified).
+
+Dropped: Optuna interception, NPU support.
 
 ## 4. Future work, in priority order
 
-| # | Unit | What | Entry points | Size | Why this rank |
-|---|---|---|---|---|---|
-| 1 | FIX-REQUEUE | section 3 | coordinator.go:503-599 | S | real users hit it whenever a node dies with no spare |
-| 2 | FIX-BUILDINT | section 3 | app/env.go:66, :146 | S | Ctrl+C must always work; small |
-| 3 | AUDIT | whole-repo audit beyond the demo round: security, "errors are never silent", dead code, docs drift. Findings become fix units | everything; start with `CONTEXT-MAP.md` | M-L | the demo round reviewed only its own diff |
-| 4 | SKIPPED-CHECKS | run the VERIFY.md "Not re-checked" list on the labs or real machines, fix what fails | VERIFY.md; `scripts/lab-lan.sh`, `scripts/lab-gpu.sh` | M (mostly running) | features shipped without one real run |
-| 5 | FRIEND-RING | the real two-laptop GPU ring with a third machine submitting. **Not to be done now; later, when both laptops are together** (user, 2026-10-12) | DEMO-SCRIPT GPU backup step; SETUP.md | needs two people | the only proof of DDP across physical GPUs |
-| 6 | DDP-LEAD | two-GPU training survives the loss of the lead (rank 0) machine. Today the lead's daemon runs the rendezvous and gradient sync, so its death ends the run | `src/main.go:1091` (`rank0 := ring[0]`), `src/internal/daemonapi/ddpsync.go`, `ddpup.go`, `src/ddpdown.go:161-170` (the "can't continue" message) | ~300-400 lines | the largest robustness gap; needs a design choice (who takes over the sync), so ask first |
-| 7 | PRUNE-EDGE | `PruneCompletedJobDirs` checks the job dir's mtime; appending to `output.jsonl` doesn't touch it, so a job running longer than `JobRetention` (7 d) can lose its dir mid-run | `src/internal/daemonapi/server.go:445-494`, mtime check :480, retention :431 | S | data loss, but only for week-long jobs |
-| 8 | DAEMON-IMPORT-CTX | the daemon runs nix imports/exports with `nixstore.Cmd` and no ctx; a cancelled upload's import runs to the end | `src/internal/daemonapi/narcache.go:210,235,278,316`; `execution.go:1194-1214` (`importNAR`) | S | wasted work after a cancel, no wrong results |
-| 9 | UNTRUST | a `pipedpeer untrust` command; `nixtrust.Remove` exists but nothing calls it | `src/internal/nixtrust/nixtrust.go:298`; the `trust` command at `src/main.go:401` | S | trust can be granted but not taken back |
-| 10 | DDP-BARRIER-BACKENDS | the DDP start barrier covers only the daemon sync channel, not gloo/nccl | shim start wait `src/internal/nixgen/shim.go:3593`; backend choice :4281; `ddpsync.go:344` | S-M (not estimated) | gloo/nccl are the fallback transport, rarely used |
-| 11 | NODES-PRUNE | test daemons left ~20 stale rows in a dev machine's `nodes.db` (cleared by hand at the freeze). Prune long-unreachable identities or document the cleanup | `src/internal/nodestore/store.go:317` `PruneStale` (skips manual rows, drops its SQL error without a log); called at `server.go:1873` | S | cosmetic, but stale rows could be picked by `--remote` |
-| 12 | Docs drift | known-issues.md is dated 2026-10-02 (4c91ef3) with later sections; file:line references here and in CONTEXT-MAP drift with every change. Fold into AUDIT | `docs/`, `CONTEXT-MAP.md`, this file | S | stale docs mislead the next agent |
-
-The report, paper and system report were brought up to date at the freeze
-(aa9f169: report 80 pages, paper 5 pages).
+1. Whatever the verification pass and the real-hardware runs (section 2)
+   found.
+2. **DiLoCo in automatic mode**, only if its benchmark passes (validation loss
+   within 1% of one GPU on every test model, mean of 3 seeds, spread
+   reported), then **Streaming DiLoCo** if it is cheap on top of the overlap
+   thread.
+3. Superlinear steps the scaling map flagged (`docs/benchmarks/scaling.md`).
+4. DDP-LEAD, then the memory ladder.
+5. AMD through ROCm.
+6. Locality- and topology-aware placement.
 
 ## 5. Decisions already made (do not reopen)
 
-All by the user, 2026-10-12, unless marked.
+By the user on 2026-10-12 and 2026-10-15 unless marked. The ADRs hold the
+reasoning.
 
-**Freeze**
-- The project is frozen after the demo round. All deferred work (section 4)
-  was skipped on purpose; only the report/paper sync was done.
-- FIX-REQUEUE and FIX-BUILDINT are documented as known gaps, not fixed.
-- `s` and `s2` were merged into `nightly-fixes`, which was then merged into
-  `dev` (2026-10-12) so the nightly channel serves the demo build. `main` and
-  the stable releases were not touched.
-- The live demo shows only sensible, repeatable steps; Ctrl+C, network loss
-  and the like are backup steps, shown only if asked.
-- DDP lead (rank 0) survival: after the demo. The demo drill kills a non-lead.
+**Product**
+- Thirteen commands (section 1); the `python` alias and `join` are gone.
+- `invite` prints exactly one line, `pipedpeer connect <code>`; no install
+  one-liner or short URL in the product. Every build is published under its own
+  version (`nightly-<version>`) and the installer takes `--version <v>`, so
+  every machine of a cluster runs the same build.
+- The web page gets the token from the URL fragment that `pipedpeer ui` opens;
+  no loopback exemption (internet peers arrive through loopback forwarders).
+- Autostart is optional, asked during setup, default on; `start --boot` /
+  `stop --boot` change it.
+- `uninstall` removes the binary, data, service, firewall rules and root bits,
+  and keeps Nix with a printed hint.
+- No relay, ever. Where no direct path exists, use Tailscale.
+- No sleep blocking; no NPU; Intel integrated graphics are never a GPU.
+- No binary changes on other people's machines mid-event.
 
-**Behaviour**
+**Training**
+- Training keeps the user's maths: the batch is split across ranks (sum = the
+  script's batch); no learning-rate scaling; no added epochs.
+- Automatic mode picks one GPU or an exact split; DiLoCo stays behind
+  `--ddp-sync fast` until promoted on evidence. The old "auto interval gave a
+  worse loss" result was measured under fp16 averaging, no outer optimizer
+  and full-batch ranks; it does not judge DiLoCo.
+- A rank whose script fails stops every rank; a lost machine is dropped and
+  the ring continues; a lost lead stops the survivors (exit 76).
+
+**Measurement**
+- The plain lab (three containers on one host) proves work crosses nodes,
+  never speedup. The quota-plus-netem lab (`scripts/lab-emu.sh`) is the
+  emulation method; its results are always labelled emulated. Real points are
+  the Tailscale runs and the demo-day recording.
+- Every recorded timing run takes `flock ~/.cache/pipedpeer-bench.lock`.
+- Lab containers get a hard `--memory` with `--memory-swap` equal to it, and
+  the running total stays at least 5 GB below host RAM.
+
+**Kept from 2026-10-12**
 - `run --offload`: the script runs here; every distributed piece goes to other
-  machines; if no peer can take a piece it runs locally with a warning (ef68f02).
-- `--remote` waits up to 10 min for room, with a progress line every 30 s (1e07d56).
-- DDP keeps going when a rank dies: drop it, say which and where, re-spread its
-  share (DDP-DOWN). A machine that comes back rejoins (DDP-UP), using a
-  consistent-hash ring for shards and a model + optimizer snapshot at an epoch
-  boundary.
-- Ctrl+C or closing the terminal stops the job everywhere within a couple of
-  seconds and frees leases. A submitter that vanishes with no signal leaves a
-  `--remote` job running and attachable.
-- Background mode: `--detach` and Ctrl+Z detach; `attach <id>` replays and
-  follows; the watcher downloads results into the script's folder when the job
-  ends. Detach/attach is only output visibility; every other step is identical
-  to a foreground run. Unattached job dirs are kept 24 h.
-- `--cold` re-sends the environment as if the peer had none; it does not rebuild.
-- `events` is per machine. `attach` only from the machine that started the job.
+  machines.
+- `--remote` waits up to 10 min for room.
+- Ctrl+C or closing the terminal stops the job everywhere; a vanished
+  submitter leaves a `--remote` job running and attachable; `--detach`, Ctrl+Z
+  and `attach <id>`.
+- `--cold` re-sends the environment; it does not rebuild.
 - `\r` progress updates are forwarded so tqdm bars animate.
-- No result cache. Do cache nix packages: a common-packages pre-build on every
-  machine, plus auto packages for unknown imports and `requirements.txt`.
-- Memory: a job with no estimate and a daemon without systemd both get a
-  default cap.
-- `--gpu prefer` picks one device kind and never blends GPU and CPU ranks.
-- The run summary has a "this machine" usage line (CPU, RAM, GPU); the GPU demo
-  step trains long enough (~10-20 s) for nvidia-smi to move.
-- tqdm, seaborn, sympy, networkx and statsmodels are in the import-to-nix table.
-
-**Demo and venue**
-- No projector: every screen is read on a laptop held up. No VPS: the
-  rendezvous runs on a laptop and everyone joins its LAN IP.
-- The GPU step is a highlight: a GPU-less PC submits, a laptop GPU runs it.
-  The GPU environment is built by the sender and pre-seeded on every machine.
-- Wow order: unchanged script across the lab, then failover, then the
-  teacher's own script. Numbers shown live only if good; one cold run, the
-  rest cached; the finale runs jobs in parallel.
-- Laptop sleep is not tested or shown. The rehearsal adds netem delay/loss and
-  keeps one lab PC with ufw on.
-- No big new builds without asking; small demo additions are fine.
-
-**Assumption audit (accepted: "agreed with all, make them all")**
-Changed, and built in fix pass 8: #4 a DDP joiner's skipped epochs yield one
-no-op batch so loop variables exist (82596fe); #6 a node that refuses the
-closure is skipped, the job goes to the next (1e07d56); #7 nix export/pack
-children die on Ctrl+C (99cf0ad); #9 a slow pool peer is raced locally, first
-result wins (8541355); #10 the CLI reads its own daemon's memory ceiling; #11
-`--remote` waits 10 min; #12 `--max-concurrent` survives `auth set`/`join`
-(76a0c3b); #13 "offline" also probes the default gateway and introducer
-(879b86c); #29 at most 3 attempts on distinct nodes (1e07d56). #5 (lead
-survival) deferred. Every other audited assumption was kept as built. All
-merge-round assumptions were confirmed the same way.
+- No result cache; common packages are pre-built (now the background warm-up).
+- `--gpu prefer` never blends GPU and CPU ranks.
 
 ## 6. Open questions for the user
 
-Eight agent assumptions from the last two batches were never confirmed.
+Assumptions the phase built on, waiting for confirmation:
 
 | # | Assumption | Recommend |
 |---|---|---|
-| 1 | POOLRACE: the remote copy of a raced part has no HTTP timeout; a dead peer is caught by TCP keepalive or the cancel. If both copies fail, the part fails with both errors | keep: a fixed timeout would kill long, healthy parts |
-| 2 | POOLRACE: a late-started local win is not counted in speed measurements | keep: it would skew the peer's speed estimate |
-| 3 | PLACE: "untried node first" applies only to the smart strategy; round-robin already rotates | keep |
-| 4 | OFFLOAD: `--offload` ships every interceptable op like `--distribute force` (no cost model). DDP fails with a hint if placement drops a rank between counting and placing | keep: the flag is an explicit opt-in |
-| 5 | SELFUSE: attach/collect summaries have no usage lines (no samples saved while detached); DDP usage lines print under "=== Usage ===" | keep |
-| 6 | JOINEPOCH: BatchNorm running stats on a joining rank see the catch-up batches, then the lead's buffers overwrite them | keep: the lead's buffers are authoritative |
-| 7 | DDPREADY: the start wait defaults to 5 min (`PIPEDPEER_DDP_START_WAIT`); on a ~2 MB/s link a slow machine misses it and joins later | keep: the late rank joins via DDP-UP; pre-seeding the environment avoids it |
-| 8 | CLI2: the restart after `auth set`/`join` keeps `--max-concurrent` (76a0c3b); nothing else the daemon was started with is confirmed kept | change: have AUDIT check every `start` flag survives the restart |
+| 1 | `start --boot` / `stop --boot` are the autostart switches | keep |
+| 2 | `map` and `events` stay as hidden commands | keep: working features with tests |
+| 3 | Plain `run` prints the simple view only when work left this machine; `-v` adds the detailed view | keep |
+| 4 | int8 with error feedback replaces fp16 on the wire by default | keep unless the benchmarks show a loss gap |
+| 5 | No gradient accumulation for the default batch split | keep: OOM handling is parked |
+| 6 | numpy matmul/svd offload and the pandas hash-shuffle stay | keep |
+| 7 | The GPU "quick speed test" is a static per-device score cached by PCI address | keep; DDP's step-time refit is the real per-model measure |
+| 8 | Pool(4) is still widened automatically; placement load signals not wired | revisit with placement work |
+| 9 | From 2026-10-12, kept as built: no HTTP timeout on a raced remote copy; late local wins not counted in speed; untried-node-first only for smart placement; `--offload` ships every interceptable op; no usage lines for attach/collect; the lead's BatchNorm buffers win; DDP start wait 5 min | keep |
 
 ## 7. Resuming on a new machine
 
@@ -221,11 +181,13 @@ Eight agent assumptions from the last two batches were never confirmed.
 
 | Tool | Notes |
 |---|---|
-| Go | the version in `src/go.mod` (1.25.0 at the freeze) |
-| Nix | multi-user install. On some installs nix is not on PATH for non-login shells: put `/nix/var/nix/profiles/default/bin` first, or the 4 signed-closure tests skip |
-| docker | both labs use docker (lab-lan needs the host on the bridge, which rootless podman can't do). The GPU lab needs the NVIDIA container toolkit with a CDI spec (`docker run --device nvidia.com/gpu=all ... nvidia-smi` must work) |
+| Go | the version in `src/go.mod` |
+| Nix | multi-user install; put `/nix/var/nix/profiles/default/bin` first on PATH in non-login shells, or the 4 signed-closure tests skip |
+| docker | the labs (`lab/`, `lab/net`, the emulated lab). The GPU lab needs the NVIDIA container toolkit with a CDI spec |
 | Python deps | pandas, scikit-learn, joblib, torch for the shim tests; otherwise they skip |
-| tectonic | to rebuild the PDFs. A local TeX Live may lack `geometry.sty`. Under XeTeX the paper keeps a Times look through TeX Gyre Termes |
+| uv | `uvx ruff`, `uvx pytest` for `scripts/shim-check.sh` |
+| qemu-user-static | arm64 binfmt, for the Termux phone image |
+| tectonic | to rebuild the PDFs |
 
 ### Commands
 
@@ -234,36 +196,33 @@ cd src && go build -o ../bin/pipedpeer .          # never a bare `go build` (str
 cd src && gofmt -l . ; go vet ./...
 cd src && PATH=/nix/var/nix/profiles/default/bin:$PATH go test -count=1 -p 1 ./...
 scripts/check-skips.sh                            # must say "all 15 distribution tests ran"
-cd docs/report && tectonic -X compile --outdir <out> main.tex
-cd docs/paper  && tectonic -X compile --outdir <out> paper.tex
+scripts/shim-check.sh                             # ruff + pytest on src/internal/nixgen/shim
+make test-net                                     # E1-E5 network scenarios in containers
+tectonic --outdir <out> docs/report/main.tex
+tectonic --outdir <out> docs/paper/paper.tex
 ```
 
-Labs, one at a time:
-
-```sh
-scripts/lab-lan.sh up | join all | x <pc> <cmd> | logs | down   # venue: 4 PCs on one bridge, ~6 GB
-scripts/lab-gpu.sh up | join all | x <node> <cmd> | logs | down # gpu1+gpu2 share one GPU, sub1 submits, ~7 GB
-```
+Benchmarks (emulated, one timed run at a time under the bench lock):
+`scripts/bench-ddp-switch.sh`, `scripts/bench-w10.sh`,
+`scripts/bench-diloco.sh`, `scripts/scaling/sweep.sh`,
+`scripts/scaling/train.sh`, all on top of `scripts/lab-emu.sh` and
+`scripts/bench-lib.sh`.
 
 ### Lab facts and traps
 
 - Containers share the host kernel's boot_id, so they count as one physical
-  machine (`heartbeat.Machine()`): `--offload` can't be shown in a lab without
-  per-container boot_id bind-mounts.
-- The GPU lab's nix store is lost on down/up; rebuilding the CUDA environment
-  takes ~20 min. Update the binary in place instead of recycling the lab.
-- Move this machine's `nodes.db` aside during a lab, or stale rows show up.
-- `lab-gpu.sh` writes logs and its token under a hard-coded folder in your home
-  (`logroot`, near the top of the script); create it or change it.
-- Lab PCs have no python3, so `7-gpu.sh` skips there. Lab PCs (~1.2 GB each)
-  can't run `12-everything`. netem runs as `docker exec <pc> tc ...`.
-- The lab proves logic, never speedup (shared CPU); speed numbers come from
-  real machines.
+  machine: `--offload` can't be shown in a lab without per-container boot_id
+  bind-mounts.
+- Docker bridges for network tests use
+  `-o com.docker.network.bridge.inhibit_ipv4=true` so the host is invisible.
+- `PIPEDPEER_NO_LAN_DISCOVERY=1` tests the connect/introducer path alone.
+- Restart an introducer between test cases: it remembers peers for 2 minutes.
+- Never touch the host's own daemon from a lab.
 
 ### Safety
 
-Heavy work (labs, full tests, big builds) can crash a 13-16 GB laptop. Run it
-in a memory-capped scope and check `free -g` shows at least 3 GB first:
+Heavy work (labs, full tests, big builds) can crash a 13-16 GB laptop. Run Go
+builds and tests in a memory-capped scope:
 
 ```sh
 cd src && systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=1G -p CPUQuota=400% \
@@ -271,16 +230,13 @@ cd src && systemd-run --user --scope -q -p MemoryMax=3G -p MemorySwapMax=1G -p C
   sh -c 'gofmt -l . ; go vet ./... && go test -count=1 -p 1 ./...'
 ```
 
-Never run two labs, or a lab and a full test, at once.
-
 ## 8. How to work on it
 
-1. Cut a new branch from `dev` (for example `deferred-fixes`) and open a PR
-   back into `dev` when it is verified; `main` is for tagged releases
-   ([CONTRIBUTING.md](../CONTRIBUTING.md)).
-2. Re-check the file:line references above, then pick from section 4 in order.
-   Ask section 6's questions once, up front.
-3. Before merging into any branch a demo uses, re-run the demo flow:
-   VERIFY.md end to end on lab-lan, the GPU lab for DDP, and the full test
-   suite with `check-skips.sh`.
+1. Cut a new branch from `dev` and open a PR back into `dev` when it is
+   verified; `main` is for tagged releases ([CONTRIBUTING.md](../CONTRIBUTING.md)).
+2. Read [CONTEXT-MAP.md](../CONTEXT-MAP.md) and the matching ADR before
+   changing anything that looks odd.
+3. Security-relevant wire changes are hard cuts
+   ([ADR-0006](adr/0006-hard-cuts-for-security-wire-changes.md)); everything
+   else stays additive.
 4. Update this file when an item lands or a decision changes.

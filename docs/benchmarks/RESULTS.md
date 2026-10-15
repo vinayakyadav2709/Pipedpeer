@@ -17,7 +17,8 @@ result says which one it comes from.
 - **Toolchain:** Go 1.25.9 and Python 3.14.4. torch 2.14.1+cpu is installed in
   a virtualenv, matching what CI installs.
 - **Lab:** three podman containers with host networking, as daemons on
-  38081–38083, built by `scripts/lab-up.sh`. The submitting daemon is on 38080.
+  38081–38083, built by `scripts/lab-up.sh`. The submitting daemon is on 38080
+  (the ports of that build; the current block is 4242–4244).
   The binary was built from `4c91ef3`.
 - **Workaround:** on this host `$HOME` is a git repository, which breaks the
   default build directory (`../known-issues.md` item 1). Every run therefore
