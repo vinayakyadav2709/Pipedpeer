@@ -1,4 +1,5 @@
 """Transparent DDP's wire: every sync with the lead daemon (or a shard's)."""
+import math
 import os
 import sys
 import time
@@ -437,6 +438,10 @@ class _Sync:
             if prev is not None and prev.shape == flat.shape:
                 flat += prev
             q, scales, dequant = _int8_encode(flat, counts)
+            if not all(math.isfinite(s) for s in scales):
+                # A block's peak is inf or NaN: int8 cannot carry it, and its
+                # scale would reach the lead as JSON Infinity (HTTP 400).
+                self._stop(_EXIT_ABORTED, self._nonfinite_why(kind))
             # Whatever quantisation lost: carried to the next step.
             flat -= dequant
             self.err[key] = flat
@@ -452,6 +457,17 @@ class _Sync:
         mean = _int8_decode(raw_mean, rscales or [float(reply.get("scale", 1.0)) or 1.0], counts)
         self._count_sync(time.monotonic() - _t0, sent, recv)
         return self._unpack(mean, shapes, sizes, [a.dtype for a in arrs])
+
+    def _nonfinite_why(self, kind):
+        why = ("rank %d's %s for sync %d hold inf or NaN: the training diverged"
+               % (self.rank, "gradients" if kind == "grads" else kind, self.seq + 1))
+        if self.overlap and kind == "grads":
+            # FIX-OVERLAP: a one-step-late gradient under heavy momentum
+            # diverges where the same script on one machine does not.
+            why += (". PIPEDPEER_DDP_OVERLAP=1 applies every gradient one step late, "
+                    "which diverges at this script's learning rate and momentum: "
+                    "run without it")
+        return why
 
     def _daemon_allreduce(self, tensors, half=None, kind="grads", manifest=None, key=None,
                           samples=None):

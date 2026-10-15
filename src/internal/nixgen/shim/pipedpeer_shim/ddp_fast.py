@@ -6,7 +6,8 @@ from pipedpeer_shim import ddp_diloco
 from pipedpeer_shim.core import _log, _warn
 from pipedpeer_shim.ddp_diloco import (
     _DILOCO_ENV_H, _DILOCO_REF_WINDOW, _DILOCO_ROUND_SLACK, _DILOCO_UNWEIGHTED,
-    _DiLoCo, _diloco_cap, _diloco_epoch_cap, _diloco_next_interval,
+    _DILOCO_RANKS, _DiLoCo, _diloco_cap, _diloco_epoch_cap, _diloco_every,
+    _diloco_next_interval,
     _diloco_round, _diloco_use_every, _diloco_warmup, _round_budget,
 )
 from pipedpeer_shim.ddp_sampler import _push_window
@@ -295,8 +296,43 @@ class _Fast:
                 self._apply_delayed(prev, orig, (), {}, restore=True)
 
     def _diloco_shared(self, o):
+        """The DiLoCo schedule's state a joiner must share to decide as the
+        ring: {} when the ring is not in DiLoCo. outer: which rounds carry
+        the optimizer state (_DILOCO_STATE_EVERY); a joiner counting from 0
+        sent int8 where the ring sent float32 and the lead stopped the ring."""
         st = self.diloco.get(id(o))
-        if st is None:
+        if st is None or not self.fast:
             return {}
         return {"refs": list(st.refs), "ref": st.ref, "started": st.started,
-                "h": ddp_diloco._DILOCO_FIXED_H}
+                "outer": st.outer, "h": ddp_diloco._DILOCO_FIXED_H}
+
+    def _warn_unvalidated(self, n, h):
+        if self.rank == 0:
+            _warn("ddp: --ddp-sync fast is validated for up to %d ranks and this ring has %d: "
+                  "syncing every %d steps, but it may land more than 1%% off one device — "
+                  "--ddp-sync exact keeps the script's arithmetic"
+                  % (_DILOCO_RANKS[-1][0], n, h))
+
+    def _diloco_regrow(self, n):
+        """A join grows a DiLoCo ring to n ranks, at an epoch boundary after
+        _diloco_settle, on every rank alike (the joiner takes the result from
+        the snapshot): the interval becomes the _DILOCO_RANKS row for n, since
+        the starting size's H trains outside the bar on a bigger ring. Past
+        the table an auto ring goes back to exact sync, as the lead would
+        never have picked DiLoCo there; an explicit --ddp-sync fast keeps the
+        last row's H and says so."""
+        h, validated = _diloco_every(n)
+        if not validated and self.auto_sync:
+            self.fast = False
+            self.sync_tuned = None
+            if self.rank == 0:
+                _warn("ddp: the ring grew to %d ranks, past the %d DiLoCo is validated for, "
+                       "so it syncs every step again from this epoch"
+                       % (n, _DILOCO_RANKS[-1][0]))
+            return
+        if h != ddp_diloco._DILOCO_FIXED_H:
+            _log("ddp: DiLoCo syncs every %d steps for the ring of %d (was %d)"
+                 % (h, n, ddp_diloco._DILOCO_FIXED_H))
+            _diloco_use_every(h)
+        if not validated:
+            self._warn_unvalidated(n, h)

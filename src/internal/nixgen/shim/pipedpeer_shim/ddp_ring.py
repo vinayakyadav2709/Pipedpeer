@@ -240,6 +240,8 @@ class _Membership:
             sys.stderr.flush()
             os._exit(_EXIT_RELEASED)
         if world > self.world:
+            if self.fast:
+                self._diloco_regrow(self._live_ranks(w, world))
             if p.get("from") == self.rank and p.get("join") is not None:
                 try:
                     self._send_snapshot(p["join"], call, world, w)
@@ -313,6 +315,7 @@ class _Membership:
                 st.refs = [float(x) for x in d.get("refs") or []]
                 st.ref = d.get("ref")
                 st.started = bool(d.get("started"))
+                st.outer = int(d.get("outer") or 0)
                 if d.get("h") is not None:
                     _diloco_use_every(int(d["h"]))   # the ring's interval, not this size's
         self.join_bufs = state.get("buffers")

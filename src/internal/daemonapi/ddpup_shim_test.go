@@ -20,7 +20,23 @@ import (
 // ring's model and optimizer, and from then on train in lockstep - so all
 // three end with the same parameters, and the last epoch's shards are
 // disjoint across all three.
+//
+// Once per sync mode, each pinned so the run never depends on timing (left
+// to the lead, a loaded machine made it pick DiLoCo before the join on some
+// runs only): exact throughout; a DiLoCo ring the joiner (in auto mode)
+// joins, which must take the ring's interval for three ranks and its round
+// count; and an auto ring the lead switches to DiLoCo after the join, which
+// all three must take at the same step.
 func TestARankJoinsARunningRingThroughTheShim(t *testing.T) {
+	for _, mode := range []string{"exact", "fast-before-join", "auto-after-join"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			testRankJoins(t, mode)
+		})
+	}
+}
+
+func testRankJoins(t *testing.T, mode string) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not available")
@@ -94,6 +110,12 @@ if __name__ == "__main__":
 		if join {
 			r.cmd.Env = append(r.cmd.Env, "PIPEDPEER_DDP_JOIN=1")
 		}
+		switch {
+		case mode == "exact":
+			r.cmd.Env = append(r.cmd.Env, "PIPEDPEER_DDP_SYNC_MODE=exact")
+		case mode == "fast-before-join" && !join:
+			r.cmd.Env = append(r.cmd.Env, "PIPEDPEER_DDP_SYNC_MODE=fast")
+		}
 		r.cmd.Stdout = &r.out
 		r.cmd.Stderr = &r.out
 		if err := r.cmd.Start(); err != nil {
@@ -114,6 +136,11 @@ if __name__ == "__main__":
 		s.ddp.mu.Lock()
 		run := s.ddp.runs["g"]
 		ok := run != nil && run.lastSeq > 0
+		if ok {
+			// auto-after-join: the lead's own verdict is off (as if already
+			// given), so the only switch is the one sent below.
+			run.diloco = run.diloco || mode == "auto-after-join"
+		}
 		s.ddp.mu.Unlock()
 		if ok {
 			break
@@ -124,6 +151,23 @@ if __name__ == "__main__":
 		time.Sleep(100 * time.Millisecond)
 	}
 	ranks = append(ranks, start(2, 3, true))
+	if mode == "auto-after-join" {
+		// Once the joiner holds the model and syncs, the lead tells the ring
+		// of three to switch, as soloFor would.
+		for grown, joined := false, false; !joined; time.Sleep(50 * time.Millisecond) {
+			s.ddp.mu.Lock()
+			run := s.ddp.runs["g"]
+			grown = grown || run.world == 3
+			joined = grown && run.join == nil && run.loading == nil
+			if joined {
+				s.ddp.publish(run, run.lastSeq+1, fmt.Sprintf(`, "diloco": %d, "why": "test switch"`, dilocoEvery(3)))
+			}
+			s.ddp.mu.Unlock()
+			if time.Now().After(deadline.Add(60 * time.Second)) {
+				t.Fatal("the joiner never joined")
+			}
+		}
+	}
 
 	for i, r := range ranks {
 		done := make(chan error, 1)
@@ -168,6 +212,38 @@ if __name__ == "__main__":
 
 	if !strings.Contains(joiner, "restored to the ring's") {
 		t.Errorf("the joiner never put back the ring's learning rate:\n%s", joiner)
+	}
+
+	switch mode {
+	case "fast-before-join":
+		// The ring of two's interval would train outside the bar at three.
+		grew := fmt.Sprintf("DiLoCo syncs every %d steps for the ring of 3 (was %d)", dilocoEvery(3), dilocoEvery(2))
+		for i, r := range ranks[:2] {
+			if !strings.Contains(r.out.String(), grew) {
+				t.Errorf("rank %d kept the ring of two's interval:\n%s", i, r.out.String())
+			}
+		}
+		if !strings.Contains(joiner, fmt.Sprintf("syncing every %d steps", dilocoEvery(3))) {
+			t.Errorf("the joiner never trained locally at the ring's interval:\n%s", joiner)
+		}
+	case "auto-after-join":
+		var at []string
+		for i, r := range ranks {
+			m := switchedAt.FindStringSubmatch(r.out.String())
+			if m == nil {
+				t.Fatalf("rank %d never switched to DiLoCo:\n%s", i, r.out.String())
+			}
+			at = append(at, m[1])
+		}
+		if at[0] != at[1] || at[0] != at[2] {
+			t.Errorf("ranks switched at different steps: %v", at)
+		}
+	default:
+		for i, r := range ranks {
+			if out := r.out.String(); switchedAt.MatchString(out) || strings.Contains(out, "training locally") {
+				t.Errorf("rank %d of an exact ring ran DiLoCo:\n%s", i, r.out.String())
+			}
+		}
 	}
 
 	p0 := field(ranks[0].out.String(), "PARAMS ")

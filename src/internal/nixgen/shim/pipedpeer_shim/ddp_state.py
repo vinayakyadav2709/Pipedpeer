@@ -7,7 +7,7 @@ import weakref
 from pipedpeer_shim import record
 from pipedpeer_shim.core import _log, _warn
 from pipedpeer_shim.ddp_diloco import (
-    _DILOCO_RANKS, _diloco_every, _diloco_use_every, _sync_mode,
+    _diloco_every, _diloco_use_every, _sync_mode,
 )
 from pipedpeer_shim.ddp_sampler import _parse_weights, _recent_mean_ms
 from pipedpeer_shim.ddp_wire import _SyncThread
@@ -105,15 +105,12 @@ class _RingState:
         self.pace = None          # the last reply's steps_ms (rank -> ms), for round budgets
         # DILOCO-MANY: the interval for this ring's size. An auto ring takes the
         # lead's instead when it switches (_go_fast); a joiner takes the ring's
-        # (_join_ring). ponytail: fixed at the start size; a ring that grows
-        # by joins keeps it (no mid-run interval change across ranks).
+        # (_join_ring); a ring grown by a join takes its new size's
+        # (_diloco_regrow).
         self.h_for_world, self.h_validated = _diloco_every(self._live_ranks())
         _diloco_use_every(self.h_for_world)
-        if self.fast and not self.h_validated and self.rank == 0:
-            _warn("ddp: --ddp-sync fast is validated for up to %d ranks and this ring has %d: "
-                  "syncing every %d steps, but it may land more than 1%% off one device — "
-                  "--ddp-sync exact keeps the script's arithmetic"
-                  % (_DILOCO_RANKS[-1][0], self._live_ranks(), self.h_for_world))
+        if self.fast and not self.h_validated:
+            self._warn_unvalidated(self._live_ranks(), self.h_for_world)
         self.round_ms = None      # a local round's ms per step, sent as its step_ms
         self.told_pace = False
         # The butterfly (U26): every rank's sync URL as this rank reaches it, in
