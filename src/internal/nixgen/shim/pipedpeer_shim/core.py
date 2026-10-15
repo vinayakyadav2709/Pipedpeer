@@ -1,4 +1,5 @@
 """Shared shim state: environment, logging, --offload, the submit batcher."""
+import math
 import os
 import sys
 import threading
@@ -9,7 +10,22 @@ _ENABLED = os.environ.get("PIPEDPEER_SHIM") == "1"
 _URL = os.environ.get("PIPEDPEER_DAEMON_URL", "")
 _STORE = os.environ.get("PIPEDPEER_STORE_PATH", "")
 _NODE_ID = os.environ.get("PIPEDPEER_NODE_ID", "")
-_NUM_SHARDS = os.environ.get("PIPEDPEER_CLOSURE_NODES", "0")  # closure node count; map shards use PIPEDPEER_NUM_SHARDS
+_NUM_SHARDS = os.environ.get("PIPEDPEER_CLOSURE_NODES", "0")  # closure node count (map shards are a separate variable)
+# run -v: the shim's progress lines. Off by default so a job prints only
+# what the script prints; _warn lines show regardless.
+_VERBOSE = os.environ.get("PIPEDPEER_VERBOSE") == "1"
+
+
+def _log(msg):
+    """Progress detail: shown only under run -v."""
+    if _ENABLED and _VERBOSE:
+        sys.stderr.write("[pipedpeer] " + msg + "\n")
+
+
+def _warn(msg):
+    """Always shown. Only for a result that may be wrong or a step the user
+    must take; a fallback that still gives the right answer is _log."""
+    sys.stderr.write("pipedpeer: " + msg + "\n")
 # PIPEDPEER_DISTRIBUTE=force skips every cost model: any interceptable
 # operation over the size floor ships to the cluster even when local would
 # win. This deliberately breaks the never-slower invariant — it exists to
@@ -34,8 +50,8 @@ def _offload_here():
             return f.read().strip() == _OFFLOAD
     except OSError as e:
         # Unknown: keep the promise rather than guess this is elsewhere.
-        sys.stderr.write("[pipedpeer] --offload: cannot read this machine's key (%s); "
-                         "treating it as the machine to keep work off\n" % e)
+        _warn("--offload: cannot read this machine's key (%s); "
+              "treating it as the machine to keep work off" % e)
         return True
 
 
@@ -70,11 +86,6 @@ _SUBMITTER = os.environ.get("PIPEDPEER_SUBMITTER", "")
 _TOKEN = os.environ.get("PIPEDPEER_TOKEN", "")
 
 
-def _log(msg):
-    if _ENABLED:
-        sys.stderr.write("[pipedpeer] " + msg + "\n")
-
-
 _OFFLOAD_SAID = set()
 
 
@@ -84,8 +95,65 @@ def _offload_warn(what, why):
     if not _OFFLOAD_HERE or why in _OFFLOAD_SAID:
         return
     _OFFLOAD_SAID.add(why)
-    sys.stderr.write("[pipedpeer] warning: --offload: %s ran on this machine: %s\n"
-                     % (what, why))
+    _warn("--offload: %s ran on this machine: %s" % (what, why))
+
+
+def _cpu_quota(root="/sys/fs/cgroup", own=None):
+    """Cores the cgroup v2 cpu.max quotas allow this process (rounded up), or
+    None when no quota applies or none is readable. A quota on any ancestor
+    binds, so the walk keeps the smallest. own defaults to this process's
+    cgroup from /proc/self/cgroup."""
+    if own is None:
+        try:
+            with open("/proc/self/cgroup") as f:
+                own = next((ln[3:].strip() for ln in f if ln.startswith("0::")), None)
+        except OSError as e:
+            _log("cpu quota: /proc/self/cgroup unreadable (%s)" % e)
+            return None
+        if own is None:
+            return None
+    best = None
+    path = os.path.normpath(root + "/" + own)
+    while path.startswith(root):
+        try:
+            with open(path + "/cpu.max") as f:
+                quota, period = f.read().split()[:2]
+            if quota != "max":
+                n = max(1, -(-int(quota) // int(period)))
+                best = n if best is None else min(best, n)
+        except FileNotFoundError:
+            pass        # no cpu controller at this level
+        except (OSError, ValueError) as e:
+            _log("cpu quota: %s/cpu.max unreadable (%s)" % (path, e))
+        if path == root:
+            break
+        path = os.path.dirname(path)
+    return best
+
+
+def _usable_cores():
+    """Cores this process may actually run on.
+
+    os.cpu_count() is the machine's total, which overcounts whenever the job is
+    pinned (taskset, a container's cpuset) or throttled (a cgroup cpu.max
+    quota): a 2-CPU container on a 16-core host started 14 Pool workers that
+    only time-slice each other. The crun sandbox mounts no /sys, so there the
+    quota cannot be read and comes from PIPEDPEER_CPU_LIMIT (cores, set by
+    the daemon from its own cgroup)."""
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
+    limit = os.environ.get("PIPEDPEER_CPU_LIMIT", "").strip()
+    if limit:
+        try:
+            n = min(n, max(1, math.ceil(float(limit))))
+        except ValueError:
+            _log("PIPEDPEER_CPU_LIMIT=%r is not a number; ignored" % limit)
+    quota = _cpu_quota()
+    if quota is not None:
+        n = min(n, quota)
+    return max(1, n)
 
 
 def _cluster_ready():

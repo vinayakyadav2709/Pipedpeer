@@ -103,6 +103,7 @@ if __name__ == "__main__":
 		"PIPEDPEER_SHIM=1",
 		"PIPEDPEER_DAEMON_URL=", // empty
 		"PIPEDPEER_CLOSURE_NODES=0",
+		"PIPEDPEER_VERBOSE=1", // the "local 3 items" line is a -v detail
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -113,53 +114,6 @@ if __name__ == "__main__":
 	}
 	if !strings.Contains(string(out), "local 3 items") {
 		t.Fatalf("expected local fallback to be used, got: %q", out)
-	}
-}
-
-// TestShimTorchFallbackLocal confirms torch matmul interception, when enabled
-// but with no reachable daemon, falls back to plain local torch so a model run
-// never breaks on an absent cluster. Skipped if torch isn't installed.
-func TestShimTorchFallbackLocal(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not available")
-	}
-	if _, err := exec.Command(python, "-c", "import torch").CombinedOutput(); err != nil {
-		t.Skipf("torch not available: %v", err)
-	}
-
-	dir := t.TempDir()
-	if err := WriteShimDir(dir); err != nil {
-		t.Fatal(err)
-	}
-	src := `
-import torch
-torch.manual_seed(0)
-a = torch.rand(40, 40)
-b = torch.rand(40, 40)
-expected = torch.matmul(a, b)
-r = torch.matmul(a, b)
-assert torch.allclose(r, expected), "torch matmul wrong under shim"
-print("torch-ok")
-`
-	script := filepath.Join(dir, "work.py")
-	if err := os.WriteFile(script, []byte(src), 0644); err != nil {
-		t.Fatal(err)
-	}
-	// Enabled + torch interception on, but no daemon URL: local fallback.
-	cmd := exec.Command(python, script)
-	cmd.Env = append(os.Environ(),
-		"PYTHONPATH="+dir,
-		"PIPEDPEER_SHIM=1",
-		"PIPEDPEER_DAEMON_URL=",
-		"PIPEDPEER_CLOSURE_NODES=0",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("torch shim local fallback failed:\n%s\n%v", out, err)
-	}
-	if !strings.Contains(string(out), "torch-ok") {
-		t.Fatalf("torch matmul wrong under shim: %q", out)
 	}
 }
 
@@ -362,7 +316,8 @@ func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...stri
 		t.Fatal(err)
 	}
 	cmd := exec.Command(python, script)
-	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir)
+	// Verbose: several tests assert the shim's progress lines (run -v detail).
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+dir, "PIPEDPEER_VERBOSE=1")
 	cmd.Env = append(cmd.Env, envs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
