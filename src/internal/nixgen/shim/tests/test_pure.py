@@ -48,28 +48,33 @@ def test_chunk_covers_every_item_in_order():
     assert pool._chunk(seq, 0) == [seq]           # 0 falls back to 64
 
 
-def test_maybe_compress_small_payload_untouched():
-    items = [b"x" * 100]
-    header = {}
-    assert transfer._maybe_compress(items, header) is items
-    assert "items_zlib" not in header
+def test_frames_body_layout():
+    import json
+    import struct
+    body = transfer._frames_body({"items_frames": 2}, b"G", [b"ab", b"c"])
+    head, rest = body.split(b"\n", 1)
+    assert json.loads(head) == {"items_frames": 2}
+    assert rest == struct.pack(">I", 1) + b"G" + struct.pack(">I", 2) + b"ab" + struct.pack(">I", 1) + b"c"
 
 
-def test_maybe_compress_repetitive_payload_compressed():
-    import zlib
-    items = [pickle.dumps(b"abcdefgh" * 400000) for _ in range(2)]
-    header = {}
-    out = transfer._maybe_compress(list(items), header)
-    assert header.get("items_zlib") is True
-    assert [zlib.decompress(p) for p in out] == items
+def test_frames_body_is_linear():
+    # The old body += loop copied the body so far per item: 20k x 1 KiB items
+    # meant ~200 GB of copying. A single join does it in milliseconds.
+    import time
+    items = [b"x" * 1024] * 20000
+    t0 = time.monotonic()
+    body = transfer._frames_body({"items_frames": len(items)}, None, items)
+    assert time.monotonic() - t0 < 5
+    assert len(body) > 20000 * 1028
 
 
-def test_maybe_compress_random_payload_untouched():
-    import os
-    items = [os.urandom(2 << 20)]
-    header = {}
-    assert transfer._maybe_compress(items, header) is items
-    assert "items_zlib" not in header
+def test_dumps_loads_plain_and_out_of_band():
+    assert transfer._loads(transfer._dumps({"a": [1, 2]})) == {"a": [1, 2]}
+    raw = bytearray(b"z" * 4096)
+    blob = transfer._dumps(pickle.PickleBuffer(raw))
+    assert blob[:4] == transfer._OOB_MAGIC
+    back = transfer._loads(bytearray(blob))
+    assert bytes(back) == bytes(raw)
 
 
 def test_pool_required():

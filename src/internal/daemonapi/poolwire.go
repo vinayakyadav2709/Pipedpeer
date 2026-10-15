@@ -1,13 +1,26 @@
 package daemonapi
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"io"
+	"io/fs"
+	"log"
+	"math"
+	"net/http"
+	"os"
 	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"github.com/klauspost/compress/zstd"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // Frames wire format. A frames body is a small JSON header line followed by
@@ -175,6 +188,86 @@ def run_items(func, items, starmap, req):
     return [_call_one(item) for item in items]
 `
 
+// frameCodec is shared by both worker scripts: frames are read through a
+// memoryview with offsets (slicing bytes copied the rest of the body per
+// frame, O(n^2) in the chunk size), from a bytearray so protocol-5
+// out-of-band buffers come out writable, as numpy arrays from pickle are.
+//
+// An out-of-band frame (R9 a3) is self-describing, so it survives a daemon
+// that rebuilds the header without the flag: _OOB_MAGIC, buffer count,
+// pickle length, each buffer length (all >I), the pickle, then the buffers.
+// Results go out of band only when the request says oob (the submitter can
+// read them); otherwise they are plain protocol-5 pickles.
+const frameCodec = `
+_OOB_MAGIC = b"\x00PP5"
+_STEPS = []
+
+
+def _step(name, t0, nbytes=0):
+    dur = time.perf_counter() - t0
+    end = time.time_ns()
+    _STEPS.append({"step": name, "start_ns": end - int(dur * 1e9),
+                   "dur_ns": int(dur * 1e9), "bytes": int(nbytes)})
+
+
+def read_body(path):
+    with open(path, "rb") as f:
+        buf = bytearray(os.fstat(f.fileno()).st_size)
+        f.readinto(buf)
+    return memoryview(buf)
+
+
+def read_frames(mv, off, n):
+    out = []
+    for _ in range(n):
+        size = struct.unpack_from(">I", mv, off)[0]
+        out.append(mv[off + 4:off + 4 + size])
+        off += 4 + size
+    return out, off
+
+
+def load_obj(b):
+    if bytes(b[:4]) == _OOB_MAGIC:
+        nbuf, plen = struct.unpack_from(">II", b, 4)
+        lens = struct.unpack_from(">%dI" % nbuf, b, 12)
+        off = 12 + 4 * nbuf
+        p = b[off:off + plen]
+        off += plen
+        bufs = []
+        for n in lens:
+            bufs.append(b[off:off + n])
+            off += n
+        return pickle.loads(p, buffers=bufs)
+    return pickle.loads(b)
+
+
+def dump_parts(obj, oob):
+    if not oob:
+        return [pickle.dumps(obj, protocol=5)]
+    bufs = []
+    p = pickle.dumps(obj, protocol=5, buffer_callback=bufs.append)
+    if not bufs:
+        return [p]
+    raws = [b.raw() for b in bufs]
+    return [_OOB_MAGIC + struct.pack(">II%dI" % len(raws), len(raws), len(p),
+                                     *[r.nbytes for r in raws]), p] + raws
+
+
+def write_results(path, results, oob):
+    t0 = time.perf_counter()
+    framed = []
+    for r in results:
+        parts = dump_parts(r, oob)
+        framed.append(struct.pack(">I", sum(len(x) for x in parts)))
+        framed.extend(parts)
+    nbytes = sum(len(x) for x in framed)
+    _step("pickle", t0, nbytes)
+    head = {"results_frames": len(results), "steps": _STEPS}
+    with open(path, "wb") as f:
+        f.write(json.dumps(head).encode() + b"\n")
+        f.writelines(framed)
+`
+
 // poolRunner is the Python helper executed inside the closure to run a
 // pickled function over a batch of items. It is written to a temp file and
 // invoked via <storePath>/bin/run pool_runner.py <payload.bin> <out.bin>.
@@ -183,44 +276,35 @@ def run_items(func, items, starmap, req):
 // Accepts both the frames wire format (header line + length-prefixed raw
 // pickle frames) and the legacy base64-in-JSON batch.
 const poolRunner = `# Runs a pickled callable over a batch, for pipedpeer's cluster pool.
-import base64, hashlib, json, os, pickle, struct, sys
+import base64, hashlib, json, os, pickle, struct, sys, time
 
-` + chunkFanOut + `
+` + chunkFanOut + frameCodec + `
 
-with open(sys.argv[1], "rb") as f:
-    data = f.read()
-
-nl = data.find(b"\n")
-req = json.loads(data if nl < 0 else data[:nl])
+t0 = time.perf_counter()
+data = read_body(sys.argv[1])
+nl = data.obj.find(b"\n")
+req = json.loads(data.obj if nl < 0 else data.obj[:nl])
 frames = bool(req.get("items_frames"))
 if frames:
-    rest = data[nl + 1:]
-    def read_frame(rest):
-        n = struct.unpack(">I", rest[:4])[0]
-        return rest[4:4 + n], rest[4 + n:]
+    off = nl + 1
+    g = b""
     if req.get("globals"):
-        g, rest = read_frame(rest)
-    else:
-        g = b""
-    raw = []
-    for _ in range(req["items_frames"]):
-        f, rest = read_frame(rest)
-        raw.append(f)
-    # items_zlib: the submitter found this payload compressible and said so,
-    # rather than either side guessing. Dense float arrays are sent raw.
+        (g,), off = read_frames(data, off, 1)
+    raw, off = read_frames(data, off, req["items_frames"])
+    # items_zlib: an older submitter compressed each item (kept for it).
     if req.get("items_zlib"):
         import zlib
         raw = [zlib.decompress(r) for r in raw]
-    items = [pickle.loads(r) for r in raw]
+    items = [load_obj(r) for r in raw]
 else:
-    req = json.loads(data)
+    req = json.loads(data.obj)
     g = b""
     items = req["items"]
 
 ns = {"_CACHE": {}}
 ns["_CHUNK_DIR"] = req.get("chunk_dir", "")
 if g:
-    ns.update(pickle.loads(g))
+    ns.update(load_obj(g))
 elif req.get("extra_b64"):
     ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
 if req.get("func_src"):
@@ -231,6 +315,7 @@ else:
 starmap = req.get("starmap", False)
 if not frames and req.get("items_b64"):
     items = [pickle.loads(base64.b64decode(i)) for i in items]
+_step("unpickle", t0, len(data))
 
 if req.get("cache_keys"):
     items = []
@@ -247,12 +332,12 @@ if req.get("cache_keys"):
         missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
         raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, ns["_CHUNK_DIR"]))
 
+t0 = time.perf_counter()
 results = run_items(func, items, starmap, req)
+_step("compute", t0)
 
 if frames:
-    out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
-    with open(sys.argv[2], "wb") as f:
-        f.write(b'{"results_frames": %d}\n' % len(results) + out)
+    write_results(sys.argv[2], results, bool(req.get("oob")))
 else:
     out = {"results": [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
     with open(sys.argv[2], "w") as f:
@@ -276,9 +361,9 @@ const warmWorkerScript = `# Persistent pipedpeer cluster worker. One process per
 # keyed by content hash, which is how out-of-core reads keep chunks on nodes.
 # in_file/out_file use the frames wire format (header line + length-prefixed
 # raw pickle frames) for heavy chunks and legacy base64 JSON for small ones.
-import base64, gc, hashlib, json, os, pickle, struct, sys, traceback
+import base64, gc, hashlib, json, os, pickle, struct, sys, time, traceback
 
-` + chunkFanOut + `
+` + chunkFanOut + frameCodec + `
 
 # ponytail: FIFO-eviction byte budget instead of a true LRU — the point is to
 # never OOM the worker from accumulating parsed chunks, and a dict preserves
@@ -332,34 +417,26 @@ _CACHE = _BoundedCache()
 _CHUNK_DIR = ""
 
 def load_req(path):
-    with open(path, "rb") as f:
-        data = f.read()
-    nl = data.find(b"\n")
-    req = json.loads(data if nl < 0 else data[:nl])
+    data = read_body(path)
+    nl = data.obj.find(b"\n")
+    req = json.loads(data.obj if nl < 0 else data.obj[:nl])
     frames = bool(req.get("items_frames"))
     if not frames:
-        req = json.loads(data)
+        req = json.loads(data.obj)
         # Legacy requests carry globals as extra_b64 (base64 pickle); return an
         # empty bytes g so the caller's extra_b64 branch decodes them. Passing
         # extra_b64 here would make pickle.loads(g) choke on a str.
-        return req, frames, req["items"], b""
-    rest = data[nl + 1:]
-    def read_frame(rest):
-        n = struct.unpack(">I", rest[:4])[0]
-        return rest[4:4 + n], rest[4 + n:]
+        return req, frames, req["items"], b"", len(data)
+    off = nl + 1
     g = b""
     if req.get("globals"):
-        g, rest = read_frame(rest)
-    raw = []
-    for _ in range(req["items_frames"]):
-        f, rest = read_frame(rest)
-        raw.append(f)
-    # items_zlib: the submitter found this payload compressible and said so,
-    # rather than either side guessing. Dense float arrays are sent raw.
+        (g,), off = read_frames(data, off, 1)
+    raw, off = read_frames(data, off, req["items_frames"])
+    # items_zlib: an older submitter compressed each item (kept for it).
     if req.get("items_zlib"):
         import zlib
         raw = [zlib.decompress(r) for r in raw]
-    return req, frames, [pickle.loads(r) for r in raw], g
+    return req, frames, [load_obj(r) for r in raw], g, len(data)
 
 for line in sys.stdin:
     line = line.strip()
@@ -367,11 +444,13 @@ for line in sys.stdin:
         continue
     try:
         msg = json.loads(line)
-        req, frames, items, g = load_req(msg["in_file"])
+        del _STEPS[:]
+        t0 = time.perf_counter()
+        req, frames, items, g, nbytes = load_req(msg["in_file"])
         _CHUNK_DIR = req.get("chunk_dir", "")
         ns = {}
         if g:
-            ns.update(pickle.loads(g))
+            ns.update(load_obj(g))
         elif req.get("extra_b64"):
             ns.update(pickle.loads(base64.b64decode(req["extra_b64"])))
         ns["_CACHE"] = _CACHE
@@ -384,6 +463,7 @@ for line in sys.stdin:
         starmap = req.get("starmap", False)
         if not frames and req.get("items_b64"):
             items = [pickle.loads(base64.b64decode(i)) for i in items]
+        _step("unpickle", t0, nbytes)
         # cache_keys: item i is a content hash resolved from the process-wide
         # chunk cache (or the on-disk fallback) instead of the payload. A miss
         # is an error: the submitter falls back to local work rather than
@@ -402,11 +482,11 @@ for line in sys.stdin:
             if any(i is None for i in items):
                 missing = [k for k, v in zip(req["cache_keys"], items) if v is None]
                 raise KeyError("chunk cache miss: %s (dir=%s)" % (missing, _CHUNK_DIR))
+        t0 = time.perf_counter()
         results = run_items(func, items, starmap, req)
+        _step("compute", t0)
         if frames:
-            out = b"".join(struct.pack(">I", len(p)) + p for p in [pickle.dumps(r) for r in results])
-            with open(msg["out_file"], "wb") as f:
-                f.write(b'{"results_frames": %d}\n' % len(results) + out)
+            write_results(msg["out_file"], results, bool(req.get("oob")))
         else:
             out = {"id": msg["id"], "results":
                    [base64.b64encode(pickle.dumps(r)).decode() for r in results]}
@@ -417,7 +497,7 @@ for line in sys.stdin:
         ack = {"id": msg.get("id"), "done": False, "error": str(e) + "\n" + traceback.format_exc()}
     # Explicit release before the next chunk: a long-lived worker must not
     # accumulate partitions while pipelining micro-chunks on a small node.
-    for _n in ("req", "items", "results"):
+    for _n in ("req", "items", "results", "g"):
         try:
             exec("del " + _n)
         except NameError:
@@ -446,27 +526,474 @@ func resultPickle(r any) []byte {
 	return []byte(m["pickle"])
 }
 
-// --- Contracts for the transfer work (U27 implements; U18 calls from pool.go).
-// Stubs keep today's behaviour until U27 lands.
+// --- The peer link (C21): U27 implements, U18 calls from pool.go.
+//
+// Three things happen to a frames body on its way to a peer, all here so the
+// shim never pays for them on the loopback hop:
+//   - a globals frame of 1 MiB or more crosses once per peer: later bodies
+//     carry only its sha256 and the peer reads it from its own cache;
+//   - the whole body becomes one zstd stream when a sample says it shrinks
+//     and the link is slow enough for that to pay (Dask's sample test, R9 a1);
+//   - the bytes/s every real transfer achieved feed a per-peer EWMA, which
+//     replaces the shim's 64 MB probe (R9 a4).
+// Everything is additive on the wire (ADR-0006): an older peer never sees a
+// hash-only body or a zstd one unless it was sent by a build that knows it.
 
-// encodePeerBody prepares a frames body for the link to one peer: U27 makes it
-// zstd-compress by measured link speed and drop a globals frame the peer
-// already holds. Stub: unchanged body, no Content-Encoding.
-func encodePeerBody(peerKey string, body []byte) (out []byte, contentEncoding string) {
-	return body, ""
+const (
+	// globalsByHashMin is joblib's memmap threshold; below it the frame costs
+	// less than the extra round trip a cache miss would.
+	globalsByHashMin = 1 << 20
+	// compressMinBody: smaller bodies are latency-bound; Dask skips < 10 kB.
+	compressMinBody = 64 << 10
+	trialSamples    = 5
+	trialSampleSize = 16 << 10
+	// globalsCacheMax bounds the peer-side globals cache on disk.
+	globalsCacheMax = 2 << 30
+	// heldPerPeer bounds how many hashes the origin remembers per peer.
+	heldPerPeer = 64
+	// linkFresh is how long a link sample stays believable: Wi-Fi moves.
+	linkFresh = 15 * time.Minute
+	linkEWMA  = 0.3
+	// linkMinSample: smaller transfers measure latency, not bandwidth.
+	linkMinSample = 256 << 10
+)
+
+type peerLink struct {
+	bps  float64
+	at   time.Time
+	held map[string]time.Time // globals sha256 -> when sent
 }
 
-// decodePoolBody undoes encodePeerBody on the receiving daemon. Stub: as is.
-func decodePoolBody(contentEncoding string, raw []byte) ([]byte, error) {
-	return raw, nil
+var links = struct {
+	sync.Mutex
+	m map[string]*peerLink
+}{m: map[string]*peerLink{}}
+
+func linkFor(peerKey string) *peerLink {
+	l := links.m[peerKey]
+	if l == nil {
+		l = &peerLink{held: map[string]time.Time{}}
+		links.m[peerKey] = l
+	}
+	return l
+}
+
+// encodePeerBody prepares a frames body for the link to one peer: it drops a
+// globals frame the peer already holds (sending its globals_sha256 instead)
+// and zstd-compresses the result when that pays on this link. Set
+// Content-Encoding to the returned value when it is non-empty. Bodies that are
+// not frames pass through untouched.
+func encodePeerBody(peerKey string, body []byte) (out []byte, contentEncoding string) {
+	body = globalsByHash(peerKey, body)
+	bps, known := linkSpeed(peerKey)
+	lvl, ok, _ := compressChoice(body, bps, known)
+	if !ok {
+		return body, ""
+	}
+	return encoderFor(lvl).EncodeAll(body, make([]byte, 0, len(body)/2)), "zstd"
+}
+
+// splitFramesHeader returns the parsed header line and the frames after it,
+// or ok=false for a legacy (non-frames) body.
+func splitFramesHeader(body []byte) (hdr map[string]json.RawMessage, rest []byte, ok bool) {
+	nl := bytes.IndexByte(body, '\n')
+	if nl <= 0 {
+		return nil, nil, false
+	}
+	if err := json.Unmarshal(body[:nl], &hdr); err != nil {
+		return nil, nil, false
+	}
+	var n int
+	if json.Unmarshal(hdr["items_frames"], &n) != nil || n <= 0 {
+		return nil, nil, false
+	}
+	return hdr, body[nl+1:], true
+}
+
+func hdrBool(hdr map[string]json.RawMessage, k string) bool {
+	var b bool
+	_ = json.Unmarshal(hdr[k], &b) // absent or not a bool reads as false
+	return b
+}
+
+// joinFrames rebuilds a body from a header and the frames that follow it.
+func joinFrames(hdr map[string]json.RawMessage, globals, rest []byte) []byte {
+	h, _ := json.Marshal(hdr) // map of RawMessage that came from json always marshals
+	n := len(h) + 1 + len(rest)
+	if globals != nil {
+		n += 4 + len(globals)
+	}
+	buf := make([]byte, 0, n)
+	buf = append(buf, h...)
+	buf = append(buf, '\n')
+	if globals != nil {
+		buf = putFrame(buf, globals)
+	}
+	return append(buf, rest...)
+}
+
+func globalsByHash(peerKey string, body []byte) []byte {
+	hdr, rest, ok := splitFramesHeader(body)
+	if !ok || !hdrBool(hdr, "globals") {
+		return body
+	}
+	g, after, err := readFrame(rest)
+	if err != nil || len(g) < globalsByHashMin {
+		return body
+	}
+	sum := sha256.Sum256(g)
+	sha := hex.EncodeToString(sum[:])
+	hdr["globals_sha256"], _ = json.Marshal(sha)
+	links.Lock()
+	l := linkFor(peerKey)
+	_, held := l.held[sha]
+	if !held {
+		if len(l.held) >= heldPerPeer {
+			evictOldest(l.held)
+		}
+	}
+	// Marked before the send: a send that fails leaves the peer without it,
+	// and that peer's 409 brings it back through forgetPeerGlobals.
+	l.held[sha] = time.Now()
+	links.Unlock()
+	if held {
+		hdr["globals"] = json.RawMessage("false")
+		return joinFrames(hdr, nil, after)
+	}
+	return joinFrames(hdr, g, after)
+}
+
+func evictOldest(m map[string]time.Time) {
+	var oldK string
+	var oldT time.Time
+	for k, t := range m {
+		if oldK == "" || t.Before(oldT) {
+			oldK, oldT = k, t
+		}
+	}
+	delete(m, oldK)
 }
 
 // forgetPeerGlobals is called when a peer answers that it lacks a globals
-// blob it was assumed to hold, before the one resend. Stub: nothing cached.
-func forgetPeerGlobals(peerKey, sha string) {}
+// blob it was assumed to hold, before the one resend.
+func forgetPeerGlobals(peerKey, sha string) {
+	links.Lock()
+	defer links.Unlock()
+	if l := links.m[peerKey]; l != nil {
+		delete(l.held, sha)
+	}
+	log.Printf("[pool] peer %s lacked globals %.12s; resending them once", peerKey, sha)
+}
 
-// linkSpeed is the measured bytes/s on the link to a peer (passive EWMA of
-// real transfers, U27). Stub: unknown.
+// missingGlobalsError is decodePoolBody's answer to a hash-only body whose
+// globals this node does not hold. The handler replies 409
+// {"missing_globals": sha} (poolDecodeStatus) and the origin resends.
+type missingGlobalsError struct{ Sha string }
+
+func (e *missingGlobalsError) Error() string {
+	return "globals " + e.Sha + " not in this node's cache"
+}
+
+// poolDecodeStatus maps a decodePoolBody error to the reply handlePoolMap
+// writes: 409 {"missing_globals": sha} on a cache miss, else 400.
+func poolDecodeStatus(err error) (int, map[string]string) {
+	var m *missingGlobalsError
+	if errors.As(err, &m) {
+		return http.StatusConflict, map[string]string{"missing_globals": m.Sha}
+	}
+	return http.StatusBadRequest, map[string]string{"error": "bad pool body: " + err.Error()}
+}
+
+// missingGlobalsIn reads a peer's reply: ok when it is the 409 asking for a
+// globals blob, so the origin calls forgetPeerGlobals and resends once.
+func missingGlobalsIn(status int, body []byte) (sha string, ok bool) {
+	if status != http.StatusConflict {
+		return "", false
+	}
+	var r struct {
+		Sha string `json:"missing_globals"`
+	}
+	if json.Unmarshal(body, &r) != nil || r.Sha == "" {
+		return "", false
+	}
+	return r.Sha, true
+}
+
+// decodePoolBody undoes encodePeerBody on the receiving daemon, right after
+// handlePoolMap reads the body: it unpacks zstd and puts back a globals frame
+// sent by hash (or stores one sent in full, for the next chunk). A hash it
+// cannot resolve is a *missingGlobalsError.
+func decodePoolBody(contentEncoding string, raw []byte) ([]byte, error) {
+	body := raw
+	switch contentEncoding {
+	case "", "identity":
+	case "zstd":
+		var err error
+		if body, err = zstdDecoder().DecodeAll(raw, nil); err != nil {
+			return nil, fmt.Errorf("zstd body: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported Content-Encoding %q", contentEncoding)
+	}
+	hdr, rest, ok := splitFramesHeader(body)
+	if !ok {
+		return body, nil
+	}
+	var sha string
+	if json.Unmarshal(hdr["globals_sha256"], &sha) != nil || sha == "" {
+		return body, nil
+	}
+	if !validSha256(sha) {
+		return nil, fmt.Errorf("bad globals_sha256 %q", sha)
+	}
+	path := filepath.Join(globalsCacheDir(), sha)
+	if hdrBool(hdr, "globals") {
+		g, _, err := readFrame(rest)
+		if err != nil {
+			return nil, err
+		}
+		storeGlobals(path, sha, g)
+		return body, nil
+	}
+	g, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			log.Printf("[pool] reading cached globals %.12s: %v; asking the origin to resend", sha, err)
+		}
+		return nil, &missingGlobalsError{Sha: sha}
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil { // LRU order for pruneGlobals
+		log.Printf("[pool] touching cached globals %.12s: %v", sha, err)
+	}
+	hdr["globals"] = json.RawMessage("true")
+	return joinFrames(hdr, g, rest), nil
+}
+
+func validSha256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+// globalsCacheDir sits beside the per-store chunk caches: globals are
+// content-addressed, so one directory serves every store.
+func globalsCacheDir() string {
+	return filepath.Join(userdir.Cache(), "chunkcache", "globals")
+}
+
+// storeGlobals keeps a globals blob for later hash-only bodies. Failing to
+// store costs one resend later, so it logs and carries on.
+func storeGlobals(path, sha string, g []byte) {
+	if _, err := os.Stat(path); err == nil {
+		return
+	}
+	if sum := sha256.Sum256(g); hex.EncodeToString(sum[:]) != sha {
+		log.Printf("[pool] globals frame does not match its globals_sha256 %.12s; not caching it", sha)
+		return
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("[pool] globals cache %s: %v", dir, err)
+		return
+	}
+	f, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		log.Printf("[pool] globals cache %s: %v", dir, err)
+		return
+	}
+	_, werr := f.Write(g)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		log.Printf("[pool] writing globals %.12s: %v %v", sha, werr, cerr)
+		_ = os.Remove(f.Name())
+		return
+	}
+	if err := os.Rename(f.Name(), path); err != nil {
+		log.Printf("[pool] storing globals %.12s: %v", sha, err)
+		_ = os.Remove(f.Name())
+		return
+	}
+	pruneGlobals(dir, globalsCacheMax)
+}
+
+// pruneGlobals drops the least recently used blobs above max bytes, in the
+// style of narCache.prune. A wrong eviction costs one resend.
+func pruneGlobals(dir string, max int64) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("[pool] pruning globals cache %s: %v", dir, err)
+		return
+	}
+	type item struct {
+		path string
+		size int64
+		used time.Time
+	}
+	var items []item
+	var total int64
+	for _, e := range entries {
+		if !validSha256(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue // removed under us
+		}
+		items = append(items, item{filepath.Join(dir, e.Name()), info.Size(), info.ModTime()})
+		total += info.Size()
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].used.Before(items[j].used) })
+	for _, it := range items {
+		if total <= max {
+			return
+		}
+		if err := os.Remove(it.path); err != nil {
+			log.Printf("[pool] pruning globals %s: %v", it.path, err)
+			continue
+		}
+		total -= it.size
+	}
+}
+
+// compressChoice is the Dask-style sample test (R9 a1): five 16 KiB samples
+// at the fastest level give the ratio and the compressor speed C. Compression
+// is kept only when the samples shrink to <= 0.8 and C (scaled for the level)
+// is at least 1.5x the link speed B; the level follows B: under 5 MB/s
+// better, under 60 MB/s default, else fastest. An unknown link gets fastest.
+// trialed is the bytes compressed to decide (the cost on incompressible input).
+func compressChoice(body []byte, bps float64, known bool) (lvl zstd.EncoderLevel, ok bool, trialed int) {
+	if len(body) < compressMinBody {
+		return 0, false, 0
+	}
+	enc := encoderFor(zstd.SpeedFastest)
+	step := (len(body) - trialSampleSize) / (trialSamples - 1)
+	var packed int
+	dst := make([]byte, 0, trialSampleSize+64)
+	start := time.Now()
+	for i := 0; i < trialSamples; i++ {
+		s := body[i*step : i*step+trialSampleSize]
+		dst = enc.EncodeAll(s, dst[:0])
+		packed += len(dst)
+		trialed += len(s)
+	}
+	took := time.Since(start).Seconds()
+	if float64(packed) > 0.8*float64(trialed) {
+		return 0, false, trialed
+	}
+	if !known {
+		return zstd.SpeedFastest, true, trialed
+	}
+	c := float64(trialed) / max(took, 1e-9)
+	// Relative speed of each level against fastest (klauspost README:
+	// 318 / 134 / 67 MB/s), so the measured C carries over.
+	for _, l := range []struct {
+		lvl   zstd.EncoderLevel
+		below float64
+		speed float64
+	}{
+		{zstd.SpeedBetterCompression, 5e6, 0.21},
+		{zstd.SpeedDefault, 60e6, 0.42},
+		{zstd.SpeedFastest, math.Inf(1), 1},
+	} {
+		if bps < l.below && c*l.speed >= 1.5*bps {
+			return l.lvl, true, trialed
+		}
+	}
+	return 0, false, trialed
+}
+
+var (
+	encMu    sync.Mutex
+	encoders = map[zstd.EncoderLevel]*zstd.Encoder{}
+	decOnce  sync.Once
+	decoder  *zstd.Decoder
+)
+
+// encoderFor returns a shared encoder; EncodeAll is safe for concurrent use.
+func encoderFor(l zstd.EncoderLevel) *zstd.Encoder {
+	encMu.Lock()
+	defer encMu.Unlock()
+	if e := encoders[l]; e != nil {
+		return e
+	}
+	e, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(l))
+	if err != nil {
+		panic("zstd encoder with static options: " + err.Error()) // only bad options fail
+	}
+	encoders[l] = e
+	return e
+}
+
+// zstdDecoder is shared; DecodeAll is safe for concurrent use. The output is
+// capped like an uncompressed body, so a small bomb cannot grow past it.
+func zstdDecoder() *zstd.Decoder {
+	decOnce.Do(func() {
+		d, err := zstd.NewReader(nil, zstd.WithDecoderMaxMemory(maxPoolBody))
+		if err != nil {
+			panic("zstd decoder with static options: " + err.Error())
+		}
+		decoder = d
+	})
+	return decoder
+}
+
+// observeLink feeds one real transfer on the link to a peer into its EWMA:
+// bytes that crossed and the time they took. U18 calls it through timedRead
+// for replies, and for requests with (time to response headers - the peer's
+// reported compute). Small transfers measure latency and are ignored.
+func observeLink(peerKey string, n int64, d time.Duration) {
+	if n < linkMinSample || d <= 0 {
+		return
+	}
+	bps := float64(n) / d.Seconds()
+	links.Lock()
+	defer links.Unlock()
+	l := linkFor(peerKey)
+	if l.bps == 0 || time.Since(l.at) > linkFresh {
+		l.bps = bps
+	} else {
+		l.bps = linkEWMA*bps + (1-linkEWMA)*l.bps
+	}
+	l.at = time.Now()
+}
+
+// timedRead reads a peer's reply body and records how fast it arrived.
+func timedRead(peerKey string, r io.Reader) ([]byte, error) {
+	start := time.Now()
+	b, err := io.ReadAll(r)
+	if err == nil {
+		observeLink(peerKey, int64(len(b)), time.Since(start))
+	}
+	return b, err
+}
+
+// linkSpeed is the measured bytes/s on the link to a peer (EWMA of real
+// transfers); ok=false when there is no recent sample.
 func linkSpeed(peerKey string) (bytesPerSec float64, ok bool) {
-	return 0, false
+	links.Lock()
+	defer links.Unlock()
+	l := links.m[peerKey]
+	if l == nil || l.bps == 0 || time.Since(l.at) > linkFresh {
+		return 0, false
+	}
+	return l.bps, true
+}
+
+// clusterLinkSpeed is the sum of every fresh per-peer speed: the aggregate
+// the shim's cost models expect (numpy_ops divides it per peer). It is the
+// additive link_bytes_per_sec field of /v1/pool/stats; ok=false omits it and
+// the shim falls back to a small probe.
+func clusterLinkSpeed() (bytesPerSec float64, ok bool) {
+	links.Lock()
+	defer links.Unlock()
+	for _, l := range links.m {
+		if l.bps > 0 && time.Since(l.at) <= linkFresh {
+			bytesPerSec += l.bps
+			ok = true
+		}
+	}
+	return bytesPerSec, ok
 }
