@@ -2,9 +2,11 @@ version: 2
 
 project_name: pipedpeer
 
-# The rolling "nightly" prerelease tag is not semver; without this, once the
-# tag exists every snapshot build resolves .Version to "nightly" and
-# incpatch fails.
+# The rolling "nightly" tag is not semver; without this, once it exists every
+# snapshot build resolves .Version to "nightly" and incpatch fails. ignore_tags
+# matches exact names only (checked with goreleaser v2), so the per-build
+# "nightly-<version>" tags cannot be listed here; nightly.yml deletes them
+# locally before building.
 git:
   ignore_tags:
     - nightly
@@ -16,6 +18,8 @@ builds:
     binary: pipedpeer
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
     # Linux is the only platform that can run jobs (crun sandbox, Linux
     # namespaces, /dev/nvidia*). darwin is built as a submit-side client.
     goos:

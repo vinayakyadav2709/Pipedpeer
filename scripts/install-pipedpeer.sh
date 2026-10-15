@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Standard installer pattern:
-# 1) Try downloading a release artifact for the selected channel.
-# 2) Fall back to local Go build when release download is not configured.
-# 3) Install into a user bin dir and print PATH instructions.
+# Downloads the pipedpeer binary for this machine, verifies it against the
+# release's checksums.txt, installs it and runs `pipedpeer setup`.
 #
-# Channels:
-#   stable  (default) - latest tagged release
-#   nightly           - rolling prerelease built from the dev branch
+# Usage: install-pipedpeer.sh [--version <v>] [--channel nightly|stable] [-y]
+#   default             latest nightly (the rolling "nightly" release)
+#   --version <v>       a build: releases/download/nightly-<v>/ (e.g. 0.1.4-nightly.20261015-239e713)
+#   --channel stable    latest tagged v* release (old; nightly is the supported stream)
+#   -y                  passed through to `pipedpeer setup`
+# Environment: PIPEDPEER_RELEASE_BASE_URL overrides the release host,
+#              PIPEDPEER_INSTALL_DIR forces the target dir (no sudo).
 
-# Only resolvable when run from a checkout. Piped (curl ... | bash) there is no
-# script path, so BASH_SOURCE is empty and the local build fallback is off.
 script_path="${BASH_SOURCE[0]:-}"
 if [[ -n "$script_path" && -f "$script_path" ]]; then
   repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
@@ -19,158 +19,112 @@ else
   repo_root=""
 fi
 
-CHANNEL="${PIPEDPEER_CHANNEL:-stable}"
+CHANNEL="${PIPEDPEER_CHANNEL:-nightly}"
+VERSION="${PIPEDPEER_VERSION:-}"
+SETUP_ARGS=()
 
-usage() {
-  cat <<'EOF'
-Usage: install-pipedpeer.sh [--channel stable|nightly]
-
-Options:
-  --channel <name>   Release channel to install (default: stable)
-  -h, --help         Show this help
-
-Environment:
-  PIPEDPEER_CHANNEL          Same as --channel
-  PIPEDPEER_VERSION          Install a specific tag (stable channel only)
-  PIPEDPEER_INSTALL_DIR      Install target dir (default: ~/.local/bin)
-  PIPEDPEER_RELEASE_BASE_URL Override the release host
-EOF
-}
+usage() { sed -n '4,13p' "$script_path" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --channel)
-      CHANNEL="${2:-}"
-      if [[ -z "$CHANNEL" ]]; then
-        echo "--channel requires a value" >&2
-        exit 1
-      fi
-      shift 2
-      ;;
-    --channel=*)
-      CHANNEL="${1#*=}"
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown argument: $1" >&2
-      usage >&2
-      exit 1
-      ;;
+    --version) VERSION="${2:-}"; [[ -n "$VERSION" ]] || { echo "--version requires a value" >&2; exit 1; }; shift 2 ;;
+    --version=*) VERSION="${1#*=}"; shift ;;
+    --channel) CHANNEL="${2:-}"; [[ -n "$CHANNEL" ]] || { echo "--channel requires a value" >&2; exit 1; }; shift 2 ;;
+    --channel=*) CHANNEL="${1#*=}"; shift ;;
+    -y|--yes) SETUP_ARGS+=("-y"); shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
 
 case "$CHANNEL" in
   stable|nightly) ;;
-  *)
-    echo "Unknown channel: $CHANNEL (expected 'stable' or 'nightly')" >&2
-    exit 1
-    ;;
+  *) echo "Unknown channel: $CHANNEL (expected 'nightly' or 'stable')" >&2; exit 1 ;;
 esac
 
-INSTALL_DIR="${PIPEDPEER_INSTALL_DIR:-$HOME/.local/bin}"
 BINARY_NAME="pipedpeer"
 PLATFORM="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH_RAW="$(uname -m)"
-
-case "$ARCH_RAW" in
-  x86_64|amd64)
-    ARCH="amd64"
-    ;;
-  aarch64|arm64)
-    ARCH="arm64"
-    ;;
-  *)
-    ARCH="$ARCH_RAW"
-    ;;
+case "$(uname -m)" in
+  x86_64|amd64) ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  *) ARCH="$(uname -m)" ;;
 esac
 
-VERSION="${PIPEDPEER_VERSION:-latest}"
-RELEASE_BASE_URL="${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}"
+# Install target: PIPEDPEER_INSTALL_DIR, else Termux $PREFIX/bin (no sudo),
+# else /usr/local/bin via sudo (or as root), else ~/.local/bin.
+USE_SUDO=""
+NEED_PATH_NOTE=""
+if [[ -n "${PIPEDPEER_INSTALL_DIR:-}" ]]; then
+  INSTALL_DIR="$PIPEDPEER_INSTALL_DIR"
+elif [[ -n "${TERMUX_VERSION:-}" && -n "${PREFIX:-}" ]]; then
+  INSTALL_DIR="$PREFIX/bin"
+elif [[ "$(id -u)" -eq 0 ]]; then
+  INSTALL_DIR="/usr/local/bin"
+elif command -v sudo >/dev/null 2>&1; then
+  INSTALL_DIR="/usr/local/bin"
+  USE_SUDO="sudo"
+else
+  INSTALL_DIR="$HOME/.local/bin"
+  NEED_PATH_NOTE=1
+fi
 
-mkdir -p "$INSTALL_DIR"
+RELEASE_BASE_URL="${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}"
+artifact_name="${BINARY_NAME}-${PLATFORM}-${ARCH}"
+if [[ -n "$VERSION" ]]; then
+  base_url="${RELEASE_BASE_URL}/download/nightly-${VERSION#nightly-}"
+elif [[ "$CHANNEL" == "nightly" ]]; then
+  base_url="${RELEASE_BASE_URL}/download/nightly"
+else
+  base_url="${RELEASE_BASE_URL}/latest/download"
+fi
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-artifact_name="${BINARY_NAME}-${PLATFORM}-${ARCH}"
-if [[ "$CHANNEL" == "nightly" ]]; then
-  # Rolling prerelease republished from dev by the nightly workflow
-  release_url="${RELEASE_BASE_URL}/download/nightly/${artifact_name}"
-elif [[ "$VERSION" != "latest" ]]; then
-  # Version tag format like v1.0.0
-  release_url="${RELEASE_BASE_URL}/download/${VERSION}/${artifact_name}"
-else
-  # Uses GitHub's latest redirect
-  release_url="${RELEASE_BASE_URL}/latest/download/${artifact_name}"
-fi
-
-echo "Installing ${BINARY_NAME} (${CHANNEL} channel)..."
-echo "Target dir: ${INSTALL_DIR}"
-
-download_and_install() {
-  local url="$1"
-  local out="$tmp_dir/$BINARY_NAME"
-
+fetch() { # url out
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$out"
+    curl -fsSL "$1" -o "$2"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$out" "$url"
+    wget -qO "$2" "$1"
   else
+    echo "Neither curl nor wget is installed." >&2
     return 1
   fi
-
-  chmod +x "$out"
-  mv "$out" "$INSTALL_DIR/$BINARY_NAME"
 }
 
-local_build_install() {
-  if [[ -z "$repo_root" || ! -d "$repo_root/src" ]]; then
-    echo "Download failed: $release_url" >&2
-    echo "No local checkout available to build from." >&2
+echo "Installing ${BINARY_NAME} from ${base_url}"
+out="$tmp_dir/$artifact_name"
+if fetch "${base_url}/${artifact_name}" "$out" && fetch "${base_url}/checksums.txt" "$tmp_dir/checksums.txt"; then
+  want="$(awk -v f="$artifact_name" '$2 == f || $2 == "*" f {print $1}' "$tmp_dir/checksums.txt")"
+  got="$(sha256sum "$out" | awk '{print $1}')"
+  if [[ -z "$want" || "$want" != "$got" ]]; then
+    echo "Checksum mismatch for ${artifact_name} (want '${want}', got '${got}'); not installing." >&2
     exit 1
   fi
-
-  if ! command -v go >/dev/null 2>&1; then
-    echo "Download failed: $release_url" >&2
-    echo "Go is not installed, so the local build fallback is unavailable." >&2
-    exit 1
-  fi
-
-  echo "Release artifact download unavailable; falling back to local build..."
-  (
-    cd "$repo_root/src"
-    go build -o "$tmp_dir/$BINARY_NAME" .
-  )
-  chmod +x "$tmp_dir/$BINARY_NAME"
-  mv "$tmp_dir/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-}
-
-set +e
-download_and_install "$release_url"
-download_exit=$?
-set -e
-
-if [[ $download_exit -ne 0 ]]; then
-  local_build_install
-fi
-
-if [[ ! -x "$INSTALL_DIR/$BINARY_NAME" ]]; then
-  echo "Install failed: binary not found at $INSTALL_DIR/$BINARY_NAME" >&2
+  echo "Checksum ok."
+elif [[ -n "$repo_root" && -d "$repo_root/src" ]] && command -v go >/dev/null 2>&1; then
+  echo "Download failed; building from the local checkout instead (no checksum)." >&2
+  (cd "$repo_root/src" && go build -o "$out" .)
+else
+  echo "Download failed: ${base_url}/${artifact_name}" >&2
+  echo "No Go toolchain and checkout to build from." >&2
   exit 1
 fi
 
-echo
+chmod +x "$out"
+$USE_SUDO mkdir -p "$INSTALL_DIR"
+$USE_SUDO install -m 0755 "$out" "$INSTALL_DIR/$BINARY_NAME"
 echo "Installed: $INSTALL_DIR/$BINARY_NAME"
-"$INSTALL_DIR/$BINARY_NAME" --help >/dev/null 2>&1 || true
+
+if [[ -n "$NEED_PATH_NOTE" ]]; then
+  case ":$PATH:" in
+    *":$INSTALL_DIR:"*) ;;
+    *) echo "ACTION NEEDED: no sudo, so ${BINARY_NAME} went to $INSTALL_DIR which is not on PATH. Add to your shell profile:"
+       echo "  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
+  esac
+fi
+
+"$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
 
 echo
-echo "If command is not found, add this to your shell profile:"
-echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-
-echo
-echo "Quick verify:"
-echo "  $INSTALL_DIR/$BINARY_NAME jobs"
+echo "Next: run 'pipedpeer invite' on the first machine; on every other machine run 'pipedpeer connect <invite>'."

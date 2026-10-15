@@ -84,6 +84,11 @@ jobs:
             nightly-go-${{ hashFiles('src/go.sum') }}-
             nightly-go-
 
+      # Per-build nightly-<version> tags are not semver and would be picked as
+      # the current tag; the rolling one is ignored by .goreleaser.yaml.
+      - name: Drop nightly tags locally
+        run: git tag -l 'nightly-*' | xargs -r git tag -d > /dev/null
+
       - name: Build snapshot artifacts
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -135,3 +140,25 @@ jobs:
           fi
 
           gh release upload nightly upload/* --clobber
+
+          # Per-build prerelease nightly-<version> (no "v" prefix, so
+          # release.yml does not fire) with the same assets; the installer's
+          # --version <v> reads it. Then prune all but the newest 20.
+          version="$(jq -r .version dist/metadata.json)"
+          tag="nightly-${version}"
+          git tag -f "$tag" "$SHA"
+          git push -f origin "refs/tags/$tag"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "Nightly ${version}" --notes "$notes" --prerelease
+          else
+            gh release create "$tag" --title "Nightly ${version}" --notes "$notes" \
+              --prerelease --verify-tag
+          fi
+          gh release upload "$tag" upload/* --clobber
+
+          gh release list --limit 200 --json tagName,createdAt \
+            -q '[.[] | select(.tagName | startswith("nightly-"))] | sort_by(.createdAt) | reverse | .[20:][].tagName' |
+          while read -r old; do
+            echo "pruning $old"
+            gh release delete "$old" --cleanup-tag --yes
+          done
