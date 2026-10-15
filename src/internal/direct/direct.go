@@ -337,6 +337,9 @@ type Prober struct {
 
 	mu      sync.Mutex
 	waiting map[[8]byte]chan netip.AddrPort
+	// onRequest, when set, hears the fingerprint prefix of every other node
+	// punching at us: proof its packets reach us again (FIX-RELINK).
+	onRequest func(from string)
 }
 
 // NewProber wraps a socket. self is this node's fingerprint.
@@ -371,6 +374,9 @@ func (p *Prober) Deliver(payload []byte, from netip.AddrPort) bool {
 		// our own router to their address.
 		reply := probe{kind: probeReply, nonce: pr.nonce, from: p.self}
 		_, _ = p.conn.WriteToUDPAddrPort(reply.marshal(), from)
+		if p.onRequest != nil {
+			p.onRequest(strings.TrimRight(string(pr.from[:]), "\x00"))
+		}
 	case probeReply:
 		p.mu.Lock()
 		ch := p.waiting[pr.nonce]

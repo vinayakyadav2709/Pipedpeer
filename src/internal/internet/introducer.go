@@ -96,6 +96,9 @@ func (m *Manager) onPunchRequest(ctx context.Context, p rendezvous.Punch) {
 	}
 	m.mu.Unlock()
 	if busy {
+		// Ours may be a stale attempt from an outage, probing while the
+		// peer is not; restart it alongside the peer's.
+		m.kick(ctx, p.From, "peer "+short(p.From)+" is trying to reach us", true)
 		return
 	}
 
@@ -129,6 +132,7 @@ func (m *Manager) onRegistered(ctx context.Context, in *introducer, you string, 
 
 	m.mu.Lock()
 	wasSilent := in.silent
+	wasLost := in.lostLocked(now)
 	in.lastReply = now
 	in.waiting = time.Time{}
 	in.lastErr = ""
@@ -175,7 +179,13 @@ func (m *Manager) onRegistered(ctx context.Context, in *introducer, you string, 
 			link.lastSeen = now
 		}
 		m.mu.Unlock()
-		m.attempt(ctx, p.Node)
+		if wasLost {
+			// Our packets reach the introducer again after an outage; the
+			// penalties and attempts from the outage are stale.
+			m.kick(ctx, p.Node, "introducer "+in.addr+" is answering again", true)
+		} else {
+			m.attempt(ctx, p.Node)
+		}
 	}
 
 	// Peers no fresh introducer lists have stopped checking in. Their

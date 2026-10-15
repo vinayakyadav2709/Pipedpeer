@@ -54,6 +54,15 @@ cleanup() {
 	done
 }
 
+# save_logs: the daemons' own logs into the log dir, for whatever failed.
+save_logs() {
+	local c
+	for c in a b intro; do
+		x "$c" 'cat /root/.local/state/pipedpeer/daemon.log' >"$logdir/daemon-$c.log" 2>&1 ||
+			echo "lab-net-e6: no daemon log from $c" >&2
+	done
+}
+
 x() {
 	local c="$1"
 	shift
@@ -163,10 +172,11 @@ crossed() { (($(share "$log" ppnode-a) > 0 && $(share "$log" ppnode-b) > 0)); }
 only_b() { (($(share "$log" ppnode-a) == 0 && $(share "$log" ppnode-b) > 0)); }
 has() { grep -qF -- "$1" "$log"; }
 
-# Both machines healthy in A's status (one line each: name state ...).
+# both_healthy [on]: both machines healthy in <on>'s status (default a; one
+# line each: name state path ...).
 both_healthy() {
 	local st
-	st="$($rt exec ppn6-a pipedpeer status 2>/dev/null)" || return 1
+	st="$($rt exec "ppn6-${1:-a}" pipedpeer status 2>/dev/null)" || return 1
 	awk '$1 == "ppnode-a" && $2 == "healthy" { a = 1 } $1 == "ppnode-b" && $2 == "healthy" { b = 1 } END { exit !(a && b) }' <<<"$st"
 }
 
@@ -175,6 +185,18 @@ b_path() {
 	local p
 	p="$($rt exec ppn6-a pipedpeer status 2>/dev/null | awk '$1 == "ppnode-b" { print $3; exit }')"
 	if (($#)); then [[ "$p" == "$1" ]]; else echo "${p:-none}"; fi
+}
+
+# peer_path <on> <peer>: <peer>'s path in <on>'s status, none without a row.
+peer_path() {
+	local p
+	p="$($rt exec "ppn6-$1" pipedpeer status 2>/dev/null | awk -v n="ppnode-$2" '$1 == n { print $3; exit }')"
+	echo "${p:-none}"
+}
+
+# both_views: each machine sees the other healthy over its internet link.
+both_views() {
+	both_healthy a && both_healthy b && [[ "$(peer_path a b)" == internet && "$(peer_path b a)" == internet ]]
 }
 
 wait_for() { # wait_for <s> <cmd...>
@@ -315,11 +337,14 @@ checks() {
 	has "Pool: 240 items, checksum 7199999008" || why+="Pool checksum; "
 	row "failover: B cut mid-run, run completes" "$why"
 	t0="$(now)"
-	wait_for 60 both_healthy
+	wait_for 60 both_views
 	took="$(since "$t0")"
-	both_healthy && why="" || why="B not back in A's status; "
-	b_path internet || why+="A reaches B by $(b_path) path; "
-	row "failover: B back within 60 s, no command" "$why"
+	why=""
+	both_healthy a || why+="B not back in A's status; "
+	both_healthy b || why+="A not back in B's status; "
+	[[ "$(peer_path a b)" == internet ]] || why+="A reaches B by $(peer_path a b) path; "
+	[[ "$(peer_path b a)" == internet ]] || why+="B reaches A by $(peer_path b a) path; "
+	row "failover: B back within 60 s, both views" "$why"
 
 	# ui, doctor, export
 	on a ui-print / pipedpeer ui --print
@@ -361,7 +386,7 @@ $rt build -q -t "$nix_image" -f "$repo_root/lab/nat/Dockerfile.node" "$repo_root
 pp_lab_mem_check "$((2 * $(pp_bytes "$mem") + 2 * $(pp_bytes 128m) + $(pp_bytes 256m)))" lab-net-e6 || exit 1
 
 cleanup
-[[ "${LAB_E6_KEEP:-0}" == 1 ]] || trap cleanup EXIT
+if [[ "${LAB_E6_KEEP:-0}" == 1 ]]; then trap save_logs EXIT; else trap 'save_logs; cleanup' EXIT; fi
 echo "logs: $logdir"
 echo "rig: two NATed 192.168.0.0/24 sites, introducer on 203.0.113.10"
 rig || { echo "lab-net-e6: rig failed" >&2; exit 1; }

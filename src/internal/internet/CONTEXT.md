@@ -76,6 +76,7 @@ Per introducer: last reply, last error, members it listed (`Manager.Introducers`
 
 - Daemon wiring: `src/daemon_cmd.go` `runDaemon` (`internet.New`, `OnPeer`/`OnPeerGone` into `daemonapi`).
 - Peer manager: `internet/internet.go` `Manager.Run`, `connect`, `raceOrCollide`, `linkUp`, `noPath` (backoff, capped at 5 min).
+- Back after an outage: `kick` lifts a peer's penalty and restarts an attempt begun in the outage when a lost introducer answers again, the peer asks us to punch, or its probe reaches us; a lost introducer is re-registered with every `lostAfter` (5 s).
 - Teardown: `expired()` picks peers to drop (never one with a live link), `dropLink` closes the link and its forwarder.
 - Candidates and race: `direct/direct.go` `Gather`, `Prober.Race`; reasons are the `Reason*` constants.
 - Collision: `direct/birthday.go` `SprayToward`, `OpenMany`.
