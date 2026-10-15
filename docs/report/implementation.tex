@@ -21,7 +21,7 @@ traffic without error. When the UDP probe returns nothing, the daemon sweeps
 each local interface's prefix (container and VPN interfaces skipped) with
 concurrent health probes, 64 at a time with a 700\,ms timeout each, and stops
 once any daemon answers. A reply's host is taken from the packet's source
-address, never from the address the peer advertised at start-up.
+address, never from the address the peer advertised at startup.
 
 \textbf{The address book.} The node store keeps every node under its node id,
 the fingerprint of its key, together with every \emph{path} to it: its kind
@@ -97,8 +97,10 @@ leading brace, everything else handed to QUIC.
 add a timeout for every address that cannot work. When one side's NAT allocates
 a fresh external port for every destination there is no address to publish, and
 the \textbf{birthday collision} \cite{anderson2020nat} runs: that side opens 256
-sockets toward the peer, the other sends 600 probes to random ports, and the
-socket that is hit is kept, since its mapping is the reachable one.
+sockets toward the peer, the other sends 600 probes to random ports among the
+64{,}511 above 1024, and the socket that is hit is kept, since its mapping is
+the reachable one. A round hits one of the 256 mappings with probability
+$1-(1-256/64511)^{600} \approx 91\%$.
 
 \textbf{The link.} The winning path carries QUIC \cite{rfc9000} with TLS~1.3.
 Inside it each side sends a hello signed with its Ed25519 node key, and each
@@ -137,7 +139,7 @@ Security has three layers (Figure~\ref{fig:trust}).
     \label{fig:trust}
 \end{figure}
 
-\textbf{The shared secret.} The first machine's set-up stores 32 random bytes,
+\textbf{The shared secret.} The first machine's setup stores 32 random bytes,
 readable only by the user, before its daemon first starts; \texttt{connect}
 stores the secret from the invite code. Every route on the daemon,
 \texttt{/health} included, requires it, compared in constant time, and outbound
@@ -170,7 +172,7 @@ signature policy.
 A worker learns a new peer's key before Nix does, so the import passes the
 cluster's keys to that one copy operation, after checking the archive's named
 signer against the signer's published identity. Because a multi-user Nix daemon
-ignores keys passed by an untrusted user, set-up also installs a root-owned
+ignores keys passed by an untrusted user, setup also installs a root-owned
 helper that can do nothing but add or remove keys of the cluster's fixed form.
 The limits of this design are set out in Section~\ref{sec:security}.
 
@@ -212,9 +214,10 @@ four hardware terms together move the score by at most $\pm0.18$, so a fast but
 busy machine loses to a slower idle one, as it should on
 workstations that people are also using. \textbf{Missing telemetry is neutral}:
 normalisation returns the midpoint $0.5$ for an absent value, so a node that does
-not report its clock speed is neither rewarded nor punished.
+not report its clock speed is neither rewarded nor punished. $S$ is clamped at
+zero.
 
-When a GPU is requested, a second function adds up to $0.8$, drawn from total
+When a GPU is requested, a second function adds up to $0.8$ to $S$, drawn from total
 VRAM, device count, free VRAM on the best device and compute capability, less a
 utilisation penalty. The free memory a node advertises is what it can actually
 \emph{grant}: its own budget less the reservations of every daemon on the same
@@ -392,7 +395,7 @@ at a throttling limit stalls instead of failing. Daemons on a single machine,
 recognised by the kernel's boot identifier, subtract one another's reservations,
 so two of them cannot promise the same memory twice.
 
-\textbf{Without root.} On a machine with no system Nix, set-up seeds a private
+\textbf{Without root.} On a machine with no system Nix, setup seeds a private
 store in the user's data directory and mounts it at \texttt{/nix} inside a user
 and mount namespace, and installs \texttt{crun} into the user's own binary
 directory when no package manager supplies it.
@@ -422,7 +425,7 @@ after it ends, and its log is capped at 50\,MB.
 
 \textbf{Phones.} An Android phone joins under Termux \cite{termux} as a worker for
 parallel chunks, running them from a Nix environment inside a Debian under
-\texttt{proot} \cite{proot} where set-up can install one, and otherwise with
+\texttt{proot} \cite{proot} where setup can install one, and otherwise with
 Termux's own Python. Closures go only to peers of the same architecture, so a
 phone receives the job's package list instead, builds its own environment in the
 background, and declines the job until it is ready.
@@ -439,7 +442,7 @@ before the user's first line. Nothing is installed on any node. Nix ships its ow
 module of the same name, which adds the environment's package directories; the
 shim performs that work first, since only the first module on the path is
 imported (Figure~\ref{fig:shim}). \texttt{multiprocessing.Pool} and \texttt{ProcessPoolExecutor} are
-patched at start-up, while NumPy, pandas, torch and joblib are patched on their
+patched at startup, while NumPy, pandas, torch and joblib are patched on their
 first import through an import hook, so a job that never imports torch never pays
 its 1.7\,s import (Section~\ref{sec:res-shim}).
 
@@ -466,13 +469,13 @@ counting the items that ran remotely and locally, the parts that failed, and the
 node each part ran on, so a claim about where work ran can be checked.
 
 \textbf{Sharing work by measured speed.} On the daemon, a chunk is divided among
-peers by a makespan solver. Each device is modelled as a set-up time $o_i$ plus a
+peers by a makespan solver. Each device is modelled as a setup time $o_i$ plus a
 throughput $r_i$, fitted by least squares from the last eight parts it returned;
 an unmeasured peer is assumed to be as fast as this node, scaled by its core
 count, since assuming it slow would size its share below anything worth sending.
 The solver finds the finishing time $T$ at which the devices together complete
 the work, allocating $(T - o_i)\,r_i$ items to each, and drops any device whose
-set-up time alone exceeds $T$. On a peer, a part fans out across its cores.
+setup time alone exceeds $T$. On a peer, a part fans out across its cores.
 Division therefore repeats at two levels, machines and then cores, and a part
 already split off is never split across machines or forwarded again. A map too
 large for the node that holds it is the one case of forwarding: it goes whole,
@@ -668,19 +671,23 @@ The checks run in order. At least two nodes and 32\,MB of payload are required.
 \textbf{If the working set does not fit in local memory, the work goes to the
 cluster} whatever the transfer costs, and a matrix product the cluster cannot
 take either raises an error naming the size and the remedy rather than exhausting
-the machine. If any peer reports a GPU, $R'$ is six times $R$. The inequality is
+the machine. If any peer reports a GPU, $R'$ is taken as six times $R$, a conservative
+heuristic multiplier rather than a measured speed. The inequality is
 then evaluated at an optimistic 10\,Gbit/s (Figure~\ref{fig:cost}); if offloading loses even there, the
 work stays local without measuring anything. Otherwise bandwidth is
-\emph{measured} by pushing 64\,MB through the real dispatch path, cached for five
-minutes, and a failed probe keeps the work local.
+\emph{measured}: the daemon's rate over recent real transfers is used when it
+has one, and otherwise an 8\,MB probe is pushed through the real dispatch path
+(about 3\,s on a 2.5\,MB/s link); the result is cached for five minutes, and a
+failed probe keeps the work local.
 
 \begin{figure}[!htbp]
     \centering
     \includegraphics[width=80mm]{\figpath{fig_4.11_cost_model.png}}
     \caption[Cost model decision regions]{Decision regions of Equation~\ref{eq:cost} for the pandas path
     ($\rho = 1$, $R = R' = 1$\,GFLOP/s) at three nodes on a 500\,MB/s link.
-    Grouped aggregation and joins have low arithmetic intensity, so they are
-    distributed only above 512\,MB.}
+    The step at 512\,MB is a separate rule, not Equation~\ref{eq:cost}: work
+    below 8 flop per byte stays local up to 512\,MB, so grouped aggregation and
+    joins are distributed only above it.}
     \label{fig:cost}
 \end{figure}
 
@@ -741,7 +748,7 @@ memory of the last five runs of the same script; or per-library baselines plus
 historical tier closes a feedback loop: the worker samples the job's process tree
 while it runs and records the peak, which sizes the next run's admission request.
 
-\textbf{Commands.} The CLI has thirteen commands, among them set-up, invite,
+\textbf{Commands.} The CLI has thirteen commands, among them setup, invite,
 connect, run, status, attach, doctor and uninstall. Configuration is a single file
 holding the secret, the introducers and the node's role, and the ports are one
 block: 4242 for the daemon API and discovery, 4243 for direct links and 4244 for

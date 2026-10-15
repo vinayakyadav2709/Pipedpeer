@@ -39,7 +39,7 @@ server that runs nothing.
 
 The principal subsystems are listed in Table~\ref{tab:subsystems}. All are
 packages under \texttt{src/internal/}; the remainder are supporting code
-(process management, set-up, paths, logging).
+(process management, setup, paths, logging).
 
 \begin{table}[!htbp]
 \centering
@@ -131,6 +131,19 @@ identity and trust store (node key, pinned certificates, trusted Nix keys).
 
 Figure~\ref{fig:usecase} shows who uses the system and for what; machines are
 actors as well as people.
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{User:} runs a script on the cluster, asks for a GPU or a memory
+  floor, trains with data parallelism, and inspects jobs and nodes.
+  \item \textbf{Node operator:} sets up a machine, invites another machine, and
+  connects a machine with an invite code.
+  \item \textbf{Peer daemon:} accepts and leases work, serves signed closures,
+  executes parallel chunks, and introduces its cluster's peers to one another.
+  \item \textbf{Phone (Termux):} joins under \texttt{proot} and Nix and executes
+  parallel chunks.
+  \item \textbf{Hosted introducer:} registers nodes and forwards punch requests;
+  it carries no job data.
+\end{itemize}
 
 \begin{figure}[!htbp]
     \centering
