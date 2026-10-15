@@ -2,7 +2,9 @@ package daemonapi
 
 import (
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -16,7 +18,7 @@ func TestPeakMemTracker(t *testing.T) {
 		t.Skipf("cannot start process: %v", err)
 	}
 
-	tracker := newPeakMemTracker(int32(cmd.Process.Pid), 50*time.Millisecond)
+	tracker := newPeakMemTracker(int32(cmd.Process.Pid), 50*time.Millisecond, "")
 	// Tree walking can transiently miss a sample; wait until one lands (the
 	// process lives 2s, well past the 3s deadline).
 	deadline := time.Now().Add(3 * time.Second)
@@ -83,5 +85,16 @@ time.sleep(30)
 	mib := (&peakMemTracker{}).treeMem(int32(cmd.Process.Pid)) / 1024
 	if mib < 100 || mib > 256 {
 		t.Fatalf("tree memory %d MiB, want ~128 (shared pages counted once)", mib)
+	}
+}
+
+func TestPeakMemTrackerCgroup(t *testing.T) {
+	dir := t.TempDir()
+	stat := "anon 4194304\nfile 1073741824\nkernel_stack 16384\nslab 1048576\n"
+	os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(stat), 0o644)
+	tr := newPeakMemTracker(0, 10*time.Millisecond, dir)
+	time.Sleep(100 * time.Millisecond)
+	if got, want := tr.stop(), int64(4194304+16384+1048576); got != want {
+		t.Fatalf("peak = %d, want %d (anon+kernel, no file cache)", got, want)
 	}
 }
