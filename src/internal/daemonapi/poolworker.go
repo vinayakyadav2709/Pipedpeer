@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -30,7 +31,7 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command(runPath, workerScript)
+	cmd := termuxexec.Command(runPath, workerScript)
 	// Own process group, so a cancel kills whatever the user's function forked.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
@@ -274,7 +275,7 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 	}
 
 	ctx := ch.context()
-	cmd := exec.CommandContext(ctx, runPath, runnerPath, inPath, outPath)
+	cmd := termuxexec.CommandContext(ctx, runPath, runnerPath, inPath, outPath)
 	// Own process group, killed whole on cancel (see killProcessGroup).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }

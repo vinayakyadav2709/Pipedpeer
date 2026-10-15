@@ -17,6 +17,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/dustin/go-humanize"
 	"github.com/spf13/cobra"
 
@@ -41,6 +43,9 @@ import (
 )
 
 func main() {
+	// Play-Store Termux starts us through Android's linker; undo its argv
+	// change before anything reads os.Args (internal/termuxexec).
+	termuxexec.FixArgs()
 	// First of all: run from the root-owned key helper (sudo lets the user
 	// run that file as root with any arguments), this binary does nothing
 	// but add or remove nix keys (ADR-0018).

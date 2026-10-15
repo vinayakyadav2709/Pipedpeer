@@ -13,6 +13,8 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 )
 
 // Name is the unit's name.
@@ -20,13 +22,13 @@ const Name = "pipedpeer.service"
 
 // systemctl runs `systemctl --user args...`; a variable so tests run without systemd.
 var systemctl = func(args ...string) (string, error) {
-	out, err := exec.Command("systemctl", append([]string{"--user"}, args...)...).CombinedOutput()
+	out, err := termuxexec.Command("systemctl", append([]string{"--user"}, args...)...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
 // loginctl runs `loginctl args...`; a variable for tests.
 var loginctl = func(args ...string) (string, error) {
-	out, err := exec.Command("loginctl", args...).CombinedOutput()
+	out, err := termuxexec.Command("loginctl", args...).CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -82,7 +84,7 @@ func Installed() bool {
 // Install writes the unit (pointing at this binary) and reloads systemd;
 // enable also turns on start at boot.
 func Install(enable bool) error {
-	exe, err := os.Executable()
+	exe, err := termuxexec.Executable()
 	if err != nil {
 		return fmt.Errorf("finding this binary for the service: %w", err)
 	}

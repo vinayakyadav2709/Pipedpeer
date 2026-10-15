@@ -5,10 +5,11 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -59,7 +60,7 @@ func Seed(progress func(string, ...any)) error {
 	if err := os.MkdirAll(unpack, 0o755); err != nil {
 		return err
 	}
-	if out, err := exec.Command("tar", "-xJf", tarball, "-C", unpack).CombinedOutput(); err != nil {
+	if out, err := termuxexec.Command("tar", "-xJf", tarball, "-C", unpack).CombinedOutput(); err != nil {
 		return fmt.Errorf("unpacking nix: %v: %s", err, out)
 	}
 
@@ -69,7 +70,7 @@ func Seed(progress func(string, ...any)) error {
 	}
 	// -a preserves the read-only modes store paths carry; -n so a partially
 	// seeded store is completed rather than half-overwritten.
-	if out, err := exec.Command("cp", "-an", inner[0]+"/.", storeDir+"/").CombinedOutput(); err != nil {
+	if out, err := termuxexec.Command("cp", "-an", inner[0]+"/.", storeDir+"/").CombinedOutput(); err != nil {
 		return fmt.Errorf("populating the private store: %v: %s", err, out)
 	}
 

@@ -8,11 +8,12 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -84,7 +85,7 @@ func Start(exe string, nvidia bool) error {
 	if err := os.WriteFile(LogPath(), []byte(head), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", LogPath(), err)
 	}
-	cmd := exec.Command("sh", append([]string{"-c", shell, exe}, Args(script, nvidia)...)...)
+	cmd := termuxexec.Command("sh", append([]string{"-c", shell, exe}, Args(script, nvidia)...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PIPEDPEER_WARMUP_LOG="+LogPath())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

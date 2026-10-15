@@ -70,6 +70,14 @@ fi
 
 RELEASE_BASE_URL="${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}"
 artifact_name="${BINARY_NAME}-${PLATFORM}-${ARCH}"
+# Termux gets the android build: Play-Store Termux runs only PIE binaries
+# (through Android's linker), and the linux build is static, not PIE.
+# Builds before it existed have only the linux one, tried second.
+fallback_name=""
+if [[ -n "${TERMUX_VERSION:-}" && "$ARCH" == "arm64" ]]; then
+  fallback_name="$artifact_name"
+  artifact_name="${BINARY_NAME}-android-${ARCH}"
+fi
 if [[ -n "$VERSION" ]]; then
   base_url="${RELEASE_BASE_URL}/download/nightly-${VERSION#nightly-}"
 elif [[ "$CHANNEL" == "nightly" ]]; then
@@ -94,7 +102,17 @@ fetch() { # url out
 
 echo "Installing ${BINARY_NAME} from ${base_url}"
 out="$tmp_dir/$artifact_name"
-if fetch "${base_url}/${artifact_name}" "$out" && fetch "${base_url}/checksums.txt" "$tmp_dir/checksums.txt"; then
+fetched=""
+if [[ -n "$fallback_name" ]]; then
+  if fetch "${base_url}/${artifact_name}" "$out" 2>/dev/null; then
+    fetched=1
+  else
+    echo "No ${artifact_name} in this release; using ${fallback_name} (will not start on Play-Store Termux)." >&2
+    artifact_name="$fallback_name"
+    out="$tmp_dir/$artifact_name"
+  fi
+fi
+if { [[ -n "$fetched" ]] || fetch "${base_url}/${artifact_name}" "$out"; } && fetch "${base_url}/checksums.txt" "$tmp_dir/checksums.txt"; then
   want="$(awk -v f="$artifact_name" '$2 == f || $2 == "*" f {print $1}' "$tmp_dir/checksums.txt")"
   got="$(sha256sum "$out" | awk '{print $1}')"
   if [[ -z "$want" || "$want" != "$got" ]]; then

@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
@@ -329,7 +331,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 	if !cfg.Isolate {
 		runCmd := buildNonIsolatedCmd(phoneBox, runPath, job.WorkDir, cfg.ScriptPath, cfg.Args, cfg.Envs)
-		cmd := exec.Command("sh", "-c", runCmd)
+		cmd := termuxexec.Command("sh", "-c", runCmd)
 		// Its own process group, so a cancel reaches python and everything
 		// it started, not just the shell.
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -497,11 +499,11 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 		os.WriteFile(filepath.Join(bundleDir, "config.json"), data, 0644)
 
 		containerID := "pp-" + jobID
-		exec.Command("crun", "delete", "-f", containerID).Run()
-		defer exec.Command("crun", "delete", "-f", containerID).Run()
+		termuxexec.Command("crun", "delete", "-f", containerID).Run()
+		defer termuxexec.Command("crun", "delete", "-f", containerID).Run()
 		defer os.RemoveAll(bundleDir)
 
-		cmd := exec.Command("crun", "run", "--bundle", bundleDir, containerID)
+		cmd := termuxexec.Command("crun", "run", "--bundle", bundleDir, containerID)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()

@@ -17,13 +17,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/rs/zerolog/log"
 
@@ -85,7 +86,7 @@ func Launch(args []string) {
 // there by default, so this binary and the user's working directory keep
 // their paths.
 func forward(args []string) int {
-	exe, err := os.Executable()
+	exe, err := termuxexec.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pipedpeer: cannot find this binary to run it in the phone's Debian: %v\n", err)
 		return 1
@@ -107,7 +108,7 @@ func forward(args []string) int {
 		login = append(login, "-w", wd)
 	}
 	login = append(login, Distro, "--", exe)
-	cmd := exec.Command("proot-distro", append(login, args...)...)
+	cmd := termuxexec.Command("proot-distro", append(login, args...)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	cmd.ExtraFiles = []*os.File{w}
 	// Ctrl-C reaches the whole foreground group, the command inside
@@ -144,7 +145,7 @@ func serveDetach(r io.Reader) {
 			continue
 		}
 		login := append([]string{"login", "--detach", "-e", "PATH=" + guestPath, Distro, "--"}, argv...)
-		if out, err := exec.Command("proot-distro", login...).CombinedOutput(); err != nil {
+		if out, err := termuxexec.Command("proot-distro", login...).CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "pipedpeer: could not start %s in the phone's Debian: %v %s\n", argv[0], err, tail(out))
 		}
 	}
@@ -276,7 +277,7 @@ echo "full-node phone; written by pipedpeer setup" > /etc/pipedpeer-phone
 // runStep runs a setup command with its output to w; a variable so tests
 // fake proot-distro, pkg and the Nix install.
 var runStep = func(w io.Writer, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	cmd := termuxexec.Command(name, args...)
 	cmd.Stdout, cmd.Stderr = w, w
 	return cmd.Run()
 }

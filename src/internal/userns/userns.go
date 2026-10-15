@@ -14,10 +14,11 @@ package userns
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 )
 
 // Available reports whether a user namespace can be created, and when it
@@ -64,11 +65,11 @@ const recheckEnv = "PIPEDPEER_USERNS_RECHECK"
 // process, and AppArmor attaches a profile only at exec: after setup loads the
 // pipedpeer profile, only a freshly exec'd binary shows whether it worked.
 func ProbeFresh() (bool, string) {
-	self, err := os.Executable()
+	self, err := termuxexec.Executable()
 	if err != nil {
 		return false, "cannot locate this executable to probe with: " + err.Error()
 	}
-	cmd := exec.Command(self)
+	cmd := termuxexec.Command(self)
 	cmd.Env = append(os.Environ(), recheckEnv+"=1")
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -82,7 +83,7 @@ func ProbeFresh() (bool, string) {
 }
 
 func available() (bool, string) {
-	self, err := os.Executable()
+	self, err := termuxexec.Executable()
 	if err != nil {
 		return false, "cannot locate this executable to probe with: " + err.Error()
 	}
@@ -97,7 +98,7 @@ func available() (bool, string) {
 	// available" on a machine where every job would fail. Measured on gcp1,
 	// where the one-step probe said yes and crun said
 	// "unshare `CLONE_NEWNS`: Operation not permitted".
-	cmd := exec.Command(self)
+	cmd := termuxexec.Command(self)
 	cmd.Env = append(os.Environ(), probeEnv+"=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags:  syscall.CLONE_NEWUSER,
@@ -141,7 +142,7 @@ func diagnose() string {
 		// the kernel asks AppArmor, and AppArmor's answer depends on a
 		// profile that only root can install. The narrow profile is offered
 		// first because the sysctl turns the protection off machine-wide.
-		exe, _ := os.Executable()
+		exe, _ := termuxexec.Executable()
 		if exe == "" {
 			exe = "/usr/local/bin/pipedpeer"
 		}

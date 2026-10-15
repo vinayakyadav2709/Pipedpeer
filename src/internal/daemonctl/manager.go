@@ -5,19 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/pipedpeer/pipedpeer/internal/cgroups"
-	"github.com/pipedpeer/pipedpeer/internal/phone"
-	"github.com/pipedpeer/pipedpeer/internal/service"
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
+	"github.com/pipedpeer/pipedpeer/internal/service"
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 type State struct {
@@ -107,7 +108,7 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 		return nil
 	}
 
-	exe, err := os.Executable()
+	exe, err := termuxexec.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to resolve executable: %w", err)
 	}
@@ -151,7 +152,7 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	argv := append([]string{exe}, args...)
 	argv = append(cgroups.ScopePrefix("pipedpeer-daemon-"+strconv.Itoa(port)), argv...)
 
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := termuxexec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {

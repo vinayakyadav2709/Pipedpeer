@@ -22,12 +22,19 @@ builds:
       - -s -w -X main.version={{ .Version }}
     # Linux is the only platform that can run jobs (crun sandbox, Linux
     # namespaces, /dev/nvidia*). darwin is built as a submit-side client.
+    # android/arm64 is for Termux: Play-Store Termux starts every program
+    # through /system/bin/linker64, which runs only PIE binaries, and a
+    # GOOS=android build is one (src/internal/termuxexec).
     goos:
       - linux
       - darwin
+      - android
     goarch:
       - amd64
       - arm64
+    ignore:
+      - goos: android
+        goarch: amd64
 
 # By default, GoReleaser creates archives.
 # "formats: [binary]" ensures we publish raw binaries instead. Note that this

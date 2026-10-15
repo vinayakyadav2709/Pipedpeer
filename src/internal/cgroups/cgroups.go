@@ -29,6 +29,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+
 	"github.com/rs/zerolog/log"
 )
 
@@ -223,7 +225,7 @@ func clearStaleScope(unit string) {
 		{"--user", "stop", unit},
 		{"--user", "reset-failed", unit},
 	} {
-		cmd := exec.Command("systemctl", args...)
+		cmd := termuxexec.Command("systemctl", args...)
 		cmd.Stdout, cmd.Stderr = nil, nil
 		_ = cmd.Run()
 	}

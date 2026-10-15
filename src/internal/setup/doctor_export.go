@@ -3,9 +3,10 @@ package setup
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -33,7 +34,7 @@ func OwnCrun() (path string, ours bool, why string) {
 	if _, err := os.Stat(path); err != nil {
 		return path, false, "not present"
 	}
-	out, err := exec.Command(path, "--version").Output()
+	out, err := termuxexec.Command(path, "--version").Output()
 	if err != nil {
 		return path, false, "it does not run, so it cannot be identified as setup's: " + err.Error()
 	}
