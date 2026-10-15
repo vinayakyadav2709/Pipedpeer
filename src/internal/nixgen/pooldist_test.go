@@ -751,7 +751,7 @@ func TestPoolWidthFollowsCPUPinning(t *testing.T) {
 	runShimPython(t, "pinned", `
 import os
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pool_resources
 
 if not hasattr(os, "sched_setaffinity"):
     print("PINNED-OK")
@@ -761,7 +761,7 @@ assert core._usable_cores() <= len(allowed), core._usable_cores()
 os.sched_setaffinity(0, {allowed[0]})
 assert core._usable_cores() == 1, "pinned to one core, sized for %d" % core._usable_cores()
 os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
-assert pool._pool_width(None) == 1, pool._pool_width(None)
+assert pool_resources._pool_width(None) == 1, pool_resources._pool_width(None)
 print("PINNED-OK")
 `, "PINNED-OK")
 }
@@ -774,12 +774,12 @@ func TestPoolResizeCountsItsOwnWorkersAsFree(t *testing.T) {
 	runShimPython(t, "reclaim", `
 import os
 import sitecustomize as shim
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp, pool_resources
 
 os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
 core._usable_cores = lambda: 2
 budget = int(2 * (256 << 20) / 0.4) + 1     # exactly room for two workers
-pool._avail_bytes = lambda: budget
+pool_resources._avail_bytes = lambda: budget
 
 def inc(x):
     return x + 1
