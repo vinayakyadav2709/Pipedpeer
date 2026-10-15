@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,8 +11,9 @@ import (
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
+	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/internet"
-	"github.com/pipedpeer/pipedpeer/internal/portmap"
+	"github.com/pipedpeer/pipedpeer/internal/term"
 )
 
 // Two things setup can do for direct connections without weakening anything.
@@ -210,16 +212,12 @@ func openUFW(ctx context.Context, rules []string, apply bool) firewallStatus {
 	return st
 }
 
-// networkReport prints what this machine can do about direct connections.
-//
-// Printed during setup rather than left for a failure to reveal, because the
-// failure it prevents is a peer that quietly never appears - nothing errors,
-// nothing logs, work simply goes elsewhere and the machine looks idle.
-func networkReport(port int, apply bool) {
-	fmt.Println()
-	fmt.Println("  Direct connections")
-	fmt.Println("  ------------------")
-
+// networkReport opens this machine's ports on the host firewall (apply) or
+// says which are blocked. Printed during setup rather than left for a failure
+// to reveal: a blocked port looks like a peer that quietly never appears.
+// The router is not asked for a mapping any more (no router mapping call):
+// peers punch, and the introducer learns the public address.
+func networkReport(apply bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
@@ -228,55 +226,81 @@ func networkReport(port int, apply bool) {
 	fw := openFirewall(ctx, rules, apply)
 	switch {
 	case fw.err != nil:
-		fmt.Printf("    firewall     ✗  %s is running and ports %s could not be opened:\n", fw.tool, list)
-		fmt.Printf("                    %v\n", fw.err)
-		fmt.Printf("                    Peers will not be able to reach this machine directly.\n")
+		term.Fail(os.Stdout, "firewall: %s is running and %s could not be opened: %v", fw.tool, list, fw.err)
+		term.Action(os.Stdout, "open %s in %s yourself, or peers cannot reach this machine", list, fw.tool)
 	case fw.tool == "":
-		fmt.Printf("    firewall     ✓  none running; %s reachable\n", list)
+		term.OK(os.Stdout, "firewall: none running; %s reachable", list)
 	case fw.changed:
-		fmt.Printf("    firewall     ✓  opened %s in %s\n", list, fw.tool)
-		fmt.Printf("                    Daemon API (token-authenticated), discovery, and signed-identity QUIC only.\n")
-		fmt.Printf("                    Undo with: %s\n", fw.undo)
+		term.OK(os.Stdout, "firewall: opened %s in %s (undo: %s)", list, fw.tool, fw.undo)
 	case fw.open:
-		fmt.Printf("    firewall     ✓  %s already allows %s\n", fw.tool, list)
+		term.OK(os.Stdout, "firewall: %s already allows %s", fw.tool, list)
 	default:
-		fmt.Printf("    firewall     ✗  %s is running and blocks %s\n", fw.tool, list)
-		fmt.Printf("                    Re-run with -y to open it, or allow it yourself.\n")
-	}
-
-	m, err := portmap.Map(ctx, uint16(port))
-	switch {
-	case err == nil && m.Public:
-		fmt.Printf("    router       ✓  granted %s\n", m.External)
-		fmt.Printf("                    This machine is directly reachable; peers need no punching.\n")
-	case err == nil && !m.Public:
-		fmt.Printf("    router       ~  granted %s, which is not a public address\n", m.External)
-		fmt.Printf("                    There is a second layer of NAT above this router - a phone\n")
-		fmt.Printf("                    tether or a carrier network. Peers will punch instead.\n")
-	default:
-		fmt.Printf("    router       ~  no port mapping offered\n")
-		fmt.Printf("                    Normal: many routers have it switched off. Peers will punch.\n")
+		term.Fail(os.Stdout, "firewall: %s is running and blocks %s", fw.tool, list)
+		term.Action(os.Stdout, "run `pipedpeer setup -y` to open them, or allow them yourself")
 	}
 }
 
 // FirewallRules is every port a peer must reach on this machine, firewalld
-// spelling. Each has the listener it serves:
-//
-//	38080/tcp        daemon API, daemonapi/server.go:335 (main.go flags "--port")
-//	38099/udp        LAN discovery, discovery/discovery.go:39
-//	38447/udp        direct QUIC, internet.DefaultPort internet/internet.go:61
-//	                 (direct/transport.go:217)
-//	38445/udp        rendezvous address book, netcheck.go:563 (introducer role)
-//	29500-29509/tcp  DDP master range, main.go:1032 ddpPickMasterPort
+// spelling: the daemon API (tcp) and LAN discovery (udp) on
+// daemonctl.DefaultPort, direct QUIC on internet.DefaultPort, the introducer
+// on clustercfg.DefaultPort.
 func FirewallRules() []string {
 	return []string{
-		"38080/tcp",
-		"38099/udp",
+		fmt.Sprintf("%d/tcp", daemonctl.DefaultPort),
+		fmt.Sprintf("%d/udp", daemonctl.DefaultPort),
 		fmt.Sprintf("%d/udp", DirectPort()),
 		fmt.Sprintf("%d/udp", clustercfg.DefaultPort),
-		"29500-29509/tcp",
 	}
 }
 
+// legacyRules are the ports builds before the 4242 block opened; uninstall
+// closes them too, so a machine set up by an old build is left clean.
+var legacyRules = []string{"38080/tcp", "38099/udp", "38447/udp", "38445/udp", "29500-29509/tcp"}
+
 // DirectPort is the port the report and the firewall rule are about.
 func DirectPort() int { return internet.DefaultPort }
+
+// CloseFirewall removes every rule setup (this build or an older one) added
+// to firewalld or ufw. No firewall running is not an error.
+func CloseFirewall() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	rules := append(FirewallRules(), legacyRules...)
+	var errs []error
+	if _, err := lookPath("firewall-cmd"); err == nil {
+		if out, err := firewallCmd(ctx, "firewall-cmd", "--state"); err == nil && strings.TrimSpace(out) == "running" {
+			removed := false
+			for _, rule := range rules {
+				if out, err := firewallCmd(ctx, "firewall-cmd", "--permanent", "--query-port="+rule); err != nil ||
+					!strings.HasPrefix(strings.TrimSpace(out), "yes") {
+					continue
+				}
+				if out, err := runRoot(ctx, "firewall-cmd", "--permanent", "--remove-port="+rule); err != nil {
+					errs = append(errs, fmt.Errorf("firewall-cmd --remove-port=%s: %v (%s)", rule, err, strings.TrimSpace(out)))
+					continue
+				}
+				removed = true
+			}
+			if removed {
+				if out, err := runRoot(ctx, "firewall-cmd", "--reload"); err != nil {
+					errs = append(errs, fmt.Errorf("firewall-cmd --reload: %v (%s)", err, strings.TrimSpace(out)))
+				}
+			}
+		}
+	}
+	if _, err := lookPath("ufw"); err == nil {
+		out, err := runRoot(ctx, "ufw", "status")
+		if err == nil && strings.Contains(out, "Status: active") && !strings.Contains(out, "Status: inactive") {
+			for _, rule := range rules {
+				r := ufwRule(rule)
+				if !strings.Contains(out, r) {
+					continue
+				}
+				if o, err := runRoot(ctx, "ufw", "delete", "allow", r); err != nil {
+					errs = append(errs, fmt.Errorf("ufw delete allow %s: %v (%s)", r, err, strings.TrimSpace(o)))
+				}
+			}
+		}
+	}
+	return errors.Join(errs...)
+}

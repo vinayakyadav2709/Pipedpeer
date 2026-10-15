@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -17,7 +18,7 @@ func RunningMaxConcurrent(port int) int {
 func maxConcurrentAt(url string) int {
 	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get(url)
 	if err != nil {
-		fmt.Printf("warn: could not read max-concurrent from %s, restarting with 0: %v\n", url, err)
+		fmt.Fprintf(os.Stderr, "pipedpeer: could not read max-concurrent from %s, restarting with 0: %v\n", url, err)
 		return 0
 	}
 	defer resp.Body.Close()
@@ -25,7 +26,7 @@ func maxConcurrentAt(url string) int {
 		MaxConcurrent int `json:"max_concurrent"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
-		fmt.Printf("warn: bad /health from %s, restarting with max-concurrent 0: %v\n", url, err)
+		fmt.Fprintf(os.Stderr, "pipedpeer: bad /health from %s, restarting with max-concurrent 0: %v\n", url, err)
 		return 0
 	}
 	return h.MaxConcurrent

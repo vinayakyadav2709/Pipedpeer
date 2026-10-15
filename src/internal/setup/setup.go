@@ -14,6 +14,8 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
+	"github.com/pipedpeer/pipedpeer/internal/service"
+	"github.com/pipedpeer/pipedpeer/internal/term"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -582,74 +584,118 @@ func missingWithInstaller(results []result) []prereq {
 	return missing
 }
 
+// Seams for the daemon step, so a test can watch the order of token and start.
+var (
+	daemonStatus     = daemonctl.Status
+	daemonStart      = daemonctl.Start
+	daemonRestart    = daemonctl.Restart
+	serviceSupported = service.Supported
+	serviceInstalled = service.Installed
+	serviceInstall   = service.Install
+)
+
+// ask prints a [Y/n] question; empty, y and yes are yes.
+func ask(q string) bool {
+	fmt.Print(q + " [Y/n] ")
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil && err.Error() != "unexpected newline" {
+		fmt.Fprintf(os.Stderr, "pipedpeer: no answer read (%v); taking yes\n", err)
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "" || answer == "y" || answer == "yes"
+}
+
+// installService asks whether the daemon starts at boot and installs the user
+// unit either way (enabled or not), so start/stop always go through systemd.
+// It reports whether the unit is new.
+func installService(autoYes, noInstall bool) bool {
+	if noInstall {
+		return false
+	}
+	if !serviceSupported() {
+		term.Warn(os.Stdout, "no systemd user manager here; the daemon will not start at boot")
+		return false
+	}
+	isNew := !serviceInstalled()
+	boot := autoYes || ask("  Start pipedpeer at boot?")
+	if err := serviceInstall(boot); err != nil {
+		term.Fail(os.Stdout, "could not install the pipedpeer service: %v", err)
+		term.Action(os.Stdout, "start the daemon by hand after a reboot: pipedpeer start")
+		return false
+	}
+	if boot {
+		term.OK(os.Stdout, "starts at boot (turn off: pipedpeer stop --boot)")
+	} else {
+		term.OK(os.Stdout, "installed as a service, not started at boot (turn on: pipedpeer start --boot)")
+	}
+	return isNew
+}
+
+// startDaemon brings the daemon up exactly once, and never without a cluster
+// secret (Q7): a daemon started token-less served an open API and had to be
+// restarted as soon as the secret arrived. created reports a new cluster.
+func startDaemon(nodeID string, port int, mustRestart bool) (created bool, err error) {
+	created, err = EnsureToken()
+	if err != nil {
+		return false, err
+	}
+	switch st := daemonStatus(); {
+	case !st.Running:
+		if err := daemonStart(nodeID, port, 0); err != nil {
+			return created, fmt.Errorf("daemon start: %w", err)
+		}
+		term.OK(os.Stdout, "daemon running on :%d", port)
+	case created || mustRestart:
+		if err := daemonRestart(nodeID, port, 0); err != nil {
+			return created, fmt.Errorf("daemon restart: %w", err)
+		}
+		term.OK(os.Stdout, "daemon restarted on :%d", port)
+	default:
+		term.OK(os.Stdout, "daemon already running on :%d", port)
+	}
+	return created, nil
+}
+
 // Run executes the setup flow. Returns the daemon port if started.
 func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	fmt.Println()
-	fmt.Println("  Pipedpeer Setup")
-	fmt.Println("  ===============")
+	fmt.Println("  Pipedpeer setup")
 	fmt.Println()
 
-	fmt.Println("  Checking prerequisites...")
-
 	results := checkAll()
-	for _, r := range results {
-		icon := "✓"
-		if r.status != "ok" {
-			icon = "✗"
-		}
-		fmt.Printf("    %-12s %s  %s\n", r.name, icon, r.status)
-	}
-
 	allOK := true
 	for _, r := range results {
-		if r.status != "ok" {
+		if r.status == "ok" {
+			term.OK(os.Stdout, "%s", r.name)
+		} else {
 			allOK = false
-			break
+			term.Fail(os.Stdout, "%s %s", r.name, r.status)
 		}
 	}
 
-	if allOK {
-		fmt.Println()
-		fmt.Println("  All prerequisites satisfied.")
-	} else if noInstall {
-		fmt.Println()
-		fmt.Println("  Run without --no-install to install missing prerequisites.")
-	} else {
+	if !allOK && noInstall {
+		term.Action(os.Stdout, "run `pipedpeer setup` without --no-install to install what is missing")
+	} else if !allOK {
 		toInstall := missingWithInstaller(results)
 		if len(toInstall) == 0 {
-			fmt.Println()
-			fmt.Println("  Some prerequisites are missing but cannot be auto-installed.")
+			term.Action(os.Stdout, "install the missing tools above with your package manager, then run `pipedpeer setup` again")
 		} else {
-			fmt.Println()
-
-			if !autoYes {
-				fmt.Print("  Install missing prerequisites? [Y/n] ")
-				var answer string
-				fmt.Scanln(&answer)
-				answer = strings.ToLower(strings.TrimSpace(answer))
-				if answer != "" && answer != "y" && answer != "yes" {
-					fmt.Println("  Skipping install.")
-					fmt.Println("  Run again with -y to auto-confirm.")
-					return 0, nil
-				}
+			if !autoYes && !ask("  Install missing prerequisites?") {
+				term.Action(os.Stdout, "run `pipedpeer setup -y` to install what is missing")
+				return 0, nil
 			}
-
 			for _, p := range toInstall {
 				if err := p.install(); err != nil {
 					return 0, fmt.Errorf("install %s failed: %w", p.name, err)
 				}
-				fmt.Printf("    %-12s ✓  installed\n", p.name)
+				term.OK(os.Stdout, "%s installed", p.name)
 			}
-
 			for _, p := range toInstall {
 				// Only bail out when nix is still unusable from this process,
 				// which means a fresh install landed a binary that is not yet
 				// on our PATH. Creating a missing store needs no such dance.
 				if p.name == "nix" && !nixUsable() {
-					fmt.Println()
-					fmt.Println("  Nix installed. Restart your shell or run:")
-					fmt.Println("    . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh")
-					fmt.Println("  Then run 'pipedpeer setup' again to finalize.")
+					term.Action(os.Stdout, "open a new terminal (or run `. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh`), then run `pipedpeer setup` again")
 					return 0, nil
 				}
 			}
@@ -660,38 +706,36 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	// to a process exec'd after it is loaded.
 	profileLoaded := allowUserns(noInstall)
 
-	fmt.Println()
-	fmt.Println("  Post Install Setup")
-	fmt.Println("  ------------------")
-	fmt.Println()
-
 	nodeID, err := identity.GetOrCreate()
 	if err != nil {
 		return 0, fmt.Errorf("identity: %w", err)
 	}
-	fmt.Printf("  Node identity: %s\n", nodeID.ShortID())
-	fmt.Println()
+	term.OK(os.Stdout, "this machine is %s", nodeID.ShortID())
 
-	wasStarted, err := daemonctl.EnsureStarted(nodeID.NodeID, daemonPort)
+	// Before the daemon starts, so the service owns its only start.
+	serviceNew := installService(autoYes, noInstall)
+
+	// Ports before the daemon: peers that find it should be able to reach it.
+	networkReport(autoYes)
+
+	created, err := startDaemon(nodeID.NodeID, daemonPort, profileLoaded || serviceNew)
 	if err != nil {
-		return 0, fmt.Errorf("daemon start: %w", err)
+		return 0, err
 	}
-	if wasStarted {
-		fmt.Printf("  Daemon starting on :%d...  ✓\n", daemonPort)
-	} else {
-		fmt.Printf("  Daemon already running on :%d\n", daemonPort)
-		if profileLoaded {
-			fmt.Println("  It started before the AppArmor profile, so its jobs still run unisolated.\n" +
-				"  Restart it: pipedpeer stop && pipedpeer setup")
-		}
-	}
-
-	// After the daemon is up, because the report asks the router for the
-	// port the daemon will use and it should be told the truth about a
-	// machine in its finished state.
-	networkReport(DirectPort(), autoYes)
 
 	fmt.Println()
-	fmt.Println("  Setup complete.")
+	if created {
+		code, err := InviteCode()
+		if err != nil {
+			return daemonPort, err
+		}
+		term.OK(os.Stdout, "cluster created. On each other machine, run:")
+		fmt.Println()
+		fmt.Println("    pipedpeer connect " + code)
+		fmt.Println()
+		fmt.Println("  (pipedpeer invite prints this line again)")
+		return daemonPort, nil
+	}
+	term.OK(os.Stdout, "setup complete")
 	return daemonPort, nil
 }

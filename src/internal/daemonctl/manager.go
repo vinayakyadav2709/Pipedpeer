@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/service"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"net/http"
@@ -47,6 +48,10 @@ func DefaultPaths() Paths {
 	}
 }
 
+// serviceInstalled is service.Installed; a variable so tests keep off the
+// developer's real unit.
+var serviceInstalled = service.Installed
+
 func Status() State {
 	paths := DefaultPaths()
 	pid, _ := readInt(paths.PIDFile)
@@ -55,6 +60,12 @@ func Status() State {
 	running := processRunning(pid)
 	if !running {
 		pid = 0
+	}
+	if !running && serviceInstalled() {
+		running, pid = service.Active()
+		if port == 0 {
+			port = DefaultPort
+		}
 	}
 	return State{Running: running, PID: pid, NodeID: strings.TrimSpace(nodeID), Port: port}
 }
@@ -71,6 +82,29 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	paths := DefaultPaths()
 	if err := os.MkdirAll(filepath.Dir(paths.PIDFile), 0755); err != nil {
 		return fmt.Errorf("failed to create daemon state dir: %w", err)
+	}
+
+	// Installed as a user service (C13): systemd owns the process, so it
+	// survives a reboot; the unit runs on the default port.
+	if serviceInstalled() {
+		if maxConcurrent > 0 || port != DefaultPort {
+			fmt.Fprintf(os.Stderr, "pipedpeer: the daemon runs as a service on port %d; "+
+				"ignoring port %d / max-concurrent %d (set PIPEDPEER_MAX_CONCURRENT in the unit instead)\n",
+				DefaultPort, port, maxConcurrent)
+		}
+		if err := service.Start(); err != nil {
+			return err
+		}
+		if err := os.WriteFile(paths.NodeFile, []byte(nodeID+"\n"), 0644); err != nil {
+			return err
+		}
+		if err := writeInt(paths.PortFile, DefaultPort); err != nil {
+			return err
+		}
+		if err := waitForHealthy(DefaultPort, 10*time.Second); err != nil {
+			return fmt.Errorf("daemon service did not become healthy (journalctl --user -u %s): %w", service.Name, err)
+		}
+		return nil
 	}
 
 	exe, err := os.Executable()
@@ -123,8 +157,15 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 
 func Stop() error {
 	paths := DefaultPaths()
+	if serviceInstalled() {
+		if err := service.Stop(); err != nil {
+			return err
+		}
+	}
 	pid, err := readInt(paths.PIDFile)
 	if err != nil || pid <= 0 {
+		_ = os.Remove(paths.NodeFile)
+		_ = os.Remove(paths.PortFile)
 		return nil
 	}
 
@@ -149,6 +190,15 @@ func Stop() error {
 	_ = os.Remove(paths.NodeFile)
 	_ = os.Remove(paths.PortFile)
 	return nil
+}
+
+// Restart stops and starts the daemon once (through the service when
+// installed), so a changed cluster.json takes effect.
+func Restart(nodeID string, port int, maxConcurrent int) error {
+	if err := Stop(); err != nil {
+		return err
+	}
+	return Start(nodeID, port, maxConcurrent)
 }
 
 func EnsureStarted(nodeID string, port int) (bool, error) {
@@ -319,14 +369,12 @@ func CommitLease(host string, port int, leaseID string) error {
 	return nil
 }
 
-// CompleteLease completes a lease after job execution.
+// CompleteLease completes a lease after job execution. It is ReleaseLease
+// (3 s timeout, status checked): an unreachable node used to hang the end of
+// a run on the default client's unlimited timeout.
 func CompleteLease(host string, port int, leaseID, status string) error {
-	url := fmt.Sprintf("http://%s:%d/v1/complete", host, port)
-	payload := fmt.Sprintf(`{"lease_id":%q,"status":%q}`, leaseID, status)
-	resp, err := http.Post(url, "application/json", strings.NewReader(payload))
-	if err != nil {
+	if err := ReleaseLease(host, port, leaseID, status); err != nil {
 		return fmt.Errorf("failed to complete lease: %w", err)
 	}
-	defer resp.Body.Close()
 	return nil
 }
