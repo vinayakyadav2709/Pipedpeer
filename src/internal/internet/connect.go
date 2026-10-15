@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/direct"
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 	"github.com/quic-go/quic-go"
 )
@@ -64,7 +65,7 @@ func orNone(s string) string {
 
 // interfaceAddrs is this machine's non-loopback addresses, sorted.
 func interfaceAddrs() (string, error) {
-	addrs, err := net.InterfaceAddrs()
+	addrs, err := netaddr.InterfaceAddrs()
 	if err != nil {
 		return "", err
 	}

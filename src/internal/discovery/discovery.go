@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"golang.org/x/sys/unix"
 )
 
@@ -231,7 +232,7 @@ func Discover(timeout time.Duration) []DiscoveredNode {
 // localBroadcasts returns broadcast addresses for all local interfaces.
 func localBroadcasts() []net.IP {
 	var addrs []net.IP
-	ifaces, err := net.Interfaces()
+	ifaces, err := netaddr.Interfaces()
 	if err != nil {
 		return addrs
 	}
@@ -239,7 +240,7 @@ func localBroadcasts() []net.IP {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagBroadcast == 0 {
 			continue
 		}
-		ifAddrs, err := iface.Addrs()
+		ifAddrs, err := netaddr.Addrs(iface)
 		if err != nil {
 			continue
 		}

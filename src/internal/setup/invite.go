@@ -11,6 +11,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/authtoken"
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/invite"
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 )
 
 // maxInviteAddrs keeps the code short enough to paste in one line.
@@ -107,7 +108,7 @@ var virtualPrefixes = []string{"docker", "br-", "veth", "virbr", "podman", "cni"
 // lanIPs is this machine's IPv4 addresses on up, non-loopback, non-container
 // interfaces (IPv6 is parked).
 func lanIPs() []string {
-	ifs, err := net.Interfaces()
+	ifs, err := netaddr.Interfaces()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pipedpeer: could not list network interfaces: %v\n", err)
 		return nil
@@ -117,7 +118,7 @@ func lanIPs() []string {
 		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || isVirtual(ifc.Name) {
 			continue
 		}
-		addrs, err := ifc.Addrs()
+		addrs, err := netaddr.Addrs(ifc)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "pipedpeer: could not read addresses of %s: %v\n", ifc.Name, err)
 			continue

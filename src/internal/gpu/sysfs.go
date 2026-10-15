@@ -74,6 +74,8 @@ func exists(path string) bool {
 	return err == nil
 }
 
+var pciListWarn sync.Once
+
 // enumeratePCI lists display devices from sysfs in PCI address order. Reading
 // class, vendor, driver, boot_vga and runtime_status never wakes a device.
 func enumeratePCI() []Device {
@@ -81,7 +83,8 @@ func enumeratePCI() []Device {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			logf("cannot list %s, falling back to vendor tools: %v", dir, err)
+			// Android refuses it on every 10 s poll; it will not change.
+			pciListWarn.Do(func() { logf("cannot list %s, falling back to vendor tools: %v", dir, err) })
 		}
 		return nil
 	}

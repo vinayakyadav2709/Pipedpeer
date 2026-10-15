@@ -24,6 +24,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/internet"
 	"github.com/pipedpeer/pipedpeer/internal/logging"
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
@@ -418,7 +419,7 @@ func routeSourceIP(host string) (net.IP, bool) {
 }
 
 func detectLocalIP() string {
-	ifaces, err := net.Interfaces()
+	ifaces, err := netaddr.Interfaces()
 	if err != nil {
 		return "127.0.0.1"
 	}
@@ -428,7 +429,7 @@ func detectLocalIP() string {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue
 		}
-		addrs, err := iface.Addrs()
+		addrs, err := netaddr.Addrs(iface)
 		if err != nil {
 			continue
 		}
