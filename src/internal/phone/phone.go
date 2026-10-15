@@ -272,6 +272,7 @@ var (
 // installs Termux python with numpy, torch and scipy, and says what is still
 // missing.
 func Setup(w io.Writer) error {
+	recordDirs("")
 	c, err := clustercfg.Load()
 	if err != nil {
 		return err
@@ -286,7 +287,7 @@ func Setup(w io.Writer) error {
 	install := func(what string, pkgs ...string) bool {
 		fmt.Fprintf(w, "installing %s (pkg install %s), this can take a few minutes...\n", what, strings.Join(pkgs, " "))
 		var out []byte
-		err := tracked(func() (err error) {
+		err := tracked(pkgs, func() (err error) {
 			out, err = runCmd("pkg", append([]string{"install", "-y"}, pkgs...)...)
 			return err
 		})
@@ -309,12 +310,12 @@ func Setup(w io.Writer) error {
 		term.Fail(w, "%v", err)
 		return nil
 	}
-	hadPickle := len(missingModules(py, []string{"cloudpickle"})) == 0
+	if len(missingModules(py, []string{"cloudpickle"})) > 0 {
+		record(installed{Pip: []string{"cloudpickle"}})
+	}
 	if out, err := runCmd(py, "-m", "pip", "install", "-q", "cloudpickle"); err != nil {
 		log.Warn().Err(err).Str("output", tail(out)).Msg("phone: pip install cloudpickle failed")
 		term.Action(w, "for by-value functions: %s -m pip install cloudpickle", py)
-	} else if !hadPickle {
-		record(nil, []string{"cloudpickle"})
 	}
 	have := []string{}
 	for _, m := range []string{"numpy", "torch", "scipy", "cloudpickle"} {

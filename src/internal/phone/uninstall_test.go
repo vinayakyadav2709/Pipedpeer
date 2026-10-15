@@ -3,6 +3,7 @@ package phone
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -32,18 +33,120 @@ func fakeDpkg(have *[]string, ran *[]string, sim string) {
 	}
 }
 
-func TestTrackedRecordsOnlyWhatSetupAdded(t *testing.T) {
+func TestTrackedRecordsOnlyWhatSetupAddedAcrossReruns(t *testing.T) {
 	fakePhone(t)
-	have := []string{"bash", "python"} // the user's python stays theirs
+	have := []string{"bash", "python", "curl"} // the user's: python stays theirs
 	var ran []string
-	fakeDpkg(&have, &ran, "")
-	if err := tracked(func() error { have = append(have, "python-numpy", "libopenblas"); return nil }); err != nil {
+	fakeDpkg(&have, &ran, "Inst python-numpy (2.4 Termux)\nInst curl [8.20] (8.21 Termux)\n")
+	pkgs := []string{"python", "python-numpy", "curl"}
+	if err := tracked(pkgs, func() error { have = append(have, "python-numpy", "libopenblas"); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	record(nil, []string{"cloudpickle"})
-	got := loadRecord()
-	if !slices.Equal(got.Pkgs, []string{"libopenblas", "python-numpy"}) || !slices.Equal(got.Pip, []string{"cloudpickle"}) {
-		t.Errorf("record = %+v, want only the new packages and cloudpickle", got)
+	record(installed{Pip: []string{"cloudpickle"}})
+	want := []string{"libopenblas", "python-numpy"}
+	check := func(when string) {
+		got, found := loadRecord()
+		slices.Sort(got.Pkgs)
+		if !found || !slices.Equal(got.Pkgs, want) || !slices.Equal(got.Pip, []string{"cloudpickle"}) {
+			t.Errorf("%s: record = %+v, want packages %q (no upgrade, nothing of the user's) and cloudpickle", when, got, want)
+		}
+	}
+	check("first setup")
+
+	// Setup again (or after an update): everything is present now, apt has
+	// nothing to do, and the record must still say these are ours.
+	fakeDpkg(&have, &ran, "")
+	if err := tracked(pkgs, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	check("second setup")
+}
+
+func TestInterruptedSetupRecordsFirst(t *testing.T) {
+	fakePhone(t)
+	have := []string{"bash"}
+	var ran []string
+	fakeDpkg(&have, &ran, "Inst proot-distro (5.3)\nInst proot (5.1)\n")
+	runStep = func(w io.Writer, name string, args ...string) error {
+		if len(args) > 0 && args[0] == "install" {
+			return errors.New("killed") // pkg install or proot-distro install, half done
+		}
+		if name == "proot-distro" {
+			return errors.New("not installed")
+		}
+		return nil
+	}
+	if err := SetupProot(io.Discard); err == nil {
+		t.Fatal("want the failed install reported")
+	}
+	got, _ := loadRecord()
+	slices.Sort(got.Pkgs)
+	if !slices.Equal(got.Pkgs, []string{"proot", "proot-distro"}) {
+		t.Errorf("record = %+v, want what apt was about to install", got)
+	}
+
+	// The package step passes, the container step is killed: the container
+	// is recorded before it is created.
+	runStep = func(w io.Writer, name string, args ...string) error {
+		if name == "proot-distro" && args[0] != "list" {
+			return errors.New("killed")
+		}
+		return nil
+	}
+	if err := SetupProot(io.Discard); err == nil {
+		t.Fatal("want the failed install reported")
+	}
+	if got, _ := loadRecord(); !slices.Contains(got.Containers, Distro) || !slices.Contains(got.Paths, filepath.Dir(Rootfs())) {
+		t.Errorf("record = %+v, want container %s and its dir", got, Distro)
+	}
+}
+
+func TestUninstallAfterUpdateRemovesOldNames(t *testing.T) {
+	fakePhone(t)
+	pre := os.Getenv("PREFIX")
+	oldRoot := filepath.Join(pre, "var", "lib", "proot-distro", "containers", "pp-old", "rootfs")
+	oldData := filepath.Join(t.TempDir(), "old-data")
+	for _, d := range []string{oldRoot, oldData} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(installed{Containers: []string{"pp-old"}, Paths: []string{oldData, filepath.Join(t.TempDir(), "never-made")}})
+	var have, ran []string
+	fakeDpkg(&have, &ran, "")
+	var whats []string
+	for _, s := range UninstallSteps() {
+		whats = append(whats, s.What)
+		if err := s.Do(); err != nil {
+			t.Errorf("%s: %v", s.What, err)
+		}
+	}
+	if !slices.Equal(ran, []string{"proot-distro remove pp-old"}) || exists(oldData) {
+		t.Errorf("ran %q, old dir left %v; want the old container and dir removed", ran, exists(oldData))
+	}
+	if exists(filepath.Dir(recordPath())) {
+		t.Errorf("steps %q: want the record deleted last", whats)
+	}
+}
+
+func TestUninstallWithoutRecordSaysSo(t *testing.T) {
+	fakePhone(t)
+	have := []string{"proot-distro", "python", "bash"}
+	var ran []string
+	fakeDpkg(&have, &ran, "")
+	var whats []string
+	for _, s := range UninstallSteps() {
+		whats = append(whats, s.What)
+		if err := s.Do(); err != nil {
+			t.Errorf("%s: %v", s.What, err)
+		}
+	}
+	all := strings.Join(whats, "\n")
+	if !strings.Contains(all, "no install record at "+recordPath()) || !strings.Contains(all, "present: proot-distro python ") || strings.Contains(all, "bash") {
+		t.Errorf("steps:\n%s\nwant the missing record named with setup's packages that are present", all)
+	}
+	if len(ran) != 0 {
+		t.Errorf("ran %q, want nothing removed without a record", ran)
 	}
 }
 
@@ -61,7 +164,7 @@ func TestUninstallStepsRemoveOnlyOurs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	record([]string{"proot-distro", "proot", "gone"}, nil)
+	record(installed{Pkgs: []string{"proot-distro", "proot", "gone"}})
 	have := []string{"proot-distro", "python"}
 	var ran []string
 	fakeDpkg(&have, &ran, "Purg proot-distro [5.3.0]\n")
