@@ -61,13 +61,15 @@ func prefix() string {
 
 // Rootfs is the Debian's root directory as Termux sees it: proot-distro 5
 // keeps it under containers/, 4 under installed-rootfs/.
-func Rootfs() string {
+func Rootfs() string { return rootfsOf(Distro) }
+
+func rootfsOf(name string) string {
 	base := filepath.Join(prefix(), "var", "lib", "proot-distro")
-	v4 := filepath.Join(base, "installed-rootfs", Distro)
+	v4 := filepath.Join(base, "installed-rootfs", name)
 	if exists(v4) {
 		return v4
 	}
-	return filepath.Join(base, "containers", Distro, "rootfs")
+	return filepath.Join(base, "containers", name, "rootfs")
 }
 
 // ProotReady reports whether this Termux has the full-node route set up.
@@ -359,12 +361,14 @@ func SetupProot(w io.Writer) error {
 		}
 		return nil
 	}
+	recordDirs("")
 	if runStep(io.Discard, "proot-distro", "list") != nil {
-		if err := tracked(func() error { return step("installing proot-distro", "pkg", "install", "-y", "proot-distro") }); err != nil {
+		if err := tracked([]string{"proot-distro"}, func() error { return step("installing proot-distro", "pkg", "install", "-y", "proot-distro") }); err != nil {
 			return err
 		}
 	}
 	if runStep(io.Discard, "proot-distro", "login", Distro, "--", "true") != nil {
+		recordDirs(Distro)
 		if err := step("installing Debian for the full node (~100 MB)", "proot-distro", "install", "--name", Distro, "debian"); err != nil {
 			return err
 		}

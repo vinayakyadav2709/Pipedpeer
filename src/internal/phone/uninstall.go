@@ -27,54 +27,74 @@ import (
 // may be the user's, so uninstall only names it.
 const legacyDistro = "debian"
 
-// installed is the record: Termux packages (with the dependencies they
-// pulled in) and pip packages that were not there before setup.
+// installed is the record of what setup created, kept across setup reruns
+// and updates: it only grows, so a package setup installed in any run stays
+// ours even when a later run finds it present. Termux packages include the
+// dependencies they pulled in; Containers are proot-distro names, Paths the
+// directories setup made (an update may move them, the record keeps the old).
 type installed struct {
-	Pkgs []string `json:"pkgs,omitempty"`
-	Pip  []string `json:"pip,omitempty"`
+	Pkgs       []string `json:"pkgs,omitempty"`
+	Pip        []string `json:"pip,omitempty"`
+	Containers []string `json:"containers,omitempty"`
+	Paths      []string `json:"paths,omitempty"`
 }
 
-func recordPath() string { return filepath.Join(userdir.State(), "phone-installed.json") }
+// recordPath never moves, so any later build finds it: under Termux's
+// prefix, not userdir (whose paths an update may change).
+func recordPath() string {
+	return filepath.Join(prefix(), "var", "lib", "pipedpeer", "phone-installed.json")
+}
 
-func loadRecord() installed {
-	var r installed
+// loadRecord reads the record; found is false when there is no file.
+func loadRecord() (r installed, found bool) {
 	b, err := os.ReadFile(recordPath())
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Warn().Err(err).Str("path", recordPath()).Msg("phone: cannot read what setup installed; uninstall keeps every Termux package")
 		}
-		return r
+		return r, false
 	}
 	if err := json.Unmarshal(b, &r); err != nil {
 		log.Warn().Err(err).Str("path", recordPath()).Msg("phone: bad install record; uninstall keeps every Termux package")
 	}
-	return r
+	return r, true
 }
 
-// record adds pkgs and pip names to the record.
-func record(pkgs, pip []string) {
-	if len(pkgs) == 0 && len(pip) == 0 {
-		return
-	}
-	r := loadRecord()
-	for _, p := range pkgs {
-		if !slices.Contains(r.Pkgs, p) {
-			r.Pkgs = append(r.Pkgs, p)
+// record adds to the record (a union; nothing is ever dropped). Setup calls
+// it before each install step, so an interrupted setup leaves a record of
+// what it was installing.
+func record(add installed) {
+	r, _ := loadRecord()
+	union := func(have *[]string, more []string) {
+		for _, p := range more {
+			if p != "" && !slices.Contains(*have, p) {
+				*have = append(*have, p)
+			}
 		}
 	}
-	for _, p := range pip {
-		if !slices.Contains(r.Pip, p) {
-			r.Pip = append(r.Pip, p)
-		}
-	}
-	b, _ := json.MarshalIndent(r, "", "  ") // two string slices always marshal
+	union(&r.Pkgs, add.Pkgs)
+	union(&r.Pip, add.Pip)
+	union(&r.Containers, add.Containers)
+	union(&r.Paths, add.Paths)
+	b, _ := json.MarshalIndent(r, "", "  ") // string slices always marshal
 	err := os.MkdirAll(filepath.Dir(recordPath()), 0o700)
 	if err == nil {
 		err = os.WriteFile(recordPath(), b, 0o600)
 	}
 	if err != nil {
-		log.Warn().Err(err).Strs("packages", pkgs).Msg("phone: cannot record what setup installed; uninstall will keep these")
+		log.Warn().Err(err).Interface("adding", add).Msg("phone: cannot record what setup installs; uninstall will keep these")
 	}
+}
+
+// recordDirs records the Termux-side pipedpeer dirs and, when given, a
+// container about to be created.
+func recordDirs(container string) {
+	add := installed{Paths: []string{userdir.Data(), userdir.State(), userdir.Cache()}}
+	if container != "" {
+		add.Containers = []string{container}
+		add.Paths = append(add.Paths, filepath.Dir(rootfsOf(container)))
+	}
+	record(add)
 }
 
 // installedPkgs is every Termux package installed now; nil when dpkg cannot
@@ -94,14 +114,35 @@ func installedPkgs() map[string]bool {
 	return have
 }
 
-// tracked runs a package install and records the packages it added.
-func tracked(install func() error) error {
+// tracked runs install (a pkg install of pkgs) and records what it adds:
+// before it runs, what apt says it will install (new packages only, not
+// upgrades) plus the requested ones missing now; after, what actually
+// appeared.
+func tracked(pkgs []string, install func() error) error {
 	before := installedPkgs()
-	err := install()
-	if before == nil {
-		return err
+	var plan []string
+	if out, err := runCmd("apt-get", append([]string{"-s", "install"}, pkgs...)...); err != nil {
+		log.Warn().Err(err).Str("output", tail(out)).Strs("packages", pkgs).Msg("phone: apt cannot say what it will install; recording the requested packages only")
+	} else {
+		for _, l := range strings.Split(string(out), "\n") {
+			// "Inst name (ver ...)" is new; "Inst name [old] (ver ...)" an upgrade.
+			if f := strings.Fields(l); len(f) > 2 && f[0] == "Inst" && !strings.HasPrefix(f[2], "[") {
+				plan = append(plan, f[1])
+			}
+		}
 	}
-	record(newSince(before), nil)
+	if before != nil {
+		for _, p := range pkgs {
+			if !before[p] {
+				plan = append(plan, p)
+			}
+		}
+	}
+	record(installed{Pkgs: plan})
+	err := install()
+	if before != nil {
+		record(installed{Pkgs: newSince(before)})
+	}
 	return err
 }
 
@@ -129,9 +170,17 @@ func UninstallSteps() []doctor.Step {
 			return nil
 		}})
 	}
-	rec := loadRecord()
+	rec, found := loadRecord()
+	failed := false
+	add := func(what string, do func() error) {
+		steps = append(steps, doctor.Step{What: what, Do: func() error {
+			err := do()
+			failed = failed || err != nil
+			return err
+		}})
+	}
 	if len(rec.Pip) > 0 {
-		steps = append(steps, doctor.Step{What: "pip uninstall " + strings.Join(rec.Pip, " ") + " (installed by setup)", Do: func() error {
+		add("pip uninstall "+strings.Join(rec.Pip, " ")+" (installed by setup)", func() error {
 			py, _, err := hostPython()
 			if err != nil {
 				log.Warn().Err(err).Strs("pip", rec.Pip).Msg("phone: no python to pip uninstall with; nothing of pip's is left either")
@@ -141,49 +190,90 @@ func UninstallSteps() []doctor.Step {
 				return fmt.Errorf("%w: %s", err, tail(out))
 			}
 			return nil
-		}})
+		})
 	}
-	if exists(Rootfs()) {
-		steps = append(steps, doctor.Step{What: "delete the proot-distro container " + Distro + " (Debian, Nix and the daemon's state inside)", Do: func() error {
-			if out, err := runCmd("proot-distro", "remove", Distro); err != nil {
-				return fmt.Errorf("proot-distro remove %s: %w: %s", Distro, err, tail(out))
+	// Every container setup created, under any name it ever had, and ours
+	// by name even without a record.
+	names := append(slices.Clone(rec.Containers), Distro)
+	slices.Sort(names)
+	for _, name := range slices.Compact(names) {
+		if !exists(rootfsOf(name)) {
+			continue
+		}
+		add("delete the proot-distro container "+name+" (Debian, Nix and the daemon's state inside)", func() error {
+			if out, err := runCmd("proot-distro", "remove", name); err != nil {
+				return fmt.Errorf("proot-distro remove %s: %w: %s", name, err, tail(out))
 			}
 			return nil
-		}})
+		})
 	}
-	legacy := filepath.Join(filepath.Dir(filepath.Dir(Rootfs())), legacyDistro, "rootfs")
-	if exists(filepath.Join(legacy, marker)) {
-		steps = append(steps, doctor.Step{What: "keep the proot-distro container " + legacyDistro + ": an older setup put Nix in it and it may be yours (remove it with: proot-distro remove " + legacyDistro + ")", Do: func() error { return nil }})
+	if !slices.Contains(rec.Containers, legacyDistro) && exists(filepath.Join(rootfsOf(legacyDistro), marker)) {
+		add("keep the proot-distro container "+legacyDistro+": an older setup put Nix in it and it may be yours (remove it with: proot-distro remove "+legacyDistro+")", func() error { return nil })
+	}
+	// Dirs setup made at paths this build no longer uses (the current
+	// userdir ones are the caller's).
+	current := []string{userdir.Data(), userdir.State(), userdir.Cache()}
+	for _, p := range rec.Paths {
+		if exists(p) && !slices.Contains(current, p) {
+			add("delete "+p+" (made by an earlier setup)", func() error { return os.RemoveAll(p) })
+		}
 	}
 	if own := filepath.Dir(filepath.Dir(ownProot())); exists(own) {
-		steps = append(steps, doctor.Step{What: "delete " + own + " (the proot built for proot-distro)", Do: func() error { return os.RemoveAll(own) }})
+		add("delete "+own+" (the proot built for proot-distro)", func() error { return os.RemoveAll(own) })
 	}
 	if len(rec.Pkgs) > 0 {
-		steps = append(steps, doctor.Step{What: "remove the Termux packages setup installed: " + strings.Join(rec.Pkgs, " "), Do: func() error { return removePkgs(rec.Pkgs) }})
+		add("remove the Termux packages setup installed: "+strings.Join(rec.Pkgs, " "), func() error { return removePkgs(rec.Pkgs) })
+	}
+	if !found {
+		log.Warn().Str("path", recordPath()).Msg("phone: no install record; uninstall keeps every Termux package")
+		var cands []string
+		have := installedPkgs()
+		for _, p := range append(append([]string{"proot-distro", "proot"}, requiredPkgs...), mlPkgs...) {
+			if have[p] {
+				cands = append(cands, p)
+			}
+		}
+		what := "keep Termux packages: no install record at " + recordPath() + " (an older setup kept none), so setup's packages cannot be told from yours"
+		if len(cands) > 0 {
+			what += "; present: " + strings.Join(cands, " ") + " (to remove those you do not use: pkg uninstall <name>)"
+		} else {
+			what += "; none of them is present"
+		}
+		add(what, func() error { return nil })
 	}
 	// Package removal leaves the programs' own data: proot-distro's image
 	// cache and locks, proot's temp dirs. Ours when setup installed them.
 	pdData := filepath.Join(prefix(), "var", "lib", "proot-distro")
 	if slices.Contains(rec.Pkgs, "proot-distro") && exists(pdData) {
-		steps = append(steps, doctor.Step{What: "delete " + pdData + " (proot-distro's image cache)", Do: func() error {
+		add("delete "+pdData+" (proot-distro's image cache)", func() error {
 			if left, _ := os.ReadDir(filepath.Join(pdData, "containers")); len(left) > 0 {
 				log.Warn().Int("containers", len(left)).Msg("phone: other proot-distro containers exist; keeping proot-distro's data")
 				return nil
 			}
 			return os.RemoveAll(pdData)
-		}})
+		})
 	}
 	if slices.Contains(rec.Pkgs, "proot") {
 		tmp, _ := filepath.Glob(filepath.Join(prefix(), "tmp", "proot-*")) // the pattern is valid
 		if len(tmp) > 0 {
-			steps = append(steps, doctor.Step{What: fmt.Sprintf("delete proot's %d temp dirs in %s", len(tmp), filepath.Join(prefix(), "tmp")), Do: func() error {
+			add(fmt.Sprintf("delete proot's %d temp dirs in %s", len(tmp), filepath.Join(prefix(), "tmp")), func() error {
 				var errs []error
 				for _, d := range tmp {
 					errs = append(errs, os.RemoveAll(d))
 				}
 				return errors.Join(errs...)
-			}})
+			})
 		}
+	}
+	if found {
+		// Last, and only after every step above worked: a rerun needs it.
+		dir := filepath.Dir(recordPath())
+		steps = append(steps, doctor.Step{What: "delete " + dir + " (the install record)", Do: func() error {
+			if failed {
+				return fmt.Errorf("kept, so a rerun of uninstall still knows what setup installed")
+			}
+			return os.RemoveAll(dir)
+		}})
 	}
 	return steps
 }

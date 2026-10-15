@@ -111,7 +111,7 @@ func TestSetupTermuxFallback(t *testing.T) {
 	launch = func([]string) { t.Error("must not forward when the full node failed") }
 	var pkgs []string
 	runCmd = func(name string, args ...string) ([]byte, error) {
-		if name != "dpkg-query" {
+		if name != "dpkg-query" && name != "apt-get" {
 			pkgs = append(pkgs, name+" "+strings.Join(args, " "))
 		}
 		return nil, nil
