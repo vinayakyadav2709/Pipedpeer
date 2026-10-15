@@ -1,5 +1,10 @@
-"""Spill cost model, bandwidth probe, compression and _pool_send."""
+"""Spill cost model, link speed, pickling helpers and _pool_send.
+
+Compression, send-once-by-hash and link measurement live in the daemon's peer
+link (poolwire.go): the loopback hop to the local daemon is never worth
+compressing, and the daemon sees every real transfer."""
 import os
+import struct
 import threading
 import time
 
@@ -10,6 +15,11 @@ from pipedpeer_shim.core import (
 from pipedpeer_shim.stats import (
     _WHY, _decide,
 )
+
+try:
+    from pipedpeer_shim import record as _rec
+except ImportError:  # record.py sits beside sitecustomize.py until U03 moves it
+    import record as _rec
 
 
 # ---- distributed pandas: cost model, hash-shuffle groupby/merge, OOC ----
@@ -25,6 +35,11 @@ _BW_CACHE = {"t": 0.0, "bw": None}
 # Floor of an svd/eig offload's wall-clock limit (tests lower it).
 _LINALG_MIN_DEADLINE = 30.0
 _BW_TTL = 300.0
+# How long the daemon's measured link speed is trusted before asking again.
+_LINK_TTL = 30.0
+# Fallback probe when the daemon has no transfer samples yet (R9 a4: at most
+# 8 MB; the old 64 MB probe was half a minute of a 2 MB/s link).
+_PROBE_BYTES = 8 * 1024 * 1024
 
 # The daemon always listens on loopback (http://127.0.0.1:<selfPort>), so its
 # requests must never be routed through an http(s)_proxy / no_proxy env proxy
@@ -92,18 +107,23 @@ def _should_spill_why(nbytes, flops_per_byte):
 
 
 def _measure_bandwidth():
-    """Effective bytes/sec to the cluster, cached 300s. Probes through the
-    same frames path real work uses (the base64-in-JSON path measured ~30MB/s
-    and the cost model then refused every spill; frames ships raw pickle).
-    64MB of blobs so the measurement is throughput-bound, not latency-bound.
-    None on failure means stay local."""
+    """Effective bytes/sec to the cluster (the aggregate over peers). First
+    the daemon's passive measurement of real transfers, /v1/pool/stats
+    link_bytes_per_sec, trusted for _LINK_TTL; when it has no samples, one
+    8 MB probe through the frames path, cached _BW_TTL. None on failure means
+    stay local."""
     now = time.monotonic()
     if now - _BW_CACHE["t"] < _BW_TTL:
         return _BW_CACHE["bw"]
+    bw = _daemon_link_speed()
+    if bw:
+        _BW_CACHE["t"] = now - (_BW_TTL - _LINK_TTL)
+        _BW_CACHE["bw"] = bw
+        return bw
     import pickle
     try:
-        blobs = [os.urandom(8 * 1024 * 1024) for _ in range(8)]
-        items = [pickle.dumps(b) for b in blobs]
+        blobs = [os.urandom(_PROBE_BYTES // 2) for _ in range(2)]
+        items = [pickle.dumps(b, protocol=5) for b in blobs]
         hdr = {
             "func_src": "def run(x):\n    return len(x)\n",
             "items_frames": len(items),
@@ -111,40 +131,103 @@ def _measure_bandwidth():
         t0 = time.monotonic()
         _pool_send(hdr, None, items, 60)
         bw = sum(len(b) for b in blobs) / max(time.monotonic() - t0, 1e-6)
-    except Exception:
+    except Exception as e:
+        _log("bandwidth probe failed, keeping work here: %s" % str(e)[:200])
         bw = None
     _BW_CACHE["t"] = now
     _BW_CACHE["bw"] = bw
     return bw
 
 
-def _maybe_compress(items, header):
-    """Compress item frames when it pays for itself.
-
-    Whether it does depends entirely on the payload. A pandas frame of
-    strings or categoricals shrinks by most of its size; a dense float array
-    is already incompressible and every byte of CPU spent on it is waste. So
-    try, keep the result only if it is meaningfully smaller, and record the
-    choice in the header rather than guessing again on the other side.
-
-    The daemon relays these bytes without looking inside them, and carries
-    the items_zlib flag across every header it rebuilds when it splits
-    or forwards the work, so the choice reaches whichever worker runs it.
-    """
-    if not items:
-        return items
-    raw_total = sum(len(i) for i in items)
-    if raw_total < 1 << 20:
-        return items                  # too small for the CPU to be worth it
-    import zlib
+def _daemon_link_speed():
+    """link_bytes_per_sec from the local daemon, or None (an older daemon, or
+    no transfer measured yet)."""
+    import json
+    import urllib.request
     try:
-        packed = [zlib.compress(i, 1) for i in items]
-    except Exception:
-        return items
-    if sum(len(p) for p in packed) > raw_total * 0.9:
-        return items                  # not worth the decompression on the far side
-    header["items_zlib"] = True
-    return packed
+        req = urllib.request.Request(core._URL + "/v1/pool/stats")
+        with _daemon_open(req, 5) as resp:
+            v = json.loads(resp.read()).get("link_bytes_per_sec")
+    except Exception as e:
+        _log("no link speed from the daemon (%s); probing" % str(e)[:200])
+        return None
+    return float(v) if v else None
+
+
+# An out-of-band pickle frame (R9 a3), read by the worker scripts in
+# poolwire.go (frameCodec): magic, buffer count, pickle length, each buffer
+# length (all >I), the pickle, then the buffers. Self-describing, so it never
+# depends on a header flag surviving the daemon's header rebuilds.
+_OOB_MAGIC = b"\x00PP5"
+
+
+def _dumps(obj, chunk=-1):
+    """Pickle one item for a frames request: protocol 5, numpy-style buffers
+    out of band (one copy fewer than in-band, R9 a3). Plain protocol-5 bytes
+    when nothing went out of band."""
+    import pickle
+    t0 = time.perf_counter()
+    bufs = []
+    p = pickle.dumps(obj, protocol=5, buffer_callback=bufs.append)
+    if bufs:
+        raws = [b.raw() for b in bufs]
+        p = b"".join([_OOB_MAGIC + struct.pack(">II%dI" % len(raws), len(raws), len(p),
+                                               *[r.nbytes for r in raws]), p] + raws)
+    _rec.step("pickle", time.perf_counter() - t0, len(p), chunk=chunk)
+    return p
+
+
+def _loads(blob, chunk=-1):
+    """Unpickle one result frame, plain or out of band. Buffers stay views
+    over the reply, which _pool_send reads into a bytearray, so arrays come
+    back writable."""
+    import pickle
+    t0 = time.perf_counter()
+    if bytes(blob[:4]) == _OOB_MAGIC:
+        mv = memoryview(blob)
+        nbuf, plen = struct.unpack_from(">II", mv, 4)
+        lens = struct.unpack_from(">%dI" % nbuf, mv, 12)
+        off = 12 + 4 * nbuf
+        p = mv[off:off + plen]
+        off += plen
+        bufs = []
+        for n in lens:
+            bufs.append(mv[off:off + n])
+            off += n
+        v = pickle.loads(p, buffers=bufs)
+    else:
+        v = pickle.loads(blob)
+    _rec.step("unpickle", time.perf_counter() - t0, len(blob), chunk=chunk)
+    return v
+
+
+def _frames_body(header, globals_pickle, items):
+    """The frames request body, built as a list and joined once: the old
+    body += loop copied everything built so far per item (O(n^2) bytes)."""
+    import json
+    parts = [json.dumps(header).encode(), b"\n"]
+    if globals_pickle is not None:
+        parts += [struct.pack(">I", len(globals_pickle)), globals_pickle]
+    for it in items:
+        parts += [struct.pack(">I", len(it)), it]
+    return b"".join(parts)
+
+
+def _read_reply(resp):
+    """The whole reply in a bytearray (writable, for out-of-band results),
+    read straight into place when the length is known."""
+    n = resp.length
+    if n is None:
+        return bytearray(resp.read())
+    buf = bytearray(n)
+    mv = memoryview(buf)
+    got = 0
+    while got < n:
+        k = resp.readinto(mv[got:])
+        if not k:
+            raise RuntimeError("daemon reply cut short: %d of %d bytes" % (got, n))
+        got += k
+    return buf
 
 
 def _pool_send(header, globals_pickle, items, timeout, out_header=None, opener=None):
@@ -153,22 +236,21 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None, opener=N
     pickle blobs of the results (frames response). Bulk data never touches
     base64 or a giant JSON parse, which is what made the old encoding ~30MB/s."""
     import json
-    import struct
     import urllib.request
-    items = _maybe_compress(items, header)
-    body = json.dumps(header).encode() + b"\n"
-    if globals_pickle is not None:
-        body += struct.pack(">I", len(globals_pickle)) + globals_pickle
-    for it in items:
-        body += struct.pack(">I", len(it)) + it
+    body = _frames_body(header, globals_pickle, items)
     req = urllib.request.Request(core._URL + "/v1/pool/map", data=body,
                                  headers={"Content-Type": "application/vnd.pipedpeer.frames",
                                           "X-Pipedpeer-Store": core._STORE,
                                           "X-Pipedpeer-Submitter": _SUBMITTER,
                                           "X-Pipedpeer-Offload": _OFFLOAD})
+    t0 = time.perf_counter()
     try:
         with _daemon_open(req, timeout, opener) as resp:
-            data = resp.read()
+            # send = upload plus the cluster's work, up to the reply headers.
+            _rec.step("send", time.perf_counter() - t0, len(body))
+            t0 = time.perf_counter()
+            data = _read_reply(resp)
+            _rec.step("receive", time.perf_counter() - t0, len(data))
     except Exception as e:
         # Every caller falls back to running the work here.
         _offload_warn("work the cluster refused", "the cluster could not take it (%s)" % str(e)[:200])
@@ -182,12 +264,14 @@ def _pool_send(header, globals_pickle, items, timeout, out_header=None, opener=N
                       "(none healthy with this environment, or each one failed)")
     if out_header is not None:
         out_header.update(hdr)
-    rest = data[nl + 1:]
+    # Views at offsets: slicing off the rest per frame was O(n^2) as well.
+    mv = memoryview(data)
+    off = nl + 1
     out = []
     for _ in range(hdr.get("results_frames", 0)):
-        n = struct.unpack(">I", rest[:4])[0]
-        out.append(rest[4:4 + n])
-        rest = rest[4 + n:]
+        n = struct.unpack_from(">I", mv, off)[0]
+        out.append(mv[off + 4:off + 4 + n])
+        off += 4 + n
     return out
 
 
