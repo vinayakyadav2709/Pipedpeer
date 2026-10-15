@@ -22,6 +22,15 @@
 #   PHONE_GB6 (3000), LAPTOP_GB6 (7600), PHONE_PROFILE (wifi), PHONE_LOSS (0),
 #   PHONE_BIN (binary; default: built from the checkout), plus bench-lib.sh's
 #   BL_REPS, BL_OUT, BL_RUN_TIMEOUT, BL_LAB_WAIT.
+#   PHONE_CASES ("fleet mixed"): fleet = N phones vs one laptop (above);
+#   mixed = one ring of one laptop node + MIXED_PHONES (3) phone nodes, all
+#   MIXED_MEM (1g), training train.py for MIXED_STEPS (400) steps under
+#   --ddp-sync fast twice: "equal" (PIPEDPEER_DILOCO_ROUND_SLACK=0, every
+#   local round waits for its slowest rank) and "timed" (MIXED_SLACK, default 2:
+#   a round over 2x the ring's median step time skips to its sync); the laptop
+#   node alone trains the same steps as the loss reference.
+#   MIXED_ENV: extra -e flags for both variants (default: DILOCO-TUNE's fast
+#   default, plain outer step lr 1 momentum 0, H 64).
 # Memory: a real S20 FE has ~4-5 GB usable, so this emulation is memory-starved
 #   (a few hundred MB per phone); torch workloads may be OOM-killed that real
 #   phones would survive. The host is a Ryzen 7 5800H.
@@ -53,6 +62,9 @@ fi
 profile="${PHONE_PROFILE:-wifi}" loss="${PHONE_LOSS:-0}"
 phone_cpus="$(awk -v l="$lap_cpus" -v p="${PHONE_GB6:-3000}" -v t="${LAPTOP_GB6:-7600}" 'BEGIN { printf "%.2f", l * p / t }')"
 cases=("pool pool.py" "train train.py")
+pcases=" ${PHONE_CASES:-fleet mixed} "
+mixn="${MIXED_PHONES:-3}" mixmem="${MIXED_MEM:-1g}" mixsteps="${MIXED_STEPS:-400}"
+mixcpus="$lap_cpus$(for ((i = 0; i < mixn; i++)); do printf ' %s' "$phone_cpus"; done)"
 
 if ((dry)); then
 	cat <<PLAN
@@ -64,6 +76,9 @@ bench-phones plan (EMULATED, nothing is started):
   per lab, per workload: ${cases[*]##* } x $BL_REPS timed reps (BL_REPS)
     baseline: pipedpeer run <script>
     phones:   pool -> pipedpeer run pool.py ; train -> pipedpeer run --ddp $n train.py
+  mixed ring:   cpus "$mixcpus", $mixmem each, profile $profile; train.py $mixsteps steps,
+    --ddp $((mixn + 1)) --ddp-sync fast, variants equal (ROUND_SLACK=0) and timed (${MIXED_SLACK:-2})
+  cases:        $pcases
   results: $BL_OUT/phones/results.csv
 PLAN
 	exit 0
@@ -102,21 +117,40 @@ bl_workloads "$work"
 # Baseline first: one laptop-sized node, no peers, so the run stays local.
 phone_lab_up 1 "$lap_cpus" "$lmem" lan 0
 bl_put 1 "$work"
-for c in "${cases[@]}"; do
-	read -r name script <<<"$c"
-	bl_warm "$script"
-	bl_reps "$name" laptop1 after "$script"
-done
+if [[ "$pcases" == *" fleet "* ]]; then
+	for c in "${cases[@]}"; do
+		read -r name script <<<"$c"
+		bl_warm "$script"
+		bl_reps "$name" laptop1 after "$script"
+	done
+fi
+if [[ "$pcases" == *" mixed "* ]]; then
+	bl_warm train.py
+	bl_reps mixtrain laptop1 after train.py -e BENCH_STEPS="$mixsteps"
+fi
 
 # Then the phone fleet; node 1 submits and pools/trains across all n.
-phone_lab_up "$n" "$phone_cpus" "$pmem" "$profile" "$loss"
-bl_put 1 "$work"
-for c in "${cases[@]}"; do
-	read -r name script <<<"$c"
-	flags=()
-	[[ "$name" == train ]] && flags=(--ddp "$n")
-	bl_warm "$script" "${flags[@]}"
-	bl_reps "$name" "phones$n" after "$script" "${flags[@]}"
-done
+if [[ "$pcases" == *" fleet "* ]]; then
+	phone_lab_up "$n" "$phone_cpus" "$pmem" "$profile" "$loss"
+	bl_put 1 "$work"
+	for c in "${cases[@]}"; do
+		read -r name script <<<"$c"
+		flags=()
+		[[ "$name" == train ]] && flags=(--ddp "$n")
+		bl_warm "$script" "${flags[@]}"
+		bl_reps "$name" "phones$n" after "$script" "${flags[@]}"
+	done
+fi
+
+# Unequal ranks in one ring (PHONE-DDP): node 1 is the laptop and submits.
+if [[ "$pcases" == *" mixed "* ]]; then
+	phone_lab_up "$((mixn + 1))" "$mixcpus" "$mixmem" "$profile" "$loss"
+	bl_put 1 "$work"
+	read -r -a menv <<<"${MIXED_ENV:--e PIPEDPEER_DILOCO_OUTER_LR=1 -e PIPEDPEER_DILOCO_MOMENTUM=0 -e PIPEDPEER_DILOCO_H=64}"
+	mflags=(--ddp "$((mixn + 1))" --ddp-sync fast -v -e BENCH_STEPS="$mixsteps" "${menv[@]}")
+	bl_warm train.py "${mflags[@]}"
+	bl_reps mixtrain "equal$((mixn + 1))" after train.py "${mflags[@]}" -e PIPEDPEER_DILOCO_ROUND_SLACK=0
+	bl_reps mixtrain "timed$((mixn + 1))" after train.py "${mflags[@]}" -e PIPEDPEER_DILOCO_ROUND_SLACK="${MIXED_SLACK:-2}"
+fi
 bl_lab_down
 bl_table
