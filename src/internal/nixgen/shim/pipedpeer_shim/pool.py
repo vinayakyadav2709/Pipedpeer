@@ -5,17 +5,193 @@ import sys
 import threading
 import time
 
-from pipedpeer_shim import core
+from pipedpeer_shim import core, record
 from pipedpeer_shim.core import (
-    _BatchResult, _OFFLOAD_HERE, _POOL_MIN_WORK, _REMOTE_INFLIGHT, _Raised,
+    _BatchResult, _OFFLOAD_HERE, _POOL_MIN_WORK, _Raised, _SUBMITTER,
     _SubmitBatcher, _cluster_ready, _log, _offload_warn,
 )
 from pipedpeer_shim.stats import (
     _STATS, _STATS_LOCK, _add_stat, _decide, _record, _record_local,
 )
 from pipedpeer_shim.transfer import (
-    _pool_required, _pool_send,
+    _daemon_open, _dumps, _loads, _pool_required, _pool_send,
 )
+
+
+# ---- pacing and cancellation of remote chunks (research R5/R8) ----
+
+_PACING = {"t": -1e9, "v": None}
+_PACING_TTL = 5.0
+# Remote chunks in a row that won nothing, after which this process stops
+# sending chunks out for _LOST_PAUSE seconds (F20: on a fast origin local won
+# all 300 races and every remote copy was wasted peer time). A win resets it.
+_LOST_LIMIT = 3
+_LOST_PAUSE = 60.0
+_LOST = {"n": 0, "until": 0.0}
+_LOST_LOCK = threading.Lock()
+
+
+def _remote_paused():
+    return time.monotonic() < _LOST["until"]
+
+
+def _race_won():
+    with _LOST_LOCK:
+        _LOST["n"] = 0
+
+
+def _race_lost(secs):
+    """A remote chunk won nothing: count the peer time it wasted, and pause
+    remote dispatch after _LOST_LIMIT such chunks in a row."""
+    _add_stat("races_lost", 1)
+    _add_stat("wasted_peer_s", round(secs, 3))
+    with _LOST_LOCK:
+        _LOST["n"] += 1
+        pause = _LOST["n"] >= _LOST_LIMIT
+        if pause:
+            _LOST["n"] = 0
+            _LOST["until"] = time.monotonic() + _LOST_PAUSE
+    if pause:
+        _log("this machine won the last %d races against the cluster; keeping "
+             "pool work here for %.0f s" % (_LOST_LIMIT, _LOST_PAUSE))
+
+
+def _cluster_pacing():
+    """How the daemon wants a map paced, from /v1/pool/stats?store=:
+    inflight (chunks to keep in flight: the sum over peers of each node's
+    depth), part_s (target seconds of one part), cores (the peers' cores) and
+    peers. Cached a few seconds; without an answer one peer's worth (2 in
+    flight, half a second a part) is assumed, said in a log line."""
+    now = time.monotonic()
+    if _PACING["v"] is not None and now - _PACING["t"] < _PACING_TTL:
+        return _PACING["v"]
+    v = {"inflight": 2, "part_s": 0.5, "cores": 0, "peers": 0}
+    if core._URL:
+        import json
+        import urllib.parse
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                core._URL + "/v1/pool/stats?store=" + urllib.parse.quote(core._STORE, safe=""),
+                headers={"X-Pipedpeer-Submitter": _SUBMITTER})
+            with _daemon_open(req, 5) as resp:
+                got = json.loads(resp.read())
+            if "inflight" in got:
+                v = {"inflight": max(1, int(got["inflight"])),
+                     "part_s": max(0.25, int(got.get("part_ms", 500)) / 1000.0),
+                     "cores": int(got.get("cores", 0)),
+                     "peers": int(got.get("peers", 0))}
+            else:
+                _log("the daemon sent no pacing (an older build); keeping %d chunks in flight"
+                     % v["inflight"])
+        except Exception as e:
+            _log("could not ask the daemon how to pace this map (%s); keeping %d chunks in flight"
+                 % (e, v["inflight"]))
+    _PACING["t"], _PACING["v"] = now, v
+    return v
+
+
+def _fac2_size(remaining, pullers, floor):
+    """Items in the next chunk (FAC2 factoring with an overhead floor): each
+    round hands out half of what remains, split over every puller, so the
+    first chunks amortise the start-up and the last ones are small and the
+    tail short. Never under floor (a part too short to pay for its round
+    trip), never over a puller's fair share of what is left."""
+    if remaining <= 0:
+        return 0
+    pullers = max(1, pullers)
+    size = max(floor, -(-remaining // (2 * pullers)))
+    return max(1, min(size, -(-remaining // pullers), remaining))
+
+
+def _chunk_floor(per_item_cost, width, pacing):
+    """The smallest worthwhile chunk: enough items to keep the receiving
+    cores busy for one target part (pacing part_s), and at least the local
+    pool's width."""
+    lanes = max(width, pacing.get("cores") or 0)
+    if per_item_cost <= 0:
+        return max(width, 64)
+    return max(width, 1, round(pacing["part_s"] * lanes / per_item_cost))
+
+
+def _fn_fp(payload):
+    """The function's fingerprint (C22): sha256 over the store path, the
+    function's source or pickle and its name, 16 hex. With the node id it
+    keys the daemon's speed stats kept across runs."""
+    fp = payload.get("fp")
+    if fp is None:
+        import hashlib
+        body = payload.get("pickled") or payload.get("src") or ""
+        fp = hashlib.sha256(("%s\0%s\0%s" % (core._STORE, body, payload.get("name", ""))
+                             ).encode()).hexdigest()[:16]
+        payload["fp"] = fp
+    return fp
+
+
+# The _Flight the current deliver thread's request belongs to.
+_TLS = threading.local()
+
+
+class _Flight:
+    """One remote chunk's request, so the race can cut it off once it lost.
+
+    Closing the socket is the cancel: the daemon reads the requester going
+    away as its request context ending, drops its peer forwards, and each
+    peer kills the worker running the part (see the daemon's poolcancel
+    tests)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.conns = []
+        self.cancelled = False
+
+    def add(self, conn):
+        with self.lock:
+            self.conns.append(conn)
+            cut = self.cancelled
+        if cut:
+            _shut(conn)
+
+    def cancel(self):
+        with self.lock:
+            if self.cancelled:
+                return
+            self.cancelled = True
+            conns = list(self.conns)
+        for c in conns:
+            _shut(c)
+
+
+def _shut(conn):
+    import socket
+    try:
+        if conn.sock is not None:
+            conn.sock.shutdown(socket.SHUT_RDWR)
+    except OSError as e:
+        _log("could not close a losing chunk's request: %s" % e)
+
+
+def _flight_opener(flight):
+    """A proxy-less opener whose connections join flight (so a cancel can
+    close them) and that tells the daemon this interpreter's version
+    (X-Pipedpeer-Python: a peer with another Python cannot load by-value
+    bytecode)."""
+    import http.client
+    import urllib.request
+
+    class _Conn(http.client.HTTPConnection):
+        def connect(self):
+            super().connect()
+            if flight is not None:
+                flight.add(self)
+
+    class _Handler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_Conn, req)
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Handler())
+    opener.addheaders = [("X-Pipedpeer-Python", "%d.%d" % sys.version_info[:2])]
+    return opener
 
 
 class _ClusterPool:
@@ -283,13 +459,16 @@ class _ClusterPool:
         if starmap:
             vals = [v if isinstance(v, (list, tuple)) else (v,) for v in vals]
         t0 = time.monotonic()
+        flight = getattr(_TLS, "flight", None)
         try:
             globals_pickle = pickle.dumps(payload.get("gvars") or {})
-            items = [pickle.dumps(v) for v in vals]
+            items = [_dumps(v) for v in vals]
             header = {
                 "items_frames": len(items),
                 "globals": True,
                 "starmap": starmap,
+                "fn_fp": _fn_fp(payload),
+                "oob": True,       # results may come back out of band; _loads reads both
             }
             # Exactly one of the two, never both: the runner prefers func_src
             # and would silently ignore a callable sent beside it, so a
@@ -312,17 +491,31 @@ class _ClusterPool:
             if core._FORCE:
                 header["force"] = True
             info = {}
-            blobs = _pool_send(header, globals_pickle, items, 600, info)
+            blobs = _pool_send(header, globals_pickle, items, 600, info,
+                               opener=_flight_opener(flight))
             if len(blobs) != len(idxs):
                 raise RuntimeError("got %d results for %d items" % (len(blobs), len(idxs)))
-            out = [(idxs[i], pickle.loads(b)) for i, b in enumerate(blobs)]
+            out = [(idxs[i], _loads(b)) for i, b in enumerate(blobs)]
         except Exception as e:
+            if flight is not None and flight.cancelled:
+                # Local already holds every result: a cancelled loser, not a failure.
+                _log("cancelled a chunk of %d items: this machine finished them first" % len(idxs))
+                return None
             _record(kind, len(idxs), False, str(e), (time.monotonic() - t0) * 1000)
             _log("remote failed (%s); local covers it" % e)
             return None
         ms = (time.monotonic() - t0) * 1000
         receipt = info.get("receipt")
         _record(kind, len(out), True, "", ms, receipt)
+        # The daemons' own steps (queue at a node, compute there), relayed
+        # into this job's run record.
+        for p in (receipt or {}).get("parts", []):
+            for st in p.get("steps") or []:
+                try:
+                    record.step(st["step"], int(st.get("dur_ns", 0)) / 1e9, int(st.get("bytes", 0)),
+                                int(st.get("chunk", -1)), st.get("node") or str(p.get("where", "")))
+                except (KeyError, TypeError, ValueError) as e:
+                    _log("skipped an unreadable step in a chunk receipt (%s): %r" % (e, st))
         out = _RemotePairs(out)
         out.elsewhere = sum(int(p.get("items", 0)) for p in (receipt or {}).get("parts", [])
                             if str(p.get("where", "")).startswith("peer:"))
@@ -386,10 +579,11 @@ def _offload_items(items, per_item_cost, width, run_local, run_remote):
     local core races it. A chunk the cluster could not take runs here, said
     out loud, so the run still finishes."""
     from concurrent.futures import ThreadPoolExecutor
-    size = max(1, min(max(_adaptive_chunk(per_item_cost), width), len(items)))
+    pacing = _cluster_pacing()
+    size = max(1, min(_chunk_floor(per_item_cost, width, pacing), len(items)))
     chunks = _chunk(list(enumerate(items)), size)
     slots = [None] * len(items)
-    with ThreadPoolExecutor(max(1, min(_REMOTE_INFLIGHT, len(chunks)))) as ex:
+    with ThreadPoolExecutor(max(1, min(pacing["inflight"], len(chunks)))) as ex:
         answers = list(ex.map(run_remote, chunks))
     for chunk, res in zip(chunks, answers):
         if res is None:
@@ -414,12 +608,11 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
     chunk failed. width is the local lane count. Shared by Pool.map and joblib,
     so both get the same never-slower-than-local guarantee.
     """
-    # D2: local and remote each pull ~half the tail concurrently; when local
-    # finishes its share and a remote chunk is still in flight, an idle
-    # local core speculatively re-runs it — first result wins per item.
-    # Worst case (remote dead/absent) local eventually does everything, so
-    # this is never slower than a plain local Pool; a working remote halves
-    # the tail's wall time.
+    # D2: local and remote pull from one queue concurrently; when local runs
+    # dry and a remote chunk is still in flight, an idle local core
+    # speculatively re-runs it, first result wins per item, and the losing
+    # remote copy is cancelled. Worst case (remote dead/absent) local does
+    # everything, so this is never slower than a plain local Pool.
     if _OFFLOAD_HERE:
         return _offload_items(items, per_item_cost, width, run_local, run_remote)
     n = len(items)
@@ -429,31 +622,31 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
     unset = object()
     slots = [unset] * n
     lock = threading.Lock()
-    # A chunk has to be wide enough to fill the node that receives it. The
-    # adaptive size targets half a second of work taken one item at a
-    # time, which for an item costing about a second collapses to a single
-    # item per round trip: the peer then runs one item on one core and
-    # sixteen sit idle while the origin waits out the latency. Sizing to
-    # at least the local pool width uses this machine as the stand-in for
-    # a peer's core count, which is the best estimate the shim has.
-    #
-    # Capped at half the tail, because ownership alternates: one chunk
-    # would be dealt to the local side and the cluster handed nothing.
-    chunk_size = max(1, min(max(_adaptive_chunk(per_item_cost), width),
-                            (n + 1) // 2))
-    chunks = _chunk(list(enumerate(items)), chunk_size)  # [(orig_idx, item), ...]
+    t_start = time.monotonic()
 
-    # One queue both sides pull from, so each takes chunks as fast as it
-    # finishes them. Ownership used to be dealt alternately up front, which
-    # fixed this machine's share at half however many peers there were: a
-    # three-worker cluster ran 00_pool no faster than a one-worker one,
-    # because the half left here took as long as the whole job did elsewhere.
-    queue = list(chunks)
+    # Pacing comes from the daemon: how many chunks to keep in flight (each
+    # node's depth, summed: one running and one queued per node on a LAN, not
+    # a global 4) and how long a part should be. Chunks are cut as they are
+    # taken, FAC2-style: each round hands out half of what is left, so the
+    # first chunks amortise start-up and the last are small and the tail
+    # short. The floor keeps a chunk wide enough to fill the cores that get it
+    # and long enough to pay for its round trip.
+    pacing = _cluster_pacing()
+    inflight = max(1, pacing["inflight"])
+    floor = _chunk_floor(per_item_cost, width, pacing)
+    pullers = 1 + inflight
+    # Threads beyond one per peer only prefetch; they stop in the tail, when
+    # the queue can no longer fill everyone (bind late).
+    base = max(1, pacing["peers"])
+    queue = list(enumerate(items))      # [(orig_idx, item), ...]
+    pos = [0]
+    seq = [0]
     remote_taken = []
     claimed = {}       # id(chunk) -> when a peer took it; None once it failed
     remote_secs = []   # how long finished remote chunks took
+    flights = {}       # id(chunk) -> _Flight while its request is out
 
-    def take(remote=False):
+    def take(remote=False, prefetch=False):
         # Popping and recording a remote claim happen under one lock: split,
         # local could find the queue empty and the claim not yet listed, and
         # return with that chunk's slots still empty.
@@ -461,19 +654,39 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
             # Once every item has its result the race is over: a peer
             # thread that comes back for more must not send anything, or
             # its request lands in the middle of the script's next call.
-            if not queue or done.is_set():
+            left = n - pos[0]
+            if not left or done.is_set():
                 return None
-            chunk = queue.pop(0)
+            if remote and (_remote_paused() or (prefetch and left < inflight * floor)):
+                return None
+            size = _fac2_size(left, pullers, floor)
+            chunk = queue[pos[0]:pos[0] + size]
+            pos[0] += size
+            k = seq[0]
+            seq[0] += 1
             if remote:
                 remote_taken.append(chunk)
                 claimed[id(chunk)] = time.monotonic()
-            return chunk
+        record.step("queue", time.monotonic() - t_start, chunk=k)
+        return chunk
+
+    def cut_losers():
+        """Cancel remote chunks whose every item already has a result."""
+        with lock:
+            losers = [flights.pop(cid) for cid in list(flights)
+                      if all(slots[p[0]] is not unset for p in by_id[cid])]
+        for f in losers:
+            f.cancel()
+
+    by_id = {}
 
     def fill(pairs):
         """Run user func over (idx, item) pairs and first-wins into slots."""
         idxs = [p[0] for p in pairs]
         vals = [p[1] for p in pairs]
+        t0 = time.monotonic()
         res = run_local(vals)
+        record.step("compute", time.monotonic() - t0)
         won = 0
         with lock:
             for i, v in zip(idxs, res):
@@ -485,20 +698,33 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
         # the map. A speculative re-run that lost is not counted twice.
         if won:
             _record_local(won)
+        cut_losers()
 
     # Remote threads: each pulls a chunk, dispatches it, first-wins into
-    # slots, and pulls the next. Several are in flight at once: one at a time
-    # capped the whole cluster's throughput at a single chunk, so a peer sat
-    # idle between round trips no matter how many cores it had. A failed
-    # chunk stops that thread pulling; local re-runs what it held.
-    def deliver_loop():
+    # slots, and pulls the next. A failed chunk stops that thread pulling;
+    # local re-runs what it held. A cancelled one (local won it) lost a race.
+    def deliver_loop(j):
         while True:
-            chunk = take(remote=True)
+            chunk = take(remote=True, prefetch=j >= base)
             if chunk is None:
                 return
+            flight = _Flight()
+            with lock:
+                by_id[id(chunk)] = chunk
+                flights[id(chunk)] = flight
+            _TLS.flight = flight
             t0 = time.monotonic()
-            res = run_remote(chunk)
+            try:
+                res = run_remote(chunk)
+            finally:
+                _TLS.flight = None
+                with lock:
+                    flights.pop(id(chunk), None)
+            secs = time.monotonic() - t0
             if res is None:
+                if flight.cancelled:
+                    _race_lost(secs)
+                    continue
                 with lock:
                     claimed[id(chunk)] = None
                 return
@@ -508,8 +734,11 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
                     if slots[orig_i] is unset:
                         slots[orig_i] = v
                         won += 1
-            with lock:
-                remote_secs.append(time.monotonic() - t0)
+                remote_secs.append(secs)
+            if won:
+                _race_won()
+            else:
+                _race_lost(secs)
             # ponytail: the receipt says how many of a chunk's items ran
             # elsewhere, not which, so a mixed chunk that won only in part is
             # counted pro rata; per-item placement on the wire would make it exact.
@@ -543,13 +772,13 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
         return now + here < start + expected or now > start + 1.5 * expected + 0.2
 
     def remote_run():
-        inflight = max(1, min(_REMOTE_INFLIGHT, len(chunks) - 1))
         # Daemons, unlike the local side: once the race is done a chunk still
         # in flight is a loser whose answer is thrown away, and as a non-daemon
         # it held the interpreter open at exit for as long as a slow peer took
         # (up to the 600 s request timeout). t_local below is what keeps a
         # live race - and the receipt of what it kept - alive at exit.
-        threads = [threading.Thread(target=deliver_loop, daemon=True) for _ in range(inflight)]
+        threads = [threading.Thread(target=deliver_loop, args=(j,), daemon=True)
+                   for j in range(max(1, min(inflight, n)))]
         for t in threads:
             t.start()
 
@@ -585,6 +814,11 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
             failed.append(e)
         finally:
             done.set()  # also stops take() handing peers new chunks
+            with lock:
+                left = list(flights.values())
+                flights.clear()
+            for f in left:   # every request still out lost the race
+                f.cancel()
 
     done = threading.Event()
     # Explicitly not daemons: a thread inherits daemon from its creator,
@@ -697,40 +931,6 @@ def _avail_bytes():
     return avail
 
 
-def _usable_cores():
-    """Cores this process may actually run on.
-
-    os.cpu_count() is the machine's total, which overcounts whenever the job is
-    pinned (taskset, a container's cpuset) or throttled (a cgroup cpu.max
-    quota): the pool then starts more workers than there are cores to run
-    them, and they only time-slice each other.
-    """
-    try:
-        n = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        n = os.cpu_count() or 1
-    try:
-        with open("/proc/self/cgroup") as f:
-            own = next((ln[3:].strip() for ln in f if ln.startswith("0::")), None)
-    except OSError:
-        own = None
-    if own is not None:
-        # A quota on any ancestor binds, so walk up and keep the smallest.
-        path = "/sys/fs/cgroup" + own
-        while True:
-            try:
-                with open(path + "/cpu.max") as f:
-                    quota, period = f.read().split()[:2]
-                if quota != "max":
-                    n = min(n, max(1, -(-int(quota) // int(period))))
-            except (OSError, ValueError):
-                pass
-            if path in ("/sys/fs/cgroup", "/sys/fs/cgroup/"):
-                break
-            path = os.path.dirname(path)
-    return max(1, n)
-
-
 def _imap_batch(procs):
     """Items to buffer before running a batch of a lazy imap."""
     override = os.environ.get("PIPEDPEER_IMAP_BATCH", "").strip()
@@ -755,7 +955,7 @@ def _pool_width(requested, reclaim=0):
     times over - and those break rather than slow down when overridden.
     PIPEDPEER_RESPECT_POOL_SIZE=1 hands the decision back.
     """
-    cores = _usable_cores()
+    cores = core._usable_cores()
     if os.environ.get("PIPEDPEER_RESPECT_POOL_SIZE") == "1" and requested:
         return max(1, int(requested))
     n = cores

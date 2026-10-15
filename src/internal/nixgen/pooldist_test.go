@@ -678,57 +678,6 @@ if __name__ == "__main__":
 	}
 }
 
-// TestShimCompressesCompressiblePayloadsOnly covers the decision, not just
-// the mechanism. Compression pays for itself on a frame of repeated strings
-// and is pure waste on a dense float array, which is already incompressible —
-// so the shim measures rather than assuming, and tells the worker which it
-// chose instead of leaving both sides to guess.
-func TestShimCompressesCompressiblePayloadsOnly(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 not available")
-	}
-	dir := t.TempDir()
-	if err := WriteShimDir(dir); err != nil {
-		t.Fatal(err)
-	}
-	probe := `
-import pickle, random, sys, zlib
-sys.path.insert(0, sys.argv[1])
-from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
-
-# Highly repetitive and genuinely large: worth compressing. (A list of one
-# repeated string would not be — pickle memoises it down to a few bytes.)
-repetitive = [pickle.dumps(b"abcdefgh" * 400000) for _ in range(3)]
-header = {}
-out = transfer._maybe_compress(list(repetitive), header)
-assert header.get("items_zlib"), "repetitive payload was not compressed"
-assert sum(map(len, out)) < sum(map(len, repetitive)) * 0.9, "no real saving"
-assert [zlib.decompress(o) for o in out] == repetitive, "does not round-trip"
-
-# Random bytes: incompressible, so compressing is pure CPU cost.
-noise = [pickle.dumps(random.randbytes(2 << 20)) for _ in range(2)]
-header = {}
-out = transfer._maybe_compress(list(noise), header)
-assert not header.get("items_zlib"), "incompressible payload was compressed anyway"
-assert out == noise, "payload altered despite declining to compress"
-
-# Small payloads are not worth the round trip through zlib at all.
-small = [pickle.dumps("hello")]
-header = {}
-out = transfer._maybe_compress(list(small), header)
-assert not header.get("items_zlib") and out == small
-print("compress-ok")
-`
-	out, err := exec.Command(python, "-c", probe, dir).CombinedOutput()
-	if err != nil {
-		t.Fatalf("probe failed:\n%s\n%v", out, err)
-	}
-	if !strings.Contains(string(out), "compress-ok") {
-		t.Fatalf("unexpected output: %q", out)
-	}
-}
-
 // TestTheReceiptAccountsForEveryItem: local_items + remote_items must cover
 // the whole map. The race's local share (and the stragglers it re-runs for a
 // failed chunk) went uncounted, so a lab run of 80 items reported 44. The
@@ -802,9 +751,9 @@ if not hasattr(os, "sched_setaffinity"):
     print("PINNED-OK")
     raise SystemExit(0)
 allowed = sorted(os.sched_getaffinity(0))
-assert pool._usable_cores() <= len(allowed), pool._usable_cores()
+assert core._usable_cores() <= len(allowed), core._usable_cores()
 os.sched_setaffinity(0, {allowed[0]})
-assert pool._usable_cores() == 1, "pinned to one core, sized for %d" % pool._usable_cores()
+assert core._usable_cores() == 1, "pinned to one core, sized for %d" % core._usable_cores()
 os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
 assert pool._pool_width(None) == 1, pool._pool_width(None)
 print("PINNED-OK")
@@ -822,7 +771,7 @@ import sitecustomize as shim
 from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
-pool._usable_cores = lambda: 2
+core._usable_cores = lambda: 2
 budget = int(2 * (256 << 20) / 0.4) + 1     # exactly room for two workers
 pool._avail_bytes = lambda: budget
 

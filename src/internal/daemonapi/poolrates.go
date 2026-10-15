@@ -1,7 +1,7 @@
 package daemonapi
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
 	"runtime"
@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
 	"github.com/pipedpeer/pipedpeer/internal/schedule"
 )
 
@@ -189,9 +190,9 @@ const localDeviceID = "local"
 // model refuses the shares that are not worth a round trip and keeps the ones
 // that are.
 
-func (pm *poolManager) planShares(items []json.RawMessage, peers []string, includeLocal bool) []schedule.Share {
-	devices := pm.rates.devices(peers, pm.peerCores, pm.localRate(), includeLocal)
-	plan := schedule.Compute(schedule.Options{Items: len(items)}, devices)
+func (pm *poolManager) planShares(ch *chunk, peers []string, includeLocal bool) []schedule.Share {
+	devices := pm.devicesFor(peers, ch.fnFP, includeLocal)
+	plan := schedule.Compute(schedule.Options{Items: len(ch.items)}, devices)
 
 	for _, r := range plan.Rejected {
 		// Loud: a peer silently missing from a plan looks exactly like a peer
@@ -226,4 +227,211 @@ func (pm *poolManager) localRate() float64 {
 		return rate
 	}
 	return float64(localCores())
+}
+
+// devicesFor is rateModel.devices for a map of function fn, with what the
+// plain model lacks (R5 step 2, R8 step 3): each peer is measured under its
+// node id, never its address; an unmeasured peer starts from what earlier
+// runs saw for fn on that node (poolPrior) before falling back to the
+// core-count guess; and the work a node already holds is added to its setup,
+// so the split equalises real finish times across chunks in flight instead of
+// treating every node as idle.
+func (pm *poolManager) devicesFor(peers []string, fn string, includeLocal bool) []schedule.Device {
+	devs := pm.rates.devices(nil, pm.peerCores, pm.localRate(), includeLocal)
+	now := time.Now()
+	for _, p := range peers {
+		rate, setup := pm.peerRate(p, fn)
+		devs = append(devs, schedule.Device{
+			ID: p, Node: p, Kind: schedule.CPU,
+			Rate: rate, SetupSec: setup + pm.book.backlog(pm.key(p), now), MemBytes: 1 << 62,
+		})
+	}
+	return devs
+}
+
+// peerRate is a peer's items/s and fixed seconds per request for fn: this
+// run's measurements, else an earlier run's (poolPrior), else the core-count
+// prior rateModel.devices uses.
+func (pm *poolManager) peerRate(peer, fn string) (rate, setup float64) {
+	key := pm.key(peer)
+	if r, o, ok := pm.rates.fit(key); ok {
+		return r, o
+	}
+	if pm.priorFn != nil && fn != "" {
+		if r, o, ok := pm.priorFn(key, fn); ok && r > 0 {
+			return r, o
+		}
+	}
+	d := pm.rates.devices([]string{peer}, pm.peerCores, pm.localRate(), false)
+	return d[0].Rate, d[0].SetupSec
+}
+
+// expectedSec predicts how long n items of fn take on peer ("" = this node),
+// fixed cost included; 0 when nothing is known.
+func (pm *poolManager) expectedSec(peer, fn string, n int) float64 {
+	if peer == "" {
+		if r, o, ok := pm.rates.fit(localDeviceID); ok && r > 0 {
+			return o + float64(n)/r
+		}
+		if pm.priorFn != nil && fn != "" && pm.selfID != "" {
+			if r, o, ok := pm.priorFn(pm.selfID, fn); ok && r > 0 {
+				return o + float64(n)/r
+			}
+		}
+		return 0
+	}
+	r, o := pm.peerRate(peer, fn)
+	if r <= 0 {
+		return 0
+	}
+	return o + float64(n)/r
+}
+
+// depth is how many parts peer should hold at once: one running plus enough
+// to cover its lead time (its fixed cost per request and, when measured, a
+// part's payload over the link), against parts sized so that cost is under
+// 10% (schedule.PartSec). 2 on any LAN or Wi-Fi link, 3 at most.
+func (pm *poolManager) depth(peer, fn string) int {
+	_, setup := pm.peerRate(peer, fn)
+	return schedule.Depth(setup, schedule.PartSec(setup, 0))
+}
+
+// observeStats feeds one completed part to the cross-run stats, skipping each
+// (node, fn)'s first part since this daemon started: it carries closure fetch
+// and worker spawn, not the function's speed.
+func (pm *poolManager) observeStats(node, fn string, items int, computeSec, elapsedSec float64) {
+	if pm.observeFn == nil || fn == "" || node == "" || items <= 0 {
+		return
+	}
+	if pm.firstPart(node, fn) {
+		return
+	}
+	pm.observeFn(node, fn, items, computeSec, elapsedSec)
+}
+
+// step is one daemon-side run-record step about node, for a part's receipt.
+func (pm *poolManager) step(node, name string, start time.Time, d time.Duration, part int) runrec.Step {
+	return runrec.Step{Machine: pm.selfID, Node: node, Chunk: part, Name: name,
+		StartNS: start.UnixNano(), DurNS: d.Nanoseconds()}
+}
+
+// pacing answers how the shim should pace a map on storePath (the additive
+// /v1/pool/stats fields): the sum of the peers' depths, the target length of
+// one part and the peers' cores. With no peer the
+// shim keeps one chunk in flight.
+func (pm *poolManager) pacing(storePath, submitter string) map[string]int64 {
+	pm.mu.Lock()
+	var peers []string
+	if pm.peerFn != nil {
+		peers = pm.peerFn(storePath, submitter)
+	}
+	pm.mu.Unlock()
+	var inflight, cores int64
+	part := 0.25
+	for _, p := range peers {
+		_, setup := pm.peerRate(p, "")
+		inflight += int64(schedule.Depth(setup, schedule.PartSec(setup, 0)))
+		part = max(part, schedule.PartSec(setup, 0))
+		c := pm.peerCores(p)
+		if c <= 0 {
+			c = localCores()
+		}
+		cores += int64(c)
+	}
+	return map[string]int64{
+		"peers":    int64(len(peers)),
+		"inflight": max(inflight, 1),
+		"part_ms":  int64(part * 1000),
+		"cores":    cores,
+	}
+}
+
+// flightBook is what every node holds right now: each part running on it and
+// how long it was predicted to take. The split reads it as backlog (a busy
+// node starts late); the gate reads it as depth.
+type flightBook struct {
+	mu    sync.Mutex
+	next  int64
+	nodes map[string]*nodeFlights
+}
+
+type nodeFlights struct {
+	busy map[int64]flight
+	wake chan struct{} // closed and replaced whenever a part leaves
+}
+
+type flight struct {
+	start time.Time
+	pred  float64
+}
+
+func (b *flightBook) node(key string) *nodeFlights {
+	if b.nodes == nil {
+		b.nodes = map[string]*nodeFlights{}
+	}
+	n := b.nodes[key]
+	if n == nil {
+		n = &nodeFlights{busy: map[int64]flight{}, wake: make(chan struct{})}
+		b.nodes[key] = n
+	}
+	return n
+}
+
+// backlog is the predicted seconds of work key still holds.
+func (b *flightBook) backlog(key string, now time.Time) float64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := b.nodes[key]
+	if n == nil {
+		return 0
+	}
+	var pred, el []float64
+	for _, f := range n.busy {
+		pred = append(pred, f.pred)
+		el = append(el, now.Sub(f.start).Seconds())
+	}
+	return schedule.Backlog(pred, el)
+}
+
+// held is how many parts key holds right now.
+func (b *flightBook) held(key string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n := b.nodes[key]; n != nil {
+		return len(n.busy)
+	}
+	return 0
+}
+
+// acquire waits until key holds fewer than depth parts (or ctx ends), then
+// books one predicted to take pred seconds. release frees it; calling it
+// again is harmless.
+func (b *flightBook) acquire(ctx context.Context, key string, depth int, pred float64) (release func(), err error) {
+	for {
+		b.mu.Lock()
+		n := b.node(key)
+		if len(n.busy) < max(depth, 1) {
+			b.next++
+			id := b.next
+			n.busy[id] = flight{start: time.Now(), pred: pred}
+			b.mu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					b.mu.Lock()
+					delete(n.busy, id)
+					close(n.wake)
+					n.wake = make(chan struct{})
+					b.mu.Unlock()
+				})
+			}, nil
+		}
+		wake := n.wake
+		b.mu.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
