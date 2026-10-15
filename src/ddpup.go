@@ -183,7 +183,13 @@ func ddpJoinCheck(host string, port int, group string, rank int) error {
 
 // ddpFetchNodes reads the daemon's node list.
 func ddpFetchNodes(daemonPort int) ([]registry.NodeRecord, error) {
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
+	return ddpFetchNodesAt("127.0.0.1", daemonPort)
+}
+
+// ddpFetchNodesAt reads the node list of the daemon at host:port.
+func ddpFetchNodesAt(host string, port int) ([]registry.NodeRecord, error) {
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(
+		fmt.Sprintf("http://%s/v1/nodes", net.JoinHostPort(host, strconv.Itoa(port))))
 	if err != nil {
 		return nil, err
 	}
