@@ -15,6 +15,7 @@ from pipedpeer_shim.core import (
 _EXIT_MISSED_START = 75
 _EXIT_ABORTED = 76
 _EXIT_RELEASED = 77
+_SKIP_END = object()    # next()'s default when a loader runs out mid-skip
 
 # The "samples" a pad step reports: a repeated sample that only keeps the
 # step counts equal, weighed as nothing by the daemon (0 still means "not
@@ -314,6 +315,41 @@ def _diloco_note(total):
             "interval before the final step")
 
 
+# Time-bounded rounds, for ranks of unequal speed (a phone next to a laptop).
+# A local round gets a budget of SLACK x its steps x the ring's median step
+# time (the lead daemon's steps_ms, from every rank's last report). A rank
+# still short of the round's end when its budget runs out skips the round's
+# remaining batches and syncs with what it trained; the average is weighted
+# by samples, so the round is the mean over the work actually done. A fast
+# rank then waits at most one budget a round instead of the slowest rank's
+# whole interval. The skipped batches are not trained this epoch; the
+# epoch-boundary refit shrinks a slow rank's share, so skips fade after it.
+# Skipped data costs accuracy (PHONE-DDP sim, H 64, 1 laptop + 10 phones that
+# each stall 3x in a tenth of rounds: slack 2 saves ~30% of the time, drops
+# ~3% of samples and adds +0.1-2% val loss against equal-step rounds; 1.25 on
+# misjudged shares dropped ~10% for +6%). Accuracy outranks speed, so the
+# default 4 is a stall guard only: it trips on a rank 4x slower than the
+# ring's median for a round, not on the ordinary spread the refit absorbs.
+# PIPEDPEER_DILOCO_ROUND_SLACK=0 gives equal-step rounds (the A/B baseline).
+_DILOCO_ROUND_SLACK = _env_num("PIPEDPEER_DILOCO_ROUND_SLACK", 4.0)
+
+
+def _round_budget(steps_ms, steps, slack=None):
+    """Seconds a local round of the given steps may take: slack x steps x the
+    median of the ranks' step times (ms, by rank). None when nothing is known
+    or the budget is off."""
+    slack = _DILOCO_ROUND_SLACK if slack is None else slack
+    try:
+        vals = sorted(float(v) for v in (steps_ms or {}).values() if float(v) > 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if slack <= 0 or not vals or steps < 1:
+        return None
+    k = len(vals)
+    med = vals[k // 2] if k % 2 else (vals[k // 2 - 1] + vals[k // 2]) / 2
+    return slack * steps * med / 1000.0
+
+
 def _outer_nesterov(theta, buf, delta, lr=_DILOCO_OUTER_LR, mu=_DILOCO_MOMENTUM):
     """torch.optim.SGD(nesterov=True) on one tensor, with the averaged
     pseudo-gradient as the gradient. Returns the new (theta, buf)."""
@@ -367,6 +403,13 @@ class _DiLoCo:
         self.refs = []
         self.ref = None
         self.started = False
+        # The round's clock: set when its first batch is handed out (not at
+        # the sync, so an evaluation between epochs is not counted), with
+        # the step it started after and its budget in seconds (None: none).
+        self.t0 = None
+        self.n0 = 0
+        self.budget = None
+        self.skipped = 0    # batches skipped over the run, for the report
 
     def begin(self, params, h, done):
         """Start a local phase after step done: the model now is the global
@@ -377,6 +420,7 @@ class _DiLoCo:
         self.next_sync = done + h
         self.samples = 0
         self.started = True
+        self.t0 = None
 
 
 def _diloco_round(st, opt, params, reduce, force_state=False):
@@ -792,6 +836,9 @@ def _install_ddp():
     _TOTAL = [None]         # the run's optimizer steps, when a OneCycleLR says
     _DRIFT = [None]         # the last reduce reply's drift, None if it had none
     _TOLD_FAST = [False]
+    _PACE = [None]          # the last reply's steps_ms (rank -> ms), for round budgets
+    _ROUND_MS = [None]      # a local round's ms per step, sent as its step_ms
+    _TOLD_PACE = [False]
     # The butterfly (U26): every rank's sync URL as this rank reaches it, in
     # rank order, when the CLI built a ring of 3+ machines that all reach
     # each other. Shard k of each gradient goes to rank k's daemon (shard 0
@@ -1060,6 +1107,11 @@ def _install_ddp():
                 1000.0 * sync_total / _DDP_STATS["syncs"],
                 _DDP_STATS["sent_bytes"] / 1048576.0,
                 _DDP_STATS["recv_bytes"] / 1048576.0))
+        skipped = sum(st.skipped for st in _DILOCO.values())
+        if skipped:
+            _log("ddp: rank %d skipped %d batch(es) in local rounds that ran over their "
+                 "time budget (not trained this epoch; PIPEDPEER_DILOCO_ROUND_SLACK=0 "
+                 "waits for them instead)" % (_RANK, skipped))
         live = _live_ranks()
         if live < 2 or _STEP_SEC[1] < 2:
             return
@@ -1264,6 +1316,8 @@ def _install_ddp():
         # models that have taken different numbers of local steps, which
         # shows up as a worse final loss and nothing else.
         _DRIFT[0] = reply.get("drift")
+        if isinstance(reply.get("steps_ms"), dict):
+            _PACE[0] = reply["steps_ms"]
         agreed = reply.get("sync_every", 0)
         if agreed and agreed != _SYNC_TUNED[0]:
             _SYNC_TUNED[0] = int(agreed)
@@ -1660,11 +1714,18 @@ def _install_ddp():
         round its small entries to zero (huge Adam steps there) and the
         reply's error feedback could push them below zero. That round sends
         the carried int8 error at full width and clears it."""
+        round_ms, _ROUND_MS[0] = _ROUND_MS[0], None
         if _DROPPED[0] or _live_ranks() <= 1:
             return None
         _DRIFT[0] = None
         if _DILOCO_UNWEIGHTED:
             samples = 0         # the daemon weighs a rank that gives none as 1
+        # A timed round reports its time per step of the round, skipped
+        # batches included: samples / that is the rank's real throughput (x
+        # the round length, as for every rank), which is what the refit needs.
+        more = {"samples": int(samples)}
+        if round_ms:
+            more["step_ms"] = round_ms
         if extras or not _INT8_GRADS:
             err = _ERR.pop("delta", None)
             wire, off = [], 0
@@ -1675,10 +1736,9 @@ def _install_ddp():
                 off += d.size
                 wire.append(d)
             wire += [e.astype("float32", copy=False) for e in extras]
-            means = _daemon_reduce(wire, _np_ddp.dtype("float32"), "delta",
-                                   samples=int(samples))
+            means = _daemon_reduce(wire, _np_ddp.dtype("float32"), "delta", **more)
         else:
-            means = _daemon_reduce_int8(deltas, "delta", "delta", samples=int(samples))
+            means = _daemon_reduce_int8(deltas, "delta", "delta", **more)
         return means, _DRIFT[0]
 
     def _fast_epoch_cap(h):
@@ -1732,8 +1792,18 @@ def _install_ddp():
             return out
         out = orig(*sa, **skw)
         st.samples += max(0, int(_BATCH_N[0]))  # a pad step adds no samples
-        if done < st.next_sync:
-            return out
+        if done >= st.next_sync:
+            _fast_round_end(st, opt, params, done)
+        return out
+
+    def _fast_round_end(st, opt, params, done):
+        """The DiLoCo round that ends a local phase's interval at step done,
+        and the next interval. Reached by the round's last step, or by a
+        timed-out rank skipping to it (_timed_rounds)."""
+        total = _TOTAL[0]
+        if st.t0 is not None and done > st.n0:
+            _ROUND_MS[0] = 1000.0 * (time.monotonic() - st.t0) / (done - st.n0)
+        st.t0 = None
         cap = _diloco_cap(done, total)
         last = cap is not None and cap <= 1
         drift = _diloco_round(st, opt, params, _diloco_reduce, force_state=last)
@@ -1741,7 +1811,7 @@ def _install_ddp():
             st.theta = None
             _SYNC_TUNED[0] = 1
             _log("ddp: DiLoCo back to exact sync for the last %d step(s)" % max(0, total - done))
-            return out
+            return
         h = _fast_epoch_cap(_diloco_next_interval(st.h, drift, st.ref, done, total))
         if h != st.h:
             _log("ddp: DiLoCo syncs every %d steps now (was %d; drift %s against %s)"
@@ -1749,7 +1819,68 @@ def _install_ddp():
                     "%.3g" % st.ref if st.ref is not None else "no reference"))
         st.h, st.next_sync = h, done + h
         _SYNC_TUNED[0] = h
-        return out
+
+    def _timed_state(ep, given):
+        """(optimizer, its _DiLoCo) when this loader's next batch falls in a
+        timed local round: fast mode, one optimizer, a local phase, and every
+        batch handed out this epoch stepped once (a script that accumulates
+        gradients over several batches is not timed: a skipped batch would
+        not be a skipped step). None otherwise."""
+        if not _FAST or _DILOCO_ROUND_SLACK <= 0 or len(_DILOCO) != 1:
+            return None
+        if _EPOCH[0] is not ep or ep[1] != given or _DROPPED[0] or _live_ranks() <= 1:
+            return None
+        key, st = next(iter(_DILOCO.items()))
+        if st.theta is None:
+            return None
+        opt = next((o for o in _live_opts() if id(o) == key), None)
+        if opt is None or st.next_sync - _STEPN.get(key, 0) < 1:
+            return None
+        return opt, st
+
+    def _timed_rounds(it, ep):
+        """A fast-mode loader's batches, with each local round held to its
+        budget (_DILOCO_ROUND_SLACK). Before handing out a batch: start the
+        round's clock if this is its first; if the budget has run out, skip
+        the round's remaining batches (loaded, not trained), count them as
+        steps so every rank's schedule stays in line, and sync now."""
+        given = 0
+        for batch in it:
+            got = _timed_state(ep, given)
+            if got is not None:
+                opt, st = got
+                key = id(opt)
+                now = time.monotonic()
+                if st.t0 is None:
+                    st.t0, st.n0 = now, _STEPN.get(key, 0)
+                    st.budget = _round_budget(_PACE[0], st.next_sync - st.n0)
+                    if st.budget is None and not _TOLD_PACE[0]:
+                        _TOLD_PACE[0] = True
+                        _log("ddp: no step times from the lead daemon (an older build, "
+                             "or the budget is off), so local rounds are not timed: "
+                             "each waits for its slowest rank")
+                elif st.budget is not None and now - st.t0 >= st.budget:
+                    left = st.next_sync - _STEPN.get(key, 0)
+                    skipped = 1
+                    while skipped < left and next(it, _SKIP_END) is not _SKIP_END:
+                        skipped += 1
+                    if skipped < left:
+                        _log("ddp: the loader ended %d batch(es) before the round's "
+                             "sync; syncing there anyway" % (left - skipped))
+                    ep[1] += skipped
+                    given += skipped
+                    _STEPN[key] = st.next_sync
+                    st.skipped += skipped
+                    _STEP_MARK[0] = None    # the skip is not a step's compute
+                    _log("ddp: round over its %.2f s budget after %d of %d steps; "
+                         "skipping %d batch(es) and syncing"
+                         % (st.budget, st.next_sync - st.n0 - left, st.next_sync - st.n0,
+                            skipped))
+                    params = [p for g in opt.param_groups for p in g["params"]]
+                    _fast_round_end(st, opt, params, st.next_sync)
+                    continue
+            given += 1
+            yield batch
 
     def _diloco_settle():
         """Before the ring changes: end every local phase with a round that
@@ -2468,6 +2599,8 @@ def _install_ddp():
             # ponytail: one counter, for the loader iterated last; a loop that
             # interleaves two sharded loaders' steps would need one each.
             _EPOCH[0] = [sampler, 0] if isinstance(sampler, _WeightedShardSampler) else None
+            if _FAST and _EPOCH[0] is not None and _DILOCO_ROUND_SLACK > 0:
+                return _timed_rounds(_ORIG_ITER(self), _EPOCH[0])
         return _ORIG_ITER(self)
 
     def _ddp_init(self, *a, **kw):

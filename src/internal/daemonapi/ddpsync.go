@@ -836,6 +836,16 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		if e.hasDrift {
 			driftJSON = ", \"drift\": " + strconv.FormatFloat(e.drift, 'g', 6, 64)
 		}
+		// Every rank's step time this round, so a fast-mode rank can time its
+		// local rounds against the ring's pace (additive; older shims ignore it).
+		stepsJSON := ""
+		if len(e.stepMillis) > 0 {
+			if b, err := json.Marshal(e.stepMillis); err == nil {
+				stepsJSON = ", \"steps_ms\": " + string(b)
+			} else {
+				log.Warn().Err(err).Str("group", req.Group).Msg("ddp: step times left out of the reply")
+			}
+		}
 		sameWork := e.checked && e.sameWork && e.fingerprinted > 1
 		// How many ranks the result actually averages. Equal to the world
 		// size unless the round completed short-handed, and the shim says so
@@ -869,8 +879,8 @@ func (s *Server) handleDDPSync(w http.ResponseWriter, r *http.Request) {
 		}
 		body := []byte(fmt.Sprintf(
 			"{\"reduced\": true, \"sync_every\": %d, \"scale\": %v, \"scales\": %s, "+
-				"\"same_work\": %t, \"ranks\": %d%s%s}\n",
-			agreedEvery, rscale, rscales, sameWork, ranks, driftJSON, rebalanceJSON))
+				"\"same_work\": %t, \"ranks\": %d%s%s%s}\n",
+			agreedEvery, rscale, rscales, sameWork, ranks, driftJSON, stepsJSON, rebalanceJSON))
 		body = putFrame(body, result)
 		w.Header().Set("Content-Type", DDPReduceContentType)
 		w.WriteHeader(http.StatusOK)
