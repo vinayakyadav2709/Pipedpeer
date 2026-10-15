@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/say"
 )
 
@@ -374,16 +376,40 @@ const ddpRoleCapability = "role"
 // ddpEligibleCountExcept is ddpEligibleCount without the nodes on the machine
 // whose key is exclude ("" excludes nothing).
 func ddpEligibleCountExcept(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) int {
+	n, _ := ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude)
+	return n
+}
+
+// ddpRefusal is one healthy node the eligibility count turned down. busy:
+// it was running something, so its memory may free up shortly.
+type ddpRefusal struct {
+	node, reason string
+	busy         bool
+}
+
+// ddpEligibleRanks is ddpEligibleCountExcept plus why each healthy node was
+// turned down, so a DDP script that ends up on one node can say why.
+//
+// Memory is admitted like single-node placement and the peer daemon admit it
+// (resourceest.Admit): an idle node whose grantable memory is under the
+// estimate still counts. The estimate is 1.2x the script's last peak, and a
+// node's grantable memory right after a run still holds that run's page
+// cache, so the strict check alone dropped an auto ring to one node with
+// nothing printed (FIX-WORLD1) while --ddp 2 rings on the same nodes ran.
+func ddpEligibleRanks(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) (int, []ddpRefusal) {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
 	if err != nil {
-		return 0
+		say.Warnf("cannot list nodes for a DDP ring (%v); running on one node\n", err)
+		return 0, nil
 	}
 	defer resp.Body.Close()
 	var all []registry.NodeRecord
 	if err := json.NewDecoder(resp.Body).Decode(&all); err != nil {
-		return 0
+		say.Warnf("unreadable node list for a DDP ring (%v); running on one node\n", err)
+		return 0, nil
 	}
 	count := 0
+	var refused []ddpRefusal
 	for _, n := range all {
 		if n.State != "healthy" || n.Capabilities[ddpRoleCapability] != "" {
 			continue
@@ -391,15 +417,61 @@ func ddpEligibleCountExcept(daemonPort int, requireGPU bool, requiredGPUMem, req
 		if heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], exclude) {
 			continue
 		}
+		idle := n.Load.ActiveJobs == 0
 		gpuOK := ddpHasGPU(n) &&
 			(requiredGPUMem <= 0 || n.Load.GPUMemBytes-n.Load.GPUMemUsedBytes >= requiredGPUMem)
 		cpuOK := !requireGPU &&
-			(requiredMem <= 0 || n.Load.AvailableMemBytes >= requiredMem)
+			(requiredMem <= 0 || resourceest.Admit(requiredMem, n.Load.AvailableMemBytes, idle, "node "+shortID(n.NodeID)))
 		if gpuOK || cpuOK {
 			count += ddpSlots(n)
+			continue
 		}
+		var why string
+		switch {
+		case requireGPU && !ddpHasGPU(n):
+			why = "no GPU (--gpu force)"
+		case requireGPU:
+			why = fmt.Sprintf("GPU memory: need %s, free %s", resourceest.FormatBytes(requiredGPUMem),
+				resourceest.FormatBytes(n.Load.GPUMemBytes-n.Load.GPUMemUsedBytes))
+		default:
+			why = fmt.Sprintf("memory: need %s (estimate), grantable %s, %d job(s) running",
+				resourceest.FormatBytes(requiredMem), resourceest.FormatBytes(n.Load.AvailableMemBytes), n.Load.ActiveJobs)
+		}
+		refused = append(refused, ddpRefusal{node: shortID(n.NodeID), reason: why, busy: !idle})
 	}
-	return count
+	return count, refused
+}
+
+// ddpSettleWait bounds how long a ring short of two ranks waits for a busy
+// node to report its last job gone: peers' load reaches this daemon by a
+// 10 s poll, so a run started straight after another sees the old job.
+const ddpSettleWait = 25 * time.Second
+
+// ddpEligibleSettled is ddpEligibleRanks, asked again every 2 s for up to
+// ddpSettleWait while fewer than two ranks fit and a refused node was busy.
+func ddpEligibleSettled(ctx context.Context, daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) (int, []ddpRefusal) {
+	n, refused := ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude)
+	deadline := time.Now().Add(ddpSettleWait)
+	for n < 2 && slices.ContainsFunc(refused, func(r ddpRefusal) bool { return r.busy }) && time.Now().Before(deadline) {
+		say.Printf("[coordinator] DDP: %d rank(s) fit; waiting up to %s for busy nodes to finish (%s)\n",
+			n, ddpSettleWait, ddpRefusalLine(refused))
+		select {
+		case <-ctx.Done():
+			return n, refused
+		case <-time.After(2 * time.Second):
+		}
+		n, refused = ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude)
+	}
+	return n, refused
+}
+
+// ddpRefusalLine is the refusals as one "node: reason; ..." line.
+func ddpRefusalLine(refused []ddpRefusal) string {
+	parts := make([]string, len(refused))
+	for i, r := range refused {
+		parts[i] = r.node + ": " + r.reason
+	}
+	return strings.Join(parts, "; ")
 }
 
 func ddpExtractHost(endpoint string) string {

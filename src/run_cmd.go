@@ -261,11 +261,11 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			ddpOffload := false
 			if ddpNodes > 1 || (ddpNodes == 0 && pythondeps.HasDistributedImports(scriptPath)) {
 				exclude := offloadKey
-				eligible := ddpEligibleCountExcept(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
+				eligible, refused := ddpEligibleSettled(ctx, daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
 				if exclude != "" && eligible == 0 {
 					say.Warnf("--offload: no other machine can take a rank, so this machine trains\n")
 					exclude = ""
-					eligible = ddpEligibleCount(daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes)
+					eligible, refused = ddpEligibleSettled(ctx, daemonPort, requireGPU, requiredGPUMem, resReq.MemBytes, exclude)
 				}
 				ddpOffload = exclude != ""
 				worldSize := eligible
@@ -306,8 +306,13 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 						return runOutcome(err)
 					}
 					say.Printf("[coordinator] running on one node: every ring available measures slower\n")
-				} else if ddpNodes > 1 {
-					say.Printf("[coordinator] fewer than 2 eligible nodes — running single-node\n")
+				} else if len(refused) > 0 {
+					// A DDP script that runs alone changes the result: say why,
+					// whatever the verbosity (FIX-WORLD1: an auto ring fell to
+					// one rank with nothing printed, even under -v).
+					say.Warnf("DDP: %d rank(s) fit, running on one node; turned down: %s\n", eligible, ddpRefusalLine(refused))
+				} else {
+					say.Printf("[coordinator] DDP: no other node can take a rank — running single-node\n")
 				}
 			}
 
