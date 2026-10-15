@@ -158,6 +158,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.ClosureFormats = h.Capabilities[heartbeat.ClosureFormatCapability]
 	ph.GPU = h.Capabilities["gpu"]
 	ph.Role = h.Capabilities[heartbeat.RoleCapability]
+	ph.Arch = h.Capabilities["arch"]
 
 	capsJSON, err := json.Marshal(h.Capabilities)
 	if err != nil {

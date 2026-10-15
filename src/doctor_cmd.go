@@ -15,6 +15,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/doctor"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/say"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -68,11 +69,15 @@ func newDoctorCmd() *cobra.Command {
 					return err == nil
 				},
 				Nix:       setup.NixUsable,
+				Phone:     phone.Route(),
 				PCIRoot:   "/sys/bus/pci/devices",
 				DriverDir: "/proc/driver/nvidia",
 				NvidiaSMI: func() bool { _, err := exec.LookPath("nvidia-smi"); return err == nil },
 				DiskPath:  disk,
 				FreeBytes: doctor.Statfs,
+			}
+			if phone.InProot() {
+				m.PhoneBox = phone.SandboxNote
 			}
 
 			out := cmd.OutOrStdout()

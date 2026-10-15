@@ -137,6 +137,9 @@ func create(path, nodeID string) (NodeIdentity, error) {
 
 func identityPath() string { return filepath.Join(userdir.Data(), "node_identity.json") }
 
+// System is this machine's nix system, e.g. "aarch64-linux".
+func System() string { return nixArch() }
+
 func nixArch() string {
 	arch := runtime.GOARCH
 	goos := runtime.GOOS

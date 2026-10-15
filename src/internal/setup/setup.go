@@ -11,6 +11,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
@@ -663,10 +664,18 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	fmt.Println("  Pipedpeer setup")
 	fmt.Println()
 
-	// A phone in Termux has no Nix, crun, systemd or firewall to set up: it
-	// becomes a pool-only worker on its own python.
+	// Inside a full-node phone's Debian: Nix came with SetupProot; there is
+	// no crun, systemd or firewall to set up (Android allows none of them).
+	if phone.InProot() {
+		phone.ProotSetup(os.Stdout, nixgen.NixpkgsRef)
+		return startAndReport(daemonPort, false)
+	}
+
+	// A phone in Termux becomes a full node in a proot Debian with Nix, and
+	// this same command reruns there (phone.Launch, which exits). When that
+	// cannot be set up it becomes a pool-only worker on Termux's python.
 	if phone.IsTermux() {
-		if err := phone.Setup(os.Stdout); err != nil {
+		if err := phone.SetupTermux(os.Stdout, os.Args[1:], daemonctl.Stop); err != nil {
 			return 0, fmt.Errorf("phone setup: %w", err)
 		}
 		return startAndReport(daemonPort, false)

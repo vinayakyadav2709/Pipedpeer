@@ -300,11 +300,12 @@ func addGPUSysModule(c *ociConfig, rootfsDir, jobID string) {
 	c.Mounts = append(c.Mounts, ociMount{Destination: dir, Type: "bind", Source: dir, Options: []string{"rbind", "ro"}})
 }
 
-func buildNonIsolatedCmd(runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
+// wrap is a shell fragment the command is appended to (the phone sandbox), or "".
+func buildNonIsolatedCmd(wrap, runPath, workDir string, scriptRelPath string, scriptArgs, envs []string) string {
 	// Same reasoning as the sandbox env: stdout is a pipe, and python would
 	// otherwise sit on a full training run's prints until exit.
 	cmd := "export PYTHONUNBUFFERED=1 && mkdir -p " + shellQuote(workDir) + " && cd " + shellQuote(workDir) + " && " +
-		shellQuote(runPath) + " " + shellQuote(scriptRelPath)
+		wrap + shellQuote(runPath) + " " + shellQuote(scriptRelPath)
 	for _, arg := range scriptArgs {
 		cmd += " " + shellQuote(arg)
 	}

@@ -13,13 +13,13 @@ var oldPyVersionOf = pyVersionOf
 
 func stub(t *testing.T, pool bool, version string) {
 	t.Helper()
-	oldPool, oldLook, oldVer := poolOnly, lookPython, pyVersionOf
+	oldPool, oldLook, oldVer := hostChunks, lookPython, pyVersionOf
 	t.Cleanup(func() {
-		poolOnly, lookPython, pyVersionOf = oldPool, oldLook, oldVer
+		hostChunks, lookPython, pyVersionOf = oldPool, oldLook, oldVer
 		pyOnce = sync.Once{}
 	})
 	pyOnce = sync.Once{}
-	poolOnly = func() bool { return pool }
+	hostChunks = func() bool { return pool }
 	lookPython = func() (string, error) { return "/termux/bin/python3", nil }
 	pyVersionOf = func(string) (string, error) { return version, nil }
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/service"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
@@ -120,6 +121,26 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	args := []string{"__daemon__", "--port", strconv.Itoa(port)}
 	if maxConcurrent > 0 {
 		args = append(args, "--max-concurrent", strconv.Itoa(maxConcurrent))
+	}
+	// A full-node phone: proot-distro kills what this command leaves behind,
+	// so the Termux launcher starts the daemon in a session of its own; the
+	// shell records its pid (exec keeps it) and sends output to the log.
+	if phone.InProot() {
+		sh := `echo $$ > "$1"; log=$2; shift 2; exec "$@" >>"$log" 2>&1`
+		if err := phone.Detach(append([]string{"/bin/sh", "-c", sh, "sh", paths.PIDFile, paths.LogFile, exe}, args...)); err != nil {
+			return err
+		}
+		if err := os.WriteFile(paths.NodeFile, []byte(nodeID+"\n"), 0644); err != nil {
+			return err
+		}
+		if err := writeInt(paths.PortFile, port); err != nil {
+			return err
+		}
+		// proot slows a cold start; 4 s is a laptop's budget.
+		if err := waitForHealthy(port, 60*time.Second); err != nil {
+			return fmt.Errorf("daemon did not become healthy (see %s): %w", paths.LogFile, err)
+		}
+		return nil
 	}
 	// Start inside a delegated user scope when this process is not already in
 	// one. Without it the daemon inherits an ssh session scope that systemd

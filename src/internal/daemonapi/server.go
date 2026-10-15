@@ -205,6 +205,9 @@ type PeerHealth struct {
 	// Role is the peer's heartbeat.RoleCapability ("" = full node). Pool
 	// spill skips introducer-only peers; the poller fills it from /health.
 	Role string `json:"role,omitempty"`
+	// Arch is the peer's nix system ("aarch64-linux"; "" from an old peer).
+	// A closure of another system cannot run there, so it is not sent one.
+	Arch string `json:"arch,omitempty"`
 }
 
 // takesPoolWork reports whether pool spill may send this peer work: every
@@ -644,7 +647,11 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	}
 	// A pool-only phone runs chunks on its host python and has no Nix to
 	// import a closure into.
-	targets = slices.DeleteFunc(targets, func(ph PeerHealth) bool { return ph.Role == heartbeat.RolePoolOnly })
+	// A peer of another architecture (a phone among laptops) cannot run this
+	// closure; it runs chunks on its own pinned python instead (phone.CanRun).
+	targets = slices.DeleteFunc(targets, func(ph PeerHealth) bool {
+		return ph.Role == heartbeat.RolePoolOnly || (ph.Arch != "" && ph.Arch != identity.System())
+	})
 	if len(targets) == 0 {
 		// Usually a timing problem: the health poller has not run since the
 		// peers were added, so they are known but not yet marked healthy.

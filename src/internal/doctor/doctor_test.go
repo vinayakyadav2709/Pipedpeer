@@ -324,3 +324,21 @@ func TestUninstallCarriesOnPastFailure(t *testing.T) {
 		t.Fatal("later step did not run after a failure")
 	}
 }
+
+// A phone never has user namespaces or crun: doctor names the route and the
+// weaker sandbox instead of failing on them.
+func TestMachinePhone(t *testing.T) {
+	m := machine(t)
+	m.Phone, m.PhoneBox = "full node (Debian in proot with Nix)", "phone sandbox: proot view, weaker than crun"
+	var phone, box bool
+	for _, c := range m.Run(context.Background()) {
+		if strings.Contains(c.What, "namespace") || strings.Contains(c.What, "crun installed") || strings.Contains(c.What, "crun missing") {
+			t.Errorf("phone got the laptop sandbox check %q", c.What)
+		}
+		phone = phone || (c.Level == OK && c.What == "phone: "+m.Phone)
+		box = box || (c.Level == Warn && c.What == m.PhoneBox)
+	}
+	if !phone || !box {
+		t.Errorf("route line %v, sandbox warning %v; want both", phone, box)
+	}
+}

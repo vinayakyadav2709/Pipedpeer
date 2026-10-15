@@ -1,10 +1,14 @@
-// Package phone makes an Android phone in Termux a pool-only worker.
+// Package phone makes an Android phone in Termux a node.
 //
-// A phone has no Nix and no crun (no user namespaces for app processes), and
-// an arm64 phone never holds the laptops' x86 store paths anyway. So it takes
-// only Pool/joblib chunks, run with Termux's own python (`pkg install python
-// python-numpy`), and refuses whole jobs through the pool-only role in
-// cluster.json. The pool runner scripts use the standard library only. A chunk
+// The main route (proot.go) is a full node: Debian in proot-distro with Nix.
+// The fallback, when that cannot be set up, is a pool-only worker: no Nix and
+// no crun (no user namespaces for app processes), so it takes only Pool/joblib
+// chunks, run with Termux's own python (`pkg install python python-numpy`),
+// and refuses whole jobs through the pool-only role in cluster.json.
+//
+// Both routes run other architectures' chunks (an arm64 phone never runs the
+// laptops' x86 store paths) on a host python: Termux's, or on the full node a
+// pinned Nix python stack. The pool runner scripts use the standard library only. A chunk
 // that ships func_src is re-compiled there and runs on any host python; a
 // by-value pickled function carries bytecode, so it needs the submitter's
 // minor version.
@@ -36,12 +40,16 @@ const FuncSrcHeader = "X-Pipedpeer-Func-Src"
 
 // IsTermux reports whether this process runs inside Termux.
 func IsTermux() bool {
-	return os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
+	return !InProot() && os.Getenv("TERMUX_VERSION") != "" || strings.Contains(os.Getenv("PREFIX"), "com.termux")
 }
 
-// poolOnly reports whether this node is configured pool-only. A variable so
-// tests need no cluster.json.
-var poolOnly = func() bool {
+// hostChunks reports whether this node runs chunks of closures it lacks on a
+// host python: a pool-only phone, or a full-node phone (whose closures are
+// another architecture's). A variable so tests need no cluster.json.
+var hostChunks = func() bool {
+	if InProot() {
+		return true
+	}
 	c, err := clustercfg.Load()
 	if err != nil {
 		log.Warn().Err(err).Msg("phone: cannot read cluster.json; treating this node as a full node")
@@ -53,7 +61,16 @@ var poolOnly = func() bool {
 // hostPython finds the host python and its "major.minor". Variables so tests
 // can stub them; probed once because every chunk asks.
 var (
-	lookPython  = func() (string, error) { return exec.LookPath("python3") }
+	lookPython = func() (string, error) {
+		if InProot() {
+			py := filepath.Join(hostEnv(), "bin", "python3")
+			if !exists(py) {
+				return "", fmt.Errorf("no pool python at %s (pipedpeer setup builds it)", py)
+			}
+			return py, nil
+		}
+		return exec.LookPath("python3")
+	}
 	pyVersionOf = func(py string) (string, error) {
 		out, err := exec.Command(py, "-c", "import sys; print('%d.%d' % sys.version_info[:2])").Output()
 		return strings.TrimSpace(string(out)), err
@@ -79,7 +96,7 @@ func hostPython() (string, string, error) {
 }
 
 // PoolRunPath is the executable a pool chunk runs under: `<store>/bin/run`
-// when the closure is here, else on a pool-only node the host python (the
+// when the closure is here, else on a phone the host python (the
 // runner is invoked as `<runPath> <script> <args>`, which python accepts as
 // is).
 func PoolRunPath(store string) (string, error) {
@@ -88,7 +105,7 @@ func PoolRunPath(store string) (string, error) {
 			return run, nil
 		}
 	}
-	if !poolOnly() {
+	if !hostChunks() {
 		return "", fmt.Errorf("closure %s is not materialised here", store)
 	}
 	py, _, err := hostPython()
@@ -100,13 +117,13 @@ func PoolRunPath(store string) (string, error) {
 }
 
 // CanRun answers /v1/store?runnable=1: the closure is materialised, or this
-// is a pool-only node with a host python that is either any version (the
+// is a phone with a host python that is either any version (the
 // chunk ships func_src) or the submitter's minor version (by-value bytecode).
 func CanRun(store string, h http.Header) bool {
 	if store != "" && exists(filepath.Join(store, "bin", "run")) {
 		return true
 	}
-	if !poolOnly() {
+	if !hostChunks() {
 		return false
 	}
 	funcSrc := h.Get(FuncSrcHeader) == "1"
