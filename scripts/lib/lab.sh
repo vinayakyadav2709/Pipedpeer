@@ -5,7 +5,8 @@
 # --memory with --memory-swap equal to it, so the container is OOM-killed and
 # never the laptop; the sum of all running containers stays within host RAM
 # minus 5 GB; and a set starts only when it fits in MemAvailable minus 4 GB at
-# that moment, otherwise we wait and say so.
+# that moment. A set that does not fit either way waits (another lab may be
+# about to finish), logging each retry, until LAB_MEM_WAIT seconds (600).
 
 # pp_lab_runtime: docker first. The isolated bridges below use docker's
 # inhibit_ipv4 option, and every rig so far was proven on docker.
@@ -40,30 +41,34 @@ pp_running_mem() {
 	echo "$total"
 }
 
-# pp_lab_mem_check <bytes wanted> [label]: refuse a set that breaks the cap,
-# wait (with a log line) while MemAvailable is short.
+# pp_lab_mem_check <bytes wanted> [label]: wait (with a log line per retry)
+# while the set breaks the cap or MemAvailable is short.
 pp_lab_mem_check() {
 	local want="$1" label="${2:-lab}" gib=1073741824
-	local total running cap avail waited=0 limit="${LAB_MEM_WAIT:-600}"
+	local total running cap avail why waited=0 limit="${LAB_MEM_WAIT:-600}"
 	total="$(pp_meminfo MemTotal)"
-	running="$(pp_running_mem)"
 	cap=$((total - 5 * gib))
-	if ((running + want > cap)); then
-		printf '%s: refusing to start: %.1f GB wanted + %.1f GB already running > %.1f GB cap (host RAM - 5 GB).\n' \
-			"$label" "$(bc_g "$want")" "$(bc_g "$running")" "$(bc_g "$cap")" >&2
-		echo "  use fewer nodes or a smaller LAB_MEM" >&2
+	if ((want > cap)); then
+		printf '%s: refusing: %.1f GB wanted is over the %.1f GB cap (host RAM - 5 GB) on its own; use fewer nodes or a smaller LAB_MEM\n' \
+			"$label" "$(bc_g "$want")" "$(bc_g "$cap")" >&2
 		return 1
 	fi
 	while :; do
+		running="$(pp_running_mem)"
 		avail="$(pp_meminfo MemAvailable)"
-		((avail - 4 * gib >= want)) && return 0
+		why=""
+		if ((running + want > cap)); then
+			why="$(printf '%.1f GB wanted + %.1f GB in running containers > %.1f GB cap (host RAM - 5 GB)' \
+				"$(bc_g "$want")" "$(bc_g "$running")" "$(bc_g "$cap")")"
+		elif ((avail - 4 * gib < want)); then
+			why="$(printf '%.1f GB wanted, MemAvailable %.1f GB (needs 4 GB spare)' "$(bc_g "$want")" "$(bc_g "$avail")")"
+		fi
+		[[ -z "$why" ]] && return 0
 		if ((waited >= limit)); then
-			printf '%s: gave up after %ds: %.1f GB wanted, MemAvailable %.1f GB (needs 4 GB spare)\n' \
-				"$label" "$waited" "$(bc_g "$want")" "$(bc_g "$avail")" >&2
+			echo "$label: gave up after ${waited}s: $why; use fewer nodes or a smaller LAB_MEM" >&2
 			return 1
 		fi
-		printf '%s: waiting for memory: %.1f GB wanted, MemAvailable %.1f GB (needs 4 GB spare); retry in 15 s\n' \
-			"$label" "$(bc_g "$want")" "$(bc_g "$avail")" >&2
+		echo "$label: waiting for memory: $why; retry in 15 s" >&2
 		sleep 15
 		waited=$((waited + 15))
 	done
