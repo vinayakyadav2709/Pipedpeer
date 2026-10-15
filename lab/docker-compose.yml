@@ -20,6 +20,7 @@ services:
       - ${LAB_BIN:-./pipedpeer}:/usr/local/bin/pipedpeer:ro
     environment:
       - XDG_DATA_HOME=/var/lib/pipedpeer
+      - LAB_NODE=${LAB_CTR:-pipedpeer-lab}-1
       - LAB_TOKEN=${LAB_TOKEN:-}
       - PIPEDPEER_TOKEN=${LAB_TOKEN:-}
   worker2:
@@ -36,6 +37,7 @@ services:
       - ${LAB_BIN:-./pipedpeer}:/usr/local/bin/pipedpeer:ro
     environment:
       - XDG_DATA_HOME=/var/lib/pipedpeer
+      - LAB_NODE=${LAB_CTR:-pipedpeer-lab}-2
       - LAB_TOKEN=${LAB_TOKEN:-}
       - PIPEDPEER_TOKEN=${LAB_TOKEN:-}
   worker3:
@@ -52,6 +54,7 @@ services:
       - ${LAB_BIN:-./pipedpeer}:/usr/local/bin/pipedpeer:ro
     environment:
       - XDG_DATA_HOME=/var/lib/pipedpeer
+      - LAB_NODE=${LAB_CTR:-pipedpeer-lab}-3
       - LAB_TOKEN=${LAB_TOKEN:-}
       - PIPEDPEER_TOKEN=${LAB_TOKEN:-}
 

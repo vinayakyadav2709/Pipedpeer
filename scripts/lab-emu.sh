@@ -153,10 +153,13 @@ DOCKER
 			-e XDG_DATA_HOME=/var/lib/pipedpeer \
 			-e PIPEDPEER_EMULATED=1 \
 			-e LAB_TOKEN="$tok" \
+			-e LAB_NODE="$lab_name-$i" \
 			-e PIPEDPEER_TOKEN="$tok" \
 			-e LAB_API_PORT="${LAB_API_PORT:-4242}" \
 			"$image" sh -c '
 				mkdir -p /var/lib/pipedpeer/pipedpeer /var/log /tmp
+				# Own machine id per container: the machine key hashes it.
+				printf %s "$LAB_NODE" | md5sum | cut -c1-32 >/etc/machine-id
 				umask 077
 				printf "{\"token\":\"%s\"}\n" "$LAB_TOKEN" >/var/lib/pipedpeer/pipedpeer/cluster.json
 				pipedpeer setup -y >/var/log/pipedpeer-setup.log 2>&1 || cat /var/log/pipedpeer-setup.log >&2
