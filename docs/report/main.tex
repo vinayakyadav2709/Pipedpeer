@@ -86,8 +86,11 @@
 }
 
 % -- Table helpers -----------------------------------------------------------
-\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
-\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+% Table cells: ragged right (X columns included) and never hyphenated.
+\newcommand{\cellfmt}{\hyphenpenalty=10000\exhyphenpenalty=10000}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash\cellfmt}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash\cellfmt}p{#1}}
+\renewcommand{\tabularxcolumn}[1]{>{\raggedright\arraybackslash\cellfmt}p{#1}}
 \setlength{\emergencystretch}{2em}
 % Let a figure share a page with text rather than sit alone on a mostly empty
 % float page.

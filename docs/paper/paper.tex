@@ -26,8 +26,11 @@
 \usepackage{tabularx}
 \usepackage{url}
 
-\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
-\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+% Table cells: ragged right and never hyphenated.
+\newcommand{\cellfmt}{\hyphenpenalty=10000\exhyphenpenalty=10000}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash\cellfmt}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash\cellfmt}p{#1}}
+\renewcommand{\tabularxcolumn}[1]{>{\raggedright\arraybackslash\cellfmt}p{#1}}
 \newcommand{\figpath}[1]{../diagrams/#1}
 \usepackage{xcolor}
 \newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
@@ -87,15 +90,18 @@ removes all three for Python: a single command runs an unmodified script on othe
 machines, each running the same daemon, with no head node and no scheduler
 process. The script's environment is built as a Nix closure against a pinned
 package set, so it has the same store path on every machine, and a peer
-receives only the store paths it lacks. The parallel primitives the script
-already uses are substituted at import time; parallel maps are divided by a
-makespan solver over measured peer throughput, and numerical work moves only
-when a cost model predicts a gain. PyTorch data-parallel training is
-synchronised through the daemons with batches weighted by measured speed, either
-exactly or by DiLoCo-style periodic averaging, which stayed within 1\% of one
-device's validation loss while sending 9--16$\times$ fewer bytes. Machines behind different routers meet
-through an introducer that any member can serve, then connect directly over
-authenticated QUIC; no data is relayed. In a container lab a repeat
+receives only the store paths it lacks. Placement runs in the submitting
+client under a lease, and every distributed path falls back to a local one. The
+parallel primitives the script already uses are substituted at import time;
+parallel maps are divided by a makespan solver over measured peer throughput,
+and numerical work moves only when a cost model predicts a gain. PyTorch
+data-parallel training is synchronised through the daemons with batches
+weighted by measured speed, either exactly or by DiLoCo-style periodic
+averaging; at the default two-rank interval of 32 steps, averaging stayed
+within 1\% of one device's validation loss on every test model while each rank
+sent 7.6--9.2$\times$ fewer bytes than exact synchronisation. Machines behind
+different routers meet through an introducer that any member can serve, then
+connect directly over authenticated QUIC; no data is relayed. In a container lab a repeat
 submission took 0.83\,s against 23.4\,s for the first, and interception cost
 $1.24\times$ the startup of a trivial job. Between two laptops in different
 homes, over a Tailscale network, a CPU-bound script ran in about 14\,s against 18\,s on one.
@@ -193,7 +199,7 @@ training ring's rank~0.
 
 The cross-network mechanism follows established practice. Reflexive addresses
 are discovered as in STUN~\cite{rfc8489}; port mappings are requested with
-PCP~\cite{rfc6887} and NAT-PMP~\cite{rfc6886}; simultaneous UDP probing from the
+PCP~\cite{rfc6887}, NAT-PMP~\cite{rfc6886} and UPnP-IGD~\cite{upnpigd}; simultaneous UDP probing from the
 socket that will carry the connection is the hole punching of Ford et
 al.~\cite{ford2005p2p}; links are QUIC~\cite{rfc9000}.
 
@@ -350,8 +356,10 @@ overdue is copied to a free peer, and the first copy to finish wins.
 complete on a single node and any aggregation is exact with no combiner; the row
 order of joins is not preserved.
 
-\textbf{Training.} Ranks post gradients to the lead node's daemon rather than
-building a rank-to-rank mesh, and the daemon returns one sample-weighted average
+\textbf{Training.} Ranks post gradients to daemons, not to a rank-to-rank
+mesh: to the lead node's daemon, or, in exact mode on three or more directly
+reachable machines, one shard to each rank's daemon (a butterfly). Every rank
+receives one sample-weighted average
 $\sum_i n_i g_i / \sum_i n_i$, sent as 8-bit values with per-block scales and
 error feedback. The global batch is partitioned across ranks in proportion to their
 speed, preserving the effective learning rate. Unless the user fixed the ring
@@ -366,7 +374,7 @@ about $1/n$ of the samples.
 A fast mode synchronises every $H$ steps: an exact warm-up, then local steps
 whose weights are averaged by samples, with optimiser moments averaged every
 tenth round. It never changes epochs, batch or learning rate, and must keep
-validation loss at most 1\% above one device's (mean of three seeds, every test
+validation loss at most 1\% above one device's (mean over seeds, every test
 model). DiLoCo's outer Nesterov step (lr 0.7, momentum 0.9) settles at
 $0.7/(1-0.9)=7$ times the averaged change, which suits syncs every few hundred
 steps; at our intervals of 2--64 steps PipedPeer uses plain averaging (outer lr
@@ -387,11 +395,11 @@ and $K$ nodes, divisible work moves only when
 \label{eq:cost}
 \frac{b\phi}{R} \;>\; \frac{\rho\,b}{B} \;+\; \frac{b\phi}{R'K}\times 1.3 .
 \end{equation}
-Work needs at least two nodes and 32\,MB; work that does not fit in local memory
+Work needs at least two nodes and 32\,MiB; work that does not fit in local memory
 moves regardless, and a matrix product that fits nowhere raises an error rather
 than exhausting the machine. A GPU peer raises $R'$ sixfold, a conservative heuristic multiplier. The inequality is
 first tried at an optimistic 10\,Gbit/s and, only if offloading could win,
-bandwidth is taken from recent transfers or an 8\,MB probe through the dispatch path (Fig.~\ref{fig:cost}).
+bandwidth is taken from recent transfers or an 8\,MiB probe through the dispatch path (Fig.~\ref{fig:cost}).
 Indivisible work (SVD) moves when transfer costs under half the local time. At
 about 200\,GFLOP/s, local BLAS outruns a CPU cluster's transport, so dense
 matrix products stay local, while a GPU peer can win.
@@ -401,7 +409,7 @@ matrix products stay local, while a GPU peer can win.
 \includegraphics[width=\columnwidth]{\figpath{fig_4.11_cost_model.png}}
 \caption{Decision regions of Equation~\ref{eq:cost} for the pandas path
 ($\rho=1$, 1\,GFLOP/s) at three nodes on a 500\,MB/s link. The step at
-512\,MB is a separate rule: below 8 flop per byte, work up to 512\,MB stays
+512\,MiB is a separate rule: below 8 flop per byte, work up to 512\,MiB stays
 local.}
 \label{fig:cost}
 \end{figure}
@@ -429,9 +437,8 @@ PipedPeer's, and a summary of where its items ran.
 PipedPeer is a single Go~1.25 binary that is both client and daemon, built from
 46 Go packages and an embedded Python interception shim. The daemon serves an HTTP API, makes
 direct links with quic-go, builds environments with Nix flakes, and runs each
-job in a \texttt{crun} sandbox. The test suite is checked by a mutation audit:
-disabling any one of 95 features --- among them gradient weighting, co-located
-daemons' memory accounting and the router-mapping checks --- makes it fail.
+job in a \texttt{crun} sandbox. Disabling any one of 95 features makes the
+test suite fail.
 
 \section{Evaluation}
 
@@ -454,8 +461,8 @@ container against several of the same size. A 16-thread laptop with an RTX~3060
 laptop GPU under Fedora~44 runs a second lab. Physical runs use two laptops in different homes (RTX~3060
 and RTX~3050), a 20-core and a 16-core host joined over Tailscale, and a Samsung
 Galaxy S20~FE (Android~13). Between the two laptops, PipedPeer's own QUIC link ran on
-top of a Tailscale (WireGuard) network with 6--8\,ms round trip, because the
-second laptop is shared into the first one's tailnet: neither home offered a
+top of a Tailscale (WireGuard) network with 6--8\,ms round trip, because both
+laptops joined one Tailscale network: neither home offered a
 reachable introducer, since one router refuses port mapping and the other
 machine sits behind two NATs. These runs measure distribution between homes,
 not PipedPeer's NAT traversal. NAT traversal without
@@ -466,8 +473,9 @@ unsolicited inbound packets, with the introducer on a third network standing for
 the internet; every user command is run across it.
 Training accuracy is measured against one device trained on the same data:
 two-rank rings in the lab, larger rings in-process, with the ranks side by side
-on a single machine. Lab wall times are medians of three to five runs; accuracy is
-the mean of three seeds.
+on a single machine. Lab wall times are medians of three to five runs, and of
+one seed for training; lab accuracy is a mean of three seeds, in-process
+accuracy of seeds 0--2 and, where run, 0--5. MiB and GiB are binary.
 
 \subsection{Microbenchmarks (Q1, Q2)}
 
@@ -495,9 +503,9 @@ worker and took 2.9\,s against 3.6\,s. With one peer at a tenth of the CPU,
 the slowdown against an equal cluster fell from $1.6\times$ on the first run to
 $1.08\times$ by the fourth as the rate estimates converged.
 
-\textbf{Introducer.} During a run between peers the introducer's host carried
-0.2\,MB against about 30\,MB between the peers, and with the introducer
-suspended a known peer was reached in 0.03\,s.
+\textbf{Introducer.} In a run between two physical machines the
+introducer's host carried 0.2\,MB against about 30\,MB between the peers, and
+with the introducer suspended a known peer was reached in 0.03\,s.
 
 \subsection{End-to-end runs (Q3)}
 
@@ -518,8 +526,9 @@ run of a new GPU environment is dominated by its build (487\,s of 506\,s,
 mostly downloading CUDA PyTorch); the same script then took 17.7\,s. On the phone, a laptop's CPU script spread over
 both laptops and the phone gave the phone 8 of 192 items with an unchanged
 result, after the phone had built the environment from the cache in 27\,s.
-The same script without its pandas step ran on the phone in about 64\,s with
-Nix's Python inside \texttt{proot}, against 76\,s with Termux's own Python.
+Without its pandas step the script took a median of 62.8\,s on the phone
+with Nix's Python in \texttt{proot}, against 73.1\,s with Termux's (three runs
+each).
 
 \textbf{Across two NATs.} On the two-site testbed (Section~\ref{sec:setup}),
 scripts, parallel maps, remote runs and both training sync modes ran across the
@@ -541,9 +550,9 @@ measurements.
 Pool map, 20-core host alone vs.\ with 16-core peer (Tailscale) & 5.8--6.4 vs.\ 4.9--5.4\,s \\
 CPU script, one laptop vs.\ two over Tailscale & 18 vs.\ 14\,s \\
 Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s \\
-\quad final loss, same three & 0.0875 / 0.0875 / 0.0877 \\
+\quad final loss: 1 machine / fp16 / int8 & 0.0875 / 0.0875 / 0.0877 \\
 Training, two laptops (Tailscale): 1 GPU / \texttt{-{}-ddp~2} exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
-\quad validation loss, same four & 0.0794 / 0.0797 / 0.0797 / 0.0796 \\
+\quad val.\ loss: 1 GPU / exact / fast / auto & 0.0794 / 0.0797 / 0.0797 / 0.0796 \\
 New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
 \bottomrule
 \end{tabularx}
@@ -560,35 +569,38 @@ light steps over Wi-Fi ran ten times slower split than alone (80.7 against
 automatic sync could choose only the sync mode: the ring switched to fast mode
 after a short exact warm-up and finished in 14.6\,s, $2.5\times$ faster than
 exact; without \texttt{-{}-ddp~$N$} the lead releases a ring that one rank
-alone outruns. On a single machine, a ring of 16, 8 and 2 cores took 23.6\,s with
-measured batch sizes against 25.4\,s with equal ones.
+alone outruns. Offered 16-, 8- and 2-core ranks on one machine, admission
+took the first two, which ran in 23.6\,s with measured batch sizes against
+25.4\,s with equal ones.
 
-\textbf{Fast synchronisation.} On two ranks in the lab with LAN and Wi-Fi
-profiles, plain averaging every 64 steps after a 10-step warm-up changed
-validation loss against one device by $+0.64\%$/$+0.61\%$ on a GPU-sized
-MLP (MLP-G), $-2.14\%$/$-2.09\%$ on a CPU-sized MLP (MLP-C; periodic averaging
-can generalise slightly better~\cite{lin2020localsgd}) and $+0.18\%$/$+0.50\%$ on a small
-transformer (each pair LAN/Wi-Fi), each within exact sync's own spread, while
-sending 9--16$\times$ fewer bytes per rank; it finished 1.2--1.4$\times$ faster
-than exact sync on LAN and 1.6--3.1$\times$ on Wi-Fi (one seed). DiLoCo's outer
-step left the transformer $21.7\%$ above one device even with one sync per
-epoch (156 local steps), the longest interval these runs allow.
+\textbf{Fast synchronisation.} At the default two-rank interval, plain
+averaging every 32 steps after a 10-step warm-up kept validation loss within
+1\% of one device in-process: $+0.06\%$ on a GPU-sized MLP (MLP-G), $+0.64\%$
+on a CPU-sized MLP (MLP-C) and $+0.73\%$ on a small transformer (seeds 0--2;
+$+0.35\%$ and $-1.02\%$ for the last two over seeds 0--5). In the lab at 32
+steps (one seed), each rank sent 7.6--9.2$\times$ fewer bytes than
+exact sync, and the ring finished 1.2--1.4$\times$ faster than exact on LAN and
+1.6--3.1$\times$ on Wi-Fi. At 64 steps the lab stayed within the bar too
+(three seeds, LAN and Wi-Fi, worst $+0.64\%$), but in-process the transformer
+failed on seeds 0--2 ($+2.13\%$). DiLoCo's outer
+step left the transformer $21.7\%$ above one device even at one sync per
+epoch (156 local steps).
 
-\textbf{Many ranks.} In-process runs with ranks side by side, on up to six
-seeds, set the interval $H(n)$ as the largest that passed on every model: 32 at
-two ranks (64, which passed in the lab, failed the transformer on other seeds, $+2.13\%$), 16 at three and 4 at four; at
+\textbf{Many ranks.} In-process runs, on up to six seeds, set the interval $H(n)$ as the largest that passed on every model: 32 at
+two ranks, 16 at three and 4 at four; at
 eight ranks the transformer failed at every interval down to 2, so no interval
 is used for five or more ranks. Of ten methods tested at 4, 8 and 11 ranks, only
 exact synchronisation with rank-16 PowerSGD~\cite{vogels2019powersgd}
-compression and error feedback kept every model within 1\% of one device (worst
-mean $+0.18\%$), sending $3.2\times$ fewer bytes than int8.
+compression and error feedback kept every model within 1\% (worst mean
+$+0.18\%$), with $3.2\times$ fewer bytes than int8 on the MLPs but $1.7\times$
+more on the transformer.
 
 \section{Limitations}
 
 The labs share one processor among their workers, so they show cost, not
 speedup, and the physical runs cover two or three machines with few repetitions.
-NAT traversal is evaluated on this container testbed and over an overlay between
-real homes.
+NAT traversal is evaluated on the two-site testbed (Section~\ref{sec:setup}) and
+over an overlay between real homes.
 TLS is trust on first use, the keys trusted to sign closures are not yet bound to
 an authenticated identity, and authorisation is one shared secret. Only Python is
 supported, and a training ring depends on rank~0's machine.
@@ -596,13 +608,13 @@ supported, and a training ring depends on rank~0's machine.
 \section{Conclusion and Future Work}
 
 PipedPeer runs unmodified Python on other machines without configuring a
-cluster, by reproducing environments as content-addressed closures that are
-cached and diffed by store path, substituting the parallel primitives a script
-already uses, dividing work by measured speed, and joining machines across
-networks over direct, authenticated links with no relay and no privileged node.
-Its central design rule is to measure before distributing and to decline when
-distributing would be slower: the per-call cost gate, the measured split and the
-training ring's own check each follow from it. Future work is to bind signing
+cluster: it ships environments as content-addressed closures diffed by store
+path, substitutes the parallel primitives a script already uses, divides work
+by measured speed, and joins machines across networks over direct,
+authenticated links with no relay and no privileged node.
+Its central rule is to measure before distributing and to decline when that
+would be slower; the cost gate, the measured split and the ring's own check
+each follow from it. Future work is to bind signing
 keys to authenticated identities and require TLS, to add locality- and
 topology-aware placement and AMD accelerators, to let a training ring survive
 its submitter and rank~0, and to run a controlled evaluation on more machines.
@@ -626,6 +638,8 @@ its submitter and rank~0, and to run a controlled evaluation on more machines.
 \bibitem{rfc6887} D.~Wing, S.~Cheshire, M.~Boucadair, R.~Penno, and P.~Selkirk, ``Port Control Protocol (PCP),'' RFC~6887, IETF, Apr. 2013.
 
 \bibitem{rfc6886} S.~Cheshire and M.~Krochmal, ``NAT Port Mapping Protocol (NAT-PMP),'' RFC~6886, IETF, Apr. 2013.
+
+\bibitem{upnpigd} UPnP Forum, ``Internet Gateway Device (IGD) V2.0,'' Standardized DCP, 2010.
 
 \bibitem{ford2005p2p} B.~Ford, P.~Srisuresh, and D.~Kegel, ``Peer-to-peer communication across network address translators,'' in \textit{Proc. USENIX Annual Technical Conf.}, 2005, pp.~179--192.
 

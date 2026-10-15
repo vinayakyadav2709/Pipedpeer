@@ -19,8 +19,7 @@ never see each other; multicast with port reuse reaches all of them.
 \textbf{TCP fallback.} Access points with client isolation drop broadcast
 traffic without error. When the UDP probe returns nothing, the daemon sweeps
 each local interface's prefix (container and VPN interfaces skipped) with
-concurrent health probes, 64 at a time with a 700\,ms timeout each, and stops
-once any daemon answers. A reply's host is taken from the packet's source
+concurrent health probes, and stops once any daemon answers. A reply's host is taken from the packet's source
 address, never from the address the peer advertised at startup.
 
 \textbf{The address book.} The node store keeps every node under its node id,
@@ -33,9 +32,8 @@ LAN path beats a verified internet path. Members also gossip their own
 addresses, signed with their node keys, over the authenticated API; a gossiped
 address is a candidate, never a fact.
 
-The poller runs every 10\,s, trying the active path first; a node with no
-verified path for 15 minutes is removed, and a sighting alone never refreshes
-it.
+The poller tries the active path first; a node with no verified path for 15
+minutes is removed, and a sighting alone never refreshes it.
 
 % ------------------------------------------------------------
 \section{Joining Across Networks}
@@ -68,19 +66,18 @@ machine's reason and fix (exit 2); or failed, with what to do (exit 1).
 \textbf{An introducer in every daemon.} Every daemon holding a secret serves the
 introducer for its own cluster on UDP 4244 and refuses other clusters. A node
 registers with every introducer it knows --- those in its invite code and
-members it has verified, at most eight --- every 30\,s and at once when its own
-address changes, so the cluster survives the loss or readdressing of any one
+members it has verified --- periodically and at once when its own address
+changes, so the cluster survives the loss or readdressing of any one
 member. A public server can join as an introducer that takes no jobs. Nodes
 register their candidates under a cluster identifier derived from the secret by
 hashing, so an introducer never holds the secret itself. A \texttt{connect}
 request makes it forward a single punch datagram to the target, carrying only
-the candidates the caller itself registered, rate-limited to four requests per
-second per source. It carries no job data.
+the candidates the caller itself registered, rate-limited per source. It
+carries no job data.
 
 \textbf{Candidates.} Each node offers three kinds of address: its LAN addresses;
 a port its router agreed to forward, requested by PCP \cite{rfc6887}, NAT-PMP
-\cite{rfc6886} or UPnP-IGD \cite{upnpigd} for two hours and renewed at half the
-lifetime granted; and the reflexive address the introducer observed, in the
+\cite{rfc6886} or UPnP-IGD \cite{upnpigd} and renewed before it lapses; and the reflexive address the introducer observed, in the
 manner of STUN \cite{rfc8489}. A router mapping is withheld when its external
 address differs from the reflexive one: behind a second layer of NAT, such as a
 phone tether, the router that answers is not the one facing the internet.
@@ -115,7 +112,7 @@ peer's daemon. Placement, closure transfer and gradient exchange therefore work
 over the link unchanged.
 
 \textbf{Roaming.} A hello from a key that already has a link replaces that link
-at once. The daemon checks its interfaces every 5\,s; on a change it migrates
+at once. The daemon watches its interfaces; on a change it migrates
 the QUIC connections it dialled to the new address, redials those it accepted,
 and registers again with every introducer.
 
@@ -174,7 +171,14 @@ cluster's keys to that one copy operation, after checking the archive's named
 signer against the signer's published identity. Because a multi-user Nix daemon
 ignores keys passed by an untrusted user, setup also installs a root-owned
 helper that can do nothing but add or remove keys of the cluster's fixed form.
-The limits of this design are set out in Section~\ref{sec:security}.
+
+\textbf{Limits.}\label{sec:security} These protections have significant limits.
+Every holder of the secret can run code on every node, and jobs can read the
+secret. TLS on a local network is trust on first use and can be downgraded by an
+attacker who can break the handshake. The list of keys trusted to sign closures
+includes nodes found by unauthenticated LAN discovery, and the submitter's own
+upload is imported without a signature check. PipedPeer therefore suits
+machines whose owners trust one another, over networks they need not trust.
 
 % ------------------------------------------------------------
 \section{Placement and Scoring}
@@ -241,10 +245,10 @@ recovery lives (Figure~\ref{fig:lease}).
     \label{fig:lease}
 \end{figure}
 
-An \texttt{accept} reserves capacity for 30 seconds with a 5 second grace; a
-\texttt{commit} promotes the reservation to running, renewed every 30 seconds
-and reaped after 5 minutes without renewal; \texttt{complete} releases it. A
-sweeper runs every 2 seconds. The submitter renews while the environment builds
+An \texttt{accept} reserves capacity for 30 seconds; a \texttt{commit}
+promotes the reservation to running, renewed every 30 seconds and reaped after
+5 minutes without renewal; \texttt{complete} releases it, and a sweeper reclaims
+what has expired. The submitter renews while the environment builds
 and uploads, so a long build never outlives its lease, and a lease bound to a
 running job is kept past its expiry.
 
@@ -257,12 +261,11 @@ through the window between accept and commit.
 Recovery then needs no further machinery. A submitter that dies stops renewing,
 and the sweeper reclaims its slot. A worker that dies stops answering health
 checks and its in-flight connection fails, which the coordinator treats as a
-failed attempt and reschedules, with back-off doubling from 2 seconds to a
-2 minute ceiling. Waiting for room never drops a task, while a job that
+failed attempt and reschedules, with exponential back-off. Waiting for room never drops a task, while a job that
 \emph{fails} is run at most three times, on untried nodes first. From the
 submitter a dead node and a lost network look the same, but the first means run
 the job elsewhere and the second means wait; the client therefore runs three
-probes at once, two seconds each and none needing root --- another peer's health
+short probes at once, none needing root --- another peer's health
 endpoint, a registration with the introducer, and a TCP connection to the
 default gateway --- and an answer to any of them confirms that the remote peer,
 not the local network, failed.
@@ -334,8 +337,8 @@ environments that differ by one package share most of them. The client lists the
 closure's paths and asks the target which it lacks; if some but not all are
 missing, only those are sent, as a partial import that the receiver never caches
 as the whole closure. A fresh node may instead fetch public paths from the Nix
-binary cache; if that download has not finished 30 seconds after the sender's
-archive arrived, it is abandoned and the sender sends every missing path itself.
+binary cache; if that download falls well behind the sender's archive, it is
+abandoned and the sender sends every missing path itself.
 
 \textbf{Signed transfer between daemons.} After an upload, the worker pushes the
 closure to peers that cannot yet run it. Parallel work is shared only with peers
@@ -349,8 +352,7 @@ produced and imported by Nix's own copy mechanism.
 for these pushes. A peer still importing finishes in the background and joins
 the pool by itself, since each parallel chunk asks afresh which peers can run
 it; meanwhile it reports ``importing'', so no second send starts. A background
-send is cut only when it stops moving, after 60 seconds with no bytes sent.
-Both closure caches are pruned least-recently-used to 8\,GiB each, and workspace
+send is cut only when it stops moving. Both closure caches are pruned least-recently-used to 8\,GiB each, and workspace
 and results archives are compressed with Zstandard \cite{rfc8878}.
 
 % ------------------------------------------------------------
@@ -378,9 +380,8 @@ to the CPU silently.
 
 \textbf{A memory ceiling for every job.} Where the daemon has a usable cgroup v2
 hierarchy, each job runs in its own cgroup with a memory limit, and an equal swap
-limit, of twice its estimated requirement with a 512\,MiB floor, clamped to what
-the node can grant but never below what admission approved; a job with no
-estimate is capped at 4\,GiB. When a job is killed and the cgroup's
+limit, of twice its estimated requirement, clamped to what the node can grant
+but never below what admission approved. When a job is killed and the cgroup's
 out-of-memory counter has risen, the client says so and how to raise
 \texttt{-{}-mem}.
 
@@ -388,8 +389,8 @@ out-of-memory counter has risen, the client says so and how to raise
 processes in the daemon's own cgroup, so \texttt{pipedpeer start} launches the
 daemon in a user \texttt{systemd} scope with a ceiling of half the machine and
 swap refused. A daemon without a user \texttt{systemd}, such as one in a
-container, runs a watchdog instead that measures the daemon's children every
-second and, past the ceiling, kills the largest child and logs it, never the
+container, runs a watchdog instead that measures the daemon's children and,
+past the ceiling, kills the largest child and logs it, never the
 daemon. A hard limit is used rather than a throttling one, because a job held
 at a throttling limit stalls instead of failing. Daemons on a single machine,
 recognised by the kernel's boot identifier, subtract one another's reservations,
@@ -410,18 +411,18 @@ the job unisolated, unless it uses a private Nix store, in which case it refuses
 \textbf{Results and output.} Only files created or modified during the run are
 returned, with deletions carried in a manifest, so a job cannot overwrite the
 submitter's own sources; any path that escapes the job's directory is refused on
-both sides. Output is forwarded as each read of up to 4\,KB arrives, so a
+both sides. Output is forwarded as each read arrives, so a
 progress bar on a remote node animates on the submitter's terminal.
 
 \textbf{Stopping and detaching.} An interrupt or a closed terminal makes the
 client send one cancel frame; the daemon signals the job's process group, kills
-it two seconds later if it is still alive, and the cancel reaches remote runs,
+it if it is still alive shortly after, and the cancel reaches remote runs,
 parallel chunks on peers and every training rank. A connection that ends
 \emph{without} a cancel frame never kills the job, and background mode builds on
 this: the daemon logs every output frame, a detach closes the channel without a
 cancel, and \texttt{pipedpeer attach} replays the log, follows live, and
 downloads the results at the end. A detached job's directory is pruned 24 hours
-after it ends, and its log is capped at 50\,MB.
+after it ends.
 
 \textbf{Phones.} An Android phone joins under Termux \cite{termux} as a worker for
 parallel chunks, running them from a Nix environment inside a Debian under
@@ -444,7 +445,7 @@ shim performs that work first, since only the first module on the path is
 imported (Figure~\ref{fig:shim}). \texttt{multiprocessing.Pool} and \texttt{ProcessPoolExecutor} are
 patched at startup, while NumPy, pandas, torch and joblib are patched on their
 first import through an import hook, so a job that never imports torch never pays
-its 1.7\,s import (Section~\ref{sec:res-shim}).
+for patching it (Section~\ref{sec:res-shim} measures the startup cost).
 
 \begin{figure}[!htbp]
     \centering
@@ -470,7 +471,7 @@ node each part ran on, so a claim about where work ran can be checked.
 
 \textbf{Sharing work by measured speed.} On the daemon, a chunk is divided among
 peers by a makespan solver. Each device is modelled as a setup time $o_i$ plus a
-throughput $r_i$, fitted by least squares from the last eight parts it returned;
+throughput $r_i$, fitted by least squares from the recent parts it returned;
 an unmeasured peer is assumed to be as fast as this node, scaled by its core
 count, since assuming it slow would size its share below anything worth sending.
 The solver finds the finishing time $T$ at which the devices together complete
@@ -488,7 +489,7 @@ before the fit has caught up: a split part waiting for its peer starts on anothe
 peer with a free slot when that would finish sooner; a part running past its
 prediction gets a copy on the fastest free peer, the first result winning and the
 loser cancelled; and a chunk too small to split goes to the peer predicted to
-finish first. A peer that lost its last three races stops being raced.
+finish first. A peer that keeps losing races stops being raced.
 
 \textbf{Transfer.} Each node's chunks in flight follow its measured round trip,
 and chunk size follows the measured transfer cost. Large functions and globals
@@ -509,7 +510,7 @@ machines, keeping the sender free for its user.
 \midrule
 \texttt{multiprocessing.Pool}, \texttt{ProcessPoolExecutor.map} & Measure a few items locally, then race local against remote chunks shared by measured speed \\
 pandas \texttt{groupby().agg()}, \texttt{merge}, \texttt{join} & Hash shuffle on the key; bucket zero local \\
-pandas \texttt{read\_csv}, \texttt{read\_parquet} & Out-of-core reads in 64\,MB chunks cut at record boundaries \\
+pandas \texttt{read\_csv}, \texttt{read\_parquet} & Out-of-core reads in 64\,MiB chunks cut at record boundaries \\
 \texttt{numpy.matmul}, \texttt{dot}, \texttt{tensordot} (2-D) & Split into row blocks, concatenated at the origin \\
 \texttt{numpy.linalg.svd}, \texttt{eig} & Whole matrix offloaded to one worker \\
 \texttt{joblib.Parallel}, scikit-learn \texttt{n\_jobs} & Batches of delayed tasks, shared arrays sent once per chunk \\
@@ -522,7 +523,7 @@ torch training (\texttt{-{}-ddp}) & Gradients or weights averaged by the lead da
 Interception replaces module functions, so the operator form \texttt{A @ B} is
 not intercepted for NumPy arrays. A \texttt{joblib} call made inside a remote
 task runs inline on that worker. pandas operations are distributed only above
-512\,MB unless forced, because their arithmetic intensity is low.
+512\,MiB unless forced, because their arithmetic intensity is low.
 
 \textbf{Why the shuffle is exact.} Hash partitioning on the key is the standard
 technique of MapReduce \cite{dean2004mapreduce}; PipedPeer uses only that path,
@@ -554,13 +555,17 @@ node's ordinary daemon port, which works wherever the daemon port works,
 including over the links of Section~\ref{sec:nat}. The daemon \emph{reduces}:
 gradients arrive as raw frames, are summed in double precision weighted by the
 number of samples behind each, $\sum_i n_i g_i / \sum_i n_i$, and one averaged
-gradient is returned (Figure~\ref{fig:ddp}). Returning every rank's gradient to every rank instead was
-measured 21 times slower on two machines (62.9\,s against 2.9\,s). Gradients
+gradient is returned (Figure~\ref{fig:ddp}). A design in which every rank
+received every other rank's gradient ran the same training job in 62.9\,s
+across two machines, against 2.9\,s on one machine alone. Gradients
 travel as 8-bit integers with one scale per block of 4096 values, the rounding
 error carried into the next step in both directions (error feedback)
-\cite{dettmers2016eightbit, seide2014onebit}. Three or more ranks reduce in a
-butterfly rather than through one hub, and ranks on one machine average locally
-first.
+\cite{dettmers2016eightbit, seide2014onebit}. In exact mode a ring of three or
+more machines, each reachable directly, reduces in a butterfly instead: each
+rank's daemon averages one shard of the gradient, so the lead's link carries
+$2(N-1)/N$ of a gradient rather than $N-1$. Ranks that share a machine instead
+average there first and send one synchronisation for the machine. A ring of
+two, and every fast-mode round, goes through the lead.
 
 \textbf{Choosing the ring.} Each candidate's throughput is probed, and the ring
 admitted is the prefix of the fastest that maximises $k \cdot r_k$ --- the ring's
@@ -569,12 +574,12 @@ only, GPUs when any are wanted and present, with the lead on a GPU node. Each
 rank's shard and batch slice are sized by its share, and the slices sum to the
 script's own batch, so the learning rate and the mathematics are the script's.
 Every rank sends a manifest of its parameters to the opening barrier, and a
-mismatch stops every rank with one message. Every 20 synchronisations the daemon
-refits the shares from observed step rates, applying them at the next epoch
-boundary when a share has moved by a tenth or more, and it can drop the slowest
+mismatch stops every rank with one message. The daemon periodically refits
+the shares from observed step rates, applying them at the next epoch boundary
+when a share has moved enough to matter, and it can drop the slowest
 rank --- never rank 0, never below two --- when that rank adds more
 synchronisation time than computation. A round that a straggler has not joined
-completes without it after 45 seconds.
+completes without it after a timeout.
 
 \textbf{One GPU or a split.} After a warm-up, the lead daemon compares the
 measured step time of the split with that of the fastest rank alone, and either
@@ -599,8 +604,8 @@ validation loss may be at most 1\% above one device's, as a mean over three
 seeds, on every test model. The interval depends on the ring's size: the largest
 that passed on every model was 32 steps at two ranks, 16 at three and 4 at four,
 and none passed at eight ranks, so none is used for five or more
-(Section~\ref{sec:res-train}). That table is the
-default; an explicit fast ring beyond four ranks runs at $H=4$ with a warning.
+(Section~\ref{sec:res-train}). These intervals are the
+defaults; an explicit fast ring beyond four ranks runs at $H=4$ with a warning.
 
 \textbf{Choosing automatically.} By default the lead daemon switches a ring to
 fast synchronisation once, when every rank has reported, the ring is within the
@@ -621,7 +626,7 @@ rendezvous hash \cite{thaler1998rendezvous}, which keeps each survivor's share
 exact and over 95\% of its samples in place, where hash-modulo routing would move
 most of them. A rank whose script fails stops every rank at once. Losing rank 0's
 machine ends the run, since its daemon holds the synchronisation, and the
-survivors stop within about 30 seconds with that reason. A returning machine or a
+survivors stop with that reason. A returning machine or a
 new eligible node joins the ring at the next epoch boundary: it loads the lead's
 model, optimiser and buffer snapshot through the lead daemon, runs one inert
 batch for each epoch it missed so that the script's loop variables exist, and the
@@ -630,7 +635,7 @@ scripts that use a data loader can be re-spread.
 
 The first synchronisation is a barrier: every rank must reach the opening weight
 broadcast within a configurable wait, five minutes by default, and ranks still
-missing are dropped and named. The torch gloo and NCCL back-ends are not used.
+missing are dropped and named. The torch gloo and NCCL backends are not used.
 
 \begin{figure}[!htbp]
     \centering
@@ -667,7 +672,7 @@ multiplication is priced at about 200\,GFLOP/s with $\rho = 5$, pandas work at
 at about 1.5\,GFLOP/s and sent whole to one worker --- moves when the transfer
 costs less than half the local computation, since it frees the origin entirely.
 
-The checks run in order. At least two nodes and 32\,MB of payload are required.
+The checks run in order. At least two nodes and 32\,MiB of payload are required.
 \textbf{If the working set does not fit in local memory, the work goes to the
 cluster} whatever the transfer costs, and a matrix product the cluster cannot
 take either raises an error naming the size and the remedy rather than exhausting
@@ -676,17 +681,16 @@ heuristic multiplier rather than a measured speed. The inequality is
 then evaluated at an optimistic 10\,Gbit/s (Figure~\ref{fig:cost}); if offloading loses even there, the
 work stays local without measuring anything. Otherwise bandwidth is
 \emph{measured}: the daemon's rate over recent real transfers is used when it
-has one, and otherwise an 8\,MB probe is pushed through the real dispatch path
-(about 3\,s on a 2.5\,MB/s link); the result is cached for five minutes, and a
-failed probe keeps the work local.
+has one, and otherwise an 8\,MiB probe is pushed through the real dispatch path;
+the result is cached, and a failed probe keeps the work local.
 
 \begin{figure}[!htbp]
     \centering
     \includegraphics[width=80mm]{\figpath{fig_4.11_cost_model.png}}
     \caption[Cost model decision regions]{Decision regions of Equation~\ref{eq:cost} for the pandas path
     ($\rho = 1$, $R = R' = 1$\,GFLOP/s) at three nodes on a 500\,MB/s link.
-    The step at 512\,MB is a separate rule, not Equation~\ref{eq:cost}: work
-    below 8 flop per byte stays local up to 512\,MB, so grouped aggregation and
+    The step at 512\,MiB is a separate rule, not Equation~\ref{eq:cost}: work
+    below 8 flop per byte stays local up to 512\,MiB, so grouped aggregation and
     joins are distributed only above it.}
     \label{fig:cost}
 \end{figure}
@@ -713,8 +717,8 @@ rank continues on the survivors (Section~\ref{sec:ddp}).
   chunk the cluster has not yet returned, and the call returns only once every
   item is covered, so a dead cluster degrades to a plain local pool.
   \item \textbf{Per-primitive fallback.} Every intercepted call is wrapped, and
-  any exception falls back to the original implementation; the one exception is
-  a matrix product that fits neither locally nor on the cluster, which raises.
+  any error falls back to the original implementation; only a matrix product
+  that fits nowhere raises.
   \item \textbf{Peer fallback.} A failed peer is skipped for the rest of that
   chunk and the next candidate tried; if all fail, the work runs locally. A slow
   peer is raced by a copy of its part.
@@ -743,8 +747,8 @@ split into sequential parts, and a request body is capped at the smaller of
 
 \textbf{Resource estimation.} Tiers are consulted in order, the first that
 yields a value winning: an explicit \texttt{-{}-mem}; 1.2 times the largest peak
-memory of the last five runs of the same script; or per-library baselines plus
-100\,MB for the interpreter. The default when nothing is known is 512\,MB. The
+memory of the recent runs of the same script; or per-library baselines plus
+100\,MiB for the interpreter. The default when nothing is known is 512\,MiB. The
 historical tier closes a feedback loop: the worker samples the job's process tree
 while it runs and records the peak, which sizes the next run's admission request.
 

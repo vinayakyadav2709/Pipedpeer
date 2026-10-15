@@ -8,32 +8,34 @@
 PipedPeer runs an unmodified Python script on other machines with no cluster to
 configure, reproduces its environment exactly, distributes the parallel work
 inside it without the user touching the source, and joins machines on different
-networks with a single command and no relay. Its contributions are:
+networks with a single command and no relay. Its six contributions are:
 
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
-  \item \textbf{The store path as cache key and unit of transfer.} Pinning an
-  exact package set makes an environment's content-addressed name identical on
-  every machine and on any day, so a worker that holds an environment pays
-  nothing for it (0.83\,s warm against 23.4\,s cold) and one that holds part of
-  it receives only the paths it lacks (86\% fewer bytes).
-  \item \textbf{Transparent interception with work shared by measurement.} The
+  \item \textbf{Peer-to-peer closure distribution.} Pinning an exact package set
+  makes an environment's store path identical on every machine and on any day,
+  so a worker that holds an environment pays nothing for it (0.83\,s warm
+  against 23.4\,s cold), one that holds part of it receives only the paths it
+  lacks (86\% fewer bytes), and signed closures move between peers.
+  \item \textbf{Transparent interception with measured work sharing.} The
   parallel primitives a script already uses are substituted at import time;
-  kernels travel as source or by value; parallel maps are divided by a makespan
-  solver over measured peer rates; and numerical work moves only when the cost
-  model says moving it is cheaper than computing it.
-  \item \textbf{Data-parallel training over the daemon port.} Gradients are
-  reduced by the lead daemon in 8-bit with error feedback, the ring is chosen,
-  resized and released by measurement, and infrequent synchronisation by plain
-  averaging holds accuracy on rings of two to four machines while sending an
-  order of magnitude fewer bytes.
-  \item \textbf{Joining across networks without a relay or a server.} An
-  introducer in every daemon that never carries data, router port mapping, a
-  candidate race over one shared socket, a birthday-collision fallback for the
-  hardest NATs, and authenticated QUIC links that the rest of the system sees as
-  ordinary nodes.
-  \item \textbf{Placement without a scheduler, and a tested fallback.} Placement
-  runs in the submitting client under a three-phase lease, and every remote path
-  has a working local path beneath it.
+  parallel maps are divided by a makespan solver over measured peer rates; and
+  numerical work moves only when the cost model says moving it is cheaper than
+  computing it.
+  \item \textbf{Joining across networks without a relay.} An introducer in every
+  daemon that never carries data, router port mapping, a candidate race over one
+  shared socket, a birthday-collision fallback for the hardest NATs, and
+  authenticated QUIC links that the rest of the system sees as ordinary nodes.
+  \item \textbf{Placement without a scheduler.} Filters and a bounded score are
+  evaluated in the submitting client, under a three-phase lease whose expiry is
+  the crash recovery.
+  \item \textbf{A fallback that preserves the result on every distributed path.}
+  Every remote path has a working local path beneath it, so a script with no
+  failure handling never sees a failure.
+  \item \textbf{Speed-weighted data-parallel training through the daemon.}
+  Gradients are averaged by samples in 8-bit with error feedback, batches are
+  sized by measured speed, and exact or fast synchronisation is chosen by ring
+  size; at 32 steps on two ranks, fast synchronisation held accuracy while each
+  rank sent 7.6 to 9.2 times fewer bytes.
 \end{enumerate}
 
 The principle that runs through the design is that the cluster is used only when
@@ -57,23 +59,15 @@ synchronisation is chosen only for ring sizes where it kept accuracy.
   at eight ranks, so automatic mode keeps rings of five or more exact.
   \item \textbf{Interception gaps.} Only \texttt{map} of a process-pool executor
   is intercepted, the \texttt{@} operator is not, and numerical work under
-  32\,MB never leaves the node, by design.
+  32\,MiB never leaves the node, by design.
   \item \textbf{A partial sandbox.} The job runs as user 0 inside the container
   with the host's network and no seccomp filter, and isolation is skipped with a
   warning on a node lacking \texttt{crun} or user namespaces.
   \item \textbf{Measurement.} Speedup comes from containers with fixed processor
   quotas and a few real machines; hole-punch success across many networks, two
   GPUs in one machine and fast synchronisation at five to seven ranks are not
-  measured. NAT traversal is evaluated on a container testbed on one host and
+  measured. NAT traversal is evaluated on the two-site testbed on one host and
   over an overlay between real homes.
+  \item \textbf{Trust.} Every holder of the cluster secret can run code on every
+  node (Section~\ref{sec:security}).
 \end{itemize}
-
-\section{Security}
-\label{sec:security}
-
-The protections of Section~\ref{sec:trust} have significant limits. Every holder of the secret can run code on every node, and jobs can
-read the secret. TLS on a local network is trust on first use and can be
-downgraded by an attacker who can break the handshake. The list of keys trusted
-to sign closures includes nodes found by unauthenticated LAN discovery, and the
-submitter's own upload is imported without a signature check. PipedPeer suits
-machines whose owners trust one another, over networks they need not trust.
