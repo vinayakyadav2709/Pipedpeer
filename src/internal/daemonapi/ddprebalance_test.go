@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"testing"
@@ -289,13 +290,14 @@ func autoRing(t *testing.T, fixed bool, reps map[int]rankReport) *ddpBoard {
 	return b
 }
 
-// TestAutoPicksDiLoCoWhenItBeatsBoth: wifiSplit is ~28 ms a step under
-// DiLoCo, 40 ms on rank 0 alone, 520 ms split exactly. DiLoCo, said once,
+// TestAutoPicksDiLoCoWhenItBeatsBoth: wifiSplit is ~36 ms a step under
+// DiLoCo (every 32 steps for two ranks), 40 ms on rank 0 alone, 520 ms split
+// exactly. DiLoCo, said once,
 // with the way to turn it off.
 func TestAutoPicksDiLoCoWhenItBeatsBoth(t *testing.T) {
 	b := autoRing(t, false, wifiSplit)
 	frag := b.rebalanceFor("g", 2)
-	if !strings.Contains(frag, `"diloco": 64`) || strings.Contains(frag, "release") {
+	if !strings.Contains(frag, `"diloco": 32`) || strings.Contains(frag, "release") {
 		t.Fatalf("want a DiLoCo switch and no release: %q", frag)
 	}
 	if !strings.Contains(frag, "training with DiLoCo") || !strings.Contains(frag, "--ddp-sync exact") {
@@ -348,5 +350,48 @@ func TestPlanDiLoCoNeedsEveryRank(t *testing.T) {
 	}
 	if _, ok := planDiLoCo(wifiSplit, 2, 0, 0); ok {
 		t.Error("judged a ring planSolo had no verdict on")
+	}
+}
+
+// TestAutoPicksDiLoCoOnlyAtValidatedRingSizes (DILOCO-MANY): the note carries
+// the interval validated for the live ring's size; past the table no interval
+// passed, so the ring stays exact however much faster DiLoCo would be.
+func TestAutoPicksDiLoCoOnlyAtValidatedRingSizes(t *testing.T) {
+	last := dilocoRanks[len(dilocoRanks)-1].upTo
+	for n := 2; n <= last+2; n++ {
+		// 100 ms compute, 50 ms sync: DiLoCo beats the split by more than
+		// the margin at any H >= 2, and one rank alone is n times slower.
+		reps := map[int]rankReport{}
+		for r := 0; r < n; r++ {
+			reps[r] = rankReport{StepMillis: 100, SyncMillis: 50, Samples: 32}
+		}
+		frag := autoRing(t, false, reps).rebalanceFor("g", n)
+		every := dilocoEvery(n)
+		switch {
+		case every == 0 && strings.Contains(frag, "diloco"):
+			t.Errorf("%d ranks, past the validated %d: picked DiLoCo: %q", n, last, frag)
+		case every > 0 && !strings.Contains(frag, fmt.Sprintf(`"diloco": %d,`, every)):
+			t.Errorf("%d ranks: want DiLoCo every %d: %q", n, every, frag)
+		}
+	}
+}
+
+// TestDiLoCoEveryShrinksWithRanks: a bigger ring never syncs less often, and
+// a size past the table gets no interval.
+func TestDiLoCoEveryShrinksWithRanks(t *testing.T) {
+	last := dilocoRanks[len(dilocoRanks)-1].upTo
+	prev := dilocoEvery(2)
+	if prev != dilocoRanks[0].every {
+		t.Fatalf("2 ranks: every %d, want the first row's %d", prev, dilocoRanks[0].every)
+	}
+	for n := 3; n <= last; n++ {
+		h := dilocoEvery(n)
+		if h <= 0 || h > prev {
+			t.Errorf("%d ranks: every %d after %d for %d", n, h, prev, n-1)
+		}
+		prev = h
+	}
+	if h := dilocoEvery(last + 1); h != 0 {
+		t.Errorf("%d ranks, past the table: every %d, want 0", last+1, h)
 	}
 }
