@@ -2632,7 +2632,7 @@ Environment seed to a node holding every path & empty script's total overhead 0.
 Pool time estimate error, before (7--37$\times$) and after & error not recorded by the lab; maps that cross nodes 1.7--2.1$\times$ faster (e.g.\ 2.13 to 1.07\,s), two small maps now stay local (1.82 to 0.57\,s) & container lab \\
 Superlinear steps found by the scaling map & none in the numeric sweeps (payload 1\,KB--64\,MB, items 8--2048, cost $10^3$--$3\times10^6$, 2--4 nodes, spread 1--10$\times$); CPU-time growth fits; 4 equal nodes ran a map $2.9\times$ faster than one (2.37 to 0.81\,s, loaded host) & container lab \\
 Introducer address change, time to recover, no commands run & 12.1--12.6\,s over three runs (limit 60\,s); a joining machine connected in 0.2--0.4\,s & container network \\
-Two laptops over Tailscale: CPU, GPU and combined scripts & \todo{tailscale} & real \\
+Two laptops in different homes over a direct Tailscale path (RTX~3060, RTX~3050; 6--8\,ms round trip): CPU, GPU and combined scripts & CPU script (pool, joblib, numpy, pandas) 13.3--14.6\,s split vs 17.4--18.1\,s on one laptop (3 runs each), about half the items on the peer; small training 4.2\,s on one GPU, 37.1\,s exact sync (147 syncs of 209\,ms, 81\,MiB each way), 7.4\,s fast sync (16 syncs), validation loss 0.0794 / 0.0797 / 0.0796, both splits reported as not paying for themselves; whole job on the peer 11.7\,s; combined script cold 506\,s (487\,s environment build, CUDA PyTorch download), warm 17.7\,s & real \\
 \end{longtable}}
 
 \section{Comparative Analysis}

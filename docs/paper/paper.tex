@@ -535,8 +535,16 @@ idle host, splitting a small model with heavy steps over two containers beat one
 (9.1 against 11.8\,s), while a 9\,MB model with light steps over Wi-Fi ran ten
 times slower split than alone (80.7 against 8.0\,s). Building the parallel
 map's request body for a 100\,MB payload fell from 2.77\,s to 0.06\,s (100
-items of 1\,MB) and from 18.3\,s to 0.06\,s (1000 items). Real runs between
-two laptops over Tailscale \todo{tailscale} are to be added. After the introducer changed address, a three-machine cluster was
+items of 1\,MB) and from 18.3\,s to 0.06\,s (1000 items). Between two laptops
+in different homes over a direct Tailscale path (RTX~3060 and RTX~3050, 6--8\,ms
+round trip), the CPU script (pool, joblib, numpy, pandas) took 13.3--14.6\,s
+against 17.4--18.1\,s on one laptop alone (three runs each), with about half
+the items on the second laptop. A small training ran in 4.2\,s on one GPU,
+37.1\,s split with exact sync (147 syncs of 209\,ms, 81\,MiB each way) and
+7.4\,s with fast sync (16 syncs), at validation loss 0.0794, 0.0797 and
+0.0796; the system reported that neither split paid for itself. The first
+run of a new environment took 506\,s, 487\,s of it building the environment
+(downloading CUDA PyTorch); the same script then took 17.7\,s. After the introducer changed address, a three-machine cluster was
 connected again without any command in 12.1--12.6\,s over three runs (limit 60\,s).
 
 \begin{table}[t]
