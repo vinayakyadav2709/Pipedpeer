@@ -12,7 +12,7 @@ states its bearing on the design of Chapters~\ref{chap:arch}
 and~\ref{chap:design}.
 
 ``Spark: Cluster Computing with Working Sets'' \cite{zaharia2010spark} by
-M.~Zaharia \textit{et al.} keeps a working set in memory across parallel
+M.~Zaharia \textit{et~al.} keeps a working set in memory across parallel
 operations as resilient distributed datasets, which a lost partition rebuilds
 from its lineage, and runs iterative jobs up to ten times faster than
 MapReduce \cite{dean2004mapreduce}. A program is written against the dataset
@@ -21,7 +21,7 @@ removes; its hash partitioning by key is the technique PipedPeer's dataframe
 shuffle uses (Section~\ref{sec:intercept}).
 
 ``Ray: A Distributed Framework for Emerging AI Applications''
-\cite{moritz2018ray} by P.~Moritz \textit{et al.} unifies tasks and actors over
+\cite{moritz2018ray} by P.~Moritz \textit{et~al.} unifies tasks and actors over
 a distributed scheduler and a sharded control store, and reaches millions of
 tasks per second. Ray offers a drop-in \texttt{multiprocessing.Pool} and a
 \texttt{joblib} backend, the closest existing answer to PipedPeer's code
@@ -39,7 +39,7 @@ row-block matrix products of Section~\ref{sec:intercept} follow Dask's blocking
 idea while leaving the original pandas and NumPy calls in place.
 
 ``Towards Scalable Dataframe Systems'' \cite{petersohn2020modin} by
-D.~Petersohn \textit{et al.} formalises the dataframe and its algebra, and
+D.~Petersohn \textit{et~al.} formalises the dataframe and its algebra, and
 presents Modin, which keeps the pandas API while partitioning the frame and
 running its operations in parallel on Ray or Dask. Modin is the nearest
 precedent for distributing pandas without rewriting it, yet it still needs a
@@ -48,7 +48,7 @@ volunteers' idle machines can serve real computation, but as a platform for
 specific projects with their own servers rather than a general executor.
 
 ``Nix: A Safe and Policy-Free System for Software Deployment''
-\cite{dolstra2004nix} by E.~Dolstra \textit{et al.} stores every package under
+\cite{dolstra2004nix} by E.~Dolstra \textit{et~al.} stores every package under
 a path named by a cryptographic hash of all its build inputs, so that versions
 coexist, dependencies are complete by construction, and a package's closure can
 be copied between machines exactly. With the package set pinned, that path
@@ -65,12 +65,12 @@ specification gives each job a minimal read-only root over the Nix store and a
 device model through which a GPU can be passed in (Section~\ref{sec:sandbox}).
 
 Five studies examine WebAssembly as a lighter sandbox at the edge. Sekigawa
-\textit{et al.} \cite{sekigawa2023} run WebAssembly modules as isolated compute
+\textit{et~al.} \cite{sekigawa2023} run WebAssembly modules as isolated compute
 units without a container daemon; Hoque and Harras \cite{hoque2022} name an
 immature system interface, limited file-system and networking APIs and absent
 GPU support as the blocking gaps; Kakati and Brorsson \cite{kakati2024} report
 70--90\% of native speed across x86\_64, ARM64 and RISC-V; and Bachmeier
-\textit{et al.} \cite{bachmeier2025} and Khelifa \textit{et al.}
+\textit{et~al.} \cite{bachmeier2025} and Khelifa \textit{et~al.}
 \cite{khelifa2024} find GPU acceleration immature and memory the dominant
 constraint for AI inference. The argument that a lightweight sandbox can replace
 a full container runtime carries over, but CPython with native extensions and
@@ -79,7 +79,7 @@ as a Nix closure and run under an OCI runtime instead, at about 20\,ms per job
 (Section~\ref{sec:res-sandbox}).
 
 ``PyTorch Distributed: Experiences on Accelerating Data Parallel Training''
-\cite{li2020pytorchddp} by S.~Li \textit{et al.} describes DDP, which
+\cite{li2020pytorchddp} by S.~Li \textit{et~al.} describes DDP, which
 replicates the model, buckets gradients and overlaps their all-reduce with the
 backward pass, scaling near-linearly to 256 GPUs. It assumes ranks that open
 connections to one another on their own ports, usually inside one data centre.
@@ -90,20 +90,20 @@ optimiser to the script and routes the gradient exchange through its daemons
 ``8-Bit Approximations for Parallelism in Deep Learning''
 \cite{dettmers2016eightbit} by T.~Dettmers compresses gradients to 8 bits for
 transfer while keeping model accuracy, and ``1-Bit Stochastic Gradient
-Descent'' \cite{seide2014onebit} by F.~Seide \textit{et al.} quantises them to a
+Descent'' \cite{seide2014onebit} by F.~Seide \textit{et~al.} quantises them to a
 single bit, carrying each step's quantisation error into the next (error
 feedback) so that convergence stays close to full precision. The two combine in
 PipedPeer's wire format: 8-bit values with one scale per block of 4096 and error
 feedback in both directions, about a quarter of the float32 volume.
 
 ``Don't Use Large Mini-Batches, Use Local SGD'' \cite{lin2020localsgd} by
-T.~Lin \textit{et al.} shows that workers taking several local steps between
+T.~Lin \textit{et~al.} shows that workers taking several local steps between
 averages communicate less and, in post-local SGD, generalise better than
 large-batch training. The observation explains why a periodically averaged ring
 can finish slightly below one device's loss (Section~\ref{sec:res-train}).
 
 ``DiLoCo: Distributed Low-Communication Training of Language Models''
-\cite{douillard2023diloco} by A.~Douillard \textit{et al.}, the work closest to
+\cite{douillard2023diloco} by A.~Douillard \textit{et~al.}, the work closest to
 PipedPeer's training path, trains replicas independently for hundreds of steps
 and merges their parameter changes with an outer Nesterov step, matching
 synchronous training on a language model while communicating about 500 times
@@ -113,7 +113,7 @@ script's learning rate, so the merge is a plain average
 (Section~\ref{sec:ddp}).
 
 ``PowerSGD: Practical Low-Rank Gradient Compression for Distributed
-Optimization'' \cite{vogels2019powersgd} by T.~Vogels \textit{et al.}
+Optimization'' \cite{vogels2019powersgd} by T.~Vogels \textit{et~al.}
 approximates each gradient matrix by a low-rank product found with one step of
 power iteration, with error feedback, and matches full-precision accuracy at
 high compression. Of ten methods tried at 4, 8 and 11 ranks, rank-16
@@ -140,7 +140,7 @@ user's script contains no failure handling, so every remote path must degrade to
 a working local one, enforced here by layered fallback and tests rather than by
 proof (Sections~\ref{sec:ft} and~\ref{sec:res-ft}).
 
-``Python Array API Standard'' \cite{arrayapi2023} by A.~Meurer \textit{et al.}
+``Python Array API Standard'' \cite{arrayapi2023} by A.~Meurer \textit{et~al.}
 standardises an array interface so that the same code runs on NumPy, CuPy or JAX
 without modification. Its goal, portability without code change, is
 PipedPeer's, but the mechanism is the mirror image: the standard asks libraries
@@ -149,7 +149,7 @@ nothing the user writes and substitutes the implementations behind the
 interfaces the script already uses.
 
 ``iDDS: Intelligent Distributed Dispatch and Scheduling'' \cite{idds2025} by
-W.~Guan \textit{et al.} assigns workflow tasks to heterogeneous resources from
+W.~Guan \textit{et~al.} assigns workflow tasks to heterogeneous resources from
 real-time CPU, memory, data-locality and dependency constraints, driven by a
 task graph. Its scoring-based assignment is comparable to PipedPeer's placement
 function (Section~\ref{sec:placement}), with two differences: PipedPeer schedules
@@ -158,7 +158,7 @@ client, with no scheduler process. Data locality, which iDDS treats as
 first-class, is left to future work.
 
 ``Task Offloading in Multi-Hop Relay-Aided Multi-Access Edge Computing''
-\cite{deng2023} by Y.~Deng \textit{et al.} formulates joint task assignment and
+\cite{deng2023} by Y.~Deng \textit{et~al.} formulates joint task assignment and
 relay selection to minimise completion time under transmission and energy
 constraints. Its comparison of transmission time against local computation time
 has the same shape as PipedPeer's cost model (Section~\ref{sec:cost}), which
@@ -167,7 +167,7 @@ for parallel maps fits each peer's setup time and throughput from the work it
 has returned.
 
 ``Multi-Agent Deep Reinforcement Learning Based Dynamic Task Offloading''
-\cite{he2024} by H.~He \textit{et al.} lets each device learn an offloading policy
+\cite{he2024} by H.~He \textit{et~al.} lets each device learn an offloading policy
 from local observations without a central coordinator, outperforming centralised
 heuristics on the energy-delay trade-off. A learned policy needs training data
 and a training phase, which is at odds with a tool that a new machine joins by
@@ -175,7 +175,7 @@ running a single binary; a deterministic rule-based model is used instead, and a
 learned policy is a natural direction once a deployment has history.
 
 ``Joint Optimization of Multi-User Partial Offloading and Resource Allocation''
-\cite{yong2023} by D.~Yong \textit{et al.} optimises the split between locally
+\cite{yong2023} by D.~Yong \textit{et~al.} optimises the split between locally
 executed and offloaded portions of a task and finds partial offloading
 consistently better than all-or-nothing. Interception offloads partially in this
 sense: it splits a script's work at the granularity of pool chunks, shuffle
@@ -183,21 +183,21 @@ buckets and matrix row blocks while the rest runs locally, choosing the split
 by minimising completion time over measured rates (Section~\ref{sec:intercept}).
 
 ``Energy-Efficient Collaborative Task Offloading in MEC'' \cite{adhoc2025} by
-S.~Wang \textit{et al.} has devices cooperate by relaying tasks toward edge
+S.~Wang \textit{et~al.} has devices cooperate by relaying tasks toward edge
 servers, with a learned policy that cuts total energy. Its symmetric model, in
 which every device is both client and server, matches a single binary in which
 any node may submit or accept work, and a parallel-map request that a node
 cannot hold is likewise forwarded to a peer that can.
 
 ``Blockchain Enabled Task Offloading'' \cite{li2023blockchain} by C.~Li
-\textit{et al.} enforces service agreements between task submitters and edge
+\textit{et~al.} enforces service agreements between task submitters and edge
 workers with smart contracts, preventing free-riding among parties that do not
 trust one another. PipedPeer authenticates who may use a node
 (Section~\ref{sec:trust}) but not whether an admitted participant behaves well,
 which a cluster of mutually untrusting owners would need.
 
 ``Congestion-Aware Distributed Task Offloading Using Graph Neural Networks''
-\cite{zhao2023} by Z.~Zhao \textit{et al.} trains a graph neural network to produce
+\cite{zhao2023} by Z.~Zhao \textit{et~al.} trains a graph neural network to produce
 distributed offloading policies from local neighbourhood observations. PipedPeer
 scores each node on scalar metrics and is blind to topology when it places a
 whole job; link cost is measured only where work is divided. Feeding a
@@ -243,33 +243,33 @@ Table~\ref{tab:litsummary} summarises the surveyed work.
 \endhead
 \bottomrule
 \endlastfoot
-Zaharia et al.\ \cite{zaharia2010spark} & 2010 & In-memory resilient datasets rebuilt from lineage & Program written against the dataset API; cluster with a master \\
-Moritz et al.\ \cite{moritz2018ray} & 2018 & Tasks and actors over a distributed scheduler & Changed import; cluster with a head node on one network \\
+Zaharia et~al.\ \cite{zaharia2010spark} & 2010 & In-memory resilient datasets rebuilt from lineage & Program written against the dataset API; cluster with a master \\
+Moritz et~al.\ \cite{moritz2018ray} & 2018 & Tasks and actors over a distributed scheduler & Changed import; cluster with a head node on one network \\
 Rocklin \cite{rocklin2015dask} & 2015 & Blocked task graphs for array and dataframe work & Program written against Dask's collections \\
-Petersohn et al.\ \cite{petersohn2020modin} & 2020 & pandas API over a partitioned, parallel dataframe & Changed import; running Ray or Dask engine \\
-Douillard et al.\ \cite{douillard2023diloco} & 2023 & Local training with an outer Nesterov merge & Intervals of hundreds of steps; outer step fails at short ones \\
+Petersohn et~al.\ \cite{petersohn2020modin} & 2020 & pandas API over a partitioned, parallel dataframe & Changed import; running Ray or Dask engine \\
+Douillard et~al.\ \cite{douillard2023diloco} & 2023 & Local training with an outer Nesterov merge & Intervals of hundreds of steps; outer step fails at short ones \\
 Anderson \cite{anderson2004boinc} & 2004 & Volunteer computing on idle machines & Platform for specific projects, not a general executor \\
-Dolstra et al.\ \cite{dolstra2004nix} & 2004 & Store paths named by a hash of their build inputs & No placement or transfer between machines \\
+Dolstra et~al.\ \cite{dolstra2004nix} & 2004 & Store paths named by a hash of their build inputs & No placement or transfer between machines \\
 OCI \cite{oci2021}, \texttt{crun} \cite{crun} & 2020 & Container runtime specification and a light runtime & Isolation only; no environment or placement \\
-Li et al.\ \cite{li2020pytorchddp} & 2020 & Bucketed all-reduce overlapped with the backward pass & Ranks must reach one another directly \\
+Li et~al.\ \cite{li2020pytorchddp} & 2020 & Bucketed all-reduce overlapped with the backward pass & Ranks must reach one another directly \\
 Dettmers \cite{dettmers2016eightbit} & 2016 & 8-bit gradient approximation & Synchronisation still every step \\
-Seide et al.\ \cite{seide2014onebit} & 2014 & 1-bit quantisation with error feedback & Synchronisation still every step \\
-Lin et al.\ \cite{lin2020localsgd} & 2020 & Local steps between averages & Ranks within one cluster \\
-Vogels et al.\ \cite{vogels2019powersgd} & 2019 & Low-rank gradient compression with error feedback & More bytes than 8-bit on small matrices \\
-Sekigawa et al.\ \cite{sekigawa2023} & 2023 & WebAssembly containers at the extreme edge & Cannot host CPython with native extensions \\
+Seide et~al.\ \cite{seide2014onebit} & 2014 & 1-bit quantisation with error feedback & Synchronisation still every step \\
+Lin et~al.\ \cite{lin2020localsgd} & 2020 & Local steps between averages & Ranks within one cluster \\
+Vogels et~al.\ \cite{vogels2019powersgd} & 2019 & Low-rank gradient compression with error feedback & More bytes than 8-bit on small matrices \\
+Sekigawa et~al.\ \cite{sekigawa2023} & 2023 & WebAssembly containers at the extreme edge & Cannot host CPython with native extensions \\
 Hoque and Harras \cite{hoque2022} & 2022 & WebAssembly against containers and VMs & Immature system interface; no GPU \\
 Kakati and Brorsson \cite{kakati2024} & 2024 & WebAssembly across three architectures & 70--90\% of native speed \\
 Li and Fujita \cite{li2023elixir} & 2022 & Elixir/OTP edge server with supervisor trees & Needs a supervisor process \\
 Li and Fujita \cite{zhou2024} & 2024 & Elixir, event-driven design and MQTT & Broker messaging, not bulk transfer \\
-Bachmeier et al.\ \cite{bachmeier2025} & 2025 & wasi-nn for edge inference & Immature GPU acceleration \\
-Khelifa et al.\ \cite{khelifa2024} & 2024 & Four WebAssembly runtimes for AI inference & Inference only; memory the main limit \\
+Bachmeier et~al.\ \cite{bachmeier2025} & 2025 & wasi-nn for edge inference & Immature GPU acceleration \\
+Khelifa et~al.\ \cite{khelifa2024} & 2024 & Four WebAssembly runtimes for AI inference & Inference only; memory the main limit \\
 Spenger \cite{kth2025thesis} & 2025 & Failure-transparent programming models & Proved for dataflow streaming, not scripts \\
-Meurer et al.\ \cite{arrayapi2023} & 2023 & A standard array API across libraries & Libraries and users must adopt the interface \\
-Guan et al.\ \cite{idds2025} & 2025 & Scored dispatch of workflow task graphs & Central scheduler; task graphs, not scripts \\
-Deng et al.\ \cite{deng2023} & 2023 & Joint assignment and relay selection in MEC & Assumes a channel model \\
-He et al.\ \cite{he2024} & 2024 & Multi-agent reinforcement-learned offloading & Needs training data and a training phase \\
-Yong et al.\ \cite{yong2023} & 2023 & Optimised partial offloading & Environment, program and network path not modelled \\
-Wang et al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks toward edge servers & Learned policy; edge servers assumed \\
-Li et al.\ \cite{li2023blockchain} & 2023 & Smart-contract service agreements & Blockchain infrastructure required \\
-Zhao et al.\ \cite{zhao2023} & 2024 & Graph-neural-network offloading policies & A learned model that must first be trained \\
+Meurer et~al.\ \cite{arrayapi2023} & 2023 & A standard array API across libraries & Libraries and users must adopt the interface \\
+Guan et~al.\ \cite{idds2025} & 2025 & Scored dispatch of workflow task graphs & Central scheduler; task graphs, not scripts \\
+Deng et~al.\ \cite{deng2023} & 2023 & Joint assignment and relay selection in MEC & Assumes a channel model \\
+He et~al.\ \cite{he2024} & 2024 & Multi-agent reinforcement-learned offloading & Needs training data and a training phase \\
+Yong et~al.\ \cite{yong2023} & 2023 & Optimised partial offloading & Environment, program and network path not modelled \\
+Wang et~al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks toward edge servers & Learned policy; edge servers assumed \\
+Li et~al.\ \cite{li2023blockchain} & 2023 & Smart-contract service agreements & Blockchain infrastructure required \\
+Zhao et~al.\ \cite{zhao2023} & 2024 & Graph-neural-network offloading policies & A learned model that must first be trained \\
 \end{longtable}}

@@ -69,7 +69,8 @@ The test suite exercises the properties the design relies on, with every
 optional Python library present --- among them that a hash-shuffled aggregation
 equals local pandas, that a parallel map whose every remote part fails still
 returns the correct result, that the daemon's average is weighted by samples,
-and that a link hello replayed on another session is refused. A mutation audit
+and that a link hello replayed on another session is refused. % source: docs/benchmarks/raw/T3_audit_tests.txt (95 caught, 0 missed).
+A mutation audit
 guards against a suite that passes without proving anything: it breaks each of
 95 features in turn, from the sample-weighted gradient fold to the
 router-mapping checks, and requires a test to fail. Every mutation was caught.
@@ -97,10 +98,11 @@ Between two real machines, the path-level difference sent 29\,MB instead of
 one by one small pure-Python package. An unseen script's environment built in 4\,s on a machine that
 had built the common packages ahead of time, against 54\,s on one that had not.
 
+% source: commit a56e4de (closure broadcast, idle host): send 898.9 s; late run 2.1 s, 23 of 64 items on the slow node.
 With one of two nodes held to 800\,kbit/s, the first run waited the upload's
 60\,s limit for the slow node and then started; the background send to that
-node took about 15 minutes and held up no run, and once it had finished a run
-took 2.1\,s with the slow node taking about a third of the items. With the
+node took 899\,s and held up no run, and once it had finished a run
+took 2.1\,s with the slow node taking 23 of its 64 items. With the
 cache cap lowered, both caches were pruned and the next job still ran on its
 peer.
 
@@ -139,8 +141,8 @@ much: plain Python took 0.17\,s, a hand-tuned pool 0.17\,s, and the untouched
 script under PipedPeer 0.24\,s with a quarter of the items on the cluster.
 
 \textbf{Sharing by measured speed.} On a lab cluster limited to 8, 2 and
-1 CPUs, dividing a map by headcount ran 1.6 times slower than not distributing at
-all (3.6\,s, median of five). Dividing by measured throughput declined the
+1 CPUs, dividing a map by headcount took 3.6\,s (median of five), 1.6 times slower
+than not distributing at all. Dividing by measured throughput declined the
 one-CPU worker and took 2.9\,s: faster than the headcount split, but still
 about 1.3 times slower than running locally, so at this size neither split pays.
 With one peer held to a tenth of a processor in a cluster of otherwise equal
@@ -153,7 +155,7 @@ a scaling map sweeps one variable at a time with the rest
 fixed --- payload from 1\,KB to 64\,MB, 8 to 2048 items, per-item cost from
 $10^3$ to $3\times10^6$ operations, two to four nodes, and a speed spread of up to
 ten times --- and fits each step's growth on a log-log scale from the run
-records. No step grew faster than its expected order. Four equal nodes ran a
+records. No CPU step grew faster than its expected order. Four equal nodes ran a
 map 2.9 times faster than one (0.81\,s against 2.37\,s): quotas that together
 stay within the host's processor let this map measure how the cost grows with
 the node count, which the shared plain lab cannot; it is not a speedup between
@@ -189,7 +191,7 @@ transformer failed at 64 on seeds 0--2 ($+2.13\%$).
 
 \begin{table}[!htbp]
 \centering
-\caption{Two-rank ring in the lab at the default interval of 32 steps: bytes
+\caption[Two-rank ring at the default interval]{Two-rank ring in the lab at the default interval of 32 steps: bytes
 sent per rank and wall time against one container (one seed)}
 \label{tab:fastsync}
 \renewcommand{\arraystretch}{1.2}
@@ -240,7 +242,7 @@ batches. Throttling one rank from 8 CPUs to 1 and back moved the shares from
 \label{sec:res-ft}
 
 Table~\ref{tab:drills} lists the failure drills run in the LAN lab and its
-two-container GPU variant. The tests add that a parallel map whose every remote chunk fails
+two-container GPU variant, and the cut link on the two-site testbed. The tests add that a parallel map whose every remote chunk fails
 still returns the correct result (Section~\ref{sec:res-tests}).
 
 \begin{table}[!htbp]
@@ -253,8 +255,8 @@ still returns the correct result (Section~\ref{sec:res-tests}).
 \toprule
 \textbf{Drill} & \textbf{Result} \\
 \midrule
-% source: LAN-lab rehearsal, a node stopped by hand once its first parts had run (demo brief V2 report, failover step); not scripts/lab-fail.sh, whose run dispatched nothing (RESULTS.md R5).
-A node stopped during a parallel map, after parts had run on it & parts placed again, same checksum; \textbf{16.5}\,s against \textbf{17.0}\,s undisturbed, one run each, within noise \\
+% source: scripts/lab-net-e6.sh failover check; logs ~/.local/state/pipedpeer/lab-net-e6/20261016-034831 (18-failover.log, daemon-a.log 22:27-22:29).
+A node's link cut during a parallel map, two-site testbed & its \textbf{53} items run again on the submitting node once it overran its predicted 18\,s; checksum unchanged \\
 A worker killed during a remote job, two machines & node named gone \textbf{16}\,s after the kill \\
 A training rank killed during a run & survivor finished all 80 epochs, \textbf{90.5}\,s \\
 A training rank's machine back during a run & rejoined at the next epoch, \textbf{4}\,s after its daemon started \\
@@ -289,7 +291,7 @@ its two-container GPU variant for the GPU steps. The containers
 share one laptop, so Table~\ref{tab:lablayout} shows what each step costs and
 that it works, not speedup. A cold run is the first ever on fresh containers; a
 cached run follows it. The last row ran eight jobs at once on containers with
-6000\,MiB of memory in total.
+6.0\,GB of memory in total.
 
 \begin{table}[!htbp]
 \centering
@@ -320,7 +322,8 @@ download CUDA torch.
 
 \textbf{Two laptops in different homes.} Table~\ref{tab:twolaptops} gives runs
 between two laptops connected over a direct Tailscale path with a 6--8\,ms round
-trip.
+trip. Times are the script's own unless marked from submission; per-run records
+are in \texttt{docs/benchmarks/real-hardware.md}.
 
 \begin{table}[!htbp]
 \centering
@@ -333,12 +336,12 @@ trip.
 \textbf{Run} & \textbf{Result} \\
 \midrule
 CPU script (pool, joblib, NumPy, pandas) & about 14\,s split, half the items on the peer, against 18\,s on one laptop \\
-Whole job sent to the peer & 11.7\,s \\
+Whole job sent to the peer & 9.1\,s; 11.7\,s from submission \\
 Small training model, one GPU & 4.2\,s, validation loss 0.0794 \\
 Same, \texttt{-{}-ddp~2}, exact synchronisation & 37.1\,s, loss 0.0797 \\
 Same, \texttt{-{}-ddp~2}, fast synchronisation & 8.5\,s, loss 0.0797 \\
 Same, \texttt{-{}-ddp~2}, automatic choice & 14.6\,s, fast after a short exact warm-up; loss 0.0796 \\
-Combined script, cold and warm & 506\,s (487\,s environment build, CUDA torch download); 17.7\,s warm \\
+Combined script, from submission: first run and repeat & 506\,s (487\,s environment build, CUDA torch download); 17.7\,s, of which the script 15.6\,s \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -347,31 +350,29 @@ The mixed CPU script ran faster across the two laptops than on one. The small
 training model did not: one GPU finished first. The rings were fixed with
 \texttt{-{}-ddp~2}, so the automatic choice could pick only the sync mode, not
 release a rank; without \texttt{-{}-ddp~$N$} the lead releases a ring that one
-rank alone outruns. Across the internet link, fast synchronisation ran 4.4 times
-faster than exact at the same validation loss, and the automatic choice, which
-starts exact and switches once, ran 2.5 times faster than exact.
+rank alone outruns. In runs of one session, fast synchronisation ran 5.0 times
+faster than exact (7.4 against 37.1\,s) at the same loss; the automatic choice,
+which starts exact and switches once, took 14.6\,s against 8.5\,s for fast.
 
 \textbf{Across two NATs.} On the two-site testbed of
 Section~\ref{sec:res-setup}, scripts, parallel maps, remote runs and both
 training sync modes ran across the sites, and a node whose link was cut mid-run
 was replaced. Two machines meet directly when one introducer is reachable;
-otherwise a public address or an overlay such as Tailscale is required. That is
-the setting of the two-laptop measurements above: neither home offered a
-reachable introducer, since one router refuses port mapping and the other
-machine sits behind two NATs, so PipedPeer's own links ran over Tailscale. No
-relay is involved in either case.
+otherwise a public address or an overlay such as Tailscale is required. The
+two laptops above ran over Tailscale for that reason: neither home offered a
+reachable introducer (one router refuses port mapping, the other machine sits
+behind two NATs). No relay is involved in either case.
 
 \textbf{A phone.} On a Samsung Galaxy S20~FE (Android~13, Termux), a laptop's
 CPU script spread over that laptop, a second laptop over the internet and the
 phone gave the phone 8 of 192 parallel items with an unchanged result, after the
 phone had built the job's environment from the binary cache in 27\,s. A torch
 script training 160 small models gave the phone 6 of them, all converged;
-with 32 models the laptops finished first, so the phone took none and the result
-was unchanged.
+with 32, it took none.
 
 \textbf{Further measurements.} Table~\ref{tab:recorded} collects measurements
 between a 20-core machine, a 16-core peer and a public cloud host, each taken a
-small number of times on the machines and links available.
+few times.
 
 \begin{table}[!htbp]
 \centering
@@ -385,7 +386,7 @@ small number of times on the machines and links available.
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
 Parallel map, 20-core machine and 16-core peer over Tailscale, plain Python against PipedPeer & 5.8--6.4\,s against 4.9--5.4\,s; 116 of 256 items on the peer \\
-Training on two machines over a home link of about 54\,Mbit/s: one machine / two ranks fp16 / two ranks int8 & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
+Training on two machines over a home link of about 54\,Mbit/s: one machine~/ two ranks \mbox{fp16~/} two ranks int8 & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
 Introducer traffic during a cross-network run & 0.2\,MB, against about 30\,MB between the peers \\
 Introducer suspended during a run & live peer still reached in 0.03\,s \\
 Signed closure on a host that requires signatures & imported when the sender's key was trusted; refused when it was removed \\
@@ -394,18 +395,17 @@ Daemon memory ceiling, 3\,GiB allocation under a 1\,GiB ceiling & child killed i
 \end{tabularx}
 \end{table}
 
-These support modest claims: a parallel map runs faster across two machines
-than on one, though short of what the core counts allow, since a job of about
-5\,s is dominated by setup and serialisation; exact training over a
-home link does not beat one machine; and the introducer carries a negligible
-share of the traffic.
+A parallel map ran faster across two machines than on one, though short of
+what the core counts allow, since a job of about 5\,s is dominated by setup and
+serialisation; exact training over a home link did not beat one machine; the
+introducer carried a negligible share of the traffic.
 
 \section{Comparative Analysis}
 \label{sec:comparison}
 
 \begin{table}[!htbp]
 \centering
-\caption{PipedPeer against existing systems. The lower block is where
+\caption[PipedPeer against existing systems]{PipedPeer against existing systems. The lower block is where
 PipedPeer is partial or the weaker system.}
 \label{tab:comparison}
 \renewcommand{\arraystretch}{1.2}
