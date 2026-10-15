@@ -27,7 +27,8 @@ func TestEveryEnvVarTheShimNamesIsRead(t *testing.T) {
 	code := stripPyComments(ShimSource())
 
 	named := regexp.MustCompile(`"(PIPEDPEER_[A-Z0-9_]+)"`)
-	read := regexp.MustCompile(`(?:environ\.get|getenv|environ\[)\s*\(?\s*"(PIPEDPEER_[A-Z0-9_]+)"`)
+	// _env_num (ddp.py) is os.environ.get plus number parsing.
+	read := regexp.MustCompile(`(?:environ\.get|getenv|environ\[|_env_num)\s*\(?\s*"(PIPEDPEER_[A-Z0-9_]+)"`)
 
 	isRead := map[string]bool{}
 	for _, m := range read.FindAllStringSubmatch(code, -1) {

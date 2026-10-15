@@ -141,14 +141,15 @@ print("WPARSE-OK")
 }
 
 // TestAShareTooSmallForOneSampleIsRefused rather than producing an empty
-// shard, which would have that rank contribute a gradient over nothing.
+// shard, which would have that rank contribute a gradient over nothing. Only
+// with drop_last: without it the partial batch is one step (ad57683).
 func TestAShareTooSmallForOneSampleIsRefused(t *testing.T) {
 	runShimPython(t, "wtiny", `
 import sitecustomize as shim
 from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 try:
-    ddp._WeightedShardSampler(10, [0.99, 0.01], 1, False, 512, 2)
+    ddp._WeightedShardSampler(10, [0.99, 0.01], 1, False, 512, 2, drop_last=True)
 except ValueError as e:
     assert "do not make one step" in str(e), e
 else:
