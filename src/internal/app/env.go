@@ -1,20 +1,25 @@
 package app
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // Environment is everything a job needs that does not depend on which node
@@ -56,6 +61,9 @@ type EnvOptions struct {
 	// gigabytes smaller and comes from the binary cache instead of a
 	// fixed-output wheel fetch.
 	GPU bool
+	// Verbose prints the "Found…/Using…/Built…" detail lines and nix's own
+	// build output. Off, only warnings print (nix output only on failure).
+	Verbose bool
 }
 
 // StageFn reports build progress. Callers own the numbering so a single run
@@ -63,8 +71,25 @@ type EnvOptions struct {
 type StageFn func(step int, title string)
 
 // BuildEnvironment resolves dependencies, builds the Nix closure, exports it,
-// and packs the workspace for the project containing absScriptPath.
-func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*Environment, error) {
+// and packs the workspace for the project containing absScriptPath. Cancelling
+// ctx stops the nix build. The whole build is recorded as one env_build step.
+func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions, stage StageFn) (*Environment, error) {
+	detail := func(format string, a ...any) {
+		if opts.Verbose {
+			fmt.Printf(format, a...)
+		}
+	}
+	started := time.Now()
+	defer func() {
+		machine := ""
+		if me, err := identity.GetOrCreate(); err == nil {
+			machine = me.NodeID
+		} else {
+			fmt.Fprintf(os.Stderr, "      warning: env_build step has no machine id: %v\n", err)
+		}
+		runrec.Add(runrec.Step{Machine: machine, Node: machine, Chunk: -1, Name: "env_build",
+			StartNS: started.UnixNano(), DurNS: time.Since(started).Nanoseconds()})
+	}()
 	if stage == nil {
 		stage = func(int, string) {}
 	}
@@ -87,22 +112,22 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 	fromLock := false
 	uvLockPath := filepath.Join(projectRoot, "uv.lock")
 	if uvPkgs, err := pythondeps.ParseUVLock(uvLockPath); err == nil {
-		fmt.Printf("      Found uv.lock in project root\n")
+		detail("      Found uv.lock in project root\n")
 		imports = uvPkgs
 		fromLock = true
 	} else {
 		imports = importScan.ExternalDeps
 		if len(imports) > 0 {
-			fmt.Printf("      Found external imports: %s\n", strings.Join(imports, ", "))
+			detail("      Found external imports: %s\n", strings.Join(imports, ", "))
 		}
 	}
 	if len(importScan.LocalFiles) > 0 {
-		fmt.Printf("      Found local imports: %d (will be bundled)\n", len(importScan.LocalFiles))
+		detail("      Found local imports: %d (will be bundled)\n", len(importScan.LocalFiles))
 	}
 
 	stage(2, "Parsing dependencies...")
 	if pythondeps.RequirementsBeside(filepath.Dir(absScriptPath)) != "" {
-		fmt.Printf("      Using requirements.txt beside the script (as if passed with --pkg)\n")
+		detail("      Using requirements.txt beside the script (as if passed with --pkg)\n")
 	}
 	nixPkgs, unknown := PlanPackages(absScriptPath, imports, opts.Pkgs, fromLock)
 	if len(unknown) > 0 {
@@ -111,18 +136,18 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 			fmt.Fprintf(os.Stderr, "      warning: could not look up %s in nixpkgs: %v\n", strings.Join(unknown, ", "), err)
 		}
 		for _, f := range found {
-			fmt.Printf("      Not in the built-in table, but nixpkgs has python3Packages.%s: using it\n", f)
+			detail("      Not in the built-in table, but nixpkgs has python3Packages.%s: using it\n", f)
 			if !slices.Contains(nixPkgs, f) {
 				nixPkgs = append(nixPkgs, f)
 			}
 		}
 		if len(missing) > 0 {
-			fmt.Printf("      Not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
+			fmt.Fprintf(os.Stderr, "      warning: not packaged (the job will fail to import it): %s — add it with --pkg <nixpkgs name>\n",
 				strings.Join(missing, ", "))
 		}
 	}
 	for _, pkg := range nixPkgs {
-		fmt.Printf("      Using Nix package: %s\n", pkg)
+		detail("      Using Nix package: %s\n", pkg)
 	}
 
 	// On disk, not in RAM: the exported closure is written here and a torch
@@ -140,24 +165,32 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 		env.Close()
 		return nil, fmt.Errorf("failed to write flake.nix: %v", err)
 	}
-	fmt.Printf("      Created: %s\n", flakePath)
+	detail("      Created: %s\n", flakePath)
 
 	stage(4, "Building locally...")
 	nixSystem := nixgen.NixArch()
-	cmd, cleanup, err := nixstore.Cmd(tmpDir, "nix", "build", flakeRef(nixSystem),
+	cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, "nix", "build", flakeRef(nixSystem),
 		"--option", "build-users-group", "")
 	if err != nil {
 		env.Close()
 		return nil, err
 	}
 	defer cleanup()
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	var nixOut bytes.Buffer
+	if opts.Verbose {
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	} else {
+		cmd.Stdout, cmd.Stderr = &nixOut, &nixOut
+	}
 	if err := cmd.Run(); err != nil {
 		env.Close()
+		os.Stderr.Write(nixOut.Bytes())
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("nix build stopped: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("nix build failed: %v", err)
 	}
-	fmt.Printf("      Built successfully\n")
+	detail("      Built successfully\n")
 
 	stage(5, "Exporting closure...")
 	storePath, err := os.Readlink(filepath.Join(tmpDir, "result"))
@@ -166,7 +199,7 @@ func BuildEnvironment(absScriptPath string, opts EnvOptions, stage StageFn) (*En
 		return nil, fmt.Errorf("failed to readlink result: %v", err)
 	}
 	env.StorePath = storePath
-	fmt.Printf("      Store path: %s\n", storePath)
+	detail("      Store path: %s\n", storePath)
 
 	env.NarPath = filepath.Join(tmpDir, "closure.nar")
 	// The NAR is not exported here: UploadJob exports it on demand only when a
