@@ -13,6 +13,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/doctor"
+	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/say"
 	"github.com/pipedpeer/pipedpeer/internal/service"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
@@ -31,17 +32,21 @@ func newUninstallCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 
 			steps := doctor.UninstallPlan(uninstallDeps())
+			in := bufio.NewReader(cmd.InOrStdin())
 			if dry || !yes {
 				if err := doctor.RunSteps(out, steps, true); err != nil {
 					return err
 				}
 			}
 			if dry {
+				if phone.IsTermux() {
+					phone.PhantomNote(out, in, true, false)
+				}
 				return nil
 			}
 			if !yes {
 				fmt.Fprint(out, "Remove all of this? [y/N] ")
-				ans, err := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				ans, err := in.ReadString('\n')
 				if err != nil && ans == "" {
 					return fmt.Errorf("no answer read (use --yes to skip the question): %w", err)
 				}
@@ -51,6 +56,10 @@ func newUninstallCmd() *cobra.Command {
 				}
 			}
 			err := doctor.RunSteps(out, steps, false)
+			if phone.IsTermux() {
+				phone.PhantomNote(out, in, false, !yes)
+				return err
+			}
 			fmt.Fprintln(out, "Nix was kept: other software may use it. To remove it too, follow https://nix.dev/manual/nix/stable/installation/uninstall")
 			return err
 		},
@@ -75,7 +84,11 @@ func uninstallDeps() doctor.UninstallDeps {
 		Dirs:          []string{userdir.Data(), userdir.State(), userdir.Cache()},
 		RemoveBinary:  removeBinary,
 	}
-	if crun, ours, why := setup.OwnCrun(); ours {
+	if phone.IsTermux() {
+		// Android has no firewall, root parts or crun of ours; Nix lives in
+		// the container the phone steps remove.
+		d.CloseFirewall, d.RemoveRoot, d.Extra = nil, nil, phone.UninstallSteps()
+	} else if crun, ours, why := setup.OwnCrun(); ours {
 		d.Crun = crun
 	} else if why != "not present" {
 		d.CrunKeep = crun + ": " + why

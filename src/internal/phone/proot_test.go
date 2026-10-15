@@ -22,6 +22,7 @@ func fakePhone(t *testing.T) string {
 	t.Setenv("PREFIX", pre)
 	t.Setenv("TERMUX_VERSION", "0.118")
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldMarker, oldStep, oldLaunch, oldRun, oldLook, oldVer := marker, runStep, launch, runCmd, lookPython, pyVersionOf
 	t.Cleanup(func() {
 		marker, runStep, launch, runCmd, lookPython, pyVersionOf = oldMarker, oldStep, oldLaunch, oldRun, oldLook, oldVer
@@ -68,7 +69,7 @@ func TestSetupTermuxFullNode(t *testing.T) {
 		cmd := name + " " + strings.Join(args, " ")
 		ran = append(ran, cmd)
 		switch {
-		case cmd == "proot-distro login debian -- true":
+		case cmd == "proot-distro login "+Distro+" -- true":
 			return errors.New("not installed")
 		case strings.Contains(cmd, "/bin/sh -c"):
 			if !strings.Contains(cmd, "nix-") || !strings.Contains(cmd, "/etc/pipedpeer-phone") {
@@ -88,7 +89,7 @@ func TestSetupTermuxFullNode(t *testing.T) {
 	if err := SetupTermux(io.Discard, []string{"setup", "-y"}, func() error { stopped = true; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"proot-distro list", "proot-distro login debian -- true", "proot-distro install debian"}
+	want := []string{"proot-distro list", "proot-distro login pipedpeer -- true", "proot-distro install --name pipedpeer debian"}
 	for i, w := range want {
 		if i >= len(ran) || ran[i] != w {
 			t.Fatalf("commands = %q, want them to start with %q", ran, want)
@@ -110,7 +111,9 @@ func TestSetupTermuxFallback(t *testing.T) {
 	launch = func([]string) { t.Error("must not forward when the full node failed") }
 	var pkgs []string
 	runCmd = func(name string, args ...string) ([]byte, error) {
-		pkgs = append(pkgs, name+" "+strings.Join(args, " "))
+		if name != "dpkg-query" {
+			pkgs = append(pkgs, name+" "+strings.Join(args, " "))
+		}
 		return nil, nil
 	}
 	lookPython = func() (string, error) { return "/bin/false", nil }

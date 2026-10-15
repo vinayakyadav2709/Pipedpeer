@@ -20,7 +20,8 @@ type Step struct {
 type UninstallDeps struct {
 	StopDaemon    func() error // daemon process and user service
 	CloseFirewall func() error
-	RemoveRoot    func() error // AppArmor profile, nix key helper, trusted keys
+	RemoveRoot    func() error // AppArmor profile, nix key helper, trusted keys; nil skips both
+	Extra         []Step       // the platform's own parts (a phone's container and packages), after the stop
 	Dirs          []string     // userdir Data, State, Cache
 	// Crun is setup's own crun to delete; CrunKeep, when set instead, is
 	// "<path>: <why it stays>".
@@ -33,10 +34,13 @@ type UninstallDeps struct {
 // UninstallPlan lists the steps in order: stop first so nothing rewrites the
 // dirs being deleted, the binary last so a failure earlier can be retried.
 func UninstallPlan(d UninstallDeps) []Step {
-	steps := []Step{
-		{"stop the daemon and remove its user service", d.StopDaemon},
-		{"close pipedpeer's firewall ports", d.CloseFirewall},
-		{"remove the root parts (AppArmor profile, nix key helper, trusted cluster keys)", d.RemoveRoot},
+	steps := []Step{{"stop the daemon and remove its user service", d.StopDaemon}}
+	steps = append(steps, d.Extra...)
+	if d.CloseFirewall != nil {
+		steps = append(steps, Step{"close pipedpeer's firewall ports", d.CloseFirewall})
+	}
+	if d.RemoveRoot != nil {
+		steps = append(steps, Step{"remove the root parts (AppArmor profile, nix key helper, trusted cluster keys)", d.RemoveRoot})
 	}
 	for _, dir := range d.Dirs {
 		dir := dir
