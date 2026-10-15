@@ -66,13 +66,13 @@ forwarded again (Section~\ref{sec:intercept}).
   command, with no VPN, no port forwarding and no relay in the data path.
   \item To authenticate every request, encrypt traffic between machines, isolate
   each job, and survive the loss of any worker without losing the run.
-  \item To require no manual installation on a new machine: one binary, whose
+  \item To require no manual installation on a new machine: a single binary, whose
   set-up command installs what else is needed, without root if necessary.
 \end{enumerate}
 
 \section{Scope}
 
-Within scope and implemented are a Go daemon and CLI in one binary; discovery
+Within scope and implemented are a Go daemon and CLI in a single binary; discovery
 on the local subnet and an address book of every path to every node; joining
 across networks by an introducer in every daemon, router port mapping, hole
 punching and QUIC links; a shared secret, pinned TLS and signed closures;
@@ -81,7 +81,7 @@ by hard filters and a score, with a three-phase lease; per-job \texttt{crun}
 sandboxes under memory ceilings, with GPU passthrough and without root;
 transparent interception of \texttt{multiprocessing.Pool}, pandas, NumPy,
 \texttt{joblib} and scikit-learn, and torch data-parallel training; and Android
-phones as workers for parallel chunks. Out of scope are per-user authorisation (a cluster shares one secret;
+phones as workers for parallel chunks. Out of scope are per-user authorisation (a cluster shares a single secret;
 Section~\ref{sec:security}), runtimes other than Python, relaying traffic for a
 peer that no direct path can reach (such a peer is reported and routed around),
 and any incentive mechanism for contributing capacity.
@@ -133,7 +133,7 @@ Python, cloudpickle & Interception & The shim, embedded in the binary; shipping 
   and can do so without root by using a private Nix store.
   \item Workers run Linux, since \texttt{crun}, cgroups and the Nix store are
   Linux-specific; phones run Linux user space under Termux.
-  \item Machines in a cluster share one secret, created by the first machine's
+  \item Machines in a cluster share a single secret, created by the first machine's
   set-up and carried to the others by an invite code.
   \item Joining across networks needs one reachable member or public
   introducer. Introducers carry no job data.

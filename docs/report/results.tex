@@ -33,16 +33,17 @@ machine and one container on multi-user Nix, with a two-container variant
 sharing the host's GPU for training rings.
 
 \textbf{Two-site testbed.} Joining across networks without Tailscale is
-evaluated on a two-site testbed: two machines on separate private networks,
-both numbered 192.168.0.0/24, each behind its own address-translating router
-that drops unsolicited inbound packets, with the introducer on a third network
-standing for the internet. Every user command is run across it.
+evaluated on a two-site container testbed on the same host: two containers on
+separate private networks, both numbered 192.168.0.0/24, each behind a router
+container whose iptables rules translate addresses and drop unsolicited inbound
+packets, with the introducer on a third network standing for the internet. Every
+user command is run across it.
 
 \textbf{Training accuracy.} The accuracy of each synchronisation setting is
 measured on three models --- a four-layer perceptron sized for a GPU (MLP-G), the
 same perceptron at a CPU sizing (MLP-C), and a small transformer --- with three
 seeds per cell, against one device trained on the same data: two-rank rings in
-the lab, larger rings in-process, with the ranks side by side on one machine.
+the lab, larger rings in-process, with the ranks side by side on a single machine.
 
 \textbf{Real machines.} Two laptops in different homes (RTX~3060 and RTX~3050)
 connected over a direct Tailscale path \cite{anderson2020nat}, a Samsung
@@ -53,8 +54,8 @@ acting as introducer.
 \textbf{Workloads.} Seven example workloads cover a standard-library parallel
 map, a map over a lambda, scikit-learn with \texttt{joblib}, NumPy linear algebra,
 out-of-core pandas, torch data-parallel training and file synchronisation; one
-script combines every kind of intercepted work, and five scripts written the way
-a student would write them stand in for code the system has never seen. Lab
+script combines every kind of intercepted work, and five idiomatic, unoptimised
+user scripts stand in for unseen workloads. Lab
 wall times are medians of three to five runs, and accuracy is the mean of three
 seeds.
 
@@ -156,7 +157,7 @@ map 2.9 times faster than one (0.81\,s against 2.37\,s).
 both directions. In the lab, a small model with heavy steps on a LAN
 trained in 9.1\,s split across two ranks against 11.8\,s on one GPU, while a
 9\,MB model with light steps on Wi-Fi took 80.7\,s split against 8.0\,s on one
-GPU. On one machine, the same model and batch took 1.5\,s on its GPU and 55.0\,s
+GPU. On a single machine, the same model and batch took 1.5\,s on its GPU and 55.0\,s
 on its CPUs.
 
 \textbf{Fast synchronisation.} Table~\ref{tab:fastsync} and
@@ -201,10 +202,10 @@ Transformer (one device 26.7\,s) & $+0.18\%$ / $+0.50\%$ & 21.7 / 1.4 & 22.7 / 3
 leaving the transformer $21.7\%$ above one device even with one synchronisation
 per epoch (156 local steps), the longest interval these runs allow. In-process
 runs on the same three models, on up to six seeds, set the interval $H(n)$ as
-the largest that passed on every model: 32 steps at two ranks (64 failed the
-transformer, $+2.13\%$), 16 at three and 4 at four; from five ranks no interval
-passed, since at eight ranks the transformer failed at every interval down
-to~2. Of ten methods tested at 4, 8 and 11 ranks, only exact synchronisation
+the largest that passed on every model: 32 steps at two ranks (64, which passed
+in the lab above, failed the transformer in this harness on other seeds,
+$+2.13\%$), 16 at three and 4 at four; at eight ranks the transformer failed at
+every interval down to~2, so no interval is used for five or more ranks. Of ten methods tested at 4, 8 and 11 ranks, only exact synchronisation
 with rank-16 PowerSGD \cite{vogels2019powersgd} compression and error feedback
 kept every model within 1\% (worst mean $+0.18\%$), at $3.2\times$ fewer bytes
 than 8-bit exact synchronisation on the perceptrons
@@ -288,7 +289,7 @@ GPU job submitted from a GPU-less node & 264.8\,s & 7.6\,s \\
 Two-rank GPU ring on one shared GPU & 630.3\,s & 9.5\,s \\
 Combined script & 664.6\,s & 26.7\,s \\
 Five student-style scripts & 35--126\,s each & 20--70\,s each \\
-Every script at once & \multicolumn{2}{c}{412.0\,s, all 8 jobs completed} \\
+Concurrent workloads & \multicolumn{2}{c}{412.0\,s, all 8 jobs completed} \\
 \bottomrule
 \end{tabularx}
 \end{table}

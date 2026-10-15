@@ -36,6 +36,10 @@
 \newcommand{\linebreakand}{%
   \end{@IEEEauthorhalign}\hfill\mbox{}\par
   \mbox{}\hfill\begin{@IEEEauthorhalign}}
+% Separates the two second-row authors by the first row's gap, so the second
+% row sits centred under the gaps of the first.
+\newcommand{\androwtwo}{%
+  \end{@IEEEauthorhalign}\hspace{9pt}\begin{@IEEEauthorhalign}}
 \makeatother
 
 \begin{document}
@@ -66,7 +70,7 @@ sahil.gupta23@spit.ac.in}
 \textit{Sardar Patel Institute of Technology}\\
 Mumbai, Maharashtra, India \\
 \guideemail}
-\and
+\androwtwo
 \IEEEauthorblockN{\mentorname}
 \IEEEauthorblockA{\textit{Department of Computer Engineering} \\
 \textit{Sardar Patel Institute of Technology}\\
@@ -79,7 +83,7 @@ dd\_ambawade@spit.ac.in}
 \begin{abstract}
 Distributed computing frameworks presuppose a configured cluster, a program
 written against their API, and machines that can reach one another. PipedPeer
-removes all three for Python: one command runs an unmodified script on other
+removes all three for Python: a single command runs an unmodified script on other
 machines, each running the same daemon, with no head node and no scheduler
 process. The script's environment is built as a Nix closure against a pinned
 package set, so it has the same store path on every machine, and a peer
@@ -154,7 +158,7 @@ summarises the differences.
 \begin{table}[t]
 \centering
 \caption{Comparison with existing systems. The lower block is where ours is
-partial or the weaker system.}
+partial or the weaker system}
 \label{tab:cmp}
 \renewcommand{\arraystretch}{1.15}
 \footnotesize
@@ -217,7 +221,7 @@ cores of the node that runs it. A node that cannot hold a map forwards it whole,
 once, to a peer that can, and that peer makes the split; a part already split
 off is never split across machines or forwarded again.
 
-Every machine runs one daemon; the command-line client is short-lived. The
+Every machine runs a single daemon; the command-line client is short-lived. The
 coordinator is a library linked into the client, so placement is decided where
 the job is submitted (Fig.~\ref{fig:arch}). On one network participants find
 each other unaided; across networks a participant runs \texttt{pipedpeer
@@ -314,7 +318,7 @@ that answered and proved the key, and QUIC connections migrate when an address
 changes, so a machine that changes network rejoins on its own. A peer with no
 path is reported with its reason and routed around, never relayed. The daemon
 API requires the cluster secret on every route and serves pinned
-TLS~\cite{rfc8446} and HTTP on one port.
+TLS~\cite{rfc8446} and HTTP on a single port.
 
 \subsection{Transparent Interception}
 \label{sec:intercept}
@@ -335,8 +339,8 @@ device whose set-up alone exceeds the makespan is declined. A part unfinished
 past its prediction counts as taking at least that long, a part waiting or
 overdue is copied to a free peer, and the first copy to finish wins.
 
-\textbf{Dataframes.} Grouping and joining hash rows by key, so each key is
-complete on one node and any aggregation is exact with no combiner; the row
+\textbf{DataFrame operations.} pandas grouping and joining hash rows by key, so each key is
+complete on a single node and any aggregation is exact with no combiner; the row
 order of joins is not preserved.
 
 \textbf{Training.} Ranks post gradients to the lead node's daemon rather than
@@ -413,7 +417,7 @@ PipedPeer's, and a summary of where its items ran.
 
 \subsection{Implementation}
 
-PipedPeer is about 48{,}000 lines of Go~1.25 in one binary that is both client
+PipedPeer is about 48{,}000 lines of Go~1.25 in a single binary that is both client
 and daemon, with about 37{,}000 lines of tests, and an 8{,}000-line Python
 interception package embedded in it. The daemon serves an HTTP API, makes
 direct links with quic-go, builds environments with Nix flakes, and runs each
@@ -437,7 +441,7 @@ fixed processor and memory limit; where the network matters, links are shaped
 with \texttt{tc netem} to the latency, bandwidth and loss of a LAN, a Wi-Fi
 network or a 5G link. Because the containers share one processor, the lab
 measures correctness, overhead, caching and cost growth, and speedup only as one
-container against several of the same size. A 16-thread laptop with one GPU
+container against several of the same size. A 16-thread laptop with a single GPU
 runs a second lab. Physical runs use two laptops in different homes (RTX~3060
 and RTX~3050), a 20-core and a 16-core host joined over Tailscale, and a Samsung
 Galaxy S20~FE (Android~13). Between the two laptops, PipedPeer's own QUIC link ran on
@@ -446,13 +450,14 @@ second laptop is shared into the first one's tailnet: neither home offered a
 reachable introducer, since one router refuses port mapping and the other
 machine sits behind two NATs. These runs measure distribution between homes,
 not PipedPeer's NAT traversal. NAT traversal without
-Tailscale is evaluated on a two-site testbed: two machines on separate private
-networks, both numbered 192.168.0.0/24, each behind its own address-translating
-router that drops unsolicited inbound packets, with the introducer on a third
-network standing for the internet; every user command is run across it.
+Tailscale is evaluated on a two-site container testbed on one host: two
+containers on separate private networks, both numbered 192.168.0.0/24, each
+behind a router container whose iptables rules translate addresses and drop
+unsolicited inbound packets, with the introducer on a third network standing for
+the internet; every user command is run across it.
 Training accuracy is measured against one device trained on the same data:
 two-rank rings in the lab, larger rings in-process, with the ranks side by side
-on one machine. Lab wall times are medians of three to five runs; accuracy is
+on a single machine. Lab wall times are medians of three to five runs; accuracy is
 the mean of three seeds.
 
 \subsection{Microbenchmarks (Q1, Q2)}
@@ -530,7 +535,6 @@ Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s 
 \quad final loss, same three & 0.0875 / 0.0875 / 0.0877 \\
 Training, two laptops (Tailscale): 1 GPU / \texttt{-{}-ddp~2} exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
 \quad validation loss, same four & 0.0794 / 0.0797 / 0.0797 / 0.0796 \\
-Ring of 16/8/2 cores, equal vs.\ measured batches & 25.4 vs.\ 23.6\,s \\
 New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
 \bottomrule
 \end{tabularx}
@@ -547,7 +551,8 @@ light steps over Wi-Fi ran ten times slower split than alone (80.7 against
 automatic sync could choose only the sync mode: the ring switched to fast mode
 after a short exact warm-up and finished in 14.6\,s, $2.5\times$ faster than
 exact; without \texttt{-{}-ddp~$N$} the lead releases a ring that one rank
-alone outruns. Measured batch sizes beat equal ones on an uneven ring.
+alone outruns. On a single machine, a ring of 16, 8 and 2 cores took 23.6\,s with
+measured batch sizes against 25.4\,s with equal ones.
 
 \textbf{Fast synchronisation.} On two ranks in the lab with LAN and Wi-Fi
 profiles, plain averaging every 64 steps after a 10-step warm-up changed
@@ -561,7 +566,7 @@ epoch (156 local steps), the longest interval these runs allow.
 
 \textbf{Many ranks.} In-process runs with ranks side by side, on up to six
 seeds, set the interval $H(n)$ as the largest that passed on every model: 32 at
-two ranks (64 failed the transformer, $+2.13\%$), 16 at three and 4 at four; at
+two ranks (64, which passed in the lab, failed the transformer on other seeds, $+2.13\%$), 16 at three and 4 at four; at
 eight ranks the transformer failed at every interval down to 2, so no interval
 is used for five or more ranks. Of ten methods tested at 4, 8 and 11 ranks, only
 exact synchronisation with rank-16 PowerSGD~\cite{vogels2019powersgd}
@@ -572,6 +577,8 @@ mean $+0.18\%$), sending $3.2\times$ fewer bytes than int8.
 
 The labs share one processor among their workers, so they show cost, not
 speedup, and the physical runs cover two or three machines with few repetitions.
+NAT traversal is evaluated on this container testbed and over an overlay between
+real homes.
 TLS is trust on first use, the keys trusted to sign closures are not yet bound to
 an authenticated identity, and authorisation is one shared secret. Only Python is
 supported, and a training ring depends on rank~0's machine.

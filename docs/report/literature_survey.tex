@@ -152,7 +152,7 @@ returned.
 from local observations without a central coordinator, outperforming centralised
 heuristics on the energy-delay trade-off. A learned policy needs training data
 and a training phase, which is at odds with a tool that a new machine joins by
-running one binary; PipedPeer therefore uses a deterministic rule-based model,
+running a single binary; PipedPeer therefore uses a deterministic rule-based model,
 and a learned policy is a natural direction once a deployment has history.
 
 ``Joint Optimization of Multi-User Partial Offloading and Resource Allocation''
@@ -167,7 +167,7 @@ is chosen by minimising completion time over measured rates
 ``Energy-Efficient Collaborative Task Offloading in MEC'' \cite{adhoc2025} by
 S.~Wang \textit{et al.} has devices cooperate by relaying tasks toward edge
 servers, with a learned policy that cuts total energy. Its symmetric model, in
-which every device is both client and server, is PipedPeer's: one binary, and any
+which every device is both client and server, is PipedPeer's: a single binary, and any
 node may submit or accept work. PipedPeer likewise forwards a parallel-map
 request that a node cannot hold to a peer that can.
 
