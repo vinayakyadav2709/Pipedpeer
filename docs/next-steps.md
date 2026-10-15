@@ -106,6 +106,15 @@ Parked by the user on 2026-10-15:
   `chunks-only` meanwhile. Tried: none yet. Options: an un-nested per-job proot
   started at Termux level; an inner proot with a loader file (PROOT_LOADER).
   F-Droid Termux untested.
+- A whole job started on a phone does not run on an x86_64 laptop: the CLI
+  builds the job's closure for its own system and placement refuses it ("arch
+  mismatch: closure aarch64-linux, node x86_64-linux"). Fix: the run request
+  carries the job's flake + lock (additive field) and the receiving daemon
+  builds it for its own system, as pool chunks to a phone already do; the CLI
+  skips its local build when the target's system differs. ~200-400 lines.
+- Two homes that both lack a reachable introducer (no UPnP or port forward,
+  double NAT) cannot meet without an overlay such as Tailscale; there is no
+  relay by design. A hosted introducer on any public machine removes this.
 
 Dropped: Optuna interception, NPU support.
 
