@@ -1,25 +1,23 @@
 package discovery
 
 import (
+	"net"
 	"testing"
 )
 
-func TestExtractHost(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"root@10.0.1.5:22", "10.0.1.5"},
-		{"root@192.168.1.100:2222", "192.168.1.100"},
-		{"user@myhost", "myhost"},
-		{"10.0.1.5:22", "10.0.1.5"},
-		{"myhost", "myhost"},
+func TestReplyHostIsTheSource(t *testing.T) {
+	pkt := []byte(magicHeader + `|{"node_id":"n1","daemon_port":4242,"hostname":"h"}`)
+	d, ok := parseReply(pkt, &net.UDPAddr{IP: net.ParseIP("10.9.8.7"), Port: 4242})
+	if !ok || d.Host != "10.9.8.7" || d.NodeID != "n1" || d.DaemonPort != 4242 {
+		t.Fatalf("got %+v ok=%v", d, ok)
 	}
-	for _, tc := range tests {
-		got := extractHost(tc.input)
-		if got != tc.expected {
-			t.Errorf("extractHost(%q) = %q, want %q", tc.input, got, tc.expected)
-		}
+	// A stale advertised host in the payload is ignored.
+	pkt = []byte(magicHeader + `|{"node_id":"n1","host":"1.2.3.4","ssh_endpoint":"root@1.2.3.4:22"}`)
+	if d, _ := parseReply(pkt, &net.UDPAddr{IP: net.ParseIP("10.9.8.7")}); d.Host != "10.9.8.7" {
+		t.Fatalf("host = %q", d.Host)
+	}
+	if _, ok := parseReply([]byte("junk"), &net.UDPAddr{IP: net.ParseIP("10.9.8.7")}); ok {
+		t.Fatal("accepted junk")
 	}
 }
 
@@ -36,14 +34,13 @@ func TestLocalBroadcastsReturnsAddresses(t *testing.T) {
 
 func TestServiceInfoRoundTrip(t *testing.T) {
 	info := ServiceInfo{
-		NodeID:      "test-node-uuid",
-		DaemonPort:  38080,
-		SSHEndpoint: "root@10.0.1.5:22",
-		Arch:        "x86_64-linux",
-		Hostname:    "test-host",
-		CPUPercent:  25.5,
-		MemPercent:  60.0,
-		ActiveJobs:  2,
+		NodeID:     "test-node-uuid",
+		DaemonPort: 38080,
+		Arch:       "x86_64-linux",
+		Hostname:   "test-host",
+		CPUPercent: 25.5,
+		MemPercent: 60.0,
+		ActiveJobs: 2,
 	}
 
 	if info.NodeID != "test-node-uuid" {
