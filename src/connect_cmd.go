@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +21,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/internet"
 	"github.com/pipedpeer/pipedpeer/internal/invite"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
 	"github.com/pipedpeer/pipedpeer/internal/term"
@@ -81,8 +87,10 @@ func newConnectCmd() *cobra.Command {
 				term.Action(out, "run `pipedpeer setup` so this machine accepts the other machines' environments")
 			}
 
-			res := waitConnected(fmt.Sprintf("http://127.0.0.1:%d", port), connectWait)
+			base := fmt.Sprintf("http://127.0.0.1:%d", port)
+			res := waitConnected(base, connectWait)
 			printConnResult(out, res)
+			pruneIntroducers(base, inv.Addrs)
 			if res.outcome != connFailed {
 				exe, err := termuxexec.Executable()
 				if err == nil {
@@ -100,4 +108,74 @@ func newConnectCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// pruneIntroducers keeps as introducers only the invite's addresses that
+// answered by now, plus public ones and names. An invite lists the inviting
+// machine's LAN address too; on another network it never answers, failed
+// doctor for good, and on a network that reuses the range it is a stranger
+// (E6). Peers' LAN addresses still arrive as candidates in every listing.
+func pruneIntroducers(base string, addrs []string) {
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(base + "/v1/introducers")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pipedpeer: keeping every invite introducer; could not read their status: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	var states []internet.IntroducerState
+	if err := json.NewDecoder(resp.Body).Decode(&states); err != nil {
+		fmt.Fprintf(os.Stderr, "pipedpeer: keeping every invite introducer; unreadable status: %v\n", err)
+		return
+	}
+	keep := keptIntroducers(addrs, states)
+	if len(keep) == len(addrs) {
+		return
+	}
+	cfg, err := clustercfg.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pipedpeer: could not drop silent introducers: %v\n", err)
+		return
+	}
+	var dropped []string
+	cfg.Introducers = slices.DeleteFunc(cfg.Introducers, func(a string) bool {
+		if slices.Contains(addrs, a) && !slices.Contains(keep, a) {
+			dropped = append(dropped, a)
+			return true
+		}
+		return false
+	})
+	if err := clustercfg.Save(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "pipedpeer: could not drop silent introducers: %v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "pipedpeer: not using %s as introducer(s): a private address that did not answer from here\n",
+		strings.Join(dropped, ", "))
+}
+
+// keptIntroducers is addrs without the private literals that never
+// answered; all of addrs when none would be left (nothing answered, and a
+// later retry from the right network may still need them).
+func keptIntroducers(addrs []string, states []internet.IntroducerState) []string {
+	answered := map[string]bool{}
+	for _, st := range states {
+		if !st.LastReply.IsZero() {
+			answered[st.Addr] = true
+		}
+	}
+	var keep []string
+	for _, a := range addrs {
+		host, _, err := net.SplitHostPort(a)
+		if err != nil {
+			host = a
+		}
+		ip, err := netip.ParseAddr(host)
+		private := err == nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLoopback())
+		if answered[a] || !private {
+			keep = append(keep, a)
+		}
+	}
+	if len(keep) == 0 {
+		return addrs
+	}
+	return keep
 }

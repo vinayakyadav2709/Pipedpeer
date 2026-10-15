@@ -15,6 +15,7 @@
 package netaddr
 
 import (
+	"log"
 	"net"
 	"sort"
 )
@@ -93,4 +94,30 @@ func Advertise(peers []string, fallback string) string {
 		return ranked[i].addr < ranked[j].addr // stable when tied
 	})
 	return ranked[0].addr
+}
+
+// Probeable reports whether an address learned second-hand (another member's
+// gossip) is worth dialling from here: anything but a private or link-local
+// address outside this machine's own networks, which seen from another
+// network is somebody else's machine (E6). Names count as probeable.
+func Probeable(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil || (!ip.IsPrivate() && !ip.IsLinkLocalUnicast()) {
+		return true
+	}
+	addrs, err := InterfaceAddrs()
+	if err != nil {
+		log.Printf("netaddr: cannot list this machine's networks (%v); probing %s anyway", err, host)
+		return true
+	}
+	return onNetworks(ip, addrs)
+}
+
+func onNetworks(ip net.IP, addrs []net.Addr) bool {
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }

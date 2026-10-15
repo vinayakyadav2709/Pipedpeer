@@ -174,6 +174,15 @@ func (c Cluster) introducers(ctx context.Context) []Check {
 			") but the daemon is not using them", "pipedpeer stop && pipedpeer start"}}
 	}
 	now := c.Now()
+	// One answering introducer is enough to find the cluster: a silent one
+	// next to it (an invite's LAN address seen from another network, E6) is
+	// a warning, not a failure.
+	silent := Fail
+	for _, in := range list {
+		if !in.LastReply.IsZero() && now.Sub(in.LastReply) < introducerFresh {
+			silent = Warn
+		}
+	}
 	var out []Check
 	for _, in := range list {
 		if !in.LastReply.IsZero() && now.Sub(in.LastReply) < introducerFresh {
@@ -187,7 +196,7 @@ func (c Cluster) introducers(ctx context.Context) []Check {
 		if in.LastErr != "" {
 			why += ": " + in.LastErr
 		}
-		out = append(out, Check{Fail, "introducer " + in.Addr + " not answering (" + why + ")",
+		out = append(out, Check{silent, "introducer " + in.Addr + " not answering (" + why + ")",
 			"check that machine is on and its UDP port is reachable from here; if its address changed, " + connectFix})
 	}
 	return out

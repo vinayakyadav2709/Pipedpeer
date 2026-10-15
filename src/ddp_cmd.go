@@ -22,6 +22,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
 	"github.com/pipedpeer/pipedpeer/internal/say"
 )
 
@@ -64,6 +65,7 @@ type ddpRunOptions struct {
 // sitecustomize shim sync the model through the lead rank's daemon without
 // touching user code.
 func runDDP(o ddpRunOptions) error {
+	started := time.Now()
 	absScript, err := filepath.Abs(o.ScriptPath)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %v", err)
@@ -277,6 +279,8 @@ func runDDP(o ddpRunOptions) error {
 	}
 	up := newDDPUpState(nodesAtStart)
 	var ranksMu sync.Mutex
+	// Each rank's run record, merged into one "ran on" line at the end.
+	var rankRecs []runrec.Record
 
 	errs := make(chan ddpRankResult)
 	// launch starts rank i on n. A joining rank takes the ring's size and
@@ -408,7 +412,12 @@ func runDDP(o ddpRunOptions) error {
 				return
 			}
 			err = ddpRunWatched(ctx, opts.DaemonHost, opts.DaemonPort, o.DaemonPort, func(ctx context.Context) error {
-				return app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i)})
+				return app.RunTask(ctx, env, app.Task{Options: opts, Script: absScript, Label: fmt.Sprintf("rank-%d", i),
+					OnRecord: func(r runrec.Record) {
+						ranksMu.Lock()
+						rankRecs = append(rankRecs, r)
+						ranksMu.Unlock()
+					}})
 			})
 			up.ended(n.NodeID, err != nil && ctx.Err() == nil, time.Now())
 			errs <- ddpRankResult{rank: i, err: err}
@@ -502,6 +511,13 @@ func runDDP(o ddpRunOptions) error {
 	if usage != nil {
 		usage.Print(os.Stdout)
 	}
+	ranksMu.Lock()
+	if len(rankRecs) > 0 {
+		rec := runrec.Merge(rankRecs...)
+		rec.TotalNS = time.Since(started).Nanoseconds()
+		app.PrintRunRecord(rec, true)
+	}
+	ranksMu.Unlock()
 	if firstErr != nil {
 		say.Printf("[ddp] hint: sync runs on the lead daemon at %s:%d — check that every rank can reach that address\n", masterAddr, rank0.DaemonPort)
 	}

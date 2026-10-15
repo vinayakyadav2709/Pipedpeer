@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,6 +307,28 @@ func jobInfoEnv(envs []string, nodeID string, cpuCores float64) []string {
 	}
 	if cpuCores > 0 && !envsContain(envs, "PIPEDPEER_CPU_LIMIT=") {
 		out = append(out, "PIPEDPEER_CPU_LIMIT="+strconv.FormatFloat(cpuCores, 'f', -1, 64))
+	}
+	return append(out, blasThreadEnv(envs, cpuCores, runtime.NumCPU())...)
+}
+
+// blasThreadVars size OpenMP, OpenBLAS and MKL thread pools; each starts one
+// thread per machine core when unset.
+var blasThreadVars = []string{"OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"}
+
+// blasThreadEnv caps the BLAS pools at the job's CPU limit when that is below
+// the machine's cores: under a 2-CPU quota on a 16-core host numpy's SVD ran
+// 16 threads time-slicing two cores, ~200 s (E6). A value already set (the
+// user's --env, a DDP rank's share) is kept.
+func blasThreadEnv(envs []string, cpuCores float64, machineCores int) []string {
+	n := int(math.Ceil(cpuCores))
+	if cpuCores <= 0 || n >= machineCores {
+		return nil
+	}
+	var out []string
+	for _, v := range blasThreadVars {
+		if !envsContain(envs, v+"=") {
+			out = append(out, v+"="+strconv.Itoa(max(1, n)))
+		}
 	}
 	return out
 }

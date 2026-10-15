@@ -96,14 +96,25 @@ func TestIntroducerNotAnswering(t *testing.T) {
 	if f := find(t, got, "10.0.0.1"); f.Level != OK || !strings.Contains(f.What, "3 members") {
 		t.Fatalf("fresh introducer: %+v", f)
 	}
-	if f := find(t, got, "10.0.0.2"); f.Level != Fail || !strings.Contains(f.What, "never answered: no reply") {
+	// One answers, so the silent ones only warn (E6: an invite's LAN address
+	// seen from another network failed doctor for good).
+	if f := find(t, got, "10.0.0.2"); f.Level != Warn || !strings.Contains(f.What, "never answered: no reply") {
 		t.Fatalf("silent introducer: %+v", f)
 	}
-	if f := find(t, got, "10.0.0.3"); f.Level != Fail || !strings.Contains(f.What, "5m0s ago") {
+	if f := find(t, got, "10.0.0.3"); f.Level != Warn || !strings.Contains(f.What, "5m0s ago") {
 		t.Fatalf("stale introducer: %+v", f)
 	}
 	if f := find(t, got, "no other machines"); f.Level != Warn {
 		t.Fatalf("got %+v", f)
+	}
+
+	api = fakeDaemon(t, 204, map[string]any{
+		"/v1/introducers": []introducerState{{Addr: "10.0.0.2:4244", LastErr: "no reply"}},
+		"/v1/nodes":       []node{},
+	})
+	got = cluster(api).Run(context.Background())
+	if f := find(t, got, "10.0.0.2"); f.Level != Fail {
+		t.Fatalf("the only introducer, silent: %+v; want a failure", f)
 	}
 }
 

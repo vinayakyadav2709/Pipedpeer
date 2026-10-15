@@ -231,6 +231,25 @@ func (m *Manager) bestReflexLocked(now time.Time) netip.AddrPort {
 	return best
 }
 
+// strayLocked: a configured introducer at a private address that has never
+// answered for silentAfter while another one answers. An invite lists the
+// inviting machine's LAN address; seen from another network that uses the
+// same range it is somebody else's machine, and registering with it every
+// poll hands our candidates to a stranger (E6). It is asked again as soon as
+// no other introducer answers.
+func (m *Manager) strayLocked(in *introducer, now time.Time) bool {
+	if in.self || in.hidden || !in.lastReply.IsZero() || in.waiting.IsZero() ||
+		now.Sub(in.waiting) < silentAfter || !in.at.IsValid() || isPublic(in.at.Addr()) {
+		return false
+	}
+	for _, o := range m.intros {
+		if o != in && !o.self && m.fresh(o, now) {
+			return true
+		}
+	}
+	return false
+}
+
 func isPublic(a netip.Addr) bool {
 	return a.IsGlobalUnicast() && !a.IsPrivate()
 }

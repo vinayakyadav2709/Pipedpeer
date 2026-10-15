@@ -106,6 +106,12 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 			break // only LAN candidates can still beat what answered
 		}
 		addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+		if p.Kind == nodestore.PathGossip && !netaddr.Probeable(p.Host) {
+			// Another member's private address, on none of our networks:
+			// here it is a stranger's machine (E6).
+			log.Debug().Str("peer", node.NodeID).Str("at", addr).Msg("not probing a gossiped private address off our networks")
+			continue
+		}
 		h, err := probeHealth(p.Host, p.Port)
 		if err != nil && strings.Contains(err.Error(), "expected node") {
 			// The pinned key no longer answers here. Node id = key, so this is

@@ -38,3 +38,19 @@ func TestJobInfoEnv(t *testing.T) {
 		t.Errorf("env = %v, want nothing (submitter's id kept, no limit omitted)", env)
 	}
 }
+
+// E6: a 2-CPU quota on a 16-core host ran numpy's BLAS with 16 threads. The
+// pools are capped at the limit, a value already set is kept, and an
+// unlimited job (or one allowed every core) gets nothing.
+func TestBLASThreadsFollowTheJobsCPULimit(t *testing.T) {
+	env := blasThreadEnv([]string{"MKL_NUM_THREADS=1"}, 1.5, 16)
+	if !slices.Equal(env, []string{"OMP_NUM_THREADS=2", "OPENBLAS_NUM_THREADS=2"}) {
+		t.Errorf("capped job: %v", env)
+	}
+	if env := blasThreadEnv(nil, 0, 16); env != nil {
+		t.Errorf("unlimited job: %v", env)
+	}
+	if env := blasThreadEnv(nil, 16, 16); env != nil {
+		t.Errorf("limit = every core: %v", env)
+	}
+}
