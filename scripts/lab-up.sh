@@ -5,6 +5,7 @@
 # LAB_NAME (default lab) gives the lab its own containers (pipedpeer-lab-<name>-<i>),
 # subnet, compose project and token file (~/.local/state/pipedpeer/lab-<name>.token),
 # so several can run at once; lab-down.sh and lab-fail.sh take the same name.
+# LAB_MEM is the memory per worker, swap included (default 1g; 3 workers).
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,5 +44,7 @@ echo "Using container runtime: $rt; lab $lab_name ($LAB_CTR-<i>, $LAB_SUBNET)"
 cd "$repo_root/lab"
 # Tear down first: compose will not recreate a container it already knows.
 pp_compose -p "$lab_project" down --remove-orphans 2>/dev/null || true
-pp_lab_mem_check "$((3 * $(pp_bytes 1536m)))" lab-up || exit 1
+LAB_MEM="${LAB_MEM:-1g}"
+export LAB_MEM
+pp_lab_mem_check "$((3 * $(pp_bytes "$LAB_MEM")))" lab-up || exit 1
 pp_compose -p "$lab_project" up -d --build

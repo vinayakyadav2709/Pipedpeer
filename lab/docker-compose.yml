@@ -14,8 +14,8 @@ services:
     networks:
       lab:
         ipv4_address: ${LAB_BASE:-10.87.0}.11
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    mem_limit: ${LAB_MEM:-1g}
+    memswap_limit: ${LAB_MEM:-1g}
     volumes:
       - ${LAB_BIN:-./pipedpeer}:/usr/local/bin/pipedpeer:ro
     environment:
@@ -30,8 +30,8 @@ services:
     networks:
       lab:
         ipv4_address: ${LAB_BASE:-10.87.0}.12
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    mem_limit: ${LAB_MEM:-1g}
+    memswap_limit: ${LAB_MEM:-1g}
     volumes:
       - ${LAB_BIN:-./pipedpeer}:/usr/local/bin/pipedpeer:ro
     environment:
@@ -46,8 +46,8 @@ services:
     networks:
       lab:
         ipv4_address: ${LAB_BASE:-10.87.0}.13
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    mem_limit: ${LAB_MEM:-1g}
+    memswap_limit: ${LAB_MEM:-1g}
     volumes:
       - ${LAB_BIN:-./pipedpeer}:/usr/local/bin/pipedpeer:ro
     environment:
