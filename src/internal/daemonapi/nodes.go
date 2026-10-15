@@ -292,10 +292,10 @@ func (s *Server) AddPeer(host string, port int) error {
 	since := s.pathGeneration()
 	h, err := probeHealth(host, port)
 	if err != nil {
-		log.Warn().Err(err).Str("at", addr).Msg("internet peer not answering yet; retrying every poll")
+		log.Warn().Err(err).Str("at", addr).Msg("internet peer not answering yet; retrying shortly, then every poll")
 		s.pathMu.Lock()
-		defer s.pathMu.Unlock()
 		if s.removedAt[addr] > since {
+			s.pathMu.Unlock()
 			return nil // removed while we probed
 		}
 		s.pendingMu.Lock()
@@ -304,9 +304,13 @@ func (s *Server) AddPeer(host string, port int) error {
 		}
 		s.pending[addr] = struct{}{}
 		s.pendingMu.Unlock()
+		s.pathMu.Unlock()
+		// A fresh link's first probe often meets a forwarder still settling
+		// (EOF, no answer); waiting a whole poll for it cost 10 s per join.
+		go s.retrySoon(addr, since)
 		return nil
 	}
-	if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port, since); err != nil {
+	if _, err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port, since); err != nil {
 		return err
 	}
 	// Poll now rather than at the next sweep: a peer not yet marked healthy is
@@ -317,16 +321,16 @@ func (s *Server) AddPeer(host string, port int) error {
 
 // adoptPath records host:port as a verified path of nodeID, unless RemovePeer
 // dropped that address after generation since.
-func (s *Server) adoptPath(nodeID string, kind nodestore.PathKind, host string, port int, since uint64) error {
+func (s *Server) adoptPath(nodeID string, kind nodestore.PathKind, host string, port int, since uint64) (bool, error) {
 	ok, err := s.verifyPath(nodeID, kind, host, port, since)
 	if err != nil {
-		return fmt.Errorf("verify path %s:%d for %s: %w", host, port, nodeID, err)
+		return false, fmt.Errorf("verify path %s:%d for %s: %w", host, port, nodeID, err)
 	}
 	if !ok {
 		log.Info().Str("peer", nodeID).Str("at", net.JoinHostPort(host, strconv.Itoa(port))).
 			Msg("path removed while it was being checked; not re-adding it")
 	}
-	return nil
+	return ok, nil
 }
 
 func (s *Server) pathGeneration() uint64 {
@@ -533,24 +537,56 @@ func (s *Server) retryPending() {
 	}
 	s.pendingMu.Unlock()
 	for _, a := range addrs {
-		host, portStr, err := net.SplitHostPort(a)
-		if err != nil {
-			continue // only ever written by JoinHostPort
-		}
-		port, _ := strconv.Atoi(portStr)
-		h, err := probeHealth(host, port)
-		if err != nil {
-			continue // logged once by AddPeer; still pending
-		}
-		if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port, since); err != nil {
-			log.Warn().Err(err).Str("at", a).Msg("internet peer answered but its path could not be stored")
-			continue
-		}
-		log.Info().Str("peer", h.NodeID).Str("at", a).Msg("internet peer answered")
-		s.pendingMu.Lock()
-		delete(s.pending, a)
-		s.pendingMu.Unlock()
+		s.tryPending(a, since)
 	}
+}
+
+// retrySoonDelays are AddPeer's quick retries before the poll takes over.
+var retrySoonDelays = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second}
+
+// retrySoon retries one pending forwarder after each of retrySoonDelays, and
+// polls at once when it answers. It stops when the address is no longer
+// pending (answered, or RemovePeer dropped it).
+func (s *Server) retrySoon(addr string, since uint64) {
+	for _, d := range retrySoonDelays {
+		time.Sleep(d)
+		s.pendingMu.Lock()
+		_, still := s.pending[addr]
+		s.pendingMu.Unlock()
+		if !still {
+			return
+		}
+		if s.tryPending(addr, since) {
+			s.pollAllNodes()
+			return
+		}
+	}
+}
+
+// tryPending probes one pending forwarder and, when it answers, records the
+// path (subject to the removal check) and takes it off the pending list.
+func (s *Server) tryPending(a string, since uint64) bool {
+	host, portStr, err := net.SplitHostPort(a)
+	if err != nil {
+		return false // only ever written by JoinHostPort
+	}
+	port, _ := strconv.Atoi(portStr)
+	h, err := probeHealth(host, port)
+	if err != nil {
+		return false // logged once by AddPeer; still pending
+	}
+	ok, err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port, since)
+	if err != nil {
+		log.Warn().Err(err).Str("at", a).Msg("internet peer answered but its path could not be stored")
+		return false
+	}
+	s.pendingMu.Lock()
+	delete(s.pending, a)
+	s.pendingMu.Unlock()
+	if ok {
+		log.Info().Str("peer", h.NodeID).Str("at", a).Msg("internet peer answered")
+	}
+	return ok
 }
 
 // logPeerChanges writes "peer up" for a peer healthy now and not before, and
