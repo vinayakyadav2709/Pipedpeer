@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonapi"
 )
@@ -41,7 +42,7 @@ func TestExecutionReportsTiming(t *testing.T) {
 		t.Fatal(err)
 	}
 	tarPath := filepath.Join(t.TempDir(), "ws.tar")
-	if err := CreateWorkspaceTar(project, tarPath, ""); err != nil {
+	if err := CreateWorkspaceTar(project, tarPath, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,7 +102,7 @@ open("out.txt", "w").write("result")
 		t.Fatal(err)
 	}
 	tarPath := filepath.Join(t.TempDir(), "ws.tar")
-	if err := CreateWorkspaceTar(project, tarPath, "# shim"); err != nil {
+	if err := CreateWorkspaceTar(project, tarPath, fstest.MapFS{"sitecustomize.py": {Data: []byte("# shim")}}); err != nil {
 		t.Fatal(err)
 	}
 

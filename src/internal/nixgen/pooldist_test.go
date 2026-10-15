@@ -271,7 +271,7 @@ func runPoolScriptWith(t *testing.T, python string, files map[string]string, mai
 	url, stats := startPoolFakeDaemon(t, python)
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	for name, body := range files {
@@ -515,7 +515,7 @@ func TestShimPoolSingleNodeDoesNotDialItself(t *testing.T) {
 	url, stats := startPoolFakeDaemon(t, python)
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(poolScript), 0o644); err != nil {
@@ -588,7 +588,7 @@ func TestShimPoolRespectsSizeWhenAsked(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	script := `
@@ -652,7 +652,7 @@ if __name__ == "__main__":
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(script), 0o644); err != nil {
@@ -689,19 +689,19 @@ func TestShimCompressesCompressiblePayloadsOnly(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	probe := `
 import pickle, random, sys, zlib
 sys.path.insert(0, sys.argv[1])
-import shim_mod
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 # Highly repetitive and genuinely large: worth compressing. (A list of one
 # repeated string would not be — pickle memoises it down to a few bytes.)
 repetitive = [pickle.dumps(b"abcdefgh" * 400000) for _ in range(3)]
 header = {}
-out = shim_mod._maybe_compress(list(repetitive), header)
+out = transfer._maybe_compress(list(repetitive), header)
 assert header.get("items_zlib"), "repetitive payload was not compressed"
 assert sum(map(len, out)) < sum(map(len, repetitive)) * 0.9, "no real saving"
 assert [zlib.decompress(o) for o in out] == repetitive, "does not round-trip"
@@ -709,14 +709,14 @@ assert [zlib.decompress(o) for o in out] == repetitive, "does not round-trip"
 # Random bytes: incompressible, so compressing is pure CPU cost.
 noise = [pickle.dumps(random.randbytes(2 << 20)) for _ in range(2)]
 header = {}
-out = shim_mod._maybe_compress(list(noise), header)
+out = transfer._maybe_compress(list(noise), header)
 assert not header.get("items_zlib"), "incompressible payload was compressed anyway"
 assert out == noise, "payload altered despite declining to compress"
 
 # Small payloads are not worth the round trip through zlib at all.
 small = [pickle.dumps("hello")]
 header = {}
-out = shim_mod._maybe_compress(list(small), header)
+out = transfer._maybe_compress(list(small), header)
 assert not header.get("items_zlib") and out == small
 print("compress-ok")
 `
@@ -796,16 +796,17 @@ func TestPoolWidthFollowsCPUPinning(t *testing.T) {
 	runShimPython(t, "pinned", `
 import os
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 if not hasattr(os, "sched_setaffinity"):
     print("PINNED-OK")
     raise SystemExit(0)
 allowed = sorted(os.sched_getaffinity(0))
-assert shim._usable_cores() <= len(allowed), shim._usable_cores()
+assert pool._usable_cores() <= len(allowed), pool._usable_cores()
 os.sched_setaffinity(0, {allowed[0]})
-assert shim._usable_cores() == 1, "pinned to one core, sized for %d" % shim._usable_cores()
+assert pool._usable_cores() == 1, "pinned to one core, sized for %d" % pool._usable_cores()
 os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
-assert shim._pool_width(None) == 1, shim._pool_width(None)
+assert pool._pool_width(None) == 1, pool._pool_width(None)
 print("PINNED-OK")
 `, "PINNED-OK")
 }
@@ -818,22 +819,23 @@ func TestPoolResizeCountsItsOwnWorkersAsFree(t *testing.T) {
 	runShimPython(t, "reclaim", `
 import os
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 os.environ.pop("PIPEDPEER_RESPECT_POOL_SIZE", None)
-shim._usable_cores = lambda: 2
+pool._usable_cores = lambda: 2
 budget = int(2 * (256 << 20) / 0.4) + 1     # exactly room for two workers
-shim._avail_bytes = lambda: budget
+pool._avail_bytes = lambda: budget
 
 def inc(x):
     return x + 1
 
 if __name__ == "__main__":
-    pool = shim._ClusterPool()
+    pool = pool._ClusterPool()
     assert pool._procs == 2, pool._procs
     held = pool._workers_memory()
     assert held > 0, "a running pool reported no memory held by its workers"
     # The workers now hold memory the machine no longer reports as free.
-    shim._avail_bytes = lambda: budget - held
+    pool._avail_bytes = lambda: budget - held
     pool._resize()
     assert pool._procs == 2, "shrank to %d over its own workers' memory" % pool._procs
     assert pool.map(inc, range(4)) == [1, 2, 3, 4]

@@ -17,12 +17,11 @@ func TestShimSyntax(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	shim := filepath.Join(dir, "sitecustomize.py")
-	if err := os.WriteFile(shim, []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 
-	out, err := exec.Command(python, "-m", "py_compile", shim).CombinedOutput()
+	out, err := exec.Command(python, "-m", "compileall", "-q", dir).CombinedOutput()
 	if err != nil {
 		t.Fatalf("shim does not compile:\n%s", out)
 	}
@@ -38,7 +37,7 @@ func TestShimInstallSafe(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 
@@ -80,7 +79,7 @@ func TestShimEnabledStillLocal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	src := `
@@ -130,7 +129,7 @@ func TestShimTorchFallbackLocal(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	src := `
@@ -287,6 +286,7 @@ os.environ["PIPEDPEER_STORE_PATH"] = ""
 os.environ["PIPEDPEER_OOC_MIN"] = "1"
 
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 # pandas and numpy are imported by the scripts that use them, not here. This
 # preamble is shared by every test that needs a fake daemon, and importing them
 # unconditionally made the cost-model and numpy tests skip for want of pandas
@@ -294,11 +294,11 @@ import sitecustomize as shim
 # could have run the test.
 # sitecustomize is imported at interpreter startup, before this preamble runs,
 # so the env vars it read then are stale; point the module at the fake daemon.
-shim._ENABLED = True
-shim._URL = "http://127.0.0.1:%d" % PORT
-shim._STORE = ""
-shim._NUM_SHARDS = "3"
-shim._OOC_CHUNK = 4096
+core._ENABLED = True
+core._URL = "http://127.0.0.1:%d" % PORT
+core._STORE = ""
+core._NUM_SHARDS = "3"
+pandas_ops._OOC_CHUNK = 4096
 `
 
 // runShimPython writes the shim plus a python script and runs it; any nonzero
@@ -354,7 +354,7 @@ func runShimPythonEnv(t *testing.T, name, src, wantSentinel string, envs ...stri
 		}
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	script := filepath.Join(dir, name+".py")
@@ -383,33 +383,33 @@ import numpy as np
 n = 4000
 df = pd.DataFrame({"k": np.random.randint(0, 13, n), "a": np.random.randn(n), "b": np.random.randint(0, 100, n)})
 gb = df.groupby("k")
-pd.testing.assert_frame_equal(shim._groupby_shuffle(gb, {"a": ["sum", "mean"], "b": "max"}, (), {}),
+pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(gb, {"a": ["sum", "mean"], "b": "max"}, (), {}),
                               gb.agg({"a": ["sum", "mean"], "b": "max"}))
-pd.testing.assert_frame_equal(shim._groupby_shuffle(df.groupby("k"), ["sum", "mean"], (), {}),
+pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(df.groupby("k"), ["sum", "mean"], (), {}),
                               df.groupby("k").agg(["sum", "mean"]))
-pd.testing.assert_frame_equal(shim._groupby_shuffle(df.groupby("k", as_index=False), "sum", (), {}),
+pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(df.groupby("k", as_index=False), "sum", (), {}),
                               df.groupby("k", as_index=False).sum())
 dna = df.copy()
 dna.loc[::97, "k"] = np.nan
-pd.testing.assert_frame_equal(shim._groupby_shuffle(dna.groupby("k"), "sum", (), {}),
+pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(dna.groupby("k"), "sum", (), {}),
                               dna.groupby("k").sum())
 
 L = pd.DataFrame({"id": np.random.randint(0, 50, 3000), "lv": np.random.randn(3000)})
 R = pd.DataFrame({"id": np.random.randint(0, 50, 500), "rv": np.random.randn(500)})
 for how in ("inner", "left", "right", "outer"):
-    got = shim._merge_shuffle(L, R, {"how": how, "on": "id", "sort": False})
+    got = pandas_ops._merge_shuffle(L, R, {"how": how, "on": "id", "sort": False})
     local = L.merge(R, how=how, on="id", sort=False)
     cols = list(local.columns)
     pd.testing.assert_frame_equal(got.sort_values(by=cols).reset_index(drop=True),
                                   local.sort_values(by=cols).reset_index(drop=True))
-got = shim._merge_shuffle(L, R, {"how": "left", "on": "id", "sort": True})
+got = pandas_ops._merge_shuffle(L, R, {"how": "left", "on": "id", "sort": True})
 local = L.merge(R, how="left", on="id", sort=True)
 assert got["id"].is_monotonic_increasing
 cols = list(local.columns)
 pd.testing.assert_frame_equal(got.sort_values(by=cols).reset_index(drop=True),
                               local.sort_values(by=cols).reset_index(drop=True))
 Li, Ri = L.set_index("id"), R.set_index("id")
-got = shim._merge_shuffle(Li, Ri, {"how": "inner", "left_index": True, "right_index": True, "sort": True})
+got = pandas_ops._merge_shuffle(Li, Ri, {"how": "inner", "left_index": True, "right_index": True, "sort": True})
 local = Li.merge(Ri, left_index=True, right_index=True, sort=True)
 assert got.index.is_monotonic_increasing
 pd.testing.assert_frame_equal(got.sort_index().sort_values(by=["lv", "rv"]).reset_index(drop=True),
@@ -418,7 +418,7 @@ pd.testing.assert_frame_equal(got.sort_index().sort_values(by=["lv", "rv"]).rese
 big = pd.DataFrame({"k": np.random.randint(0, 9, 20000), "v": np.random.randn(20000), "s": np.random.randint(0, 50, 20000)})
 csv = os.path.join(TMP, "big.csv")
 big.to_csv(csv, index=False)
-pf = shim._partitioned_read_csv(csv, {})
+pf = pandas_ops._partitioned_read_csv(csv, {})
 assert len(pf) == 20000 and pf.shape[1] == 3
 local_df = pd.read_csv(csv)
 pd.testing.assert_frame_equal(pf._materialize(), local_df)
@@ -449,7 +449,7 @@ import numpy as np
 big = pd.DataFrame({"k": np.random.randint(0, 9, 20000), "v": np.random.randn(20000), "s": np.random.randint(0, 50, 20000)})
 csv = os.path.join(TMP, "lost.csv")
 big.to_csv(csv, index=False)
-pf = shim._partitioned_read_csv(csv, {})
+pf = pandas_ops._partitioned_read_csv(csv, {})
 assert len(pf._keys) > 3
 local_df = pd.read_csv(csv)
 class _Lost(dict):
@@ -469,7 +469,7 @@ with contextlib.redirect_stderr(err):
 out = err.getvalue()
 for what in ("groupby", "materialize", "chunk fetch", "merge"):
     assert ("WARNING: %s on the cluster failed" % what) in out, (what, out)
-assert shim._STATS["remote_failures"] >= 5, shim._STATS["remote_failures"]
+assert stats._STATS["remote_failures"] >= 5, stats._STATS["remote_failures"]
 print("OOC-FALLBACK-OK")
 `, "OOC-FALLBACK-OK")
 }
@@ -484,7 +484,7 @@ import numpy as np
 csv = os.path.join(TMP, "lines.csv")
 with open(csv, "wb") as f:
     f.write(b"k,v\n" + b"".join(b"k%d,%d\n" % (i % 5, i) for i in range(1000)))
-ranges = list(shim._csv_ranges(csv, 0))
+ranges = list(pandas_ops._csv_ranges(csv, 0))
 offs = [ranges[0][0]] + [b for _, b in ranges]
 assert offs[0] == 4, offs
 data = open(csv, "rb").read()
@@ -502,11 +502,11 @@ r = pd.read_csv(csv)
 assert isinstance(r, pd.DataFrame) and len(r) == 1000
 os.environ["PIPEDPEER_DAEMON_URL"] = "http://127.0.0.1:%d" % PORT
 
-shim._OOC_CHUNK = 1024 * 1024
+pandas_ops._OOC_CHUNK = 1024 * 1024
 big = pd.DataFrame({"k": np.random.randint(0, 9, 800000), "v": np.random.randn(800000), "s": np.random.randint(0, 50, 800000)})
 bigcsv = os.path.join(TMP, "ram.csv")
 big.to_csv(bigcsv, index=False)
-pf = shim._partitioned_read_csv(bigcsv, {})
+pf = pandas_ops._partitioned_read_csv(bigcsv, {})
 assert len(pf) == len(big)
 b64_byte = MAX_CHUNK[0] * 3 // 4
 assert b64_byte <= 1024 * 1024 + 65536, b64_byte
@@ -519,22 +519,22 @@ print("OOC-OK")
 // decision table and the probe cache (one real probe per TTL).
 func TestShimCostModelDecisions(t *testing.T) {
 	runShimPython(t, "t6", shimFakeDaemon+`
-_real_bw = shim._measure_bandwidth
-shim._measure_bandwidth = lambda: 500e6
-assert not shim._should_spill(16 * 1024 * 1024, 100)
-assert not shim._should_spill(100 * 1024 * 1024, 2)
-assert not shim._should_spill(600 * 1024 * 1024, 2)
-shim._measure_bandwidth = lambda: 2e9
-assert shim._should_spill(600 * 1024 * 1024, 2)
-shim._measure_bandwidth = lambda: 500e6
-assert shim._should_spill(200 * 1024 * 1024, 100)
-shim._measure_bandwidth = lambda: None
-assert not shim._should_spill(1e9, 100)
-shim._measure_bandwidth = _real_bw
+_real_bw = transfer._measure_bandwidth
+transfer._measure_bandwidth = lambda: 500e6
+assert not transfer._should_spill(16 * 1024 * 1024, 100)
+assert not transfer._should_spill(100 * 1024 * 1024, 2)
+assert not transfer._should_spill(600 * 1024 * 1024, 2)
+transfer._measure_bandwidth = lambda: 2e9
+assert transfer._should_spill(600 * 1024 * 1024, 2)
+transfer._measure_bandwidth = lambda: 500e6
+assert transfer._should_spill(200 * 1024 * 1024, 100)
+transfer._measure_bandwidth = lambda: None
+assert not transfer._should_spill(1e9, 100)
+transfer._measure_bandwidth = _real_bw
 
 assert PROBES[0] == 0
-bw1 = shim._measure_bandwidth()
-bw2 = shim._measure_bandwidth()
+bw1 = transfer._measure_bandwidth()
+bw2 = transfer._measure_bandwidth()
 # Both calls must return the same value: that is the TTL cache doing its job.
 assert bw1 == bw2, "cache broken: two calls returned different values"
 # Exactly one probe reached the server. This used to accept 0 or 1, on the
@@ -570,14 +570,14 @@ A = np.zeros((2048, 2048))
 assert PROBES[0] == 0, "something probed before the test started"
 
 # matmul at real BLAS speed: local wins by a wide margin at any bandwidth.
-assert not shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
+assert not numpy_ops._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
 assert PROBES[0] == 0, (
     "the link was measured to answer a question the measurement could not "
     "change: %d probe(s), 64 MB each" % PROBES[0])
 
 # svd at LAPACK speed is the other way round - shipping plausibly wins, so the
 # real bandwidth genuinely decides and the probe is worth its cost.
-shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
+numpy_ops._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
 assert PROBES[0] == 1, (
     "expected the probe when the answer actually depends on it, got %d"
     % PROBES[0])
@@ -594,15 +594,16 @@ func TestShimNumPyInterception(t *testing.T) {
 import time
 import base64
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 import numpy as np
 
-shim._ENABLED = True
-shim._URL = "http://127.0.0.1:%d" % PORT
-shim._STORE = ""
+core._ENABLED = True
+core._URL = "http://127.0.0.1:%d" % PORT
+core._STORE = ""
 # The fake daemon's loopback latency would make the cost model refuse to
 # spill; pin the cached bandwidth so the cost model chooses remote.
-shim._BW_CACHE["bw"] = 1e9
-shim._BW_CACHE["t"] = time.monotonic()
+transfer._BW_CACHE["bw"] = 1e9
+transfer._BW_CACHE["t"] = time.monotonic()
 
 rng = np.random.RandomState(1)
 A = rng.rand(2048, 2048)
@@ -611,10 +612,10 @@ b64A = len(base64.b64encode(A.tobytes()))
 
 # Honest cost model at realistic BLAS speeds: local dgemm beats the transport
 # for matmul, but svd offloads (LAPACK is ~100x slower per flop).
-assert not shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
-assert shim._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
+assert not numpy_ops._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 8), 5, True, 200e9)
+assert numpy_ops._numpy_should_offload(A.nbytes, max(8, A.shape[0] // 4), 3, False, 1.5e9)
 # Force every offload so the slicing/frames mechanics below are exercised.
-shim._numpy_should_offload = lambda *a, **k: True
+numpy_ops._numpy_should_offload = lambda *a, **k: True
 
 C = np.matmul(A, B)            # dispatches block rows
 local = A @ B                  # @ operator is untouched: local reference
@@ -646,13 +647,14 @@ func TestShimNumPyRespectsTheCostModelsNo(t *testing.T) {
 	runShimPythonEnv(t, "t8b", shimFakeDaemon+`
 import time
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 import numpy as np
 
-shim._ENABLED = True
-shim._URL = "http://127.0.0.1:%d" % PORT
-shim._STORE = ""
-shim._BW_CACHE["bw"] = 1e9
-shim._BW_CACHE["t"] = time.monotonic()
+core._ENABLED = True
+core._URL = "http://127.0.0.1:%d" % PORT
+core._STORE = ""
+transfer._BW_CACHE["bw"] = 1e9
+transfer._BW_CACHE["t"] = time.monotonic()
 
 rng = np.random.RandomState(1)
 A = rng.rand(512, 512)
@@ -660,7 +662,7 @@ B = rng.rand(512, 512)
 
 # The model says no to everything. Nothing may cross the wire, and the answers
 # must still be right - "stayed local" is only acceptable if it also computed.
-shim._numpy_should_offload = lambda *a, **k: False
+numpy_ops._numpy_should_offload = lambda *a, **k: False
 
 before = POOL_CALLS[0]
 C = np.matmul(A, B)
@@ -689,19 +691,19 @@ func TestShimForceDistributeBypassesCostModel(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	shim := filepath.Join(dir, "sitecustomize.py")
-	if err := os.WriteFile(shim, []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 
 	script := filepath.Join(dir, "probe.py")
 	if err := os.WriteFile(script, []byte(`
 import sitecustomize as sc
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 # 1 KB of work with modest flops: auto mode must refuse, force must accept.
-assert sc._should_spill(1024, 4) is True, "_should_spill ignored force"
-assert sc._numpy_should_offload(1024, 4, 2, True, 1e9) is True, "_numpy_should_offload ignored force"
-assert sc._spill_min() == 0, "force did not zero the spill floor"
+assert transfer._should_spill(1024, 4) is True, "_should_spill ignored force"
+assert numpy_ops._numpy_should_offload(1024, 4, 2, True, 1e9) is True, "_numpy_should_offload ignored force"
+assert core._spill_min() == 0, "force did not zero the spill floor"
 print("FORCE_OK")
 `), 0644); err != nil {
 		t.Fatal(err)
@@ -723,7 +725,7 @@ print("FORCE_OK")
 
 	// And the floor must be overridable independently of force.
 	cmd = exec.Command(python, "-c",
-		"import sitecustomize as sc; assert sc._spill_min() == 5.0; print('MIN_OK')")
+		"from pipedpeer_shim import core; assert core._spill_min() == 5.0; print('MIN_OK')")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"PIPEDPEER_SHIM=1", "PIPEDPEER_SPILL_MIN=5", "PYTHONPATH="+dir)
@@ -745,7 +747,8 @@ func TestShimDoesNotImportHeavyLibsAtStartup(t *testing.T) {
 import sys
 assert sys.modules.get("sitecustomize") is not None, "shim did not load"
 import sitecustomize as shim
-assert shim._ENABLED, "shim not enabled; this test would be vacuous"
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+assert core._ENABLED, "shim not enabled; this test would be vacuous"
 for mod in ("torch", "pandas", "numpy", "joblib", "sklearn"):
     assert mod not in sys.modules, mod + " was imported at startup"
 print("LAZY-OK")
@@ -762,11 +765,12 @@ func TestShimPatchesOnFirstImport(t *testing.T) {
 	src := `
 import sys
 import sitecustomize as shim
-assert shim._ENABLED, "shim not enabled; this test would be vacuous"
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
+assert core._ENABLED, "shim not enabled; this test would be vacuous"
 assert "numpy" not in sys.modules, "numpy imported before the script asked"
 import numpy as np
-assert np.matmul.__module__ == "sitecustomize", np.matmul.__module__
-assert "numpy" not in shim._PENDING_PATCHES, "numpy patch still pending"
+assert np.matmul.__module__ == "pipedpeer_shim.numpy_ops", np.matmul.__module__
+assert "numpy" not in ddp._PENDING_PATCHES, "numpy patch still pending"
 print("PATCH-OK")
 `
 	runShimPythonEnv(t, "lazy_patch", src, "PATCH-OK",
@@ -776,7 +780,7 @@ print("PATCH-OK")
 }
 
 func TestRequiredPythonSeesTheShimsTorchHelpers(t *testing.T) {
-	for _, src := range []string{"shim._WeightedShardSampler(x)", "shim._weighted_batches(x)"} {
+	for _, src := range []string{"ddp._WeightedShardSampler(x)", "ddp._weighted_batches(x)"} {
 		found := false
 		for _, d := range requiredPython(src) {
 			found = found || d == "torch"

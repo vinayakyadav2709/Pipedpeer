@@ -169,26 +169,26 @@ func TestShimCategoricalGroupbyMatchesLocal(t *testing.T) {
 import pandas as pd
 import numpy as np
 os.environ["PIPEDPEER_SPILL_MIN"] = "1"
-shim._FORCE = True
+core._FORCE = True
 n = 3000
 rng = np.random.default_rng(7)
 cats = pd.Categorical(rng.choice(list("abcde"), n), categories=list("abcdefg"))
 df = pd.DataFrame({"c": cats, "k": rng.integers(0, 4, n), "a": rng.standard_normal(n),
                    "b": rng.integers(0, 100, n)})
-assert shim._groupby_gate(df.groupby("c", observed=False)), "gate refused a categorical key"
+assert pandas_ops._groupby_gate(df.groupby("c", observed=False)), "gate refused a categorical key"
 for obs in (True, False):
     for spec in ("sum", "mean", "count", {"a": ["sum", "mean"], "b": "max"}):
         gb = df.groupby("c", observed=obs)
-        pd.testing.assert_frame_equal(shim._groupby_shuffle(gb, spec, (), {}), gb.agg(spec))
+        pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(gb, spec, (), {}), gb.agg(spec))
     for keys in ("c", ["c", "k"], ["k", "c"]):
         gb = df.groupby(keys, observed=obs)
-        pd.testing.assert_frame_equal(shim._groupby_shuffle(gb, "sum", (), {}), gb.agg("sum"))
-        pd.testing.assert_series_equal(shim._groupby_shuffle(gb, "size", (), {}), gb.agg("size"))
+        pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(gb, "sum", (), {}), gb.agg("sum"))
+        pd.testing.assert_series_equal(pandas_ops._groupby_shuffle(gb, "size", (), {}), gb.agg("size"))
         gb = df.groupby(keys, observed=obs, as_index=False)
-        pd.testing.assert_frame_equal(shim._groupby_shuffle(gb, "sum", (), {}), gb.agg("sum"))
+        pd.testing.assert_frame_equal(pandas_ops._groupby_shuffle(gb, "sum", (), {}), gb.agg("sum"))
 # The call's own observed wins; unset means the pandas default.
-assert shim._groupby_observed(df.groupby("c", observed=False)) is False
-assert shim._groupby_observed(df.groupby("c", observed=True)) is True
+assert pandas_ops._groupby_observed(df.groupby("c", observed=False)) is False
+assert pandas_ops._groupby_observed(df.groupby("c", observed=True)) is True
 print("CATGB-OK")
 `, "CATGB-OK")
 }

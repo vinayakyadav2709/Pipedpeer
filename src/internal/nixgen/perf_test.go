@@ -42,14 +42,15 @@ srv.daemon_threads = True
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 import numpy as np
-shim._ENABLED = True
-shim._URL = "http://127.0.0.1:%d" % srv.server_address[1]
-shim._STORE = ""
-shim._BW_CACHE["bw"] = 1e9
-shim._BW_CACHE["t"] = time.monotonic()
-shim._LINALG_MIN_DEADLINE = 1.0
-shim._numpy_should_offload = lambda *a, **k: True
+core._ENABLED = True
+core._URL = "http://127.0.0.1:%d" % srv.server_address[1]
+core._STORE = ""
+transfer._BW_CACHE["bw"] = 1e9
+transfer._BW_CACHE["t"] = time.monotonic()
+transfer._LINALG_MIN_DEADLINE = 1.0
+numpy_ops._numpy_should_offload = lambda *a, **k: True
 
 A = np.random.RandomState(0).rand(256, 256)
 t0 = time.monotonic()
@@ -70,13 +71,13 @@ func TestShimSingleWorkerOffloadUsesPerPeerBandwidth(t *testing.T) {
 	runShimPythonEnv(t, "perpeer_bw", shimFakeDaemon+`
 import time
 nbytes = 4096 * 4096 * 8
-shim._BW_CACHE["bw"] = 12.8e6
-shim._BW_CACHE["t"] = time.monotonic()
-shim._NUM_SHARDS = "5"   # four peers share the 12.8 MB/s
-assert not shim._numpy_should_offload(nbytes, 1024, 3, False, 1.5e9), "svd shipped on the aggregate bandwidth"
-shim._NUM_SHARDS = "2"   # one peer has all of it
-shim._BW_CACHE["t"] = time.monotonic()
-assert shim._numpy_should_offload(nbytes, 1024, 3, False, 1.5e9), "svd refused although one peer has the full link"
+transfer._BW_CACHE["bw"] = 12.8e6
+transfer._BW_CACHE["t"] = time.monotonic()
+core._NUM_SHARDS = "5"   # four peers share the 12.8 MB/s
+assert not numpy_ops._numpy_should_offload(nbytes, 1024, 3, False, 1.5e9), "svd shipped on the aggregate bandwidth"
+core._NUM_SHARDS = "2"   # one peer has all of it
+transfer._BW_CACHE["t"] = time.monotonic()
+assert numpy_ops._numpy_should_offload(nbytes, 1024, 3, False, 1.5e9), "svd refused although one peer has the full link"
 print("PERPEER-OK")
 `, "PERPEER-OK", "PIPEDPEER_SHIM=1", "PIPEDPEER_CLOSURE_NODES=3", "PIPEDPEER_DAEMON_URL=http://127.0.0.1:1")
 }
@@ -94,7 +95,7 @@ func TestShimSIGTERMAsPID1ExitsQuietly(t *testing.T) {
 		t.Skipf("no user+pid namespaces to make python pid 1: %v", err)
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(ShimSitecustomize), 0o644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	script := filepath.Join(dir, "pool_sigterm.py")

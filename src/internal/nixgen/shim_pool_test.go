@@ -11,13 +11,14 @@ import (
 func TestShimJoblibBackendDistributes(t *testing.T) {
 	runShimPythonEnv(t, "t7", shimFakeDaemon+`
 import sitecustomize as shim
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 import joblib
 
-shim._ENABLED = True
-shim._URL = "http://127.0.0.1:%d" % PORT
-shim._STORE = ""
+core._ENABLED = True
+core._URL = "http://127.0.0.1:%d" % PORT
+core._STORE = ""
 
 rng = np.random.RandomState(0)
 X = rng.rand(200, 8)
@@ -49,7 +50,7 @@ assert lambda_calls == 0, (
     "worker could resolve, so this would have failed remotely and fallen back "
     "silently" % lambda_calls)
 assert any(d["op"] == "joblib" and not d["shipped"] and "pickled" in d["why"]
-           for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+           for d in stats._STATS["decisions"]), stats._STATS["decisions"]
 
 assert MAX_CHUNK[0] > 0, "no joblib batch reached the cluster"
 print("JOBLIB-OK")
@@ -81,7 +82,7 @@ assert res == [i * 3 for i in range(60)], res
 calls = POOL_CALLS[0] - before
 assert calls > 0, "60 x 50ms of joblib work never reached the cluster"
 assert calls < 30, "%d round trips for 60 tasks: still dispatching one at a time" % calls
-assert any(d["op"] == "joblib" and d["shipped"] for d in shim._STATS["decisions"]), shim._STATS["decisions"]
+assert any(d["op"] == "joblib" and d["shipped"] for d in stats._STATS["decisions"]), stats._STATS["decisions"]
 
 # A large array every task shares travels once per chunk, in the globals
 # frame, not inside each task.
@@ -104,10 +105,10 @@ os.environ.pop("PIPEDPEER_JB_NESTED", None)
 # Judged by this call's own decisions, not POOL_CALLS: this fake daemon serves
 # one request at a time, so chunks the previous call sent and then lost the
 # race to are still being counted here, seconds later, on a loaded machine.
-before = len(shim._STATS["decisions"])
+before = len(stats._STATS["decisions"])
 res = joblib.Parallel(n_jobs=-1)(joblib.delayed(abs)(-i) for i in range(24))
 assert res == list(range(24)), res
-mine = shim._STATS["decisions"][before:]
+mine = stats._STATS["decisions"][before:]
 assert mine and all(d["op"] == "joblib" and not d["shipped"] for d in mine), \
     "microseconds of work were shipped: %r" % mine
 print("JOBLIB-RACE-OK")

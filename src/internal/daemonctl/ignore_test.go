@@ -33,7 +33,7 @@ func TestIgnoreFileExcludesDirectoriesWrittenWithASlash(t *testing.T) {
 	write(".pipedpeerignore", "# comment\n\nbig/\nresults/\n/build\n*.log\n")
 
 	tarPath := filepath.Join(t.TempDir(), "ws.tar")
-	if err := CreateWorkspaceTar(project, tarPath, ""); err != nil {
+	if err := CreateWorkspaceTar(project, tarPath, nil); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.Open(tarPath)

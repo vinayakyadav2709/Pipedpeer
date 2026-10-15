@@ -30,7 +30,7 @@ func TestARankJoinsARunningRingThroughTheShim(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(nixgen.ShimSitecustomize), 0o644); err != nil {
+	if err := nixgen.WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	script := `

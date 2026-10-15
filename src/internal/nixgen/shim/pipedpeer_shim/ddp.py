@@ -1,7 +1,14 @@
-package nixgen
+"""Transparent PyTorch DDP: batch weights, shard sampler, sync."""
+import os
+import sys
+import weakref
 
-// shimDDPA: DDP batch weights, weighted shard sampler, hash owners.
-const shimDDPA = `def _weighted_batches(weights, base_batch, world):
+from pipedpeer_shim.core import (
+    _TOKEN, _log,
+)
+
+
+def _weighted_batches(weights, base_batch, world):
     """Each rank's per-step batch, together adding up to the ring's.
 
     The ring processes base_batch*world samples per step however the shares
@@ -223,10 +230,7 @@ def _parse_weights(raw, world):
     return w
 
 
-`
-
-// shimDDPB: transparent PyTorch DDP (_install_ddp and everything under it).
-const shimDDPB = `# ---- transparent PyTorch DDP (PIPEDPEER_DDP=1) ----
+# ---- transparent PyTorch DDP (PIPEDPEER_DDP=1) ----
 # pipedpeer run --ddp K starts K ranks, each with PIPEDPEER_RANK /
 # PIPEDPEER_WORLD_SIZE / MASTER_ADDR / MASTER_PORT / PIPEDPEER_DDP=1 set, so
 # plain single-process training code runs data-parallel with zero changes:
@@ -1627,4 +1631,3 @@ def _install_ddp():
 _PENDING_PATCHES = {}
 
 
-`

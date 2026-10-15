@@ -25,14 +25,14 @@ func runRaceProbe(t *testing.T, mode string) {
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 
 	src := `
 import sys, time
 sys.path.insert(0, sys.argv[1])
-import shim_mod
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 def double(x):
     time.sleep(0.01)
@@ -43,7 +43,7 @@ mode = sys.argv[2]
 def main():
     items = list(range(40))
 
-    class StubPool(shim_mod._ClusterPool):
+    class StubPool(pool._ClusterPool):
         def _remote_chunk(self, payload, chunk, starmap):
             if mode == "dead":
                 return None
@@ -51,7 +51,7 @@ def main():
             # win their slots and still be there at the end.
             return [(i, ("R", v * 2)) for i, v in chunk]
 
-    payload = shim_mod._func_payload(double)
+    payload = pool._func_payload(double)
     assert payload is not None, "a module-level function must be shippable"
 
     p = StubPool(processes=2)
@@ -101,18 +101,18 @@ func TestShimRaceAdaptiveChunk(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	src := `
 import sys
 sys.path.insert(0, sys.argv[1])
-import shim_mod
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 # cheap item -> big chunk, costly item -> small chunk, bounded
-assert shim_mod._adaptive_chunk(0.0001) == 256
-assert shim_mod._adaptive_chunk(1.0) == 1
-assert shim_mod._adaptive_chunk(0) == 64
-assert shim_mod._chunk(list(range(10)), 0) == [list(range(10))]
+assert pool._adaptive_chunk(0.0001) == 256
+assert pool._adaptive_chunk(1.0) == 1
+assert pool._adaptive_chunk(0) == 64
+assert pool._chunk(list(range(10)), 0) == [list(range(10))]
 print("chunk-ok")
 `
 	script := filepath.Join(dir, "probe.py")
@@ -139,13 +139,13 @@ func TestShimRaceSharesFollowSpeed(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	src := `
 import sys, time
 sys.path.insert(0, sys.argv[1])
-import shim_mod
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 def slow(vals):                      # one local lane, 50 ms an item
     out = []
@@ -159,7 +159,7 @@ def fast(chunk):                     # the cluster: 5 ms a chunk
     return [(i, ("R", v)) for i, v in chunk]
 
 items = list(range(80))
-r = shim_mod._race_items(items, 0.05, 1, slow, fast)
+r = pool._race_items(items, 0.05, 1, slow, fast)
 assert [v for _, v in r] == items, r[:5]
 remote = sum(1 for tag, _ in r if tag == "R")
 assert remote > len(items) * 3 // 4, "the cluster took only %d of %d" % (remote, len(items))
@@ -188,13 +188,13 @@ func TestARaceLeavesNoChunkBehind(t *testing.T) {
 		t.Skip("python3 not available")
 	}
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "shim_mod.py"), []byte(ShimSitecustomize), 0644); err != nil {
+	if err := WriteShimDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	src := `
 import sys, threading, time
 sys.path.insert(0, sys.argv[1])
-import shim_mod
+from pipedpeer_shim import core, stats, transfer, numpy_ops, pandas_ops, pool, ddp
 
 def run_local(vals):
     time.sleep(0.005 * len(vals))
@@ -202,13 +202,13 @@ def run_local(vals):
 
 # A peer that answers instantly but ran the work on the origin node.
 def on_origin(chunk):
-    out = shim_mod._RemotePairs((i, v * 2) for i, v in chunk)
+    out = pool._RemotePairs((i, v * 2) for i, v in chunk)
     out.elsewhere = 0
     return out
 
-r = shim_mod._race_items(list(range(40)), 0.005, 2, run_local, on_origin)
+r = pool._race_items(list(range(40)), 0.005, 2, run_local, on_origin)
 assert r == [v * 2 for v in range(40)], r[:8]
-assert shim_mod._STATS["remote_used"] == 0, shim_mod._STATS["remote_used"]
+assert stats._STATS["remote_used"] == 0, stats._STATS["remote_used"]
 
 # A peer that never answers in time.
 started = []
@@ -220,7 +220,7 @@ def stuck(chunk):
     time.sleep(60)
     return None
 
-r = shim_mod._race_items(list(range(400)), 0.005, 2, run_local, stuck)
+r = pool._race_items(list(range(400)), 0.005, 2, run_local, stuck)
 assert r == [v * 2 for v in range(400)], r[:8]
 n = len(started)
 time.sleep(0.5)

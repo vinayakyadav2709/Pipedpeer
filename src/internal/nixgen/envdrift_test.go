@@ -18,13 +18,13 @@ import (
 // nothing reads X is exactly the drift this catches, so the check runs over
 // code with comments stripped.
 func TestEveryEnvVarTheShimNamesIsRead(t *testing.T) {
-	// The constant, not the file. Reading shim.go from disk made this test
+	// The embedded files, not the source tree. Reading shim.go from disk made this test
 	// depend on the source tree being present, which it is not when the
 	// binaries are built here and run on the machine that has the Python
 	// dependencies - it failed there with "cannot find shim.go" while passing
 	// locally, which is the exact shape of problem test-on-host.sh exists to
 	// surface.
-	code := stripPyComments(ShimSitecustomize)
+	code := stripPyComments(ShimSource())
 
 	named := regexp.MustCompile(`"(PIPEDPEER_[A-Z0-9_]+)"`)
 	read := regexp.MustCompile(`(?:environ\.get|getenv|environ\[)\s*\(?\s*"(PIPEDPEER_[A-Z0-9_]+)"`)
