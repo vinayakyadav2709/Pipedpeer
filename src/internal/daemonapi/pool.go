@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/cgroups"
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
+	"github.com/pipedpeer/pipedpeer/internal/schedule"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"io"
 	"log"
@@ -51,6 +53,15 @@ type chunk struct {
 	// offload is the machine key `run --offload` keeps distributed work off
 	// (X-Pipedpeer-Offload; "" when the run did not ask). See offloadPeers.
 	offload string
+	// fnFP fingerprints the function and its environment (shim header
+	// "fn_fp"): the key, with the node id, of the speed stats kept across runs.
+	fnFP string
+	// python is the requesting shim's interpreter "major.minor"
+	// (X-Pipedpeer-Python); forwarded so a phone can refuse bytecode it
+	// cannot load.
+	python string
+	// oob mirrors poolRequest.Oob.
+	oob bool
 	// ctx is the request this chunk serves. It ends when the requester goes
 	// away (its job was killed, or the origin dropped a forward), and that
 	// kills the local workers and drops the peer forwards started for it.
@@ -152,6 +163,11 @@ type poolRequest struct {
 	// into the func_src namespace before running (fixed operands shared by all
 	// items; only valid in frames mode).
 	Globals bool `json:"globals,omitempty"`
+	// FnFP is the shim's function fingerprint (C22), the stats key.
+	FnFP string `json:"fn_fp,omitempty"`
+	// Oob: the submitter reads out-of-band (pickle-5) result frames; carried
+	// on every header the daemon rebuilds for a part.
+	Oob bool `json:"oob,omitempty"`
 }
 
 // poolWorker is a warm, long-lived closure subprocess for one store path.
@@ -205,7 +221,73 @@ type poolManager struct {
 	// can drop a machine's peers by key rather than by address.
 	machineFn func(peer string) string
 
+	// nodeFn maps a peer address to its node id (identity key fingerprint),
+	// the key of every per-node measurement: an internet peer's address is a
+	// forwarder port that changes. Nil or "" falls back to the address.
+	nodeFn func(peer string) string
+	// selfID is this node's id, for its own entries and receipt steps.
+	selfID string
+	// priorFn / observeFn reach the cross-run stats (poolstats.go, C22),
+	// keyed by node id and function fingerprint. Nil in bare tests.
+	priorFn   func(node, fn string) (itemsPerSec, overheadSec float64, ok bool)
+	observeFn func(node, fn string, items int, computeSec, elapsedSec float64)
+	bindOnce  sync.Once
+
+	// book is what every node holds right now: the per-node depth gate and
+	// the backlog the split counts.
+	book flightBook
+	// warmMu/warm remember which (node, fn) pairs have run a part: the first
+	// carries closure fetch and worker spawn, so it is not a speed sample.
+	warmMu sync.Mutex
+	warm   map[string]bool
+	// backups counts tail backups running now; at most one at a time.
+	backups atomic.Int32
+
 	stats poolStats
+}
+
+// key is the per-node measurement key for a peer address.
+func (pm *poolManager) key(peer string) string {
+	if pm.nodeFn != nil {
+		if id := pm.nodeFn(peer); id != "" {
+			return id
+		}
+	}
+	return peer
+}
+
+// firstPart reports whether this is the first part (node, fn) has run since
+// the daemon started, and marks it seen.
+func (pm *poolManager) firstPart(node, fn string) bool {
+	pm.warmMu.Lock()
+	defer pm.warmMu.Unlock()
+	k := node + "\x00" + fn
+	if pm.warm[k] {
+		return false
+	}
+	pm.warm[k] = true
+	return true
+}
+
+// bindPool connects the pool manager to this server's node table and stats
+// store, once, on the first pool request. Done here rather than in New so
+// the pool files stay the only ones that know about it.
+func (s *Server) bindPool() {
+	s.pool.bindOnce.Do(func() {
+		s.pool.selfID = s.nodeID
+		s.pool.priorFn = s.poolPrior
+		s.pool.observeFn = s.poolObserve
+		s.pool.nodeFn = func(peer string) string {
+			s.peersMu.RLock()
+			defer s.peersMu.RUnlock()
+			for addr, ph := range s.peerHealths {
+				if addr == peer || fmt.Sprintf("%s:%d", ph.Host, ph.Port) == peer {
+					return ph.NodeID
+				}
+			}
+			return ""
+		}
+	})
 }
 
 // selfMachine is this daemon's machine key; a variable so tests can move it.
@@ -253,19 +335,22 @@ type provenance struct {
 }
 
 // provPart.Where is "local" for work this node ran, or "peer:<host:port>".
+// Steps are the daemon's own timed steps for the part (queue, compute), for
+// the run record (C24); additive.
 type provPart struct {
-	Where string `json:"where"`
-	Items int    `json:"items"`
-	Ms    int64  `json:"ms"`
+	Where string        `json:"where"`
+	Items int           `json:"items"`
+	Ms    int64         `json:"ms"`
+	Steps []runrec.Step `json:"steps,omitempty"`
 }
 
-func (p *provenance) record(where string, items int, ms int64) {
+func (p *provenance) record(where string, items int, ms int64, steps ...runrec.Step) {
 	if p == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.parts = append(p.parts, provPart{Where: where, Items: items, Ms: ms})
+	p.parts = append(p.parts, provPart{Where: where, Items: items, Ms: ms, Steps: steps})
 }
 
 func (p *provenance) snapshot() []provPart {
@@ -322,6 +407,7 @@ func newPoolManager() *poolManager {
 		workers:   make(map[string]*poolWorker),
 		deadPeers: make(map[string]bool),
 		rates:     newRateModel(),
+		warm:      make(map[string]bool),
 	}
 }
 
@@ -376,8 +462,28 @@ func (pm *poolManager) spillPeerCount(storePath string) int {
 // handlePoolStats reports what pool work this node has actually done, so a
 // test or a demo can check where the work went without shelling in to grep a
 // log file.
+//
+// With ?store=<path> it also answers how the shim should pace a map on that
+// closure (additive, all integers): inflight = the sum over peers of each
+// node's depth (the shim keeps that many chunks in flight, not a global 4),
+// part_ms = the target length of one part, cores = the peers' cores (a chunk
+// must fill them). link_bytes_per_sec (always, when measured) is the sum of
+// the fresh per-peer link speeds (U27's cost models divide it per peer).
 func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.pool.stats.snapshot())
+	s.bindPool()
+	out := map[string]int64{}
+	for k, v := range s.pool.stats.snapshot() {
+		out[k] = v
+	}
+	if bw, ok := clusterLinkSpeed(); ok {
+		out["link_bytes_per_sec"] = int64(bw)
+	}
+	if store := r.URL.Query().Get("store"); store != "" {
+		for k, v := range s.pool.pacing(store, r.Header.Get("X-Pipedpeer-Submitter")) {
+			out[k] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // maxPoolBody bounds a single /v1/pool/map request. The body is read whole
@@ -427,6 +533,13 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer releaseHeapAfterWork()
+	s.bindPool()
+	// A peer may have compressed the body for the link (C21).
+	if rawBody, err = decodePoolBody(r.Header.Get("Content-Encoding"), rawBody); err != nil {
+		code, v := poolDecodeStatus(err)
+		writeJSON(w, code, v)
+		return
+	}
 	var req poolRequest
 	// Frames bodies: the header is the first line and the frames follow it.
 	// Legacy bodies are compact JSON with no literal newline, so the first
@@ -471,6 +584,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	// tail of spill order so an idle orchestrator never outranks workers.
 	submitter := r.Header.Get("X-Pipedpeer-Submitter")
 	offload := r.Header.Get("X-Pipedpeer-Offload")
+	python := r.Header.Get("X-Pipedpeer-Python")
 	runPath := filepath.Join(storePath, "bin", "run")
 	if storePath == "" || !pathExists(runPath) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-Pipedpeer-Store header (or invalid store path)"})
@@ -506,7 +620,7 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("X-Pipedpeer-Forwarded") == "" {
 				if peer := s.pool.bestPeer(storePath, submitter, offload); peer != "" {
 					log.Printf("[pool] forwarding %d items (required_mem=%d) to peer %s", len(items), req.RequiredMemBytes, peer)
-					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload) {
+					if s.forwardPoolMap(r.Context(), w, rawBody, peer, storePath, offload, python) {
 						return
 					}
 					if s.poolCancelled(r, len(items), started) {
@@ -529,6 +643,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 				cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 				chunkDir: chunkDirFor(storePath),
 				offload:  offload,
+				fnFP:     req.FnFP,
+				python:   python,
+				oob:      req.Oob,
 				// originLocal stays unset: setting it here would change
 				// placement, which is out of this path's remit.
 				prov: &provenance{},
@@ -556,6 +673,9 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		cacheKeys: req.CacheKeys, itemKeys: req.ItemKeys,
 		chunkDir:    chunkDirFor(storePath),
 		offload:     offload,
+		fnFP:        req.FnFP,
+		python:      python,
+		oob:         req.Oob,
 		originLocal: fromLocalShim,
 		prov:        &provenance{},
 		ctx:         r.Context(),
@@ -572,9 +692,13 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
 	case req.NoFanout:
 		// One-hop fan-out: the origin already split; this chunk is terminal.
+		// Timed, so the origin learns the compute time apart from the trip.
+		t0 := time.Now()
 		results, err = s.pool.runLocal(runPath, storePath, ch)
 		if err == nil {
-			ch.prov.record("local", len(ch.items), 0)
+			d := time.Since(t0)
+			ch.prov.record("local", len(ch.items), d.Milliseconds(),
+				s.pool.step(s.pool.selfID, "compute", t0, d, 0))
 		}
 	default:
 		results, err = s.pool.runChunk(runPath, storePath, ch, submitter)
@@ -672,44 +796,68 @@ func (s *Server) runMicroChunks(runPath, storePath string, ch *chunk, safe int64
 //
 // ctx is the incoming request's: when its requester goes away the forward is
 // dropped, and the peer stops the work through its own request context.
-func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawBody []byte, peer, storePath, offload string) bool {
-	fwd, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(rawBody))
-	if err != nil {
-		log.Printf("[pool] forward to %s: building request: %v", peer, err)
-		return false
+func (s *Server) forwardPoolMap(ctx context.Context, w http.ResponseWriter, rawBody []byte, peer, storePath, offload, python string) bool {
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "application/json")
+	hdr.Set("X-Pipedpeer-Store", storePath)
+	hdr.Set("X-Pipedpeer-Forwarded", "1")
+	if python != "" {
+		hdr.Set("X-Pipedpeer-Python", python)
 	}
-	fwd.Header.Set("Content-Type", "application/json")
-	fwd.Header.Set("X-Pipedpeer-Store", storePath)
-	fwd.Header.Set("X-Pipedpeer-Forwarded", "1")
 	if offload != "" {
 		// The peer may split it again; it must keep off that machine too.
-		fwd.Header.Set("X-Pipedpeer-Offload", offload)
+		hdr.Set("X-Pipedpeer-Offload", offload)
 	}
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(fwd)
+	status, ct, body, err := s.pool.postPeer(ctx, peer, rawBody, hdr, 5*time.Minute)
 	if err != nil {
 		if ctx.Err() == nil { // a cancel is logged once by the caller
 			log.Printf("[pool] forward to %s failed: %v", peer, err)
 		}
 		return false
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("[pool] forward to %s: reading reply: %v", peer, err)
-		}
-		return false
-	}
-	if resp.StatusCode == http.StatusOK {
+	if status == http.StatusOK {
 		body = relabelForwardedReceipt(body, peer)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
+	if ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
-	w.WriteHeader(resp.StatusCode)
+	w.WriteHeader(status)
 	w.Write(body)
 	return true
+}
+
+// postPeer POSTs a pool body to a peer's /v1/pool/map through the link
+// encoding (C21: compression, globals the peer already holds) and returns the
+// reply. A peer that answers 409 {"missing_globals": sha} lacked a globals
+// blob it was assumed to hold: that is forgotten and the body resent once.
+func (pm *poolManager) postPeer(ctx context.Context, peer string, raw []byte, hdr http.Header, timeout time.Duration) (status int, contentType string, body []byte, err error) {
+	key := pm.key(peer)
+	client := &http.Client{Timeout: timeout}
+	for attempt := 0; ; attempt++ {
+		enc, ce := encodePeerBody(key, raw)
+		req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("http://%s/v1/pool/map", peer), bytes.NewReader(enc))
+		if err != nil {
+			return 0, "", nil, err
+		}
+		req.Header = hdr.Clone()
+		if ce != "" {
+			req.Header.Set("Content-Encoding", ce)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return 0, "", nil, err
+		}
+		body, err = timedRead(key, resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return 0, "", nil, fmt.Errorf("reading reply: %w", err)
+		}
+		if sha, miss := missingGlobalsIn(resp.StatusCode, body); miss && attempt == 0 {
+			forgetPeerGlobals(key, sha) // logs the resend
+			continue
+		}
+		return resp.StatusCode, resp.Header.Get("Content-Type"), body, nil
+	}
 }
 
 // relabelForwardedReceipt rewrites a frames reply's receipt so every part the
@@ -891,7 +1039,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 			// participant - which is how adding a machine used to make a job
 			// slower. The scheduler equalises finish times instead, and
 			// declines any peer that cannot start before the rest are done.
-			shares := pm.planShares(items, peers, !ch.originLocal && !offHere)
+			shares := pm.planShares(ch, peers, !ch.originLocal && !offHere)
 			idx := 0
 			for _, sh := range shares {
 				if sh.Items == 0 || idx >= len(items) {
@@ -960,8 +1108,10 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 				r, e = pm.runLocal(runPath, storePath, p.c)
 				if e == nil {
 					d := time.Since(started)
-					ch.prov.record("local", len(p.c.items), d.Milliseconds())
+					ch.prov.record("local", len(p.c.items), d.Milliseconds(),
+						pm.step(pm.selfID, "compute", started, d, i))
 					pm.rates.observe(localDeviceID, len(p.c.items), d)
+					pm.observeStats(pm.selfID, ch.fnFP, len(p.c.items), d.Seconds(), d.Seconds())
 				}
 			} else {
 				// Walk the ranked peer list; a failure falls through to the
@@ -988,24 +1138,49 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 						log.Printf("[pool] part %d: no time left of %s for another peer; running its %d items here", i, remotePartBudget, len(p.c.items))
 						break
 					}
+					// The node's depth gate: parts beyond what it should hold
+					// wait here, in the daemon's queue for that node, not on
+					// the wire. The wait is a "queue" step of the record.
+					key := pm.key(peer)
+					expected := pm.expectedSec(peer, ch.fnFP, len(p.c.items))
+					qStart := time.Now()
+					release, gerr := pm.book.acquire(ctx, key, pm.depth(peer, ch.fnFP), expected)
+					if gerr != nil {
+						e = gerr
+						break
+					}
+					waited := time.Since(qStart)
+					sent := time.Now()
 					var where string
+					var compute float64
 					if offHere {
 						// No local copy races a slow peer: this machine is
 						// kept off. A peer that fails hands on to the next.
 						where = "peer:" + peer
-						r, e = pm.runRemote(peer, storePath, p.c, 0)
+						r, compute, e = pm.runRemote(peer, storePath, p.c, 0)
 					} else {
-						r, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left)
+						fresh := pm.expectedSec("", ch.fnFP, len(p.c.items))
+						r, compute, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left-waited, expected, fresh)
 					}
+					release()
 					if e == nil {
-						d := time.Since(started)
-						ch.prov.record(where, len(p.c.items), d.Milliseconds())
+						d := time.Since(sent)
+						steps := []runrec.Step{pm.step(key, "queue", qStart, waited, i)}
+						if compute > 0 && where != "local" {
+							steps = append(steps, pm.step(key, "compute", sent, time.Duration(compute*float64(time.Second)), i))
+						}
+						ch.prov.record(where, len(p.c.items), time.Since(started).Milliseconds(), steps...)
 						if where != "local" {
 							// Timed end to end, so the round trip and the closure
 							// transfer are in the number rather than assumed away.
 							// A local win is not measured: it started late, after
-							// the peer's budget ran out.
-							pm.rates.observe(peer, len(p.c.items), d)
+							// the peer's budget ran out. The queue wait is not
+							// the peer's time, so it is left out.
+							pm.rates.observe(key, len(p.c.items), d)
+							if compute <= 0 {
+								compute = d.Seconds()
+							}
+							pm.observeStats(key, ch.fnFP, len(p.c.items), compute, d.Seconds())
 						}
 						break
 					}
@@ -1207,19 +1382,19 @@ func (pm *poolManager) dropWorker(storePath string, w *poolWorker) {
 var remotePartBudget = 5 * time.Minute
 
 // runRemote posts a part to one peer and waits up to timeout for its results.
-func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time.Duration) ([]any, error) {
+// computeSec is the peer's own account of its compute time (its receipt), 0
+// when it sent none.
+func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time.Duration) (results []any, computeSec float64, err error) {
 	// no_fanout: the origin splits exactly once; a peer must never re-split and
 	// forward again (one-hop tree, results flow straight back to the origin).
 	var body []byte
 	if ch.frames {
-		sub := *ch
-		sub.noFanout = true
 		hdr, _ := json.Marshal(map[string]any{
 			"func_src": ch.funcSrc, "func_name": ch.funcName, "func": ch.pickledFunc,
 			"starmap": ch.starmap, "items_frames": len(ch.items), "globals": ch.globals != nil,
 			"required_mem": ch.requiredMem, "no_fanout": true,
 			"cache_keys": ch.cacheKeys, "item_keys": ch.itemKeys, "chunk_dir": ch.chunkDir,
-			"items_zlib": ch.itemsZlib,
+			"items_zlib": ch.itemsZlib, "fn_fp": ch.fnFP, "oob": ch.oob,
 		})
 		body = buildFrames(hdr, ch.globals, ch.items)
 	} else {
@@ -1230,46 +1405,47 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 		if len(ch.itemKeys) > 0 {
 			payload["item_keys"] = ch.itemKeys
 		}
+		if ch.fnFP != "" {
+			payload["fn_fp"] = ch.fnFP
+		}
 		body, _ = json.Marshal(payload)
 	}
-	url := fmt.Sprintf("http://%s/v1/pool/map", peer)
+	hdr := http.Header{}
+	if ch.frames {
+		hdr.Set("Content-Type", framesContentType)
+	} else {
+		hdr.Set("Content-Type", "application/json")
+	}
+	hdr.Set("X-Pipedpeer-Store", storePath)
+	if ch.python != "" {
+		hdr.Set("X-Pipedpeer-Python", ch.python)
+	}
 	// Tied to the request this chunk serves: a cancel closes the connection,
 	// and the peer stops its work when its own request context ends.
-	req, err := http.NewRequestWithContext(ch.context(), "POST", url, bytes.NewReader(body))
+	status, _, body, err := pm.postPeer(ch.context(), peer, body, hdr, timeout)
 	if err != nil {
-		return nil, err
+		return nil, 0, fmt.Errorf("peer %s: %w", peer, err)
 	}
-	if ch.frames {
-		req.Header.Set("Content-Type", "application/vnd.pipedpeer.frames")
-	} else {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("X-Pipedpeer-Store", storePath)
-
-	client := &http.Client{Timeout: timeout}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("peer %s: %w", peer, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("peer %s returned %d", peer, resp.StatusCode)
-	}
-	body, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	if status != http.StatusOK {
+		return nil, 0, fmt.Errorf("peer %s returned %d", peer, status)
 	}
 	if ch.frames {
 		// Frames response: header line + result frames.
 		nl := bytes.IndexByte(body, '\n')
 		if nl < 0 {
-			return nil, fmt.Errorf("peer %s: bad frames response", peer)
+			return nil, 0, fmt.Errorf("peer %s: bad frames response", peer)
 		}
 		var out struct {
 			ResultsFrames int `json:"results_frames"`
+			Receipt       struct {
+				Parts []provPart `json:"parts"`
+			} `json:"receipt"`
 		}
 		if err := json.Unmarshal(body[:nl], &out); err != nil || out.ResultsFrames <= 0 {
-			return nil, fmt.Errorf("peer %s: bad frames response: %v", peer, err)
+			return nil, 0, fmt.Errorf("peer %s: bad frames response: %v", peer, err)
+		}
+		for _, p := range out.Receipt.Parts {
+			computeSec += float64(p.Ms) / 1000
 		}
 		var frames [][]byte
 		rest := body[nl+1:]
@@ -1277,7 +1453,7 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 			var f []byte
 			f, rest, err = readFrame(rest)
 			if err != nil {
-				return nil, fmt.Errorf("peer %s: %v", peer, err)
+				return nil, 0, fmt.Errorf("peer %s: %v", peer, err)
 			}
 			frames = append(frames, f)
 		}
@@ -1285,66 +1461,108 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 		for _, f := range frames {
 			results = append(results, map[string]string{"pickle": string(f)})
 		}
-		return results, nil
+		return results, computeSec, nil
 	}
 	var out struct {
 		Results []map[string]string `json:"results"`
 	}
 	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&out); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	results := make([]any, 0, len(out.Results))
+	results = make([]any, 0, len(out.Results))
 	for _, r := range out.Results {
 		if _, err := base64.StdEncoding.DecodeString(r["pickle"]); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		results = append(results, r)
 	}
-	return results, nil
+	return results, 0, nil
 }
 
-// runRemoteRacing posts part i to peer. If the peer has not answered within
-// budget, the part also starts here and the first copy to finish wins; the
-// other is cancelled (a cancelled local copy kills its warm worker, a
-// cancelled remote copy closes the connection and the peer stops). where is
-// "peer:<id>" or "local"; raced reports that the local copy was started, so
-// the caller must not run the part locally again.
-func (pm *poolManager) runRemoteRacing(i int, peer, runPath, storePath string, ch *chunk, budget time.Duration) (results []any, where string, raced bool, err error) {
+// runRemoteRacing posts part i to peer. A copy also starts here, first to
+// finish wins and the other is cancelled (a cancelled local copy kills its
+// warm worker, a cancelled remote copy closes the connection and the peer
+// stops), in two cases:
+//   - the tail backup (R8 step 7): once the part is late (past twice its
+//     expected time on the peer, at least 1 s) and a copy here is expected to
+//     save more than its own setup, and no other backup is running on this
+//     daemon (at most one at a time);
+//   - the hard budget: the peer has not answered within budget at all. This
+//     is the never-stuck guarantee and ignores the one-backup cap.
+//
+// expected is the part's predicted seconds on the peer and fresh the predicted
+// seconds of a copy here, both 0 when unknown (then only the budget applies).
+// where is "peer:<id>" or "local"; raced reports that the local copy was
+// started, so the caller must not run the part locally again.
+func (pm *poolManager) runRemoteRacing(i int, peer, runPath, storePath string, ch *chunk, budget time.Duration, expected, fresh float64) (results []any, computeSec float64, where string, raced bool, err error) {
 	type outcome struct {
-		r     []any
-		err   error
-		where string
+		r       []any
+		compute float64
+		err     error
+		where   string
 	}
 	out := make(chan outcome, 2) // both senders finish even after a winner returns
 	parent := ch.context()
+	started := time.Now()
 
 	rctx, rcancel := context.WithCancel(parent)
 	defer rcancel()
 	rc := *ch
 	rc.ctx = rctx
 	go func() {
-		r, e := pm.runRemote(peer, storePath, &rc, 0)
-		out <- outcome{r, e, "peer:" + peer}
+		r, c, e := pm.runRemote(peer, storePath, &rc, 0)
+		out <- outcome{r, c, e, "peer:" + peer}
 	}()
 
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	select {
-	case o := <-out:
-		return o.r, o.where, false, o.err
-	case <-parent.Done():
-		return nil, "", false, parent.Err()
-	case <-timer.C:
+	hard := time.NewTimer(budget)
+	defer hard.Stop()
+	var lateC <-chan time.Time
+	if expected > 0 && fresh > 0 {
+		late := time.Duration(max(2*expected, 1) * float64(time.Second))
+		if late < budget {
+			t := time.NewTimer(late)
+			defer t.Stop()
+			lateC = t.C
+		}
+	}
+	backup := false
+wait:
+	for {
+		select {
+		case o := <-out:
+			return o.r, o.compute, o.where, false, o.err
+		case <-parent.Done():
+			return nil, 0, "", false, parent.Err()
+		case <-lateC:
+			lateC = nil
+			ok, gain := schedule.BackupWorth(expected, time.Since(started).Seconds(), fresh, 0)
+			if !ok {
+				continue
+			}
+			if !pm.backups.CompareAndSwap(0, 1) {
+				log.Printf("[pool] part %d: late on %s but another backup is running; waiting", i, peer)
+				continue
+			}
+			backup = true
+			log.Printf("[pool] part %d: late on %s (expected %.1fs, now %.1fs); a copy here should save %.1fs, starting it, first to finish wins",
+				i, peer, expected, time.Since(started).Seconds(), gain)
+			break wait
+		case <-hard.C:
+			log.Printf("[pool] part %d: peer %s has not finished %d items in %s; starting them here too, first to finish wins", i, peer, len(ch.items), budget.Round(100*time.Millisecond))
+			break wait
+		}
+	}
+	if backup {
+		defer pm.backups.Store(0)
 	}
 
-	log.Printf("[pool] part %d: peer %s has not finished %d items in %s; starting them here too, first to finish wins", i, peer, len(ch.items), budget.Round(100*time.Millisecond))
 	lctx, lcancel := context.WithCancel(parent)
 	defer lcancel()
 	lc := *ch
 	lc.ctx = lctx
 	go func() {
 		r, e := pm.runLocal(runPath, storePath, &lc)
-		out <- outcome{r, e, "local"}
+		out <- outcome{r, 0, e, "local"}
 	}()
 
 	var errs []error
@@ -1352,15 +1570,15 @@ func (pm *poolManager) runRemoteRacing(i int, peer, runPath, storePath string, c
 		o := <-out
 		if o.err == nil {
 			log.Printf("[pool] part %d: %s finished first; cancelling the other copy", i, o.where)
-			return o.r, o.where, true, nil // the deferred cancels stop the loser
+			return o.r, o.compute, o.where, true, nil // the deferred cancels stop the loser
 		}
 		if parent.Err() != nil {
-			return nil, "", true, parent.Err()
+			return nil, 0, "", true, parent.Err()
 		}
 		log.Printf("[pool] part %d: %s copy failed: %v; waiting for the other", i, o.where, o.err)
 		errs = append(errs, o.err)
 	}
-	return nil, "", true, errors.Join(errs...)
+	return nil, 0, "", true, errors.Join(errs...)
 }
 
 // spawn starts a warm worker for a store path. bin/run warm_worker.py reads

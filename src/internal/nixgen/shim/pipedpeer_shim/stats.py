@@ -3,6 +3,7 @@ import atexit
 import os
 import threading
 
+from pipedpeer_shim import record
 from pipedpeer_shim.core import (
     _log,
 )
@@ -31,7 +32,11 @@ from pipedpeer_shim.core import (
 _STATS = {"remote_items": 0, "local_items": 0, "dispatched_items": 0,
           "remote_failures": 0, "unshippable": 0, "shipped_pickled": 0,
           "parts": [], "by_where": {}, "decisions": [], "decisions_dropped": 0,
-          "mapped_items": 0, "remote_used": 0}
+          "mapped_items": 0, "remote_used": 0,
+          "races_lost": 0, "wasted_peer_s": 0.0}
+# races_lost counts remote chunks that won no item (local finished them
+# first; the losing request is cancelled), and wasted_peer_s the seconds those
+# requests were out: peer time spent on results thrown away (F20).
 # mapped_items counts items handed to an intercepted map, once each.
 # remote_used counts those whose kept result came from another machine. The
 # two counters above it count work done, and with local cores racing slow
@@ -137,7 +142,8 @@ def _write_receipt():
         return
     import json
     with _STATS_LOCK:
-        body = json.dumps(_STATS)
+        # The run record's steps (C24) ride in the receipt under "steps".
+        body = json.dumps(record.into(dict(_STATS)))
     try:
         with open(path, "w") as f:
             f.write(body)

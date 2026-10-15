@@ -3,6 +3,7 @@ package daemonapi
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -1607,5 +1608,122 @@ func TestSlowPeerWinsTheRace(t *testing.T) {
 	}
 	if d := time.Since(started); d > 20*time.Second {
 		t.Errorf("took %s: the chunk waited for the losing local copy", d)
+	}
+}
+
+// The depth gate holds a node to its depth: a part beyond it waits in the
+// daemon's queue for that node until one leaves, and the waiting part counts
+// as that node's backlog only once it runs.
+func TestFlightBookHoldsANodeToItsDepth(t *testing.T) {
+	var b flightBook
+	ctx := context.Background()
+	r1, err := b.acquire(ctx, "n1", 2, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, _ := b.acquire(ctx, "n1", 2, 10)
+	if got := b.held("n1"); got != 2 {
+		t.Fatalf("held = %d, want 2", got)
+	}
+	if q := b.backlog("n1", time.Now()); q < 19 || q > 20 {
+		t.Errorf("backlog = %.2f, want ~20 s", q)
+	}
+	got := make(chan func(), 1)
+	go func() {
+		r3, _ := b.acquire(ctx, "n1", 2, 10)
+		got <- r3
+	}()
+	select {
+	case <-got:
+		t.Fatal("a third part ran on a node of depth 2")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := b.acquire(ctx, "n2", 2, 1); err != nil {
+		t.Fatal("another node's depth blocked:", err)
+	}
+	r1()
+	r1() // a second release is harmless
+	select {
+	case r3 := <-got:
+		r3()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued part never started after one left")
+	}
+	r2()
+	cctx, cancel := context.WithCancel(ctx)
+	b.acquire(ctx, "n3", 1, 1)
+	go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	if _, err := b.acquire(cctx, "n3", 1, 1); err == nil {
+		t.Error("a cancelled request still got a slot")
+	}
+}
+
+// /v1/pool/stats?store= paces the shim: each unmeasured peer holds 2 parts
+// (one running, one queued), so 2 peers mean 4 chunks in flight, not 4 per
+// cluster whatever its size.
+func TestPoolStatsPacesTheShim(t *testing.T) {
+	s := New("pace-node-xxxxxxxx")
+	s.pool.SetPeerFn(func(store, submitter string) []string {
+		if store != "/nix/store/x" {
+			return nil
+		}
+		return []string{"10.0.0.2:4242", "10.0.0.3:4242"}
+	})
+	s.pool.coresFn = func(string) int { return 8 }
+	rec := httptest.NewRecorder()
+	s.handlePoolStats(rec, httptest.NewRequest(http.MethodGet, "/v1/pool/stats?store=%2Fnix%2Fstore%2Fx", nil))
+	var got map[string]int64
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["peers"] != 2 || got["inflight"] != 4 || got["cores"] != 16 || got["part_ms"] != 450 {
+		t.Errorf("pacing = %v, want peers 2, inflight 4, cores 16, part_ms 450", got)
+	}
+	if _, ok := got["chunks_received"]; !ok {
+		t.Error("the counters went missing from /v1/pool/stats")
+	}
+}
+
+// At most one tail backup runs at a time: two late parts on a slow peer, and
+// only one of them starts a copy here before the hard budget.
+func TestAtMostOneTailBackup(t *testing.T) {
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		time.Sleep(2500 * time.Millisecond)
+		writeJSON(w, http.StatusOK, map[string]any{"results": []map[string]string{
+			{"pickle": base64.StdEncoding.EncodeToString([]byte("x"))}}})
+	}))
+	defer peer.Close()
+	addr := strings.TrimPrefix(peer.URL, "http://")
+	pm := newPoolManager()
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			ch := &chunk{funcSrc: "def run(x):\n    return x\n", items: []json.RawMessage{json.RawMessage("1")}}
+			// Expected 0.1 s on the peer, 0.01 s here: late after 1 s, and a
+			// copy here would save time. The local copy fails (no closure),
+			// so the peer's answer wins either way.
+			_, _, where, _, err := pm.runRemoteRacing(i, addr, "/nonexistent/bin/run", "/nonexistent", ch, time.Minute, 0.1, 0.01)
+			if err == nil && where != "peer:"+addr {
+				err = fmt.Errorf("won by %q", where)
+			}
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("part %d: %v", i, err)
+		}
+	}
+	// runLocal counts its items before it tries to run them.
+	if got := pm.stats.snapshot()["items_executed_here"]; got != 1 {
+		t.Errorf("%d backup copies started, want exactly 1", got)
+	}
+	if pm.backups.Load() != 0 {
+		t.Error("the backup slot was not given back")
 	}
 }
