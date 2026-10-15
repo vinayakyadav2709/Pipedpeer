@@ -92,17 +92,17 @@ work="$BL_OUT/ddp-switch/work"
 bl_workloads "$work"
 
 # shellcheck disable=SC2086
-# --mem 1G: the daemon estimates 2.1 GB for a torch job, more than a 2g node.
+# --gpu off --mem 1G: the daemon estimates 2.1 GB for a torch job, more than a 2g node.
 cell() { # cell <variant> <model> <compute> [flags...] - BL_REPS reps, first failure ends it
 	local v="$1" m="$2" c="$3"
 	shift 3
-	bl_reps "$m-$c" "$v" "$mode" train.py --mem 1G $(model_env "$m") $(compute_env "$c") -e BENCH_STEPS="$steps" "$@"
+	bl_reps "$m-$c" "$v" "$mode" train.py --gpu off --mem 1G $(model_env "$m") $(compute_env "$c") -e BENCH_STEPS="$steps" "$@"
 }
 
 # solo: one node; the link profile cannot matter, so it runs once on lan.
 bl_lab_up 1 "$mem" lan 0 "$bin"
 bl_put 1 "$work"
-bl_warm train.py --mem 1G -e BENCH_STEPS=1
+bl_warm train.py --gpu off --mem 1G -e BENCH_STEPS=1
 for m in "${models[@]}"; do
 	for c in "${compute[@]}"; do
 		cell solo "$m" "$c"
@@ -112,7 +112,7 @@ done
 # split and auto: two nodes, links reshaped per profile without a restart.
 bl_lab_up 2 "$mem" "${profiles[0]}" "$loss" "$bin"
 bl_put 1 "$work"
-bl_warm train.py --mem 1G --ddp 2 -e BENCH_STEPS=1
+bl_warm train.py --gpu off --mem 1G --ddp 2 -e BENCH_STEPS=1
 for p in "${profiles[@]}"; do
 	bl_lab_shape "$p" "$loss"
 	for m in "${models[@]}"; do
