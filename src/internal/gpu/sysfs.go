@@ -101,7 +101,10 @@ func enumeratePCI() []Device {
 		if link, err := os.Readlink(filepath.Join(p, "driver")); err == nil {
 			d.Driver = filepath.Base(link)
 		}
-		gate(&d)
+		gate(&d, p, counters["nvidia-bound"])
+		if d.Driver == "nvidia" {
+			counters["nvidia-bound"]++
+		}
 		if d.Stack != "" {
 			d.Index = counters[d.Stack]
 			counters[d.Stack]++
@@ -113,7 +116,11 @@ func enumeratePCI() []Device {
 
 // gate decides whether a closure can drive the device (6fbd06e's rule
 // extended: count only what an environment we build can use).
-func gate(d *Device) {
+// Each device needs its own node: a container sees the host's sysfs (driver
+// bound) without the host's /dev, and must not claim the GPU. /dev/nvidia<N>
+// follows the driver's probe order, which is PCI order among nvidia-bound
+// devices (nvSeen of them come before this one).
+func gate(d *Device, sysDir string, nvSeen int) {
 	switch d.VendorID {
 	case "0x8086":
 		d.Integrated = true
@@ -124,6 +131,8 @@ func gate(d *Device) {
 			d.Reason = "NVIDIA GPU without the nvidia driver (driver: " + orNone(d.Driver) + ")"
 		case !exists(filepath.Join(devRoot, "nvidiactl")):
 			d.Reason = "nvidia driver bound but " + filepath.Join(devRoot, "nvidiactl") + " is missing"
+		case !exists(filepath.Join(devRoot, "nvidia"+strconv.Itoa(nvSeen))):
+			d.Reason = "nvidia driver bound but " + filepath.Join(devRoot, "nvidia"+strconv.Itoa(nvSeen)) + " is missing (container without the GPU?)"
 		default:
 			d.Stack = "cuda"
 			d.Reason = "nvidia driver and device nodes present"
@@ -134,6 +143,8 @@ func gate(d *Device) {
 			d.Reason = "AMD GPU without the amdgpu driver (driver: " + orNone(d.Driver) + ")"
 		case !exists(filepath.Join(devRoot, "kfd")):
 			d.Reason = "amdgpu bound but " + filepath.Join(devRoot, "kfd") + " is missing (no ROCm)"
+		case renderNode(sysDir) == "":
+			d.Reason = "amdgpu bound but its /dev/dri/renderD* node is missing"
 		default:
 			d.Stack = "rocm"
 			d.Reason = "amdgpu driver and /dev/kfd present"
@@ -141,6 +152,25 @@ func gate(d *Device) {
 	default:
 		d.Reason = "display device from vendor " + orNone(d.VendorID) + ": not a compute GPU"
 	}
+}
+
+// renderNode is the device's /dev/dri/renderD* path, "" when absent. sysfs
+// names it under drm/; without that dir any render node will do.
+func renderNode(sysDir string) string {
+	names, _ := filepath.Glob(filepath.Join(sysDir, "drm", "renderD*"))
+	if len(names) == 0 {
+		names, _ = filepath.Glob(filepath.Join(devRoot, "dri", "renderD*"))
+		if len(names) > 0 {
+			return names[0]
+		}
+		return ""
+	}
+	for _, n := range names {
+		if p := filepath.Join(devRoot, "dri", filepath.Base(n)); exists(p) {
+			return p
+		}
+	}
+	return ""
 }
 
 func orNone(s string) string {
@@ -249,9 +279,9 @@ func stackState(pci []Device, stack string) (usable, asleep bool) {
 func liveNVIDIA(pci []Device) (changed bool) {
 	rows, err := queryNVIDIA()
 	if err != nil {
-		logf("%s failed with the nvidia driver bound, using cached GPU info: %v", nvidiaSMI, err)
-		return false
+		logf("%s failed with every NVIDIA GPU awake, counting none of them: %v", nvidiaSMI, err)
 	}
+	seen := map[string]bool{}
 	for _, r := range rows {
 		for i := range pci {
 			d := &pci[i]
@@ -259,8 +289,22 @@ func liveNVIDIA(pci []Device) (changed bool) {
 				continue
 			}
 			changed = changed || d.Name != r.name || d.MemoryBytes != r.total || d.ComputeCap != r.computeCap
-			d.Name, d.MemoryBytes, d.ComputeCap = r.name, r.total, r.computeCap
+			d.Name, d.MemoryBytes, d.ComputeCap, d.Index = r.name, r.total, r.computeCap, r.index
 			d.used, d.free, d.util, d.live = r.used, r.free, r.util, true
+			seen[d.Address] = true
+		}
+	}
+	// Awake and node present but nvidia-smi does not show it: not usable.
+	// Cached info is only for a device that is asleep.
+	for i := range pci {
+		d := &pci[i]
+		if d.Stack == "cuda" && !seen[d.Address] {
+			d.Stack, d.Index = "", -1
+			if err != nil {
+				d.Reason = nvidiaSMI + " failed: " + err.Error()
+			} else {
+				d.Reason = nvidiaSMI + " does not list this device"
+			}
 		}
 	}
 	return changed

@@ -138,6 +138,7 @@ func TestSuspendedDGPUIsNotPolled(t *testing.T) {
 	h.pci("0000:00:02.0", "0x8086", "i915", "active", map[string]string{"boot_vga": "1"})
 	h.pci("0000:01:00.0", "0x10de", "nvidia", "suspended", nil)
 	h.write("dev/nvidiactl", "")
+	h.write("dev/nvidia0", "")
 	h.write("proc/driver/nvidia/gpus/0000:01:00.0/information", "Model: \t\t NVIDIA GeForce RTX 3060 Laptop GPU\nIRQ: 1\n")
 
 	info, _, devs := fromSysfs(enumeratePCI())
@@ -176,6 +177,7 @@ func TestAMDAPUAndDGPUPicksDGPU(t *testing.T) {
 	h.pci("0000:c1:00.0", "0x1002", "amdgpu", "active", map[string]string{
 		"boot_vga": "1", "mem_info_vram_total": "536870912", "mem_info_vram_used": "100"})
 	h.write("dev/kfd", "")
+	h.write("dev/dri/renderD128", "")
 
 	info, _, devs := fromSysfs(enumeratePCI())
 	if info.Vendor != VendorAMD || info.Best != 0 || info.Name != "Radeon RX 7800 XT" || info.Count != 2 || len(devs) != 2 {
@@ -191,6 +193,7 @@ func TestAMDAPUAndDGPUPicksDGPU(t *testing.T) {
 	h2.pci("0000:05:00.0", "0x1002", "amdgpu", "active", map[string]string{"boot_vga": "1", "mem_info_vram_total": "536870912"})
 	h2.pci("0000:06:00.0", "0x1002", "amdgpu", "suspended", nil)
 	h2.write("dev/kfd", "")
+	h2.write("dev/dri/renderD128", "")
 	info, _, _ = fromSysfs(enumeratePCI())
 	if info.Best != 1 {
 		t.Fatalf("asleep dGPU should outrank the APU, got Best=%d %+v", info.Best, info.GPUs)
@@ -223,5 +226,24 @@ func TestGateNeedsDriverAndNodes(t *testing.T) {
 		if d.Stack != "" || d.Reason == "" {
 			t.Fatalf("device %s: stack=%q reason=%q", d.Address, d.Stack, d.Reason)
 		}
+	}
+}
+
+// A lab container sees the host's sysfs with the nvidia driver bound but has
+// no /dev/nvidia0; and an awake device nvidia-smi cannot query is not usable.
+func TestDriverBoundNoDevNode(t *testing.T) {
+	h := newFakeHost(t)
+	h.pci("0000:01:00.0", "0x10de", "nvidia", "active", nil)
+	h.write("dev/nvidiactl", "")
+	info, _, _ := fromSysfs(enumeratePCI())
+	if info.Vendor != VendorNone || h.smiCalled() || info.GPUs[0].Reason == "" {
+		t.Fatalf("no /dev/nvidia0 must mean no GPU: %+v", info)
+	}
+
+	h.write("dev/nvidia0", "")
+	h.write("nvidia-smi", "#!/bin/sh\nexit 9\n")
+	info, _, _ = fromSysfs(enumeratePCI())
+	if info.Vendor != VendorNone || info.GPUs[0].Stack != "" || info.GPUs[0].Reason == "" {
+		t.Fatalf("awake GPU nvidia-smi fails on must be unusable: %+v", info.GPUs)
 	}
 }
