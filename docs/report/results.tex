@@ -112,8 +112,8 @@ floor is declined by the cost model; a forced run of the same workload does
 dispatch, so the decline is the model's choice and not a dead cluster.
 Declining costs about 0.12\,s per job, the measurement of the head of the map
 plus the decision: a median of 0.80\,s against 0.68\,s with interception
-disabled. Interpreter startup for a job that imports nothing heavy is
-$1.24\times$ that of plain Python when NumPy, pandas, torch and joblib are
+disabled. Interpreter startup for a job that imports nothing heavy, best of five
+runs, is $1.24\times$ that of plain Python when NumPy, pandas, torch and joblib are
 patched on first import, against $20.0\times$ when they are patched at
 startup (Figure~\ref{fig:resshim}). A continuous-integration check fails any
 change that raises this ratio above $3\times$.
@@ -140,11 +140,13 @@ script under PipedPeer 0.24\,s with a quarter of the items on the cluster.
 
 \textbf{Sharing by measured speed.} On a lab cluster limited to 8, 2 and
 1 CPUs, dividing a map by headcount ran 1.6 times slower than not distributing at
-all. Dividing by measured throughput declined the one-CPU worker and took
-2.9\,s, against 3.6\,s by headcount. With one peer held to a tenth of a
-processor in a cluster of otherwise equal peers, the slowdown against an equal
-cluster fell from 1.6 times on the first run to 1.08 by the fourth, as the fit
-learned the slow peer.
+all (3.6\,s, median of five). Dividing by measured throughput declined the
+one-CPU worker and took 2.9\,s: faster than the headcount split, but still
+about 1.3 times slower than running locally, so at this size neither split pays.
+With one peer held to a tenth of a processor in a cluster of otherwise equal
+peers, the slowdown against an equal cluster fell from 1.6 times on the first
+run to 1.08 by the fourth, as the fit learned the slow peer
+(Table~\ref{tab:later}).
 
 \textbf{Scaling.} With each container held to a fixed quota of two processors,
 a scaling map sweeps one variable at a time with the rest
@@ -165,8 +167,9 @@ matters in both directions. In the lab, a small model with heavy steps on a LAN
 trained in 9.1\,s split across two containers of two processors against
 11.8\,s on one such container, while a 9\,MB model with light steps on Wi-Fi
 took 80.7\,s split against 8.0\,s on one container. A GPU widens the gap: the
-training job of Table~\ref{tab:recorded} took 1.5\,s on an RTX~3060
-against 55.0\,s on the same machine's processors.
+training job of Table~\ref{tab:recorded}, 54.9\,s there on one machine's
+processors, took 1.5\,s on an RTX~3060 against 55.0\,s on that machine's
+processors in a separate measurement.
 
 \textbf{Fast synchronisation.} At the default interval for two ranks, 32
 steps, in-process runs kept every model within the 1\% bar: MLP-G $+0.06\%$,
@@ -250,7 +253,8 @@ still returns the correct result (Section~\ref{sec:res-tests}).
 \toprule
 \textbf{Drill} & \textbf{Result} \\
 \midrule
-A node stopped during a parallel map & same checksum; \textbf{16.5}\,s against \textbf{17.0}\,s undisturbed, one run each, within noise \\
+% source: LAN-lab rehearsal, a node stopped by hand once its first parts had run (demo brief V2 report, failover step); not scripts/lab-fail.sh, whose run dispatched nothing (RESULTS.md R5).
+A node stopped during a parallel map, after parts had run on it & parts placed again, same checksum; \textbf{16.5}\,s against \textbf{17.0}\,s undisturbed, one run each, within noise \\
 A worker killed during a remote job, two machines & node named gone \textbf{16}\,s after the kill \\
 A training rank killed during a run & survivor finished all 80 epochs, \textbf{90.5}\,s \\
 A training rank's machine back during a run & rejoined at the next epoch, \textbf{4}\,s after its daemon started \\
@@ -285,7 +289,7 @@ its two-container GPU variant for the GPU steps. The containers
 share one laptop, so Table~\ref{tab:lablayout} shows what each step costs and
 that it works, not speedup. A cold run is the first ever on fresh containers; a
 cached run follows it. The last row ran eight jobs at once on containers with
-6.0\,GB of memory in total.
+6000\,MiB of memory in total.
 
 \begin{table}[!htbp]
 \centering
@@ -361,9 +365,9 @@ relay is involved in either case.
 CPU script spread over that laptop, a second laptop over the internet and the
 phone gave the phone 8 of 192 parallel items with an unchanged result, after the
 phone had built the job's environment from the binary cache in 27\,s. A torch
-script training many small models gave the phone a few of them, all converged;
-when the laptops could finish first, the phone took none and the result was
-unchanged.
+script training 160 small models gave the phone 6 of them, all converged;
+with 32 models the laptops finished first, so the phone took none and the result
+was unchanged.
 
 \textbf{Further measurements.} Table~\ref{tab:recorded} collects measurements
 between a 20-core machine, a 16-core peer and a public cloud host, each taken a
@@ -421,10 +425,10 @@ Joins NATed machines, no relay$^{\dagger}$ & yes & no & no  & no      & no      
 \midrule
 \multicolumn{7}{l}{\textit{Where it is partial or behind}} \\
 Survives losing a node$^{*}$ & partial & yes & yes & yes & yes & no \\
-Authenticated and encrypted & partial & yes & partial & partial & yes & yes \\
+Authenticated, encrypted & partial & yes & partial & partial & yes & yes \\
 Sandboxes each job          & partial & no  & no      & no      & partial & no \\
-Runtimes other than Python  & no & yes & partial & no & yes & yes \\
-Proven in production use    & no & yes & yes & yes & yes & yes \\
+Runtimes beyond Python  & no & yes & partial & no & yes & yes \\
+Proven in production    & no & yes & yes & yes & yes & yes \\
 \bottomrule
 \end{tabularx}
 \par\smallskip\raggedright\footnotesize $^{\dagger}$When one introducer is
@@ -434,7 +438,7 @@ training ring's rank~0.
 \end{table}
 
 The upper block lists the criteria on which PipedPeer was designed to differ, so
-it wins them by construction; the lower block is the more informative half
+it meets them by design; the lower block is the more informative half
 (Section~\ref{sec:security}). Spark, Ray and Dask are far more capable at scale,
 with mature schedulers and tooling; PipedPeer trades maturity and scale for the
 elimination of setup, code change and network configuration. BOINC

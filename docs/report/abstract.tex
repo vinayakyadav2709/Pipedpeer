@@ -15,7 +15,9 @@ system that runs an unmodified Python script on other machines with none of
 these. Each machine runs one daemon from a single binary; the submitting machine
 builds the script's environment as a pinned \textbf{Nix closure}, places the job
 by live capacity, sends only the store paths the chosen machine lacks, and runs
-the job in a \texttt{crun} sandbox under its own memory ceiling. A shim injected
+the job in a \texttt{crun} sandbox under its own memory ceiling. Placement
+runs in the submitting client under a lease, and every distributed path falls
+back to a local one. A shim injected
 into the interpreter \textbf{intercepts the parallel primitives the script already
 uses} --- \texttt{multiprocessing.Pool}, \texttt{joblib}, pandas, NumPy and torch
 data-parallel training --- and spreads their work across machines in proportion
@@ -30,7 +32,8 @@ two laptops in different homes, a mixed CPU script finished in about 14\,s
 against 18\,s on one laptop. On a two-rank training ring, synchronising
 every 32 steps instead of every step kept the validation loss no more than 1\%
 above one device's on every test model, and each rank sent 7.6 to 9.2 times
-fewer bytes. Disabling any tested feature makes the test suite fail.
+fewer bytes. A mutation audit breaks each tested feature in turn, and every
+mutation fails a test.
 
 \vspace{0.6cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal,

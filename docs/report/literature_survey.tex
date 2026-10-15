@@ -116,7 +116,7 @@ script's learning rate, so the merge is a plain average
 Optimization'' \cite{vogels2019powersgd} by T.~Vogels \textit{et al.}
 approximates each gradient matrix by a low-rank product found with one step of
 power iteration, with error feedback, and matches full-precision accuracy at
-high compression. Of ten methods tried for rings past four ranks, rank-16
+high compression. Of ten methods tried at 4, 8 and 11 ranks, rank-16
 PowerSGD on exact synchronisation alone kept every test model within 1\%, yet
 on a small transformer's narrow matrices it sends more bytes than 8-bit values
 (Section~\ref{sec:res-train}), which is why it is not the default.
@@ -217,7 +217,7 @@ discovery uses the reflexive-address idea of STUN \cite{rfc8489}, and a router's
 mapping and filtering behaviour is classified in the terms of RFC~5780
 \cite{rfc5780}. Port mapping follows NAT-PMP \cite{rfc6886}, its successor PCP
 \cite{rfc6887}, and UPnP IGD \cite{upnpigd}. Simultaneous UDP probing from the
-socket that will carry the connection is the hole-punching technique analysed by
+socket that will carry the connection is hole punching, as analysed by
 Ford, Srisuresh and Kegel \cite{ford2005p2p}, whose observation that a router's
 mapping belongs to a socket shapes PipedPeer's shared-socket design. Links are
 QUIC \cite{rfc9000} secured by TLS~1.3 \cite{rfc8446}, node identities are
@@ -226,17 +226,23 @@ Zstandard \cite{rfc8878}.
 
 Table~\ref{tab:litsummary} summarises the surveyed work.
 
-\begin{table}[!htbp]
-\centering
-\caption{Summary of the surveyed work}
-\label{tab:litsummary}
-\renewcommand{\arraystretch}{1.1}
+% longtable, not table: a float this tall ran off the page and lost its last rows.
+{\renewcommand{\arraystretch}{1.1}
 \rowcolors{2}{}{rowgray}
-\footnotesize
-\begin{tabularx}{\textwidth}{L{3.1cm} C{0.8cm} X X}
+\footnotesize\singlespacing
+\begin{longtable}{L{2.8cm} C{0.75cm} L{4.85cm} L{4.85cm}}
+\caption{Summary of the surveyed work}
+\label{tab:litsummary} \\
 \toprule
 \textbf{Author} & \textbf{Year} & \textbf{Method} & \textbf{Gap for PipedPeer} \\
 \midrule
+\endfirsthead
+\toprule
+\textbf{Author} & \textbf{Year} & \textbf{Method} & \textbf{Gap for PipedPeer} \\
+\midrule
+\endhead
+\bottomrule
+\endlastfoot
 Zaharia et al.\ \cite{zaharia2010spark} & 2010 & In-memory resilient datasets rebuilt from lineage & Program written against the dataset API; cluster with a master \\
 Moritz et al.\ \cite{moritz2018ray} & 2018 & Tasks and actors over a distributed scheduler & Changed import; cluster with a head node on one network \\
 Rocklin \cite{rocklin2015dask} & 2015 & Blocked task graphs for array and dataframe work & Program written against Dask's collections \\
@@ -266,6 +272,4 @@ Yong et al.\ \cite{yong2023} & 2023 & Optimised partial offloading & Environment
 Wang et al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks toward edge servers & Learned policy; edge servers assumed \\
 Li et al.\ \cite{li2023blockchain} & 2023 & Smart-contract service agreements & Blockchain infrastructure required \\
 Zhao et al.\ \cite{zhao2023} & 2024 & Graph-neural-network offloading policies & A learned model that must first be trained \\
-\bottomrule
-\end{tabularx}
-\end{table}
+\end{longtable}}

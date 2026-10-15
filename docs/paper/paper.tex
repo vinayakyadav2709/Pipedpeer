@@ -162,10 +162,10 @@ a drop-in \texttt{multiprocessing.Pool} and a \texttt{joblib} backend, and
 Modin~\cite{petersohn2020modin} provides distributed pandas behind the pandas
 API; each needs a changed import and a running cluster. PipedPeer changes no
 line of the program, because substitution happens before the first user
-statement, and it decides per call whether to distribute.
-BOINC~\cite{anderson2004boinc} pioneered volunteer computing, but as a platform
-for specific projects rather than a general executor. Table~\ref{tab:cmp}
+statement, and it decides per call whether to distribute. Table~\ref{tab:cmp}
 summarises the differences.
+BOINC~\cite{anderson2004boinc} pioneered volunteer computing, but as a platform
+for specific projects rather than a general executor.
 
 \begin{table}[t]
 \centering
@@ -185,10 +185,10 @@ Reproduces the environment & yes & part. & part. & part. & no \\
 Joins NATed machines, no relay$^{\dagger}$ & yes & no & no & no & no \\
 \midrule
 Survives losing a node$^{*}$ & part. & yes & yes & yes & no \\
+Authenticated, encrypted & part. & yes & part. & part. & yes \\
 Sandboxes each job         & part. & no & no   & no    & no \\
-Authenticated, encrypted   & part. & yes & part. & part. & yes \\
-Runtimes beyond Python     & \textbf{no} & yes & part. & no & yes \\
-Proven in production       & \textbf{no} & yes & yes & yes & yes \\
+Runtimes beyond Python & \textbf{no} & yes & part. & no & yes \\
+Proven in production & \textbf{no} & yes & yes & yes & yes \\
 \bottomrule
 \end{tabularx}
 \par\smallskip\raggedright\scriptsize $^{\dagger}$When one introducer is
@@ -371,9 +371,10 @@ at the next epoch boundary while over 95\% of their samples stay in place, and a
 rank that returns joins from the lead's model and optimiser snapshot, taking
 about $1/n$ of the samples.
 
-A fast mode synchronises every $H$ steps: an exact warm-up, then local steps
+A fast mode synchronises every $H$ steps: an exact warm-up (a tenth of the
+run, 10--500 steps), then local steps
 whose weights are averaged by samples, with optimiser moments averaged every
-tenth round. It never changes epochs, batch or learning rate, and must keep
+tenth round; $H$ shrinks to 1 over the run's last tenth. It never changes epochs, batch or learning rate, and must keep
 validation loss at most 1\% above one device's (mean over seeds, every test
 model). DiLoCo's outer Nesterov step (lr 0.7, momentum 0.9) settles at
 $0.7/(1-0.9)=7$ times the averaged change, which suits syncs every few hundred
@@ -409,7 +410,7 @@ matrix products stay local, while a GPU peer can win.
 \includegraphics[width=\columnwidth]{\figpath{fig_4.11_cost_model.png}}
 \caption{Decision regions of Equation~\ref{eq:cost} for the pandas path
 ($\rho=1$, 1\,GFLOP/s) at three nodes on a 500\,MB/s link. The step at
-512\,MiB is a separate rule: below 8 flop per byte, work up to 512\,MiB stays
+512\,MiB is a separate rule: below 8 FLOP per byte, work up to 512\,MiB stays
 local.}
 \label{fig:cost}
 \end{figure}
@@ -437,8 +438,8 @@ PipedPeer's, and a summary of where its items ran.
 PipedPeer is a single Go~1.25 binary that is both client and daemon, built from
 46 Go packages and an embedded Python interception shim. The daemon serves an HTTP API, makes
 direct links with quic-go, builds environments with Nix flakes, and runs each
-job in a \texttt{crun} sandbox. Disabling any one of 95 features makes the
-test suite fail.
+job in a \texttt{crun} sandbox. A mutation audit breaks each of 95 features in
+turn; every mutation fails a test.
 
 \section{Evaluation}
 
@@ -480,7 +481,7 @@ accuracy of seeds 0--2 and, where run, 0--5. MiB and GiB are binary.
 \subsection{Microbenchmarks (Q1, Q2)}
 
 \textbf{Interception.} Startup of a job that imports nothing heavy takes
-0.117\,s with interception against 0.094\,s without ($1.24\times$). On a whole job that the cost model declines, a 16-item map with 0.01\,s
+0.117\,s with interception against 0.094\,s without (best of five, $1.24\times$). On a whole job that the cost model declines, a 16-item map with 0.01\,s
 of work and none of it dispatched, the median was 0.80\,s against 0.68\,s:
 declining costs about 0.12\,s per job.
 
@@ -498,8 +499,8 @@ already held sent 29\,MB instead of 206\,MB.
 \end{figure}
 
 \textbf{Work split.} On a lab limited to 8, 2 and 1 CPUs, a headcount split was
-$1.6\times$ slower than not distributing; the measured split declined the 1-CPU
-worker and took 2.9\,s against 3.6\,s. With one peer at a tenth of the CPU,
+$1.6\times$ slower than local (3.6\,s); the measured split declined the 1-CPU
+worker and took 2.9\,s, better but still $1.3\times$ slower than local. With one peer at a tenth of the CPU,
 the slowdown against an equal cluster fell from $1.6\times$ on the first run to
 $1.08\times$ by the fourth as the rate estimates converged.
 
@@ -532,10 +533,8 @@ each).
 
 \textbf{Across two NATs.} On the two-site testbed (Section~\ref{sec:setup}),
 scripts, parallel maps, remote runs and both training sync modes ran across the
-sites, and a node whose link was cut mid-run was replaced. Two machines meet
-directly when one introducer is reachable; otherwise a public address or an
-overlay such as Tailscale is required, which is the setting of the two-laptop
-measurements.
+sites, and a node whose link was cut mid-run was replaced. Without a reachable
+introducer, a public address or an overlay such as Tailscale is needed.
 
 \begin{table}[t]
 \centering
@@ -549,8 +548,6 @@ measurements.
 \midrule
 Pool map, 20-core host alone vs.\ with 16-core peer (Tailscale) & 5.8--6.4 vs.\ 4.9--5.4\,s \\
 CPU script, one laptop vs.\ two over Tailscale & 18 vs.\ 14\,s \\
-Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s \\
-\quad final loss: 1 machine / fp16 / int8 & 0.0875 / 0.0875 / 0.0877 \\
 Training, two laptops (Tailscale): 1 GPU / \texttt{-{}-ddp~2} exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
 \quad val.\ loss: 1 GPU / exact / fast / auto & 0.0794 / 0.0797 / 0.0797 / 0.0796 \\
 New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
@@ -603,7 +600,8 @@ NAT traversal is evaluated on the two-site testbed (Section~\ref{sec:setup}) and
 over an overlay between real homes.
 TLS is trust on first use, the keys trusted to sign closures are not yet bound to
 an authenticated identity, and authorisation is one shared secret. Only Python is
-supported, and a training ring depends on rank~0's machine.
+supported, and a training ring depends on rank~0's machine. The 1\% accuracy
+bar is a mean over seeds; single seeds spread from $-3.9\%$ to $+2.2\%$.
 
 \section{Conclusion and Future Work}
 
