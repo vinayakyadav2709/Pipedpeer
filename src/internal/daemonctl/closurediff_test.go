@@ -182,8 +182,14 @@ func TestStreamedPackFailureIsReported(t *testing.T) {
 // nothing but the workspace, and the upload costs round trips, not packing.
 func TestWarmReseedTakesMilliseconds(t *testing.T) {
 	var imported bool
+	var checks, missingAsks int
 	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/store/missing", func(w http.ResponseWriter, r *http.Request) {
+		missingAsks++
+		w.WriteHeader(http.StatusNotFound) // workspace question: an older node
+	})
 	mux.HandleFunc("/v1/store", func(w http.ResponseWriter, r *http.Request) {
+		checks++
 		json.NewEncoder(w).Encode(map[string]any{"cached": true})
 	})
 	mux.HandleFunc("/v1/store/import", func(w http.ResponseWriter, r *http.Request) { imported = true })
@@ -207,6 +213,7 @@ func TestWarmReseedTakesMilliseconds(t *testing.T) {
 	if _, err := UploadJob(context.Background(), u.Hostname(), port, ws, "/unused.nar", "/nix/store/xxx-run", "main.py", UploadOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	checks, missingAsks = 0, 0
 	start := time.Now()
 	resp, err := UploadJob(context.Background(), u.Hostname(), port, ws, "/unused.nar", "/nix/store/xxx-run", "main.py", UploadOptions{})
 	took := time.Since(start)
@@ -216,8 +223,14 @@ func TestWarmReseedTakesMilliseconds(t *testing.T) {
 	if imported || resp.Closure != "on-node" {
 		t.Errorf("closure sent to a node that had it (closure=%s)", resp.Closure)
 	}
-	if took > 100*time.Millisecond {
-		t.Errorf("warm re-seed took %v, want < 100 ms", took)
+	if checks != 1 || missingAsks > 1 {
+		t.Errorf("closure checks = %d, missing questions = %d; want one round trip, no closure diff", checks, missingAsks)
+	}
+	// The millisecond figure is U25's benchmark; here only a bound a loaded
+	// 2-core CI runner meets.
+	t.Logf("warm re-seed took %v", took)
+	if took > 2*time.Second {
+		t.Errorf("warm re-seed took %v, want < 2 s", took)
 	}
 }
 
