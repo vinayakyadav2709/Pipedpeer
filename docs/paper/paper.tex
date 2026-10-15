@@ -68,7 +68,8 @@ Mumbai, Maharashtra, India \\
 \IEEEauthorblockN{\mentorname}
 \IEEEauthorblockA{\textit{Department of Computer Engineering} \\
 \textit{Sardar Patel Institute of Technology}\\
-Mumbai, Maharashtra, India}
+Mumbai, Maharashtra, India \\
+dd\_ambawade@spit.ac.in}
 }
 
 \maketitle
@@ -88,7 +89,7 @@ through an introducer that any member can serve, then connect directly over
 authenticated QUIC; no data is relayed. In a container lab a repeat
 submission took 0.83\,s against 23.4\,s for the first, and interception cost
 $1.24\times$ the start-up of a trivial job. Between two laptops in different
-homes, a CPU-bound script ran in 13.3--14.6\,s against 17.4--18.1\,s on one.
+homes, over a Tailscale network, a CPU-bound script ran in 13.3--14.6\,s against 17.4--18.1\,s on one.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -117,8 +118,8 @@ port forwarding or a relay --- are either configuration or a bottleneck.
 PipedPeer addresses all three. Its contributions are:
 
 \begin{enumerate}
-\item \textbf{Peer-to-peer closure distribution.} Content-addressed store paths
-are Nix's~\cite{dolstra2004nix}; we push signed closures between peers, send
+\item \textbf{Peer-to-peer closure distribution.} Building on Nix's
+content-addressed store paths~\cite{dolstra2004nix}, we push signed closures between peers, send
 only the store paths a receiver lacks, and offer distributed work only to peers
 that can run the closure (Section~\ref{sec:env}).
 \item \textbf{Transparent interception with measured work sharing.} Parallel
@@ -150,7 +151,7 @@ summarises the differences.
 
 \begin{table}[t]
 \centering
-\caption{PipedPeer against existing systems. The lower block is where it is
+\caption{Comparison with existing systems. The lower block is where ours is
 the weaker system.}
 \label{tab:cmp}
 \renewcommand{\arraystretch}{1.15}
@@ -235,20 +236,21 @@ and VRAM --- and survivors are scored:
 \begin{equation}
 \label{eq:score}
 \begin{split}
-S = \Bigl(1 &- \tfrac{u_{\text{cpu}}}{200} - \tfrac{u_{\text{mem}}}{200}
-     - 0.05\,n_{\text{jobs}} \\
-    &+ 0.10(\hat{c}-\tfrac12) + 0.06(\hat{f}-\tfrac12) \\
-    &+ 0.10(\hat{m}-\tfrac12) + 0.10(\hat{r}-\tfrac12)\Bigr)\cdot H
+S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200}
+     - 0.05\,n_{\mathrm{jobs}} \\
+    &+ 0.10(\hat{c}-0.5) + 0.06(\hat{f}-0.5) \\
+    &+ 0.10(\hat{m}-0.5) + 0.10(\hat{r}-0.5)\Bigr)\cdot h
 \end{split}
 \end{equation}
 
-where $u$ are utilisations in percent, $n_{\text{jobs}}$ the running jobs,
+where $u_{\mathrm{cpu}}$ and $u_{\mathrm{mem}}$ are processor and memory utilisation in percent, $n_{\text{jobs}}$ the running jobs,
 $\hat{c},\hat{f},\hat{m},\hat{r}$ core count, clock, free memory and free-core
-ratio normalised onto $[0,1]$, and $H$ a health score. Load dominates hardware:
+ratio normalised onto $[0,1]$, and $h \in [0,1]$ the node's health score. Load dominates hardware:
 the load terms can subtract $1.0$, the hardware terms move the score by at most
 $0.36$, and a missing metric takes the neutral $0.5$. Free memory is what a node
 can \emph{grant}: where a user \texttt{systemd} is available, each daemon runs under a cgroup ceiling of half the machine,
-and daemons on one machine subtract one another's reservations.
+and co-located daemons (several on one machine) subtract one another's
+reservations.
 
 Work is reserved by a three-phase lease; the concurrency and memory checks and
 the insertion happen under one lock. The submitter renews every 30\,s, also
@@ -261,8 +263,8 @@ leaves the healthy set and its job is rescheduled with back-off.
 
 The client scans imports, resolves them to packages, and builds a Nix closure
 from a flake pinned to an \emph{exact} package-set revision, so the store path
-is a stable name for an environment across machines and time. An import the
-mapping table does not know is looked up by name in the pinned set, the scan
+is a stable name for an environment across machines and time. Imports absent
+from the mapping table are looked up by name in the pinned set, the scan
 follows the script's own modules, a \texttt{requirements.txt} is honoured, and
 an import still unresolved is reported before the run.
 
@@ -334,8 +336,8 @@ order of joins is not preserved.
 \textbf{Training.} Ranks post gradients to the lead node's daemon rather than
 building a rank-to-rank mesh, and the daemon returns one sample-weighted average
 $\sum_i n_i g_i / \sum_i n_i$, sent as 8-bit values with per-block scales and
-error feedback. The script's batch is split across ranks by speed, so its
-learning rate stays correct, and after a warm-up the lead compares the split's
+error feedback. The global batch is partitioned across ranks in proportion to their
+speed, preserving the effective learning rate, and after a warm-up the lead compares the split's
 step time with the fastest rank alone and keeps the ring only if it is faster.
 Samples are assigned to ranks by a weighted rendezvous
 hash~\cite{thaler1998rendezvous}: when a rank dies the survivors take its share
@@ -407,7 +409,7 @@ interception package embedded in it. The daemon serves an HTTP API, makes
 direct links with quic-go, builds environments with Nix flakes, and runs each
 job in a \texttt{crun} sandbox. The suite of 829
 tests is checked by a mutation audit that disables 95 features one at a time ---
-among them gradient weighting, roommate memory accounting and the router-mapping
+among them gradient weighting, co-located daemons' memory accounting and the router-mapping
 checks --- and fails for every one.
 
 \section{Evaluation}
@@ -428,8 +430,13 @@ network or a 5G link. Because the containers share one processor, the lab
 measures correctness, overhead, caching and cost growth, and speedup only as one
 container against several of the same size. A 16-thread laptop with one GPU
 runs a second lab. Physical runs use two laptops in different homes (RTX~3060
-and RTX~3050) over a direct Tailscale path with 6--8\,ms round trip, a 20-core
-and a 16-core host on one LAN, and a Samsung Galaxy S20~FE (Android~13).
+and RTX~3050), a 20-core and a 16-core host on one LAN, and a Samsung Galaxy
+S20~FE (Android~13). Between the two laptops, PipedPeer's own QUIC link ran on
+top of a Tailscale (WireGuard) network with 6--8\,ms round trip, because the
+second laptop is shared into the first one's tailnet; these runs measure
+distribution between homes, not PipedPeer's NAT traversal. NAT traversal without
+Tailscale is evaluated on a two-router testbed: two separate NATs whose LANs
+both use 192.168.0.0/24, across which every user command is run.
 Training accuracy is measured in-process, with several ranks side by side on one
 machine, against a single device. Lab wall times are medians of three runs
 unless stated; accuracy is the mean of three seeds.
@@ -473,7 +480,9 @@ ran on three other daemons in each of five runs, with identical checksums. In
 the second lab a parallel map took 43.5\,s on its first run and 17.0\,s with
 its environment cached; a GPU job submitted from a node without a GPU ran on the
 GPU node in 7.6\,s cached (264.8\,s the first time); an interrupt stopped work
-on every peer within 2\,s; a detached job was reattached and returned its
+on every peer within 2\,s; after the introducer changed address, a
+three-node cluster reconnected with no command in 12.1--12.6\,s over three
+runs; a detached job was reattached and returned its
 results; and a two-rank ring finished its 80 epochs after one rank was killed,
 in 90.5\,s.
 
@@ -481,9 +490,7 @@ Table~\ref{tab:phys} lists the physical-machine results. A parallel map and a
 mixed CPU script (pool, joblib, NumPy, pandas) ran faster on two machines than
 on one, the latter with about half its items on the second laptop. The first
 run of a new GPU environment is dominated by its build (487\,s of 506\,s,
-mostly downloading CUDA PyTorch); the same script then took 17.7\,s. After the
-introducer changed address, a three-machine cluster reconnected with no command
-in 12.1--12.6\,s over three runs. On the phone, a laptop's CPU script spread over
+mostly downloading CUDA PyTorch); the same script then took 17.7\,s. On the phone, a laptop's CPU script spread over
 both laptops and the phone gave the phone 8 of 192 items with an unchanged
 checksum, after the phone had built the environment from the cache in 27\,s;
 Nix's Python inside \texttt{proot} ran it in 62--66\,s against 73--81\,s for
@@ -500,14 +507,13 @@ Termux's own Python (three runs each).
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
 Pool map, 20-core host alone vs.\ with 16-core peer (LAN) & 5.8--6.4 vs.\ 4.9--5.4\,s \\
-CPU script, one laptop vs.\ two over the internet & 17.4--18.1 vs.\ 13.3--14.6\,s \\
+CPU script, one laptop vs.\ two over Tailscale & 17.4--18.1 vs.\ 13.3--14.6\,s \\
 Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s \\
-\quad final loss, same three & .087495 / .087497 / .087688 \\
-Training, two laptops: 1 GPU / exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
-\quad validation loss, same four & .0794 / .0797 / .0797 / .0796 \\
+\quad final loss, same three & 0.087495 / 0.087497 / 0.087688 \\
+Training, two laptops (Tailscale): 1 GPU / exact / fast / auto & 4.2 / 37.1 / 8.5 / 14.6\,s \\
+\quad validation loss, same four & 0.0794 / 0.0797 / 0.0797 / 0.0796 \\
 Ring of 16/8/2 cores, equal vs.\ measured batches & 25.4 vs.\ 23.6\,s \\
 New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
-Rejoin after introducer address change & 12.1--12.6\,s \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -519,24 +525,25 @@ Rejoin after introducer address change & 12.1--12.6\,s \\
 over two containers beat one (9.1 against 11.8\,s), while a 9\,MB model with
 light steps over Wi-Fi ran ten times slower split than alone (80.7 against
 8.0\,s). Between physical machines neither split beat one GPU
-(Table~\ref{tab:phys}), and at the end of the run the system reported so; this
-is why the lead keeps a ring only when it measures it faster. With automatic
+(Table~\ref{tab:phys}), which the system reported at the end of the run; the lead keeps a ring
+only when it measures a net speedup. With automatic
 sync, the two-laptop ring ran 19 exact steps, switched to fast mode and
 finished in 14.6\,s with 25 syncs: auto pays a short exact warm-up before it
 switches. Measured batch
 sizes beat equal ones on an uneven ring.
 
 \textbf{Fast synchronisation.} On two ranks with LAN and Wi-Fi profiles, plain
-averaging every 64 steps after a 10-step warm-up landed $+0.64/+0.61\%$,
-$-2.14/-2.09\%$ and $+0.18/+0.50\%$ from one device on two perceptrons and a
-small transformer, each within exact sync's own spread, while sending
+averaging every 64 steps after a 10-step warm-up changed validation
+loss against one device by $+0.64/+0.61\%$ on a first perceptron,
+$-2.14/-2.09\%$ on a second and $+0.18/+0.50\%$ on a small transformer
+(each pair LAN/Wi-Fi), each within exact sync's own spread, while sending
 9--15$\times$ fewer bytes per rank; it finished 1.2--1.4$\times$ faster than
 exact sync on LAN and 1.6--3.1$\times$ on Wi-Fi (one seed). With DiLoCo's outer
 step the transformer was $+21.7\%$ even at 156 local steps.
 
 \textbf{Many ranks.} The largest interval passing on every model was 32 at two
 ranks, 16 at three and 4 at four; at eight ranks the transformer failed at every
-interval down to 2, so no interval is used from five ranks. At 4, 8 and 11
+interval down to 2, so no interval is used for five or more ranks. At 4, 8 and 11
 ranks, only exact synchronisation with rank-16
 PowerSGD~\cite{vogels2019powersgd} compression and error feedback kept every
 model within 1\% of one device (worst mean $+0.18\%$), sending $3.2\times$ fewer
