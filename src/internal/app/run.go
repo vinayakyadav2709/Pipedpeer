@@ -248,9 +248,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 			sum.Err = runErr
 			printSummary(os.Stdout, sum)
 		}
-		if task.single {
-			saveRunRecord(historyDir, historyRecord.ID, opts, started, scriptStart, scriptDur, sum.Receipt)
-		}
+		saveRunRecord(historyDir, historyRecord.ID, opts, started, scriptStart, scriptDur, sum.Receipt, task.single)
 	}()
 	_ = jobhistory.CopyFileTo(historyDir, task.Script, "script.py")
 	_ = jobhistory.SaveText(historyDir, "flake.nix", env.FlakeContent)
@@ -474,12 +472,17 @@ func syncResults(host string, port int, jobID, resultsDir, historyDir string, re
 	return manifest, nil
 }
 
-// saveRunRecord merges this process's run steps with the shim receipt's
-// "steps", adds the script's own run time, saves the record beside the job's
-// history and prints its simple view (stderr) when work left this machine,
-// plus the detailed view under -v.
-func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart time.Time, scriptDur time.Duration, receipt json.RawMessage) {
-	steps := runrec.Steps()
+// saveRunRecord saves every run's record (single run, fan-out task, DDP rank)
+// beside its job history: the shim receipt's "steps" (a DDP rank's sync
+// rounds among them) plus the script's own run time. A single run also takes
+// this process's steps (environment build and send) and prints the simple
+// view (stderr) when work left this machine, plus the detailed view under -v;
+// a task or rank prints nothing, its caller owns the terminal.
+func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart time.Time, scriptDur time.Duration, receipt json.RawMessage, single bool) {
+	var steps []runrec.Step
+	if single {
+		steps = runrec.Steps()
+	}
 	if len(receipt) > 0 {
 		var r struct {
 			Steps []runrec.Step `json:"steps"`
@@ -527,6 +530,9 @@ func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart 
 	}
 	if err := runrec.Save(historyDir, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not save the run record in %s: %v\n", historyDir, err)
+	}
+	if !single {
+		return
 	}
 	if left {
 		runrec.WriteSimple(os.Stderr, runrec.Simple(rec))
