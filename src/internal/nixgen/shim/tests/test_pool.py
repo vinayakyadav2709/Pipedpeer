@@ -166,3 +166,20 @@ def test_relayed_steps_keep_the_machine_that_ran_them(monkeypatch):
     ]}
     pool_pacing._relay_steps(receipt)
     assert [s["machine"] for s in pool_pacing._RELAYED_STEPS] == ["peer-id", "10.0.0.3:4242"]
+
+
+def test_pool_width_fits_the_job_memory_cap(monkeypatch):
+    # The sandbox has no /sys: the cap arrives as PIPEDPEER_MEM_LIMIT. A
+    # 16-core box with a 2 GiB script under a 4.5 GiB cap once got 16
+    # torch-importing workers and was killed in 5 s.
+    from pipedpeer_shim import core, pool_resources as pr
+    gib = 1 << 30
+    monkeypatch.setattr(core, "_usable_cores", lambda: 16)
+    monkeypatch.setattr(pr, "_cgroup_headroom", lambda: None)
+    monkeypatch.setattr(pr, "_private_bytes", lambda pid: 2 * gib if pid == "self" else 0)
+    monkeypatch.setenv("PIPEDPEER_MEM_LIMIT", str(int(4.5 * gib)))
+    assert pr._pool_width(None) <= 4  # 2.5 GiB room * 0.4 / 256 MiB
+    # Measured workers cost 1 GiB each: size by that, not the 256 MiB floor.
+    assert pr._pool_width(None, reclaim=4 * gib, workers=4) <= 2
+    monkeypatch.setenv("PIPEDPEER_MEM_LIMIT", "bogus")
+    assert pr._limit_headroom() is None

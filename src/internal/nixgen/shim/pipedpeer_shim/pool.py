@@ -75,7 +75,7 @@ class _ClusterPool:
         it. multiprocessing.Pool cannot grow or shrink, so this rebuilds it
         between calls; within a single map the width is fixed.
         """
-        want = _pool_width(self._requested, self._workers_memory())
+        want = _pool_width(self._requested, self._workers_memory(), self._procs)
         if want == self._procs:
             return
         if self._batcher is not None and self._batcher._busy:

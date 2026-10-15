@@ -100,8 +100,44 @@ def _avail_bytes():
             return 0
     room = _cgroup_headroom()
     if room is not None and room < avail:
-        return max(0, room)
+        avail = max(0, room)
+    room = _limit_headroom()
+    if room is not None and room < avail:
+        avail = max(0, room)
     return avail
+
+
+def _private_bytes(pid):
+    """Resident memory a process does not share (statm resident - shared)."""
+    try:
+        with open("/proc/%s/statm" % pid) as f:
+            fields = f.read().split()
+        return max(0, int(fields[1]) - int(fields[2])) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return 0
+
+
+def _limit_headroom():
+    """What the job's memory cap still allows, or None without one.
+
+    A sandboxed job has no /sys, so _cgroup_headroom finds nothing there and
+    the daemon passes the cap as PIPEDPEER_MEM_LIMIT instead. Used is this
+    process plus its children, measured as _workers_memory measures workers,
+    so a resize that adds those back (reclaim) nets to this process alone.
+    """
+    raw = os.environ.get("PIPEDPEER_MEM_LIMIT", "").strip()
+    if not raw:
+        return None
+    try:
+        limit = int(raw)
+    except ValueError:
+        _log("PIPEDPEER_MEM_LIMIT=%r is not a byte count; ignored" % raw)
+        return None
+    import multiprocessing
+    used = _private_bytes("self")
+    for child in multiprocessing.active_children():
+        used += _private_bytes(child.pid)
+    return limit - used
 
 
 def _imap_batch(procs):
@@ -115,7 +151,7 @@ def _imap_batch(procs):
     return max(64, procs * 32)
 
 
-def _pool_width(requested, reclaim=0):
+def _pool_width(requested, reclaim=0, workers=0):
     """How many local workers to run.
 
     A hand-picked process count is a guess about the machine the author had
@@ -127,6 +163,10 @@ def _pool_width(requested, reclaim=0):
     a resource that is not safe to touch twice, a model that only fits a few
     times over - and those break rather than slow down when overridden.
     PIPEDPEER_RESPECT_POOL_SIZE=1 hands the decision back.
+
+    reclaim is what the current pool's workers hold and workers how many
+    there are: their average is the real per-worker cost (a torch import is
+    ~300MB, not the 256MB floor) and sizes the next pool.
     """
     cores = core._usable_cores()
     if os.environ.get("PIPEDPEER_RESPECT_POOL_SIZE") == "1" and requested:
@@ -140,7 +180,10 @@ def _pool_width(requested, reclaim=0):
         # Nothing here knows the per-worker working set before the job runs,
         # so assume a conservative 256MB rather than none: a box with many
         # cores and little free memory must not fan out to all of them.
-        n = min(n, max(1, int(avail * 0.4) // (256 << 20)))
+        per = 256 << 20
+        if workers > 0:
+            per = max(per, reclaim // workers)
+        n = min(n, max(1, int(avail * 0.4) // per))
     if requested and int(requested) != n:
         _log("using %d workers, not the %d requested (cores=%d); "
              "set PIPEDPEER_RESPECT_POOL_SIZE=1 to keep your own count"
