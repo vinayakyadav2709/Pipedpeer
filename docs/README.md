@@ -1,8 +1,10 @@
 # Paper and report source
 
 Everything needed to produce the major project report and the conference paper.
-The documents are written against commit `4c91ef3` (2026-09-01) and were
-re-measured and checked against the code on 2026-10-02.
+The documents are written against commit `4c91ef3` (2026-09-01), were
+re-measured and checked against the code on 2026-10-02, and were extended for
+the address-book phase after the 2026-10-14 demo (numbers still to be measured
+are marked TODO).
 
 ## Layout
 
@@ -19,6 +21,9 @@ re-measured and checked against the code on 2026-10-02.
 | `benchmarks/raw/` | Raw output behind every number quoted. `C_commit_measurements.md` quotes the multi-machine measurements verbatim from their commits. |
 | `known-issues.md` | Defects found while documenting, each marked when resolved. |
 | `fixes-and-roadmap.md` | What was fixed after the report, how to check each fix, and the phases that come next. |
+| `next-steps.md` | Where the project stands after the address-book phase, what is unverified, and the decisions not to reopen. |
+| `hosted-introducer.md`, `phone.md` | Deploy guides: an introducer-only server; an Android phone as a pool worker. |
+| `adr/` | Why things are the way they are. |
 
 ## Rebuilding
 
@@ -34,15 +39,14 @@ for f in diagrams/src/*.dot; do
   magick "$out" -background white -alpha remove -alpha off "$out"
 done
 
-# Documents (three passes, for the table of contents and cross-references)
-cd report && pdflatex main.tex && pdflatex main.tex && pdflatex main.tex
-cd ../paper && pdflatex paper.tex && pdflatex paper.tex
+# Documents (tectonic fetches the packages it needs and runs the passes itself)
+tectonic --outdir <scratch dir> report/main.tex
+tectonic --outdir <scratch dir> paper/paper.tex
 ```
 
-You need a full TeX Live. `report/main.tex` uses `enumitem`, `multirow` and
-`tocloft`, and the paper needs IEEEtran's Times fonts. Without a full
-installation, prefix the commands with
-`nix shell nixpkgs#texliveFull nixpkgs#graphviz -c`.
+A full TeX Live works too (`pdflatex` three times for the report, twice for the
+paper): `nix shell nixpkgs#texliveFull nixpkgs#graphviz -c`. Numbers still to
+be measured are marked `\todo{}` and render in red.
 
 ## Re-running the measurements
 
@@ -52,7 +56,7 @@ cd src && go build -o ../bin/pipedpeer . && cd ..   # bench.py uses bin/pipedpee
 scripts/check-skips.sh
 scripts/audit-tests.sh                              # edits src/ temporarily; run nothing else meanwhile
 bash scripts/lab-up.sh                              # 3 worker containers
-for p in 38081 38082 38083; do ./bin/pipedpeer nodes add 127.0.0.1 $p; done
+./bin/pipedpeer status                              # the workers appear by LAN discovery
 python3 docs/benchmarks/bench.py --repeat 5
 scripts/bench-shim-d2.sh
 BENCH_ITEMS=48 scripts/bench-pool.sh
@@ -85,8 +89,13 @@ results chapter says is needed for speedup figures.
 
 `system-report.md` Appendix B tabulates both sets of differences.
 
-**No speedup is claimed from the lab.** The lab is three containers on one host.
-What it measures honestly:
+**No speedup is claimed from the plain lab.** The plain lab is three containers
+on one host, so it proves work crosses nodes, never speedup. Speedup numbers
+come from the emulated lab (`scripts/lab-emu.sh`: equal containers with fixed
+CPU and memory quotas, links shaped by tc netem to LAN, Wi-Fi and 5G profiles
+plus loss; speedup = 1 container vs N of the same size) and are always labelled
+*emulated*; real-hardware points come from two laptops over Tailscale and the
+demo-day runs (`pipedpeer jobs --export-all`). What the plain lab measures honestly:
 - the environment cache (23.41 s first, 0.83 s once the closure is present);
 - interception start-up (1.24×);
 - that work crosses nodes;

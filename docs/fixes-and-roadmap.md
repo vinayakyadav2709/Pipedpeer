@@ -2,7 +2,10 @@
 
 This records the work done after the report was written, on branch
 `nightly-fixes-s` in October 2026. It covers what changed, how to test each
-part, and what comes next. `known-issues.md` holds the original defect list,
+part, and what comes next. It is a historical record: command names and ports
+below were updated to the current build (`jobs <id>` for the old `job`,
+`status` for `nodes`/`stats`, port 4242), but the demo scripts it names were
+retired; the plan after the address-book phase is in `next-steps.md`. `known-issues.md` holds the original defect list,
 with each entry marked when resolved.
 
 | Phase | What | Status | Commits |
@@ -76,7 +79,7 @@ mkdir -p /tmp/pptest && cd /tmp/pptest && touch .pipedpeerignore
 | Daemon start-up deleted job history. The history and the daemon's job directories share `jobs/`, and each pruner removed the other's entries | The daemon removes only UUID-named job directories. The history removes only directories holding a record |
 | The cluster's signing keys sometimes could not be recorded: two writers renamed each other's temporary file away | Each write uses its own uniquely named temporary file |
 | `--remote` looked for a node once, and could report "no eligible node found" spuriously | It waits up to 10 min for a node (15 s before 1e07d56), says every 30 s why each one is busy. `PIPEDPEER_REMOTE_WAIT` changes the wait (`0s` takes one look) |
-| A peer with no direct path was only logged, never shown | `pipedpeer nodes` lists it under "No direct path", with the reason |
+| A peer with no direct path was only logged, never shown | `pipedpeer status` lists it under "No direct path", with the reason |
 
 **Pool, shim and resolver fixes** (`fad3ce4`)
 
@@ -167,9 +170,9 @@ list of why each node was turned down.
 for this one.
 
 ```bash
-pp auth set
-curl -s -o /dev/null -w '%{http_code}\n' localhost:38080/health   # 401
-pp nodes                                                          # peers still found
+pp invite                                                       # creates the secret if none
+curl -s -o /dev/null -w '%{http_code}\n' localhost:4242/health   # 401
+pp status                                                          # peers still found
 ```
 
 **7. Pool sizing follows pinning.** On the docker bench rig (3 cores per
@@ -218,8 +221,7 @@ execution's final message, and the seeding time in the upload's answer.
 
 Where it shows:
 - Every run now ends with the `=== Summary ===` block; the stage timeline is kept in the history record.
-- `pipedpeer job --timeline` draws the timeline as bars on a shared time axis.
-- `pipedpeer job --last` picks the most recent run, so no ID needs copying.
+- `pipedpeer jobs <id> --timeline` draws the timeline as bars on a shared time axis.
 
 ### Test it automatically
 
@@ -237,7 +239,7 @@ least 300 ms of script time.
 cd /tmp/pptest
 printf 'import time\nt=time.time()\nsum(i*i for i in range(3_000_000))\nprint("done in %%.2fs" %% (time.time()-t))\n' > job.py
 pp run job.py
-pp job --last --timeline
+pp jobs <id> --timeline
 ```
 
 The run ends with a line such as:
@@ -246,7 +248,7 @@ The run ends with a line such as:
 Stages: detect imports 0ms · … · nix build 520ms · export closure 5ms · upload 5.3s · sandbox setup 0ms · script 254ms · sync results 8ms (total 6.1s)
 ```
 
-and `job --last --timeline` draws it:
+and `jobs <id> --timeline` draws it:
 
 ```
 STAGE             WHERE        START      TIME
@@ -280,7 +282,7 @@ used before, such as `from tabulate import tabulate`.
 - **A node on an older binary shows one `execute` stage** instead of setup,
   import and script.
 - **`placement` is recorded only when the coordinator chose the node** (with
-  `--remote`, or `pipedpeer python`).
+  `--remote`, or plain `pipedpeer run`).
 
 ---
 
@@ -288,13 +290,13 @@ used before, such as `from tabulate import tabulate`.
 
 ### What changed
 
-**`pipedpeer job --explain`: why a node was chosen.** A run placed by the
+**`pipedpeer jobs <id> --explain`: why a node was chosen.** A run placed by the
 coordinator keeps the whole decision:
 - every node considered
 - its score, or the reason it was rejected
 - the load figures the score is made of: CPU, memory, running jobs, free cores and free memory
 
-**`pipedpeer job --receipt`: what the shim distributed, and why.** For every
+**`pipedpeer jobs <id> --receipt`: what the shim distributed, and why.** For every
 intercepted run, the daemon points the shim's receipt at
 `<workdir>/.pipedpeer/receipt.json`. It returns the receipt with the run, and
 the run's history keeps it. The receipt shows:
@@ -308,7 +310,7 @@ the run's history keeps it. The receipt shows:
 
 A run ends with the Summary block, whose `spread` row reports it.
 
-**`pipedpeer stats`: the cluster at a glance.** It shows:
+**`pipedpeer status`: the cluster at a glance.** It shows:
 - every node's cores, CPU use, free memory and running tasks
 - each node's pool counters: chunks received, chunks from peers, items run,
   parts sent on to peers, failures
@@ -361,7 +363,7 @@ if __name__ == "__main__":
     print("POOL", len(r), "in %.2fs" % (time.time() - t))
 EOF
 pp run pool.py
-pp job --last --receipt
+pp jobs <id> --receipt
 ```
 
 The run ends with a Summary row such as
@@ -375,8 +377,8 @@ Items: 200 total
   (75 computed on both: idle local cores raced the slowest remote chunks)
 
 By peer:
-  192.168.0.107:38080        31  ████
-  172.21.0.3:38080           18  ██
+  192.168.0.107:4242         31  ████
+  172.21.0.3:4242            18  ██
   ...
 Cost model decisions:
   shipped     pool.map             188 items x 0.038s = 7.17s of work, over the 0.50s worth a round trip
@@ -386,7 +388,7 @@ A run placed by the coordinator, explained:
 
 ```bash
 pp run job.py --remote
-pp job --last --explain
+pp jobs <id> --explain
 ```
 
 ```
@@ -403,8 +405,7 @@ Chosen: score=0.753, source=discovery
 The cluster:
 
 ```bash
-pp stats
-pp stats --json | head -40
+pp status
 ```
 
 ```
@@ -419,7 +420,7 @@ ID                   SCRIPT             STATUS     NODE          TOTAL  SLOWEST 
 1791725631738480222  pool.py            succeeded  e5b24777       2.3s  seed peers 1s          15/200 items remote
 ```
 
-All three views at once: `pp job --last --timeline --explain --receipt`.
+All three views at once: `pp jobs <id> --timeline --explain --receipt`.
 
 ### Limits
 
@@ -438,7 +439,7 @@ All three views at once: `pp job --last --timeline --explain --receipt`.
 
 ### What changed
 
-Every daemon now serves a page at **`http://<machine>:38080/ui`**. It needs
+Every daemon now serves a page at **`http://<machine>:4242/ui`**. It needs
 no extra service, no build step and no internet access: the page is one file
 compiled into the binary.
 
@@ -456,7 +457,7 @@ can be linked to directly. The page has a pause button and a light/dark toggle
 (it follows the system theme otherwise), and it works at phone width.
 
 **The data.** The page reads one endpoint, `GET /v1/stats`. It returns the
-same snapshot as `pipedpeer stats --json`, from the same `clusterstats`
+same snapshot `pipedpeer status` shows, from the same `clusterstats`
 package, and is cached for one second so several open tabs don't multiply the
 calls to every node.
 
@@ -488,30 +489,28 @@ These tests check four things:
 ```bash
 pp stop; pp start            # the daemon must be running the new binary
 pp run pool.py               # something to show (see Phase 2)
-pp ui                        # opens http://127.0.0.1:38080/ui
+pp ui                        # opens http://127.0.0.1:4242/ui#token=…
 ```
 
 What to check on the page:
-1. The tiles and the nodes table match `pp stats`.
-2. The newest run is selected. Its timeline matches `pp job --last --timeline`,
-   and "Where the work ran" matches `pp job --last --receipt`.
+1. The tiles and the nodes table match `pp status`.
+2. The newest run is selected. Its timeline matches `pp jobs <id> --timeline`,
+   and "Where the work ran" matches `pp jobs <id> --receipt`.
 3. Start another run (`pp run pool.py`) while the page is open. It appears at
    the top within two seconds, as `running · executing`, then `succeeded`.
 4. Click an older run. The address changes to `#run=<id>`, and reloading keeps
    it selected.
-5. Open the page from another machine, using the "From elsewhere" address
-   printed by `pp ui`.
-6. Set a secret (`pp auth set`, then restart the daemon) and reload. The page
-   asks for the secret; paste the one `pp auth show` prints. Check that
-   `curl localhost:38080/v1/stats` returns 401.
+5. Open `http://127.0.0.1:4242/ui` without the `#token=` part in a private
+   window. The page asks for the secret. Check that
+   `curl localhost:4242/v1/stats` returns 401.
 7. Narrow the window to phone width. The tables scroll sideways, and the
    timeline still draws.
 
 Without a browser:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' localhost:38080/ui      # 200
-curl -s localhost:38080/v1/stats | python3 -m json.tool | head -30
+curl -s -o /dev/null -w '%{http_code}\n' localhost:4242/ui      # 200
+curl -s localhost:4242/v1/stats | python3 -m json.tool | head -30
 ```
 
 ### Limits
@@ -545,7 +544,7 @@ neither is a Pipedpeer bug:
 | Problem | Cause | Fix |
 |---|---|---|
 | `RandomForest(n_jobs=-1)` took 32 s on the cluster and 4.5 s on the orchestrator alone. The old 01_sklearn_rf numbers (190–240 s, against 34 s locally) were the same bug | The joblib backend sent one task per round trip and waited for it before joblib submitted the next. A peer runs one request at a time, so the cluster fitted one tree at a time | joblib calls take `Pool.map`'s path: the first tasks run here on joblib's own backend, which measures them; below 0.5 s of work they stay local; otherwise the rest race between this machine and multi-task chunks sent to peers. The race is now shared code (`_race_items`), and joblib work appears in the receipt as its own kind |
-| Every script in the demo root took ~12 s to tar and upload | `.pipedpeerignore` lines written gitignore-style (`03_pandas_ooc/`, `results/`) reached tar with the slash and matched nothing, so the 1.1 GB CSV went into every upload. `pipedpeer init`'s own template is written that way | Trailing slashes are dropped; a leading slash anchors the pattern at the project root |
+| Every script in the demo root took ~12 s to tar and upload | `.pipedpeerignore` lines written gitignore-style (`03_pandas_ooc/`, `results/`) reached tar with the slash and matched nothing, so the 1.1 GB CSV went into every upload. the old `init` command's template is written that way | Trailing slashes are dropped; a leading slash anchors the pattern at the project root |
 | The capstone's Pool stage rebuilt its pool mid-run on the 3 GB orchestrator | The pool's own worker processes counted against the free memory used to size it, so each map shrank 3 workers to 2 | The workers' private memory counts as reclaimable when the pool re-sizes |
 
 **Three more, found by the first full benchmark run** (`3ec5100`):
@@ -590,7 +589,7 @@ run into 90 minutes in the record). Each run writes a row to
 **The demo flow:**
 - **Step 1** ends by printing the live page's address (`pipedpeer ui --print`) for the second screen.
 - **Step 14, `14-capstone.sh`,** is new: the capstone, showing each stage's time, `results/` arriving, and the `spread` row.
-- **Step 10, `10-proof.sh`,** now shows `pipedpeer job --last --timeline` and `--receipt` before `pipedpeer traffic`.
+- **Step 10, `10-proof.sh`,** now shows `pipedpeer jobs <id> --timeline` and `--receipt`.
 - `setup.sh` generates the capstone's data and rehearses it.
 - `prep-2-rehearse.sh` times it against its local baseline.
 - DEMO-SCRIPT.md and DEMO-PREP.md follow these changes, and the "first run cost" table uses the new numbers.
@@ -651,7 +650,7 @@ cd pipedpeer-demo/07_capstone
 python3 make_data.py                                      # once, ~200 MB
 pp run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7 -e PIPEDPEER_SHIM=0   # baseline
 pp run 07_capstone.py -e PIPEDPEER_OOC_MIN=5e7                        # cluster
-pp job --last --receipt     # joblib, pool.map decisions; items per peer
+pp jobs <id> --receipt     # joblib, pool.map decisions; items per peer
 ls results/
 ```
 

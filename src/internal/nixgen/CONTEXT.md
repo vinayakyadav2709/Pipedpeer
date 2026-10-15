@@ -1,13 +1,13 @@
 # Interception
 
-How a running job's parallel work reaches other nodes without code changes: the Python shim on one side, the daemon's pool and DDP handlers on the other. Covers `nixgen/shim.go`, `daemonapi/pool*.go`, `daemonapi/ddp*.go`, `schedule` and `ddpplace`. (`nixgen/flake.go` belongs to [Environments and closures](../nixstore/CONTEXT.md).) Design detail: [system report 4.9](../../../docs/system-report.md#49-transparent-interception) and [4.10](../../../docs/system-report.md#410-the-cost-model).
+How a running job's parallel work reaches other nodes without code changes: the Python shim on one side, the daemon's pool and DDP handlers on the other. Covers `nixgen/shim/*.py` (embedded by `nixgen/embed.go`), `daemonapi/pool*.go`, `daemonapi/ddp*.go`, `schedule` and `ddpplace`. (`nixgen/flake.go` belongs to [Environments and closures](../nixstore/CONTEXT.md).) Design detail: [system report 4.9](../../../docs/system-report.md#49-transparent-interception) and [4.10](../../../docs/system-report.md#410-the-cost-model).
 
 ## Language
 
 ### Pool work
 
 **Shim**:
-The `sitecustomize.py` injected into every job's environment that patches parallel primitives; lives as a Go raw string in `shim.go`.
+The Python package injected into every job's environment (`.pipedpeer/shim/` on PYTHONPATH) that patches parallel primitives: `sitecustomize.py` (install order) imports `core` (logging, env, shared state), `stats`, `record`, `pool`, `transfer`, `numpy_ops`, `pandas_ops`, `ddp`. Silent unless `PIPEDPEER_VERBOSE=1` (`run -v`); `_warn` lines (wrong result or the user must act) always print.
 _Avoid_: SDK, agent, plugin
 
 **Interception**:
@@ -41,7 +41,7 @@ The shim's decision whether a call is worth spilling, from measured per-item cos
 `--distribute force`: every spill gate says yes, bypassing the cost model.
 
 **Pool width**:
-How many local worker processes an intercepted Pool runs: `min(cpu_count, MemAvailable*0.4 // 256MB)`, where available memory is capped by the cgroup's headroom less reclaimable `inactive_file` (`7128212`). The count the user passed is ignored unless `PIPEDPEER_RESPECT_POOL_SIZE=1` (`_pool_width`, `_avail_bytes`, `_cgroup_headroom` in `shim.go`).
+How many local worker processes an intercepted Pool runs: `min(cpu_count, MemAvailable*0.4 // 256MB)`, where available memory is capped by the cgroup's headroom less reclaimable `inactive_file` (`7128212`). The count the user passed is ignored unless `PIPEDPEER_RESPECT_POOL_SIZE=1` (`_pool_width`, `_avail_bytes`, `_cgroup_headroom` in `shim/pool.py`).
 _Avoid_: processes, concurrency
 
 **Warm worker**:
@@ -54,8 +54,14 @@ Sequential slices of a request too big for this node's free memory at once; forw
 The pool wire format: JSON header line plus length-prefixed raw pickles ([ADR-0009](../../../docs/adr/0009-pool-frames-wire-format.md)).
 
 **Receipt**:
-The record of where each item actually ran (local, which peer, forwarded), written by the shim and the daemon.
+The record of where each item actually ran (local, which peer, forwarded), written by the shim and the daemon; its additive `steps` key carries the run record's steps.
 _Avoid_: stats, log
+
+**Run record**:
+Timed steps (pickle, compress, send, queue, compute, receive, unpickle, env_build, env_send, ddp_sync, script) per machine and chunk; `shim/record.py` `step()` on the job side, `runrec` on the Go side. Shim work is never folded into `script`.
+
+**In-flight depth**:
+Copies a node may hold at once, from its measured round trip (at most 3); losing race copies are cancelled, and a peer that lost its last 3 races stops being raced.
 
 ### Data frames
 
@@ -71,7 +77,7 @@ A large CSV or parquet read in byte-range chunks across nodes, returned as a par
 One training process in a DDP ring; a node with two accelerators can hold two.
 
 **Ring**:
-The set of ranks for one `--ddp K` run, chosen by measured throughput (`ddpplace`).
+The set of ranks for one training run, chosen by measured throughput (`ddpplace`); one device kind, lead on a GPU node whenever one exists. Auto mode may shrink it to the fastest rank (exit 77) after warm-up; `--ddp N` fixes it (`PIPEDPEER_DDP_FIXED=1`).
 
 **Lead**:
 The rank whose daemon receives syncs and averages them; must be told apart from a forwarded remote peer.
@@ -79,8 +85,14 @@ The rank whose daemon receives syncs and averages them; must be told apart from 
 **Sync**:
 One round where every rank posts its gradients (or weights) to the lead's daemon and gets back the average ([ADR-0010](../../../docs/adr/0010-gradient-sync-through-the-daemon.md)).
 
+**Batch split**:
+Per-rank slices of the script's batch, by speed, summing to the script's batch; the learning rate is never changed.
+
 **Sync interval**:
-Steps between syncs; 1 by default, `auto` only when the user asks.
+Steps between syncs; 1 by default. `--ddp-sync fast` (`PIPEDPEER_DDP_SYNC=fast`) is DiLoCo: exact warm-up, then a drift-driven interval in [1, 64] that tightens near the end, sample-weighted pseudo-gradients and an outer Nesterov step.
+
+**Training exit codes**:
+75 missed start barrier, 76 ring aborted or lead lost (after one `pipedpeer: training stopped: <reason>` line), 77 rank released because the ring shrank (not a failure).
 
 ## Invariants
 
@@ -88,16 +100,17 @@ Steps between syncs; 1 by default, `auto` only when the user asks.
 - Spill goes only to peers that already hold the closure (`daemonapi/server.go` `peerHasStore`).
 - A reply uses the format the request asked for (`0cffbbb`).
 - Every `PIPEDPEER_*` variable the shim names must be read somewhere; a test fails otherwise (`8492458`).
-- `shim.go` is a Go raw string: the Python inside cannot contain a backtick.
+- The shim modules stay importable without torch/numpy/pandas (they import lazily); `scripts/shim-check.sh` runs ruff and pytest.
+- A global another module rebinds is read through its module (`core._NUM_SHARDS`), never copied with `from … import`.
 
 ## Entry points
 
-- Shim source and install order: `nixgen/shim.go` `ShimSitecustomize`, `_install`, `WriteShim`.
-- Pool: `shim.go` `_ClusterPool`, `_race`, `_pool_width`, `_func_payload`, `_func_pickle`, `_pool_send`.
-- Cost gates: `shim.go` `_should_spill`, `_numpy_should_offload`.
-- Libraries: `shim.go` `_install_numpy`, `_install_pandas`, `_install_io` (out-of-core), `_install_ddp`, `_install_joblib`.
+- Shim source and install order: `nixgen/embed.go` `ShimFS`, `WriteShimDir`, `ShimSource`; `shim/sitecustomize.py`.
+- Pool: `shim/pool.py` `_ClusterPool`, `_race`, `_pool_width`, `_func_payload`; transfer `shim/transfer.py` `_pool_send`; daemon wire `daemonapi/poolwire.go`.
+- Cost gates: `_should_spill` (`shim/transfer.py`), `_numpy_should_offload` (`shim/numpy_ops.py`); per-machine rates across runs `daemonapi/poolstats.go`.
+- Libraries: `shim/numpy_ops.py`, `shim/pandas_ops.py` (incl. out-of-core), `shim/ddp.py` `_install_ddp`, `shim/pool.py` (joblib).
 - Injection into a job: `daemonapi/execution.go` `handleJobExec`.
 - Daemon pool: `daemonapi/pool.go` `handlePoolMap`, `runChunk`, `forwardPoolMap`, `runMicroChunks`, warm worker `spawn`.
 - Shares: `daemonapi/poolrates.go` `planShares`, `schedule/schedule.go` `Compute`.
-- DDP: `daemonapi/ddpsync.go` `handleDDPSync`, `daemonapi/ddpreduce.go` `ddpAccumulator`, `src/main.go` `runDDP`.
+- DDP: `daemonapi/ddpsync.go` `handleDDPSync`, `daemonapi/ddpreduce.go` `ddpAccumulator`, `src/ddp_cmd.go` `runDDP`; the one-GPU-or-split decision `daemonapi/ddprebalance.go`.
 - Tests need pandas, scikit-learn, joblib and torch or they skip: `scripts/check-skips.sh`, `scripts/test-on-host.sh`.

@@ -1,6 +1,6 @@
 # Never slower than local
 
-A workload not worth distributing must run exactly as a plain local `multiprocessing.Pool` would: the shim starts local, measures per-item cost, spills only when a cost model says the cluster wins, and keeps local cores pulling from the same queue, with idle cores re-running the remote straggler tail (`d2dee3f`, `_race` in `src/internal/nixgen/shim.go`). Peers get shares by measured throughput, and a peer that cannot lower the makespan is declined (`8c9284c`, `src/internal/schedule/schedule.go` `Compute`); dividing by headcount measured 1.6x slower than not distributing.
+A workload not worth distributing must run exactly as a plain local `multiprocessing.Pool` would: the shim starts local, measures per-item cost, spills only when a cost model says the cluster wins, and keeps local cores pulling from the same queue, with idle cores re-running the remote straggler tail (`d2dee3f`, `_race` in `src/internal/nixgen/shim/pool.py`). Peers get shares by measured throughput, and a peer that cannot lower the makespan is declined (`8c9284c`, `src/internal/schedule/schedule.go` `Compute`); dividing by headcount measured 1.6x slower than not distributing.
 
 ## Consequences
 
