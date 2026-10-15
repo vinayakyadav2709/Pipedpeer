@@ -43,3 +43,19 @@ func TestToNodeRespDowngradesStaleHealthy(t *testing.T) {
 		})
 	}
 }
+
+// /v1/nodes keeps every old field (ssh_endpoint stays "root@<host>:22" for its
+// parsers) and adds host, path and reason from the active path.
+func TestToNodeRespCarriesHostPathReason(t *testing.T) {
+	got := toNodeResp(nodestore.Node{
+		NodeID: "n1", Host: "127.0.0.1", Port: 40001, Source: "internet",
+		State: "unreachable", Reason: "connection refused",
+	})
+	if got.SSHEndpoint != "root@127.0.0.1:22" || got.Host != "127.0.0.1" || got.DaemonPort != 40001 ||
+		got.Path != "internet" || got.Capabilities[PathCapability] != "internet" || got.Reason != "connection refused" {
+		t.Fatalf("got %+v", got)
+	}
+	if empty := toNodeResp(nodestore.Node{NodeID: "n2"}); empty.Path != "" || empty.SSHEndpoint != "" || empty.State != "unknown" {
+		t.Fatalf("row with no address: got %+v, want no path, no endpoint, state unknown", empty)
+	}
+}
