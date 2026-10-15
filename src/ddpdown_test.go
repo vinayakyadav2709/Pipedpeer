@@ -5,6 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,21 +84,28 @@ func TestCancelIsNotADeath(t *testing.T) {
 }
 
 // TestAScriptFailureOnOneRankFailsTheRun: rank 0 crashing at checkpoint save
-// is the script failing, not a lost machine. The ring still carries on (the
-// others must not stall), but the run must not exit 0.
+// is the script failing, not a lost machine. Every other rank is stopped at
+// once (training on is wasted work) and the run fails with the script's error.
 func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
 	results := make(chan ddpRankResult, 2)
 	results <- ddpRankResult{rank: 0, err: exited(1)}
-	results <- ddpRankResult{rank: 1}
 	var out bytes.Buffer
 	var downs []int
-	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, nil,
+	stopped := false
+	stop := []context.CancelFunc{nil, func() { stopped = true; results <- ddpRankResult{rank: 1, err: context.Canceled} }}
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, stop, nil,
 		func(rank int, err error) { downs = append(downs, rank) })
-	if err == nil || !strings.Contains(err.Error(), "rank 0 on a") {
+	if err == nil || !strings.Contains(err.Error(), "rank 0 on a: the script failed") {
 		t.Fatalf("got %v, want a failure naming rank 0 on a", err)
 	}
-	if len(downs) != 1 {
-		t.Errorf("lead daemon told about %v, want [0] so the ring does not stall", downs)
+	if ddpExitCode(err) != 1 {
+		t.Errorf("exit status %d travels with the error, want the script's 1", ddpExitCode(err))
+	}
+	if !stopped {
+		t.Error("rank 1 was left training after rank 0's script failed")
+	}
+	if len(downs) != 0 {
+		t.Errorf("lead daemon told about %v; the ring is being stopped, not continued", downs)
 	}
 	// A rank killed by a signal (machine stopping), or a node that could not
 	// start the script (126/127), is a loss, not a failure.
@@ -104,6 +115,55 @@ func TestAScriptFailureOnOneRankFailsTheRun(t *testing.T) {
 		if err := ddpAwaitRanks(context.Background(), &out, results, []string{"a", "b"}, nil, nil, func(int, error) {}); err != nil {
 			t.Errorf("a rank that exited %d failed the run: %v", code, err)
 		}
+	}
+}
+
+// TestATrainingStopStopsEveryRank: exit 76 is the lead aborting the ring (the
+// shim printed why). Every rank is stopped and the run fails without taking
+// 76 as its own exit status.
+func TestATrainingStopStopsEveryRank(t *testing.T) {
+	results := make(chan ddpRankResult, 3)
+	results <- ddpRankResult{rank: 1, err: exited(ddpStoppedExit)}
+	var stopped []int
+	stopFor := func(r int) context.CancelFunc {
+		return func() { stopped = append(stopped, r); results <- ddpRankResult{rank: r, err: context.Canceled} }
+	}
+	stop := []context.CancelFunc{stopFor(0), nil, stopFor(2)}
+	err := ddpAwaitRanks(context.Background(), &bytes.Buffer{}, results, []string{"a", "b", "c"}, stop, nil, func(int, error) {})
+	if err == nil || !strings.Contains(err.Error(), "training stopped") {
+		t.Fatalf("got %v, want the training-stopped failure", err)
+	}
+	if ddpExitCode(err) == ddpStoppedExit {
+		t.Error("76 leaked into the run's exit status")
+	}
+	if len(stopped) != 2 {
+		t.Errorf("stopped ranks %v, want 0 and 2", stopped)
+	}
+}
+
+// TestAReleasedRankIsNotAFailure: exit 77 is the ring shrinking to its
+// fastest rank; the run succeeds when that rank finishes, and the release
+// does not start the "ring finished" grace on the rank still training.
+func TestAReleasedRankIsNotAFailure(t *testing.T) {
+	old := ddpJoinGrace
+	ddpJoinGrace = 10 * time.Millisecond
+	t.Cleanup(func() { ddpJoinGrace = old })
+	results := make(chan ddpRankResult)
+	stop := []context.CancelFunc{func() { t.Error("the training rank was stopped after the other was released") }, nil}
+	var downs []int
+	done := make(chan error, 1)
+	go func() {
+		done <- ddpAwaitRanks(context.Background(), &bytes.Buffer{}, results, []string{"a", "b"}, stop, nil,
+			func(rank int, err error) { downs = append(downs, rank) })
+	}()
+	results <- ddpRankResult{rank: 1, err: exited(ddpReleasedExit)}
+	time.Sleep(50 * time.Millisecond) // past the grace, were it running
+	results <- ddpRankResult{rank: 0}
+	if err := <-done; err != nil {
+		t.Fatalf("a released rank failed the run: %v", err)
+	}
+	if len(downs) != 0 {
+		t.Errorf("a released rank was reported down: %v", downs)
 	}
 }
 
@@ -165,16 +225,16 @@ func TestARerunUnderTheSameNameGetsAFreshGroup(t *testing.T) {
 	}
 }
 
-// TestTheLeadDyingEndsTheRun: rank 0's machine hosts the rendezvous and the
-// sync, so the ring cannot carry on without it. Say so instead of
-// "continuing on 1", don't post to the dead lead, and fail the run.
+// TestTheLeadDyingEndsTheRun: rank 0's machine hosts the sync, so the ring
+// cannot carry on without it. Say so instead of "continuing on 1", stop the
+// other ranks now, don't post to the dead lead, and fail the run.
 func TestTheLeadDyingEndsTheRun(t *testing.T) {
 	results := make(chan ddpRankResult, 2)
 	results <- ddpRankResult{rank: 0, err: errors.New("connection lost")}
-	results <- ddpRankResult{rank: 1}
 	var out bytes.Buffer
-	called := false
-	err := ddpAwaitRanks(context.Background(), &out, results, []string{"gpu1", "gpu2"}, nil, nil,
+	called, stopped := false, false
+	stop := []context.CancelFunc{nil, func() { stopped = true; results <- ddpRankResult{rank: 1, err: context.Canceled} }}
+	err := ddpAwaitRanks(context.Background(), &out, results, []string{"gpu1", "gpu2"}, stop, nil,
 		func(int, error) { called = true })
 	if err == nil || !strings.Contains(err.Error(), "leads the ring") {
 		t.Fatalf("got %v, want a failure saying the lead's machine died", err)
@@ -182,8 +242,55 @@ func TestTheLeadDyingEndsTheRun(t *testing.T) {
 	if strings.Contains(out.String(), "continuing") || !strings.Contains(out.String(), "rank 0 on gpu1 died") {
 		t.Errorf("wrong message for a dead lead:\n%s", out.String())
 	}
+	if !stopped {
+		t.Error("rank 1 was left running after the lead died")
+	}
 	if called {
 		t.Error("the dead lead daemon was told a rank is down")
+	}
+}
+
+// TestALostLeadMachineFailsFast is Finding 5: a Wi-Fi blip killed the lead's
+// output stream without a FIN, the submitter's read never returned, and the
+// run sat on its last line while no node had jobs. The rank's machine going
+// silent now cancels that rank within ddpNodeLostAfter, which stops the ring
+// with a message naming the machine.
+func TestALostLeadMachineFailsFast(t *testing.T) {
+	oldEvery, oldAfter, oldUp := ddpNodeProbeEvery, ddpNodeLostAfter, ddpNetworkUp
+	ddpNodeProbeEvery, ddpNodeLostAfter = 10*time.Millisecond, 60*time.Millisecond
+	ddpNetworkUp = func(int, string) (string, bool) { return "peer gpu2 answers", true }
+	t.Cleanup(func() { ddpNodeProbeEvery, ddpNodeLostAfter, ddpNetworkUp = oldEvery, oldAfter, oldUp })
+
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	host, portStr, _ := net.SplitHostPort(strings.TrimPrefix(node.URL, "http://"))
+	port, _ := strconv.Atoi(portStr)
+
+	results := make(chan ddpRankResult)
+	// A rank's stream that died silently: it returns only when cancelled.
+	deadStream := func(ctx context.Context) error {
+		<-ctx.Done()
+		return fmt.Errorf("execution failed: %w", ctx.Err())
+	}
+	rank1Ctx, stopRank1 := context.WithCancel(context.Background())
+	go func() {
+		results <- ddpRankResult{rank: 0, err: ddpRunWatched(context.Background(), host, port, 0, deadStream)}
+	}()
+	go func() { results <- ddpRankResult{rank: 1, err: deadStream(rank1Ctx)} }()
+
+	time.Sleep(30 * time.Millisecond)
+	node.Close() // the lead's machine drops off the network
+
+	start := time.Now()
+	err := ddpAwaitRanks(context.Background(), &bytes.Buffer{}, results, []string{"gpu1", "gpu2"},
+		[]context.CancelFunc{nil, stopRank1}, nil, func(int, error) {})
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("took %s to notice the lost lead", time.Since(start))
+	}
+	if err == nil || !strings.Contains(err.Error(), "lost the connection to "+host) || !strings.Contains(err.Error(), "leads the ring") {
+		t.Fatalf("got %v, want a lost-connection failure naming the lead", err)
+	}
+	if rank1Ctx.Err() == nil {
+		t.Error("rank 1 was left running after its lead was lost")
 	}
 }
 

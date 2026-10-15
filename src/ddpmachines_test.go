@@ -158,10 +158,12 @@ func TestTheRingPutsAReachableLeadFirst(t *testing.T) {
 		Capabilities: map[string]string{heartbeat.MachineCapability: "boot-lan"},
 	}
 
-	got, ok := ddpLeadFirst([]registry.NodeRecord{forwarded, local, lan}, selfMachine)
-	if !ok {
+	ring := []registry.NodeRecord{forwarded, local, lan}
+	lead := ddpLeadIndex(ring, selfMachine)
+	if lead < 0 {
 		t.Fatal("no lead was found though two candidates could lead")
 	}
+	got := ddpToFront(ring, lead)
 	if got[0].NodeID == "far" {
 		t.Error("a forwarded peer was left leading the ring")
 	}
@@ -191,7 +193,48 @@ func TestARingWithNoReachableLeadIsRefused(t *testing.T) {
 		NodeID: "b", SSHEndpoint: "root@127.0.0.1:22",
 		Capabilities: map[string]string{heartbeat.MachineCapability: "boot-2"},
 	}
-	if _, ok := ddpLeadFirst([]registry.NodeRecord{far1, far2}, "boot-self"); ok {
+	if ddpLeadIndex([]registry.NodeRecord{far1, far2}, "boot-self") >= 0 {
 		t.Error("a ring of forwarded peers was accepted; every rank would sync to itself")
+	}
+}
+
+// TestTheLeadIsAGPUNodeWhenOneCanLead: in a mixed set the lead is never the
+// CPU node (Finding 22: a CPU lead built a smaller model and every weight
+// sync was refused). Slots and shares move with their node.
+func TestTheLeadIsAGPUNodeWhenOneCanLead(t *testing.T) {
+	cpu := registry.NodeRecord{NodeID: "pc", SSHEndpoint: "root@10.0.0.2:22",
+		Capabilities: map[string]string{heartbeat.MachineCapability: "boot-pc"}}
+	gpu := registry.NodeRecord{NodeID: "laptop", SSHEndpoint: "root@10.0.0.3:22",
+		Capabilities: map[string]string{heartbeat.MachineCapability: "boot-laptop", "gpu": "NVIDIA RTX 3060"}}
+	ring := []registry.NodeRecord{cpu, gpu}
+	lead := ddpLeadIndex(ring, "boot-self")
+	if lead != 1 {
+		t.Fatalf("lead index %d, want the GPU node (1)", lead)
+	}
+	if got := ddpToFront(ring, lead); got[0].NodeID != "laptop" || got[1].NodeID != "pc" {
+		t.Errorf("ring order %s,%s, want laptop,pc", got[0].NodeID, got[1].NodeID)
+	}
+	if w := ddpToFront([]float64{0.2, 0.8}, lead); w[0] != 0.8 || w[1] != 0.2 {
+		t.Errorf("shares %v did not move with their node", w)
+	}
+	// A GPU node that cannot lead (forwarded) leaves the lead to one that can.
+	far := gpu
+	far.SSHEndpoint = "root@127.0.0.1:22"
+	if lead := ddpLeadIndex([]registry.NodeRecord{cpu, far}, "boot-self"); lead != 0 {
+		t.Errorf("lead index %d, want the reachable node (0)", lead)
+	}
+}
+
+// TestANodeWithARoleTakesNoRank: pool-only and introducer-only nodes (C5)
+// never take a DDP rank.
+func TestANodeWithARoleTakesNoRank(t *testing.T) {
+	for _, role := range []string{"pool-only", "introducer-only"} {
+		n := registry.NodeRecord{NodeID: "phone", Capabilities: map[string]string{"role": role}}
+		if !ddpExcluded(ddpRunOptions{}, n) {
+			t.Errorf("a %s node was offered a rank", role)
+		}
+	}
+	if ddpExcluded(ddpRunOptions{}, registry.NodeRecord{NodeID: "pc"}) {
+		t.Error("a full node was excluded")
 	}
 }

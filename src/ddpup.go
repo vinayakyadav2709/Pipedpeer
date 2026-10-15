@@ -207,7 +207,7 @@ type ddpGrower struct {
 	nextRank   func() int // the index the next rank takes
 	// start launches a rank that joins; false when the run is ending.
 	start func(rank int, n registry.NodeRecord) bool
-	out   io.Writer
+	out   io.Writer // progress lines (ddpProgressOut); warnings go to stderr
 	fetch func(int) ([]registry.NodeRecord, error)
 	check func(host string, port int, group string, rank int) error
 }
@@ -247,7 +247,7 @@ func (g *ddpGrower) run(ctx context.Context) {
 			}
 			if why := err.Error(); why != lastWhy {
 				lastWhy = why
-				fmt.Fprintf(os.Stderr, "[ddp] not adding %s yet: %v\n", ddpHostName(n), err)
+				fmt.Fprintf(g.out, "[ddp] not adding %s yet: %v\n", ddpHostName(n), err)
 			}
 			continue
 		}

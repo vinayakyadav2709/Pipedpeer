@@ -35,9 +35,6 @@ var (
 	healthTimeout  = 2 * time.Second
 )
 
-// defaultDaemonPort is the local daemon's port when the caller gave none.
-const defaultDaemonPort = 38080
-
 // judgeLostConnection decides, when the connection to a started job breaks,
 // whether the node died (rerun it elsewhere: the failover) or this machine
 // lost its network (the job runs on: detach). The node answering settles
@@ -75,8 +72,28 @@ const networkDownWhy = "no other peer, no introducer and no default gateway answ
 var (
 	gatewayAddr    = portmap.DefaultGateway
 	gatewayPorts   = []string{"53", "80", "443"}
-	introducerAddr = clustercfg.Rendezvous
+	introducerAddr = lastIntroducer
 )
+
+// lastIntroducer is the most recently remembered introducer, or "".
+func lastIntroducer() string {
+	c, err := clustercfg.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read the cluster config to ask the introducer whether this machine is online: %v\n", err)
+		return ""
+	}
+	if len(c.Introducers) == 0 {
+		return ""
+	}
+	return c.Introducers[len(c.Introducers)-1]
+}
+
+// NetworkUp is networkUp for the DDP watchdog in package main: whether this
+// machine still has a network while node does not answer.
+func NetworkUp(selfPort int, node string) (how string, ok bool) { return networkUp(selfPort, node) }
+
+// NetworkDownWhy names what NetworkUp tried when nothing answered.
+const NetworkDownWhy = networkDownWhy
 
 // networkUp reports whether this machine still has a network, so that a
 // silent node means the node is gone rather than us offline. With two
@@ -176,7 +193,7 @@ func nodeUnreachable(err error) bool {
 // this machine and except, answers /health; it returns that peer's address.
 func anyPeerAnswers(selfPort int, except string) (string, bool) {
 	if selfPort <= 0 {
-		selfPort = defaultDaemonPort
+		selfPort = daemonctl.DefaultPort
 	}
 	var nodes []struct {
 		SSHEndpoint string `json:"ssh_endpoint"`
