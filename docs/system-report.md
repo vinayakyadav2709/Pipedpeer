@@ -391,8 +391,8 @@ two such machines come to share a direct, encrypted link.
 **One command per machine.**
 - `pipedpeer invite` prints one line, `pipedpeer connect <code>`. The code is
   `pp1-` + base64url of the cluster secret and up to six introducer addresses
-  (this machine's LAN addresses, known introducers, its public mapped address
-  when known) + a CRC-32, so a mistyped code is refused as damaged
+  (this machine's LAN addresses, known introducers, and the public address
+  given with `setup --public-address`, if any) + a CRC-32, so a mistyped code is refused as damaged
   (`invite/invite.go`).
 - `pipedpeer connect <code>` saves the secret and introducers to
   `cluster.json` (`clustercfg`), restarts the daemon once, waits up to 60 s on
@@ -1802,8 +1802,8 @@ script's time; it used to be, which is how the quadratic request body hid.
 - *Simple view*, printed after every run that used another machine:
   `pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%,
   fedora 40%`.
-- *Detailed view*: `run -v`, `jobs <id> --steps`, the web run view, and CSV or
-  JSON (`jobs <id> --export`, `jobs --export-all <dir>` for every run).
+- *Detailed view*: `run -v`, `jobs <id> --steps` (`jobs last --steps` for the latest run), the web run view, and CSV or
+  JSON (`jobs <id> --export csv|json`, `jobs --export-all <dir>` for every run).
 
 **Emulated lab.** The plain lab (three containers on one host) proves that
 work crosses nodes, never speedup. Speedup figures come from the emulated lab

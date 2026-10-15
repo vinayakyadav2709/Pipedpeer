@@ -50,6 +50,14 @@ member):
 curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <version>
 ```
 
+The VM's public IP is not on any of its interfaces (Oracle maps it 1:1 onto a
+private address), so tell pipedpeer what it is; it is stored as
+`public_address` in `cluster.json` and put into every invite the VM prints:
+
+```sh
+pipedpeer setup --public-address <public ip>
+```
+
 On any existing member, print an invite and run the line it prints on the VM:
 
 ```sh
@@ -68,12 +76,12 @@ that is expected, since the members reach it, not the other way round.
 
 ## 4. Tell the members about it
 
-New invites printed by members include the introducers they know. For the
-members that already exist, print a fresh invite on the VM and run its
-`connect` line on each of them once; afterwards they remember the VM's address.
+Print a fresh invite on the VM; because of `--public-address` it names the
+VM's public IP. Run its `connect` line once on each existing member and use it
+for new machines; members then remember the VM's address.
 
 ```sh
-pipedpeer invite              # on the VM; it lists its own public address
+pipedpeer invite              # on the VM
 ```
 
 ## 5. Check it
@@ -81,7 +89,7 @@ pipedpeer invite              # on the VM; it lists its own public address
 On any member:
 
 ```sh
-pipedpeer status              # the VM appears with role introducer-only
+pipedpeer status              # the VM appears in the machine list
 pipedpeer doctor              # each introducer: answering, or the last error
 ```
 

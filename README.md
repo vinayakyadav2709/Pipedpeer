@@ -131,7 +131,7 @@ Commands:
 | `pipedpeer status` | Machines, their paths and state, running tasks, last runs |
 | `pipedpeer dashboard` | Live terminal view of nodes and jobs |
 | `pipedpeer ui` | Open the web view on this machine (no token to type) |
-| `pipedpeer jobs [id]` | Run history; `--steps` and `--export csv\|json` for one run, `--export-all <dir>` for all |
+| `pipedpeer jobs [id]` | Run history; `jobs last` is the latest run; `--steps` and `--export csv\|json` for one run, `--export-all <dir>` for all |
 | `pipedpeer attach <id>` | Follow a running job's output |
 | `pipedpeer start` / `stop` | Start or stop the daemon; `--boot` turns autostart on or off |
 | `pipedpeer doctor` | Check network, firewall, sandbox, GPU driver; each problem with its fix |
