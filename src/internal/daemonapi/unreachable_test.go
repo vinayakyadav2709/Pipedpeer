@@ -4,81 +4,65 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
+	"strings"
 	"testing"
 )
 
-// An internet peer with no direct path has no forwarder, so /v1/nodes never
-// lists it. The daemon must say it is there and why it gets no work.
-func TestUnreachablePeersAreServed(t *testing.T) {
-	s := New("test-node")
-	ts := httptest.NewServer(s.Handler())
-	defer ts.Close()
-
-	get := func() []unreachablePeer {
-		t.Helper()
-		resp, err := http.Get(ts.URL + "/v1/peers/unreachable")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("status %d, want 200", resp.StatusCode)
-		}
-		var out []unreachablePeer
-		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			t.Fatal(err)
-		}
-		if out == nil {
-			t.Fatal("body decoded to null, want [] so clients need no nil case")
-		}
-		return out
+func getJSON(t *testing.T, url string, out any) {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	if got := get(); len(got) != 0 {
-		t.Fatalf("no reporter: got %+v, want []", got)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d, want 200", url, resp.StatusCode)
 	}
-
-	s.SetUnreachableReporter(func() map[string]string {
-		return map[string]string{"bbbb": "both behind symmetric NAT", "aaaa": "punch timed out"}
-	})
-	want := []unreachablePeer{{"aaaa", "punch timed out"}, {"bbbb", "both behind symmetric NAT"}}
-	if got := get(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %+v, want %+v (sorted by peer)", got, want)
-	}
-
-	s.SetUnreachableReporter(func() map[string]string { return nil })
-	if got := get(); len(got) != 0 {
-		t.Fatalf("empty reporter: got %+v, want []", got)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		t.Fatal(err)
 	}
 }
 
-// The /ui page shows unreachable peers as rows: a known node is marked with
-// the reason, a peer the store never held is appended, the rest are untouched.
-func TestWithUnreachableMarksRows(t *testing.T) {
-	s := New("test-node")
-	nodes := []nodeResp{
-		{NodeID: "known", State: "healthy", Capabilities: map[string]string{"cpu": "4"}},
-		{NodeID: "other", State: "healthy"},
-	}
-	if got := s.withUnreachable(nodes); !reflect.DeepEqual(got, nodes) {
-		t.Fatalf("no reporter: got %+v, want rows unchanged", got)
+// /v1/peers/unreachable is served from the rows themselves, so a reason lands
+// on the node it belongs to (B3: the old report was keyed by fingerprint and
+// the rows by UUID, which made phantom rows). Healthy peers are not listed.
+func TestUnreachablePeersComeFromTheirRows(t *testing.T) {
+	s := nodeTestServer(t, "me")
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	var empty []unreachablePeer
+	getJSON(t, ts.URL+"/v1/peers/unreachable", &empty)
+	if empty == nil || len(empty) != 0 {
+		t.Fatalf("no peers: got %#v, want []", empty)
 	}
 
-	s.SetUnreachableReporter(func() map[string]string {
-		return map[string]string{"known": "punch timed out", "stranger": "both behind symmetric NAT"}
-	})
-	got := s.withUnreachable([]nodeResp{
-		{NodeID: "known", State: "healthy", Capabilities: map[string]string{"cpu": "4"}},
-		{NodeID: "other", State: "healthy"},
-	})
-	want := []nodeResp{
-		{NodeID: "known", State: "unreachable", Capabilities: map[string]string{"cpu": "4", ReasonCapability: "punch timed out"}},
-		{NodeID: "other", State: "healthy"},
-		{NodeID: "stranger", State: "unreachable", Source: "internet",
-			Capabilities: map[string]string{ReasonCapability: "both behind symmetric NAT"}},
+	okHost, okPort := fakePeer(t, "alive")
+	if err := s.AddPeer(okHost, okPort); err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %+v\nwant %+v", got, want)
+	deadHost, deadPort := deadAddr(t)
+	if err := s.store.SeePath("gone", "lan", deadHost, deadPort); err != nil {
+		t.Fatal(err)
+	}
+	s.pollAllNodes()
+
+	var got []unreachablePeer
+	getJSON(t, ts.URL+"/v1/peers/unreachable", &got)
+	if len(got) != 1 || got[0].Peer != "gone" || !strings.Contains(got[0].Reason, "refused") {
+		t.Fatalf("got %+v, want only 'gone' with its connection error", got)
+	}
+
+	var nodes []nodeResp
+	getJSON(t, ts.URL+"/v1/nodes", &nodes)
+	byID := map[string]nodeResp{}
+	for _, n := range nodes {
+		byID[n.NodeID] = n
+	}
+	if a := byID["alive"]; a.State != "healthy" || a.Reason != "" || a.Path != "internet" || a.Host != okHost {
+		t.Fatalf("alive row %+v: want healthy, internet path at %s, no reason", a, okHost)
+	}
+	if g := byID["gone"]; g.State != "unreachable" || g.Reason == "" || g.Capabilities[ReasonCapability] != g.Reason {
+		t.Fatalf("gone row %+v: want unreachable with its reason (top level and capability)", g)
 	}
 }

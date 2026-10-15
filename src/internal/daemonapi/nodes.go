@@ -11,45 +11,55 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 )
 
 // nodesState is the part of Server that keeps the node store fed: the peer
-// poller, discovery, and how this node describes itself. Embedded in Server,
-// so its fields read as s.<field>.
+// poller, discovery, gossip, and how this node describes itself. Embedded in
+// Server, so its fields read as s.<field>.
 type nodesState struct {
-	// pathReporter says how each peer is reached, keyed by local address.
-	// Set by internet mode; nil when nothing is joined over the internet.
-	pathReporter func() map[string]string
-	// unreachableReporter names the internet peers with no direct path, and
-	// why (fingerprint → reason). Set by internet mode.
-	unreachableReporter func() map[string]string
-
 	stopPoller chan struct{}
 
-	// Discovery function for mDNS scanning (set before StartPeerPoller)
+	// Discovery function for LAN scanning (set before StartPeerPoller)
 	discoverFn func() []NodeDiscovered
 
-	// How this node describes itself in the node store (set by SetSelfInfo)
+	// How this node describes itself in the node store (set by SetSelfInfo).
+	// selfHost is the address the last poll published (route-chosen), so a
+	// change can drop the old self path.
 	selfMu   sync.RWMutex
-	selfSSH  string
+	selfIP   string
 	selfPort int
 	selfCaps map[string]string
+	selfHost string
+
+	// pending holds internet forwarders ("host:port") whose peer has not
+	// answered /health yet, so its node id - and therefore its row - is not
+	// known. Each poll retries them until they answer or RemovePeer drops them.
+	pendingMu sync.Mutex
+	pending   map[string]struct{}
+
+	// introducerStatus and hinter come from internet mode (nil without it).
+	hookMu           sync.RWMutex
+	introducerStatus func() []IntroducerState
+	hinter           func(node string, candidates []string)
+
+	gossip gossipState
 }
 
-// NodeDiscovered represents a node found via mDNS or other discovery.
+// NodeDiscovered is a node found by LAN discovery. Host is the packet's
+// source address, never what the node advertised about itself (E4).
 type NodeDiscovered struct {
-	NodeID      string
-	SSHEndpoint string
-	DaemonPort  int
-	Arch        string
-	Hostname    string
+	NodeID     string
+	Host       string
+	DaemonPort int
+	Arch       string
+	Hostname   string
 }
 
 // SetDiscoverFn installs the LAN discovery probe used by the peer poller.
@@ -76,162 +86,96 @@ func (s *Server) nodeList() ([]nodeResp, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	// How each peer is reached, when anything knows. Carried in the
-	// capabilities map rather than as a new field, so an older orchestrator
-	// decoding this into a registry.NodeRecord keeps working and simply
-	// ignores it.
-	paths := s.reportedPaths()
-
 	nodes := make([]nodeResp, 0, len(dbNodes))
 	for _, n := range dbNodes {
 		resp := toNodeResp(n)
-		if p := pathFor(n, paths); p != "" {
-			if resp.Capabilities == nil {
-				resp.Capabilities = map[string]string{}
-			}
-			resp.Capabilities[PathCapability] = p
+		if resp.Reason == "" && resp.State == "unreachable" {
+			resp.Reason = s.lastPathError(n.NodeID)
+		}
+		if resp.Reason != "" {
+			resp.Capabilities[ReasonCapability] = resp.Reason
 		}
 		nodes = append(nodes, resp)
 	}
 	return nodes, nil
 }
 
-// ReasonCapability carries why a peer cannot be reached.
+// lastPathError is the most useful failure the store holds for a node whose
+// row carries no reason of its own: the best path's last error.
+func (s *Server) lastPathError(nodeID string) string {
+	paths, err := s.store.Paths(nodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", nodeID).Msg("could not read node paths for its reason")
+		return ""
+	}
+	for _, p := range paths {
+		if p.LastErr != "" {
+			return p.LastErr
+		}
+	}
+	if len(paths) == 0 {
+		return "no address known"
+	}
+	return ""
+}
+
+// ReasonCapability carries why a peer cannot be reached. Kept in the
+// capabilities map beside the top-level reason for consumers that decode rows
+// into registry.NodeRecord.
 const ReasonCapability = "unreachable_reason"
 
-// withUnreachable marks the rows the unreachable reporter names (State
-// "unreachable", the reason under ReasonCapability) and appends a row for each
-// such peer the store never held. Only /v1/stats uses it: `pipedpeer nodes`
-// prints /v1/peers/unreachable itself.
-func (s *Server) withUnreachable(nodes []nodeResp) []nodeResp {
-	s.mu.Lock()
-	f := s.unreachableReporter
-	s.mu.Unlock()
-	if f == nil {
-		return nodes
-	}
-	marks := f()
-	if len(marks) == 0 {
-		return nodes
-	}
-	left := make(map[string]string, len(marks))
-	for id, reason := range marks {
-		left[id] = reason
-	}
-	for i := range nodes {
-		reason, ok := left[nodes[i].NodeID]
-		if !ok {
-			continue
-		}
-		delete(left, nodes[i].NodeID)
-		caps := make(map[string]string, len(nodes[i].Capabilities)+1)
-		for k, v := range nodes[i].Capabilities {
-			caps[k] = v
-		}
-		caps[ReasonCapability] = reason
-		nodes[i].Capabilities = caps
-		nodes[i].State = "unreachable"
-	}
-	ids := make([]string, 0, len(left))
-	for id := range left {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		nodes = append(nodes, nodeResp{
-			NodeID:       id,
-			Capabilities: map[string]string{ReasonCapability: left[id]},
-			State:        "unreachable",
-			Source:       "internet",
-		})
-	}
-	return nodes
-}
-
-// PathCapability is where the route to a peer travels.
+// PathCapability is how a peer is reached (lan, internet, self), mirrored
+// from the top-level path for the same consumers.
 const PathCapability = "path"
 
-// SetPathReporter tells the daemon how peers are being reached.
-//
-// Set by internet mode, which is the only thing that knows: a peer there is
-// behind a local forwarder and could be reached by a punched connection, a
-// mapped port, or nothing at all. Without this a machine that has quietly
-// stopped serving looks the same as one that was never there, which is the
-// failure this exists to prevent.
-func (s *Server) SetPathReporter(f func() map[string]string) {
-	s.mu.Lock()
-	s.pathReporter = f
-	s.mu.Unlock()
-}
-
-func (s *Server) reportedPaths() map[string]string {
-	s.mu.Lock()
-	f := s.pathReporter
-	s.mu.Unlock()
-	if f == nil {
-		return nil
-	}
-	return f()
-}
-
-// SetUnreachableReporter tells the daemon which internet peers it cannot
-// reach and why. Such a peer has no forwarder, so it never shows up in
-// /v1/nodes; without this it would vanish without a word.
-func (s *Server) SetUnreachableReporter(f func() map[string]string) {
-	s.mu.Lock()
-	s.unreachableReporter = f
-	s.mu.Unlock()
-}
+// withUnreachable used to merge internet mode's unreachable report into the
+// rows. Rows carry their own state and reason now (B3: the report was keyed by
+// fingerprint, rows by UUID, which made phantom rows), so it returns them as
+// they are. ponytail: kept only so ui.go compiles; drop the call there.
+func (s *Server) withUnreachable(nodes []nodeResp) []nodeResp { return nodes }
 
 type unreachablePeer struct {
 	Peer   string `json:"peer"`
 	Reason string `json:"reason"`
 }
 
-// handleUnreachable serves GET /v1/peers/unreachable, sorted by peer. A
-// separate route because /v1/nodes rows decode into registry.NodeRecord
-// across many consumers.
+// handleUnreachable serves GET /v1/peers/unreachable, sorted by peer: every
+// row the poller found unreachable, with its reason.
 func (s *Server) handleUnreachable(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	f := s.unreachableReporter
-	s.mu.Unlock()
 	out := []unreachablePeer{}
-	if f != nil {
-		for peer, reason := range f() {
-			out = append(out, unreachablePeer{Peer: peer, Reason: reason})
+	nodes, err := s.nodeList()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, n := range nodes {
+		if n.State == "unreachable" && n.Source != string(nodestore.PathSelf) {
+			out = append(out, unreachablePeer{Peer: n.NodeID, Reason: n.Reason})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Peer < out[j].Peer })
 	writeJSON(w, http.StatusOK, out)
 }
 
-// pathFor is how a node is reached, or "" when nothing can say.
-//
-// A peer behind a local forwarder is only knowable from the manager that made
-// it. Anything else with a routable address is reached by talking straight to
-// it, which is a direct path by construction - no relay is involved and never
-// was - so that much can be stated without asking anyone.
-func pathFor(n nodestore.Node, paths map[string]string) string {
-	if n.Source == "self" {
-		return "self"
-	}
-	addr := net.JoinHostPort(n.Host, strconv.Itoa(n.Port))
-	if p, ok := paths[addr]; ok && p != "" {
-		return p
-	}
-	if ip := net.ParseIP(n.Host); ip != nil && ip.IsLoopback() {
-		// A loopback address that no manager claims is a forwarder whose
-		// link has gone, or a second daemon on this machine. Saying "lan"
-		// here would be inventing a route.
+// pathName is the path a row is reached by as /v1/nodes shows it: lan,
+// internet or self, "" with no active path. A verified gossip address is a
+// direct TCP connection to the peer, the same thing as a LAN path.
+func pathName(n nodestore.Node) string {
+	if n.Host == "" {
 		return ""
+	}
+	switch nodestore.PathKind(n.Source) {
+	case nodestore.PathSelf:
+		return "self"
+	case nodestore.PathInternet:
+		return "internet"
 	}
 	return "lan"
 }
 
-// nodeResp is a registry.NodeRecord as served by /v1/nodes. The orchestrator
-// decodes it straight back into registry.NodeRecord, so the JSON tags must
-// match that type's.
+// nodeResp is a registry.NodeRecord as served by /v1/nodes, plus host, path
+// and reason. The orchestrator decodes it straight back into
+// registry.NodeRecord, so the shared JSON tags must match that type's.
 type nodeResp struct {
 	NodeID       string            `json:"node_id"`
 	SSHEndpoint  string            `json:"ssh_endpoint"`
@@ -241,12 +185,15 @@ type nodeResp struct {
 	State        string            `json:"state"`
 	HealthScore  float64           `json:"health_score"`
 	Source       string            `json:"source"`
+	Host         string            `json:"host"`
+	Path         string            `json:"path"`
+	Reason       string            `json:"reason,omitempty"`
 }
 
 // staleAfter is how long a node may go unheard-from before /v1/nodes stops
 // reporting it healthy. The poller runs every 10s, so this is four missed
-// rounds: long enough to ride out a slow poll, far shorter than the
-// staleNodeTTL that eventually deletes the row.
+// rounds: long enough to ride out a slow poll, far shorter than the prune
+// that eventually deletes the row.
 //
 // This is the death filter for everything that reads the endpoint. Stored
 // state is only ever as fresh as the last poll that wrote it, so a node whose
@@ -257,16 +204,14 @@ type nodeResp struct {
 const staleAfter = 45 * time.Second
 
 func toNodeResp(n nodestore.Node) nodeResp {
-	ssh := n.SSHEndpoint
-	if ssh == "" {
-		ssh = fmt.Sprintf("root@%s:22", n.Host)
-	}
-
 	// Prefer the full payload captured from the node's own /health; fall back
 	// to the indexed columns for entries that have never been polled.
 	caps := map[string]string{}
 	if n.CapsJSON != "" {
-		_ = json.Unmarshal([]byte(n.CapsJSON), &caps)
+		if err := json.Unmarshal([]byte(n.CapsJSON), &caps); err != nil {
+			log.Warn().Err(err).Str("peer", n.NodeID).Msg("stored capabilities unreadable; showing indexed columns only")
+			caps = map[string]string{}
+		}
 	}
 	if caps["arch"] == "" && n.Arch != "" {
 		caps["arch"] = n.Arch
@@ -277,7 +222,9 @@ func toNodeResp(n nodestore.Node) nodeResp {
 
 	var load registry.LoadInfo
 	if n.LoadJSON != "" {
-		_ = json.Unmarshal([]byte(n.LoadJSON), &load)
+		if err := json.Unmarshal([]byte(n.LoadJSON), &load); err != nil {
+			log.Warn().Err(err).Str("peer", n.NodeID).Msg("stored load unreadable; showing indexed columns only")
+		}
 	}
 	load.AvailableMemBytes = n.AvailableMem
 	load.ActiveJobs = n.ActiveJobs
@@ -293,6 +240,19 @@ func toNodeResp(n nodestore.Node) nodeResp {
 	if state == "healthy" && time.Since(time.Unix(n.LastSeen, 0)) > staleAfter {
 		state = "stale"
 	}
+	if state == "" {
+		state = "unknown"
+	}
+
+	path := pathName(n)
+	if path != "" {
+		caps[PathCapability] = path
+	}
+	// Eight parsers read "root@<host>:22"; the decision is to keep it.
+	ssh := ""
+	if n.Host != "" {
+		ssh = fmt.Sprintf("root@%s:22", n.Host)
+	}
 
 	return nodeResp{
 		NodeID:       n.NodeID,
@@ -302,113 +262,88 @@ func toNodeResp(n nodestore.Node) nodeResp {
 		Load:         load,
 		State:        state,
 		HealthScore:  n.HealthScore,
-		Source:       n.Source,
+		Source:       string(n.Source),
+		Host:         n.Host,
+		Path:         path,
+		Reason:       n.Reason,
 	}
 }
 
-func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Host string `json:"host"`
-		Port int    `json:"port"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Host == "" || req.Port == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host and port required"})
-		return
-	}
-	if s.store == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
-		return
-	}
-	if err := s.store.AddManual(req.Host, req.Port); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	// Poll it now rather than waiting for the next sweep. A peer that is
-	// known but not yet marked healthy is invisible to closure broadcast and
-	// to spill, so a job submitted in the seconds after `nodes add` runs
-	// entirely local and nothing explains why.
-	go s.pollAllNodes()
-	writeJSON(w, http.StatusOK, map[string]string{"status": "added"})
-}
-
-// AddPeer registers a peer at host:port and polls it immediately, the same way
-// `pipedpeer nodes add` does. Exported so internet mode can register the local
-// ports it puts in front of remote peers, without going back out through HTTP
-// to reach its own daemon.
+// AddPeer registers the peer internet mode put in front of host:port (a local
+// forwarder) as a verified internet path of whichever node answers there.
+// A peer that does not answer yet is retried by every poll.
 func (s *Server) AddPeer(host string, port int) error {
 	if s.store == nil {
 		return fmt.Errorf("node store unavailable")
 	}
-	if err := s.store.AddManual(host, port); err != nil {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	h, err := probeHealth(host, port)
+	if err != nil {
+		log.Warn().Err(err).Str("at", addr).Msg("internet peer not answering yet; retrying every poll")
+		s.pendingMu.Lock()
+		if s.pending == nil {
+			s.pending = map[string]struct{}{}
+		}
+		s.pending[addr] = struct{}{}
+		s.pendingMu.Unlock()
+		return nil
+	}
+	if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port); err != nil {
 		return err
 	}
+	// Poll now rather than at the next sweep: a peer not yet marked healthy is
+	// invisible to closure broadcast and to spill.
 	go s.pollAllNodes()
 	return nil
 }
 
-// RemovePeer forgets a peer, for when internet mode's local port goes away.
+// adoptPath records host:port as a verified path of nodeID.
+func (s *Server) adoptPath(nodeID string, kind nodestore.PathKind, host string, port int) error {
+	if err := s.store.SeePath(nodeID, kind, host, port); err != nil {
+		return fmt.Errorf("record path %s:%d for %s: %w", host, port, nodeID, err)
+	}
+	if err := s.store.PathOK(nodeID, kind, host, port); err != nil {
+		return fmt.Errorf("verify path %s:%d for %s: %w", host, port, nodeID, err)
+	}
+	tlsid.Expect(net.JoinHostPort(host, strconv.Itoa(port)), nodeID)
+	return nil
+}
+
+// RemovePeer forgets the internet path at host:port, for when internet mode's
+// forwarder goes away. Only that path: the node keeps any other.
 func (s *Server) RemovePeer(host string, port int) error {
 	if s.store == nil {
 		return fmt.Errorf("node store unavailable")
 	}
-	_, err := s.store.RemoveManualAt(host, port)
-	return err
-}
+	s.pendingMu.Lock()
+	delete(s.pending, net.JoinHostPort(host, strconv.Itoa(port)))
+	s.pendingMu.Unlock()
 
-func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) {
-	host := chi.URLParam(r, "host")
-	if host == "_all" {
-		if s.store == nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
-			return
-		}
-		if err := s.store.RemoveAll(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "all removed"})
-		return
-	}
-	if host == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
-		return
-	}
-	if s.store == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store unavailable"})
-		return
-	}
-	// The target may be a host (manual entries) or a node ID — full or the
-	// short prefix `pipedpeer nodes` prints. Deleting nothing is an error:
-	// a 200 no-op left ghost nodes that "removal" could never clear.
-	n, err := s.store.RemoveManual(host)
+	nodes, err := s.store.ListAll()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
+		return err
 	}
-	if n == 0 {
-		nodeID, err := s.store.ResolveNodeID(host)
+	for _, n := range nodes {
+		paths, err := s.store.Paths(n.NodeID)
 		if err != nil {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-			return
+			return fmt.Errorf("paths of %s: %w", n.NodeID, err)
 		}
-		if nodeID == "" {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "no node matches " + host})
-			return
-		}
-		if nodeID == s.nodeID {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "refusing to remove this node's own entry"})
-			return
-		}
-		if err := s.store.DeleteNode(nodeID); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+		for _, p := range paths {
+			if p.Host == host && p.Port == port {
+				if err := s.store.DropPath(n.NodeID, host, port); err != nil {
+					return err
+				}
+			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+	// The forwarder port goes back to the pool; the next peer behind it is
+	// another node.
+	tlsid.Forget(net.JoinHostPort(host, strconv.Itoa(port)))
+	return nil
 }
 
-// StartPeerPoller launches a background goroutine that discovers nodes via mDNS
-// and polls health from both discovered and manually added nodes.
+// StartPeerPoller launches a background goroutine that discovers nodes on the
+// LAN and polls every known node's paths.
 func (s *Server) StartPeerPoller(interval time.Duration) {
 	s.peersMu.Lock()
 	s.peerHealths = make(map[string]*PeerHealth)
@@ -439,24 +374,13 @@ func (s *Server) StopPeerPoller() {
 	s.peersMu.Unlock()
 }
 
-// extractHost pulls "host" from "user@host:port" or "host:port" or "host".
-func extractHost(endpoint string) string {
-	s := endpoint
-	if idx := strings.Index(s, "@"); idx != -1 {
-		s = s[idx+1:]
-	}
-	if idx := strings.LastIndex(s, ":"); idx != -1 {
-		s = s[:idx]
-	}
-	return s
-}
-
 // SetSelfInfo tells the daemon how to describe itself in the node store, so
 // this machine is a placement candidate for every peer that polls it and shows
-// up in its own node list.
-func (s *Server) SetSelfInfo(sshEndpoint string, daemonPort int, caps map[string]string) {
+// up in its own node list. host is the start-time guess; each poll publishes
+// the address the kernel would route to the known peers instead.
+func (s *Server) SetSelfInfo(host string, daemonPort int, caps map[string]string) {
 	s.selfMu.Lock()
-	s.selfSSH = sshEndpoint
+	s.selfIP = host
 	s.selfPort = daemonPort
 	s.selfCaps = caps
 	s.selfMu.Unlock()
@@ -464,7 +388,7 @@ func (s *Server) SetSelfInfo(sshEndpoint string, daemonPort int, caps map[string
 
 // pollAllNodes is one refresh cycle of cluster membership:
 //
-//	discover on the LAN → record self → health-check every peer → prune the dead.
+//	discover on the LAN → record self → check every peer's paths → gossip → prune.
 //
 // Everything the orchestrator later reads from /v1/nodes is written here.
 func (s *Server) pollAllNodes() {
@@ -472,23 +396,17 @@ func (s *Server) pollAllNodes() {
 		return
 	}
 
-	// 1. mDNS discovery. New nodes are inserted with state "unknown" and get
-	//    promoted to healthy by the health check below.
+	// 1. LAN discovery adds candidates only. A sighting never replaces a
+	//    working path and never refreshes a row (E4, E5e): the path checks
+	//    below decide.
 	if s.discoverFn != nil {
 		for _, d := range s.discoverFn() {
-			if d.NodeID == "" || d.NodeID == s.nodeID {
+			if d.NodeID == "" || d.NodeID == s.nodeID || d.Host == "" || d.DaemonPort == 0 {
 				continue
 			}
-			_ = s.store.UpsertNode(nodestore.Node{
-				NodeID:      d.NodeID,
-				Host:        extractHost(d.SSHEndpoint),
-				Port:        d.DaemonPort,
-				SSHEndpoint: d.SSHEndpoint,
-				Arch:        d.Arch,
-				Hostname:    d.Hostname,
-				State:       "unknown",
-				Source:      "discovery",
-			})
+			if err := s.store.SeePath(d.NodeID, nodestore.PathLAN, d.Host, d.DaemonPort); err != nil {
+				log.Warn().Err(err).Str("peer", d.NodeID).Str("host", d.Host).Msg("could not record discovered address")
+			}
 		}
 	}
 
@@ -496,9 +414,13 @@ func (s *Server) pollAllNodes() {
 	//    the same table as everyone else rather than being special-cased.
 	s.upsertSelf()
 
-	// 3. Health-check every known peer concurrently.
+	// 3. Internet forwarders whose peer had not answered yet.
+	s.retryPending()
+
+	// 4. Check every known peer concurrently.
 	nodes, err := s.store.ListAll()
 	if err != nil {
+		log.Warn().Err(err).Msg("node store unreadable; skipping this poll")
 		return
 	}
 
@@ -514,8 +436,11 @@ func (s *Server) pollAllNodes() {
 		go func(node nodestore.Node) {
 			defer wg.Done()
 			ph := s.pollOne(node)
+			if ph == nil {
+				return
+			}
 			mu.Lock()
-			finalHealths[fmt.Sprintf("%s:%d", node.Host, node.Port)] = ph
+			finalHealths[net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))] = ph
 			mu.Unlock()
 		}(n)
 	}
@@ -531,13 +456,46 @@ func (s *Server) pollAllNodes() {
 	}
 	logPeerChanges(prev, finalHealths, hostnames)
 
-	// 4. Forget auto-discovered nodes that have been gone a while. Manual
-	//    entries survive — see nodestore.PruneStale.
-	s.store.PruneStale(staleNodeTTL)
+	// 5. Learn moved peers' addresses from the healthy ones.
+	s.maybePullGossip(finalHealths)
 
-	// 5. Keep the list of signing keys this cluster uses current, so nix can
+	// 6. Forget nodes and paths gone long enough (rules in nodestore).
+	if err := s.store.PruneStale(); err != nil {
+		log.Warn().Err(err).Msg("could not prune stale nodes")
+	}
+
+	// 7. Keep the list of signing keys this cluster uses current, so nix can
 	//    require a signature and still accept peer closures.
 	s.refreshTrustedKeys()
+}
+
+// retryPending polls the forwarders AddPeer could not identify yet.
+func (s *Server) retryPending() {
+	s.pendingMu.Lock()
+	addrs := make([]string, 0, len(s.pending))
+	for a := range s.pending {
+		addrs = append(addrs, a)
+	}
+	s.pendingMu.Unlock()
+	for _, a := range addrs {
+		host, portStr, err := net.SplitHostPort(a)
+		if err != nil {
+			continue // only ever written by JoinHostPort
+		}
+		port, _ := strconv.Atoi(portStr)
+		h, err := probeHealth(host, port)
+		if err != nil {
+			continue // logged once by AddPeer; still pending
+		}
+		if err := s.adoptPath(h.NodeID, nodestore.PathInternet, host, port); err != nil {
+			log.Warn().Err(err).Str("at", a).Msg("internet peer answered but its path could not be stored")
+			continue
+		}
+		log.Info().Str("peer", h.NodeID).Str("at", a).Msg("internet peer answered")
+		s.pendingMu.Lock()
+		delete(s.pending, a)
+		s.pendingMu.Unlock()
+	}
 }
 
 // logPeerChanges writes "peer up" for a peer healthy now and not before, and
@@ -564,44 +522,109 @@ func logPeerChanges(prev, next map[string]*PeerHealth, hostnames map[string]stri
 	}
 }
 
-// staleNodeTTL is how long a discovered node may go unseen before it is
-// dropped: long enough to ride out a daemon restart, short enough that a
-// machine taken off the LAN stops being offered work.
-const staleNodeTTL = 5 * time.Minute
+// healthTimeout bounds one /health probe of one path.
+const healthTimeout = 3 * time.Second
 
-func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
-	source := node.Source
-	if source == "" {
-		source = "discovery"
-	}
-	ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: source}
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://%s:%d/health", node.Host, node.Port))
+// probeHealth asks host:port who it is. An answer without a node id is not an
+// answer.
+func probeHealth(host string, port int) (healthResponse, error) {
+	var h healthResponse
+	client := &http.Client{Timeout: healthTimeout}
+	resp, err := client.Get(fmt.Sprintf("http://%s/health", net.JoinHostPort(host, strconv.Itoa(port))))
 	if err != nil {
-		// A pin mismatch is not the same as a machine being down, and
-		// reporting it as "unreachable" sends the operator to check cables
-		// for a node that is answering. It means the peer's certificate
-		// changed - a reinstall, or someone in the middle - and only they
-		// can tell which.
-		if strings.Contains(err.Error(), "certificate for") {
-			log.Warn().Str("peer", fmt.Sprintf("%s:%d", node.Host, node.Port)).Err(err).
-				Msg("peer certificate changed; run `pipedpeer auth forget <host:port>` if it was reinstalled")
-		}
-		ph.Status = "unreachable"
-		s.store.MarkUnreachable(node.NodeID)
-		return ph
+		return h, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return h, fmt.Errorf("/health answered %s", resp.Status)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return h, fmt.Errorf("/health unreadable: %w", err)
+	}
+	if h.NodeID == "" {
+		return h, fmt.Errorf("/health named no node")
+	}
+	return h, nil
+}
 
-	var h healthResponse
-	if json.NewDecoder(resp.Body).Decode(&h) != nil || h.NodeID == "" {
-		ph.Status = "unreachable"
-		s.store.MarkUnreachable(node.NodeID)
-		return ph
+// candidateOrder is the order the poller tries a node's paths: the active one
+// first, then lan before internet before gossip.
+func candidateOrder(paths []nodestore.Path) []nodestore.Path {
+	rank := map[nodestore.PathKind]int{nodestore.PathLAN: 0, nodestore.PathInternet: 1, nodestore.PathGossip: 2}
+	out := make([]nodestore.Path, 0, len(paths))
+	var rest []nodestore.Path
+	for _, p := range paths {
+		if p.Kind == nodestore.PathSelf {
+			continue
+		}
+		if p.Active && len(out) == 0 {
+			out = append(out, p)
+			continue
+		}
+		rest = append(rest, p)
+	}
+	sort.SliceStable(rest, func(i, j int) bool { return rank[rest[i].Kind] < rank[rest[j].Kind] })
+	return append(out, rest...)
+}
+
+// pollOne checks one node: the active path first, then the other candidates
+// until one answers as this node. A path that answers is verified (PathOK, and
+// its certificate pinned to the node id); one that fails or answers as another
+// node is marked so. While the active path is not a LAN one, LAN candidates are
+// still tried so a verified LAN path can take over (nodestore decides).
+func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
+	paths, err := s.store.Paths(node.NodeID)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not read node paths")
+		return nil
+	}
+	ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: string(node.Source), Status: "unreachable"}
+	var verified *healthResponse
+	for _, p := range candidateOrder(paths) {
+		if verified != nil && p.Kind != nodestore.PathLAN {
+			break // only LAN candidates can still beat what answered
+		}
+		addr := net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+		h, err := probeHealth(p.Host, p.Port)
+		if err != nil && strings.Contains(err.Error(), "expected node") {
+			// The pinned key no longer answers here. Node id = key, so this is
+			// another node (a reused address, a reinstall) or someone in the
+			// middle; either way it is not this node's path. Forget the pin so
+			// whoever lives here can be found as itself.
+			s.dropPath(node.NodeID, p.Host, p.Port, "a different key answers at "+addr)
+			continue
+		}
+		if err != nil {
+			if ferr := s.store.PathFailed(node.NodeID, p.Host, p.Port, err.Error()); ferr != nil {
+				log.Warn().Err(ferr).Str("peer", node.NodeID).Str("at", addr).Msg("could not record failed path")
+			}
+			continue
+		}
+		if h.NodeID != node.NodeID {
+			// Someone else lives at this address now (a reused forwarder port,
+			// a DHCP lease handed on).
+			s.dropPath(node.NodeID, p.Host, p.Port, "node "+h.NodeID+" answers at "+addr)
+			continue
+		}
+		if err := s.store.PathOK(node.NodeID, p.Kind, p.Host, p.Port); err != nil {
+			log.Warn().Err(err).Str("peer", node.NodeID).Str("at", addr).Msg("could not record verified path")
+			continue
+		}
+		tlsid.Expect(addr, node.NodeID)
+		if verified == nil {
+			hh := h
+			verified = &hh
+			ph.Host, ph.Port, ph.Source = p.Host, p.Port, string(p.Kind)
+		}
 	}
 
-	ph.NodeID = h.NodeID
+	if verified == nil {
+		if err := s.store.MarkUnreachable(node.NodeID); err != nil {
+			log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not record unreachable peer")
+		}
+		return ph
+	}
+	h := *verified
 	ph.Status = "healthy"
 	ph.ActiveJobs = h.ActiveJobs
 	ph.AvailableMem = h.AvailableMem
@@ -610,15 +633,20 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	ph.Machine = h.Capabilities[heartbeat.MachineCapability]
 	ph.ClosureFormats = h.Capabilities[heartbeat.ClosureFormatCapability]
 	ph.GPU = h.Capabilities["gpu"]
+	ph.Role = h.Capabilities[heartbeat.RoleCapability]
 
-	capsJSON, _ := json.Marshal(h.Capabilities)
-	loadJSON, _ := json.Marshal(h.Load)
-
-	updated := nodestore.Node{
-		NodeID:       h.NodeID,
-		Host:         node.Host,
-		Port:         node.Port,
-		SSHEndpoint:  node.SSHEndpoint,
+	capsJSON, err := json.Marshal(h.Capabilities)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not encode peer capabilities")
+	}
+	loadJSON, err := json.Marshal(h.Load)
+	if err != nil {
+		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not encode peer load")
+	}
+	// Host/Port/Source are the store's (the active path); MarkHealthy never
+	// moves them.
+	if err := s.store.MarkHealthy(nodestore.Node{
+		NodeID:       node.NodeID,
 		Arch:         h.Capabilities["arch"],
 		Hostname:     h.Capabilities["hostname"],
 		ActiveJobs:   h.ActiveJobs,
@@ -626,28 +654,30 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 		ReservedMem:  h.ReservedMem,
 		TotalMem:     h.Load.TotalMemBytes,
 		CPUPercent:   h.Load.CPUPercent,
-		Source:       source,
-		IsManual:     node.IsManual,
 		CapsJSON:     string(capsJSON),
 		LoadJSON:     string(loadJSON),
-	}
-	if err := s.store.MarkHealthy(updated); err != nil {
-		return ph
-	}
-
-	// A manual entry added before the node was up carries a placeholder
-	// "manual-host:port" ID. Now that the real UUID is known, drop the
-	// placeholder row so the node is not counted twice.
-	if node.NodeID != h.NodeID && strings.HasPrefix(node.NodeID, "manual-") {
-		s.store.DeleteNode(node.NodeID)
+	}); err != nil {
+		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not record healthy peer")
 	}
 	return ph
 }
 
-// upsertSelf writes this node's own live state into the store.
+// dropPath lets go of a path that belongs to someone else now, and of the
+// address's pin, so a different machine that takes the address is not refused.
+func (s *Server) dropPath(nodeID, host string, port int, why string) {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	log.Info().Str("peer", nodeID).Str("at", addr).Str("why", why).Msg("dropping a path that is not this node's any more")
+	if err := s.store.DropPath(nodeID, host, port); err != nil {
+		log.Warn().Err(err).Str("peer", nodeID).Str("at", addr).Msg("could not drop path")
+	}
+	tlsid.Forget(addr)
+}
+
+// upsertSelf writes this node's own live state into the store, at the address
+// the kernel would use to reach the known peers (re-chosen every poll).
 func (s *Server) upsertSelf() {
 	s.selfMu.RLock()
-	ssh, port, caps := s.selfSSH, s.selfPort, s.selfCaps
+	ip, port, caps, prevHost := s.selfIP, s.selfPort, s.selfCaps, s.selfHost
 	s.selfMu.RUnlock()
 	if port == 0 {
 		return // SetSelfInfo not called (tests, or daemon not fully started)
@@ -661,19 +691,29 @@ func (s *Server) upsertSelf() {
 	// the host's: a daemon in a 1.5 GiB container showed 9.8 GiB on its own
 	// `nodes` row, and local placement read that row.
 	load.AvailableMemBytes = s.grantableFrom(load, reserved)
-	capsJSON, _ := json.Marshal(caps)
-	loadJSON, _ := json.Marshal(load)
+	capsJSON, err := json.Marshal(caps)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not encode own capabilities")
+	}
+	loadJSON, err := json.Marshal(load)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not encode own load")
+	}
 
-	// Both fields, not just Host: peers read the endpoint, and publishing a
-	// routable Host beside an unroutable endpoint fixes nothing.
-	host := s.advertisedHost(extractHost(ssh))
-	ssh = rewriteHost(ssh, host)
+	host := s.advertisedHost(ip)
+	if prevHost != "" && prevHost != host {
+		// PathOK below replaces the old self path.
+		log.Info().Str("from", prevHost).Str("to", host).Msg("this machine's address changed")
+	}
+	if err := s.store.PathOK(s.nodeID, nodestore.PathSelf, host, port); err != nil {
+		log.Warn().Err(err).Str("host", host).Msg("could not record own address")
+	}
+	s.selfMu.Lock()
+	s.selfHost = host
+	s.selfMu.Unlock()
 
-	_ = s.store.MarkHealthy(nodestore.Node{
+	if err := s.store.MarkHealthy(nodestore.Node{
 		NodeID:       s.nodeID,
-		Host:         host,
-		Port:         port,
-		SSHEndpoint:  ssh,
 		Arch:         caps["arch"],
 		Hostname:     caps["hostname"],
 		ActiveJobs:   s.ActiveJobs(),
@@ -681,10 +721,11 @@ func (s *Server) upsertSelf() {
 		ReservedMem:  s.ReservedMem(),
 		TotalMem:     load.TotalMemBytes,
 		CPUPercent:   load.CPUPercent,
-		Source:       "self",
 		CapsJSON:     string(capsJSON),
 		LoadJSON:     string(loadJSON),
-	})
+	}); err != nil {
+		log.Warn().Err(err).Msg("could not record this node's own row")
+	}
 }
 
 // advertisedHost is the address this node publishes to its peers.
@@ -692,18 +733,17 @@ func (s *Server) upsertSelf() {
 // The interface-list guess is only right when a machine has one route to the
 // world. A laptop holding a stale 192.168.x lease published that while its
 // peers were reachable only over an overlay, and nothing complained: the node
-// simply advertised an address no peer could dial. DDP appeared to work
-// because the reachable machine happened to draw rank 0; with the roles
-// reversed the sync endpoint would have been unreachable for the other rank.
+// simply advertised an address no peer could dial.
 //
 // So ask the kernel which of our addresses it would use to reach the peers we
-// already know about, and publish that.
+// can currently reach, and publish that.
 func (s *Server) advertisedHost(fallback string) string {
 	if s.store == nil {
 		return fallback
 	}
 	nodes, err := s.store.ListAll()
 	if err != nil {
+		log.Warn().Err(err).Msg("node store unreadable; advertising the start-time address")
 		return fallback
 	}
 	var peers []string
@@ -711,10 +751,9 @@ func (s *Server) advertisedHost(fallback string) string {
 		if n.NodeID == s.nodeID || n.Host == "" || n.Port == 0 {
 			continue
 		}
-		// Only peers we can currently reach get a vote. Unreachable rows
-		// outlive whatever they described - manual entries never expire at
-		// all - and letting a machine that is long gone decide how we
-		// describe ourselves is how the stale answer survives.
+		// Only peers we can currently reach get a vote: letting a machine
+		// that is long gone decide how we describe ourselves is how the
+		// stale answer survives.
 		if n.State != "healthy" {
 			continue
 		}
@@ -737,4 +776,17 @@ func rewriteHost(endpoint, host string) string {
 		return user + net.JoinHostPort(host, port)
 	}
 	return user + host
+}
+
+// handleNodesAdd and handleNodesRemove answer the retired POST /v1/nodes and
+// DELETE /v1/nodes/{host}: nodes come from discovery, `connect` and gossip
+// now. ponytail: kept only so the package builds until the wiring unit drops
+// both routes from buildRouter; delete them with the routes.
+func (s *Server) handleNodesAdd(w http.ResponseWriter, r *http.Request) { nodesRouteGone(w) }
+
+func (s *Server) handleNodesRemove(w http.ResponseWriter, r *http.Request) { nodesRouteGone(w) }
+
+func nodesRouteGone(w http.ResponseWriter) {
+	writeJSON(w, http.StatusGone, map[string]string{
+		"error": "adding or removing nodes by hand is gone; machines join with `pipedpeer connect`"})
 }
