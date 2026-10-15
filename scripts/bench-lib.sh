@@ -20,17 +20,19 @@
 # Knobs (environment):
 #   BL_BEFORE_REV   commit for the BEFORE binary (c7e2c7f)
 #   BL_EMU          path to lab-emu.sh (scripts/lab-emu.sh)
-#   BL_EMU_PREFIX   container name prefix lab-emu.sh uses (ppemu-)
+#   BL_LAB_NAME     LAB_NAME for lab-emu.sh (bench: containers ppbench-<i>, never
+#                   shared with the functional tests' default "emu" lab)
 #   BL_REPS         timed repetitions per cell (3)
-#   BL_RUN_TIMEOUT  seconds before one run counts as failed (1800)
+#   BL_RUN_TIMEOUT  seconds before one run counts as failed (600)
 #   BL_OUT          results directory (~/.local/state/pipedpeer/bench)
 
 BL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BL_BEFORE_REV="${BL_BEFORE_REV:-c7e2c7f}"
 BL_EMU="${BL_EMU:-$BL_ROOT/scripts/lab-emu.sh}"
-BL_EMU_PREFIX="${BL_EMU_PREFIX:-ppemu-}"
+BL_LAB_NAME="${BL_LAB_NAME:-bench}"
+BL_EMU_PREFIX="pp${BL_LAB_NAME}-"
 BL_REPS="${BL_REPS:-3}"
-BL_RUN_TIMEOUT="${BL_RUN_TIMEOUT:-1800}"
+BL_RUN_TIMEOUT="${BL_RUN_TIMEOUT:-600}"
 BL_OUT="${BL_OUT:-${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/bench}"
 BL_BINDIR="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer-bench/bin"
 BL_LOCK="${BL_LOCK:-$HOME/.cache/pipedpeer-bench.lock}"
@@ -53,7 +55,7 @@ bl_init() {
 		flock 9
 	fi
 	BL_CSV="$BL_OUT/$BL_SUITE/results.csv"
-	[[ -f "$BL_CSV" ]] || echo "suite,case,variant,binary,rev,profile,loss,nodes,rep,status,wall_s,script_s,step_s,sync_s,world,loss_val,steps,emulated,when" > "$BL_CSV"
+	[[ -f "$BL_CSV" ]] || echo "suite,case,variant,binary,rev,profile,loss,nodes,rep,status,wall_s,script_s,step_s,sync_s,world,loss_val,steps,emulated,when,log" > "$BL_CSV"
 	trap 'bl_lab_down' EXIT
 }
 
@@ -99,7 +101,7 @@ bl_lab_up() {
 	bl_lab_down
 	bl_log "lab up: $n x (2 cpu, $mem), profile $profile, loss $loss%, $(basename "$bin")"
 	LAB_MEM="$mem" LAB_PROFILE="$profile" LAB_LOSS="$loss" LAB_CPUS=2 PIPEDPEER="$bin" \
-		LAB_API_PORT="$BL_API_PORT" "$BL_EMU" up "$n" >&2 || bl_die "lab-emu.sh up failed"
+		LAB_API_PORT="$BL_API_PORT" LAB_NAME="$BL_LAB_NAME" "$BL_EMU" up "$n" >&2 || bl_die "lab-emu.sh up failed"
 	BL_NODES_UP="$n"
 	BL_PROFILE="$profile"
 	BL_LOSS="$loss"
@@ -108,14 +110,14 @@ bl_lab_up() {
 # bl_lab_shape <profile> <loss%> - reshape the running lab's links.
 bl_lab_shape() {
 	[[ "$1" == "${BL_PROFILE:-}" && "$2" == "${BL_LOSS:-}" ]] && return 0
-	"$BL_EMU" shape "$1" "$2" >&2 || bl_die "lab-emu.sh shape $1 $2 failed"
+	LAB_NAME="$BL_LAB_NAME" "$BL_EMU" shape "$1" "$2" >&2 || bl_die "lab-emu.sh shape $1 $2 failed"
 	BL_PROFILE="$1"
 	BL_LOSS="$2"
 }
 
 bl_lab_down() {
 	[[ "$BL_NODES_UP" -gt 0 ]] || return 0
-	"$BL_EMU" down >&2 || bl_log "warning: lab-emu.sh down failed; containers ${BL_EMU_PREFIX}* may still run"
+	LAB_NAME="$BL_LAB_NAME" "$BL_EMU" down >&2 || bl_log "warning: lab-emu.sh down failed; containers ${BL_EMU_PREFIX}* may still run"
 	BL_NODES_UP=0
 }
 
@@ -260,13 +262,12 @@ bl_run() {
 	local case="$1" variant="$2" binlabel="$3" rep="$4" script="$5"
 	shift 5
 	local log="$BL_OUT/$BL_SUITE/logs/${case}_${variant}_${binlabel}_${BL_PROFILE}_n${BL_NODES_UP}_r${rep}.log"
-	local status=ok t0 t1
+	local status=ok t0 t1 rc=0
 	bl_exec 1 touch /bench/.mark
 	t0="$(date +%s.%N)"
-	if ! timeout "$BL_RUN_TIMEOUT" "$BL_RT" exec -w /bench "${BL_EMU_PREFIX}1" \
-		pipedpeer run "$@" "$script" > "$log" 2>&1; then
-		status=fail
-	fi
+	timeout "$BL_RUN_TIMEOUT" "$BL_RT" exec -w /bench "${BL_EMU_PREFIX}1" \
+		pipedpeer run "$@" "$script" > "$log" 2>&1 || rc=$?
+	if ((rc == 124)); then status=timeout; elif ((rc != 0)); then status=fail; fi
 	t1="$(date +%s.%N)"
 	# The newest run record on the submitter, if this binary writes one.
 	local steps="$log.steps.json"
@@ -296,10 +297,28 @@ if os.path.exists(steps) and os.path.getsize(steps):
 row = ["$BL_SUITE", "$case", "$variant", "$binlabel", "$BL_REV", "$BL_PROFILE", "$BL_LOSS", "$BL_NODES_UP", "$rep",
        status, "%.3f" % (float(t1) - float(t0)), script, last(r"BENCH_STEP_S ([0-9.]+)"), sync,
        str(max(worlds)) if worlds else "", last(r"BENCH_LOSS ([0-9.]+)"), last(r"BENCH_STEPS_DONE (\d+)"),
-       "1", time.strftime("%Y-%m-%dT%H:%M:%S")]
+       "1", time.strftime("%Y-%m-%dT%H:%M:%S"), log]
 print(",".join(row))
 PY
-	[[ "$status" == ok ]] || bl_log "run failed: $case/$variant ($binlabel) - see $log"
+	[[ "$(tail -1 "$BL_CSV" | cut -d, -f10)" == ok ]] && return 0
+	bl_log "run failed: $case/$variant ($binlabel) - see $log"
+	return 1
+}
+
+# bl_reps <case> <variant> <binary-label> <script> [run flags...] - BL_REPS
+# timed runs. The first failure or timeout ends the cell: it is recorded once
+# ("fails/times out on <rev>" in bl_table, with its log) and the remaining reps
+# are skipped. A known-broken build failing is a valid BEFORE result; burning
+# 3 x BL_RUN_TIMEOUT on it only holds the bench lock.
+bl_reps() {
+	local case="$1" variant="$2" binlabel="$3" script="$4" r
+	shift 4
+	for r in $(seq 1 "$BL_REPS"); do
+		bl_run "$case" "$variant" "$binlabel" "$r" "$script" "$@" || {
+			bl_log "$case/$variant fails or times out on $BL_REV; skipping its remaining reps"
+			return 0
+		}
+	done
 }
 
 # bl_warm <script> [args...] - one untimed run so the environment is built and
@@ -325,11 +344,21 @@ for r in csv.DictReader(open(sys.argv[1])):
 med = lambda rs, k: (lambda v: "%.2f" % statistics.median(v) if v else "-")([float(r[k]) for r in rs if r["status"] == "ok" and r[k]])
 print("| case | variant | binary | profile | loss | nodes | runs ok | wall s | script s | step s | sync s | world | loss | label |")
 print("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+bad = []
 for (c, v, b, rev, p, l, n), rs in sorted(cells.items()):
     ok = sum(r["status"] == "ok" for r in rs)
+    for r in rs:
+        if r["status"] != "ok":
+            bad.append("- %s / %s on %s, %s, %s nodes: %s on %s (%ss): `%s`" % (
+                c, v, b, p, n, "times out" if r["status"] == "timeout" else "fails",
+                rev, r["wall_s"].split(".")[0], r.get("log") or "?"))
     worlds = sorted({r["world"] for r in rs if r["world"]})
     print("| %s | %s | %s %s | %s | %s%% | %s | %d/%d | %s | %s | %s | %s | %s | %s | emulated |" % (
         c, v, b, rev, p, l, n, ok, len(rs), med(rs, "wall_s"), med(rs, "script_s"), med(rs, "step_s"),
         med(rs, "sync_s"), "/".join(worlds) or "-", med(rs, "loss_val")))
+if bad:
+    print()
+    print("Failed cells (remaining reps skipped):")
+    print("\n".join(bad))
 PY
 }
