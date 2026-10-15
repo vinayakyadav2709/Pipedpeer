@@ -109,7 +109,7 @@ bl_lab_up() {
 	until LAB_MEM="$mem" LAB_PROFILE="$profile" LAB_LOSS="$loss" LAB_CPUS=2 PIPEDPEER="$bin" \
 		LAB_API_PORT="$BL_API_PORT" LAB_NAME="$BL_LAB_NAME" "$BL_EMU" up "$n" > "$out" 2>&1; do
 		cat "$out" >&2
-		grep -q "refusing to start" "$out" || bl_die "lab-emu.sh up failed"
+		grep -qE "refusing to start|gave up after" "$out" || bl_die "lab-emu.sh up failed"
 		((waited < ${BL_LAB_WAIT:-3600})) || bl_die "memory cap still full after ${waited}s"
 		bl_log "memory cap full (other labs running); retrying in 60 s (waited ${waited}s)"
 		sleep 60
@@ -177,7 +177,9 @@ for _ in range(DEPTH):
     layers += [nn.Linear(WIDTH, WIDTH), nn.ReLU()]
 model = nn.Sequential(*layers, nn.Linear(WIDTH, 1)).to(dev)
 print("BENCH_PARAMS", sum(p.numel() for p in model.parameters()))
-opt = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)
+# Adam: with SGD(0.05, momentum 0.9) the 4.5 M-parameter model sat at ln 2
+# (0.689) after 60 steps even on one device without pipedpeer.
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss_fn = nn.BCEWithLogitsLoss()
 loader = DataLoader(TensorDataset(X, y), batch_size=BATCH, shuffle=True)
 t0, steps = time.monotonic(), 0
