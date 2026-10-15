@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -206,10 +207,8 @@ func fromSysfs(pci []Device) (Info, Usage, []DeviceUsage) {
 		if d.Stack == "cuda" && d.Name == "" {
 			d.Name = procNVIDIAModel(d.Address) // driver-held text, no wake
 		}
-		// An AMD part with little VRAM is an APU's iGPU. A suspended device is
-		// a dGPU: a boot display never runtime-suspends.
-		if d.VendorID == "0x1002" && d.MemoryBytes > 0 && d.MemoryBytes < 2<<30 {
-			d.Integrated = true
+		if d.Stack == "rocm" {
+			classifyAMD(d)
 		}
 		// ponytail: static score (VRAM GiB) stands in for the per-device speed
 		// test; replace with the in-closure matmul calibration (R11 §3 step 4).
@@ -228,7 +227,9 @@ func fromSysfs(pci []Device) (Info, Usage, []DeviceUsage) {
 			best = i
 		}
 	}
-	if best < 0 {
+	// An iGPU alone does not make a GPU node (6fbd06e's rule for Intel): it
+	// shares the CPU's memory and bandwidth.
+	if best < 0 || pci[best].Integrated {
 		return info, Usage{}, nil
 	}
 	b := pci[best]
@@ -255,6 +256,46 @@ func fromSysfs(pci []Device) (Info, Usage, []DeviceUsage) {
 		usage = Usage{MemoryUsedBytes: b.used, MemoryFreeBytes: b.free, UtilizationGPU: b.util}
 	}
 	return info, usage, devs
+}
+
+// classifyAMD marks an APU's iGPU as integrated. KFD topology is the signal:
+// an APU's node has both CPU cores and SIMDs. Without a KFD node for the
+// device it falls back to VRAM under 2 GiB (strict: a real 2 GB dGPU reads
+// exactly 2 GiB). A suspended device with nothing cached has no VRAM and stays
+// discrete: a boot display never runtime-suspends.
+func classifyAMD(d *Device) {
+	apu, known := kfdAPU(d.Address)
+	if !known && d.MemoryBytes > 0 {
+		apu = d.MemoryBytes < 2<<30
+		logf("no KFD topology node for %s, deciding APU by VRAM (%d bytes): integrated=%v", d.Address, d.MemoryBytes, apu)
+	}
+	if apu {
+		d.Integrated = true
+		d.Reason = "AMD APU integrated graphics: shares system memory, not a GPU node on its own"
+	}
+}
+
+// kfdAPU reports whether the KFD topology node of the PCI device at addr
+// ("0000:c1:00.0") is an APU: cpu_cores_count > 0 and simd_count > 0 on the
+// same node. known is false when no node matches.
+func kfdAPU(addr string) (apu, known bool) {
+	files, _ := filepath.Glob(filepath.Join(sysRoot, "class/kfd/kfd/topology/nodes/*/properties"))
+	for _, f := range files {
+		props := map[string]int64{}
+		for _, line := range strings.Split(readTrim(f), "\n") {
+			if k, v, ok := strings.Cut(line, " "); ok {
+				props[k] = parseInt64(v)
+			}
+		}
+		if props["simd_count"] == 0 {
+			continue // CPU-only node
+		}
+		loc := props["location_id"] // bus<<8 | device<<3 | function
+		if fmt.Sprintf("%04x:%02x:%02x.%x", props["domain"], loc>>8, (loc>>3)&0x1f, loc&7) == addr {
+			return props["cpu_cores_count"] > 0, true
+		}
+	}
+	return false, false
 }
 
 // better ranks a over b: discrete before integrated, then score, then PCI order.

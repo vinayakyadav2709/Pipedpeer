@@ -1,6 +1,7 @@
 package gpu
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -245,5 +246,46 @@ func TestDriverBoundNoDevNode(t *testing.T) {
 	info, _, _ = fromSysfs(enumeratePCI())
 	if info.Vendor != VendorNone || info.GPUs[0].Stack != "" || info.GPUs[0].Reason == "" {
 		t.Fatalf("awake GPU nvidia-smi fails on must be unusable: %+v", info.GPUs)
+	}
+}
+
+// kfdNode writes a KFD topology node; loc is the PCI bus<<8|dev<<3|fn.
+func (h *fakeHost) kfdNode(n string, cpus, simds, loc int) {
+	h.write("sys/class/kfd/kfd/topology/nodes/"+n+"/properties", fmt.Sprintf(
+		"cpu_cores_count %d\nsimd_count %d\nmem_banks_count 1\nlocation_id %d\ndomain 0\n", cpus, simds, loc))
+}
+
+func TestAPUByKFDTopology(t *testing.T) {
+	amd := func(h *fakeHost, addr string) {
+		h.pci(addr, "0x1002", "amdgpu", "active", map[string]string{"mem_info_vram_total": "2147483648"})
+		h.write("dev/kfd", "")
+		h.write("dev/dri/renderD128", "")
+	}
+	// Laptop APU with a 2.0 GiB carve-out: KFD shows CPU cores and SIMDs on
+	// one node, so it is integrated and the host is no GPU node.
+	h := newFakeHost(t)
+	amd(h, "0000:c1:00.0")
+	h.kfdNode("0", 16, 8, 0xc100)
+	info, _, devs := fromSysfs(enumeratePCI())
+	if !info.GPUs[0].Integrated || info.Vendor != VendorNone || info.Best != -1 || devs != nil {
+		t.Fatalf("2 GiB APU counted as a GPU node: %+v", info)
+	}
+
+	// A real 2 GiB dGPU: separate CPU and GPU nodes.
+	h = newFakeHost(t)
+	amd(h, "0000:03:00.0")
+	h.kfdNode("0", 16, 0, 0)
+	h.kfdNode("1", 0, 8, 0x300)
+	info, _, _ = fromSysfs(enumeratePCI())
+	if info.GPUs[0].Integrated || info.Vendor != VendorAMD || info.Best != 0 {
+		t.Fatalf("2 GiB dGPU misread as an APU: %+v", info)
+	}
+
+	// No KFD topology: VRAM fallback keeps exactly 2 GiB discrete.
+	h = newFakeHost(t)
+	amd(h, "0000:03:00.0")
+	info, _, _ = fromSysfs(enumeratePCI())
+	if info.GPUs[0].Integrated || info.Vendor != VendorAMD {
+		t.Fatalf("fallback misread a 2 GiB dGPU: %+v", info)
 	}
 }
