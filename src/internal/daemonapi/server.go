@@ -119,6 +119,17 @@ type Server struct {
 	// real machines import into their own RAM, so default stays parallel.
 	serialImports atomic.Bool
 
+	// seeds are this node's closure sends in flight, keyed by seedKey, so a
+	// second run of the same environment waits on the send already going
+	// instead of starting another one to the same peer.
+	seedsMu sync.Mutex
+	seeds   map[string]*seed
+
+	// importing counts the closure imports this node is receiving, by store
+	// path; /v1/store reports it so no other node sends the same closure.
+	importingMu sync.Mutex
+	importing   map[string]int
+
 	// Node store (SQLite — single source of truth for all peers)
 	store *nodestore.Store
 
@@ -556,11 +567,18 @@ func (s *Server) EnablePoolSpill() {
 // need (phone.Need, may be nil) lets a pool-only phone answer for its host
 // python instead of a closure.
 func (s *Server) peerHasStore(ph *PeerHealth, storePath string, need http.Header) bool {
+	runnable, _ := s.peerStoreState(ph, storePath, need)
+	return runnable
+}
+
+// peerStoreState is peerHasStore plus whether the peer is importing the
+// closure right now (an older peer never says so).
+func (s *Server) peerStoreState(ph *PeerHealth, storePath string, need http.Header) (runnable, importing bool) {
 	u := fmt.Sprintf("http://%s:%d/v1/store?path=%s&runnable=1", ph.Host, ph.Port, url.QueryEscape(storePath))
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", ph.Host).Msg("cannot build the runnable check")
-		return false
+		return false, false
 	}
 	for k, v := range need {
 		req.Header[k] = v
@@ -568,16 +586,17 @@ func (s *Server) peerHasStore(ph *PeerHealth, storePath string, need http.Header
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return false, false
 	}
 	defer resp.Body.Close()
 	var r struct {
-		Cached bool `json:"cached"`
+		Cached    bool `json:"cached"`
+		Importing bool `json:"importing"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&r) != nil {
-		return false
+		return false, false
 	}
-	return r.Cached
+	return r.Cached, r.Importing
 }
 
 // healthyPeers returns the peers currently known to be up that take pool
@@ -604,6 +623,12 @@ func (s *Server) healthyPeers() ([]PeerHealth, int) {
 // It returns one line per peer that refused the closure, for the submitter.
 // Logged here alone, a refusal left the user with "local 80 items" and no
 // reason: the shim only sees that no peer holds the closure.
+//
+// It waits at most broadcastWait. The upload (and so the run) used to wait
+// for the slowest peer's import: ~600 s per run on a fresh lab with one slow
+// link (M2). A peer still importing then keeps going in the background and
+// joins the pool when it is done, because runChunk asks peerFn for the peers
+// holding the closure on every chunk.
 func (s *Server) broadcastClosure(storePath string) []string {
 	targets, known := s.healthyPeers()
 	if len(targets) == 0 && known == 0 {
@@ -648,19 +673,44 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	// Who gets it is settled before anything is packed. Packing first cost
 	// every GPU run 3m24s (V2 95): the whole CUDA closure was exported and
 	// then sent to nobody, because no peer had a GPU.
-	var need []PeerHealth
+	//
+	// A peer this node is already sending the closure to is waited on, not
+	// sent it again; a peer importing it from another node is left to finish.
+	var lines []string
+	var waitOn []PeerHealth
+	var waits []*seed
+	var fresh []int
 	for i := range targets {
-		if !s.peerHasStore(&targets[i], storePath, nil) {
-			need = append(need, targets[i])
+		ph := targets[i]
+		if sd := s.seedFor(ph, storePath); sd != nil {
+			log.Info().Str("peer", ph.addr()).Str("store", storePath).
+				Msg("peer is already importing this closure from us; waiting on that send")
+			waitOn, waits = append(waitOn, ph), append(waits, sd)
+			continue
+		}
+		runnable, importing := s.peerStoreState(&ph, storePath, nil)
+		switch {
+		case runnable:
+		case importing:
+			log.Info().Str("peer", ph.addr()).Str("store", storePath).
+				Msg("peer is already importing this closure from another node; not sending it again")
+			lines = append(lines, fmt.Sprintf("peer %s is still importing this environment; it joins the pool when the import finishes", ph.addr()))
+		default:
+			sd, started := s.startSeed(ph, storePath)
+			if started {
+				fresh = append(fresh, len(waits))
+			}
+			waitOn, waits = append(waitOn, ph), append(waits, sd)
 		}
 	}
-	if len(need) == 0 {
-		log.Info().Int("peers", len(targets)).Str("store", storePath).
-			Msg("every peer already holds the closure; nothing to broadcast")
-		return nil
+	if len(waits) == 0 {
+		if len(lines) == 0 {
+			log.Info().Int("peers", len(targets)).Str("store", storePath).
+				Msg("every peer already holds the closure; nothing to broadcast")
+		}
+		return lines
 	}
-	targets = need
-	log.Info().Int("peers", len(targets)).Str("store", storePath).
+	log.Info().Int("peers", len(fresh)).Int("joined", len(waits)-len(fresh)).Str("store", storePath).
 		Msg("broadcasting closure to peers")
 
 	// The old-format archive, exported from our own store when no upload
@@ -669,42 +719,127 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	// is made at most once and only when such a peer asks.
 	legacy := sync.OnceValues(func() (string, bool) { return localArchive(s.narCache, storePath) })
 
-	var refusedMu sync.Mutex
-	var refused []string
-	refuse := func(ph *PeerHealth, err error) {
-		peer := fmt.Sprintf("%s:%d", ph.Host, ph.Port)
-		log.Warn().Err(err).Str("peer", peer).Msg("closure broadcast failed")
-		refusedMu.Lock()
-		refused = append(refused, fmt.Sprintf("peer %s did not take this environment, so it gets no pool work: %v", peer, err))
-		refusedMu.Unlock()
+	send := func(i int) {
+		ph := waitOn[i]
+		start := time.Now()
+		err := s.importStoreOnPeer(&ph, storePath, legacy)
+		s.finishSeed(ph, storePath, waits[i], err)
+		if err != nil {
+			log.Warn().Err(err).Str("peer", ph.addr()).Str("store", storePath).Msg("closure broadcast failed")
+			return
+		}
+		log.Info().Str("peer", ph.addr()).Str("store", storePath).
+			Float64("secs", time.Since(start).Round(10*time.Millisecond).Seconds()).Msg("peer took the closure")
 	}
-
 	// Serial mode imports one peer at a time (shared-RAM rig); default parallel.
 	if s.serialImports.Load() {
-		for i := range targets {
-			ph := targets[i]
-			if err := s.importStoreOnPeer(&ph, storePath, legacy); err != nil {
-				refuse(&ph, err)
-			}
-		}
-		sort.Strings(refused)
-		return refused
-	}
-
-	var wg sync.WaitGroup
-	for i := range targets {
-		ph := targets[i]
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
-			if err := s.importStoreOnPeer(&ph, storePath, legacy); err != nil {
-				refuse(&ph, err)
+			for _, i := range fresh {
+				send(i)
 			}
 		}()
+	} else {
+		for _, i := range fresh {
+			go send(i)
+		}
 	}
-	wg.Wait()
-	sort.Strings(refused)
-	return refused
+
+	timer := time.NewTimer(broadcastWait)
+	defer timer.Stop()
+	expired := false
+	for i, sd := range waits {
+		if !expired {
+			select {
+			case <-sd.done:
+			case <-timer.C:
+				expired = true
+			}
+		}
+		select {
+		case <-sd.done:
+			if sd.err != nil {
+				lines = append(lines, fmt.Sprintf("peer %s did not take this environment, so it gets no pool work: %v", waitOn[i].addr(), sd.err))
+			}
+		default:
+			log.Warn().Str("peer", waitOn[i].addr()).Str("store", storePath).Dur("waited", broadcastWait).
+				Msg("peer is still importing the closure; starting without it, it joins the pool when done")
+			lines = append(lines, fmt.Sprintf("peer %s is still importing this environment after %s; it joins the pool when the import finishes", waitOn[i].addr(), broadcastWait))
+		}
+	}
+	sort.Strings(lines)
+	return lines
+}
+
+// broadcastWait bounds how long an upload waits for peers to import its
+// closure. On a LAN a CPU closure lands well inside it; a peer behind a slow
+// link (800 kbit: minutes) no longer holds every run hostage.
+var broadcastWait = 60 * time.Second
+
+// seed is one closure send to one peer, shared by every broadcast that
+// wants it while it runs. err is set before done closes.
+type seed struct {
+	done chan struct{}
+	err  error
+}
+
+func seedKey(ph PeerHealth, storePath string) string { return ph.addr() + " " + storePath }
+
+func (ph *PeerHealth) addr() string { return fmt.Sprintf("%s:%d", ph.Host, ph.Port) }
+
+// seedFor returns the send of storePath to ph already in flight, or nil.
+func (s *Server) seedFor(ph PeerHealth, storePath string) *seed {
+	s.seedsMu.Lock()
+	defer s.seedsMu.Unlock()
+	return s.seeds[seedKey(ph, storePath)]
+}
+
+// startSeed registers a send of storePath to ph; started is false when
+// another broadcast registered one since seedFor looked.
+func (s *Server) startSeed(ph PeerHealth, storePath string) (sd *seed, started bool) {
+	s.seedsMu.Lock()
+	defer s.seedsMu.Unlock()
+	key := seedKey(ph, storePath)
+	if sd := s.seeds[key]; sd != nil {
+		return sd, false
+	}
+	if s.seeds == nil {
+		s.seeds = make(map[string]*seed)
+	}
+	sd = &seed{done: make(chan struct{})}
+	s.seeds[key] = sd
+	return sd, true
+}
+
+func (s *Server) finishSeed(ph PeerHealth, storePath string, sd *seed, err error) {
+	s.seedsMu.Lock()
+	delete(s.seeds, seedKey(ph, storePath))
+	s.seedsMu.Unlock()
+	sd.err = err
+	close(sd.done)
+}
+
+// markImporting records that this node is receiving storePath until the
+// returned func runs.
+func (s *Server) markImporting(storePath string) func() {
+	s.importingMu.Lock()
+	if s.importing == nil {
+		s.importing = make(map[string]int)
+	}
+	s.importing[storePath]++
+	s.importingMu.Unlock()
+	return func() {
+		s.importingMu.Lock()
+		if s.importing[storePath]--; s.importing[storePath] <= 0 {
+			delete(s.importing, storePath)
+		}
+		s.importingMu.Unlock()
+	}
+}
+
+func (s *Server) isImporting(storePath string) bool {
+	s.importingMu.Lock()
+	defer s.importingMu.Unlock()
+	return s.importing[storePath] > 0
 }
 
 // gpuPeersOnly keeps the peers that report a GPU, and says how many it dropped.

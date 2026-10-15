@@ -442,7 +442,7 @@ func (s *Server) handleStoreCheck(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("runnable") == "1" {
 		cached = phone.CanRun(storePath, r.Header)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"cached": cached, "nar_path": path})
+	writeJSON(w, http.StatusOK, map[string]any{"cached": cached, "nar_path": path, "importing": s.isImporting(storePath)})
 }
 
 // handleStoreImport accepts a closure NAR for a store path without creating a
@@ -503,6 +503,7 @@ func (s *Server) handleStoreImport(w http.ResponseWriter, r *http.Request) {
 // and returns the status and JSON body to answer with.
 // ctx is the request's: a submitter that hangs up stops nix mid-import.
 func (s *Server) importStoreNAR(ctx context.Context, nar io.Reader, storePath string, partial bool) (int, any) {
+	defer s.markImporting(storePath)()
 	fail := func(status int, msg string) (int, any) {
 		return status, map[string]string{"error": msg}
 	}
