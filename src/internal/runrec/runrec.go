@@ -40,6 +40,25 @@ type Record struct {
 	Steps    []Step            `json:"steps"`
 }
 
+// Merge is one record for a run made of several (a DDP ring's ranks): their
+// steps and names together, the longest total and script time.
+func Merge(recs ...Record) Record {
+	out := Record{Names: map[string]string{}}
+	for _, r := range recs {
+		if out.RunID == "" {
+			out.RunID = r.RunID
+		}
+		out.TotalNS = max(out.TotalNS, r.TotalNS)
+		out.ScriptNS = max(out.ScriptNS, r.ScriptNS)
+		out.Emulated = out.Emulated || r.Emulated
+		for k, v := range r.Names {
+			out.Names[k] = v
+		}
+		out.Steps = append(out.Steps, r.Steps...)
+	}
+	return out
+}
+
 // File is the record's name in a job's history dir, beside receipt.json.
 const File = "steps.json"
 

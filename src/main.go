@@ -482,13 +482,16 @@ func listJobs(w io.Writer, limit int) error {
 			script = it.JobName
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", jobhistory.ShortID(it.ID), truncate(script, 24), status,
-			whereRan(it.Remote, ""), humanMs(it.DurationMs), humanStarted(it.StartedAt))
+			whereRan(it.Remote, "", it.RunName), humanMs(it.DurationMs), humanStarted(it.StartedAt))
 	}
 	return tw.Flush()
 }
 
 // whereRan names the machine a run went to: its host, else "-".
-func whereRan(remote, runHost string) string {
+func whereRan(remote, runHost, runName string) string {
+	if runName != "" {
+		return runName
+	}
 	if runHost != "" {
 		return runHost
 	}
@@ -572,7 +575,7 @@ func showJob(cmd *cobra.Command, id string) error {
 	}
 	row("started", started)
 	row("took", humanMs(r.DurationMs))
-	where := whereRan(r.Remote, r.RunHost)
+	where := whereRan(r.Remote, r.RunHost, r.RunName)
 	if r.TargetID != "" {
 		where += " (" + shortID(r.TargetID) + ")"
 	}

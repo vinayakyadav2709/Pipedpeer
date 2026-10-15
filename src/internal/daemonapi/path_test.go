@@ -93,7 +93,7 @@ func TestPathNameFromActiveKind(t *testing.T) {
 		{nodestore.Node{Host: "127.0.0.1", Source: "self"}, "self"},
 		{nodestore.Node{Host: "127.0.0.1", Source: "internet"}, "internet"},
 		{nodestore.Node{Host: "10.0.0.4", Source: "lan"}, "lan"},
-		{nodestore.Node{Host: "10.0.0.4", Source: "gossip"}, "lan"},
+		{nodestore.Node{Host: "10.0.0.4", Source: "gossip"}, "gossip"}, // E6: never seen on this LAN
 		{nodestore.Node{Source: "lan"}, ""},
 	}
 	for _, tc := range cases {

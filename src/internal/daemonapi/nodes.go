@@ -164,8 +164,9 @@ func (s *Server) handleUnreachable(w http.ResponseWriter, r *http.Request) {
 }
 
 // pathName is the path a row is reached by as /v1/nodes shows it: lan,
-// internet or self, "" with no active path. A verified gossip address is a
-// direct TCP connection to the peer, the same thing as a LAN path.
+// internet, gossip or self, "" with no active path. A gossip address is named
+// for where it came from (another member's record), never "lan": nothing
+// here saw it on this network (E6 showed a cut-off peer as "lan").
 func pathName(n nodestore.Node) string {
 	if n.Host == "" {
 		return ""
@@ -175,6 +176,8 @@ func pathName(n nodestore.Node) string {
 		return "self"
 	case nodestore.PathInternet:
 		return "internet"
+	case nodestore.PathGossip:
+		return "gossip"
 	}
 	return "lan"
 }

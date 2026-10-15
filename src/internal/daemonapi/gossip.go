@@ -14,6 +14,7 @@ import (
 
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
+	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 )
 
@@ -297,7 +298,7 @@ func (s *Server) applyRecord(rec addrRecord) {
 				log.Warn().Err(err).Str("node", rec.NodeID).Str("host", h).Msg("could not record gossiped address")
 			}
 		}
-		if rec.DirectPort > 0 {
+		if rec.DirectPort > 0 && netaddr.Probeable(h) {
 			hints = append(hints, net.JoinHostPort(h, strconv.Itoa(rec.DirectPort)))
 		}
 	}

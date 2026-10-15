@@ -176,6 +176,9 @@ type Task struct {
 	// single marks a run of its own (not a fan-out task or a DDP rank): it
 	// saves the run record and prints its simple view.
 	single bool
+	// OnRecord gets the task's run record once saved: a DDP ring merges its
+	// ranks' into one "ran on" line (ranks print none of their own).
+	OnRecord func(runrec.Record)
 }
 
 // RunTask uploads a prepared environment to a node, runs the script there, and
@@ -206,6 +209,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	historyRecord.JobName = resolvedJobName
 	historyRecord.JobSet = opts.JobSet
 	historyRecord.RunHost = opts.DaemonHost
+	historyRecord.RunName = runName(opts)
 	historyRecord.DaemonEndpoint = net.JoinHostPort(opts.DaemonHost, strconv.Itoa(opts.DaemonPort))
 	historyRecord.PlacementSource = opts.PlacementSource
 	historyRecord.DegradedMode = opts.DegradedMode
@@ -248,7 +252,10 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 			sum.Err = runErr
 			printSummary(os.Stdout, sum)
 		}
-		saveRunRecord(historyDir, historyRecord.ID, opts, started, scriptStart, scriptDur, sum.Receipt, task.single)
+		rec := saveRunRecord(historyDir, historyRecord.ID, opts, started, scriptStart, scriptDur, sum.Receipt, task.single)
+		if task.OnRecord != nil {
+			task.OnRecord(rec)
+		}
 	}()
 	_ = jobhistory.CopyFileTo(historyDir, task.Script, "script.py")
 	_ = jobhistory.SaveText(historyDir, "flake.nix", env.FlakeContent)
@@ -485,7 +492,7 @@ func syncResults(host string, port int, jobID, resultsDir, historyDir string, re
 // this process's steps (environment build and send) and prints the simple
 // view (stderr) when work left this machine, plus the detailed view under -v;
 // a task or rank prints nothing, its caller owns the terminal.
-func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart time.Time, scriptDur time.Duration, receipt json.RawMessage, single bool) {
+func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart time.Time, scriptDur time.Duration, receipt json.RawMessage, single bool) runrec.Record {
 	var steps []runrec.Step
 	if single {
 		steps = runrec.Steps()
@@ -538,10 +545,16 @@ func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart 
 	if err := runrec.Save(historyDir, rec); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not save the run record in %s: %v\n", historyDir, err)
 	}
-	if !single {
-		return
+	if single {
+		PrintRunRecord(rec, left)
 	}
-	// WriteDetailed opens with the simple line, so -v prints it only once.
+	return rec
+}
+
+// PrintRunRecord is the end-of-run view on stderr: the detailed one under -v
+// (it opens with the simple line), else the simple line when work left this
+// machine.
+func PrintRunRecord(rec runrec.Record, left bool) {
 	if say.Verbose {
 		runrec.WriteDetailed(os.Stderr, rec)
 	} else if left {
@@ -634,4 +647,20 @@ func memLimitFor(estimate int64) int64 {
 		return limit
 	}
 	return floor
+}
+
+// runName names the node a job runs on for the history: "this machine" by
+// node id (never by host: an internet peer is 127.0.0.1 too), else its
+// hostname as its daemon reports it; "" when neither is known.
+func runName(opts Options) string {
+	if opts.TargetID == "" {
+		return ""
+	}
+	me, err := identity.GetOrCreate()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read this node's identity for the job history: %v\n", err)
+	} else if me.NodeID == opts.TargetID {
+		return "this machine"
+	}
+	return nodeNames(opts.DaemonHost, opts.DaemonPort)[opts.TargetID]
 }

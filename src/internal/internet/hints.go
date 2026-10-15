@@ -159,6 +159,12 @@ func (m *Manager) sync(ctx context.Context) {
 		if in.hidden {
 			continue
 		}
+		m.mu.Lock()
+		stray := m.strayLocked(in, now)
+		m.mu.Unlock()
+		if stray {
+			continue
+		}
 		at, err := resolve(in.addr)
 		m.mu.Lock()
 		if err == nil {

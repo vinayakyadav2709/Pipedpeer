@@ -25,24 +25,27 @@ type Record struct {
 	ScriptPath string `json:"script_path"`
 	// Args is the script's argv after the script path: the memory estimate
 	// keys on script + args (resourceest).
-	Args           []string `json:"args,omitempty"`
-	Remote         string   `json:"remote"`
-	TargetID       string   `json:"target_id"`
-	Detached       bool     `json:"detached"`
-	Isolate        bool     `json:"isolate"`
-	JobName        string   `json:"job_name,omitempty"`
-	JobSet         string   `json:"job_set,omitempty"` // groups fan-out tasks from one map run
-	RemoteJobDir   string   `json:"remote_job_dir,omitempty"`
-	StorePath      string   `json:"store_path,omitempty"`
-	RunPath        string   `json:"run_path,omitempty"`
-	RunHost        string   `json:"run_host,omitempty"`
-	LocalSyncRoot  string   `json:"local_sync_root,omitempty"`
-	ReceivedFiles  int      `json:"received_files,omitempty"`
-	NewFiles       int      `json:"new_files,omitempty"`
-	UpdatedFiles   int      `json:"updated_files,omitempty"`
-	DeletedFiles   int      `json:"deleted_files,omitempty"`
-	UnchangedFiles int      `json:"unchanged_files,omitempty"`
-	ManifestPath   string   `json:"manifest_path,omitempty"`
+	Args         []string `json:"args,omitempty"`
+	Remote       string   `json:"remote"`
+	TargetID     string   `json:"target_id"`
+	Detached     bool     `json:"detached"`
+	Isolate      bool     `json:"isolate"`
+	JobName      string   `json:"job_name,omitempty"`
+	JobSet       string   `json:"job_set,omitempty"` // groups fan-out tasks from one map run
+	RemoteJobDir string   `json:"remote_job_dir,omitempty"`
+	StorePath    string   `json:"store_path,omitempty"`
+	RunPath      string   `json:"run_path,omitempty"`
+	RunHost      string   `json:"run_host,omitempty"`
+	// RunName is the node the job ran on by name ("this machine" for this
+	// one): an internet peer's RunHost is 127.0.0.1, which says nothing.
+	RunName        string `json:"run_name,omitempty"`
+	LocalSyncRoot  string `json:"local_sync_root,omitempty"`
+	ReceivedFiles  int    `json:"received_files,omitempty"`
+	NewFiles       int    `json:"new_files,omitempty"`
+	UpdatedFiles   int    `json:"updated_files,omitempty"`
+	DeletedFiles   int    `json:"deleted_files,omitempty"`
+	UnchangedFiles int    `json:"unchanged_files,omitempty"`
+	ManifestPath   string `json:"manifest_path,omitempty"`
 	// Coordinator placement diagnostics
 	PlacementSource string `json:"placement_source,omitempty"` // "registry", "cache", "discovery", "self", "explicit"
 	DegradedMode    bool   `json:"degraded_mode,omitempty"`
@@ -86,6 +89,7 @@ type JobSummary struct {
 	TargetID   string
 	ScriptPath string
 	Remote     string
+	RunName    string
 	StartedAt  string
 	DurationMs int64
 }
@@ -299,6 +303,7 @@ func List(limit int) ([]JobSummary, error) {
 			Stage:      r.Stage,
 			Detached:   r.Detached,
 			JobName:    r.JobName,
+			RunName:    r.RunName,
 			JobSet:     r.JobSet,
 			TargetID:   r.TargetID,
 			ScriptPath: r.ScriptPath,
