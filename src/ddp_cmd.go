@@ -76,7 +76,7 @@ func runDDP(o ddpRunOptions) error {
 	}
 
 	userMem := resourceest.ParseMemString(o.MemOverride)
-	resReq := resourceest.EstimateFromScript(o.ScriptPath, nil, userMem)
+	resReq := resourceest.EstimateForRun(o.ScriptPath, o.ScriptArgs, nil, userMem)
 
 	rrFn := func(count int) int {
 		url := fmt.Sprintf("http://127.0.0.1:%d/v1/roundrobin?count=%d", o.DaemonPort, count)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,30 +16,33 @@ import (
 )
 
 type Record struct {
-	ID             string `json:"id"`
-	Status         string `json:"status"`
-	Error          string `json:"error,omitempty"`
-	StartedAt      string `json:"started_at"`
-	FinishedAt     string `json:"finished_at,omitempty"`
-	DurationMs     int64  `json:"duration_ms,omitempty"`
-	ScriptPath     string `json:"script_path"`
-	Remote         string `json:"remote"`
-	TargetID       string `json:"target_id"`
-	Detached       bool   `json:"detached"`
-	Isolate        bool   `json:"isolate"`
-	JobName        string `json:"job_name,omitempty"`
-	JobSet         string `json:"job_set,omitempty"` // groups fan-out tasks from one map run
-	RemoteJobDir   string `json:"remote_job_dir,omitempty"`
-	StorePath      string `json:"store_path,omitempty"`
-	RunPath        string `json:"run_path,omitempty"`
-	RunHost        string `json:"run_host,omitempty"`
-	LocalSyncRoot  string `json:"local_sync_root,omitempty"`
-	ReceivedFiles  int    `json:"received_files,omitempty"`
-	NewFiles       int    `json:"new_files,omitempty"`
-	UpdatedFiles   int    `json:"updated_files,omitempty"`
-	DeletedFiles   int    `json:"deleted_files,omitempty"`
-	UnchangedFiles int    `json:"unchanged_files,omitempty"`
-	ManifestPath   string `json:"manifest_path,omitempty"`
+	ID         string `json:"id"`
+	Status     string `json:"status"`
+	Error      string `json:"error,omitempty"`
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	ScriptPath string `json:"script_path"`
+	// Args is the script's argv after the script path: the memory estimate
+	// keys on script + args (resourceest).
+	Args           []string `json:"args,omitempty"`
+	Remote         string   `json:"remote"`
+	TargetID       string   `json:"target_id"`
+	Detached       bool     `json:"detached"`
+	Isolate        bool     `json:"isolate"`
+	JobName        string   `json:"job_name,omitempty"`
+	JobSet         string   `json:"job_set,omitempty"` // groups fan-out tasks from one map run
+	RemoteJobDir   string   `json:"remote_job_dir,omitempty"`
+	StorePath      string   `json:"store_path,omitempty"`
+	RunPath        string   `json:"run_path,omitempty"`
+	RunHost        string   `json:"run_host,omitempty"`
+	LocalSyncRoot  string   `json:"local_sync_root,omitempty"`
+	ReceivedFiles  int      `json:"received_files,omitempty"`
+	NewFiles       int      `json:"new_files,omitempty"`
+	UpdatedFiles   int      `json:"updated_files,omitempty"`
+	DeletedFiles   int      `json:"deleted_files,omitempty"`
+	UnchangedFiles int      `json:"unchanged_files,omitempty"`
+	ManifestPath   string   `json:"manifest_path,omitempty"`
 	// Coordinator placement diagnostics
 	PlacementSource string `json:"placement_source,omitempty"` // "registry", "cache", "discovery", "self", "explicit"
 	DegradedMode    bool   `json:"degraded_mode,omitempty"`
@@ -328,27 +332,38 @@ func ReadOptionalText(dir, name string) (string, error) {
 // QueryPeakMem returns the PeakMemBytes from the last N runs of the same script.
 // Only returns non-zero values. Result is unsorted.
 func QueryPeakMem(scriptPath string, limit int) []int64 {
+	var peaks []int64
+	for _, r := range QueryRuns(scriptPath, limit) {
+		peaks = append(peaks, r.PeakMemBytes)
+	}
+	return peaks
+}
+
+// QueryRuns returns the last N records of scriptPath that recorded a peak,
+// newest first.
+func QueryRuns(scriptPath string, limit int) []Record {
 	entries, err := os.ReadDir(BaseDir())
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("jobhistory: reading %s for past runs of %s: %v", BaseDir(), scriptPath, err)
+		}
 		return nil
 	}
-
-	var peaks []int64
-	// Iterate in reverse (newest first)
-	for i := len(entries) - 1; i >= 0 && len(peaks) < limit; i-- {
+	var runs []Record
+	for i := len(entries) - 1; i >= 0 && len(runs) < limit; i-- {
 		e := entries[i]
 		if !e.IsDir() {
 			continue
 		}
 		r, _, err := ReadRecord(e.Name())
 		if err != nil {
-			continue
+			continue // not a record dir: the daemon shares this directory
 		}
 		if r.ScriptPath == scriptPath && r.PeakMemBytes > 0 {
-			peaks = append(peaks, r.PeakMemBytes)
+			runs = append(runs, r)
 		}
 	}
-	return peaks
+	return runs
 }
 
 // IsRecordDir reports whether dir holds a history record. The history shares
