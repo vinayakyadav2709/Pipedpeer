@@ -40,8 +40,9 @@
 \usepackage{multicol}
 \usepackage{hyperref}
 
-% -- Fields the authors fill before printing (red until filled) --------------
-\newcommand{\fillin}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
+% -- Fields the authors fill before printing: blank space in the PDF; find them
+% in the source by searching for FILL-AT-SUBMISSION --------------------------
+\newcommand{\fillin}[1]{\hspace*{3cm}}
 \newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
 
 % -- Hyperref ----------------------------------------------------------------
@@ -118,7 +119,7 @@
 \newcommand{\institute}{Sardar Patel Institute of Technology}
 \newcommand{\department}{Department of Computer Engineering}
 \newcommand{\university}{University of Mumbai}
-% Fill these before printing; each shows in red until replaced.
+% Fill these before printing; each prints as blank space until replaced.
 \newcommand{\submissiondate}{\fillin{submission date}}% FILL-AT-SUBMISSION
 \newcommand{\hodname}{Dr. Sudhir Dhage}
 \newcommand{\principalname}{Dr. Bhalchandra Chaudhari}

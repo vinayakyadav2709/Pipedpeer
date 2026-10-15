@@ -8,7 +8,7 @@
 PipedPeer runs an unmodified Python script on other machines with no cluster to
 configure, reproduces its environment exactly, distributes the parallel work
 inside it without the user touching the source, and joins machines on different
-networks with one command and no relay. Its contributions are:
+networks with a single command and no relay. Its contributions are:
 
 \begin{enumerate}[leftmargin=*, label=\arabic*.]
   \item \textbf{The store path as cache key and unit of transfer.} Pinning an
@@ -53,9 +53,9 @@ automatically only within the ring sizes where it was shown to keep accuracy.
   take parallel chunks only.
   \item \textbf{Submitter and lead.} A parallel script runs on its submitter,
   which must survive the job, and a training ring needs rank 0's machine.
-  \item \textbf{Fast synchronisation for small rings.} From five ranks no
-  synchronisation interval kept accuracy, so automatic mode keeps such rings
-  exact.
+  \item \textbf{Fast synchronisation for small rings.} At eight ranks the
+  transformer failed at every interval down to 2, so no interval is used for
+  five or more ranks and automatic mode keeps such rings exact.
   \item \textbf{Interception gaps.} Only \texttt{map} of a process-pool executor
   is intercepted, the \texttt{@} operator is not, and numerical work under
   32\,MB never leaves the node, by design.
@@ -65,7 +65,8 @@ automatically only within the ring sizes where it was shown to keep accuracy.
   \item \textbf{Measurement.} Speedup comes from containers with fixed processor
   quotas and a few real machines; hole-punch success across many networks, two
   GPUs in one machine and fast synchronisation at five to seven ranks are not
-  measured.
+  measured. NAT traversal is evaluated on a container testbed on one host and
+  over an overlay between real homes.
 \end{itemize}
 
 \section{Security}

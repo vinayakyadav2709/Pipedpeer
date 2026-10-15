@@ -61,7 +61,7 @@ packages under \texttt{src/internal/}; the remainder are supporting code
 \texttt{direct} & Shared UDP socket, candidate race, birthday-collision fallback, QUIC links \\
 \texttt{rendezvous} & The introducer's address book and punch-request forwarding \\
 \texttt{portmap} & Router port mapping by PCP, NAT-PMP and UPnP-IGD \\
-\texttt{authtoken}, \texttt{tlsid} & Shared-secret middleware; certificate from the node key, pins by node id, TLS and HTTP on one port \\
+\texttt{authtoken}, \texttt{tlsid} & Shared-secret middleware; certificate from the node key, pins by node id, TLS and HTTP on a single port \\
 \texttt{clustercfg}, \texttt{invite} & The one configuration file (secret, introducers, role); the invite code \\
 \texttt{identity}, \texttt{nixsign} & Ed25519 node key, whose fingerprint is the node id; signing closures and the trusted-key list \\
 \texttt{narpack}, \texttt{nixstore} & Signed closure archives and cache pruning; system or private (rootless) Nix store \\

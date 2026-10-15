@@ -6,7 +6,7 @@
 \section{Node Discovery and the Address Book}
 \label{sec:discovery}
 
-Three sources feed one table, and none blocks the others.
+Node discovery merges addresses from three non-blocking sources into a single table.
 
 \textbf{UDP probes.} The daemon opens two sockets on UDP port \texttt{4242}, one
 joined to multicast group \texttt{239.255.0.99} and one bound for broadcast,
@@ -85,8 +85,8 @@ manner of STUN \cite{rfc8489}. A router mapping is withheld when its external
 address differs from the reflexive one: behind a second layer of NAT, such as a
 phone tether, the router that answers is not the one facing the internet.
 
-\textbf{One socket.} Punch probes, introducer messages and QUIC share one UDP
-socket on port 4243. This is the mechanism, not a convenience: a router's
+\textbf{One socket.} Punch probes, introducer messages and QUIC share a single UDP
+socket on port 4243. Sharing one socket is required for correctness, not convenience: a router's
 mapping belongs to the socket that created it \cite{ford2005p2p}, so the
 connection must arrive on the socket the probes left from. Datagrams are
 separated by content --- probes by four magic bytes, introducer messages by a
@@ -261,7 +261,8 @@ submitter a dead node and a lost network look the same, but the first means run
 the job elsewhere and the second means wait; the client therefore runs three
 probes at once, two seconds each and none needing root --- another peer's health
 endpoint, a registration with the introducer, and a TCP connection to the
-default gateway --- and if any answers, the node is the one gone.
+default gateway --- and an answer to any of them confirms that the remote peer,
+not the local network, failed.
 
 % ------------------------------------------------------------
 \section{Reproducing the Environment}
@@ -281,7 +282,7 @@ end; a \texttt{requirements.txt} beside the script is read, and a
 Only what is still unresolved is reported, before anything runs, with the flag
 that would add it.
 
-\textbf{The keystone.} Nix \cite{dolstra2004nix} names every build output by a
+\textbf{Content-addressed environment pinning.} Nix \cite{dolstra2004nix} names every build output by a
 hash of its inputs. The generated flake pins an \emph{exact} nixpkgs revision,
 not a branch. A branch resolves at build time, so two nodes building the same
 script on different days would produce different store paths and the system
@@ -387,7 +388,7 @@ swap refused. A daemon without a user \texttt{systemd}, such as one in a
 container, runs a watchdog instead that measures the daemon's children every
 second and, past the ceiling, kills the largest child and logs it, never the
 daemon. A hard limit is used rather than a throttling one, because a job held
-at a throttling limit stalls instead of failing. Daemons on one machine,
+at a throttling limit stalls instead of failing. Daemons on a single machine,
 recognised by the kernel's boot identifier, subtract one another's reservations,
 so two of them cannot promise the same memory twice.
 
@@ -453,8 +454,8 @@ its 1.7\,s import (Section~\ref{sec:res-shim}).
 
 \texttt{map}, \texttt{starmap}, \texttt{imap} and \texttt{imap\_unordered} go to
 the cluster (\texttt{imap} lazily, in batches), while \texttt{apply} and
-\texttt{apply\_async} stay local. A head of items runs locally first to measure
-the cost of one item, and a map whose remaining work is under half a second stays
+\texttt{apply\_async} stay local. A small prefix of items runs locally first to measure
+per-item cost, and a map whose remaining work is under half a second stays
 local. The kernel reaches the peer in one of two ways. A module-level function,
 including one defined in the script's \texttt{\_\_main\_\_}, travels as its
 \emph{source}, with the helper functions it calls and a pickle of the module data
@@ -594,7 +595,8 @@ failed the accuracy bar at every interval tried. The bar is one-sided: the final
 validation loss may be at most 1\% above one device's, as a mean over three
 seeds, on every test model. The interval depends on the ring's size: the largest
 that passed on every model was 32 steps at two ranks, 16 at three and 4 at four,
-and none passed from five ranks (Section~\ref{sec:res-train}). That table is the
+and none passed at eight ranks, so none is used for five or more
+(Section~\ref{sec:res-train}). That table is the
 default; an explicit fast ring beyond four ranks runs at $H=4$ with a warning.
 
 \textbf{Choosing automatically.} By default the lead daemon switches a ring to
@@ -740,7 +742,7 @@ historical tier closes a feedback loop: the worker samples the job's process tre
 while it runs and records the peak, which sizes the next run's admission request.
 
 \textbf{Commands.} The CLI has thirteen commands, among them set-up, invite,
-connect, run, status, attach, doctor and uninstall. Configuration is one file
+connect, run, status, attach, doctor and uninstall. Configuration is a single file
 holding the secret, the introducers and the node's role, and the ports are one
 block: 4242 for the daemon API and discovery, 4243 for direct links and 4244 for
 the introducer. \texttt{pipedpeer doctor} checks the daemon, the secret, each
