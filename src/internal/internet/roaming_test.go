@@ -360,3 +360,59 @@ func TestTheIntroducerRedialsAPeerThatOnlyPunchedIn(t *testing.T) {
 		return l != nil && l.conn != oldConn && l.dialled && l.alive()
 	})
 }
+
+// TestARequestInFlightDuringASwapFailsAtOnce (FIX-E2c). connect's first
+// /health went out on a connection a newer one replaced a moment later, and
+// hung until its 3 s timeout: the forwarder waited for the request half while
+// the stream under it was gone. It must fail at once so the caller retries,
+// and a new request must ride the new connection.
+func TestARequestInFlightDuringASwapFailsAtOnce(t *testing.T) {
+	m := New(Config{Key: newKey(t)})
+	defer m.closeAll()
+	ctx := context.Background()
+	if err := m.linkUp(ctx, "peer-b", liveConn(t), "punched"); err != nil {
+		t.Fatal(err)
+	}
+	addr := m.Peers()["peer-b"]
+	m.mu.Lock()
+	m.peers["peer-b"].since = time.Now().Add(-time.Minute)
+	m.mu.Unlock()
+
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("GET /health HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the stream is open and waiting for an answer
+
+	newer := liveConn(t)
+	swapped := time.Now()
+	if err := m.linkUp(ctx, "peer-b", newer, pathInbound); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = c.Read(make([]byte, 64))
+	if err == nil {
+		t.Fatal("the in-flight request got an answer from a replaced connection")
+	}
+	if took := time.Since(swapped); took > 250*time.Millisecond {
+		t.Fatalf("the in-flight request took %s to fail after the swap; the caller waits that long to retry", took)
+	}
+
+	// A new request rides the new connection.
+	m.mu.Lock()
+	cur := m.peers["peer-b"].conn
+	m.mu.Unlock()
+	if cur != newer {
+		t.Fatal("the link does not use the newer connection")
+	}
+	st, err := m.openStream(ctx, "peer-b", m.peers["peer-b"].listener)
+	if err != nil {
+		t.Fatalf("a new request after the swap: %v", err)
+	}
+	st.CancelRead(0)
+	_ = st.Close()
+}

@@ -1344,23 +1344,14 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 // which may have been replaced since the forwarder started.
 func (m *Manager) forward(ctx context.Context, node string, ln net.Listener, local net.Conn) {
 	defer local.Close()
-	m.mu.Lock()
-	var conn *quic.Conn
-	if link := m.peers[node]; link != nil && link.listener == ln {
-		conn = link.conn
-	}
-	m.mu.Unlock()
-	if conn == nil {
-		m.cfg.Log("peer %s: no connection behind its forwarder; dropping a local request", short(node))
-		return
-	}
-	st, err := conn.OpenStreamSync(ctx)
+	st, err := m.openStream(ctx, node, ln)
 	if err != nil {
-		m.cfg.Log("peer %s: opening a stream: %v", short(node), err)
+		m.cfg.Log("peer %s: dropping a local request: %v", short(node), err)
+		reset(local)
 		return
 	}
 	defer st.Close()
-	done := make(chan struct{}, 2)
+	done := make(chan struct{}, 1)
 	go func() {
 		_, _ = io.Copy(st, local)
 		// Half-close: the far daemon sees the end of the request and
@@ -1368,12 +1359,60 @@ func (m *Manager) forward(ctx context.Context, node string, ln net.Listener, loc
 		_ = st.Close()
 		done <- struct{}{}
 	}()
-	go func() {
-		_, _ = io.Copy(local, st)
-		done <- struct{}{}
-	}()
+	if _, err := io.Copy(local, st); err != nil {
+		// The connection under the stream went away - most often a newer
+		// connection from the same peer replaced it. Reset the local side
+		// at once: waiting for the request half here held the caller until
+		// its own timeout, 3 s on connect's first /health (FIX-E2c), and a
+		// reset is what tells it to retry, which lands on the new connection.
+		reset(local)
+		st.CancelRead(0)
+		return
+	}
+	// The response is complete; the request half ends with the caller.
 	<-done
-	<-done
+}
+
+// openStream opens a stream on the link's current connection. A connection
+// that is already dead, or dies as the stream opens, is waited past for up to
+// a second: a swap to a newer connection is usually under way, and a new
+// request should ride that one rather than fail.
+func (m *Manager) openStream(ctx context.Context, node string, ln net.Listener) (*quic.Stream, error) {
+	var lastErr error
+	deadline := time.Now().Add(time.Second)
+	for {
+		m.mu.Lock()
+		var conn *quic.Conn
+		if link := m.peers[node]; link != nil && link.listener == ln {
+			conn = link.conn
+		}
+		m.mu.Unlock()
+		if conn == nil {
+			return nil, errors.New("no connection behind its forwarder")
+		}
+		if conn.Context().Err() == nil {
+			st, err := conn.OpenStreamSync(ctx)
+			if err == nil {
+				return st, nil
+			}
+			lastErr = err
+		} else {
+			lastErr = context.Cause(conn.Context())
+		}
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			return nil, fmt.Errorf("opening a stream: %w", lastErr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// reset closes a local connection with a TCP reset rather than a clean end,
+// so the caller sees a failed request and not a short answer.
+func reset(c net.Conn) {
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetLinger(0)
+	}
+	_ = c.Close()
 }
 
 // watchConn drops node's link when conn dies, unless conn was replaced.
