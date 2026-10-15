@@ -16,25 +16,25 @@
 \fi
 
 \usepackage{cite}
-\providecommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
-% Fields the authors fill before submission (red until filled).
-\newcommand{\fillin}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
 \newcommand{\guidename}{Dr. Rupali Sawant}
 \newcommand{\guideemail}{rupali\_sawant@spit.ac.in}
+\newcommand{\mentorname}{Prof. Dayanand Ambawade}
 \usepackage{amsmath,amssymb,amsfonts}
-\usepackage{algorithmic}
 \usepackage{graphicx}
 \usepackage{textcomp}
-\usepackage{xcolor}
 \usepackage{booktabs}
 \usepackage{tabularx}
 \usepackage{url}
-\usepackage{caption}
-\usepackage{subcaption}
 
 \newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
 \newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
 \newcommand{\figpath}[1]{../diagrams/#1}
+% Starts a second row of authors (IEEEtran sets one row by default).
+\makeatletter
+\newcommand{\linebreakand}{%
+  \end{@IEEEauthorhalign}\hfill\mbox{}\par
+  \mbox{}\hfill\begin{@IEEEauthorhalign}}
+\makeatother
 
 \begin{document}
 
@@ -58,42 +58,37 @@ vinayak.yadav23@spit.ac.in}
 \textit{Sardar Patel Institute of Technology}\\
 Mumbai, Maharashtra, India \\
 sahil.gupta23@spit.ac.in}
-\and
+\linebreakand
 \IEEEauthorblockN{\guidename}
 \IEEEauthorblockA{\textit{Department of Computer Engineering} \\
 \textit{Sardar Patel Institute of Technology}\\
 Mumbai, Maharashtra, India \\
 \guideemail}
+\and
+\IEEEauthorblockN{\mentorname}
+\IEEEauthorblockA{\textit{Department of Computer Engineering} \\
+\textit{Sardar Patel Institute of Technology}\\
+Mumbai, Maharashtra, India}
 }
 
 \maketitle
 
 \begin{abstract}
-Distributed computing frameworks need a cluster that somebody has already
-configured, a program rewritten against their API, and machines that can reach
-one another. Those costs come before any speedup, and they put the idle machines a
-small team owns out of reach, particularly when the machines sit behind
-different routers. We present PipedPeer, which runs an unmodified Python script
-on other machines with no manual installation: one binary whose set-up
-command installs the rest. The script's environment is built as a content-addressed Nix closure
-against a pinned package set, so the same script yields the same store path on
-every machine. A worker that holds the environment ships nothing, and one that
-holds part of it receives only the missing store paths. The parallel primitives the
-script already uses are substituted at import time. Parallel maps are divided
-among peers by a makespan solver over measured throughput, and numerical work
-moves only when a cost model finds moving it cheaper than computing it. Machines on
-different networks are joined with one command: an introducer that carries no
-data exchanges addresses, and the machines punch through their routers, with a
-birthday-collision fallback for the hardest pair of NATs, onto direct QUIC links
-authenticated by per-node Ed25519 keys. No relay carries job data. In a
-three-worker container lab, a repeat submission took 0.83\,s against 23.4\,s for
-the first. Interception costs $1.24\times$ the start-up of a job that imports
-nothing heavy, and about 0.12\,s on a job it declines. A run can be stopped on
-every machine with one interrupt, or detached and reattached, and a training ring
-continues when a rank dies and grows when a machine returns. \textbf{822} of \textbf{829} tests pass
-with \textbf{0} failing, and a mutation audit % evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
-breaking 95 features is caught in every case. Measurements recorded between real machines during development are
-reported with their provenance and are not claimed beyond it.
+Distributed computing frameworks presuppose a configured cluster, a program
+written against their API, and machines that can reach one another. PipedPeer
+removes all three for Python: one command runs an unmodified script on other
+machines, each running the same daemon, with no head node and no scheduler
+process. The script's environment is built as a Nix closure against a pinned
+package set, so it has the same store path on every machine, and a peer
+receives only the store paths it lacks. The parallel primitives the script
+already uses are substituted at import time; parallel maps are divided by a
+makespan solver over measured peer throughput, and numerical work moves only
+when a cost model predicts a gain. Machines behind different routers meet
+through an introducer that any member can serve, then connect directly over
+authenticated QUIC; no data is relayed. In a container lab a repeat
+submission took 0.83\,s against 23.4\,s for the first, and interception cost
+$1.24\times$ the start-up of a trivial job. Between two laptops in different
+homes, a CPU-bound script ran in 13.3--14.6\,s against 17.4--18.1\,s on one.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -106,97 +101,136 @@ reproducible environments, content-addressed caching, cost-based scheduling
 The gap between running \texttt{python script.py} and running the same work on
 several machines is large in operational effort and often small in the
 computation involved. Apache Spark~\cite{zaharia2010spark},
-Ray~\cite{moritz2018ray} and Dask~\cite{rocklin2015dask} all presuppose a
+Ray~\cite{moritz2018ray} and Dask~\cite{rocklin2015dask} presuppose a
 configured cluster with a head node, matching software on every worker, a
 scheduler process, and a network on which every machine reaches every other.
 Remote execution over \texttt{ssh} avoids the set-up but provides no
-environment management, placement, isolation or fault tolerance, and it still
+environment management, placement, isolation or fault tolerance, and still
 needs a reachable address.
 
-Three obstacles are usually treated separately. The \emph{environment} obstacle:
-a remote machine must be made to match the local one. The \emph{code} obstacle:
-using more than one machine normally requires rewriting the program. The
-\emph{reachability} obstacle: machines behind different home or campus routers
-accept no inbound connections, and the usual answers --- a VPN, port forwarding,
-or a relay --- are either configuration or a bottleneck. PipedPeer removes all
-three. Its contributions are:
+Three obstacles are usually treated separately. The \emph{environment}
+obstacle: a remote machine must be made to match the local one. The
+\emph{code} obstacle: using more than one machine normally means rewriting the
+program. The \emph{reachability} obstacle: machines behind different home or
+campus routers accept no inbound connections, and the usual answers --- a VPN,
+port forwarding or a relay --- are either configuration or a bottleneck.
+PipedPeer addresses all three. Its contributions are:
 
 \begin{enumerate}
-\item \textbf{Peer-to-peer closure distribution keyed and diffed by store path.}
-Content-addressed store paths and substitution are Nix's \cite{dolstra2004nix};
-we add pushing signed closures between peers, sending only the store paths a
-receiver lacks, and using a runnable-closure check to decide which peers may
-receive distributed work (Section~\ref{sec:env}).
+\item \textbf{Peer-to-peer closure distribution.} Content-addressed store paths
+are Nix's~\cite{dolstra2004nix}; we push signed closures between peers, send
+only the store paths a receiver lacks, and offer distributed work only to peers
+that can run the closure (Section~\ref{sec:env}).
 \item \textbf{Transparent interception with measured work sharing.} Parallel
-primitives are substituted at import time; parallel maps are divided by a
-makespan solver over measured peer rates, and numerical work is gated by a cost
+primitives are substituted at import time, parallel maps are divided by a
+makespan solver over measured rates, and numerical work is gated by a cost
 model (Sections~\ref{sec:intercept}, \ref{sec:cost}).
-\item \textbf{Joining across networks without a relay.} An introducer that only
-exchanges addresses, router port mapping, a candidate race on one shared socket,
-a birthday-collision fallback, and authenticated QUIC links that the rest of the
-system sees as ordinary nodes (Section~\ref{sec:nat}).
-\item \textbf{Placement without a scheduler.} Hard filters and a bounded score
-evaluated in the submitting client, with a three-phase lease and per-machine
-memory budgets (Section~\ref{sec:placement}).
-\item \textbf{A correctness-preserving fallback on every distributed path},
-with a test suite audited by disabling 95 features in turn and requiring the
-tests to notice each (Section~\ref{sec:ft}).
+\item \textbf{Joining across networks without a relay}, through an introducer
+that only exchanges addresses and that every daemon serves
+(Section~\ref{sec:nat}).
+\item \textbf{Placement without a scheduler}: filters and a bounded score
+evaluated in the submitting client, with a three-phase lease
+(Section~\ref{sec:placement}).
+\item \textbf{A fallback that preserves the result on every distributed path}
+(Section~\ref{sec:ft}).
 \end{enumerate}
 
-\section{Literature Review}
+\section{Related Work}
 
 Spark~\cite{zaharia2010spark}, Ray~\cite{moritz2018ray} and
-Dask~\cite{rocklin2015dask} are mature and considerably more capable at scale.
-Ray ships a drop-in \texttt{multiprocessing.Pool} and a \texttt{joblib} backend,
-and Modin~\cite{petersohn2020modin} provides distributed pandas behind the
-pandas API; each requires changing an import and a running cluster. Here no line
-of the program changes, because substitution happens in \texttt{sitecustomize}
-before the first user statement, and distribution is gated per call. We are not
-aware of prior work combining import-time substitution of unmodified code with
-a per-call cost gate. BOINC~\cite{anderson2004boinc} pioneered volunteer
-computing but is a platform for specific projects rather than a general executor.
+Dask~\cite{rocklin2015dask} are mature and far more capable at scale. Ray ships
+a drop-in \texttt{multiprocessing.Pool} and a \texttt{joblib} backend, and
+Modin~\cite{petersohn2020modin} provides distributed pandas behind the pandas
+API; each needs a changed import and a running cluster. PipedPeer changes no
+line of the program, because substitution happens before the first user
+statement, and it decides per call whether to distribute.
+BOINC~\cite{anderson2004boinc} pioneered volunteer computing, but as a platform
+for specific projects rather than a general executor. Table~\ref{tab:cmp}
+summarises the differences.
 
-Our cross-network mechanism follows established practice. Reflexive addresses
-are discovered as in STUN \cite{rfc8489}; port mappings are requested with PCP
-\cite{rfc6887} and NAT-PMP \cite{rfc6886}; and simultaneous UDP probing from the
-socket that will carry the connection is the hole-punching technique of Ford et
-al.~\cite{ford2005p2p}. Links are QUIC \cite{rfc9000}.
+\begin{table}[t]
+\centering
+\caption{PipedPeer against existing systems. The lower block is where it is
+the weaker system.}
+\label{tab:cmp}
+\renewcommand{\arraystretch}{1.15}
+\footnotesize
+\begin{tabularx}{\columnwidth}{X C{0.75cm} C{0.7cm} C{0.6cm} C{0.7cm} C{0.6cm}}
+\toprule
+\textbf{Property} & \textbf{Ours} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{ssh} \\
+\midrule
+Runs unmodified Python     & yes & no  & part. & part. & yes \\
+No cluster to configure    & yes & no  & no    & no    & part. \\
+No head or master node     & yes & no  & no    & no    & yes \\
+Reproduces the environment & yes & part. & part. & part. & no \\
+Joins NATed machines, no relay & yes & no & no & no & no \\
+Sandboxes each job         & part. & no & no   & no    & no \\
+Survives losing a node     & yes & yes & yes   & yes   & no \\
+\midrule
+Authenticated, encrypted   & part. & yes & part. & part. & yes \\
+Runtimes beyond Python     & \textbf{no} & yes & part. & no & yes \\
+Proven in production       & \textbf{no} & yes & yes & yes & yes \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-Edge-computing offloading addresses the decision our cost model makes. Deng et
-al.~\cite{deng2023} compare transmission against local computation; Yong et
-al.~\cite{yong2023} show partial offloading to beat all-or-nothing, the regime our
-interception operates in; learned policies~\cite{he2024} exceed a deterministic
-rule at the price of a training phase; and topology-aware placement
-\cite{zhao2023} outperforms scalar scoring, a limitation our whole-job placement
-shares. Spenger~\cite{kth2025thesis} defines failure transparency, under which
-application code never observes a failure, and proves it for stateful dataflow; that is the property Section~\ref{sec:ft} must provide for scripts
-that contain no failure handling.
+The cross-network mechanism follows established practice. Reflexive addresses
+are discovered as in STUN~\cite{rfc8489}; port mappings are requested with
+PCP~\cite{rfc6887} and NAT-PMP~\cite{rfc6886}; simultaneous UDP probing from the
+socket that will carry the connection is the hole punching of Ford et
+al.~\cite{ford2005p2p}; links are QUIC~\cite{rfc9000}.
 
-\section{Methodology}
+Edge-computing offloading studies the decision our cost model makes. Deng et
+al.~\cite{deng2023} weigh transmission against local computation; Yong et
+al.~\cite{yong2023} show partial offloading beating all-or-nothing, the regime
+our interception works in; learned policies~\cite{he2024} exceed a fixed rule at
+the price of training; and topology-aware placement~\cite{zhao2023} outperforms
+scalar scoring, a limitation our placement shares. Spenger~\cite{kth2025thesis}
+defines failure transparency, under which application code never observes a
+failure; Section~\ref{sec:ft} must provide it for scripts that contain no
+failure handling. For training we build on PyTorch
+DDP~\cite{li2020pytorchddp}, 8-bit gradient compression~\cite{dettmers2016eightbit}
+with error feedback~\cite{seide2014onebit}, and periodic averaging as in
+DiLoCo~\cite{douillard2023diloco} and local SGD~\cite{lin2020localsgd}.
+
+\section{System Design}
+
+\textbf{Design goals.} (G1) The script runs unchanged. (G2) Joining needs one
+set-up command, plus one code across networks. (G3) No machine is special:
+there is no head node, scheduler or registry, and every machine both submits
+and works. (G4) Distribution never changes the result and is declined when it
+would be slower. (G5) No job data passes through a third machine.
+
+Coordination is \emph{decentralised}: every daemon serves the introducer for
+its cluster, placement is computed in the submitting client, and a training
+ring's lead is simply the node that runs rank~0 of that job. It is
+\emph{recursive} in that work is divided again wherever it lands: a node that
+cannot hold a parallel map forwards it whole to a peer, that peer splits it
+among its own peers, and each part spreads across the cores of the node that
+runs it.
 
 Every machine runs one daemon; the command-line client is short-lived. The
-coordinator is a library linked into the client, so there is no scheduler
-process and no head node. A machine is a submitter and a worker at once. On one
-network participants find each other unaided; across networks a participant
-runs \texttt{pipedpeer connect} with a one-line code another member's
-\texttt{pipedpeer invite} printed, which carries the cluster secret and a few
-introducer addresses. Every daemon is an introducer for its own cluster.
+coordinator is a library linked into the client, so placement is decided where
+the job is submitted (Fig.~\ref{fig:arch}). On one network participants find
+each other unaided; across networks a participant runs \texttt{pipedpeer
+connect} with a one-line code that another member's \texttt{pipedpeer invite}
+printed, carrying the cluster secret and a few introducer addresses.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{\figpath{fig_3.1_system_design.png}}
 \caption{System design. Both roles are the same binary; peers on other networks
 are reached over direct links that the introducer helps establish but never
-carries. Phones take parallel chunks under \texttt{proot} and Nix.}
+carries.}
 \label{fig:arch}
 \end{figure}
 
 \subsection{Placement}
 \label{sec:placement}
 
-Candidates come from known peers, LAN probes, internet-linked peers and an
-optional registry. Five hard filters run in order --- architecture, GPU if
-required, and free memory, cores and VRAM --- and survivors are scored:
+Candidates come from known peers, LAN discovery and internet-linked peers. Hard
+filters run in order --- architecture, GPU if required, then free memory, cores
+and VRAM --- and survivors are scored:
 
 \begin{equation}
 \label{eq:score}
@@ -210,205 +244,134 @@ S = \Bigl(1 &- \tfrac{u_{\text{cpu}}}{200} - \tfrac{u_{\text{mem}}}{200}
 
 where $u$ are utilisations in percent, $n_{\text{jobs}}$ the running jobs,
 $\hat{c},\hat{f},\hat{m},\hat{r}$ core count, clock, free memory and free-core
-ratio normalised onto $[0,1]$, and $H$ a health score. Load dominates hardware
-(the load terms can subtract $1.0$, the hardware terms move the score by at most
-$0.36$), and a missing metric normalises to the neutral $0.5$. Free memory is what
-a node can \emph{grant}: where a user \texttt{systemd} is available each daemon
-runs under a cgroup ceiling of half the machine, and daemons on one machine
-subtract one another's reservations.
+ratio normalised onto $[0,1]$, and $H$ a health score. Load dominates hardware:
+the load terms can subtract $1.0$, the hardware terms move the score by at most
+$0.36$, and a missing metric takes the neutral $0.5$. Free memory is what a node
+can \emph{grant}: where a user \texttt{systemd} is available, each daemon runs under a cgroup ceiling of half the machine,
+and daemons on one machine subtract one another's reservations.
 
-Work is reserved by a three-phase lease. The concurrency and memory checks and
-the insertion occur under one lock, and the concurrency limit counts reserved and running leases together.
-The submitter renews every 30\,s, also while the environment builds and
-uploads; the plain run path once never renewed, so a build plus upload longer
-than the 5-minute expiry let the node reap the lease (a node held to 800\,kbit/s
-now builds for 533\,s without expiry). A submitter that dies stops renewing and
-its slot is reclaimed; a worker that dies drops out of the healthy set and its
-job is rescheduled with back-off.
+Work is reserved by a three-phase lease; the concurrency and memory checks and
+the insertion happen under one lock. The submitter renews every 30\,s, also
+while the environment builds and uploads, against a five-minute expiry. A
+submitter that dies stops renewing and its slot is reclaimed; a worker that dies
+leaves the healthy set and its job is rescheduled with back-off.
 
 \subsection{Environment Reproduction}
 \label{sec:env}
 
 The client scans imports, resolves them to packages, and builds a Nix closure
-from a flake that pins an \emph{exact} package-set revision. A branch would
-resolve differently on different days and change the store path; an exact pin
-makes the store path a stable name for an environment across machines and time.
-An import the mapping table does not know is looked up as the package of the same
-name in the pinned set, the scan follows the script's own modules, and a
-\texttt{requirements.txt} beside the script is honoured; an import still
-unresolved is reported before the run rather than dropped.
+from a flake pinned to an \emph{exact} package-set revision, so the store path
+is a stable name for an environment across machines and time. An import the
+mapping table does not know is looked up by name in the pinned set, the scan
+follows the script's own modules, a \texttt{requirements.txt} is honoured, and
+an import still unresolved is reported before the run.
 
 Before uploading, the client asks whether the target can already run the
-closure. If not, it lists the closure's store paths and asks which are missing,
-sending only those; adding one package to an environment a peer already held sent
-7 of 43 paths, 206.0\,MB reduced to 28.6\,MB. After an upload the worker pushes
-the closure to peers that cannot yet run it, since only those that can are
-offered distributed work. The upload waits for that push at most 60\,s; a peer
-still importing finishes in the background and joins the pool by itself, and a
-background send is cut only after 60\,s without progress rather than after a
-fixed total that a large closure on a slow link always exceeded. Between daemons the push is a signed binary cache
-produced and imported by Nix itself, signed with the sending node's key, so the
-receiver's signature policy applies. The archive names its signer, whose key the
-receiver checks against the signer's published identity before trusting it for
-that import; on a multi-user Nix, whose daemon ignores keys passed per command,
-a root-owned helper installed at set-up can only add or remove keys of the
-cluster's form. Caches are pruned least-recently-used.
-
-A phone with Nix takes parallel chunks in a Nix environment: under
-Termux~\cite{termux}, \texttt{proot-distro} provides, through
-\texttt{proot}~\cite{proot}, a Debian root with single-user Nix, and the phone advertises itself as taking chunks only. Every
-ARM path of the scientific set is in the public cache at the pin (a 395\,MiB
-download). Termux's \texttt{proot} lacks \texttt{fchmodat2} (Linux 6.6+), so on
-such kernels set-up builds the upstream fix. Closures go only to peers of the
-same architecture; a peer of another architecture receives the job's package
-list instead, builds its own environment once per flake hash, and refuses
-chunks until it has. Without Nix the phone stays a Termux worker for parallel
-chunks, taking one only after importing every module it names. On a Samsung
-Galaxy S20~FE (Android~13, Termux from Google Play) set-up ran end to end. A
-laptop's CPU script, spread over that laptop, a second laptop over the
-internet and the phone, gave the phone 8 of 192 parallel items with an
-unchanged checksum, once the phone had built the job's environment from the
-cache (27\,s); a torch script training 160 small models gave it 6, while with
-32 models the laptops finished before the phone's worker had loaded torch. On
-the phone, Nix's Python inside \texttt{proot} ran the CPU script (without its
-pandas step, which Termux lacks) in 62--66\,s, against 73--81\,s for Termux's
-own Python, three runs each.
+closure; if not, it sends only the store paths the target lacks. After an
+upload the worker pushes the closure to peers that cannot yet run it, because
+only those that can are offered distributed work. Between daemons the push is a
+binary cache produced and imported by Nix itself and signed with the sending
+node's key; the receiver checks that key against the signer's published identity
+before trusting it for that import. Closures go only to peers of the same
+architecture; a peer of another architecture receives the package list and
+builds its own environment once. A phone joins under Termux~\cite{termux}, where
+\texttt{proot-distro} provides, through \texttt{proot}~\cite{proot}, a Debian
+root with single-user Nix, and takes parallel chunks only.
 
 \subsection{Joining Across Networks}
 \label{sec:nat}
 
-An introducer keeps an address book, keyed by a hash of the cluster's shared
-secret, and forwards one punch request between two nodes; it carries no job
-data. Every daemon serves one for its own cluster and registers with every
-introducer it knows, so no single machine's address is a point of failure. Each node offers its LAN addresses, a port mapped on its router (published
-only if the router's external address matches what the introducer observed, which
-rules out a router behind a second NAT, once the reflexive address is known), and its reflexive address. Probes,
-introducer messages and QUIC share one UDP socket, because a router's mapping
-belongs to the socket that opened it. Both sides probe every candidate pair every
-250\,ms for 15\,s. When one side's NAT allocates a new port per destination there
-is no address to publish; that side opens 256 sockets toward the peer while the
-other sends 600 probes to random ports, and the socket that is hit is kept~\cite{anderson2020nat}. The
-winning path carries QUIC with a hello signed by each node's Ed25519~\cite{bernstein2012ed25519} key, checked
-against the node it meant to reach; the hello signs the session's exported keying
-material \cite{rfc5705} and proves the cluster secret by an HMAC~\cite{rfc2104} over it, so it
-cannot be replayed on another session. The link is exposed locally as a loopback
-forwarder recorded as one path of that node, so placement, transfer and gradient
-exchange run over it unchanged. A node is its key's fingerprint, never its
-address: the node store keeps every path to it (LAN, internet, signed gossip
-from other members) and switches only to a path that answered and proved the
-key, QUIC connections migrate when the local address changes, and a reconnecting
-node's hello replaces its dead link, so machines that change network rejoin on
-their own. A peer with no path is reported with its reason
-and routed around, never relayed. A container lab with cone and symmetric
-translators found four defects that kept such links from forming or lasting,
-among them a collision-found socket that stopped listening, and kept a read
-deadline, once adopted; all are fixed.
+An introducer keeps an address book, keyed by a hash of the cluster secret, and
+forwards punch requests between two nodes; it carries no job data. Every daemon
+serves one for its own cluster and registers with every introducer it knows, so
+no single machine's address is a point of failure. Each node offers its LAN
+addresses, a port mapped on its router (published only when the router's
+external address matches the one the introducer observed) and its reflexive
+address. Probes, introducer messages and QUIC share one UDP socket, because a
+router's mapping belongs to the socket that opened it; both sides probe every
+candidate pair every 250\,ms for 15\,s. When one side's NAT allocates a new port
+per destination, that side opens 256 sockets toward the peer while the other
+sends 600 probes to random ports, and the socket that is hit is
+kept~\cite{anderson2020nat}.
 
-The daemon API requires the cluster's shared secret on every route when one is
-configured, sends it only to hosts that answer a challenge with an HMAC, and
-serves pinned TLS~\cite{rfc8446} and HTTP on one port. These protections are optional and
-partial: without a secret the daemon is open, TLS is trust on first use and can
-fall back to plain text, and the set of keys trusted to sign closures is not yet
-bound to an authenticated identity.
+The winning path carries QUIC with a hello signed by each node's
+Ed25519~\cite{bernstein2012ed25519} key and checked against the node it meant to
+reach; the hello signs the session's exported keying material~\cite{rfc5705} and
+proves the cluster secret by an HMAC~\cite{rfc2104} over it, so it cannot be
+replayed on another session. The link appears locally as a loopback forwarder
+recorded as one path to that node, so placement, transfer and gradient exchange
+run over it unchanged. A node is identified by its key's fingerprint, never by
+its address: the node store keeps every path to it and switches only to a path
+that answered and proved the key, and QUIC connections migrate when an address
+changes, so a machine that changes network rejoins on its own. A peer with no
+path is reported with its reason and routed around, never relayed. The daemon
+API requires the cluster secret on every route and serves pinned
+TLS~\cite{rfc8446} and HTTP on one port.
 
 \subsection{Transparent Interception}
 \label{sec:intercept}
 
-A Python module embedded in the binary is appended to the workspace archive and
-placed on the interpreter's path, so it is imported before the user's first line;
-libraries are patched on first import. Substituted primitives are parallel maps,
-pandas grouping, joining and chunked reading, NumPy matrix products and
-decompositions, \texttt{joblib}, and data-parallel training~\cite{li2020pytorchddp}.
+A Python package embedded in the binary is placed on the interpreter's path so
+that it is imported before the user's first line; libraries are patched on first
+import. Substituted primitives are parallel maps, \texttt{joblib}, pandas
+grouping, joining and chunked reading, NumPy matrix products and
+decompositions, and data-parallel training.
 
-A parallel-map kernel travels as \emph{source} when it is a plain module-level
-function, including one defined in \texttt{\_\_main\_\_}, or \emph{by value}
-through cloudpickle~\cite{cloudpickle} when it is a lambda or closure. A chunk is divided among
-peers by a makespan solver: each device is modelled as a set-up time plus a rate,
-fitted from the parts it has returned, and a device whose set-up alone exceeds
-the makespan is declined. On a lab cluster limited to 8, 2 and 1 CPUs, a
-headcount split was 1.6$\times$ slower than not distributing; the measured split
-declined the 1-CPU worker and took 2.87\,s against 3.61\,s.
-A slow peer's parts used to lose every race to a backup copy, so its estimate
-stayed fast; a part unfinished past its prediction now counts as taking at least
-that long, a part waiting or overdue is copied to a free peer, and a chunk too
-small to split goes to the peer predicted to finish first.
+\textbf{Parallel maps.} A kernel travels as \emph{source} when it is a
+module-level function, including one in \texttt{\_\_main\_\_}, or \emph{by
+value} through cloudpickle~\cite{cloudpickle} when it is a lambda or closure.
+The node that holds a map splits it once among its peers, and each peer runs
+its part on its own cores. The split is a makespan solver: each device is modelled
+as a set-up time plus a rate, fitted from the parts it has returned, and a
+device whose set-up alone exceeds the makespan is declined. A part unfinished
+past its prediction counts as taking at least that long, a part waiting or
+overdue is copied to a free peer, and the first copy to finish wins.
 
-Grouping and joining hash rows by key, so each key is complete on one node and
-any aggregation is exact in value with no combiner; row order of joins is not
-preserved. For data-parallel training, ranks post gradients to the lead node's
-daemon port rather than building a rank-to-rank mesh, and the daemon returns one
-sample-weighted average, $\sum_i n_i g_i / \sum_i n_i$, sent as 8-bit values
-with per-block scales~\cite{dettmers2016eightbit} and error feedback~\cite{seide2014onebit}. The script's batch is split across
-ranks by speed so that its learning rate stays correct, and after a warm-up the
-lead compares the split's step time with the fastest rank alone and keeps the
-ring only if it is faster. Returning every rank's gradient instead had made two machines 21 times
-slower than one. Samples are assigned to ranks by a weighted rendezvous hash
-\cite{thaler1998rendezvous}, so when a rank dies the lead daemon stops waiting
-for it and the survivors take its share at the next epoch boundary, while over
-95\% of each survivor's samples stay in place; the ring still depends on rank
-0's machine, whose daemon holds the synchronisation.
-A rank whose machine returns, or a new eligible node, joins a running ring at
-the next epoch boundary from the lead's model and optimiser snapshot, fetched
-through the lead daemon, and the rendezvous hash moves about $1/n$ of the
-samples to it; this needs a script that uses a data loader. Training starts
-behind a barrier, so no rank trains while another still receives its closure.
+\textbf{Dataframes.} Grouping and joining hash rows by key, so each key is
+complete on one node and any aggregation is exact with no combiner; the row
+order of joins is not preserved.
 
-A fast mode synchronises every $H$ steps, after DiLoCo
-\cite{douillard2023diloco} and post-local SGD \cite{lin2020localsgd}: an
-exact warm-up, then local steps whose weights are averaged by samples, with
-optimiser moments averaged every tenth round. It never changes epochs, batch or
-learning rate, and must keep validation loss at most 1\% above one device's
-(mean of three seeds, every test model; lower is not a failure). DiLoCo's
-outer Nesterov step (lr 0.7, momentum 0.9) settles at $0.7/(1-0.9)=7$ times
-the averaged change; tuned for syncs every few hundred steps, it multiplied
-the script's learning rate by seven at our 2--64 and failed at every interval
-tried. Plain averaging (outer lr 1, no momentum) passes, but less well as the
-ring grows, so $H$ follows the ring size (Section~\ref{sec:fastsync}) and no
-interval is used past four ranks. By default the lead daemon switches a ring to
-fast mode once, when the predicted fast step with a 10\% margin beats both the
-exact split and one GPU; every rank switches at one step boundary, rank 0 says
-why, and a join past the validated size returns the ring to exact sync.
+\textbf{Training.} Ranks post gradients to the lead node's daemon rather than
+building a rank-to-rank mesh, and the daemon returns one sample-weighted average
+$\sum_i n_i g_i / \sum_i n_i$, sent as 8-bit values with per-block scales and
+error feedback. The script's batch is split across ranks by speed, so its
+learning rate stays correct, and after a warm-up the lead compares the split's
+step time with the fastest rank alone and keeps the ring only if it is faster.
+Samples are assigned to ranks by a weighted rendezvous
+hash~\cite{thaler1998rendezvous}: when a rank dies the survivors take its share
+at the next epoch boundary while over 95\% of their samples stay in place, and a
+rank that returns joins from the lead's model and optimiser snapshot, taking
+about $1/n$ of the samples.
 
-\subsection{Operating a Run}
-\label{sec:ops}
-
-A run is meant to feel like running Python locally, so the client also stops,
-detaches and reports. An interrupt or a closed terminal sends one cancel frame;
-the executing daemon signals the job's process group and kills it two seconds
-later, and parallel chunks the job had asked for stop on every peer because
-each carries its request's context. A connection that ends without that frame
-never kills the job: the daemon logs every output frame in the job's directory,
-binds the lease to the job so that it outlives its expiry while the job runs,
-and lets the submitter detach and later reattach, replaying the log without gaps
-or repeats. Output is forwarded as raw chunks, so progress bars redraw. Each run
-ends with a summary of where its items ran, drawn from a receipt the shim prints
-at exit; a dry run builds the environment and reports unresolved imports, the
-parallel calls found in the source and the intended placement; and a per-machine
-events feed turns the daemon's log into plain-language lines. An offload flag
-keeps the script here but sends every distributed piece to other machines, and
-the summary shows what each machine spent. A plain run prints only the script's
-own output and exits with its code; one closing line splits the total into the
-script's time and pipedpeer's overhead, from a per-run record of timed steps
-that \texttt{-v}, the web page and a CSV export show in full.
+A fast mode synchronises every $H$ steps: an exact warm-up, then local steps
+whose weights are averaged by samples, with optimiser moments averaged every
+tenth round. It never changes epochs, batch or learning rate, and must keep
+validation loss at most 1\% above one device's (mean of three seeds, every test
+model). DiLoCo's outer Nesterov step (lr 0.7, momentum 0.9) settles at
+$0.7/(1-0.9)=7$ times the averaged change, which suits syncs every few hundred
+steps; at our intervals of 2--64 steps PipedPeer uses plain averaging (outer lr
+1, no momentum), chooses $H$ by ring size (Section~\ref{sec:train}), and uses
+no interval past four ranks. The lead switches a ring to fast mode once, when the
+predicted fast step with a 10\% margin beats both the exact split and one GPU.
 
 \subsection{The Cost Model}
 \label{sec:cost}
 
 Numerical work is gated. With $b$ payload bytes, $\phi$ operations per byte,
-$\rho$ link crossings, $B$ bandwidth, $R$ and $R'$ local and remote throughput and
-$K$ nodes, divisible work moves only when
-
+$\rho$ link crossings, $B$ bandwidth, $R$ and $R'$ local and remote throughput
+and $K$ nodes, divisible work moves only when
 \begin{equation}
 \label{eq:cost}
 \frac{b\phi}{R} \;>\; \frac{\rho\,b}{B} \;+\; \frac{b\phi}{R'K}\times 1.3 .
 \end{equation}
-
-Work needs at least two nodes and 32\,MB. Work that does not fit in local memory
-moves regardless, and a matrix product that fits nowhere raises rather than
-exhausting the machine. A GPU peer raises $R'$ sixfold. The inequality is first
-tried at an optimistic 10\,Gbit/s and, only if offloading could win, bandwidth is
-measured with a 64\,MB probe through the dispatch path. Indivisible work (SVD)
-moves when transfer costs under half the local time.
+Work needs at least two nodes and 32\,MB; work that does not fit in local memory
+moves regardless, and a matrix product that fits nowhere raises an error rather
+than exhausting the machine. A GPU peer raises $R'$ sixfold. The inequality is
+first tried at an optimistic 10\,Gbit/s and, only if offloading could win,
+bandwidth is measured with a 64\,MB probe through the dispatch path (Fig.~\ref{fig:cost}).
+Indivisible work (SVD) moves when transfer costs under half the local time. At
+about 200\,GFLOP/s, local BLAS outruns a CPU cluster's transport, so dense
+matrix products stay local, while a GPU peer can win.
 
 \begin{figure}[t]
 \centering
@@ -418,60 +381,73 @@ moves when transfer costs under half the local time.
 \label{fig:cost}
 \end{figure}
 
-At about 200\,GFLOP/s, local BLAS beats a CPU cluster's transport, so dense
-matrix products stay local; against a four-core peer local won by 25 to
-100$\times$ and the model kept all four shapes local. An earlier version encoded
-``matrix multiplication never ships'' as a rule; it was replaced by a check that
-the choice made was not the slower one, since the rule would be wrong on a
-cluster with a GPU.
-
-\subsection{Degradation Guarantee}
+\subsection{Degradation Guarantee and Operation}
 \label{sec:ft}
 
-Using the cluster must never change the result. Parallel-map chunks alternate
-between the local side and the cluster and fill a result table first-wins, idle
-local cores re-run any chunk not yet returned, and the call returns once the
-local side has covered every item, so an unresponsive cluster degrades to a local
-pool. Beneath that, every intercepted call falls back to the original on
-exception, a failed peer is skipped, a dead worker is respawned, and a failed job
-is rescheduled with back-off; a cancelled one is not retried, and a training
-ring continues on the ranks that are left. A mutation audit disables 95 features one at a
-time --- among them gradient weighting, the rebalance hysteresis, roommate memory
-accounting and the router-mapping checks --- and the suite fails for every one.
+Using the cluster must never change the result. Parallel-map parts fill a result
+table first-wins, idle local cores re-run any part not yet returned, and the
+call returns once every item is covered, so an unresponsive cluster degrades to
+a local pool. Every intercepted call falls back to the original on exception, a
+failed peer is skipped, a dead worker is respawned, a failed job is rescheduled
+with back-off, and a training ring continues on the ranks that are left.
 
-\section{Results and Analysis}
+A run behaves like a local one. An interrupt sends one cancel frame; the
+executing daemon signals the job's process group, and parallel parts stop on
+every peer because each carries its request's context. A dropped connection
+never kills the job: the daemon logs every output frame, keeps the lease while
+the job runs, and lets the submitter reattach and replay the log without gaps or
+repeats. Each run ends with one line splitting its time into the script's and
+PipedPeer's, and a summary of where its items ran.
 
-\subsection{Evaluation setup}
+\subsection{Implementation}
+
+PipedPeer is about 48{,}000 lines of Go~1.25 in one binary that is both client
+and daemon, with about 37{,}000 lines of tests, and an 8{,}000-line Python
+interception package embedded in it. The daemon serves an HTTP API, makes
+direct links with quic-go, builds environments with Nix flakes, and runs each
+job in a \texttt{crun} sandbox. The suite of 829
+tests is checked by a mutation audit that disables 95 features one at a time ---
+among them gradient weighting, roommate memory accounting and the router-mapping
+checks --- and fails for every one.
+
+\section{Evaluation}
+
+We ask four questions. \textbf{Q1:} What does interception cost, including when
+it declines? \textbf{Q2:} How much do the environment cache and the closure diff
+save? \textbf{Q3:} Does work cross machines with correct results, and does it pay
+between physical machines? \textbf{Q4:} Does split training keep accuracy, and
+when is it faster?
+
+\subsection{Setup}
 \label{sec:setup}
 
-Three sources of measurement are reported and kept apart. \emph{Container
-lab}: worker daemons run in containers on one host, each with a fixed processor
-and memory limit; where a network matters, the links between containers are
-shaped by \texttt{tc netem} to the latency, bandwidth and loss of a LAN, a
-Wi-Fi network or a 5G link. The lab measures correctness, overhead, caching and
-how costs grow, and speedup only as one container against $N$ containers of
-the same size; it cannot show a physical network's or a second GPU's
-behaviour. Training accuracy under each synchronisation setting is measured
-in-process, with several ranks trained side by side on one machine and their
-validation loss compared with a single device's. \emph{Real hardware}: figures
-measured by hand during development on two machines over a home link or over
-Tailscale~\cite{anderson2020nat} and recorded in the commit each justified, and a run between two
-laptops over Tailscale. A first host has 12 threads and runs three worker
-daemons; a second has 16 threads
-and one laptop GPU, and its lab is laid out like a college laboratory.
+A 12-thread laptop runs a lab of three worker daemons in containers, each with a
+fixed processor and memory limit; where the network matters, links are shaped
+with \texttt{tc netem} to the latency, bandwidth and loss of a LAN, a Wi-Fi
+network or a 5G link. Because the containers share one processor, the lab
+measures correctness, overhead, caching and cost growth, and speedup only as one
+container against several of the same size. A 16-thread laptop with one GPU
+runs a second lab. Physical runs use two laptops in different homes (RTX~3060
+and RTX~3050) over a direct Tailscale path with 6--8\,ms round trip, a 20-core
+and a 16-core host on one LAN, and a Samsung Galaxy S20~FE (Android~13).
+Training accuracy is measured in-process, with several ranks side by side on one
+machine, against a single device. Lab wall times are medians of three runs
+unless stated; accuracy is the mean of three seeds.
 
-\subsection{Container-lab results}
+\subsection{Microbenchmarks (Q1, Q2)}
 
-\textbf{Tests.} \textbf{822} of \textbf{829} tests pass,
-\textbf{0} fail and \textbf{7} are skipped (two opt-in integration tests and
-five that depend on how Nix is installed on the host); before the latest round it was 615 of 617 with none failing. All 95
-mutations are caught.
-% evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
+\textbf{Interception.} Start-up of a job that imports nothing heavy takes
+0.117\,s with interception against 0.094\,s without ($1.24\times$, best of five
+runs), within the project's $3\times$ budget. On a whole job that the cost model
+declines, a 16-item map with 0.01\,s of work, the median over five runs was
+0.796\,s against 0.678\,s, every receipt showing nothing dispatched: declining
+costs about 0.12\,s per job.
 
 \textbf{Environment cache.} The first submission of a job took 23.4\,s. The
 second landed on a worker that had not yet received the closure and took 8.1\,s;
-the next three found the closure in place, shipped only the workspace, and took a
-median of 0.83\,s (Fig.~\ref{fig:cache}).
+the next three found it in place, shipped only the workspace, and took a median
+of 0.83\,s (Fig.~\ref{fig:cache}). Adding one package to an environment a peer
+already held sent 7 of 43 store paths, 28.6\,MB instead of 206.0\,MB.
 
 \begin{figure}[t]
 \centering
@@ -480,166 +456,114 @@ median of 0.83\,s (Fig.~\ref{fig:cache}).
 \label{fig:cache}
 \end{figure}
 
-\textbf{Interception cost.} Start-up of a job that imports nothing heavy is
-$1.24\times$ that without the shim, within the project's $3\times$ budget (eager
-patching had cost $20\times$). On a whole job that the cost model declines, a
-16-item map with 0.01\,s of work, the median over five runs was 0.796\,s with
-interception against 0.678\,s without, every receipt showing nothing dispatched:
-interception that declines costs about 0.12\,s per job (second host). An earlier
-whole-job comparison was not informative, because its workload had grown large
-enough to dispatch.
+\textbf{Work split.} On a lab limited to 8, 2 and 1 CPUs, a headcount split was
+$1.6\times$ slower than not distributing; the measured split declined the 1-CPU
+worker and took 2.87\,s against 3.61\,s (medians of five). With one peer at a
+tenth of the CPU, four consecutive runs took 1.60, 1.25, 1.09 and $1.08\times$
+an equal cluster's time as the rate estimates converged.
 
-\textbf{Distribution and failure.} With distribution forced, 18 of 48
-parallel-map items ran on three other daemons in every run, with identical
-checksums. The end-to-end fault-injection run, which kills a worker holding
-chunks, did not test recovery: on the freshly created lab the job ran on a node
-that already held its closure, the workers never received it, and the parallel
-map stayed local. We report it as a failed experiment; recovery is evidenced
-here only by tests in which every remote chunk fails. The cause was later traced
-to every worker refusing the broadcast closure for want of a trusted signing key
-(Section~\ref{sec:env}).
+\textbf{Introducer.} During a run between peers the introducer's host carried
+0.2\,MB against about 30\,MB between the peers, and with the introducer
+suspended a known peer was reached in 0.03\,s.
 
-\textbf{College-laboratory layout.} In the second host's lab (containers on one laptop, so these
-are costs, not speedups), the headline parallel map took \textbf{43.5}\,s on its
-first run and \textbf{17.0}\,s cached; a GPU job submitted from a node without a
-GPU ran on the GPU node in \textbf{7.6}\,s with its environment cached
-(\textbf{264.8}\,s the first time); an interrupt stopped work on every peer
-within \textbf{2}\,s; a detached job was reattached and returned its results;
-and in a second lab, two containers sharing one GPU, a two-rank ring finished
-its 80 epochs after one rank was killed, in \textbf{90.5}\,s.
-% evidence (~/Downloads/pipedpeer-work/evidence): v1/30-host-00pool-first.txt (8e14b9b), v2/71-step-2-headline.txt (31b5364),
-% v1/13-gpu-step.txt, v2/74b-gpu-pc1-direct.txt, v1/31-ctrlc-poolwatch.txt (1.3 s samples), v2/23b-ddp-down-up.txt (GPU lab, 1519952)
+\subsection{End-to-end runs (Q3)}
 
-\subsection{Recorded multi-machine results}
+With distribution forced in the three-worker lab, 18 of 48 parallel-map items
+ran on three other daemons in each of five runs, with identical checksums. In
+the second lab a parallel map took 43.5\,s on its first run and 17.0\,s with
+its environment cached; a GPU job submitted from a node without a GPU ran on the
+GPU node in 7.6\,s cached (264.8\,s the first time); an interrupt stopped work
+on every peer within 2\,s; a detached job was reattached and returned its
+results; and a two-rank ring finished its 80 epochs after one rank was killed,
+in 90.5\,s.
+
+Table~\ref{tab:phys} lists the physical-machine results. A parallel map and a
+mixed CPU script (pool, joblib, NumPy, pandas) ran faster on two machines than
+on one, the latter with about half its items on the second laptop. The first
+run of a new GPU environment is dominated by its build (487\,s of 506\,s,
+mostly downloading CUDA PyTorch); the same script then took 17.7\,s. After the
+introducer changed address, a three-machine cluster reconnected with no command
+in 12.1--12.6\,s over three runs. On the phone, a laptop's CPU script spread over
+both laptops and the phone gave the phone 8 of 192 items with an unchanged
+checksum, after the phone had built the environment from the cache in 27\,s;
+Nix's Python inside \texttt{proot} ran it in 62--66\,s against 73--81\,s for
+Termux's own Python (three runs each).
 
 \begin{table}[t]
 \centering
-\caption{Measurements between real machines, recorded during development}
-\label{tab:recorded}
+\caption{Results between physical machines}
+\label{tab:phys}
 \renewcommand{\arraystretch}{1.15}
 \footnotesize
 \begin{tabularx}{\columnwidth}{X r}
 \toprule
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
-Pool map, 20-core host + 16-core peer, plain vs.\ ours & 5.8--6.4\,s vs.\ 4.9--5.4\,s \\
-Training, 1 machine / 2 ranks fp16 / 2 ranks int8 & 54.9 / 69.4 / 56.1\,s \\
-Training, final loss, same three & .087495 / .087497 / .087688 \\
+Pool map, 20-core host alone vs.\ with 16-core peer (LAN) & 5.8--6.4 vs.\ 4.9--5.4\,s \\
+CPU script, one laptop vs.\ two over the internet & 17.4--18.1 vs.\ 13.3--14.6\,s \\
+Training at 54\,Mbit/s: 1 machine / 2 ranks fp16 / int8 & 54.9 / 69.4 / 56.1\,s \\
+\quad final loss, same three & .087495 / .087497 / .087688 \\
+Training, two laptops: 1 GPU / exact / fast sync & 4.2 / 37.1 / 7.4\,s \\
+\quad validation loss, same three & .0794 / .0797 / .0796 \\
 Ring of 16/8/2 cores, equal vs.\ measured batches & 25.4 vs.\ 23.6\,s \\
-Closure diff, one package added & 7 of 43 paths, $-86\%$ bytes \\
-Peer reached with introducer suspended & 0.03\,s \\
-Introducer traffic during verification & 0.2\,MB vs.\ $\sim$30\,MB \\
+New GPU environment, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
+Rejoin after introducer address change & 12.1--12.6\,s \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-Table~\ref{tab:recorded} lists them. They show modest gains and honest losses: a
-parallel map ran faster on two machines than on one, while two-machine training
-on a 54\,Mbit/s link did not beat one machine (fp16 26\% slower, int8 about
-level) --- which the system itself reports at the end of each run, and which
-now leads it to fall back to one machine on its own. In the container lab on an
-idle host, splitting a small model with heavy steps over two containers beat one
-(9.1 against 11.8\,s), while a 9\,MB model with light steps over Wi-Fi ran ten
-times slower split than alone (80.7 against 8.0\,s). Building the parallel
-map's request body for a 100\,MB payload fell from 2.77\,s to 0.06\,s (100
-items of 1\,MB) and from 18.3\,s to 0.06\,s (1000 items). Between two laptops
-in different homes over a direct Tailscale path (RTX~3060 and RTX~3050, 6--8\,ms
-round trip), the CPU script (pool, joblib, numpy, pandas) took 13.3--14.6\,s
-against 17.4--18.1\,s on one laptop alone (three runs each), with about half
-the items on the second laptop. A small training ran in 4.2\,s on one GPU,
-37.1\,s split with exact sync (147 syncs of 209\,ms, 81\,MiB each way) and
-7.4\,s with fast sync (16 syncs), at validation loss 0.0794, 0.0797 and
-0.0796; the system reported that neither split paid for itself. The first
-run of a new environment took 506\,s, 487\,s of it building the environment
-(downloading CUDA PyTorch); the same script then took 17.7\,s. After the introducer changed address, a three-machine cluster was
-connected again without any command in 12.1--12.6\,s over three runs (limit 60\,s).
+\subsection{Training (Q4)}
+\label{sec:train}
 
-\begin{table}[t]
-\centering
-\caption{PipedPeer against existing systems. The lower block is where it is
-the weaker system.}
-\label{tab:cmp}
-\renewcommand{\arraystretch}{1.2}
-\footnotesize
-\begin{tabularx}{\columnwidth}{X C{0.75cm} C{0.7cm} C{0.6cm} C{0.7cm} C{0.7cm}}
-\toprule
-\textbf{Property} & \textbf{Ours} & \textbf{Spark} & \textbf{Ray} & \textbf{Dask} & \textbf{ssh} \\
-\midrule
-\multicolumn{6}{l}{\textit{What it does differently}} \\
-Runs unmodified Python     & yes & no  & part. & part. & yes \\
-No cluster to configure    & yes & no  & no    & no    & part. \\
-No head or master node     & yes & no  & no    & no    & yes \\
-Reproduces the environment & yes & part. & part. & part. & no \\
-Joins NATed machines, no relay & yes & no & no & no & no \\
-Sandboxes each job         & part. & no & no   & no    & no \\
-Survives losing a node     & yes & yes & yes   & yes   & no \\
-\midrule
-\multicolumn{6}{l}{\textit{Where it is behind}} \\
-Authenticated, encrypted   & part. & yes & part. & part. & yes \\
-Runtimes beyond Python     & \textbf{no} & yes & part. & no & yes \\
-Proven in production       & \textbf{no} & yes & yes & yes & yes \\
-\bottomrule
-\end{tabularx}
-\end{table}
+\textbf{When splitting pays.} In the lab, a small model with heavy steps split
+over two containers beat one (9.1 against 11.8\,s), while a 9\,MB model with
+light steps over Wi-Fi ran ten times slower split than alone (80.7 against
+8.0\,s). Between physical machines neither split beat one GPU
+(Table~\ref{tab:phys}), and at the end of the run the system reported so; this
+is why the lead keeps a ring only when it measures it faster. Measured batch
+sizes beat equal ones on an uneven ring.
 
-\subsection{Training and slow-peer results}
-\label{sec:fastsync}
+\textbf{Fast synchronisation.} On two ranks with LAN and Wi-Fi profiles, plain
+averaging every 64 steps after a 10-step warm-up landed $+0.64/+0.61\%$,
+$-2.14/-2.09\%$ and $+0.18/+0.50\%$ from one device on two perceptrons and a
+small transformer, each within exact sync's own spread, while sending
+9--15$\times$ fewer bytes per rank; it finished 1.2--1.4$\times$ faster than
+exact sync on LAN and 1.6--3.1$\times$ on Wi-Fi (one seed). With DiLoCo's outer
+step the transformer was $+21.7\%$ even at 156 local steps.
 
-\textbf{Fast synchronisation.} In two containers on LAN and Wi-Fi
-profiles, three seeds each, plain averaging every 64 steps after a 10-step
-warm-up landed $+0.64/+0.61\%$, $-2.14/-2.09\%$ and $+0.18/+0.50\%$ from one
-device on the GPU example's perceptron, the training example's, and a small
-transformer, each within exact sync's own spread, sending 9--15$\times$ fewer
-bytes per rank, and on an idle host it finished 1.2--1.4$\times$ faster than
-exact sync on LAN and 1.6--3.1$\times$ faster on Wi-Fi (one seed). With the paper's outer
-step the transformer was $+21.7\%$ even at 156 local steps. In-process, the
-largest interval passing on every model was 32 at two ranks, 16 at three and 4
-at four; at eight ranks the transformer failed at every interval down to 2, so
-none is used from five ranks. Accuracy falling with rank count is a finding
-for a system aimed at many small machines; remedies from the literature were
-measured in-process at 4, 8 and 11 ranks. Of those, only exact synchronisation
-with rank-16 PowerSGD~\cite{vogels2019powersgd} compression and error feedback kept every model within
-1\% of one device (worst mean $+0.18\%$), sending $3.2\times$ fewer bytes than int8 exact
-on the perceptrons; keeping each rank's batch, linear~\cite{goyal2017imagenet}, square-root~\cite{hoffer2017trainlonger} or AdaScale~\cite{johnson2020adascale}
-learning-rate scaling, doubled epochs, SparseLoCo~\cite{sarfi2025sparseloco}, top-k~\cite{aji2017sparse}, FedProx~\cite{li2020fedprox} and a larger
-outer learning rate each failed.
+\textbf{Many ranks.} The largest interval passing on every model was 32 at two
+ranks, 16 at three and 4 at four; at eight ranks the transformer failed at every
+interval down to 2, so no interval is used from five ranks. At 4, 8 and 11
+ranks, only exact synchronisation with rank-16
+PowerSGD~\cite{vogels2019powersgd} compression and error feedback kept every
+model within 1\% of one device (worst mean $+0.18\%$), sending $3.2\times$ fewer
+bytes than int8; linear~\cite{goyal2017imagenet},
+square-root~\cite{hoffer2017trainlonger} and AdaScale~\cite{johnson2020adascale}
+learning-rate scaling, doubled epochs, SparseLoCo~\cite{sarfi2025sparseloco},
+top-k~\cite{aji2017sparse}, FedProx~\cite{li2020fedprox} and a larger outer
+learning rate each failed.
 
-\textbf{Slow peers and slow links.} With one peer at a tenth of the CPU, four
-consecutive runs took 1.60, 1.25, 1.09 and 1.08$\times$ an equal cluster's
-time, against 2.11, 1.35, 1.37 and 1.31$\times$ before. With the second of
-two nodes held to 800\,kbit/s, a cold run fell from 1000.9\,s to 137.5\,s and
-a warm one from 603.7\,s to 62.4\,s once the job no longer waited for the
-slowest closure import (the old times are bounded by the 600\,s timeout,
-measured before the fix; the new ones are idle-host reruns).
+\section{Limitations}
 
-\subsection{Threats to validity}
-
-The lab shares one processor among all workers, so it cannot show speedup and
-distorts transfer costs; the second host's lab likewise cannot show wireless
-links, two physical GPUs or a campus network's rules. The recorded multi-machine figures were taken by hand,
-mostly once or a few times each, on whatever machines and links were at hand,
-and are evidence of behaviour rather than a controlled experiment; one
-single-sample figure in the project's history was later found to be wrong by a
-factor of nine on repetition, which is why figures from the project's
-repeatable benchmark scripts are preferred here wherever they exist.
+The labs share one processor among their workers, so they show cost, not
+speedup, and the physical runs cover two or three machines with few repetitions.
+TLS is trust on first use, the keys trusted to sign closures are not yet bound to
+an authenticated identity, and authorisation is one shared secret. Only Python is
+supported, and a training ring depends on rank~0's machine.
 
 \section{Conclusion and Future Work}
 
-PipedPeer runs unmodified Python on other machines without configuring a cluster,
-by reproducing environments as content-addressed closures that are cached and
-diffed by store path, substituting the parallel primitives a script already uses,
-dividing work by measured speed, and joining machines across networks over
-direct, authenticated links with no relay that survive address changes. The
-most transferable lesson is the
-discipline of measuring and refusing: several features here exist in their
-current form because the first version measured slower than doing nothing.
-
-Future work is led by closing the remaining security gaps --- binding trusted
-signing keys to authenticated identities, requiring rather than preferring TLS,
-and authorisation finer than one shared secret --- then locality- and
-topology-aware placement, AMD accelerators, a
-parallel script and a training ring that survive their submitter and rank 0, and
-a controlled multi-machine evaluation.
+PipedPeer runs unmodified Python on other machines without configuring a
+cluster, by reproducing environments as content-addressed closures that are
+cached and diffed by store path, substituting the parallel primitives a script
+already uses, dividing work by measured speed, and joining machines across
+networks over direct, authenticated links with no relay and no privileged node.
+Its central design rule is to measure before distributing and to decline when
+distributing would be slower: the per-call cost gate, the measured split and the
+training ring's own check each follow from it. Future work is to bind signing
+keys to authenticated identities and require TLS, to add locality- and
+topology-aware placement and AMD accelerators, to let a training ring survive
+its submitter and rank~0, and to run a controlled evaluation on more machines.
 
 \begin{thebibliography}{00}
 
@@ -678,7 +602,6 @@ a controlled multi-machine evaluation.
 \bibitem{termux} Termux, ``Termux: Android terminal emulator and Linux environment.'' [Online]. Available: \url{https://termux.dev}
 
 \bibitem{proot} PRoot, ``chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux.'' [Online]. Available: \url{https://proot-me.github.io}
-
 
 \bibitem{anderson2020nat} D.~Anderson, ``How NAT traversal works,'' Tailscale blog, Aug. 2020. [Online]. Available: \url{https://tailscale.com/blog/how-nat-traversal-works}
 
