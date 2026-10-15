@@ -17,6 +17,10 @@
 
 \usepackage{cite}
 \providecommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+% Fields the authors fill before submission (red until filled).
+\newcommand{\fillin}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
+\newcommand{\guidename}{Rupali Sawant}
+\newcommand{\guideemail}{\fillin{guide e-mail}}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{algorithmic}
 \usepackage{graphicx}
@@ -54,6 +58,12 @@ vinayak.yadav23@spit.ac.in}
 \textit{Sardar Patel Institute of Technology}\\
 Mumbai, Maharashtra, India \\
 sahil.gupta23@spit.ac.in}
+\and
+\IEEEauthorblockN{\guidename}
+\IEEEauthorblockA{\textit{Department of Computer Engineering} \\
+\textit{Sardar Patel Institute of Technology}\\
+Mumbai, Maharashtra, India \\
+\guideemail}
 }
 
 \maketitle
@@ -133,7 +143,7 @@ with a test suite audited by disabling 95 features in turn and requiring the
 tests to notice each (Section~\ref{sec:ft}).
 \end{enumerate}
 
-\section{Related Work}
+\section{Literature Review}
 
 Spark~\cite{zaharia2010spark}, Ray~\cite{moritz2018ray} and
 Dask~\cite{rocklin2015dask} are mature and considerably more capable at scale.
@@ -162,7 +172,7 @@ shares. Bergstr\"om~\cite{kth2025thesis} surveys abstractions that hide failure
 from application code, the property Section~\ref{sec:ft} must provide for scripts
 that contain no failure handling.
 
-\section{System Design}
+\section{Methodology}
 
 Every machine runs one daemon; the command-line client is short-lived. The
 coordinator is a library linked into the client, so there is no scheduler
@@ -211,7 +221,7 @@ Work is reserved by a three-phase lease. The concurrency and memory checks and
 the insertion occur under one lock, and the concurrency limit counts reserved and running leases together.
 The submitter renews every 30\,s, also while the environment builds and
 uploads; the plain run path once never renewed, so a build plus upload longer
-than the 5-minute expiry let the node reap the lease (an emulated 800\,kbit/s node
+than the 5-minute expiry let the node reap the lease (a node held to 800\,kbit/s
 now builds for 533\,s without expiry). A submitter that dies stops renewing and
 its slot is reclaimed; a worker that dies drops out of the healthy set and its
 job is rescheduled with back-off.
@@ -346,7 +356,7 @@ outer Nesterov step (lr 0.7, momentum 0.9) settles at $0.7/(1-0.9)=7$ times
 the averaged change; tuned for syncs every few hundred steps, it multiplied
 the script's learning rate by seven at our 2--64 and failed at every interval
 tried. Plain averaging (outer lr 1, no momentum) passes, but less well as the
-ring grows, so $H$ follows the ring size (Section~\ref{sec:emulated}) and no
+ring grows, so $H$ follows the ring size (Section~\ref{sec:fastsync}) and no
 interval is used past four ranks. By default the lead daemon switches a ring to
 fast mode once, when the predicted fast step with a 10\% margin beats both the
 exact split and one GPU; every rank switches at one step boundary, rank 0 says
@@ -374,7 +384,7 @@ own output and exits with its code; one closing line splits the total into the
 script's time and pipedpeer's overhead, from a per-run record of timed steps
 that \texttt{-v}, the web page and a CSV export show in full.
 
-\section{The Cost Model}
+\subsection{The Cost Model}
 \label{sec:cost}
 
 Numerical work is gated. With $b$ payload bytes, $\phi$ operations per byte,
@@ -408,7 +418,7 @@ matrix products stay local; against a four-core peer local won by 25 to
 the choice made was not the slower one, since the rule would be wrong on a
 cluster with a GPU.
 
-\section{Degradation Guarantee}
+\subsection{Degradation Guarantee}
 \label{sec:ft}
 
 Using the cluster must never change the result. Parallel-map chunks alternate
@@ -422,24 +432,28 @@ ring continues on the ranks that are left. A mutation audit disables 95 features
 time --- among them gradient weighting, the rebalance hysteresis, roommate memory
 accounting and the router-mapping checks --- and the suite fails for every one.
 
-\section{Evaluation}
+\section{Results and Analysis}
 
-\subsection{Method and its limits}
+\subsection{Evaluation setup}
+\label{sec:setup}
 
-Two kinds of measurement are reported and kept apart. \emph{Lab}: run for this
-paper on one 12-thread host with three worker daemons in containers; this
-measures correctness, overhead and caching, and \textbf{cannot} measure
-multi-machine speedup. \emph{Recorded}: multi-machine figures measured by hand
-during development and recorded in the commit that each justified, on two
-machines over a home link or over Tailscale; they were not repeated for this
-paper. A third set comes from a rehearsal of the demonstration on a second host
-(16 threads, one laptop GPU), in containers shaped like a college laboratory;
-it too measures function and cost, not speedup. \emph{Emulated}: containers
-with equal fixed processor and memory quotas and links shaped by \texttt{tc
-netem} to LAN, Wi-Fi and 5G profiles with loss; speedup is one container
-against $N$ of the same size, and every such figure is labelled emulated.
+Three sources of measurement are reported and kept apart. \emph{Container
+lab}: worker daemons run in containers on one host, each with a fixed processor
+and memory limit; where a network matters, the links between containers are
+shaped by \texttt{tc netem} to the latency, bandwidth and loss of a LAN, a
+Wi-Fi network or a 5G link. The lab measures correctness, overhead, caching and
+how costs grow, and speedup only as one container against $N$ containers of
+the same size; it cannot show a physical network's or a second GPU's
+behaviour. Training accuracy under each synchronisation setting is measured
+in-process, with several ranks trained side by side on one machine and their
+validation loss compared with a single device's. \emph{Real hardware}: figures
+measured by hand during development on two machines over a home link or over
+Tailscale and recorded in the commit each justified, and a run between two
+laptops over Tailscale. A first host has 12 threads and runs three worker
+daemons; a second has 16 threads
+and one laptop GPU, and its lab is laid out like a college laboratory.
 
-\subsection{Lab results}
+\subsection{Container-lab results}
 
 \textbf{Tests.} \textbf{822} of \textbf{829} tests pass,
 \textbf{0} fail and \textbf{7} are skipped (two opt-in integration tests and
@@ -478,7 +492,7 @@ here only by tests in which every remote chunk fails. The cause was later traced
 to every worker refusing the broadcast closure for want of a trusted signing key
 (Section~\ref{sec:env}).
 
-\textbf{Rehearsal.} In the venue-shaped lab (containers on one laptop, so these
+\textbf{College-laboratory layout.} In the second host's lab (containers on one laptop, so these
 are costs, not speedups), the headline parallel map took \textbf{43.5}\,s on its
 first run and \textbf{17.0}\,s cached; a GPU job submitted from a node without a
 GPU ran on the GPU node in \textbf{7.6}\,s with its environment cached
@@ -486,7 +500,7 @@ GPU ran on the GPU node in \textbf{7.6}\,s with its environment cached
 within \textbf{2}\,s; a detached job was reattached and returned its results;
 and in a second lab, two containers sharing one GPU, a two-rank ring finished
 its 80 epochs after one rank was killed, in \textbf{90.5}\,s.
-% rehearsal evidence (~/Downloads/pipedpeer-work/evidence): v1/30-host-00pool-first.txt (8e14b9b), v2/71-step-2-headline.txt (31b5364),
+% evidence (~/Downloads/pipedpeer-work/evidence): v1/30-host-00pool-first.txt (8e14b9b), v2/71-step-2-headline.txt (31b5364),
 % v1/13-gpu-step.txt, v2/74b-gpu-pc1-direct.txt, v1/31-ctrlc-poolwatch.txt (1.3 s samples), v2/23b-ddp-down-up.txt (GPU lab, 1519952)
 
 \subsection{Recorded multi-machine results}
@@ -516,11 +530,11 @@ Table~\ref{tab:recorded} lists them. They show modest gains and honest losses: a
 parallel map ran faster on two machines than on one, while two-machine training
 on a 54\,Mbit/s link did not beat one machine (fp16 26\% slower, int8 about
 level) --- which the system itself reports at the end of each run, and which
-now leads it to fall back to one machine on its own. Emulated results for the
-changes made after the college demonstration --- the one-GPU-or-split decision
-\todo{ddp-switch}, fast synchronisation's wall time (its accuracy is in
-Section~\ref{sec:emulated}), the parallel map's request body \todo{pool body}, recovery from an address change
-\todo{test-net} --- and real runs between two laptops over Tailscale
+now leads it to fall back to one machine on its own. Container-lab results for
+the latest changes --- the one-GPU-or-split decision \todo{ddp-switch}, fast
+synchronisation's wall time (its accuracy is in Section~\ref{sec:fastsync}),
+the parallel map's request body \todo{pool body}, recovery from an address
+change \todo{test-net} --- and real runs between two laptops over Tailscale
 \todo{tailscale} are to be added.
 
 \begin{table}[t]
@@ -551,21 +565,21 @@ Proven in production       & \textbf{no} & yes & yes & yes & yes \\
 \end{tabularx}
 \end{table}
 
-\subsection{Emulated and simulated results}
-\label{sec:emulated}
+\subsection{Training and slow-peer results}
+\label{sec:fastsync}
 
-\textbf{Fast synchronisation.} In two emulated containers on LAN and Wi-Fi
+\textbf{Fast synchronisation.} In two containers on LAN and Wi-Fi
 profiles, three seeds each, plain averaging every 64 steps after a 10-step
 warm-up landed $+0.64/+0.61\%$, $-2.14/-2.09\%$ and $+0.18/+0.50\%$ from one
-device on the GPU demo's perceptron, the training demo's, and a small
+device on the GPU example's perceptron, the training example's, and a small
 transformer, each within exact sync's own spread, sending 9--15$\times$ fewer
 bytes per rank; wall time is pending \todo{diloco}. With the paper's outer
-step the transformer was $+21.7\%$ even at 156 local steps. In simulation the
+step the transformer was $+21.7\%$ even at 156 local steps. In-process, the
 largest interval passing on every model was 32 at two ranks, 16 at three and 4
 at four; at eight ranks the transformer failed at every interval down to 2, so
 none is used from five ranks. Accuracy falling with rank count is a finding
 for a system aimed at many small machines; remedies from the literature are
-simulated in \todo{many-rank table}.
+measured in \todo{many-rank table}.
 
 \textbf{Slow peers and slow links.} With one peer at a tenth of the CPU, four
 consecutive runs took 1.60, 1.25, 1.09 and 1.08$\times$ an equal cluster's
@@ -577,7 +591,7 @@ slowest closure import; idle-host reruns \todo{bcast quiet}.
 \subsection{Threats to validity}
 
 The lab shares one processor among all workers, so it cannot show speedup and
-distorts transfer costs; the rehearsal lab likewise cannot show wireless
+distorts transfer costs; the second host's lab likewise cannot show wireless
 links, two physical GPUs or a campus network's rules. The recorded multi-machine figures were taken by hand,
 mostly once or a few times each, on whatever machines and links were at hand,
 and are evidence of behaviour rather than a controlled experiment; one
@@ -585,7 +599,7 @@ single-sample figure in the project's history was later found to be wrong by a
 factor of nine on repetition, which is why figures from the project's
 repeatable benchmark scripts are preferred here wherever they exist.
 
-\section{Conclusion}
+\section{Conclusion and Future Work}
 
 PipedPeer runs unmodified Python on other machines without configuring a cluster,
 by reproducing environments as content-addressed closures that are cached and

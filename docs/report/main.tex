@@ -7,7 +7,8 @@
 \documentclass[12pt,a4paper]{report}
 
 % -- Packages ----------------------------------------------------------------
-\usepackage[left=30mm,right=20mm,top=25mm,bottom=25mm]{geometry}
+% Margins as the department template: 150 mm text width, centred on A4.
+\usepackage[a4paper,width=150mm,top=25mm,bottom=25mm]{geometry}
 % xcolor must load with the table option before colortbl-dependent commands
 % such as \rowcolors are used.
 \usepackage[table]{xcolor}
@@ -39,6 +40,8 @@
 
 % -- Numbers still to be measured (filled in the verify pass) ----------------
 \newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+% -- Fields the authors fill before printing (red until filled) --------------
+\newcommand{\fillin}[1]{\textcolor{red}{\textbf{[FILL: #1]}}}
 
 % -- Hyperref ----------------------------------------------------------------
 \hypersetup{
@@ -105,41 +108,50 @@
 \newcommand{\institute}{Sardar Patel Institute of Technology}
 \newcommand{\department}{Department of Computer Engineering}
 \newcommand{\university}{University of Mumbai}
-\newcommand{\academicyear}{2026--2027}
+% Fill these before printing; each shows in red until replaced.
+\newcommand{\submissiondate}{\fillin{month and year of submission}}
+\newcommand{\hodname}{\fillin{Head of Department's name}}
+\newcommand{\principalname}{\fillin{Principal's name}}
+\newcommand{\publicationstatus}{\fillin{conference or journal, and status: submitted / accepted / published}}
+% Institute logo: place spitlogo.pdf (or .png) in docs/report.
+\newcommand{\institutelogo}{\IfFileExists{spitlogo.pdf}{\includegraphics[scale=0.8]{spitlogo.pdf}}{\IfFileExists{spitlogo.png}{\includegraphics[width=3cm]{spitlogo.png}}{\fillin{institute logo}}}}
 
 \newcommand{\figpath}[1]{../diagrams/#1}
 
 % ============================================================
 \begin{document}
 
+% Front matter in the department template's order, numbered in roman.
+\pagenumbering{roman}
 \input{be_title.tex}
+\newpage
+\input{be_certificate1.tex}
 \newpage
 \input{be_certificate2.tex}
 \newpage
-
-%----------------------------------------------------------
-% DECLARATION
-%----------------------------------------------------------
-\section*{Declaration}
-\vspace{1cm}
-
-We declare that the work titled \textbf{\projecttitle} is our own work carried out under the guidance of \textbf{\guidename} at \institute. This work has not been submitted elsewhere for any degree.
-
-\begin{center}
-\renewcommand{\arraystretch}{1.2}
-\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}ccc}
-\textbf{\candone} & \textbf{\candtwo} & \textbf{\candthree} \\
-\textbf{\uidone} & \textbf{\uidtwo} & \textbf{\uidthree} \\
-\end{tabular*}
-\end{center}
-
+% No sponsorship letter: the project had no sponsor.
+\input{students_statement.tex}
 \newpage
+\input{acknowledgments.tex}
+
+% -- Contents, figures, tables, abbreviations --------------------------------
+\clearpage
+\tableofcontents
+
+\clearpage
+\listoffigures
+
+\clearpage
+\listoftables
+
+\input{list_abbreviations.tex}
 
 % -- Abstract ----------------------------------------------------------------
 \clearpage
 \thispagestyle{plain}
+\addcontentsline{toc}{chapter}{Abstract}
 \begin{center}
-  {\Large\bfseries ABSTRACT}
+  {\Large\bfseries Abstract}
 \end{center}
 \vspace{1cm}
 
@@ -155,16 +167,9 @@ a mutation audit that breaks 95 features one at a time is caught by the tests in
 \vspace{1cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal, Transparent Interception, Nix, Content-Addressed Caching, OCI Sandboxing, Cost-Based Scheduling, Fault Tolerance.
 
-% -- TOC / LOF / LOT ---------------------------------------------------------
+% -- Body, numbered in arabic -------------------------------------------------
 \clearpage
-\tableofcontents
-
-\clearpage
-\listoffigures
-
-\clearpage
-\listoftables
-
+\pagenumbering{arabic}
 % ============================================================
 \chapter{Introduction}
 % ============================================================
@@ -317,8 +322,25 @@ cloudpickle & Interception & Shipping lambdas and closures by value; added to ev
   holds the lease and receives the output stream.
 \end{itemize}
 
+\section{Layout of the Report}
+
+A brief overview of each chapter is provided here.
+\begin{itemize}[leftmargin=*]
+  \item Chapter~\ref{chap:lit}: a survey of the work PipedPeer draws on.
+  \item Chapter~\ref{chap:arch}: the design of the system --- its architecture,
+  data flow, use cases and the sequence of a run.
+  \item Chapter~\ref{chap:design}: the implementation of each mechanism, from
+  discovery and joining across networks to interception, training and fault
+  tolerance.
+  \item Chapter~\ref{chap:results}: the evaluation setup and the results.
+  \item Chapter~\ref{chap:conclusion}: conclusions, limitations and security.
+  \item Chapter~\ref{sec:future}: future scope.
+  \item Chapter~\ref{chap:pub}: the research paper drafted from this work.
+\end{itemize}
+
 % ============================================================
 \chapter{Literature Survey}
+\label{chap:lit}
 % ============================================================
 
 This chapter surveys work across the areas PipedPeer draws on: lightweight
@@ -326,7 +348,7 @@ sandboxing and environment portability at the edge, messaging and actor-style
 fault tolerance, failure-transparent programming models, portability in the
 Python ecosystem, scheduling, and collaborative task offloading. Each entry
 closes with the bearing it has on the design decisions taken in
-Chapter~\ref{chap:design}.
+Chapters~\ref{chap:arch} and~\ref{chap:design}.
 
 \subsection*{Paper 1: Web Application-Based WebAssembly Container Platform for Extreme Edge Computing}
 \addcontentsline{toc}{subsection}{Paper 1}
@@ -605,7 +627,8 @@ identities are Ed25519 keys \cite{bernstein2012ed25519}, and archives are
 compressed with Zstandard \cite{rfc8878}.
 
 % ============================================================
-\chapter{Analysis}
+\chapter{Design}
+\label{chap:arch}
 % ============================================================
 
 \section{System Architecture}
@@ -779,7 +802,7 @@ configured, and travels over pinned TLS on a local network or inside a QUIC link
 across networks.
 
 % ============================================================
-\chapter{Design and Methodology}
+\chapter{Implementation}
 \label{chap:design}
 % ============================================================
 
@@ -817,7 +840,7 @@ after the poller has reached it and the certificate's key matched the node id,
 and an active path that still answers is kept; a verified LAN path beats a
 verified internet path. Before this, the store held one address per node and
 every source overwrote it: in a container experiment LAN discovery replaced a
-working internet link with an unreachable LAN address, and at the demo a peer
+working internet link with an unreachable LAN address, and on two real laptops a peer
 that changed network stayed at its old address until each machine re-joined by
 hand. Members also gossip their own addresses, signed with their node keys,
 over the token-protected API; a gossiped address is a candidate, never a fact.
@@ -936,8 +959,8 @@ status} lists it under the table with that reason. A live link does not depend o
 the introducer: with the introducer suspended, a peer was reached in 0.03\,s.
 
 \textbf{What a NAT lab found.} Until a container lab with real translators
-existed (Section~\ref{sec:workloads}), punching was exercised only at live
-demonstrations. The lab showed peers behind NAT rarely linking, for four reasons,
+existed (Section~\ref{sec:workloads}), punching was exercised only between real
+machines by hand. The lab showed peers behind NAT rarely linking, for four reasons,
 all since fixed. The socket a birthday collision found listened under the
 search's context, which ended on adoption, so the peer's dial met a closed
 listener; it now accepts dials for 30\,s and stays open while any link it
@@ -1137,8 +1160,7 @@ the environment builds and uploads; failures show with \texttt{-v}, and a
 fourth in a row warns without it. As a backstop the node binds a job that names
 an expired lease to a fresh lease with no memory or GPU reservation, and logs a
 warning. In the lab, with one node held to 800\,kbit/s, a 533\,s environment
-build ran with no expired lease and the lease was released when the job ended
-(emulated link).
+build ran with no expired lease and the lease was released when the job ended.
 
 Two details carry the correctness argument. First, the concurrency and memory
 checks and the lease insertion happen \textbf{under a single lock}, so two
@@ -1208,9 +1230,9 @@ step uses that: it builds one environment importing the usual scientific set
 on every machine through the dry run of Section~\ref{sec:observe}, so a script
 seen for the first time shares those paths and fetches only what it adds. A
 teacher-style script's environment took \textbf{54}\,s to build without that
-step and \textbf{4}\,s with it, measured on a container of the rehearsal lab
-(Section~\ref{sec:res-rehearsal}).
-% rehearsal evidence v1/15-pc3-pkgprep-before-after.txt (8e14b9b): dry-run environment build, before/after prep-4-common
+step and \textbf{4}\,s with it, measured on a container of the laboratory-layout lab
+(Section~\ref{sec:res-lablayout}).
+% evidence v1/15-pc3-pkgprep-before-after.txt (8e14b9b): dry-run environment build, before/after prep-4-common
 
 \textbf{The keystone.} Nix \cite{dolstra2004nix} names every build output by a
 hash of its inputs. The generated flake pins an \emph{exact} nixpkgs
@@ -1287,11 +1309,11 @@ is cut only when it stops moving: after 60 seconds with no bytes sent, or 10
 minutes after the full body if the peer never answers, instead of after 10
 minutes in total, which a large closure on a slow link exceeded on every run.
 A restarted send asks again which paths are missing, so it skips what already
-arrived. In an emulated lab of two 768\,MiB nodes with the second held to
+arrived. In a lab of two 768\,MiB nodes with the second held to
 800\,kbit/s, a cold run fell from 1000.9\,s to 256.9\,s (the environment send
 from 641\,s to 60.4\,s), a warm run from 603.7\,s to 67.3\,s, and a later run
 took 2.3\,s with the slow node taking 22 of 64 items; the one background send
-took 905.6\,s, longer than the old limit allowed (emulated link; wall times
+took 905.6\,s, longer than the old limit allowed (wall times
 to be repeated on an idle host \todo{bcast quiet}).
 
 A fresh peer can also fetch from the public binary cache the paths it lacks
@@ -1416,9 +1438,9 @@ are killed by process group and forwards to peers are dropped, with nothing
 re-run. The coordinator records the lease as cancelled and does not retry. A
 connection that ends \emph{without} a cancel frame --- a crash, a lost network,
 a detach --- never kills the job, which is what background mode builds on. In
-the rehearsal (containers on one laptop), peers stopped within \textbf{2}\,s of
+the laboratory-layout lab (containers on one laptop), peers stopped within \textbf{2}\,s of
 the interrupt: their pool counters showed the cancel at the next 1.3\,s sample.
-% rehearsal evidence v1/31-ctrlc-poolwatch.txt (8e14b9b)
+% evidence v1/31-ctrlc-poolwatch.txt (8e14b9b)
 The interrupt now also stops the submitter's own Nix work. Exporting and packing
 the closure ran with no context, so Nix kept packing a multi-gigabyte closure
 until the client exited. Nix now runs in its own process group, which on cancel
@@ -1534,7 +1556,7 @@ small to split goes to the peer predicted to finish first. In the lab, with one
 peer held to a tenth of the processor against a cluster of equal peers, four
 consecutive runs took 1.60, 1.25, 1.09 and 1.08 times the equal cluster's time,
 where they had taken 2.11, 1.35, 1.37 and 1.31 times; equal clusters were
-unchanged (emulated, ratios from a host loaded to 19--21). Most of the first
+unchanged (ratios from a host loaded to 19--21). Most of the first
 run's remaining gap is starting pool workers on fresh daemons.
 
 \textbf{Keeping the sender free.} Sending a script away does not by itself keep
@@ -1629,7 +1651,7 @@ candidate's throughput is probed, and the ring admitted is the prefix of the
 fastest that maximises $k \cdot r_k$ --- the ring's worth if every rank ran at the
 slowest admitted rate --- using one device kind only, GPUs when any are wanted
 and present; the lead is a GPU node whenever any candidate has one, after a CPU
-lead at the demonstration built a smaller model whose shape every GPU rank's
+lead in a real two-laptop run built a smaller model whose shape every GPU rank's
 update then failed to match. Each rank's shard and batch slice are then sized by
 its share, and the slices sum to the script's own batch, so the learning rate and
 the mathematics are the script's; each rank used to run the full batch, which
@@ -1645,7 +1667,7 @@ more synchronisation time than computation. Throttling one rank from 8 CPUs to 1
 and back moved the shares from 64:36 to 84:16 and then to 70:30. A round that a
 straggler has not joined completes without it after 45 seconds.
 
-\textbf{One GPU or a split.} At the demonstration a small model split across two
+\textbf{One GPU or a split.} In a real run, a small model split across two
 laptops on Wi-Fi trained for about nine minutes, against about twenty seconds on
 one GPU, because 92\% of every step was synchronisation. The ring is now kept
 only when it earns its place: after a warm-up the lead daemon compares the
@@ -1676,26 +1698,26 @@ multiplied by seven, and an interval adapted to drift made it worse, since more
 drift shortened the interval and applied the oversized step more often. The
 paper's settings failed at every interval tried, even at one synchronisation
 per epoch (the small transformer $+21.7\%$ at 156 local steps). Plain averaging
---- outer learning rate 1, no momentum --- passes. In an emulated lab of two
+--- outer learning rate 1, no momentum --- passes. In a lab of two
 containers on the LAN and Wi-Fi profiles, three seeds each, the gap to one
-device was $+0.64\%$ and $+0.61\%$ on the GPU demonstration's network (a four-layer perceptron), $-2.14\%$ and
-$-2.09\%$ on the same perceptron in the training demonstration at its CPU sizing, and $+0.18\%$ and $+0.50\%$ on a
+device was $+0.64\%$ and $+0.61\%$ on the GPU example's network (a four-layer perceptron), $-2.14\%$ and
+$-2.09\%$ on the same perceptron in the training example at its CPU sizing, and $+0.18\%$ and $+0.50\%$ on a
 small transformer, each within the spread of exact synchronisation's own gap;
 each rank sent 9.1, 10.7 and 1.4\,MiB against 81.1, 98.9 and 21.7\,MiB with
 exact synchronisation, nine to fifteen times less. Wall times are to be
 measured on an idle host \todo{diloco}.
 
 The interval depends on the ring's size. Plain averaging every 64 steps passed
-at two and three ranks but failed at eleven. In simulation, on the same three
+at two and three ranks but failed at eleven. In in-process runs, on the same three
 models and the same bar, the largest interval that passed on every model was
 32 steps at two ranks, 16 at three and 4 at four; from five ranks no interval
 passed, because at eight ranks the transformer failed at every interval down to
-2 and an outer learning rate below 1 was worse (simulated). That table is the
+2 and an outer learning rate below 1 was worse. That table is the
 default, held identically by the daemon and the shim. An explicit
 \texttt{-{}-ddp-sync fast} beyond four ranks still runs, at $H=4$, and says once
 that the ring is past the validated size. That accuracy falls as ranks are
 added is itself a finding: fast synchronisation helps the two to four machines
-of a small group and not a crowd of phones. Simulations of the remedies the
+of a small group and not a crowd of phones. In-process measurements of the remedies the
 literature offers --- keeping each rank's batch so the global batch grows,
 drift correction, compressed exact synchronisation, and retuning the interval
 and outer step per ring size --- are to be added \todo{many-rank table}.
@@ -1713,7 +1735,7 @@ ring returns to exact synchronisation at the next epoch boundary; an explicit
 fast ring moves to the interval for its new size. A rank whose local round
 runs past four times the ring's median step time skips the round's remaining
 batches but counts them, so every rank stays on the same step, and the round
-is averaged by samples; since in simulation every skipped batch cost accuracy
+is averaged by samples; since in in-process runs every skipped batch cost accuracy
 (a factor of 2 instead of 4: 28--30\% less time for 0.3--1.2\% more loss),
 the default only guards against a stalled rank.
 
@@ -1729,8 +1751,8 @@ samples when one rank left; the rendezvous hash keeps each survivor's share
 exact and over 95\% of its samples in place. That holds for a lost machine; a
 rank whose script fails now stops every rank at once. Losing rank 0's machine
 still ends the run, because its daemon holds the synchronisation, but the
-survivors now stop within about 30 seconds with that reason, where at the
-demonstration the submitter waited on a ring nobody was running. A script that
+survivors now stop within about 30 seconds with that reason, where in a real
+two-laptop run the submitter waited on a ring nobody was running. A script that
 slices its own tensors instead of using a data loader is not re-spread.
 
 \textbf{When a machine comes back.} A rank whose machine returns, or a new
@@ -1749,9 +1771,9 @@ script's loop variables exist afterwards and nothing trains twice; its output is
 marked as catch-up until its first real epoch. The snapshot now carries the
 model's buffers too, copied in after the catch-up batches, so batch-normalisation
 statistics come from the lead. Losing rank 0's machine still ends the run. In
-the rehearsal (two containers sharing one GPU) a returning rank joined the ring
+a lab of two containers sharing one GPU a returning rank joined the ring
 \textbf{4}\,s after its node's daemon started.
-% rehearsal evidence v2/23b-ddp-down-up.txt + gpulab/20261012-064736-logs gpu1/gpu2 daemon.log (1519952): daemon starting 05:37:47, rank joined 05:37:51
+% evidence v2/23b-ddp-down-up.txt + gpulab/20261012-064736-logs gpu1/gpu2 daemon.log (1519952): daemon starting 05:37:47, rank joined 05:37:51
 
 \textbf{Starting together.} On a two-laptop ring, rank 0 trained while rank 1
 was still receiving its closure, so every synchronisation waited for it. The
@@ -1831,11 +1853,11 @@ stating. Local BLAS runs at roughly 200\,GFLOP/s, which a CPU cluster's transpor
 cannot beat at practical sizes, so the model keeps it local --- measured against a
 four-core peer, local won by 25 to 100 times across four shapes and the model
 chose local every time. An earlier version of the project made this a law: the
-demonstration suite failed if a matrix multiplication was ever seen leaving the
+example suite failed if a matrix multiplication was ever seen leaving the
 node. That was a fact about one rig written down as a rule, and it would have
 failed on the first cluster with a GPU. The rule is gone; matrix multiplication
 now ships when it does not fit locally, when a GPU peer makes the model favour
-it, or when forced, and the demonstration instead times the same product locally
+it, or when forced, and the example instead times the same product locally
 and checks that the choice made was not the slower one. Singular value
 decomposition, two orders of magnitude slower locally, does ship.
 
@@ -1898,7 +1920,7 @@ run's admission request.
 \section{Seeing What the Cluster Does}
 \label{sec:observe}
 
-Most of what a daemon did was visible only in its log. The demonstration work of
+Most of what a daemon did was visible only in its log. The work of
 October made it visible without adding a daemon endpoint beyond the two for
 background mode.
 
@@ -1952,12 +1974,12 @@ the line; it never fails the run.
 % evidence v5/41-item10-usage-pool-pc2.txt (00_pool.py --remote from pc2)
 
 % ------------------------------------------------------------
-\section{After the Demonstration}
-\label{sec:afterdemo}
+\section{Later Work}
+\label{sec:later}
 
-The project was demonstrated at the college on 14 October 2026 on two laptops,
-two laboratory PCs on routed subnets and a phone hotspot. The demonstration
-found the address problems of Sections~\ref{sec:discovery}--\ref{sec:nat}, the
+A run on real machines at the college on 14 October 2026 --- two laptops,
+two laboratory PCs on routed subnets and a phone hotspot --- found the address
+problems of Sections~\ref{sec:discovery}--\ref{sec:nat}, the
 training problems of Section~\ref{sec:intercept}, and a list of annoyances.
 This section covers the rest of what changed in answer.
 
@@ -1977,8 +1999,8 @@ anything the user must do with a coloured \emph{action needed} line. After
 \texttt{connect}, the common environments build in the background, so the first
 run starts warm. \texttt{pipedpeer doctor} checks the daemon, the secret, each
 introducer and each peer --- telling TCP and UDP reachability apart, since a
-router that passed UDP but not TCP explained the demonstration's unexplained
-``unknown'' row --- the firewall, user namespaces, crun, Nix, the GPU driver,
+router that passed UDP but not TCP explained the unexplained ``unknown'' row
+of that run --- the firewall, user namespaces, crun, Nix, the GPU driver,
 disk and clock, each with its fix. \texttt{pipedpeer uninstall} removes
 everything but Nix.
 
@@ -2023,7 +2045,7 @@ libraries. Where \texttt{proot-distro} and Nix are absent the phone stays a
 Termux pool worker and logs why; that worker now also carries Termux's torch
 and scipy, and takes a chunk only after importing every module the chunk names,
 so a module that is installed but fails to load sends the chunk elsewhere.
-Under emulation (an ARM Termux image under qemu) a laboratory daemon sent a
+With an ARM Termux image run under qemu, a laboratory daemon sent a
 two-item torch training chunk to the Termux worker, which trained it. The full
 route --- \texttt{proot}, Nix and a per-job environment --- is covered by unit
 tests only and is first run on a real phone \todo{phone run}.
@@ -2031,8 +2053,8 @@ tests only and is first run on a real phone \todo{phone run}.
 \textbf{Speed.} Each change below has a before-and-after figure in
 Section~\ref{sec:measure}. Each node's number of chunks in flight follows its
 measured round trip instead of a global four; the losing copy of a race is
-cancelled, and a peer that lost its last three races stops being raced (at the
-demonstration the fast laptop won all 300 races, wasting the peer's work); chunk
+cancelled, and a peer that lost its last three races stops being raced (in a real
+two-laptop run the fast laptop won all 300 races, wasting the peer's work); chunk
 size follows the measured transfer cost and shrinks toward the end. The parallel
 map's request body was built by repeated concatenation, quadratic in its size,
 and is now built once; large functions and globals cross once per peer by hash;
@@ -2048,7 +2070,7 @@ locally first.
 \section{Test Workloads}
 \label{sec:workloads}
 
-Ten dispatch scripts exercise placement and concurrency. Seven demonstration
+Ten dispatch scripts exercise placement and concurrency. Seven example
 workloads cover a standard-library parallel map, a map over a lambda,
 scikit-learn with \texttt{joblib}, NumPy linear algebra, out-of-core pandas,
 torch data-parallel training and file synchronisation, and a
@@ -2067,7 +2089,7 @@ with the introducer on a public network, and asserts that cone pairs punch and
 take work, that a cone--symmetric pair links by the birthday search, that the
 symmetric pair is reported unreachable with its reason, and that a multi-user
 Nix node set up once takes work from a node that joins later without a prompt.
-A venue-shaped lab puts containers on one bridge network as a college LAN, with
+A laboratory-layout lab puts containers on one bridge network as a college LAN, with
 the host's own daemon as the GPU machine and introducer and one container on
 multi-user Nix standing in for the lab's Ubuntu machines; a two-container lab
 shares the host's one GPU between two nodes for the training ring. One script
@@ -2075,11 +2097,12 @@ combines every kind of intercepted work, and five scripts written the way a
 student would write them stand in for code the system has never seen.
 
 % ============================================================
-\chapter{Results and Discussion}
+\chapter{Results}
 \label{chap:results}
 % ============================================================
 
 \section{Test Bed and Sources of Evidence}
+\label{sec:res-setup}
 
 Three sources of evidence appear in this chapter, and every figure states which
 it comes from. Raw output for each is kept in the project's
@@ -2105,20 +2128,30 @@ it comes from. Raw output for each is kept in the project's
   \item \textbf{12 October 2026 runs.} On a second host (Fedora~44, 16
   hardware threads, an RTX~3060 laptop GPU): the re-run of the idle
   interception measurement at commit \texttt{08ce1d4}, the test suite after the
-  demonstration round, and the rehearsal of the demonstration in the
-  venue-shaped container lab at commit \texttt{31b5364} (first-pass figures
+  October round, and the end-to-end runs in the laboratory-layout container
+  lab at commit \texttt{31b5364} (first-pass figures
   at \texttt{8e14b9b}) and a two-container GPU lab at \texttt{1519952}.
   Labelled as such.
 \end{itemize}
 
-\textbf{One caveat governs the laboratory results.} All three workers are
-containers on one machine and share one processor, one memory system and the
-loopback interface. The laboratory measures correctness, overhead, cache
-behaviour and fault handling. It \emph{cannot} measure multi-machine speedup,
-because moving processor-bound work between containers on one host cannot make
-that host faster. The only speedup figures in this chapter are recorded
-measurements between real machines (Section~\ref{sec:res-recorded}), and they
-carry their provenance.
+\textbf{Evaluation setup.} Every laboratory figure in this chapter comes from
+worker daemons in containers on one host. In the plain laboratory the
+containers share the host's processor, memory and loopback interface; it
+measures correctness, overhead, cache behaviour and fault handling, and it
+\emph{cannot} measure multi-machine speedup, because moving processor-bound
+work between containers on one host cannot make that host faster. Where a
+figure depends on speed or on the network, each container is given a fixed
+processor and memory limit and the links between containers are shaped by
+\texttt{tc netem} to the latency, bandwidth and loss of a LAN, a Wi-Fi network
+or a 5G link, with up to 5\% loss; speedup is then one container against $N$
+containers of the same size. Training accuracy under each synchronisation
+setting is measured in-process, with several ranks trained side by side on one
+machine and their validation loss compared with one device's; training scaling
+uses CPU training in the containers, with the synchronisation cost measured
+under the same link profiles, and the one GPU gives single-GPU baselines. Real
+hardware appears in two places: the recorded measurements between real machines
+(Section~\ref{sec:res-recorded}), which carry their provenance, and two laptops
+connected over Tailscale, the realistic worst case across the internet.
 
 \section{Functional Verification}
 \label{sec:res-tests}
@@ -2148,7 +2181,7 @@ The same suite on the same host \emph{without} torch installed gave 607 passed,
 sampler that raise when torch is missing rather than skipping; this is recorded
 as a defect of the tests rather than of the code they test; they now skip.
 
-After the October rounds (the leftover fixes and the demonstration work), the
+After the October rounds (the leftover fixes and the work that followed), the
 same suite gave \textbf{822} passed, \textbf{0} failed and
 \textbf{7} skipped across \textbf{38} packages: two opt-in integration tests
 and five that depend on how Nix is installed on the host.
@@ -2468,11 +2501,11 @@ lines of tests in 154 files (at \texttt{cc56753}) and \textbf{829} tests run.
 % tests: evidence fix5/go-test-json.jsonl (cc56753, go test -count=1 -p 1 -json ./..., top-level tests)
 % lines: wc -l over the tracked src/**/*.go at cc56753 (same method reproduces 23,100 test lines at 5bcf140)
 
-\section{Rehearsing the Demonstration}
-\label{sec:res-rehearsal}
+\section{End-to-End Runs in a Laboratory Layout}
+\label{sec:res-lablayout}
 
-Before the demonstration in a college laboratory, the whole of it was rehearsed
-on one laptop: the venue-shaped container lab for the processor steps, and two
+The whole system was run end to end on one laptop: a container lab laid out
+like a college laboratory for the processor steps, and two
 containers sharing the laptop's one GPU for the GPU step and the training ring.
 The containers share one processor, so these figures show what the steps cost
 and that each works, not speedup. A cold run is the first ever on fresh
@@ -2480,9 +2513,9 @@ containers; a cached run follows it.
 
 \begin{table}[H]
 \centering
-\caption{Demonstration steps, first run and cached (12 October 2026, container
+\caption{End-to-end steps, first run and cached (12 October 2026, container
 labs on one laptop)}
-\label{tab:rehearsal}
+\label{tab:lablayout}
 \renewcommand{\arraystretch}{1.3}
 \rowcolors{2}{}{rowgray}
 \begin{tabularx}{\textwidth}{X C{2.4cm} C{2.4cm}}
@@ -2501,23 +2534,23 @@ Every script at once & \multicolumn{2}{c}{\textbf{412.0}\,s, all 8 jobs ok} \\
 \bottomrule
 \end{tabularx}
 \end{table}
-% rehearsal evidence (~/Downloads/pipedpeer-work/evidence): join v2/56-join-pc3.txt (V1: 5.2 s); headline v1/30-host-00pool-first.txt + v2/71-step-2-headline.txt;
+% evidence (~/Downloads/pipedpeer-work/evidence): join v2/56-join-pc3.txt (V1: 5.2 s); headline v1/30-host-00pool-first.txt + v2/71-step-2-headline.txt;
 % lambda v2/73-step-2b-cold-pc2.txt (V1 with 0.5% netem loss: 169.1/5.8 s); GPU v1/13-gpu-step.txt + v2/74b-gpu-pc1-direct.txt; ring v2/112-c-ddp-ring-cold.txt + v2/113-c-ddp-ring-cached.txt (also v2/22-ddp2-ring.txt); ring cold V3 v3/43-ddp-ring-cold.txt (630.3 s; V2 635 s); combined v3/21-item2-everything-pc3-cold.txt + v3/22-item2-everything-pc3-cached.txt (V2 cold 700.6 s: v2/98-c-everything-pc3-cold.txt);
 % finale v3/33-item3-finale-run3.txt, lab resize v3/30-finale-lab-resize.txt;
 % students v2/75-teacher-*.txt (first run after prep-4-common), cached v2/100-c-teacher-cached-*.txt; common packages v1/15-pc3-pkgprep-before-after.txt.
 \noindent The first runs of the headline map and the GPU job are from the first
-rehearsal pass (\texttt{8e14b9b}), since the second pass found those steps warm;
+pass (\texttt{8e14b9b}), since the second pass found those steps warm;
 every other figure is from the second pass (\texttt{31b5364}), the cached
 student runs and the ring's cached run from a re-check at \texttt{cc56753}, and
 the ring's first run, the combined script and the finale from a last pass at
 \texttt{9949ad0} (the ring's first run took 635\,s at \texttt{cc56753}). A
-join has no cached form. The finale ran its eight jobs with the demo's
+join has no cached form. The finale ran its eight jobs with
 \texttt{PIPEDPEER\_REMOTE\_WAIT=10m} and with the lab's containers resized to
 6.0\,GB of memory in total; at 1.2\,GiB each, three of its jobs fitted no node.
 
 \begin{table}[H]
 \centering
-\caption{Failure drills in the rehearsal}
+\caption{Failure drills in the laboratory layout}
 \label{tab:drills}
 \renewcommand{\arraystretch}{1.3}
 \rowcolors{2}{}{rowgray}
@@ -2535,7 +2568,7 @@ A training rank's machine back during a run & rejoined at the next epoch, \textb
 \bottomrule
 \end{tabularx}
 \end{table}
-% rehearsal evidence: v1/31-ctrlc-poolwatch.txt, v1/32-sighup*.txt, v1/34-attach.txt, v1/35-detach-attach-live.txt (8e14b9b);
+% evidence: v1/31-ctrlc-poolwatch.txt, v1/32-sighup*.txt, v1/34-attach.txt, v1/35-detach-attach-live.txt (8e14b9b);
 % v2/64-senderdeath-long-*.txt + v2/65-senderdeath-collected.txt, v2/72-step-9-failover.txt (31b5364); v2/23b-ddp-down-up.txt (GPU lab, 1519952)
 
 \section{Measurement Method and the Address-Book Phase}
@@ -2552,16 +2585,6 @@ that used another machine; the detailed view is available from \texttt{-v}, the
 job history, the web page, and as CSV or JSON, including a single command that
 exports every run since a date.
 
-\textbf{Emulated laboratory.} The plain laboratory, three containers on one
-host, shows that work crosses nodes and never shows speedup. Speedup figures in
-this section come from an emulated laboratory: containers with equal fixed
-processor and memory quotas whose links are shaped by \texttt{tc netem} to LAN,
-Wi-Fi and 5G profiles with up to 5\% loss, with speedup measured as one container
-against $N$ of the same size. Every such figure is labelled \emph{emulated}.
-Training scaling uses CPU training in those containers with the synchronisation
-cost measured under the same profiles; the one real GPU gives single-GPU
-baselines only.
-
 \textbf{Scaling map.} One variable at a time is swept with the rest fixed:
 payload from 1\,KB to 2\,GB, one to eight nodes, item count and cost per item,
 link profile, loss, a speed spread of up to ten times between nodes, and a cold
@@ -2570,35 +2593,34 @@ or warm environment; for training, model size, batch, synchronisation interval,
 scale from the run records, and a step whose exponent exceeds the expected one by
 more than 0.15 is treated as a defect.
 
-\textbf{Real points.} Two laptops connected over Tailscale, the realistic worst
-case across the internet, and every run of the demonstration day, exported with
-the one command above.
+\textbf{Real points.} Runs between two laptops connected over Tailscale are
+exported with the one command above. Every figure follows the setup of
+Section~\ref{sec:res-setup}.
 
 \begin{table}[H]
 \centering
-\caption{Results of the address-book phase (to be filled by the verification pass)}
-\label{tab:afterdemo}
+\caption{Results of the address-book phase}
+\label{tab:later}
 \renewcommand{\arraystretch}{1.25}
 \begin{tabularx}{\textwidth}{X L{4.2cm} L{3.0cm}}
 \toprule
 \textbf{Measurement} & \textbf{Result} & \textbf{Source} \\
 \midrule
-One GPU against a split: a cell where the split wins, and one where one GPU wins & \todo{ddp-switch} & emulated \\
-Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time \todo{diloco} & emulated \\
-The DiLoCo paper's outer step (Nesterov 0.7, momentum 0.9) at our intervals & fails at every interval; small transformer $+21.7\%$ at 156 local steps & emulated \\
-Largest passing fast-sync interval by ring size & 2 ranks: 32; 3: 16; 4: 4; 5 or more: none & simulated \\
-Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & \todo{many-rank table} & simulated \\
-Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.09, 1.08\times$ (were $2.11, 1.35, 1.37, 1.31\times$) & emulated \\
-Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 256.9\,s, warm 603.7 to 67.3\,s; idle-host rerun \todo{bcast quiet} & emulated \\
+One GPU against a split: a cell where the split wins, and one where one GPU wins & \todo{ddp-switch} & container lab \\
+Fast synchronisation (plain averaging), validation loss against one device per model, mean of 3 seeds, LAN / Wi-Fi & $+0.64/+0.61\%$, $-2.14/-2.09\%$, $+0.18/+0.50\%$; bytes per rank 9--15$\times$ fewer than exact; wall time \todo{diloco} & container lab \\
+The DiLoCo paper's outer step (Nesterov 0.7, momentum 0.9) at our intervals & fails at every interval; small transformer $+21.7\%$ at 156 local steps & container lab \\
+Largest passing fast-sync interval by ring size & 2 ranks: 32; 3: 16; 4: 4; 5 or more: none & in-process \\
+Remedies for many ranks (larger global batch, drift correction, compressed exact sync, per-size retuning) & \todo{many-rank table} & in-process \\
+Slow peer at a tenth of the CPU, runs 1--4 against equal peers & $1.60, 1.25, 1.09, 1.08\times$ (were $2.11, 1.35, 1.37, 1.31\times$) & container lab \\
+Closure broadcast, second node at 800\,kbit/s, cold and warm run & cold 1000.9 to 256.9\,s, warm 603.7 to 67.3\,s; idle-host rerun \todo{bcast quiet} & container lab \\
 Phone as a full node through proot and Nix & \todo{phone run} & real \\
-Parallel map request body, before and after, 100\,MB payload & \todo{pool body} & emulated \\
-Workspace re-upload after editing one file & \todo{workspace} & emulated \\
-Environment seed to a node holding every path & \todo{seed} & emulated \\
-Pool time estimate error, before (7--37$\times$) and after & \todo{estimates} & emulated \\
-Superlinear steps found by the scaling map & \todo{scaling map} & emulated \\
+Parallel map request body, before and after, 100\,MB payload & \todo{pool body} & container lab \\
+Workspace re-upload after editing one file & \todo{workspace} & container lab \\
+Environment seed to a node holding every path & \todo{seed} & container lab \\
+Pool time estimate error, before (7--37$\times$) and after & \todo{estimates} & container lab \\
+Superlinear steps found by the scaling map & \todo{scaling map} & container lab \\
 Peer and introducer address change, time to recover & \todo{test-net} & container network \\
 Two laptops over Tailscale: CPU, GPU and combined scripts & \todo{tailscale} & real \\
-Demonstration-day runs & \todo{demo day} & real \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -2683,16 +2705,16 @@ Fault injection that actually distributes & the October run did not distribute (
 Hole-punch success rate across many networks & each link was observed individually; no survey of NAT types was made \\
 Two GPUs in one machine & no available machine has a second usable GPU \\
 Peer discovery latency & containers share the host's loopback, so the figure would not be meaningful \\
-The seven demonstration workloads end to end & not run for the October pass; rehearsed in containers on 12 October (Section~\ref{sec:res-rehearsal}) \\
-Speedup, wireless networks, two physical GPUs and a college network's rules & the rehearsal ran in containers on one laptop; these come only from the venue \\
+The seven example workloads end to end on separate machines & not run for the October pass; run in containers on 12 October (Section~\ref{sec:res-lablayout}) \\
+Speedup, wireless networks, two physical GPUs and a college network's rules & the laboratory-layout runs used containers on one laptop; these come only from separate machines \\
 A phone as a full node (\texttt{proot}, Nix, per-job environment) & \texttt{proot} cannot run under qemu-user, so the route is first run on a real phone \\
-Fast synchronisation at five to seven ranks & not simulated; eight and eleven were, and failed \\
+Fast synchronisation at five to seven ranks & not measured; eight and eleven were, in-process, and failed \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
 % ============================================================
-\chapter{Conclusion and Future Work}
+\chapter{Conclusion}
 \label{chap:conclusion}
 % ============================================================
 
@@ -2774,7 +2796,7 @@ first cluster with a GPU.
   builds a job's environment itself, one job at a time, on the CPU.
   \item \textbf{Fast synchronisation is for small rings.} Synchronising every
   $H$ steps holds accuracy at two to four ranks; from five ranks no interval
-  passed in simulation, so automatic mode keeps such rings exact.
+  passed in in-process runs, so automatic mode keeps such rings exact.
   \item \textbf{Dependencies outside the package set.} An import that neither the
   table nor the package set knows is reported before the run rather than dropped
   silently (Section~\ref{sec:env}), but the job still needs the user to name a
@@ -2869,8 +2891,10 @@ system is therefore suitable for machines whose owners trust one another, joined
 over networks they do not need to trust, which is a substantial change from
 before; it is not suitable for a cluster of mutually untrusting participants.
 
-\section{Future Work}
+% ============================================================
+\chapter{Future Scope}
 \label{sec:future}
+% ============================================================
 
 \begin{itemize}[leftmargin=*]
   \item \textbf{Closing the security gaps.} Binding trusted signing keys to the
@@ -2909,6 +2933,20 @@ before; it is not suitable for a cluster of mutually untrusting participants.
 \end{itemize}
 
 % ============================================================
+\chapter{Research Publication}
+\label{chap:pub}
+% ============================================================
+
+\section{\projecttitle}
+
+A research paper drawn from this work, ``\projecttitle'', written in the IEEE
+conference format, describes the system and its evaluation. Status:
+\publicationstatus.
+
+% ============================================================
+\cleardoublepage
+\phantomsection
+\addcontentsline{toc}{chapter}{Bibliography}
 \begin{thebibliography}{99}
 
 \bibitem{zaharia2010spark}
