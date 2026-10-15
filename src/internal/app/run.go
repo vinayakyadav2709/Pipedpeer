@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,7 +13,10 @@ import (
 
 	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
+	"github.com/pipedpeer/pipedpeer/internal/runrec"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 )
 
 type Options struct {
@@ -97,7 +101,7 @@ func Run(ctx context.Context, opts Options) (runErr error) {
 		return fmt.Errorf("daemon host is required")
 	}
 	if opts.DaemonPort <= 0 {
-		opts.DaemonPort = 38080
+		opts.DaemonPort = daemonctl.DefaultPort
 	}
 
 	if _, err := os.Stat(opts.ScriptPath); os.IsNotExist(err) {
@@ -109,21 +113,22 @@ func Run(ctx context.Context, opts Options) (runErr error) {
 		return fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	fmt.Printf("=== Pipedpeer CLI ===\n")
-	fmt.Printf("Script: %s\n", absScriptPath)
-	fmt.Printf("Daemon: %s:%d\n\n", opts.DaemonHost, opts.DaemonPort)
+	say.Printf("=== Pipedpeer CLI ===\n")
+	say.Printf("Script: %s\n", absScriptPath)
+	say.Printf("Daemon: %s:%d\n\n", opts.DaemonHost, opts.DaemonPort)
 
 	started := time.Now()
-	env, err := BuildEnvironment(absScriptPath, EnvOptions{
+	env, err := BuildEnvironment(ctx, absScriptPath, EnvOptions{
 		PythonVersion: opts.PythonVersion,
 		Pkgs:          opts.Pkgs,
 		Intercept:     opts.Intercept,
 		GPU:           opts.GPU,
+		Verbose:       say.Verbose,
 	}, func(step int, title string) {
 		if step == 1 {
-			fmt.Printf("[%d/7] %s\n", step, title)
+			say.Printf("[%d/7] %s\n", step, title)
 		} else {
-			fmt.Printf("\n[%d/7] %s\n", step, title)
+			say.Printf("\n[%d/7] %s\n", step, title)
 		}
 	})
 	if err != nil {
@@ -144,9 +149,12 @@ func Run(ctx context.Context, opts Options) (runErr error) {
 	task := Task{
 		Options:   opts,
 		Script:    absScriptPath,
-		StageFmt:  "[%d/7] %s\n",
 		started:   started,
 		buildTime: time.Since(started),
+		single:    true,
+	}
+	if say.Verbose {
+		task.StageFmt = "[%d/7] %s\n"
 	}
 	return RunTask(ctx, env, task)
 }
@@ -165,6 +173,9 @@ type Task struct {
 	// Set by Run so the summary covers the build too.
 	started   time.Time
 	buildTime time.Duration
+	// single marks a run of its own (not a fan-out task or a DDP rank): it
+	// saves the run record and prints its simple view.
+	single bool
 }
 
 // RunTask uploads a prepared environment to a node, runs the script there, and
@@ -216,6 +227,9 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		}
 	}
 	timeline.Stages = append(timeline.Stages, env.Stages...)
+	// The script's own run, as the node timed it; zero when it never ran.
+	var scriptStart time.Time
+	var scriptDur time.Duration
 	defer func() {
 		if detached {
 			return // Attach finalizes it
@@ -228,10 +242,13 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 			if runErr == nil {
 				fmt.Printf("\n=== Done ===\n")
 			}
-			fmt.Printf("History: %s  (pipedpeer job --id %s --timeline)\n", historyDir, jobhistory.ShortID(historyRecord.ID))
+			fmt.Printf("History: %s  (pipedpeer jobs %s --timeline)\n", historyDir, jobhistory.ShortID(historyRecord.ID))
 			sum.Total = time.Since(started)
 			sum.Err = runErr
 			printSummary(os.Stdout, sum)
+		}
+		if task.single {
+			saveRunRecord(historyDir, historyRecord.ID, opts, started, scriptStart, scriptDur, sum.Receipt)
 		}
 	}()
 	_ = jobhistory.CopyFileTo(historyDir, task.Script, "script.py")
@@ -293,7 +310,7 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	stage(7, "Executing on remote...")
 	jobhistory.UpdateStage(historyDir, "executing")
 	if opts.EstimatedMemBytes <= 0 {
-		fmt.Fprintf(os.Stderr, "      Note: no memory estimate for %s; capping the job at %s (raise with --mem)\n",
+		say.Printf("      Note: no memory estimate for %s; capping the job at %s (raise with --mem)\n",
 			env.ScriptRel, humanize.IBytes(noEstimateMemLimit))
 	}
 	execCfg := daemonctl.ExecConfig{
@@ -342,6 +359,10 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		}
 	}
 	addExecStages(timeline, node, execStart, execDur, res.Timing)
+	if tm := res.Timing; tm != nil {
+		scriptStart = execStart.Add(time.Duration(tm.ImportMs+tm.SetupMs) * time.Millisecond)
+		scriptDur = time.Duration(tm.RunMs) * time.Millisecond
+	}
 	sum.ScriptRan, sum.ScriptTime, sum.Peak, sum.Receipt = true, execDur, res.PeakBytes, res.Receipt
 	historyRecord.PeakMemBytes = res.PeakBytes
 	_ = jobhistory.SaveText(historyDir, "stdout.log", res.Stdout)
@@ -391,13 +412,15 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 				if rerr := replayRest(historyDir, res.Stdout, res.Stderr); rerr != nil {
 					fmt.Fprintf(os.Stderr, "warning: job %s: the output printed after the connection was lost is missing here: %v; pipedpeer attach %s shows what was saved\n", short, rerr, short)
 				}
-				printSummary(os.Stdout, recordSummary(historyDir, got, opts.DaemonHost, opts.DaemonPort))
+				if say.Verbose {
+					printSummary(os.Stdout, recordSummary(historyDir, got, opts.DaemonHost, opts.DaemonPort))
+				}
 				return jobErr
 			}
 			fmt.Fprintf(os.Stderr, "warning: could not collect job %s now (%v); this machine's daemon retries\n", short, cerr)
 		}
-		fmt.Printf("\ndetached — job %s keeps running\n", short)
-		fmt.Printf("  reattach: pipedpeer attach %s\n", short)
+		fmt.Fprintf(os.Stderr, "\ndetached — job %s keeps running\n", short)
+		fmt.Fprintf(os.Stderr, "  reattach: pipedpeer attach %s\n", short)
 		return fmt.Errorf("job %s detached: %w", short, err)
 	}
 	if err != nil {
@@ -408,18 +431,25 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 	}
 
 	endSync := timeline.Begin("sync results", "local")
-	sum.Files = syncResults(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, resultsDir, historyDir, &historyRecord, note)
+	sum.Files, err = syncResults(opts.DaemonHost, opts.DaemonPort, uploadResp.JobID, resultsDir, historyDir, &historyRecord, note)
 	endSync()
-	return nil
+	return err
 }
 
+// ResultsError is a run whose script finished but whose output files did not
+// come back. The run fails (and is recorded failed), but running the script
+// again elsewhere would not help, so the coordinator must not retry it.
+type ResultsError struct{ Err error }
+
+func (e *ResultsError) Error() string { return e.Err.Error() }
+func (e *ResultsError) Unwrap() error { return e.Err }
+
 // syncResults downloads the files a job produced into resultsDir and records
-// them on rec. It returns nil when the download failed (and says so).
-func syncResults(host string, port int, jobID, resultsDir, historyDir string, rec *jobhistory.Record, note func(string, ...any)) *daemonctl.ResultManifest {
+// them on rec. A failed download returns a *ResultsError.
+func syncResults(host string, port int, jobID, resultsDir, historyDir string, rec *jobhistory.Record, note func(string, ...any)) (*daemonctl.ResultManifest, error) {
 	manifest, err := daemonctl.DownloadResults(host, port, jobID, resultsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "      Warning: results download for job %s failed: %v\n", jobID, err)
-		return nil
+		return nil, &ResultsError{Err: fmt.Errorf("the script finished but its result files did not come back from job %s: %w", jobID, err)}
 	}
 	manifest.JobID = jobID
 	manifestPath, writeErr := jobhistory.WriteManifest(historyDir, manifest)
@@ -440,7 +470,52 @@ func syncResults(host string, port int, jobID, resultsDir, historyDir string, re
 		note("      Synced %d file(s) to %s (%d new, %d updated, %d deleted)\n",
 			manifest.Count(), resultsDir, len(manifest.New), len(manifest.Updated), len(manifest.Deleted))
 	}
-	return manifest
+	return manifest, nil
+}
+
+// saveRunRecord merges this process's run steps with the shim receipt's
+// "steps", adds the script's own run time, saves the record beside the job's
+// history and prints its simple view (stderr) when work left this machine,
+// plus the detailed view under -v.
+func saveRunRecord(historyDir, runID string, opts Options, started, scriptStart time.Time, scriptDur time.Duration, receipt json.RawMessage) {
+	steps := runrec.Steps()
+	if len(receipt) > 0 {
+		var r struct {
+			Steps []runrec.Step `json:"steps"`
+		}
+		if err := json.Unmarshal(receipt, &r); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not read the steps in job %s's receipt: %v\n", jobhistory.ShortID(runID), err)
+		}
+		steps = append(steps, r.Steps...)
+	}
+	self := heartbeat.Machine()
+	host, _ := os.Hostname()
+	ranHere := opts.PlacementSource == "self"
+	rec := runrec.Record{RunID: runID, TotalNS: time.Since(started).Nanoseconds(), Steps: steps}
+	if !scriptStart.IsZero() {
+		machine := self
+		if !ranHere {
+			machine = opts.TargetID
+		}
+		rec.ScriptNS = scriptDur.Nanoseconds()
+		rec.Steps = append(rec.Steps, runrec.Step{Machine: machine, Node: opts.TargetID, Chunk: -1, Name: "script",
+			StartNS: scriptStart.UnixNano(), DurNS: rec.ScriptNS})
+	}
+	if err := runrec.Save(historyDir, rec); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save the run record in %s: %v\n", historyDir, err)
+	}
+	left := !ranHere
+	for _, s := range rec.Steps {
+		if s.Machine != "" && s.Machine != self && s.Machine != host {
+			left = true
+		}
+	}
+	if left {
+		runrec.WriteSimple(os.Stderr, runrec.Simple(rec))
+	}
+	if say.Verbose {
+		runrec.WriteDetailed(os.Stderr, rec)
+	}
 }
 
 // noEstimateMemLimit caps a job that came with no memory estimate. Generous

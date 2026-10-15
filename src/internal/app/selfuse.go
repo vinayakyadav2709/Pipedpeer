@@ -13,6 +13,7 @@ import (
 	"github.com/dustin/go-humanize"
 	"github.com/pipedpeer/pipedpeer/internal/gpu"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/say"
 )
 
 // Usage watches this machine and the executing nodes while a job runs, for
@@ -169,10 +170,11 @@ func (u *Usage) finish() (self string, nodes []nodeUse) {
 	return self, nodes
 }
 
-// Print stops sampling and prints the usage lines in the summary's layout.
+// Print stops sampling and prints the usage lines in the summary's layout,
+// only under -v: a plain run prints nothing but the script's output.
 func (u *Usage) Print(w io.Writer) {
 	self, nodes := u.finish()
-	if self == "" && len(nodes) == 0 {
+	if !say.Verbose || (self == "" && len(nodes) == 0) {
 		return
 	}
 	fmt.Fprintln(w, "\n=== Usage ===")
