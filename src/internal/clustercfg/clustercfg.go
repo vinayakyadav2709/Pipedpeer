@@ -19,63 +19,173 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/rs/zerolog/log"
 )
 
 // DefaultPort is the introducer's port when an address does not name one.
 //
 // The demo, the docs and every example use it, so typing a bare host is the
-// common case and requiring ":38445" would be noise.
-const DefaultPort = 38445
+// common case and requiring ":4244" would be noise.
+const DefaultPort = 4244
 
-// EnvVar is the environment variable the daemon reads.
-const EnvVar = "PIPEDPEER_RENDEZVOUS"
+// maxIntroducers is how many introducer addresses are remembered.
+const maxIntroducers = 8
 
-type config struct {
+// Config is everything this machine remembers about its cluster, in one file.
+type Config struct {
+	Token       string   `json:"token"`
+	Introducers []string `json:"introducers"`
+	NoJobs      bool     `json:"no_jobs,omitempty"`
+	PoolOnly    bool     `json:"pool_only,omitempty"`
+}
+
+// disk is Config plus the field older builds wrote, read only to migrate it.
+type disk struct {
+	Config
 	Rendezvous string `json:"rendezvous,omitempty"`
 }
 
-func path() string {
+var mu sync.Mutex
+
+// Path is the config file, for messages to the operator.
+func Path() string {
 	return filepath.Join(userdir.Data(), "cluster.json")
 }
 
-func load() config {
-	var c config
-	b, err := os.ReadFile(path())
-	if err != nil {
-		return c
-	}
-	_ = json.Unmarshal(b, &c)
-	return c
+func legacyTokenPath() string {
+	return filepath.Join(userdir.Data(), "auth_token")
 }
 
-// Rendezvous is the introducer this machine joins through, or "".
-func Rendezvous() string { return strings.TrimSpace(load().Rendezvous) }
+// Load reads the config. A missing file is a zero Config, not an error.
+//
+// Two older layouts are migrated on the way: {"rendezvous": addr} becomes one
+// introducer, and a separate auth_token file becomes Token. The result is
+// saved, and auth_token is deleted only after that save succeeded, so a
+// failed migration loses nothing.
+func Load() (Config, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	return load()
+}
 
-// SetRendezvous records the introducer, so later starts need no flag.
+func load() (Config, error) {
+	var d disk
+	b, err := os.ReadFile(Path())
+	if err != nil && !os.IsNotExist(err) {
+		return Config{}, err
+	}
+	if err == nil {
+		if err := json.Unmarshal(b, &d); err != nil {
+			return Config{}, fmt.Errorf("%s: %w", Path(), err)
+		}
+	}
+	migrated := false
+	if r := strings.TrimSpace(d.Rendezvous); r != "" {
+		d.Introducers = mergeAddrs(d.Introducers, r)
+		migrated = true
+	}
+	legacy := false
+	if d.Token == "" {
+		if tb, err := os.ReadFile(legacyTokenPath()); err == nil {
+			if t := strings.TrimSpace(string(tb)); t != "" {
+				d.Token, legacy, migrated = t, true, true
+			}
+		}
+	}
+	if migrated {
+		log.Warn().Str("file", Path()).Msg("clustercfg: migrating the old rendezvous/auth_token files into cluster.json")
+		if err := save(d.Config); err != nil {
+			log.Warn().Err(err).Msg("clustercfg: could not save the migrated config; the old files are kept")
+		} else if legacy {
+			if err := os.Remove(legacyTokenPath()); err != nil && !os.IsNotExist(err) {
+				log.Warn().Err(err).Msg("clustercfg: could not remove the old auth_token file")
+			}
+		}
+	}
+	return d.Config, nil
+}
+
+// Save writes the config atomically with mode 0600.
 //
 // Written via a temporary file and renamed: a half-written config read by the
 // next start would look like a machine that belongs to no cluster, which is
 // indistinguishable from one that never joined.
-func SetRendezvous(addr string) error {
-	addr = strings.TrimSpace(addr)
-	dir := userdir.Data()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+func Save(c Config) error {
+	mu.Lock()
+	defer mu.Unlock()
+	return save(c)
+}
+
+func save(c Config) error {
+	if err := os.MkdirAll(userdir.Data(), 0o700); err != nil {
 		return err
 	}
-	c := load()
-	c.Rendezvous = addr
+	if c.Introducers == nil {
+		c.Introducers = []string{}
+	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path() + ".tmp"
+	tmp := Path() + ".tmp"
 	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path())
+	return os.Rename(tmp, Path())
 }
+
+// mergeAddrs appends add to have, dropping duplicates (the newest position
+// wins) and keeping the maxIntroducers most recent.
+func mergeAddrs(have []string, add ...string) []string {
+	var out []string
+	for _, a := range append(append([]string{}, have...), add...) {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		for i, o := range out {
+			if o == a {
+				out = append(out[:i], out[i+1:]...)
+				break
+			}
+		}
+		out = append(out, a)
+	}
+	if len(out) > maxIntroducers {
+		out = out[len(out)-maxIntroducers:]
+	}
+	return out
+}
+
+// RememberIntroducers adds introducer addresses (host:port) to the config.
+func RememberIntroducers(addrs ...string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	c, err := load()
+	if err != nil {
+		return err
+	}
+	c.Introducers = mergeAddrs(c.Introducers, addrs...)
+	return save(c)
+}
+
+// Rendezvous is the most recently remembered introducer, or "".
+func Rendezvous() string {
+	c, err := Load()
+	if err != nil || len(c.Introducers) == 0 {
+		if err != nil {
+			log.Warn().Err(err).Msg("clustercfg: cannot read the config; treating this machine as in no cluster")
+		}
+		return ""
+	}
+	return c.Introducers[len(c.Introducers)-1]
+}
+
+// SetRendezvous remembers one introducer.
+func SetRendezvous(addr string) error { return RememberIntroducers(addr) }
 
 // Normalize turns what a person types into host:port.
 //
@@ -125,17 +235,11 @@ func Normalize(addr string) (string, error) {
 	return addr, nil
 }
 
-// Effective is the introducer to use, and where the answer came from.
-//
-// Precedence is flag, then environment, then what was saved. A flag is how
-// somebody overrides a saved cluster for one run, so it has to win; the saved
-// value exists so that nothing has to be typed at all.
+// Effective is the introducer to use, and where the answer came from: a flag
+// beats what was saved.
 func Effective(flag string) (addr, source string) {
 	if s := strings.TrimSpace(flag); s != "" {
 		return s, "flag"
-	}
-	if s := strings.TrimSpace(os.Getenv(EnvVar)); s != "" {
-		return s, "environment"
 	}
 	if s := Rendezvous(); s != "" {
 		return s, "saved"

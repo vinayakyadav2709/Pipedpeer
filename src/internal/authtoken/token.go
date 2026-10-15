@@ -31,12 +31,11 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/rs/zerolog/log"
 )
 
@@ -53,10 +52,6 @@ var (
 	cached string
 	loaded bool
 )
-
-func tokenPath() string {
-	return filepath.Join(userdir.Data(), "auth_token")
-}
 
 // Current returns the configured token, or "" when the daemon is open.
 func Current() string {
@@ -87,10 +82,12 @@ func Current() string {
 		cached = v
 		return cached
 	}
-	b, err := os.ReadFile(tokenPath())
-	if err == nil {
-		cached = strings.TrimSpace(string(b))
+	c, err := clustercfg.Load()
+	if err != nil {
+		log.Warn().Err(err).Msg("authtoken: cannot read the cluster config; running without a token")
+		return cached
 	}
+	cached = strings.TrimSpace(c.Token)
 	return cached
 }
 
@@ -103,22 +100,17 @@ func underTest() bool {
 		flag.Lookup("test.v") != nil
 }
 
-// Set writes a token, or clears it when tok is empty.
+// Set writes a token into the cluster config, or clears it when tok is empty.
 func Set(tok string) error {
 	tok = strings.TrimSpace(tok)
-	path := tokenPath()
-	if tok == "" {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	} else {
-		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-			return err
-		}
-		// 0600: a token readable by every user on the box protects nothing.
-		if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
-			return err
-		}
+	c, err := clustercfg.Load()
+	if err != nil {
+		return err
+	}
+	c.Token = tok
+	// 0600 (clustercfg.Save): a token readable by every user on the box protects nothing.
+	if err := clustercfg.Save(c); err != nil {
+		return err
 	}
 	mu.Lock()
 	cached, loaded = tok, true
@@ -136,7 +128,7 @@ func Generate() string {
 }
 
 // Path is where the token lives, for messages to the operator.
-func Path() string { return tokenPath() }
+func Path() string { return clustercfg.Path() }
 
 // Middleware rejects requests without the token once one is configured.
 // Comparison is constant-time: a byte-by-byte compare leaks the token one
