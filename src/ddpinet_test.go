@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -61,5 +62,44 @@ func TestARankOnAnInternetPeerSyncsThroughItsOwnForwarder(t *testing.T) {
 		if got, err := ddpLeadAddrFor(n, lead, selfMachine, noFetch); err != nil || got != "" {
 			t.Errorf("%s: got %q, %v; want the shared address", n.NodeID, got, err)
 		}
+	}
+}
+
+// A native torch.distributed script connects rank to rank on its own ports,
+// which a forwarder does not carry: a node reached over the internet link is
+// turned down with a reason (so a ring left with one rank falls back with the
+// FIX-WORLD1 warning), and the ring never picks it. The shim's own sync is
+// unaffected.
+func TestNativeDDPTakesNoNodeBehindAForwarder(t *testing.T) {
+	self := map[string]string{heartbeat.MachineCapability: "boot-a"}
+	far := map[string]string{heartbeat.MachineCapability: "boot-b", "hostname": "fedora"}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"capabilities": self})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]registry.NodeRecord{
+			{NodeID: "node-a", SSHEndpoint: "root@127.0.0.1:22", State: "healthy", Capabilities: self},
+			{NodeID: "node-b", SSHEndpoint: "root@127.0.0.1:22", State: "healthy", Capabilities: far},
+		})
+	}))
+	defer srv.Close()
+	_, p, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	port, _ := strconv.Atoi(p)
+
+	if n, refused := ddpEligibleRanks(port, false, 0, 0, "", false); n != 2 || len(refused) != 0 {
+		t.Fatalf("shim sync: eligible %d, refused %+v; want both nodes", n, refused)
+	}
+	n, refused := ddpEligibleRanks(port, false, 0, 0, "", true)
+	if n != 1 || len(refused) != 1 || refused[0].node != "node-b" ||
+		!strings.Contains(refused[0].reason, "fedora is reached over the internet link") {
+		t.Fatalf("native: eligible %d, refused %+v; want node-b turned down for its internet link", n, refused)
+	}
+	o := ddpRunOptions{Native: true, SelfMachine: "boot-a"}
+	if !ddpExcluded(o, registry.NodeRecord{NodeID: "node-b", SSHEndpoint: "root@127.0.0.1:22", Capabilities: far}) {
+		t.Error("the native ring may pick a node behind a forwarder")
+	}
+	if ddpExcluded(o, registry.NodeRecord{NodeID: "node-c", SSHEndpoint: "root@192.168.1.7:22"}) {
+		t.Error("the native ring refuses a LAN node")
 	}
 }

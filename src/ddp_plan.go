@@ -394,13 +394,24 @@ func ddpEligibleCount(daemonPort int, requireGPU bool, requiredGPUMem, requiredM
 // (pool-only, introducer-only: C5), this node under NoSelf (--remote), and
 // any node on the machine --offload keeps work off, by its machine key.
 func ddpExcluded(o ddpRunOptions, n registry.NodeRecord) bool {
-	if n.Capabilities[ddpRoleCapability] != "" {
+	if n.Capabilities[ddpRoleCapability] != "" || ddpNativeRefusal(o.Native, n, o.SelfMachine) != "" {
 		return true
 	}
 	if o.NoSelf && o.SelfNodeID != "" && n.NodeID == o.SelfNodeID {
 		return true
 	}
 	return heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], o.ExcludeMachine)
+}
+
+// ddpNativeRefusal is why a native torch.distributed script cannot put a
+// rank on n, or "". Its gloo/NCCL ring connects rank to rank on its own
+// ports; a node reached only through this daemon's forwarder carries the
+// daemon API and nothing else.
+func ddpNativeRefusal(native bool, n registry.NodeRecord, selfMachine string) string {
+	if !native || !ddpForwardedLead(n, selfMachine) {
+		return ""
+	}
+	return "native torch.distributed needs a direct network path; " + ddpHostName(n) + " is reached over the internet link"
 }
 
 // ddpRoleCapability marks a node that takes no DDP rank: "pool-only" or
@@ -410,7 +421,7 @@ const ddpRoleCapability = "role"
 // ddpEligibleCountExcept is ddpEligibleCount without the nodes on the machine
 // whose key is exclude ("" excludes nothing).
 func ddpEligibleCountExcept(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) int {
-	n, _ := ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude)
+	n, _ := ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude, false)
 	return n
 }
 
@@ -430,7 +441,10 @@ type ddpRefusal struct {
 // node's grantable memory right after a run still holds that run's page
 // cache, so the strict check alone dropped an auto ring to one node with
 // nothing printed (FIX-WORLD1) while --ddp 2 rings on the same nodes ran.
-func ddpEligibleRanks(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) (int, []ddpRefusal) {
+//
+// native (the script starts torch.distributed itself) also turns down every
+// node reached only through a forwarder (ddpNativeRefusal).
+func ddpEligibleRanks(daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string, native bool) (int, []ddpRefusal) {
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/v1/nodes", daemonPort))
 	if err != nil {
 		say.Warnf("cannot list nodes for a DDP ring (%v); running on one node\n", err)
@@ -444,11 +458,19 @@ func ddpEligibleRanks(daemonPort int, requireGPU bool, requiredGPUMem, requiredM
 	}
 	count := 0
 	var refused []ddpRefusal
+	selfMachine := ""
+	if native {
+		selfMachine = ddpSelfMachine(daemonPort)
+	}
 	for _, n := range all {
 		if n.State != "healthy" || n.Capabilities[ddpRoleCapability] != "" {
 			continue
 		}
 		if heartbeat.SameMachine(n.Capabilities[heartbeat.MachineCapability], exclude) {
+			continue
+		}
+		if why := ddpNativeRefusal(native, n, selfMachine); why != "" {
+			refused = append(refused, ddpRefusal{node: shortID(n.NodeID), reason: why})
 			continue
 		}
 		idle := n.Load.ActiveJobs == 0
@@ -483,8 +505,8 @@ const ddpSettleWait = 25 * time.Second
 
 // ddpEligibleSettled is ddpEligibleRanks, asked again every 2 s for up to
 // ddpSettleWait while fewer than two ranks fit and a refused node was busy.
-func ddpEligibleSettled(ctx context.Context, daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string) (int, []ddpRefusal) {
-	n, refused := ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude)
+func ddpEligibleSettled(ctx context.Context, daemonPort int, requireGPU bool, requiredGPUMem, requiredMem int64, exclude string, native bool) (int, []ddpRefusal) {
+	n, refused := ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude, native)
 	deadline := time.Now().Add(ddpSettleWait)
 	for n < 2 && slices.ContainsFunc(refused, func(r ddpRefusal) bool { return r.busy }) && time.Now().Before(deadline) {
 		say.Printf("[coordinator] DDP: %d rank(s) fit; waiting up to %s for busy nodes to finish (%s)\n",
@@ -494,7 +516,7 @@ func ddpEligibleSettled(ctx context.Context, daemonPort int, requireGPU bool, re
 			return n, refused
 		case <-time.After(2 * time.Second):
 		}
-		n, refused = ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude)
+		n, refused = ddpEligibleRanks(daemonPort, requireGPU, requiredGPUMem, requiredMem, exclude, native)
 	}
 	return n, refused
 }
@@ -560,6 +582,10 @@ func ddpChooseRing(o ddpRunOptions, rank0 registry.NodeRecord) ([]registry.NodeR
 		// an all-reduce must not silently mix devices, and the probe measures
 		// CPU throughput, so it cannot rank a GPU against a CPU anyway.
 		if o.RequireGPU && !ddpHasGPU(n) {
+			continue
+		}
+		if why := ddpNativeRefusal(o.Native, n, o.SelfMachine); why != "" {
+			say.Printf("      Not using %s: %s\n", shortID(n.NodeID), why)
 			continue
 		}
 		if ddpExcluded(o, n) {

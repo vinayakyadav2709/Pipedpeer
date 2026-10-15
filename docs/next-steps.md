@@ -112,6 +112,15 @@ Dropped: Optuna interception, NPU support.
 4. DDP-LEAD, then the memory ladder.
 5. AMD through ROCm.
 6. Locality- and topology-aware placement.
+7. **`pipedpeer explain <script>`**, like SQL's EXPLAIN: before running, print
+   the plan: the environment it would build (imports found, CPU or CUDA
+   torch), the machines considered and the chosen one, each Pool / joblib /
+   pandas / torch call the shim will take over (file:line, from a static
+   scan), the DDP choice (one node or split, sync mode, H) and, from the
+   job history, expected chunk counts and wall time. `pipedpeer jobs <id>
+   --explain` is already the EXPLAIN ANALYZE half (after a run, why each
+   machine won); chunk sizes are decided at run time from measured item
+   cost, so before a first run they can only be estimates.
 
 ## 5. Decisions already made (do not reopen)
 

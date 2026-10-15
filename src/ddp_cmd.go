@@ -46,8 +46,13 @@ type ddpRunOptions struct {
 	// --offload); SelfNodeID is this node, for NoSelf. runDDP fills it.
 	ExcludeMachine string
 	SelfNodeID     string
-	Strategy       string
-	MemOverride    string
+	// Native: the script starts torch.distributed itself, so no rank may
+	// sit behind a forwarder (ddpNativeRefusal). SelfMachine is this
+	// machine's key; runDDP fills it.
+	Native      bool
+	SelfMachine string
+	Strategy    string
+	MemOverride string
 	// MaxRanks caps the ring when ranks join mid-run (--ddp N); 0 lets every
 	// eligible machine that comes back or turns up join.
 	MaxRanks int
@@ -130,6 +135,7 @@ func runDDP(o ddpRunOptions) error {
 	// slowest machine in the ring's most important seat: every rank waits for
 	// it, and it also serves as the rendezvous master.
 	o.SelfNodeID = nodeID.NodeID
+	o.SelfMachine = ddpSelfMachine(o.DaemonPort)
 	ring, ringSlots, ringWeights := ddpChooseRing(o, rank0)
 	if len(ring) < 2 {
 		// Measurement says one machine beats any ring available. That is an
@@ -151,7 +157,7 @@ func runDDP(o ddpRunOptions) error {
 	// this daemon forwards. Reordering rather than dropping: such a node is
 	// still a good rank, it just cannot be the one everybody syncs to. Slots
 	// and shares move with it: they are per ring position.
-	selfMachine := ddpSelfMachine(o.DaemonPort)
+	selfMachine := o.SelfMachine
 	lead := ddpLeadIndex(ring, selfMachine)
 	if lead < 0 {
 		return fmt.Errorf("no rank in this ring can lead it: every candidate is " +
