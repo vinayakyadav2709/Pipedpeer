@@ -1727,3 +1727,32 @@ func TestAtMostOneTailBackup(t *testing.T) {
 		t.Error("the backup slot was not given back")
 	}
 }
+
+// Steps of a part that ran on a peer carry that peer's node id, taken from
+// its reply, never the submitter's: "where it ran" in every view reads it.
+func TestRemotePartStepsCarryThePeersNodeID(t *testing.T) {
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", framesContentType)
+		w.Write(putFrame(poolFramesHeader(1, "peer-node-id", []provPart{{Where: "local", Items: 1, Ms: 3}}), []byte("x")))
+	}))
+	defer peer.Close()
+	addr := strings.TrimPrefix(peer.URL, "http://")
+	pm := newPoolManager()
+	pm.selfID = "origin-node-id"
+	pm.SetPeerFn(func(string, string, http.Header) []string { return []string{addr} })
+	ch := &chunk{funcSrc: "def run(x):\n    return x\n", frames: true, force: true,
+		items: []json.RawMessage{json.RawMessage("1")}, prov: &provenance{}}
+	if _, err := pm.runChunk("/nonexistent/bin/run", "/nonexistent", ch, ""); err != nil {
+		t.Fatal(err)
+	}
+	parts := ch.prov.snapshot()
+	if len(parts) != 1 || parts[0].Where != "peer:"+addr || len(parts[0].Steps) == 0 {
+		t.Fatalf("parts = %+v, want one peer part with steps", parts)
+	}
+	for _, st := range parts[0].Steps {
+		if st.Machine != "peer-node-id" {
+			t.Errorf("step %s carries machine %q, want the peer's node id", st.Name, st.Machine)
+		}
+	}
+}

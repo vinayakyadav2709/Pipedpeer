@@ -153,3 +153,16 @@ def test_by_value_callable_rides_the_globals_frame_not_the_header():
         pool._pool_send = orig
     assert not sent["header"].get("func")
     assert pickle.loads(sent["g"][pool._FUNC_KEY])(1) == 2
+
+
+def test_relayed_steps_keep_the_machine_that_ran_them(monkeypatch):
+    monkeypatch.setattr(pool, "_RELAYED_STEPS", [])
+    receipt = {"node": "origin-id", "parts": [
+        {"where": "peer:10.0.0.2:4242", "items": 3, "ms": 5, "steps": [
+            {"machine": "peer-id", "node": "peer-id", "chunk": 0, "step": "compute",
+             "start_ns": 1, "dur_ns": 2}]},
+        {"where": "peer:10.0.0.3:4242", "items": 1, "ms": 5, "steps": [
+            {"step": "queue", "start_ns": 1, "dur_ns": 2}]},
+    ]}
+    pool._relay_steps(receipt)
+    assert [s["machine"] for s in pool._RELAYED_STEPS] == ["peer-id", "10.0.0.3:4242"]

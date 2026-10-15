@@ -309,9 +309,11 @@ func (pm *poolManager) observeStats(node, fn string, items int, computeSec, elap
 	pm.observeFn(node, fn, items, computeSec, elapsedSec)
 }
 
-// step is one daemon-side run-record step about node, for a part's receipt.
+// step is one daemon-side run-record step of the node that ran the part (a
+// peer's node id for a remote part, this node's for a local one), for the
+// part's receipt: "where it ran" in every view is read from Machine.
 func (pm *poolManager) step(node, name string, start time.Time, d time.Duration, part int) runrec.Step {
-	return runrec.Step{Machine: pm.selfID, Node: node, Chunk: part, Name: name,
+	return runrec.Step{Machine: node, Node: node, Chunk: part, Name: name,
 		StartNS: start.UnixNano(), DurNS: d.Nanoseconds()}
 }
 
