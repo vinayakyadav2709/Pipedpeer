@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -57,7 +58,7 @@ func (l *testLog) logf(format string, args ...any) {
 // stubKeeper and shortTimers set the package knobs for one test.
 func stubKeeper(t *testing.T) {
 	prevKeeper, prevSilent := newKeeper, silentAfter
-	newKeeper = func(context.Context, uint16, func(string, ...any)) *portmap.Keeper { return &portmap.Keeper{} }
+	newKeeper = func(context.Context, uint16, func(string, ...any)) portMapper { return &portmap.Keeper{} }
 	t.Cleanup(func() { newKeeper, silentAfter = prevKeeper, prevSilent })
 }
 
@@ -261,3 +262,55 @@ func TestHintsJoinTheCandidates(t *testing.T) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+// fakeMapper is a router that grants a fixed mapping.
+type fakeMapper struct{ m portmap.Mapping }
+
+func (f fakeMapper) Current() portmap.Mapping { return f.m }
+func (f fakeMapper) Close()                   {}
+
+// TestASlowRouterDoesNotDelayConnecting (FIX-E2). UPnP/NAT-PMP discovery
+// takes seconds on a router that speaks neither, and it used to run before
+// the introducer's replies were read. Peers now link while the mapper is
+// still asking, and the mapped address reaches them when it is granted.
+func TestASlowRouterDoesNotDelayConnecting(t *testing.T) {
+	stubKeeper(t)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	mapped := netip.MustParseAddrPort("203.0.113.77:40404")
+	newKeeper = func(ctx context.Context, _ uint16, _ func(string, ...any)) portMapper {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return fakeMapper{portmap.Mapping{Kind: portmap.KindNATPMP, External: mapped, Public: true}}
+	}
+
+	introPort := freeUDPPort(t)
+	a := run(t, "A", Config{Key: newKey(t), DirectPort: freeUDPPort(t),
+		ServeIntroducer: true, IntroducerPort: introPort})
+	b := run(t, "B", Config{Key: newKey(t), DirectPort: freeUDPPort(t),
+		Introducers: []string{net.JoinHostPort("127.0.0.1", itoa(introPort))}})
+
+	waitFor(t, 3*time.Second, "A and B link while both routers are still being asked",
+		func() bool { return linked(a, b) })
+
+	close(release)
+	want := "mapped:" + mapped.String()
+	waitFor(t, 3*time.Second, "B learns A's mapped address once it is granted", func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		for _, c := range b.cands[a.node()] {
+			if c == want {
+				return true
+			}
+		}
+		return false
+	})
+}
