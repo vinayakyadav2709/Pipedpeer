@@ -324,8 +324,12 @@ func TestAutoKeepsExactUnlessDiLoCoIsFaster(t *testing.T) {
 		"solo wins": {map[int]rankReport{
 			0: {StepMillis: 5, SyncMillis: 2000, Samples: 32},
 			1: {StepMillis: 200, SyncMillis: 2000, Samples: 32}}, false, true, `"release": 0`},
-		// --ddp N / PIPEDPEER_DDP_FIXED=1: never.
-		"fixed": {wifiSplit, true, true, ""},
+		// --ddp N: DiLoCo must still beat the split by the margin.
+		"fixed, fast link": {map[int]rankReport{
+			0: {StepMillis: 100, SyncMillis: 10, Samples: 32},
+			1: {StepMillis: 100, SyncMillis: 10, Samples: 32}}, true, true, ""},
+		// --ddp N with --ddp-sync exact: never, and no release either.
+		"fixed, user chose exact": {wifiSplit, true, false, ""},
 		// --ddp-sync exact (or an older shim): never; D2 as before.
 		"user chose exact": {wifiSplit, false, false, `"release": 0`},
 	}
@@ -339,6 +343,24 @@ func TestAutoKeepsExactUnlessDiLoCoIsFaster(t *testing.T) {
 		if c.want == "" && strings.Contains(frag, "release") || !strings.Contains(frag, c.want) {
 			t.Errorf("%s: note %q, want %q", name, frag, c.want)
 		}
+	}
+}
+
+// TestAutoPicksDiLoCoUnderDDPN (FIX-AUTOSYNC): `--ddp 2` over the internet
+// was 93% sync-bound and stayed exact, because a fixed ring returned before
+// DiLoCo was weighed. --ddp N fixes the ring's size, not its sync mode: one
+// rank alone (10 ms) is not on offer, so DiLoCo (~68 ms) need only beat the
+// exact split (~2 s). The ring keeps both ranks.
+func TestAutoPicksDiLoCoUnderDDPN(t *testing.T) {
+	soloWins := map[int]rankReport{
+		0: {StepMillis: 5, SyncMillis: 2000, Samples: 32},
+		1: {StepMillis: 200, SyncMillis: 2000, Samples: 32}}
+	frag := autoRing(t, true, soloWins).rebalanceFor("g", 2)
+	if !strings.Contains(frag, `"diloco": 32`) || strings.Contains(frag, "release") {
+		t.Fatalf("want a DiLoCo switch and no release under --ddp 2: %q", frag)
+	}
+	if strings.Contains(frag, "one rank alone") || !strings.Contains(frag, "--ddp-sync exact") {
+		t.Errorf("the line compares against a solo run --ddp 2 rules out, or hides the off switch: %q", frag)
 	}
 }
 

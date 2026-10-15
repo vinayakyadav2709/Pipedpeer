@@ -251,7 +251,8 @@ func dilocoEvery(n int) int {
 // planSolo) against planSolo's split and solo times. DiLoCo trains a slightly
 // different model, so it must beat both by ddpSoloMargin, never tie. No
 // verdict (false) until planSolo has one: every rank measured. Never for a
-// ring size no interval passed at.
+// ring size no interval passed at. solo is math.MaxFloat64 when one rank
+// alone is not on offer (--ddp N).
 func planDiLoCo(reports map[int]rankReport, live int, solo, split float64) (float64, bool) {
 	every := dilocoEvery(live)
 	if every == 0 || live < 2 || len(reports) < live || solo <= 0 || split <= 0 {
@@ -273,23 +274,32 @@ func planDiLoCo(reports map[int]rankReport, live int, solo, split float64) (floa
 //
 // U32: when the ranks left the sync mode to us, DiLoCo is the third option,
 // taken only when it beats both (planDiLoCo); the ring keeps every rank.
+// Under --ddp N it need only beat the split: N fixes the ring's size, not its
+// sync mode (--ddp-sync does that), and one rank alone is not on offer.
 func (b *ddpBoard) soloFor(group string, r *ddpRun, world int) string {
-	if r.fixed || r.released || r.join != nil || r.loading != nil {
+	if r.released || r.join != nil || r.loading != nil {
 		return ""
 	}
 	live := world - b.dropsBelow(group, world)
 	keep, solo, split := planSolo(r.reports, live, r.syncEvery)
 	if r.autoSync && !r.diloco {
-		if fast, ok := planDiLoCo(r.reports, live, solo, split); ok {
+		bar, alone := solo, fmt.Sprintf(" and %.0f ms on one rank alone", solo)
+		if r.fixed {
+			bar, alone = math.MaxFloat64, ""
+		}
+		if fast, ok := planDiLoCo(r.reports, live, bar, split); ok {
 			r.diloco = true
 			every := dilocoEvery(live)
 			why := fmt.Sprintf("training with DiLoCo, sync every %d steps: about %.0f ms a step "+
-				"against %.0f ms for the exact split and %.0f ms on one rank alone "+
-				"(--ddp-sync exact for per-step sync)", every, fast, split, solo)
+				"against %.0f ms for the exact split%s "+
+				"(--ddp-sync exact for per-step sync)", every, fast, split, alone)
 			log.Info().Str("group", group).Float64("diloco_ms", fast).Float64("split_ms", split).
-				Float64("solo_ms", solo).Msg("ddp: " + why)
+				Float64("solo_ms", solo).Bool("fixed", r.fixed).Msg("ddp: " + why)
 			return fmt.Sprintf(`, "diloco": %d, "why": %q`, every, why)
 		}
+	}
+	if r.fixed {
+		return ""
 	}
 	if keep < 0 || !r.sharded {
 		return ""

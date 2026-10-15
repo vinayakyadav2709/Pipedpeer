@@ -31,7 +31,8 @@ var switchedAt = regexp.MustCompile(`switching to DiLoCo after (\d+) optimizer s
 
 // TestShimAutoSwitchesToDiLoCoAtTheSameStep: with --ddp-sync unset, the
 // lead's verdict reaches both ranks in the reply to the same sync; both
-// switch after the same step and rank 0 prints the line. --ddp-sync exact
+// switch after the same step and rank 0 prints the line, under --ddp 2 too
+// (it fixes the ring's size, not its sync mode). --ddp-sync exact
 // pins the ring: no switch.
 func TestShimAutoSwitchesToDiLoCoAtTheSameStep(t *testing.T) {
 	old := rebalanceEvery
@@ -41,37 +42,42 @@ func TestShimAutoSwitchesToDiLoCoAtTheSameStep(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "job.py"), []byte(ddpAutoScript), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	verbose := []string{"PIPEDPEER_VERBOSE=1"}
+	// The auto ring, and --ddp 2 (FIX-AUTOSYNC: a fixed ring never switched).
+	for _, env := range [][]string{
+		{"PIPEDPEER_VERBOSE=1"},
+		{"PIPEDPEER_VERBOSE=1", "PIPEDPEER_DDP_FIXED=1"},
+	} {
 
-	outs, errs := ddpRing(t, run, verbose, verbose)
-	var at [2]string
-	for rank, out := range outs {
-		if errs[rank] != nil || !strings.Contains(out, "RANK-OK") {
-			t.Fatalf("rank %d: %v\n%s", rank, errs[rank], out)
+		outs, errs := ddpRing(t, run, env, env)
+		var at [2]string
+		for rank, out := range outs {
+			if errs[rank] != nil || !strings.Contains(out, "RANK-OK") {
+				t.Fatalf("rank %d: %v\n%s", rank, errs[rank], out)
+			}
+			m := switchedAt.FindStringSubmatch(out)
+			if m == nil {
+				t.Fatalf("rank %d never switched to DiLoCo:\n%s", rank, out)
+			}
+			at[rank] = m[1]
+			// The lead's interval for a ring of two (DILOCO-MANY), not the shim's own.
+			if !strings.Contains(out, fmt.Sprintf("training locally, syncing every %d steps", dilocoEvery(2))) {
+				t.Errorf("rank %d switched but never trained locally:\n%s", rank, out)
+			}
 		}
-		m := switchedAt.FindStringSubmatch(out)
-		if m == nil {
-			t.Fatalf("rank %d never switched to DiLoCo:\n%s", rank, out)
+		if at[0] != at[1] {
+			t.Errorf("ranks switched at different steps: %s and %s", at[0], at[1])
 		}
-		at[rank] = m[1]
-		// The lead's interval for a ring of two (DILOCO-MANY), not the shim's own.
-		if !strings.Contains(out, fmt.Sprintf("training locally, syncing every %d steps", dilocoEvery(2))) {
-			t.Errorf("rank %d switched but never trained locally:\n%s", rank, out)
+		if !strings.Contains(outs[0], "pipedpeer: training with DiLoCo") ||
+			!strings.Contains(outs[0], "--ddp-sync exact") {
+			t.Errorf("rank 0 did not say it switched and how to undo it:\n%s", outs[0])
 		}
-	}
-	if at[0] != at[1] {
-		t.Errorf("ranks switched at different steps: %s and %s", at[0], at[1])
-	}
-	if !strings.Contains(outs[0], "pipedpeer: training with DiLoCo") ||
-		!strings.Contains(outs[0], "--ddp-sync exact") {
-		t.Errorf("rank 0 did not say it switched and how to undo it:\n%s", outs[0])
-	}
-	if strings.Count(outs[0], "pipedpeer: training with DiLoCo") != 1 {
-		t.Errorf("the line was printed more than once:\n%s", outs[0])
+		if strings.Count(outs[0], "pipedpeer: training with DiLoCo") != 1 {
+			t.Errorf("the line was printed more than once:\n%s", outs[0])
+		}
 	}
 
 	pinned := []string{"PIPEDPEER_VERBOSE=1", "PIPEDPEER_DDP_SYNC_MODE=exact"}
-	outs, errs = ddpRing(t, run, pinned, pinned)
+	outs, errs := ddpRing(t, run, pinned, pinned)
 	for rank, out := range outs {
 		if errs[rank] != nil {
 			t.Fatalf("pinned rank %d: %v\n%s", rank, errs[rank], out)
