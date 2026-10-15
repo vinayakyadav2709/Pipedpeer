@@ -309,6 +309,23 @@ func (pm *poolManager) observeStats(node, fn string, items int, computeSec, elap
 	pm.observeFn(node, fn, items, computeSec, elapsedSec)
 }
 
+// observeLost records a part peer did not finish (a backup copy here won, or
+// the requester left first) as taking d: a lower bound on its real time.
+// Only wins used to be measured, so a peer slow enough that every part lost
+// was never measured at all, kept its fast prior and kept getting the biggest
+// share of every chunk (M2 spread: a 10x-slow peer got 7 of 9 items). The
+// bound is used only once it passes the prediction, so it can only make the
+// estimate slower: a part cancelled early says nothing about the peer.
+func (pm *poolManager) observeLost(peer, fn string, items int, d time.Duration, expected float64) {
+	if expected <= 0 || d.Seconds() <= expected {
+		return
+	}
+	key := pm.key(peer)
+	log.Printf("[pool] %s did not finish %d items in %.1fs (expected %.1fs); counting that as its time", key, items, d.Seconds(), expected)
+	pm.rates.observe(key, items, d)
+	pm.observeStats(key, fn, items, d.Seconds(), d.Seconds())
+}
+
 // step is one daemon-side run-record step of the node that ran the part (a
 // peer's node id for a remote part, this node's for a local one), for the
 // part's receipt: "where it ran" in every view is read from Machine.

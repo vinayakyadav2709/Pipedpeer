@@ -1265,10 +1265,13 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 								compute = d.Seconds()
 							}
 							pm.observeStats(key, ch.fnFP, len(p.c.items), compute, d.Seconds())
+						} else {
+							pm.observeLost(peer, ch.fnFP, len(p.c.items), d, expected)
 						}
 						break
 					}
 					if ctx.Err() != nil {
+						pm.observeLost(peer, ch.fnFP, len(p.c.items), time.Since(sent), expected)
 						break // the requester left; the peer did nothing wrong
 					}
 					if raced {
