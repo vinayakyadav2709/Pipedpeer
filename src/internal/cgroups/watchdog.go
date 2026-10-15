@@ -166,9 +166,9 @@ func TakeWatchdogKill(root int32) (WatchdogKill, bool) {
 // run. Falls back to RSS, said once, when smaps_rollup is unreadable.
 func residentShare(pid int32, logf func(format string, args ...any)) int64 {
 	p := &process.Process{Pid: pid}
-	maps, err := p.MemoryMaps(true)
-	if err == nil && maps != nil && len(*maps) > 0 {
-		return int64((*maps)[0].Pss) * 1024
+	pss, err := processPSS(p)
+	if err == nil {
+		return pss
 	}
 	pssWarnOnce.Do(func() {
 		logf("memory watchdog: cannot read PSS of pid %d (err %v); counting RSS, so shared pages count more than once", pid, err)
