@@ -1,6 +1,7 @@
 package daemonapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -912,6 +913,11 @@ func (srv *Server) sendClosureOnce(ph *PeerHealth, storePath string, legacy func
 	}
 	defer f.Close()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watch := newSendWatch(cancel)
+	defer watch.stop()
+
 	pr, pw := io.Pipe()
 	mp := multipart.NewWriter(pw)
 	go func() {
@@ -939,19 +945,28 @@ func (srv *Server) sendClosureOnce(ph *PeerHealth, storePath string, legacy func
 		if err != nil {
 			return
 		}
-		_, _ = io.Copy(w, f)
+		if _, err := io.Copy(w, watch.reader(f)); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
 		mp.Close()
+		watch.sent()
 	}()
 
 	url := fmt.Sprintf("http://%s:%d/v1/store/import", ph.Host, ph.Port)
-	req, err := http.NewRequest("POST", url, pr)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, pr)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", mp.FormDataContentType())
-	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Do(req)
+	// No total timeout: a big closure on a slow link takes as long as it
+	// takes, and a 10-minute cap failed it on every run. The watch cuts a
+	// send that stops moving instead.
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if why := watch.cut(); why != "" {
+			return fmt.Errorf("import %s: %s", url, why)
+		}
 		return fmt.Errorf("import %s: %v", url, err)
 	}
 	defer resp.Body.Close()

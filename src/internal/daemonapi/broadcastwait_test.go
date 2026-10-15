@@ -2,8 +2,10 @@ package daemonapi
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -133,5 +135,93 @@ func TestTheStoreCheckSaysWhenAnImportIsUnderway(t *testing.T) {
 	done()
 	if check() {
 		t.Fatal("a finished import is still reported")
+	}
+}
+
+// closureFile makes a sparse file of n bytes to send as a closure archive.
+func closureFile(t *testing.T, n int64) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "closure.nar")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(n); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return p
+}
+
+func peerAt(t *testing.T, srv *httptest.Server) *PeerHealth {
+	hostport := strings.TrimPrefix(srv.URL, "http://")
+	return &PeerHealth{Host: strings.Split(hostport, ":")[0], Port: mustPort(t, hostport), Status: "healthy"}
+}
+
+// TestAStalledClosureSendIsCut: a send that stops moving fails with the
+// reason, well before any total timeout.
+func TestAStalledClosureSendIsCut(t *testing.T) {
+	old := closureSendStall
+	closureSendStall = 300 * time.Millisecond
+	defer func() { closureSendStall = old }()
+
+	// The handler never reads the body; the server cannot see the client
+	// leave until it does, so the test lets it go.
+	done := make(chan struct{})
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/store/import" {
+			http.NotFound(w, r)
+			return
+		}
+		<-done
+	}))
+	defer peerSrv.Close()
+	defer close(done)
+	nar := closureFile(t, 64<<20)
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	s := New("node-" + strings.Repeat("s", 8))
+	defer s.StopWarmWorkers()
+	start := time.Now()
+	err := s.sendClosureOnce(peerAt(t, peerSrv), "/nix/store/stall-env", func() (string, bool) { return nar, true })
+	if err == nil || !strings.Contains(err.Error(), "stalled") {
+		t.Fatalf("want a stalled error, got %v", err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Fatalf("the stall took %s to be noticed", took)
+	}
+}
+
+// TestASlowButMovingClosureSendFinishes: a send that runs several stall
+// windows long but keeps moving is not cut.
+func TestASlowButMovingClosureSendFinishes(t *testing.T) {
+	old := closureSendStall
+	closureSendStall = 300 * time.Millisecond
+	defer func() { closureSendStall = old }()
+
+	peerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/store/import" {
+			http.NotFound(w, r)
+			return
+		}
+		buf := make([]byte, 256<<10)
+		for {
+			if _, err := io.ReadFull(r.Body, buf); err != nil {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"imported": true})
+	}))
+	defer peerSrv.Close()
+	nar := closureFile(t, 24<<20) // ~96 reads x 25 ms: several stall windows
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	s := New("node-" + strings.Repeat("s", 8))
+	defer s.StopWarmWorkers()
+	start := time.Now()
+	if err := s.sendClosureOnce(peerAt(t, peerSrv), "/nix/store/slow-env", func() (string, bool) { return nar, true }); err != nil {
+		t.Fatalf("a moving send was cut: %v", err)
+	}
+	if took := time.Since(start); took < closureSendStall {
+		t.Fatalf("the send took %s, under one stall window: the test proves nothing", took)
 	}
 }
