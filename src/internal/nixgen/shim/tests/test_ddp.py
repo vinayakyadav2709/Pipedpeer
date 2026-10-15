@@ -90,7 +90,16 @@ def test_read_frames_round_trip_and_truncation():
 
 # DiLoCo schedule (--ddp-sync fast).
 
-def test_interval_grows_on_low_drift_and_shrinks_on_high():
+def test_fixed_interval_ignores_drift_and_may_pass_the_adaptive_ceiling(monkeypatch):
+    assert ddp._DILOCO_FIXED_H == 64      # the default (DILOCO-TUNE)
+    assert ddp._diloco_next_interval(64, 9.0, 1.0, 100, None) == 64
+    monkeypatch.setattr(ddp, "_DILOCO_FIXED_H", 256)
+    assert ddp._diloco_next_interval(2, 0.0, 1.0, 100, None) == 256
+    assert ddp._diloco_next_interval(256, 0.0, 1.0, 150, 200) == 50   # never past the end
+
+
+def test_interval_grows_on_low_drift_and_shrinks_on_high(monkeypatch):
+    monkeypatch.setattr(ddp, "_DILOCO_FIXED_H", 0)    # PIPEDPEER_DILOCO_H=0: adaptive
     assert ddp._diloco_next_interval(4, 0.1, 1.0, 100, None) == 8
     assert ddp._diloco_next_interval(4, 2.0, 1.0, 100, None) == 2
     assert ddp._diloco_next_interval(4, 0.85, 1.0, 100, None) == 4   # dead band
@@ -124,7 +133,7 @@ def test_no_tightening_without_a_run_length_is_said():
     assert ddp._diloco_cap(10 ** 6, None) is None
     assert "no tightening" in ddp._diloco_note(None)
     assert "tightens" in ddp._diloco_note(1000)
-    assert ddp._diloco_warmup(None) == 50
+    assert ddp._diloco_warmup(None) == 10
     assert ddp._diloco_warmup(1000) == 100
     assert ddp._diloco_warmup(30) == 10
 
@@ -139,7 +148,7 @@ def test_outer_step_matches_torch_nesterov():
     buf = None
     for _ in range(4):
         delta = rng.standard_normal(5).astype(np.float32)
-        theta, buf = ddp._outer_nesterov(theta, buf, delta)
+        theta, buf = ddp._outer_nesterov(theta, buf, delta, lr=0.7, mu=0.9)
         p.grad = torch.from_numpy(delta.copy())
         ref.step()
         np.testing.assert_allclose(theta, p.detach().numpy(), rtol=1e-5, atol=1e-6)
@@ -184,7 +193,7 @@ def test_round_applies_the_outer_step_and_keeps_the_lr():
         assert not np.allclose(t0, local)
     for p, t0, b in zip(params, start, st.buf):
         delta = b  # first outer step: buf = delta
-        want = t0 - 0.7 * (delta + 0.9 * delta)
+        want = t0 - ddp._DILOCO_OUTER_LR * (delta + ddp._DILOCO_MOMENTUM * delta)
         np.testing.assert_allclose(p.detach().numpy(), want, rtol=1e-5, atol=1e-6)
     assert opt.param_groups[0]["lr"] == 0.01
 
@@ -307,6 +316,7 @@ def test_pass_end_fires_once_and_passes_through():
     (5, [0.5, 0.5], 8),         # less than one step: a single partial one
 ])
 def test_every_sample_once_including_the_last_partial_batch(n, weights, base):
+    pytest.importorskip("numpy")   # the sampler's assignment is vectorised
     seen, total, pads = [], set(), 0
     for rank in range(len(weights)):
         s = ddp._WeightedShardSampler(n, weights, rank, False, base, len(weights))

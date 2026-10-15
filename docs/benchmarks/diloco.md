@@ -6,6 +6,12 @@ relative validation loss of training on one device? The bar is the mean over
 2026-10-15). U32 (promotion to auto) and U33 (Streaming DiLoCo) stay blocked
 unless every model passes.
 
+**Answer (DILOCO-TUNE, 2026-10-15): yes, with the new defaults** (plain
+averaging every 64 steps after a 10-step warm-up): every model passes under
+lan and wifi with 9-15x fewer bytes than exact sync. See
+[Tuning](#tuning-diloco-tune-the-new-defaults). The Results and Diagnosis
+sections below are the earlier runs of the paper's defaults.
+
 ## Method
 
 - Driver: `scripts/bench-diloco.sh` (runner `scripts/bench-lib.sh`, rig
@@ -87,7 +93,7 @@ script marks a gap below one device as PASS too.
 
 Tolerance: fast's mean validation loss over the seeds within 1% (relative) of single's. Overall: FAIL | ddp04 fail | gpu pass | tfm fail
 
-### Verdict: the defaults FAIL. U32 and U33 stay blocked.
+### Verdict for the paper's defaults (0.7/0.9): FAIL (superseded by the tuning below)
 
 - `fast` (the defaults) fails ddp04 (+14% under 5g, +49% under wifi; seed gaps
   reach +138%) and tfm (+1.9% and +2.8%). Its gpu "pass" is -42%: it changes
@@ -101,6 +107,113 @@ Tolerance: fast's mean validation loss over the seeds within 1% (relative) of si
   is the user's call.
 - First run (`ba7b54d`, defaults, no end-of-epoch sync): ddp04 +672% / +1467%
   (one seed reached 0.77), gpu -33% / -43%, tfm +1.8% / +4.1%.
+
+## Tuning (DILOCO-TUNE): the new defaults
+
+**Result.** The default `--ddp-sync fast` is now plain sample-weighted model
+averaging (outer lr 1, no momentum) every 64 steps and at every epoch's end,
+after a 10-step exact warm-up. It is within 1% of one device on all three
+models and needs 13-16 syncs per run, against 144-312 for exact sync and
+62-122 for the old defaults (the gpu, ddp04 and tfm runs are 147, 180 and
+314 steps).
+The paper's outer Nesterov 0.7/0.9 fails at every interval these runs can
+reach, so U32 may now be dispatched on this table; the Nesterov-at-large-H
+half of the candidate rule is not supported (see below).
+
+**Sweep.** Outer optimizer (plain 1/0, the paper's 0.7/0.9, the middle point
+0.85/0.45) x H (fixed 4, 16, 64, 256, and the drift-adaptive rule) x warm-up
+(50, the old default; then 10 and 25 for the leaders), 3 seeds each, 6 for
+the finalists. The epoch-end sync caps every interval at the steps left in the
+epoch (48 for gpu, 29 for ddp04, 156 for tfm), so H=64 and H=256 are the same
+run on gpu and ddp04 and nothing here trains more than 156 steps locally.
+Syncs count every exact warm-up step plus every DiLoCo round; bytes are
+proportional to syncs (each carries the int8 model or gradient, about
+0.56 MB for the MLPs), plus Adam's or SGD's state every 10th round.
+
+**Evidence 1: in-process 2-rank simulation** (DILOCO-DIAG's harness, the
+shim's own schedule functions, int8 with error feedback on both directions,
+the end-of-epoch sync; no daemon, no timing). Gap = mean validation loss over
+the seeds against the same seeds' one-device runs; negative is better.
+
+| outer lr/momentum | H | warm-up | gpu | ddp04 | tfm | all pass |
+|---|---|---|---|---|---|---|
+| exact (control) | - | - | -0.00% (worst +0.0%; 3 seeds), 144 syncs (48.0/epoch) | -0.05% (worst -0.0%; 3 seeds), 174 syncs (29.0/epoch) | +0.07% (worst +0.2%; 3 seeds), 312 syncs (156.0/epoch) | **PASS** |
+| middle 0.85/0.45 | 4 | 50 | -18.26% (worst -17.2%; 3 seeds), 74 syncs (24.7/epoch) | -7.37% (worst -3.1%; 3 seeds), 84 syncs (14.0/epoch) | -0.12% (worst +0.1%; 3 seeds), 116 syncs (58.0/epoch) | **PASS** |
+| middle 0.85/0.45 | 16 | 10 | -18.95% (worst -18.1%; 3 seeds), 19 syncs (6.3/epoch) | -17.91% (worst -15.1%; 3 seeds), 22 syncs (3.7/epoch) | +0.97% (worst +1.5%; 3 seeds), 30 syncs (15.0/epoch) | **PASS** |
+| middle 0.85/0.45 | 16 | 25 | -17.86% (worst -16.6%; 3 seeds), 33 syncs (11.0/epoch) | -19.29% (worst -17.7%; 3 seeds), 36 syncs (6.0/epoch) | +0.67% (worst +1.7%; 3 seeds), 44 syncs (22.0/epoch) | **PASS** |
+| middle 0.85/0.45 | 16 | 50 | -14.54% (worst -14.2%; 3 seeds), 56 syncs (18.7/epoch) | -17.75% (worst -16.9%; 3 seeds), 59 syncs (9.8/epoch) | -0.01% (worst +0.4%; 3 seeds), 67 syncs (33.5/epoch) | **PASS** |
+| middle 0.85/0.45 | 64 | 10 | -11.70% (worst -10.5%; 6 seeds), 13 syncs (4.3/epoch) | -16.27% (worst -10.0%; 6 seeds), 16 syncs (2.7/epoch) | -1.34% (worst +0.8%; 6 seeds), 16 syncs (8.0/epoch) | **PASS** |
+| middle 0.85/0.45 | 64 | 50 | -9.33% (worst -9.2%; 3 seeds), 52 syncs (17.3/epoch) | -16.02% (worst -15.0%; 3 seeds), 55 syncs (9.2/epoch) | +1.87% (worst +2.4%; 3 seeds), 55 syncs (27.5/epoch) | fail |
+| middle 0.85/0.45 | 256 | 50 | -9.33% (worst -9.2%; 3 seeds), 52 syncs (17.3/epoch) | -16.02% (worst -15.0%; 3 seeds), 55 syncs (9.2/epoch) | +2.02% (worst +2.7%; 3 seeds), 52 syncs (26.0/epoch) | fail |
+| middle 0.85/0.45 | adaptive | 50 | -17.48% (worst -16.8%; 3 seeds), 77 syncs (25.7/epoch) | +3.84% (worst +26.2%; 3 seeds), 91 syncs (15.2/epoch) | +3.36% (worst +8.9%; 3 seeds), 166 syncs (83.0/epoch) | fail |
+| paper 0.7/0.9 | 4 | 50 | -24.83% (worst -10.8%; 3 seeds), 74 syncs (24.7/epoch) | +57.54% (worst +72.0%; 3 seeds), 84 syncs (14.0/epoch) | +54.35% (worst +74.6%; 3 seeds), 116 syncs (58.0/epoch) | fail |
+| paper 0.7/0.9 | 16 | 50 | -37.04% (worst -35.4%; 3 seeds), 56 syncs (18.7/epoch) | +168.37% (worst +548.1%; 3 seeds), 59 syncs (9.8/epoch) | +6.34% (worst +11.7%; 3 seeds), 67 syncs (33.5/epoch) | fail |
+| paper 0.7/0.9 | 64 | 50 | -16.00% (worst -15.3%; 3 seeds), 52 syncs (17.3/epoch) | +6.43% (worst +32.8%; 3 seeds), 55 syncs (9.2/epoch) | +0.98% (worst +1.2%; 3 seeds), 55 syncs (27.5/epoch) | fail |
+| paper 0.7/0.9 | 256 | 50 | -16.00% (worst -15.3%; 3 seeds), 52 syncs (17.3/epoch) | +6.43% (worst +32.8%; 3 seeds), 55 syncs (9.2/epoch) | +21.66% (worst +29.4%; 3 seeds), 52 syncs (26.0/epoch) | fail |
+| paper 0.7/0.9 | adaptive | 50 | -44.61% (worst -42.6%; 3 seeds), 63 syncs (21.0/epoch) | +54.90% (worst +186.7%; 3 seeds), 62 syncs (10.3/epoch) | +66.80% (worst +151.9%; 3 seeds), 122 syncs (61.0/epoch) | fail |
+| plain 1/0 | 4 | 50 | +0.02% (worst +0.0%; 3 seeds), 74 syncs (24.7/epoch) | +0.50% (worst +1.1%; 3 seeds), 84 syncs (14.0/epoch) | +0.53% (worst +1.2%; 3 seeds), 116 syncs (58.0/epoch) | **PASS** |
+| plain 1/0 | 16 | 10 | +0.06% (worst +0.1%; 6 seeds), 19 syncs (6.3/epoch) | +0.30% (worst +1.9%; 6 seeds), 22 syncs (3.7/epoch) | -0.49% (worst +6.7%; 6 seeds), 30 syncs (15.0/epoch) | **PASS** |
+| plain 1/0 | 16 | 50 | +0.06% (worst +0.1%; 3 seeds), 56 syncs (18.7/epoch) | +1.15% (worst +2.3%; 3 seeds), 59 syncs (9.8/epoch) | +1.42% (worst +3.8%; 3 seeds), 67 syncs (33.5/epoch) | fail |
+| plain 1/0 | 64 | 10 | +0.08% (worst +0.2%; 6 seeds), 13 syncs (4.3/epoch) | +0.42% (worst +1.3%; 6 seeds), 16 syncs (2.7/epoch) | -0.02% (worst +4.5%; 6 seeds), 16 syncs (8.0/epoch) | **PASS** |
+| plain 1/0 | 64 | 50 | +0.07% (worst +0.1%; 3 seeds), 52 syncs (17.3/epoch) | +1.13% (worst +2.5%; 3 seeds), 55 syncs (9.2/epoch) | +0.11% (worst +0.3%; 3 seeds), 55 syncs (27.5/epoch) | fail |
+| plain 1/0 | 256 | 10 | +0.08% (worst +0.2%; 6 seeds), 13 syncs (4.3/epoch) | +0.42% (worst +1.3%; 6 seeds), 16 syncs (2.7/epoch) | -0.93% (worst +1.8%; 6 seeds), 12 syncs (6.0/epoch) | **PASS** |
+| plain 1/0 | 256 | 50 | +0.07% (worst +0.1%; 3 seeds), 52 syncs (17.3/epoch) | +1.13% (worst +2.5%; 3 seeds), 55 syncs (9.2/epoch) | +0.56% (worst +1.0%; 3 seeds), 52 syncs (26.0/epoch) | fail |
+| plain 1/0 | adaptive | 50 | +0.02% (worst +0.0%; 3 seeds), 84 syncs (28.0/epoch) | +0.49% (worst +0.8%; 3 seeds), 60 syncs (10.0/epoch) | +0.59% (worst +1.0%; 3 seeds), 177 syncs (88.5/epoch) | **PASS** |
+
+What it shows:
+
+- The warm-up was most of the cost: with 50 exact steps every arm needs at
+  least 52 syncs. Ten warm-up steps ended no worse (plain H64: ddp04 +0.42%
+  over 6 seeds against +1.13% over 3 with 50) and cut syncs 3-4x.
+- Plain averaging matches one device (gpu +0.1%, ddp04 +0.4%, tfm 0.0% at
+  H64 over 6 seeds; exact itself is within 0.1% in this harness). The
+  drift-adaptive rule is no help: it shrinks to H=2 on tfm (177 syncs).
+- The paper's 0.7/0.9 fails at every H, including one sync per epoch (tfm
+  at 156 local steps: +21.7%), so "Nesterov at H >= 100" is not supported
+  on these models. The middle point 0.85/0.45 passes the one-sided bar but
+  by changing the training (gpu -12%, ddp04 -16%: an effective step of
+  0.85/(1-0.45) = 1.55x the script's), with no fewer syncs than plain: not
+  chosen, because a model nearer its stable learning rate would diverge
+  the way ddp04 did under 7x.
+- H=64 rather than H=256: they are the same run on gpu and ddp04, H=256
+  saves 4 of 16 syncs on tfm, and no run here measured more than 156 local
+  steps, so 256 would be an extrapolation. `PIPEDPEER_DILOCO_H=256` selects
+  it.
+
+**Evidence 2: lab, the new defaults** (`fast` = no `PIPEDPEER_DILOCO_*`
+set), binary built from `14b3b48` plus this change, 2 containers of 2 CPUs
+and 1 GB, under the lan and wifi profiles; `single` from the same session's
+binary on one container. Rows from `~/.local/state/pipedpeer/bench-dtune/diloco/`.
+Wall times and bytes are **emulated and unlocked, not for the paper**
+(QUIET-RERUN redoes wall times); MiB sent per rank is the speed proxy.
+
+| model | arm | profile | seeds | val loss mean | min-max | std | gap vs single (mean) | per-seed gaps | worst rank gap | wall s | MiB sent/rank | syncs (per epoch) | verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ddp04 | single | - | 3 | 0.0200 | 0.0198-0.0203 | 0.0002 | - | - | - | 46 | 0.0 | 0 (0.0) | - |
+| ddp04 | exact | lan | 3 | 0.0197 | 0.0191-0.0210 | 0.0009 | -1.31% | -3.55% +3.47% -3.97% | +3.47% | 14 | 98.9 | 180 (30.0) | - |
+| ddp04 | fast | lan | 3 | 0.0196 | 0.0190-0.0204 | 0.0006 | -2.14% | -3.87% +0.37% -2.97% | +0.37% | 10 | 10.7 | 16 (2.7) | PASS |
+| ddp04 | fast | wifi | 3 | 0.0196 | 0.0191-0.0204 | 0.0006 | -2.09% | -3.69% +0.62% -3.25% | +0.62% | 41 | 10.7 | 16 (2.7) | PASS |
+| gpu | single | - | 3 | 0.0793 | 0.0785-0.0800 | 0.0006 | - | - | - | 79 | 0.0 | 0 (0.0) | - |
+| gpu | exact | lan | 3 | 0.0798 | 0.0792-0.0802 | 0.0004 | +0.60% | +0.88% +0.18% +0.74% | +0.88% | 18 | 81.1 | 147 (49.0) | - |
+| gpu | fast | lan | 3 | 0.0798 | 0.0792-0.0802 | 0.0005 | +0.64% | +0.87% +0.24% +0.82% | +0.87% | 14 | 9.1 | 13 (4.3) | PASS |
+| gpu | fast | wifi | 3 | 0.0798 | 0.0791-0.0802 | 0.0004 | +0.61% | +0.84% +0.17% +0.82% | +0.84% | 19 | 9.1 | 13 (4.3) | PASS |
+| tfm | single | - | 3 | 0.2751 | 0.2726-0.2796 | 0.0032 | - | - | - | 166 | 0.0 | 0 (0.0) | - |
+| tfm | exact | lan | 3 | 0.2758 | 0.2750-0.2764 | 0.0006 | +0.27% | +1.23% -1.16% +0.78% | +1.23% | 24 | 21.7 | 314 (157.0) | - |
+| tfm | fast | lan | 3 | 0.2755 | 0.2746-0.2766 | 0.0008 | +0.18% | +1.01% -1.07% +0.63% | +1.01% | 20 | 1.4 | 16 (8.0) | PASS |
+| tfm | fast | wifi | 3 | 0.2764 | 0.2746-0.2793 | 0.0020 | +0.50% | +1.01% -0.12% +0.63% | +1.01% | 82 | 1.4 | 16 (8.0) | PASS |
+
+Every model passes under both profiles: gpu +0.6%, ddp04 -2.1%, tfm +0.2% /
++0.5%, each within the `exact` control's own spread (-1.3%, +0.6%, +0.3%).
+Bytes per rank drop 9x (gpu, ddp04) and 15x (tfm) against exact sync.
+DILOCO-DIAG's rare tfm seed at 0.400 (plain, 50-step warm-up, adaptive H)
+did not recur in these six tfm runs or the twelve simulated ones; a rare
+unstable seed cannot be ruled out by 3-6 seeds.
+
+Reproduce (one lab session; `single` and `exact` once, then the defaults):
+
+```sh
+UNLOCKED=1 BL_LAB_NAME=dtune TRAIN_MEM=1g PROFILES="lan wifi" scripts/bench-diloco.sh run
+```
 
 ## Diagnosis (DILOCO-DIAG)
 
