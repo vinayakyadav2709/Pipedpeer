@@ -39,7 +39,7 @@ const poolFakeDaemon = `
 import base64, json, os, pickle, struct, sys, threading, traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-STATE = {"requests": 0, "errors": 0, "items": 0, "last_error": "", "by_src": 0, "by_ref": 0, "both": 0}
+STATE = {"requests": 0, "errors": 0, "items": 0, "last_error": "", "by_src": 0, "by_ref": 0, "both": 0, "func_frame": 0}
 LOCK = threading.Lock()
 
 class Handler(BaseHTTPRequestHandler):
@@ -126,7 +126,12 @@ class Handler(BaseHTTPRequestHandler):
             # exactly as the real warm worker's would.
             with LOCK:
                 STATE["by_ref"] += 1
-            func = pickle.loads(base64.b64decode(req["func"]))
+            if "__pipedpeer_func__" in ns:
+                with LOCK:
+                    STATE["func_frame"] += 1
+                func = pickle.loads(ns.pop("__pipedpeer_func__"))
+            else:
+                func = pickle.loads(base64.b64decode(req["func"]))
 
         starmap = req.get("starmap", False)
         results = []
@@ -163,6 +168,7 @@ type fakeDaemonStats struct {
 	BySrc     int    `json:"by_src"`
 	ByRef     int    `json:"by_ref"`
 	Both      int    `json:"both"`
+	FuncFrame int    `json:"func_frame"`
 }
 
 // startPoolFakeDaemon runs poolFakeDaemon in its own process, from its own

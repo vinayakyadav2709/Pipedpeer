@@ -121,7 +121,9 @@ def _fn_fp(payload):
     fp = payload.get("fp")
     if fp is None:
         import hashlib
-        body = payload.get("pickled") or payload.get("src") or ""
+        body = payload.get("src") or ""
+        if payload.get("pickled"):
+            body = hashlib.sha256(payload["pickled"]).hexdigest()
         fp = hashlib.sha256(("%s\0%s\0%s" % (core._STORE, body, payload.get("name", ""))
                              ).encode()).hexdigest()[:16]
         payload["fp"] = fp
@@ -169,6 +171,44 @@ def _shut(conn):
             conn.sock.shutdown(socket.SHUT_RDWR)
     except OSError as e:
         _log("could not close a losing chunk's request: %s" % e)
+
+
+_STOP_GRACE = 2.0
+# The globals-frame key a by-value callable travels under; the daemon's
+# worker scripts (daemonapi/poolwire.go) pop the same name.
+_FUNC_KEY = "__pipedpeer_func__"
+
+
+def _stop_pool(pool, grace=_STOP_GRACE):
+    """multiprocessing.Pool.terminate() with a deadline.
+
+    terminate() sends each worker one SIGTERM and then joins it with no
+    timeout, so a busy worker that survives the signal (user code or a
+    library that installs its own SIGTERM handler, or one that ignores it)
+    hung the job's exit forever. terminate runs on a helper thread; workers
+    still alive after grace seconds get SIGKILL, which unblocks its join."""
+    try:
+        t = threading.Thread(target=pool.terminate, name="pipedpeer-pool-stop", daemon=True)
+        t.start()
+    except RuntimeError as e:     # interpreter finalising: no new threads
+        _log("pool exit: no thread to bound terminate() (%s); terminating inline" % e)
+        pool.terminate()
+        return
+    t.join(grace)
+    if not t.is_alive():
+        return
+    stuck = [p for p in list(getattr(pool, "_pool", None) or [])
+             if hasattr(p, "kill") and p.is_alive()]
+    _log("pool exit: %d worker(s) still running %.0fs after SIGTERM; killing them"
+         % (len(stuck), grace))
+    for p in stuck:
+        try:
+            p.kill()
+        except OSError as e:
+            _log("pool exit: could not kill worker %s: %s" % (p.pid, e))
+    t.join(grace)
+    if t.is_alive():
+        _log("pool exit: terminate() still blocked after SIGKILL; leaving it behind")
 
 
 def _flight_opener(flight):
@@ -251,9 +291,9 @@ class _ClusterPool:
             self._threads = None          # rebuilt at the new width on demand
         _log("local pool resized to %d workers" % want)
         try:
-            old.terminate()
-        except Exception:
-            pass
+            _stop_pool(old)
+        except Exception as e:
+            _log("stopping the old local pool after a resize failed: %s" % e)
 
     def _workers_memory(self):
         """Private memory held by this pool's own worker processes.
@@ -461,7 +501,13 @@ class _ClusterPool:
         t0 = time.monotonic()
         flight = getattr(_TLS, "flight", None)
         try:
-            globals_pickle = pickle.dumps(payload.get("gvars") or {})
+            gvars = payload.get("gvars") or {}
+            if payload.get("pickled"):
+                # The callable rides in the globals frame as raw bytes, not
+                # as base64 in the JSON header: a third bigger, and parsed as
+                # one JSON string on every hop. The worker pops it from there.
+                gvars = dict(gvars, **{_FUNC_KEY: payload["pickled"]})
+            globals_pickle = pickle.dumps(gvars)
             items = [_dumps(v) for v in vals]
             header = {
                 "items_frames": len(items),
@@ -474,20 +520,16 @@ class _ClusterPool:
             # and would silently ignore a callable sent beside it, so a
             # header carrying both would test the wrong path while looking
             # like it tested this one.
-            if payload.get("pickled"):
-                header["func"] = payload["pickled"]
-            else:
+            if not payload.get("pickled"):
                 header["func_src"] = payload["src"]
                 header["func_name"] = payload["name"]
             # Admission control: the daemon 503s rather than OOM when it
             # cannot spare this, and micro-chunks when it is over budget.
             #
-            # The callable counts towards it. A lambda closing over a large
-            # array carries that array inside its own payload rather than in
-            # the globals frame, so sizing globals+items alone would report a
-            # few kilobytes for a request holding hundreds of megabytes.
-            header["required_mem"] = _pool_required(
-                globals_pickle, items, header.get("func", ""))
+            # The callable counts towards it: a lambda closing over a large
+            # array carries that array inside itself, and it rides in
+            # globals_pickle (above), so sizing globals+items includes it.
+            header["required_mem"] = _pool_required(globals_pickle, items)
             if core._FORCE:
                 header["force"] = True
             info = {}
@@ -541,9 +583,9 @@ class _ClusterPool:
             self._batcher.drain()     # queued calls finish before the pool goes
         try:
             self._ctx.close()
-            self._ctx.terminate()
-        except Exception:
-            pass
+            _stop_pool(self._ctx)
+        except Exception as e:
+            _log("pool exit: stopping the local pool failed: %s" % e)
         if self._threads is not None:
             try:
                 self._threads.close()
@@ -1116,7 +1158,7 @@ def _process_safe(func):
 
 
 def _func_pickle(func):
-    """Ship func by value with cloudpickle, as {"pickled": b64}, or None.
+    """Ship func by value with cloudpickle, as {"pickled": bytes}, or None.
 
     The second tier, tried only where source shipping has already given up.
     Source is preferred because it is the smaller and older path: it sends a
@@ -1134,8 +1176,6 @@ def _func_pickle(func):
     handle, a live socket, a running generator, a lock - and the caller then
     keeps the work local, as before.
     """
-    import base64
-
     try:
         import cloudpickle
     except ImportError:
@@ -1172,7 +1212,7 @@ def _func_pickle(func):
         _log("kernel %r cannot ship by value either (%s)"
              % (getattr(func, "__name__", "?"), e))
         return None
-    return {"pickled": base64.b64encode(blob).decode()}
+    return {"pickled": blob}
 
 
 def _apply(func, item):

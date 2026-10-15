@@ -187,6 +187,10 @@ KERNEL = functools.partial(_add, 10)`, "x + 10"},
 			if res.stats.BySrc > 0 {
 				t.Errorf("%d chunks shipped as source for a callable that has none", res.stats.BySrc)
 			}
+			if res.stats.FuncFrame != res.stats.ByRef {
+				t.Errorf("%d of %d by-value chunks carried the callable in the globals frame; the rest sent base64 in the header",
+					res.stats.FuncFrame, res.stats.ByRef)
+			}
 			if res.receipt.ShippedPickled == 0 {
 				t.Errorf("receipt does not record any by-value shipping: %+v", res.receipt)
 			}

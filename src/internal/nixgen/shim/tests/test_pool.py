@@ -106,3 +106,50 @@ def test_three_lost_races_pause_sending(pacing, monkeypatch):
     n = len(calls)
     pool._race_items(list(range(40)), 0.0001, 1, local, remote)
     assert len(calls) == n, "sent a chunk while paused"
+
+
+def _ignore_first_sigterm():
+    import signal
+
+    def once(*_):
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, once)
+
+
+def _sleep_long(x):
+    time.sleep(60)
+    return x
+
+
+def test_stop_pool_kills_a_worker_that_ignores_sigterm():
+    import multiprocessing
+    p = multiprocessing.get_context("fork").Pool(2, initializer=_ignore_first_sigterm)
+    procs = list(p._pool)
+    p.map_async(_sleep_long, range(2))
+    time.sleep(0.5)             # both workers inside _sleep_long
+    p.close()
+    t0 = time.monotonic()
+    pool._stop_pool(p, grace=1.0)
+    assert time.monotonic() - t0 < 5, "pool exit took %.1fs" % (time.monotonic() - t0)
+    assert not any(w.is_alive() for w in procs)
+
+
+def test_by_value_callable_rides_the_globals_frame_not_the_header():
+    import pickle
+    pytest.importorskip("cloudpickle")
+    sent = {}
+
+    def fake_send(header, globals_pickle, items, timeout, info, opener=None):
+        sent["header"], sent["g"] = header, pickle.loads(globals_pickle)
+        return [pickle.dumps(v) for v in range(len(items))]
+
+    orig = pool._pool_send
+    pool._pool_send = fake_send
+    try:
+        payload = pool._func_pickle(lambda v: v + 1)
+        assert isinstance(payload["pickled"], bytes)
+        pool._ClusterPool._remote_chunk(payload, [(0, 1), (1, 2)], False)
+    finally:
+        pool._pool_send = orig
+    assert not sent["header"].get("func")
+    assert pickle.loads(sent["g"][pool._FUNC_KEY])(1) == 2
