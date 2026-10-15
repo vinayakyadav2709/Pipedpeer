@@ -88,7 +88,9 @@ Parked by the user on 2026-10-15:
 - Tuning levels (`--ddp-tune`) and defaults that change batch, learning
   rate, sync interval or epochs, so fast sync stays accurate past 4
   ranks. The simulated results are in
-  [benchmarks/diloco.md](benchmarks/diloco.md).
+  [benchmarks/diloco.md](benchmarks/diloco.md); the one candidate that
+  passed everywhere is exact sync with PowerSGD rank 16 plus error
+  feedback for 5+ ranks.
 - A single machine never crashing on huge numpy.
 - Sleep handling (no sleep inhibitor).
 - Web page parity with the CLI (the page is read-only by design).
