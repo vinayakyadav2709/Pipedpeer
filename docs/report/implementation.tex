@@ -59,7 +59,7 @@ without any machine relaying their traffic.
 line, \texttt{pipedpeer connect <code>}, whose code carries the cluster secret
 and up to six introducer addresses with a checksum, so a mistyped code is
 refused as damaged rather than tried. \texttt{connect} saves both, restarts the
-daemon once, waits up to a minute, and ends with one of three results:
+daemon once, waits up to 60\,s, and ends with one of three results:
 connected, naming the machines (exit 0); partly connected, giving each missing
 machine's reason and fix (exit 2); or failed, with what to do (exit 1).
 
@@ -90,11 +90,11 @@ separated by content --- probes by four magic bytes, introducer messages by a
 leading brace, everything else handed to QUIC.
 
 \textbf{The race.} Both sides probe every pairing of their candidates every
-250\,ms for fifteen seconds, rather than trying candidates in turn, which would
+250\,ms for 15\,s, rather than trying candidates in turn, which would
 add a timeout for every address that cannot work. When one side's NAT allocates
 a fresh external port for every destination there is no address to publish, and
 the \textbf{birthday collision} \cite{anderson2020nat} runs: that side opens 256
-sockets toward the peer, the other sends 600 probes to random ports among the
+sockets towards the peer, the other sends 600 probes to random ports among the
 64{,}511 above 1024, and the socket that is hit is kept, since its mapping is
 the reachable one. A round hits one of the 256 mappings with probability
 $1-(1-256/64511)^{600} \approx 91\%$.
@@ -190,7 +190,7 @@ deduplicated by node id; a node with a role is never offered a job. Five hard
 filters run in order: architecture must match the closure; a GPU must be present
 if one was required; and free memory, free cores and free VRAM must each satisfy
 the request (Figure~\ref{fig:placement}). Every rejection records a reason, shown by
-\texttt{pipedpeer jobs <id> -{}-explain}.
+\mbox{\texttt{pipedpeer jobs <id> -{}-explain}}.
 
 \begin{figure}[!htbp]
     \centering
@@ -245,8 +245,8 @@ recovery lives (Figure~\ref{fig:lease}).
     \label{fig:lease}
 \end{figure}
 
-An \texttt{accept} reserves capacity for 30 seconds; a \texttt{commit}
-promotes the reservation to running, renewed every 30 seconds and reaped after
+An \texttt{accept} reserves capacity for 30\,s; a \texttt{commit}
+promotes the reservation to running, renewed every 30\,s and reaped after
 5 minutes without renewal; \texttt{complete} releases it, and a sweeper reclaims
 what has expired. The submitter renews while the environment builds
 and uploads, so a long build never outlives its lease, and a lease bound to a
@@ -307,7 +307,7 @@ is requested, which is the default when a script imports torch.
 \textbf{Common packages built ahead of time.} Environments share Nix store
 paths, and a transfer sends only the paths a peer lacks. After
 \texttt{connect}, every machine builds in the background one environment
-importing the usual scientific set (numpy, pandas, scikit-learn, scipy,
+importing the usual scientific set (NumPy, pandas, scikit-learn, SciPy,
 matplotlib, seaborn, tqdm and CUDA torch), so a script seen for the first time
 shares those paths and builds only what it adds.
 
@@ -348,7 +348,7 @@ format receives one archive containing a signed binary cache --- the signature
 records for every path and the compressed archives for the paths it lacks ---
 produced and imported by Nix's own copy mechanism.
 
-\textbf{Not waiting for the slowest peer.} The upload waits at most 60 seconds
+\textbf{Not waiting for the slowest peer.} The upload waits at most 60\,s
 for these pushes. A peer still importing finishes in the background and joins
 the pool by itself, since each parallel chunk asks afresh which peers can run
 it; meanwhile it reports ``importing'', so no second send starts. A background
@@ -446,6 +446,8 @@ imported (Figure~\ref{fig:shim}). \texttt{multiprocessing.Pool} and \texttt{Proc
 patched at startup, while NumPy, pandas, torch and joblib are patched on their
 first import through an import hook, so a job that never imports torch never pays
 for patching it (Section~\ref{sec:res-shim} measures the startup cost).
+Table~\ref{tab:intercept} lists the intercepted primitives and how each is
+distributed.
 
 \begin{figure}[!htbp]
     \centering
@@ -640,14 +642,14 @@ world size and shards grow to include it, moving about $1/n$ of the data. Only
 scripts that use a data loader can be re-spread.
 
 The first synchronisation is a barrier: every rank must reach the opening weight
-broadcast within a configurable wait, five minutes by default, and ranks still
+broadcast within a configurable wait, 5 minutes by default, and ranks still
 missing are dropped and named. The torch gloo and NCCL backends are not used.
 
 \begin{figure}[!htbp]
     \centering
     \includegraphics[width=123mm]{\figpath{fig_4.10_ddp.png}}
     \caption[Training synchronisation over the daemon port]{Synchronisation over the daemon port. The lead daemon averages by
-    samples and returns one average: int8 gradients every step in exact mode,
+    samples and returns one average: 8-bit gradients every step in exact mode,
     weights every $H$ steps in fast mode; auto switches to fast once.}
     \label{fig:ddp}
 \end{figure}
@@ -759,7 +761,8 @@ memory of the recent runs of the same script; or per-library baselines plus
 historical tier closes a feedback loop: the worker samples the job's process tree
 while it runs and records the peak, which sizes the next run's admission request.
 
-\textbf{Commands.} The CLI has thirteen commands, among them setup, invite,
+\textbf{Commands.} The CLI has fifteen commands, two of them hidden (\texttt{events} and
+\texttt{map}); the visible ones include setup, invite,
 connect, run, status, attach, doctor and uninstall. Configuration is a single file
 holding the secret, the introducers and the node's role, and the ports are one
 block: 4242 for the daemon API and discovery, 4243 for direct links and 4244 for

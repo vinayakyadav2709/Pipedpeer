@@ -11,8 +11,8 @@
 but using them for a Python script normally requires a configured cluster, a
 program rewritten against a cluster API, and machines that can reach one
 another through their routers. This report presents \textbf{PipedPeer}, a
-system that runs an unmodified Python script on other machines with none of
-these. Each machine runs one daemon from a single binary; the submitting machine
+system that runs an unmodified Python script on other machines without a
+configured cluster, a rewritten program or an open route between the machines. Each machine runs one daemon from a single binary; the submitting machine
 builds the script's environment as a pinned \textbf{Nix closure}, places the job
 by live capacity, sends only the store paths the chosen machine lacks, and runs
 the job in a \texttt{crun} sandbox under its own memory ceiling. Placement
@@ -25,7 +25,9 @@ to measured throughput, only when a cost model predicts a gain. Machines on
 different networks meet through an introducer that every daemon provides, then
 connect directly over QUIC links, authenticated by each node's key and a shared
 cluster secret, after port mapping or hole punching; no relay carries job data
-and no central server exists. An Android phone under Termux joins as a worker
+and no central server exists. NAT traversal was evaluated on a two-site
+container testbed; the runs between physical machines in different homes used
+Tailscale. An Android phone under Termux joins as a worker
 for parallel chunks.
 
 \noindent In a container lab, a job whose environment is already in place
@@ -33,8 +35,9 @@ starts in a median of 0.83\,s against 23.4\,s for its first submission. Between
 two laptops in different homes, joined over Tailscale, a mixed CPU script
 finished in about 14\,s against 18\,s on one laptop. On a two-rank training ring, synchronising
 every 32 steps instead of every step kept the validation loss no more than 1\%
-above one device's on every test model, and each rank sent 7.6 to 9.2 times
-fewer bytes. Each of 95 features was broken in turn; the suite caught every mutation.
+above one device's on every test model in in-process runs (mean of three
+seeds), and in a separate container-lab run (one seed) each rank sent 7.6 to
+9.2 times fewer bytes. Each of 95 features was broken in turn; the suite caught every mutation.
 
 \vspace{0.6cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal,

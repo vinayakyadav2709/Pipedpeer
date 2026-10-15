@@ -69,14 +69,14 @@ Five studies examine WebAssembly as a lighter sandbox at the edge. Sekigawa
 units without a container daemon; Hoque and Harras \cite{hoque2022} name an
 immature system interface, limited file-system and networking APIs and absent
 GPU support as the blocking gaps; Kakati and Brorsson \cite{kakati2024} report
-70--90\% of native speed across x86\_64, ARM64 and RISC-V; and Bachmeier
+70--90\% of native speed across x86\_64, ARM64 and \mbox{RISC-V}; and Bachmeier
 \textit{et~al.} \cite{bachmeier2025} and Khelifa \textit{et~al.}
 \cite{khelifa2024} find GPU acceleration immature and memory the dominant
 constraint for AI inference. The argument that a lightweight sandbox can replace
 a full container runtime carries over, but CPython with native extensions and
 CUDA libraries cannot run under WebAssembly, so a native environment is shipped
-as a Nix closure and run under an OCI runtime instead, at about 20\,ms per job
-(Section~\ref{sec:res-sandbox}).
+as a Nix closure and run under an OCI runtime instead, at 15 to 21\,ms more per job than
+\texttt{bwrap} (Section~\ref{sec:res-sandbox}).
 
 ``PyTorch Distributed: Experiences on Accelerating Data Parallel Training''
 \cite{li2020pytorchddp} by S.~Li \textit{et~al.} describes DDP, which
@@ -183,18 +183,18 @@ buckets and matrix row blocks while the rest runs locally, choosing the split
 by minimising completion time over measured rates (Section~\ref{sec:intercept}).
 
 ``Energy-Efficient Collaborative Task Offloading in MEC'' \cite{adhoc2025} by
-S.~Wang \textit{et~al.} has devices cooperate by relaying tasks toward edge
+S.~Wang \textit{et~al.} has devices cooperate by relaying tasks towards edge
 servers, with a learned policy that cuts total energy. Its symmetric model, in
 which every device is both client and server, matches a single binary in which
-any node may submit or accept work, and a parallel-map request that a node
-cannot hold is likewise forwarded to a peer that can.
+any node may submit or accept work, but PipedPeer assumes no edge servers and
+forwards a map once, by a fixed rule rather than a learned policy.
 
 ``Blockchain Enabled Task Offloading'' \cite{li2023blockchain} by C.~Li
 \textit{et~al.} enforces service agreements between task submitters and edge
 workers with smart contracts, preventing free-riding among parties that do not
-trust one another. PipedPeer authenticates who may use a node
-(Section~\ref{sec:trust}) but not whether an admitted participant behaves well,
-which a cluster of mutually untrusting owners would need.
+trust one another. PipedPeer instead trusts every holder of the cluster
+secret (Section~\ref{sec:trust}), so it needs no contract layer but cannot
+police an admitted participant.
 
 ``Congestion-Aware Distributed Task Offloading Using Graph Neural Networks''
 \cite{zhao2023} by Z.~Zhao \textit{et~al.} trains a graph neural network to produce
@@ -269,7 +269,7 @@ Guan et~al.\ \cite{idds2025} & 2025 & Scored dispatch of workflow task graphs & 
 Deng et~al.\ \cite{deng2023} & 2023 & Joint assignment and relay selection in MEC & Assumes a channel model \\
 He et~al.\ \cite{he2024} & 2024 & Multi-agent reinforcement-learned offloading & Needs training data and a training phase \\
 Yong et~al.\ \cite{yong2023} & 2023 & Optimised partial offloading & Environment, program and network path not modelled \\
-Wang et~al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks toward edge servers & Learned policy; edge servers assumed \\
+Wang et~al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks towards edge servers & Learned policy; edge servers assumed \\
 Li et~al.\ \cite{li2023blockchain} & 2023 & Smart-contract service agreements & Blockchain infrastructure required \\
 Zhao et~al.\ \cite{zhao2023} & 2024 & Graph-neural-network offloading policies & A learned model that must first be trained \\
 \end{longtable}}
