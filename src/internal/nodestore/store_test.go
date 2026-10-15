@@ -2,15 +2,8 @@ package nodestore
 
 import (
 	"database/sql"
-	"fmt"
-	"net"
-	"net/http"
-	"net/http/httptest"
+	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
-	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -25,25 +18,52 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// setClock pins the store's clock for the rest of the test.
+func setClock(t *testing.T, at time.Time) {
+	t.Helper()
+	old := now
+	now = func() time.Time { return at }
+	t.Cleanup(func() { now = old })
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func nodeByID(t *testing.T, s *Store, id string) (Node, bool) {
+	t.Helper()
+	nodes, err := s.ListAll()
+	must(t, err)
+	for _, n := range nodes {
+		if n.NodeID == id {
+			return n, true
+		}
+	}
+	return Node{}, false
+}
+
+func ids(t *testing.T, s *Store) map[string]bool {
+	t.Helper()
+	nodes, err := s.ListAll()
+	must(t, err)
+	out := map[string]bool{}
+	for _, n := range nodes {
+		out[n.NodeID] = true
+	}
+	return out
+}
+
 func TestUpsertAndList(t *testing.T) {
 	s := newTestStore(t)
+	must(t, s.UpsertNode(Node{NodeID: "node-a", Hostname: "a", State: "healthy"}))
+	must(t, s.SeePath("node-a", PathLAN, "10.0.0.1", 4242))
 
-	if err := s.UpsertNode(Node{
-		NodeID: "node-a", Host: "10.0.0.1", Port: 38080,
-		State: "healthy", Source: "discovery",
-	}); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-
-	nodes, err := s.ListAll()
-	if err != nil {
-		t.Fatalf("list: %v", err)
-	}
-	if len(nodes) != 1 {
-		t.Fatalf("expected 1 node, got %d", len(nodes))
-	}
-	if nodes[0].NodeID != "node-a" || nodes[0].Port != 38080 {
-		t.Fatalf("round-trip mismatch: %+v", nodes[0])
+	n, ok := nodeByID(t, s, "node-a")
+	if !ok || n.Hostname != "a" || n.Host != "10.0.0.1" || n.Port != 4242 || n.Source != "lan" {
+		t.Fatalf("round-trip mismatch: %+v", n)
 	}
 }
 
@@ -51,360 +71,317 @@ func TestUpsertAndList(t *testing.T) {
 // the scheduler.
 func TestCapabilitiesAndLoadRoundTrip(t *testing.T) {
 	s := newTestStore(t)
-
 	caps := `{"cpu_cores":"32","gpu_name":"RTX 4090","gpu_compute_cap":"8.9"}`
 	load := `{"cpu_percent":12.5,"gpus":[{"index":0,"memory_free_bytes":21474836480}]}`
+	must(t, s.UpsertNode(Node{NodeID: "gpu-node", State: "healthy", CapsJSON: caps, LoadJSON: load}))
 
-	if err := s.UpsertNode(Node{
-		NodeID: "gpu-node", Host: "10.0.0.2", Port: 38080,
-		State: "healthy", Source: "discovery",
-		CapsJSON: caps, LoadJSON: load,
-	}); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-
-	nodes, _ := s.ListAll()
-	if nodes[0].CapsJSON != caps {
-		t.Fatalf("capabilities not preserved:\n got %s\nwant %s", nodes[0].CapsJSON, caps)
-	}
-	if nodes[0].LoadJSON != load {
-		t.Fatalf("load not preserved:\n got %s\nwant %s", nodes[0].LoadJSON, load)
+	n, _ := nodeByID(t, s, "gpu-node")
+	if n.CapsJSON != caps || n.LoadJSON != load {
+		t.Fatalf("caps/load not preserved: %+v", n)
 	}
 }
 
-// A discovery upsert (which knows only an address) must not erase the richer
-// hardware detail an earlier health poll recorded.
-func TestUpsertDoesNotClobberCapabilitiesWithEmpty(t *testing.T) {
+// An upsert that knows less must not erase the richer hardware detail an
+// earlier health poll recorded, and must never move the address.
+func TestUpsertKeepsCapsAndNeverMovesTheAddress(t *testing.T) {
 	s := newTestStore(t)
-
 	caps := `{"cpu_cores":"64"}`
-	_ = s.UpsertNode(Node{
-		NodeID: "n", Host: "10.0.0.3", Port: 38080,
-		State: "healthy", Source: "discovery", CapsJSON: caps,
-		LoadJSON: `{"cpu_percent":5}`,
-	})
+	must(t, s.PathOK("n", PathInternet, "127.0.0.1", 40001))
+	must(t, s.UpsertNode(Node{NodeID: "n", State: "healthy", CapsJSON: caps, LoadJSON: `{"cpu_percent":5}`}))
+	must(t, s.UpsertNode(Node{NodeID: "n", Host: "10.0.0.3", Port: 4242, Source: "lan", State: "unknown"}))
 
-	// Second upsert simulates rediscovery: address only, no capabilities.
-	_ = s.UpsertNode(Node{
-		NodeID: "n", Host: "10.0.0.3", Port: 38080,
-		State: "unknown", Source: "discovery",
-	})
-
-	nodes, _ := s.ListAll()
-	if nodes[0].CapsJSON != caps {
-		t.Fatalf("rediscovery wiped capabilities: got %q, want %q", nodes[0].CapsJSON, caps)
+	n, _ := nodeByID(t, s, "n")
+	if n.CapsJSON != caps || n.LoadJSON == "" {
+		t.Fatalf("second upsert wiped capabilities/load: %+v", n)
 	}
-	if nodes[0].LoadJSON == "" {
-		t.Fatal("rediscovery wiped load data")
+	if n.Host != "127.0.0.1" || n.Port != 40001 || n.Source != "internet" {
+		t.Fatalf("UpsertNode moved the address: %+v", n)
 	}
 }
 
-// A manually added node keeps its manual flag when discovery later finds it.
-func TestManualFlagSurvivesRediscovery(t *testing.T) {
+// E5e: the QUIC link was up, then LAN discovery overwrote the working
+// internet address with an unreachable LAN one and the row flapped. A
+// discovery candidate must never replace a verified internet path, even when
+// the candidate is tried and fails.
+func TestDiscoveryCandidateNeverReplacesVerifiedInternetPath(t *testing.T) {
 	s := newTestStore(t)
+	must(t, s.PathOK("d", PathInternet, "127.0.0.1", 34089))
+	must(t, s.SeePath("d", PathLAN, "10.79.220.165", 4242))
 
-	_ = s.UpsertNode(Node{
-		NodeID: "m", Host: "10.0.0.4", Port: 38080,
-		Source: "manual", IsManual: true, State: "healthy",
-	})
-	_ = s.UpsertNode(Node{
-		NodeID: "m", Host: "10.0.0.4", Port: 38080,
-		Source: "discovery", State: "healthy",
-	})
-
-	manual, err := s.ListManual()
-	if err != nil {
-		t.Fatalf("list manual: %v", err)
+	n, _ := nodeByID(t, s, "d")
+	if n.Host != "127.0.0.1" || n.Port != 34089 || n.Source != "internet" || n.Reason != "" {
+		t.Fatalf("candidate replaced the internet path: %+v", n)
 	}
-	if len(manual) != 1 {
-		t.Fatalf("expected the node to still be manual, got %d manual entries", len(manual))
+	must(t, s.PathFailed("d", "10.79.220.165", 4242, "context deadline exceeded"))
+	n, _ = nodeByID(t, s, "d")
+	if n.Host != "127.0.0.1" || n.Reason != "" {
+		t.Fatalf("a failed candidate disturbed the active path: %+v", n)
 	}
-	if manual[0].Source != "manual" {
-		t.Fatalf("expected source to stay manual, got %q", manual[0].Source)
+	ps, err := s.Paths("d")
+	must(t, err)
+	if len(ps) != 2 || !ps[0].Active || ps[0].Kind != PathInternet || ps[1].LastErr == "" {
+		t.Fatalf("paths: %+v", ps)
 	}
 }
 
-// ListHealthy is the death filter: a node last seen long ago is not a
-// placement candidate even if its stored state still says healthy.
-func TestListHealthyExcludesStaleNodes(t *testing.T) {
+// A moved peer: its new LAN address is a candidate until verified, and the
+// old one stays active while it still answers.
+func TestMovedPeerNewLANPathActiveOnlyAfterPathOK(t *testing.T) {
 	s := newTestStore(t)
-
-	_ = s.UpsertNode(Node{
-		NodeID: "fresh", Host: "10.0.0.5", Port: 38080,
-		State: "healthy", Source: "discovery",
-	})
-	_ = s.UpsertNode(Node{
-		NodeID: "stale", Host: "10.0.0.6", Port: 38080,
-		State: "healthy", Source: "discovery",
-		LastSeen: time.Now().Add(-1 * time.Hour).Unix(),
-	})
-
-	healthy, err := s.ListHealthy(30 * time.Second)
-	if err != nil {
-		t.Fatalf("list healthy: %v", err)
+	must(t, s.PathOK("b", PathLAN, "10.77.1.3", 4242))
+	must(t, s.SeePath("b", PathLAN, "10.77.1.23", 4242))
+	if n, _ := nodeByID(t, s, "b"); n.Host != "10.77.1.3" {
+		t.Fatalf("a sighting moved the active path: %+v", n)
 	}
-	if len(healthy) != 1 || healthy[0].NodeID != "fresh" {
-		t.Fatalf("expected only the fresh node, got %+v", healthy)
+
+	// The new address answers while the old one still does too: keep it.
+	must(t, s.PathOK("b", PathLAN, "10.77.1.23", 4242))
+	if n, _ := nodeByID(t, s, "b"); n.Host != "10.77.1.3" {
+		t.Fatalf("an answering incumbent of the same kind was replaced: %+v", n)
+	}
+
+	// The old address stops answering: the shown reason says so until the
+	// verified challenger takes over on its next success.
+	must(t, s.PathFailed("b", "10.77.1.3", 4242, "no route to host"))
+	if n, _ := nodeByID(t, s, "b"); n.Host != "10.77.1.3" || n.Reason != "no route to host" {
+		t.Fatalf("failed incumbent: %+v", n)
+	}
+	must(t, s.PathOK("b", PathLAN, "10.77.1.23", 4242))
+	if n, _ := nodeByID(t, s, "b"); n.Host != "10.77.1.23" || n.Reason != "" {
+		t.Fatalf("verified challenger did not take over from a failing incumbent: %+v", n)
 	}
 }
 
-// PruneStale drops forgotten discovered nodes but keeps manual ones, which the
-// user added deliberately.
-func TestPruneStaleKeepsManualNodes(t *testing.T) {
+func TestVerifiedLANBeatsVerifiedInternet(t *testing.T) {
 	s := newTestStore(t)
-
-	old := time.Now().Add(-2 * time.Hour).Unix()
-	_ = s.UpsertNode(Node{NodeID: "auto", Host: "h1", Port: 1, Source: "discovery", LastSeen: old})
-	_ = s.UpsertNode(Node{NodeID: "man", Host: "h2", Port: 2, Source: "manual", IsManual: true, LastSeen: old})
-
-	s.PruneStale(time.Minute)
-
-	nodes, _ := s.ListAll()
-	if len(nodes) != 1 {
-		t.Fatalf("expected 1 node left, got %d: %+v", len(nodes), nodes)
+	must(t, s.PathOK("p", PathInternet, "127.0.0.1", 40001))
+	must(t, s.PathOK("p", PathLAN, "192.168.1.9", 4242))
+	if n, _ := nodeByID(t, s, "p"); n.Source != "lan" || n.Host != "192.168.1.9" {
+		t.Fatalf("verified lan should beat verified internet: %+v", n)
 	}
-	if nodes[0].NodeID != "man" {
-		t.Fatalf("prune removed the manual node instead of the discovered one: %+v", nodes[0])
+	// And internet does not take it back while lan answers.
+	must(t, s.PathOK("p", PathInternet, "127.0.0.1", 40001))
+	if n, _ := nodeByID(t, s, "p"); n.Source != "lan" {
+		t.Fatalf("internet replaced an answering lan path: %+v", n)
+	}
+}
+
+// Whoever answers (authenticated) at an address is the node there: a
+// forwarder port reused by another peer, a recreated container.
+func TestPathOKTakesTheAddressFromOtherNodes(t *testing.T) {
+	s := newTestStore(t)
+	must(t, s.PathOK("old", PathInternet, "127.0.0.1", 40001))
+	must(t, s.PathOK("other", PathInternet, "127.0.0.1", 40002))
+	must(t, s.PathOK("new", PathInternet, "127.0.0.1", 40001))
+
+	if ps, _ := s.Paths("old"); len(ps) != 0 {
+		t.Fatalf("superseded node kept the address: %+v", ps)
+	}
+	if ps, _ := s.Paths("other"); len(ps) != 1 {
+		t.Fatalf("a different port was touched: %+v", ps)
+	}
+}
+
+func TestSelfPathReplacesOldSelfAddress(t *testing.T) {
+	s := newTestStore(t)
+	must(t, s.PathOK("me", PathSelf, "10.0.0.2", 4242))
+	must(t, s.PathOK("me", PathSelf, "10.24.7.5", 4242))
+	ps, err := s.Paths("me")
+	must(t, err)
+	if len(ps) != 1 || ps[0].Host != "10.24.7.5" || !ps[0].Active {
+		t.Fatalf("self paths: %+v", ps)
+	}
+}
+
+func TestSightingNeverDowngradesKind(t *testing.T) {
+	s := newTestStore(t)
+	must(t, s.SeePath("n", PathLAN, "10.0.0.7", 4242))
+	must(t, s.SeePath("n", PathGossip, "10.0.0.7", 4242))
+	if ps, _ := s.Paths("n"); len(ps) != 1 || ps[0].Kind != PathLAN {
+		t.Fatalf("gossip downgraded a lan path: %+v", ps)
+	}
+}
+
+func TestBadPathsAreRefused(t *testing.T) {
+	s := newTestStore(t)
+	for _, c := range []struct {
+		id, host string
+		kind     PathKind
+		port     int
+	}{
+		{"", "h", PathLAN, 1}, {"n", "", PathLAN, 1}, {"n", "h", PathLAN, 0},
+		{"n", "h", PathLAN, 70000}, {"n", "h", "manual", 1},
+	} {
+		if err := s.SeePath(c.id, c.kind, c.host, c.port); err == nil {
+			t.Errorf("SeePath(%q, %q, %q, %d) accepted", c.id, c.kind, c.host, c.port)
+		}
+	}
+}
+
+// Prune rules, and E4: a sighting alone never keeps a node alive.
+func TestPruneRules(t *testing.T) {
+	s := newTestStore(t)
+	t0 := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	setClock(t, t0)
+	must(t, s.PathOK("me", PathSelf, "10.0.0.1", 4242))
+	must(t, s.PathOK("verified", PathLAN, "10.0.0.2", 4242))
+	must(t, s.SeePath("candidate", PathLAN, "10.0.0.3", 4242))
+	must(t, s.SeePath("gossiped", PathGossip, "203.0.113.4", 4243))
+	must(t, s.SeePath("inet-unverified", PathInternet, "127.0.0.1", 40009))
+	must(t, s.PathOK("moved", PathLAN, "10.77.1.3", 4242))
+
+	// 3 min: the never-verified lan/gossip nodes go, even though the
+	// candidate is still being sighted.
+	setClock(t, t0.Add(3*time.Minute))
+	must(t, s.SeePath("candidate", PathLAN, "10.0.0.3", 4242))
+	must(t, s.PathOK("verified", PathLAN, "10.0.0.2", 4242))
+	must(t, s.SeePath("moved", PathLAN, "10.77.1.3", 4242))
+	must(t, s.PruneStale())
+	got := ids(t, s)
+	if got["candidate"] || got["gossiped"] {
+		t.Fatalf("never-verified lan/gossip nodes survived 2 min: %v", got)
+	}
+	if !got["inet-unverified"] || !got["verified"] || !got["moved"] || !got["me"] {
+		t.Fatalf("pruned too early: %v", got)
+	}
+
+	// 16 min: "moved" was sighted every poll but never verified again.
+	setClock(t, t0.Add(16*time.Minute))
+	must(t, s.PathOK("verified", PathLAN, "10.0.0.2", 4242))
+	must(t, s.SeePath("moved", PathLAN, "10.77.1.3", 4242))
+	must(t, s.PruneStale())
+	got = ids(t, s)
+	if got["moved"] || got["inet-unverified"] {
+		t.Fatalf("nodes without a verified path for 15 min survived: %v", got)
+	}
+	if !got["verified"] || !got["me"] {
+		t.Fatalf("live nodes pruned: %v", got)
+	}
+
+	// Path TTLs: a lan path unseen 10 min goes, an internet path unseen less
+	// than an hour stays; self is never pruned however old.
+	must(t, s.SeePath("verified", PathLAN, "10.0.0.99", 4242))
+	must(t, s.SeePath("verified", PathInternet, "127.0.0.1", 40010))
+	setClock(t, t0.Add(27*time.Minute))
+	must(t, s.PathOK("verified", PathLAN, "10.0.0.2", 4242))
+	must(t, s.PruneStale())
+	ps, _ := s.Paths("verified")
+	if len(ps) != 2 || ps[0].Host != "10.0.0.2" || ps[1].Kind != PathInternet {
+		t.Fatalf("after 11 min want the verified lan + internet paths, got %+v", ps)
+	}
+	setClock(t, t0.Add(80*time.Minute))
+	must(t, s.PathOK("verified", PathLAN, "10.0.0.2", 4242))
+	must(t, s.PruneStale())
+	if ps, _ := s.Paths("verified"); len(ps) != 1 {
+		t.Fatalf("internet path unseen for an hour survived: %+v", ps)
+	}
+	if ps, _ := s.Paths("me"); len(ps) != 1 || !ids(t, s)["me"] {
+		t.Fatalf("self pruned: %+v", ps)
 	}
 }
 
 func TestMarkUnreachableClearsLiveCounters(t *testing.T) {
 	s := newTestStore(t)
-
-	_ = s.UpsertNode(Node{
-		NodeID: "n", Host: "h", Port: 1, State: "healthy", Source: "discovery",
-		ActiveJobs: 3, AvailableMem: 1 << 30,
-	})
-	s.MarkUnreachable("n")
-
-	nodes, _ := s.ListAll()
-	if nodes[0].State != "unreachable" {
-		t.Fatalf("expected state unreachable, got %q", nodes[0].State)
-	}
-	if nodes[0].ActiveJobs != 0 || nodes[0].AvailableMem != 0 {
-		t.Fatalf("unreachable node should report no capacity, got jobs=%d mem=%d",
-			nodes[0].ActiveJobs, nodes[0].AvailableMem)
+	must(t, s.UpsertNode(Node{NodeID: "n", State: "healthy", ActiveJobs: 3, AvailableMem: 1 << 30}))
+	must(t, s.MarkUnreachable("n"))
+	n, _ := nodeByID(t, s, "n")
+	if n.State != "unreachable" || n.ActiveJobs != 0 || n.AvailableMem != 0 {
+		t.Fatalf("unreachable node should report no capacity: %+v", n)
 	}
 }
 
-func TestDeleteNode(t *testing.T) {
+func TestDeleteNodeTakesItsPaths(t *testing.T) {
 	s := newTestStore(t)
-	_ = s.UpsertNode(Node{NodeID: "gone", Host: "h", Port: 1, Source: "manual", IsManual: true})
-
-	if err := s.DeleteNode("gone"); err != nil {
-		t.Fatalf("delete: %v", err)
+	must(t, s.PathOK("gone", PathLAN, "10.0.0.5", 4242))
+	must(t, s.DeleteNode("gone"))
+	if len(ids(t, s)) != 0 {
+		t.Fatal("node survived delete")
 	}
-	nodes, _ := s.ListAll()
-	if len(nodes) != 0 {
-		t.Fatalf("expected node removed, got %+v", nodes)
+	var n int
+	must(t, s.db.QueryRow(`SELECT count(*) FROM paths`).Scan(&n))
+	if n != 0 {
+		t.Fatalf("%d paths survived their node (foreign keys off?)", n)
 	}
 }
 
-// Removal must say when it deleted nothing — a 200 no-op is how ghost node
-// entries survived cleanup — and short ID prefixes must resolve like the ones
-// `pipedpeer nodes` prints.
-func TestRemoveReportsCountsAndResolvesPrefixes(t *testing.T) {
+func TestDropPathFallsBackToBestRemaining(t *testing.T) {
 	s := newTestStore(t)
-	_ = s.UpsertNode(Node{NodeID: "2b74d935-b039-4adb", Host: "10.0.0.9", Port: 38081, Source: "manual", IsManual: true})
-	_ = s.UpsertNode(Node{NodeID: "2b7fffff-0000-0000", Host: "10.0.0.9", Port: 38082, Source: "discovery"})
-
-	if n, err := s.RemoveManual("no-such-host"); err != nil || n != 0 {
-		t.Fatalf("no-op remove: n=%d err=%v, want 0 rows", n, err)
+	must(t, s.PathOK("n", PathInternet, "127.0.0.1", 40001))
+	must(t, s.PathOK("n", PathLAN, "10.0.0.5", 4242))
+	must(t, s.DropPath("n", "10.0.0.5", 4242))
+	if n, _ := nodeByID(t, s, "n"); n.Host != "127.0.0.1" || n.Source != "internet" {
+		t.Fatalf("after dropping the active path: %+v", n)
 	}
+}
 
+// Short ID prefixes resolve like the ones `pipedpeer nodes` prints.
+func TestResolveNodeIDPrefixes(t *testing.T) {
+	s := newTestStore(t)
+	must(t, s.UpsertNode(Node{NodeID: "2b74d935b039"}))
+	must(t, s.UpsertNode(Node{NodeID: "2b7fffff0000"}))
 	if _, err := s.ResolveNodeID("2b7"); err == nil {
 		t.Fatal("ambiguous prefix must error, not pick one")
 	}
-	id, err := s.ResolveNodeID("2b74d935")
-	if err != nil || id != "2b74d935-b039-4adb" {
+	if id, err := s.ResolveNodeID("2b74d935"); err != nil || id != "2b74d935b039" {
 		t.Fatalf("prefix resolve: id=%q err=%v", id, err)
 	}
 	if id, _ := s.ResolveNodeID("ffffffff"); id != "" {
 		t.Fatalf("unknown prefix resolved to %q", id)
 	}
-
-	if n, err := s.RemoveManual("10.0.0.9"); err != nil || n != 1 {
-		t.Fatalf("manual remove by host: n=%d err=%v, want 1 (discovery entry must survive)", n, err)
-	}
 }
 
-// Internet peers all sit behind forwarders on 127.0.0.1. One leaving must
-// take only its own port, not every other peer's forwarder with it.
-func TestRemoveManualAtKeepsOtherForwarders(t *testing.T) {
-	s := newTestStore(t)
-	_ = s.UpsertNode(Node{NodeID: "peer-a", Host: "127.0.0.1", Port: 40001, Source: "manual", IsManual: true})
-	_ = s.UpsertNode(Node{NodeID: "peer-b", Host: "127.0.0.1", Port: 40002, Source: "manual", IsManual: true})
-
-	if n, err := s.RemoveManualAt("127.0.0.1", 40001); err != nil || n != 1 {
-		t.Fatalf("RemoveManualAt: n=%d err=%v, want 1", n, err)
-	}
-	nodes, _ := s.ListAll()
-	if len(nodes) != 1 || nodes[0].NodeID != "peer-b" {
-		t.Fatalf("after removing port 40001, want only peer-b, got %+v", nodes)
-	}
-}
-
-// An existing database created before caps_json/load_json existed must migrate
-// in place rather than failing to open.
-func TestMigrationFromPreviousSchema(t *testing.T) {
+// A database from an older build is a hard cut: dropped and recreated, not
+// half-migrated.
+func TestOldSchemaIsRecreated(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "legacy.db")
-
 	db, err := sql.Open("sqlite", p)
-	if err != nil {
-		t.Fatalf("open raw db: %v", err)
-	}
-	if _, err := db.Exec(`
-		CREATE TABLE nodes (
-			node_id       TEXT PRIMARY KEY,
-			host          TEXT NOT NULL,
-			port          INTEGER NOT NULL,
-			ssh_endpoint  TEXT,
-			arch          TEXT,
-			hostname      TEXT,
-			state         TEXT DEFAULT 'unknown',
-			active_jobs   INTEGER DEFAULT 0,
-			available_mem INTEGER DEFAULT 0,
-			reserved_mem  INTEGER DEFAULT 0,
-			total_mem     INTEGER DEFAULT 0,
-			cpu_percent   REAL DEFAULT 0,
-			health_score  REAL DEFAULT 0,
-			source        TEXT NOT NULL,
-			is_manual     INTEGER DEFAULT 0,
-			last_seen     INTEGER DEFAULT 0
-		);
-		INSERT INTO nodes (node_id, host, port, source, state, last_seen)
-		VALUES ('legacy-node', '10.0.0.9', 38080, 'manual', 'healthy', 0);
-	`); err != nil {
-		t.Fatalf("seed legacy schema: %v", err)
-	}
+	must(t, err)
+	_, err = db.Exec(`
+		CREATE TABLE nodes (node_id TEXT PRIMARY KEY, host TEXT NOT NULL, port INTEGER NOT NULL,
+			source TEXT NOT NULL, is_manual INTEGER DEFAULT 0, last_seen INTEGER DEFAULT 0);
+		INSERT INTO nodes (node_id, host, port, source, is_manual) VALUES ('legacy', '10.0.0.9', 38080, 'manual', 1);`)
+	must(t, err)
 	db.Close()
+	must(t, os.Chmod(p, 0o644))
 
 	s, err := NewAt(p)
 	if err != nil {
-		t.Fatalf("opening a pre-existing database should migrate, not fail: %v", err)
+		t.Fatalf("an old schema must be recreated, not fail: %v", err)
 	}
 	defer s.Close()
-
-	nodes, err := s.ListAll()
-	if err != nil {
-		t.Fatalf("list after migration: %v", err)
+	if got := ids(t, s); len(got) != 0 {
+		t.Fatalf("old rows survived the hard cut: %v", got)
 	}
-	if len(nodes) != 1 || nodes[0].NodeID != "legacy-node" {
-		t.Fatalf("existing rows should survive migration, got %+v", nodes)
+	must(t, s.PathOK("fresh", PathLAN, "10.0.0.1", 4242))
+	if n, ok := nodeByID(t, s, "fresh"); !ok || n.Host != "10.0.0.1" {
+		t.Fatalf("recreated schema unusable: %+v", n)
 	}
-
-	// And the new columns must be usable.
-	nodes[0].CapsJSON = `{"cpu_cores":"8"}`
-	if err := s.UpsertNode(nodes[0]); err != nil {
-		t.Fatalf("write to migrated schema: %v", err)
-	}
-	reread, _ := s.ListAll()
-	if reread[0].CapsJSON != `{"cpu_cores":"8"}` {
-		t.Fatalf("migrated column did not persist, got %q", reread[0].CapsJSON)
+	fi, err := os.Stat(p)
+	must(t, err)
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("nodes.db mode %v, want 0600", fi.Mode().Perm())
 	}
 }
 
-// Migration must be idempotent — the daemon reopens this database every start.
-func TestMigrationIsIdempotent(t *testing.T) {
+// The daemon reopens this database every start; rows survive a reopen.
+func TestReopenKeepsRows(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "repeat.db")
 	for i := 0; i < 3; i++ {
 		s, err := NewAt(p)
 		if err != nil {
 			t.Fatalf("open %d: %v", i+1, err)
 		}
+		if i == 0 {
+			must(t, s.PathOK("n", PathLAN, "10.0.0.1", 4242))
+		}
+		if !ids(t, s)["n"] {
+			t.Fatalf("open %d lost the row", i+1)
+		}
 		s.Close()
 	}
-}
-
-// TestReaddingAnAddressReplacesTheOldIdentity. A worker that comes back with a
-// new node ID - a container recreated, a machine reinstalled - used to land
-// beside its old entry rather than replacing it, and manual entries are exempt
-// from PruneStale, so they accumulated forever. Eleven rows for a four-node
-// cluster, each dead one health-checked on every cycle.
-//
-// Goes through AddManual rather than the helper it calls: an earlier version
-// of this test called the helper directly and stayed green when the call site
-// was deleted, which is the failure this whole audit exists to catch.
-func TestReaddingAnAddressReplacesTheOldIdentity(t *testing.T) {
-	s := newTestStore(t)
-
-	// One address, answering with a different identity each time - a container
-	// recreated between the two adds.
-	var nodeID atomic.Value
-	nodeID.Store("gen1")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"node_id":%q}`, nodeID.Load().(string))
-	}))
-	defer srv.Close()
-	host, portStr, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, _ := strconv.Atoi(portStr)
-
-	// A manual neighbour at another port, and a discovered row at this one:
-	// neither is ours to remove.
-	_ = s.UpsertNode(Node{NodeID: "other", Host: host, Port: port + 1, Source: "manual", IsManual: true})
-	_ = s.UpsertNode(Node{NodeID: "found", Host: host, Port: port, Source: "discovery"})
-
-	if err := s.AddManual(host, port); err != nil {
-		t.Fatal(err)
-	}
-	nodeID.Store("gen2")
-	if err := s.AddManual(host, port); err != nil {
-		t.Fatal(err)
-	}
-
-	nodes, _ := s.ListAll()
-	got := map[string]bool{}
-	for _, n := range nodes {
-		got[n.NodeID] = true
-	}
-	if got["gen1"] {
-		t.Errorf("the superseded identity at %s:%d survived: %v", host, port, keysOf(got))
-	}
-	if !got["gen2"] {
-		t.Errorf("the node currently at %s:%d is missing: %v", host, port, keysOf(got))
-	}
-	if !got["other"] {
-		t.Errorf("a manual node at a different port was removed: %v", keysOf(got))
-	}
-	if !got["found"] {
-		t.Errorf("a discovered node was removed; only manual residue is ours to " +
-			"clear, and deleting discovered rows here races the discovery loop")
-	}
-}
-
-func keysOf(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// TestAPollFindingANewIdentityReplacesTheOldRow. AddManual drops a superseded
-// identity, but the health poller is what usually meets the new one: a lab
-// container recreated, or an internet forwarder port reused by another peer.
-// It added a manual row beside the old one on every recreation, and manual
-// rows are never pruned - twenty-odd dead rows for a four-node lab.
-func TestAPollFindingANewIdentityReplacesTheOldRow(t *testing.T) {
-	s := newTestStore(t)
-	_ = s.UpsertNode(Node{NodeID: "found", Host: "10.0.0.5", Port: 38081, Source: "discovery"})
-	_ = s.UpsertNode(Node{NodeID: "other", Host: "10.0.0.5", Port: 38082, Source: "manual", IsManual: true})
-	for i := 0; i < 5; i++ {
-		if err := s.MarkHealthy(Node{NodeID: fmt.Sprintf("gen%d", i), Host: "10.0.0.5",
-			Port: 38081, Source: "manual", IsManual: true}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	nodes, _ := s.ListAll()
-	got := map[string]bool{}
-	for _, n := range nodes {
-		got[n.NodeID] = true
-	}
-	if len(got) != 3 || !got["gen4"] || !got["found"] || !got["other"] {
-		t.Errorf("want gen4 (current), found (discovered) and other (another port), got %v", keysOf(got))
+	fi, err := os.Stat(p)
+	must(t, err)
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("nodes.db mode %v, want 0600", fi.Mode().Perm())
 	}
 }
