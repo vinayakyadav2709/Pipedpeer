@@ -235,7 +235,36 @@ func renewInterval(lifetime time.Duration) time.Duration {
 	return d
 }
 
+// failureLog decides which renewal failures are worth a line: the first,
+// then one an hour while it keeps failing. A router without UPnP or NAT-PMP
+// fails every attempt, and one line per attempt was 49 lines a day saying the
+// same thing (runs §5 I).
+type failureLog struct {
+	since, last time.Time
+}
+
+// fail records a failure at now and reports whether to log it.
+func (f *failureLog) fail(now time.Time) bool {
+	if f.since.IsZero() {
+		f.since, f.last = now, now
+		return true
+	}
+	if now.Sub(f.last) >= time.Hour {
+		f.last = now
+		return true
+	}
+	return false
+}
+
+// ok records a success and reports whether it ends a run of failures.
+func (f *failureLog) ok() bool {
+	was := !f.since.IsZero()
+	f.since, f.last = time.Time{}, time.Time{}
+	return was
+}
+
 func (k *Keeper) renew(ctx context.Context, internal uint16) {
+	var failures failureLog
 	for {
 		cur := k.Current()
 		wait := renewInterval(cur.Lifetime)
@@ -255,10 +284,15 @@ func (k *Keeper) renew(ctx context.Context, internal uint16) {
 		m, err := Map(attemptCtx, internal)
 		cancel()
 		if err != nil {
-			k.log("port mapping renewal failed: %v", err)
+			if failures.fail(time.Now()) {
+				k.log("port mapping renewal failed (logged again hourly while it keeps failing): %v", err)
+			}
 			// Keep announcing the old one until it actually lapses; it may
 			// well still be live and this may have been a blip.
 			continue
+		}
+		if failures.ok() {
+			k.log("port mapping renewal works again: %s", m.String())
 		}
 		if m.External != cur.External {
 			k.log("port mapping changed: %s -> %s", cur.String(), m.String())

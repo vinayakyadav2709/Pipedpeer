@@ -49,8 +49,8 @@ func pump(t *testing.T, c *net.UDPConn, p *Prober) {
 func TestCandidatesAreTriedBestFirst(t *testing.T) {
 	got := ParseCandidates([]string{
 		"reflex:203.0.113.1:41000",
-		"mapped:203.0.113.1:38447",
-		"lan:192.168.0.10:38447",
+		"mapped:203.0.113.1:4243",
+		"lan:192.168.0.10:4243",
 	})
 	if len(got) != 3 {
 		t.Fatalf("parsed %d of 3: %v", len(got), got)
@@ -69,7 +69,7 @@ func TestCandidatesAreTriedBestFirst(t *testing.T) {
 func TestAnUnknownCandidateKindIsSkippedNotFatal(t *testing.T) {
 	got := ParseCandidates([]string{
 		"quantum:203.0.113.1:1",
-		"lan:192.168.0.10:38447",
+		"lan:192.168.0.10:4243",
 		"garbage",
 	})
 	if len(got) != 1 || got[0].Kind != KindLAN {
@@ -81,9 +81,9 @@ func TestAnUnknownCandidateKindIsSkippedNotFatal(t *testing.T) {
 // relay-only design serves worst and most often: their traffic goes out to
 // the internet and back for no reason at all.
 func TestGatherFindsTheLANAddresses(t *testing.T) {
-	mapped := netip.MustParseAddrPort("203.0.113.9:38447")
+	mapped := netip.MustParseAddrPort("203.0.113.9:4243")
 	reflex := netip.MustParseAddrPort("203.0.113.9:41000")
-	got := Gather(38447, mapped, reflex)
+	got := Gather(4243, mapped, reflex)
 
 	var lans, maps, reflexes int
 	for _, c := range got {
@@ -93,7 +93,7 @@ func TestGatherFindsTheLANAddresses(t *testing.T) {
 			if c.Addr.Addr().IsLoopback() {
 				t.Errorf("loopback %s offered as a candidate; it reaches only this machine", c.Addr)
 			}
-			if c.Addr.Port() != 38447 {
+			if c.Addr.Port() != 4243 {
 				t.Errorf("LAN candidate %s is not on the shared port", c.Addr)
 			}
 		case KindMapped:

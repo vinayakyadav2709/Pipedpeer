@@ -168,7 +168,7 @@ func TestReflectAnswersWithTheSourceAddress(t *testing.T) {
 	addr := pc.LocalAddr().String()
 	// Serve on the socket already bound, so there is no window between the
 	// port being known and the reflector answering on it.
-	go func() { _ = ReflectOn(ctx, pc) }()
+	go func() { _ = ReflectPair(ctx, pc, nil) }()
 
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
@@ -183,81 +183,6 @@ func TestReflectAnswersWithTheSourceAddress(t *testing.T) {
 	}
 	if got != conn.LocalAddr().String() {
 		t.Errorf("reflector said %q, want %q", got, conn.LocalAddr().String())
-	}
-}
-
-// TestPunchKeepsSendingAfterItSucceeds covers a flaw that made a working path
-// look like a broken one.
-//
-// Stopping the moment the first packet lands is the obvious thing and it
-// breaks the other side: whoever succeeds first goes quiet, and the peer -
-// whose router may not have had its state ready yet - hears nothing and
-// reports failure. Measured exactly that way against a public host: one side
-// declared success in 0.4s and exited, the other sent 199 packets into
-// silence and called the network unpunchable.
-func TestPunchKeepsSendingAfterItSucceeds(t *testing.T) {
-	// A peer that answers once and then only counts.
-	peer, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer peer.Close()
-
-	after := make(chan int, 1)
-	go func() {
-		buf := make([]byte, 1500)
-		var got int
-		var replied bool
-		for {
-			if err := peer.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-				return
-			}
-			_, from, err := peer.ReadFromUDP(buf)
-			if err != nil {
-				select {
-				case after <- got:
-				default:
-				}
-				return
-			}
-			if !replied {
-				replied = true
-				_, _ = peer.WriteToUDP([]byte("punch-back"), from)
-				got = 0 // start counting only after we have answered
-				continue
-			}
-			got++
-			if got >= 5 {
-				select {
-				case after <- got:
-				default:
-				}
-				return
-			}
-		}
-	}()
-
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-
-	ok, _, st, err := Punch(context.Background(), conn, peer.LocalAddr().String(), 10*time.Second)
-	if err != nil {
-		t.Fatalf("punch: %v", err)
-	}
-	if !ok {
-		t.Fatalf("punch failed though the peer answered: %+v", st)
-	}
-	select {
-	case n := <-after:
-		if n < 3 {
-			t.Errorf("only %d packet(s) sent after the path opened; the peer needs "+
-				"to keep hearing us long enough to confirm its own side", n)
-		}
-	case <-time.After(2 * time.Second):
-		t.Error("the peer saw nothing after the path opened: we went quiet immediately")
 	}
 }
 

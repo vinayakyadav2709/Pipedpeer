@@ -67,7 +67,7 @@ func TestALivePeerIsNeverDropped(t *testing.T) {
 // mapping between polls and the address published to peers stops working
 // while the introducer still lists it.
 func TestThePollKeepsTheMappingAlive(t *testing.T) {
-	m := New(Config{Rendezvous: "203.0.113.9:38445"})
+	m := New(Config{Introducers: []string{"203.0.113.9:4244"}})
 	if m.cfg.Poll <= 0 {
 		t.Fatal("no default poll interval; the manager would spin")
 	}
@@ -81,7 +81,7 @@ func TestThePollKeepsTheMappingAlive(t *testing.T) {
 // address a peer cached are both worth keeping across a restart, and neither
 // survives a port that changes every time the daemon starts.
 func TestTheDirectPortIsFixedByDefault(t *testing.T) {
-	m := New(Config{Rendezvous: "203.0.113.9:38445"})
+	m := New(Config{Introducers: []string{"203.0.113.9:4244"}})
 	if m.cfg.DirectPort != DefaultPort {
 		t.Errorf("DirectPort = %d, want the fixed default %d", m.cfg.DirectPort, DefaultPort)
 	}
@@ -107,17 +107,17 @@ func TestAMappingThatIsNotOursIsNotPublished(t *testing.T) {
 		why     string
 	}{
 		{
-			name: "the router and the world agree", mapped: "203.0.113.9:38447",
+			name: "the router and the world agree", mapped: "203.0.113.9:4243",
 			reflex: "203.0.113.9:41000", publish: true,
 			why: "the mapping is genuinely this machine's",
 		},
 		{
-			name: "the phone tether case", mapped: "172.168.3.211:38447",
+			name: "the phone tether case", mapped: "172.168.3.211:4243",
 			reflex: "103.57.97.77:44069", publish: false,
 			why: "the router is behind another NAT and named a stranger",
 		},
 		{
-			name: "no reflexive address yet", mapped: "203.0.113.9:38447",
+			name: "no reflexive address yet", mapped: "203.0.113.9:4243",
 			reflex: "", publish: true,
 			why: "on the first poll the mapping is the better of two guesses",
 		},
@@ -209,8 +209,8 @@ func TestAPeerWithNoPathIsNeverHandedToTheDaemon(t *testing.T) {
 	joined := make(chan string, 4)
 	var unreachable []string
 	m := New(Config{
-		Rendezvous: "203.0.113.9:38445",
-		OnPeer:     func(node, addr string) { joined <- node },
+		Introducers: []string{"203.0.113.9:4244"},
+		OnPeer:      func(node, addr string) { joined <- node },
 		OnUnreachable: func(node, reason string) {
 			unreachable = append(unreachable, node+": "+reason)
 		},
@@ -259,8 +259,8 @@ func TestAPeerWithNoPathIsNeverHandedToTheDaemon(t *testing.T) {
 //
 // The penalty belongs to a situation, not to a peer.
 func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
-	m := New(Config{Rendezvous: "203.0.113.9:38445"})
-	old := []string{"reflex:203.0.113.1:41000", "lan:192.168.0.5:38447"}
+	m := New(Config{Introducers: []string{"203.0.113.9:4244"}})
+	old := []string{"reflex:203.0.113.1:41000", "lan:192.168.0.5:4243"}
 
 	m.noPath("beef", &direct.Unreachable{Peer: "beef", Reason: direct.ReasonTimeout}, candKey(old))
 
@@ -276,7 +276,7 @@ func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
 	if entry.tried != candKey(old) {
 		t.Errorf("penalty recorded against %q, want the addresses that failed", entry.tried)
 	}
-	if candKey([]string{"lan:192.168.0.5:38447", "reflex:203.0.113.1:41000"}) != candKey(old) {
+	if candKey([]string{"lan:192.168.0.5:4243", "reflex:203.0.113.1:41000"}) != candKey(old) {
 		t.Error("the same addresses in a different order read as a different situation")
 	}
 
@@ -289,7 +289,7 @@ func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
 	}
 
 	// Restarted: a new reflexive port, so a new situation and no wait.
-	fresh := []string{"reflex:203.0.113.1:52111", "lan:192.168.0.5:38447"}
+	fresh := []string{"reflex:203.0.113.1:52111", "lan:192.168.0.5:4243"}
 	if !shouldTry(entry, fresh, now) {
 		t.Error("a restarted peer offering a new address was made to serve out a " +
 			"penalty earned by an address that no longer exists")
@@ -308,7 +308,7 @@ func TestARestartedPeerDoesNotServeTheOldPenalty(t *testing.T) {
 // introducer still lists it and no link exists, and not otherwise: a linked
 // peer is reachable, and one that stopped registering is gone, not stuck.
 func TestUnreachablePeersCarryTheirReason(t *testing.T) {
-	m := New(Config{Rendezvous: "203.0.113.9:38445"})
+	m := New(Config{Introducers: []string{"203.0.113.9:4244"}})
 	cands := []string{"reflex:203.0.113.1:41000"}
 	reg := func(nodes ...string) {
 		var peers []rendezvous.Peer
@@ -316,7 +316,7 @@ func TestUnreachablePeersCarryTheirReason(t *testing.T) {
 			peers = append(peers, rendezvous.Peer{Node: n, Candidates: cands})
 		}
 		// The backoff holds for these candidates, so no connect is started.
-		m.onRegistered(context.Background(), "", peers)
+		m.onRegistered(context.Background(), m.intros[0], "", peers)
 	}
 
 	m.noPath("beef", &direct.Unreachable{Peer: "beef", Reason: direct.ReasonBothSymmetric}, candKey(cands))
@@ -489,11 +489,11 @@ func TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch(t *testing.T) {
 	}
 	defer ep.Close()
 
-	m := New(Config{Rendezvous: intro.LocalAddr().String(), Cluster: "c1", Key: key})
+	m := New(Config{Introducers: []string{intro.LocalAddr().String()}, Cluster: "c1", Key: key})
 	m.endpoint = ep
 	m.keeper = &portmap.Keeper{}
 
-	m.onRegistered(context.Background(), "198.51.100.12:38447", nil)
+	m.onRegistered(context.Background(), m.intros[0], "198.51.100.12:4243", nil)
 
 	_ = intro.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 2048)
@@ -508,7 +508,7 @@ func TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch(t *testing.T) {
 	if err := json.Unmarshal(buf[:n], &req); err != nil {
 		t.Fatal(err)
 	}
-	want := "reflex:198.51.100.12:38447"
+	want := "reflex:198.51.100.12:4243"
 	found := false
 	for _, c := range req.Candidates {
 		found = found || c == want
@@ -518,7 +518,7 @@ func TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch(t *testing.T) {
 	}
 
 	// The same address again is not news: no extra registration per reply.
-	m.onRegistered(context.Background(), "198.51.100.12:38447", nil)
+	m.onRegistered(context.Background(), m.intros[0], "198.51.100.12:4243", nil)
 	_ = intro.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	if _, _, err := intro.ReadFromUDP(buf); err == nil {
 		t.Error("re-registered on an unchanged address; every reply would cause another")
@@ -530,7 +530,7 @@ func TestTheFirstReplyIsRegisteredAgainBeforeAnyPunch(t *testing.T) {
 // labelled every ordinary punch "punched", hiding that reflex links worked.
 func TestAMappedRaceAddressKeepsItsCandidateKind(t *testing.T) {
 	cands := []direct.Candidate{
-		{Kind: direct.KindLAN, Addr: netip.MustParseAddrPort("10.0.0.2:38447")},
+		{Kind: direct.KindLAN, Addr: netip.MustParseAddrPort("10.0.0.2:4243")},
 		{Kind: direct.KindReflex, Addr: netip.MustParseAddrPort("198.51.100.7:40001")},
 	}
 	if got := pathKind(cands, netip.MustParseAddrPort("[::ffff:198.51.100.7]:40001")); got != "reflex" {

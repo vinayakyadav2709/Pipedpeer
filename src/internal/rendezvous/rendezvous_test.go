@@ -384,3 +384,48 @@ func mustJSON(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
 }
+
+// TestADaemonsIntroducerRefusesOtherClusters. Every daemon runs an introducer
+// for its own cluster (ADR-0004). It lives on somebody's laptop, so a stranger
+// with another cluster id gets the silence junk gets: no reply, no forward.
+func TestADaemonsIntroducerRefusesOtherClusters(t *testing.T) {
+	s := NewClusterServer(time.Minute, "c1")
+	register(t, s, "c1", "alice", "203.0.113.5:1")
+
+	body, _ := json.Marshal(request{Op: "register", Cluster: "c2", Node: "mallory"})
+	if raw := s.Handle(body, fakeAddr("198.51.100.9:2")); raw != nil {
+		t.Fatalf("an introducer for c1 answered a c2 registration: %s", raw)
+	}
+	connect, _ := json.Marshal(request{Op: "connect", Cluster: "c2", Node: "mallory", Peer: "alice"})
+	if reply, fwd := s.handle(connect, fakeAddr("198.51.100.9:2")); reply != nil || fwd != nil {
+		t.Fatal("an introducer for c1 forwarded a punch for another cluster")
+	}
+	if got := register(t, s, "c1", "bob", "198.51.100.7:3"); len(got.Peers) != 1 {
+		t.Fatalf("its own cluster is no longer served: %+v", got.Peers)
+	}
+}
+
+// TestALoopbackRegistrationIsShownOnlyOnThisMachine. A daemon registers with
+// its own introducer over loopback; that address reaches only this machine, so
+// a remote member must not be handed it, while another process on the same
+// machine may be.
+func TestALoopbackRegistrationIsShownOnlyOnThisMachine(t *testing.T) {
+	s := NewClusterServer(time.Minute, "c1")
+	register(t, s, "c1", "self", "127.0.0.1:4243")
+
+	remote := register(t, s, "c1", "bob", "198.51.100.7:3")
+	if len(remote.Peers) != 1 || remote.Peers[0].Addr != "" {
+		t.Fatalf("a remote member was given a loopback address: %+v", remote.Peers)
+	}
+	local := register(t, s, "c1", "carol", "127.0.0.1:5000")
+	for _, p := range local.Peers {
+		if p.Node == "self" && p.Addr != "127.0.0.1:4243" {
+			t.Fatalf("a member on the same machine lost the loopback address: %+v", p)
+		}
+	}
+	// A punch request for the loopback member still reaches it.
+	connect, _ := json.Marshal(request{Op: "connect", Cluster: "c1", Node: "bob", Peer: "self"})
+	if _, fwd := s.handle(connect, fakeAddr("198.51.100.7:3")); fwd == nil || fwd.To != "127.0.0.1:4243" {
+		t.Fatalf("the punch request for the local member went to %+v", fwd)
+	}
+}

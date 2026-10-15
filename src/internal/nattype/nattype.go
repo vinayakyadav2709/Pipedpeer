@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"sync"
 	"time"
 )
 
@@ -270,25 +269,6 @@ func reflectOnce(ctx context.Context, conn *net.UDPConn, addr *net.UDPAddr, time
 	return "", fmt.Errorf("no answer from %s", addr)
 }
 
-// Reflect runs the server half: it answers every packet with the address it
-// came from. Small enough to be worth having in-tree rather than depending on
-// a STUN server whose availability is somebody else's decision.
-func Reflect(ctx context.Context, addr string) error {
-	pc, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		return err
-	}
-	return ReflectOn(ctx, pc)
-}
-
-// ReflectOn is Reflect on an already-bound socket. Separate so a caller can
-// know the port before anything is served on it - a test that binds and then
-// hands over cannot otherwise tell when the reflector is ready, and a UDP
-// dial always "succeeds", so there is nothing to wait on.
-func ReflectOn(ctx context.Context, pc net.PacketConn) error {
-	return ReflectPair(ctx, pc, nil)
-}
-
 // ReflectPair serves one socket and, when given a second, can answer from it
 // instead.
 //
@@ -340,152 +320,4 @@ func ReflectPair(ctx context.Context, pc net.PacketConn, other net.PacketConn) e
 		})
 		_, _ = pc.WriteTo(reply, from)
 	}
-}
-
-// Punch tries to open a direct path to a peer whose external address is
-// already known, from the same local port that produced our own.
-//
-// Both sides have to start at roughly the same moment. Each one's outbound
-// packets create the state its router needs to accept the other's; the first
-// few are usually dropped because that state does not exist yet at the far
-// end, which is why this keeps sending rather than giving up on the first
-// silence.
-//
-// The local port matters and is not incidental: the external address a peer
-// was told about belongs to that port. Punching from a different one arrives
-// at the router as an unrelated flow and is dropped.
-// PunchStats is what happened, so a failure can be told apart from a
-// misconfiguration. "Nothing arrived" and "nothing was sent" look identical
-// from the outside and need different fixes.
-type PunchStats struct {
-	Sent      int
-	SendErrs  int
-	Received  int
-	FromOther int
-	LastErr   string
-	// OpenedAfter is how long the first packet from the peer took.
-	OpenedAfter time.Duration
-}
-
-// punchLinger is how long to keep sending after the path opens, so the peer
-// gets its confirmation too.
-const punchLinger = 3 * time.Second
-
-func Punch(ctx context.Context, conn *net.UDPConn, peer string, timeout time.Duration) (bool, time.Duration, PunchStats, error) {
-	var st PunchStats
-	target, err := net.ResolveUDPAddr("udp", peer)
-	if err != nil {
-		return false, 0, st, err
-	}
-	start := time.Now()
-	deadline := start.Add(timeout)
-
-	var mu sync.Mutex
-	done := make(chan time.Duration, 1)
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			if err := conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
-				return
-			}
-			n, from, err := conn.ReadFromUDP(buf)
-			if err == nil && n > 0 {
-				mu.Lock()
-				st.Received++
-				if from != nil && from.IP.Equal(target.IP) {
-					st.FromOther++
-				}
-				mu.Unlock()
-				if n >= 5 && string(buf[:5]) == "punch" {
-					select {
-					case done <- time.Since(start):
-					default:
-					}
-					return
-				}
-			}
-			if time.Now().After(deadline) {
-				return
-			}
-		}
-	}()
-
-	// Keep sending briefly after the path opens. Stopping the moment the
-	// first packet lands is the obvious thing and it breaks the other side:
-	// whoever succeeds first goes quiet, and the peer - whose router may not
-	// have had its state ready yet - never hears anything and reports
-	// failure. Measured exactly that way: one side declared success in 0.4s
-	// and exited, the other sent 199 packets into silence.
-	var opened time.Time
-	for time.Now().Before(deadline) {
-		select {
-		case d := <-done:
-			if opened.IsZero() {
-				opened = time.Now()
-				st.OpenedAfter = d
-			}
-		case <-ctx.Done():
-			mu.Lock()
-			out := st
-			mu.Unlock()
-			return false, time.Since(start), out, ctx.Err()
-		default:
-		}
-		if !opened.IsZero() && time.Since(opened) > punchLinger {
-			mu.Lock()
-			out := st
-			mu.Unlock()
-			return true, out.OpenedAfter, out, nil
-		}
-		if _, err := conn.WriteToUDP([]byte("punch-hello"), target); err != nil {
-			mu.Lock()
-			st.SendErrs++
-			st.LastErr = err.Error()
-			mu.Unlock()
-		} else {
-			mu.Lock()
-			st.Sent++
-			mu.Unlock()
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	select {
-	case d := <-done:
-		mu.Lock()
-		out := st
-		mu.Unlock()
-		return true, d, out, nil
-	default:
-	}
-	mu.Lock()
-	out := st
-	mu.Unlock()
-	return false, time.Since(start), out, nil
-}
-
-// BindAndDiscover opens a local port and learns the external address it maps
-// to, so the caller can hand that address to a peer and then punch from the
-// very same socket.
-func BindAndDiscover(ctx context.Context, localPort int, servers []string, timeout time.Duration) (*net.UDPConn, string, error) {
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: localPort})
-	if err != nil {
-		return nil, "", err
-	}
-	if len(servers) == 0 {
-		servers = DefaultSTUNServers
-	}
-	for _, s := range servers {
-		addr, err := net.ResolveUDPAddr("udp", s)
-		if err != nil {
-			continue
-		}
-		if ext, err := stunOnce(ctx, conn, addr, timeout); err == nil && ext != "" {
-			// Clear the deadline the probe set, or the punch that follows
-			// inherits it and gives up immediately.
-			_ = conn.SetDeadline(time.Time{})
-			return conn, ext, nil
-		}
-	}
-	conn.Close()
-	return nil, "", fmt.Errorf("no STUN server answered, so this machine's external address is unknown")
 }

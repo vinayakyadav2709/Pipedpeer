@@ -42,10 +42,12 @@ import (
 	"net/netip"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
 	"github.com/pipedpeer/pipedpeer/internal/direct"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/portmap"
@@ -57,13 +59,23 @@ import (
 //
 // Fixed rather than ephemeral: a port mapping and a peer's cached address are
 // both worth keeping across a restart, and neither survives a port that
-// changes every time the daemon starts.
-const DefaultPort = 38447
+// changes every time the daemon starts. Part of the 4242 block (4242 API and
+// LAN discovery, 4243 direct, 4244 introducer).
+const DefaultPort = 4243
 
 // Config is what a daemon needs to join over the internet.
 type Config struct {
-	// Rendezvous is the introducer, host:port. Empty disables all of this.
-	Rendezvous string
+	// Introducers are the cluster's introducers, host:port. This node
+	// registers with every one of them, so one that is down or has moved
+	// costs nothing while another still answers.
+	Introducers []string
+	// ServeIntroducer runs this cluster's introducer inside the daemon, on
+	// IntroducerPort, answering this cluster id only. Any member can then
+	// introduce the others; the node registers with its own over loopback.
+	ServeIntroducer bool
+	// IntroducerPort is where ServeIntroducer listens. Zero means
+	// clustercfg.DefaultPort.
+	IntroducerPort int
 	// Cluster is derived from the shared token; peers in different clusters
 	// never see each other.
 	Cluster string
@@ -95,15 +107,64 @@ type Config struct {
 	Log func(format string, args ...any)
 }
 
+// IntroducerState is one configured introducer as this node last saw it.
+type IntroducerState struct {
+	Addr      string    `json:"addr"`
+	LastReply time.Time `json:"last_reply"`
+	LastErr   string    `json:"last_err,omitempty"`
+	// Members is how many other members it listed in its last reply.
+	Members int `json:"members"`
+}
+
+// Tunables, variables so tests can shorten them.
+var (
+	// silentAfter is how long an introducer may go unanswered before it is
+	// reported. Three missed polls: one lost datagram is not an outage.
+	silentAfter = 60 * time.Second
+	// raceWindow is how long a fresh link is defended against a second
+	// connection from the same peer by the deterministic tie-break. Both
+	// ends punching at once makes two connections within a second or two;
+	// a second connection after this is the peer coming back from somewhere
+	// else, and the newer one wins (F33).
+	raceWindow = 10 * time.Second
+	// ifacePoll is how often this machine's own addresses are checked.
+	ifacePoll = 5 * time.Second
+	// localAddrs lists this machine's addresses, for noticing a change.
+	localAddrs = interfaceAddrs
+	// newKeeper asks the router for a port; tests stub it rather than map a
+	// port on whatever router the test machine sits behind.
+	newKeeper = portmap.NewKeeper
+)
+
+const (
+	// hintTTL is how long a gossiped address stays worth trying. Gossip
+	// repeats every minute, so ten minutes is many missed rounds.
+	hintTTL = 10 * time.Minute
+	// migrateTimeout bounds the path probe after an address change.
+	migrateTimeout = 5 * time.Second
+	// pathInbound is the path of a link the peer dialled.
+	pathInbound = "punched-in"
+	// codeReplaced closes a connection that lost to another one between the
+	// same two nodes. The far end keeps its link for replaceGrace instead of
+	// dropping it: the winner is usually still finishing its handshake there.
+	codeReplaced quic.ApplicationErrorCode = 2
+	replaceGrace                           = 5 * time.Second
+)
+
 // Manager keeps the cluster's remote members reachable.
 type Manager struct {
 	cfg      Config
 	endpoint *direct.Endpoint
 	keeper   *portmap.Keeper
 
-	mu    sync.Mutex
-	peers map[string]*peerLink
-	// reflex is this node's address as the introducer last saw it.
+	mu sync.Mutex
+	// ctx is Run's, for work started from outside it (Hint).
+	ctx context.Context
+	// intros are the introducers, configured ones first.
+	intros []*introducer
+	peers  map[string]*peerLink
+	// reflex is this node's address as the introducers see it, the best of
+	// their fresh answers.
 	reflex netip.AddrPort
 	// backoff is when to next try a peer that had no path, and which
 	// addresses earned the penalty.
@@ -111,9 +172,42 @@ type Manager struct {
 	// waiting are peers that asked us to punch, so an incoming request is
 	// answered by racing rather than ignored.
 	invited map[string][]string
-	// listed are the peers in the introducer's latest reply, so a peer that
-	// stopped registering is no longer reported as unreachable.
+	// listed are the peers some fresh introducer reply lists, so a peer that
+	// stopped registering everywhere is no longer reported as unreachable.
 	listed map[string]bool
+	// cands is each peer's latest published candidates.
+	cands map[string][]string
+	// hints are addresses other members vouched for (signed gossip).
+	hints map[string]hint
+	// trying are peers with a connection attempt in flight.
+	trying map[string]bool
+}
+
+// introducer is one address book this node registers with.
+type introducer struct {
+	addr string
+	// self is this daemon's own introducer, reached over loopback; it is
+	// not reported, as nobody configured it.
+	self bool
+	// hidden is an address that answered without being one we registered
+	// with (a multi-homed introducer answering from another address).
+	hidden bool
+	// at is addr as last resolved; replies are matched against it.
+	at netip.AddrPort
+	// waiting is the first registration sent since the last reply.
+	waiting   time.Time
+	lastReply time.Time
+	lastErr   string
+	members   int
+	you       netip.AddrPort
+	peers     map[string]bool
+	// silent is set once "has not answered" has been logged.
+	silent bool
+}
+
+type hint struct {
+	cands []string
+	at    time.Time
 }
 
 // backoffEntry records a failed attempt.
@@ -135,9 +229,14 @@ type backoffEntry struct {
 type peerLink struct {
 	listener net.Listener
 	addr     string
+	// conn is swapped, under Manager.mu, when a newer connection from the
+	// same key replaces it; the forwarder and its address stay.
 	conn     *quic.Conn
 	stop     context.CancelFunc
 	lastSeen time.Time
+	// since is when conn was set, dialled whether this end dialled it.
+	since   time.Time
+	dialled bool
 	// path says how this peer is reached, for `pipedpeer nodes`.
 	path string
 	// announced is done once OnPeer has returned. OnPeerGone waits for it:
@@ -157,15 +256,36 @@ func New(cfg Config) *Manager {
 	if cfg.DirectPort == 0 {
 		cfg.DirectPort = DefaultPort
 	}
+	if cfg.IntroducerPort == 0 {
+		cfg.IntroducerPort = clustercfg.DefaultPort
+	}
 	if cfg.Log == nil {
 		cfg.Log = func(string, ...any) {}
 	}
-	return &Manager{
+	m := &Manager{
 		cfg:     cfg,
 		peers:   map[string]*peerLink{},
 		backoff: map[string]backoffEntry{},
 		invited: map[string][]string{},
+		cands:   map[string][]string{},
+		hints:   map[string]hint{},
+		trying:  map[string]bool{},
 	}
+	seen := map[string]bool{}
+	for _, a := range cfg.Introducers {
+		a = strings.TrimSpace(a)
+		if a == "" || seen[a] {
+			continue
+		}
+		seen[a] = true
+		m.intros = append(m.intros, &introducer{addr: a})
+	}
+	if cfg.ServeIntroducer {
+		m.intros = append(m.intros, &introducer{
+			addr: net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.IntroducerPort)), self: true,
+		})
+	}
+	return m
 }
 
 // Run joins the cluster and keeps it joined until ctx ends.
@@ -173,7 +293,8 @@ func New(cfg Config) *Manager {
 // Failures are never fatal: a machine with no internet, or an introducer that
 // is down, must still run local jobs. Everything is retried on the next tick.
 func (m *Manager) Run(ctx context.Context) {
-	if m.cfg.Rendezvous == "" {
+	if len(m.intros) == 0 {
+		m.cfg.Log("no introducer configured and none served here; internet links are off")
 		return
 	}
 
@@ -191,7 +312,7 @@ func (m *Manager) Run(ctx context.Context) {
 		// authenticated and then left unused while the far side reconnected
 		// every few seconds - seen against the two real machines.
 		OnInbound: func(node string, conn *quic.Conn) {
-			if err := m.linkUp(ctx, node, conn, "punched-in"); err != nil {
+			if err := m.linkUp(ctx, node, conn, pathInbound); err != nil {
 				m.cfg.Log("could not use the connection from %s: %v", short(node), err)
 			}
 		},
@@ -202,19 +323,32 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 	m.endpoint = ep
 	defer ep.Close()
-	go func() { _ = ep.Serve(ctx) }()
+	go func() {
+		if err := ep.Serve(ctx); err != nil && ctx.Err() == nil {
+			m.cfg.Log("direct connections stopped being accepted: %v", err)
+		}
+	}()
+
+	if m.cfg.ServeIntroducer {
+		m.serveIntroducer(ctx)
+	}
 
 	// Ask the router for a port. When it grants one this node is reachable
 	// without any punching at all, which is the best case and the cheapest.
-	m.keeper = portmap.NewKeeper(ctx, ep.Port(), m.cfg.Log)
+	m.keeper = newKeeper(ctx, ep.Port(), m.cfg.Log)
 	defer m.keeper.Close()
 	if mp := m.keeper.Current(); mp.Kind != portmap.KindNone {
 		m.cfg.Log("router granted %s", mp)
 	}
 
+	m.mu.Lock()
+	m.ctx = ctx
+	m.mu.Unlock()
+
 	// The introducer's replies and peers' punch requests arrive on the same
 	// socket as everything else, so one reader dispatches them.
 	go m.readIntroducer(ctx)
+	go m.watchInterfaces(ctx)
 
 	ticker := time.NewTicker(m.cfg.Poll)
 	defer ticker.Stop()
@@ -228,6 +362,27 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ticker.C:
 		}
 	}
+}
+
+// serveIntroducer runs this cluster's address book inside the daemon.
+//
+// Any member can introduce the others (ADR-0004: refused across clusters), so
+// the cluster has no special machine and no outside server; a member whose
+// introducer port is reachable is enough for the rest to meet.
+func (m *Manager) serveIntroducer(ctx context.Context) {
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{Port: m.cfg.IntroducerPort})
+	if err != nil {
+		m.cfg.Log("cannot introduce this cluster's members on udp port %d: %v", m.cfg.IntroducerPort, err)
+		return
+	}
+	srv := rendezvous.NewClusterServer(0, m.cfg.Cluster)
+	srv.Log = m.cfg.Log
+	go func() {
+		if err := srv.Serve(pc, ctx.Done()); err != nil && ctx.Err() == nil {
+			m.cfg.Log("this cluster's introducer stopped: %v", err)
+		}
+	}()
+	m.cfg.Log("introducing this cluster's members on udp port %d", m.cfg.IntroducerPort)
 }
 
 // readIntroducer dispatches datagrams that are neither QUIC nor probes.
@@ -244,16 +399,34 @@ func (m *Manager) readIntroducer(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		_ = from
 		if p, ok := rendezvous.ParsePunch(payload); ok {
 			m.onPunchRequest(ctx, p)
 			continue
 		}
 		if you, peers, ok := rendezvous.ParseRegister(payload); ok {
-			m.onRegistered(ctx, you, peers)
+			m.onRegistered(ctx, m.introducerAt(from), you, peers)
 			continue
 		}
 	}
+}
+
+// introducerAt is the introducer a reply came from. An address nobody
+// registered with gets a hidden entry of its own: its listing is still used,
+// and the configured address it probably stands for stays reported as silent,
+// which is what it is.
+func (m *Manager) introducerAt(from netip.AddrPort) *introducer {
+	from = netip.AddrPortFrom(from.Addr().Unmap(), from.Port())
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, in := range m.intros {
+		if in.at == from {
+			return in
+		}
+	}
+	in := &introducer{addr: from.String(), at: from, hidden: true}
+	m.intros = append(m.intros, in)
+	m.cfg.Log("introducer reply from %s, an address this node did not register with; using it", from)
+	return in
 }
 
 // onPunchRequest answers a peer that wants to reach us.
@@ -261,22 +434,28 @@ func (m *Manager) readIntroducer(ctx context.Context) {
 // Racing back does two things: it opens this router to that peer's address,
 // and it finds the path from this side. Without it the far side punches alone
 // and a port-restricted router here drops every packet.
+//
+// Answered even when we hold a link to that peer: a peer asks only when it
+// has none to us, which means it moved or lost the link, and our side's link
+// is the stale one (F33). The newer connection replaces it in linkUp.
 func (m *Manager) onPunchRequest(ctx context.Context, p rendezvous.Punch) {
+	if p.From == m.node() {
+		return
+	}
 	m.mu.Lock()
 	m.invited[p.From] = p.Candidates
-	if p.You != "" {
-		if ap, err := netip.ParseAddrPort(p.You); err == nil {
-			m.reflex = ap
-		}
+	busy := m.trying[p.From]
+	if !busy {
+		m.trying[p.From] = true
 	}
-	_, already := m.peers[p.From]
 	m.mu.Unlock()
-	if already {
+	if busy {
 		return
 	}
 
 	m.cfg.Log("peer %s is trying to reach us; punching back", short(p.From))
 	go func() {
+		defer m.doneTrying(p.From)
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		if err := m.connect(cctx, p.From, p.Candidates); err != nil {
@@ -285,80 +464,214 @@ func (m *Manager) onPunchRequest(ctx context.Context, p rendezvous.Punch) {
 	}()
 }
 
-// onRegistered records what the introducer said and connects to anyone new.
-func (m *Manager) onRegistered(ctx context.Context, you string, peers []rendezvous.Peer) {
-	if ap, err := netip.ParseAddrPort(you); err == nil {
-		m.mu.Lock()
-		changed := m.reflex != ap
-		m.reflex = ap
-		m.mu.Unlock()
-		// Re-register before asking anyone to punch. A peer we ask is woken
-		// with the candidates we REGISTERED, and the first registration goes
-		// out before the introducer has told us our reflexive address, so it
-		// carries LAN addresses only. The woken peer then punched back at a
-		// private address on another network and never at our public one,
-		// and a port-restricted router on our side dropped everything it
-		// sent: in the NAT lab two cone sites never linked by an ordinary
-		// punch, only by collision (FIX-NAT2). Sent first, on the same
-		// socket, so it reaches the introducer before the punch requests.
-		if changed {
-			m.sync(ctx)
+func (m *Manager) doneTrying(node string) {
+	m.mu.Lock()
+	delete(m.trying, node)
+	m.mu.Unlock()
+}
+
+// onRegistered records what an introducer said and connects to anyone new.
+func (m *Manager) onRegistered(ctx context.Context, in *introducer, you string, peers []rendezvous.Peer) {
+	now := time.Now()
+	self := m.node()
+	listed := map[string]bool{}
+	for _, p := range peers {
+		if p.Node != self {
+			listed[p.Node] = true
 		}
 	}
 
-	live := map[string]bool{}
+	m.mu.Lock()
+	wasSilent := in.silent
+	in.lastReply = now
+	in.waiting = time.Time{}
+	in.lastErr = ""
+	in.silent = false
+	in.members = len(listed)
+	in.peers = listed
+	if ap, err := netip.ParseAddrPort(you); err == nil {
+		in.you = netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
+	}
+	before := m.reflex
+	m.reflex = m.bestReflexLocked(now)
+	changed := m.reflex.IsValid() && m.reflex != before
+	m.mu.Unlock()
+
+	if wasSilent {
+		m.cfg.Log("introducer %s is answering again (%d other members)", in.addr, len(listed))
+	}
+	// Re-register before asking anyone to punch. A peer we ask is woken
+	// with the candidates we REGISTERED, and the first registration goes
+	// out before the introducer has told us our reflexive address, so it
+	// carries LAN addresses only. The woken peer then punched back at a
+	// private address on another network and never at our public one,
+	// and a port-restricted router on our side dropped everything it
+	// sent: in the NAT lab two cone sites never linked by an ordinary
+	// punch, only by collision (FIX-NAT2). Sent first, on the same
+	// socket, so it reaches the introducer before the punch requests.
+	if changed {
+		m.sync(ctx)
+	}
+
 	for _, p := range peers {
-		if p.Node == m.node() {
+		if p.Node == self {
 			continue
 		}
-		live[p.Node] = true
-
-		m.mu.Lock()
-		link, connected := m.peers[p.Node]
-		if connected {
-			link.lastSeen = time.Now()
-		}
-		back := m.backoff[p.Node]
-		m.mu.Unlock()
-		if connected {
-			continue
-		}
-
 		cands := p.Candidates
 		// The reflexive address the introducer saw is a candidate too, and
 		// on an old daemon that publishes none it is the only one.
 		if p.Addr != "" {
 			cands = append(append([]string{}, cands...), string(direct.KindReflex)+":"+p.Addr)
 		}
-
-		if !shouldTry(back, cands, time.Now()) {
-			continue
+		m.mu.Lock()
+		m.cands[p.Node] = cands
+		if link := m.peers[p.Node]; link != nil {
+			link.lastSeen = now
 		}
-		go func(node string, cands []string) {
-			cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			defer cancel()
-			if err := m.connect(cctx, node, cands); err != nil {
-				m.noPath(node, err, candKey(cands))
-			}
-		}(p.Node, cands)
+		m.mu.Unlock()
+		m.attempt(ctx, p.Node)
 	}
 
-	// Peers the introducer no longer lists have stopped checking in. Their
+	// Peers no fresh introducer lists have stopped checking in. Their
 	// local port is kept for one further pass rather than closed at once,
 	// because a single missed registration is not a machine going away and
 	// tearing the node out makes every job in flight against it fail.
 	m.mu.Lock()
-	m.listed = live
-	now := time.Now()
-	gone := expired(m.peers, live, now, m.cfg.Poll)
+	m.listed = m.listedLocked(now)
+	gone := expired(m.peers, m.listed, now, m.cfg.Poll)
 	m.mu.Unlock()
 	for _, node := range gone {
 		m.dropLink(node)
 	}
 }
 
-// sync registers with the introducer and asks it to wake anyone we want to
-// reach.
+// fresh reports whether an introducer's last reply still counts.
+func (m *Manager) fresh(in *introducer, now time.Time) bool {
+	return !in.lastReply.IsZero() && now.Sub(in.lastReply) <= 3*m.cfg.Poll
+}
+
+// listedLocked is every peer some fresh introducer lists.
+func (m *Manager) listedLocked(now time.Time) map[string]bool {
+	out := map[string]bool{}
+	for _, in := range m.intros {
+		if !m.fresh(in, now) {
+			continue
+		}
+		for node := range in.peers {
+			out[node] = true
+		}
+	}
+	return out
+}
+
+// bestReflexLocked picks this node's reflexive address from the introducers'
+// fresh answers: a public one over a private one, the most recent among
+// equals, never loopback. Our own introducer sees us on loopback, and an
+// introducer on the LAN sees our LAN address; neither is what a peer on
+// another network needs.
+func (m *Manager) bestReflexLocked(now time.Time) netip.AddrPort {
+	var best netip.AddrPort
+	var bestAt time.Time
+	bestPublic := false
+	for _, in := range m.intros {
+		if !m.fresh(in, now) || !in.you.IsValid() || in.you.Addr().IsLoopback() {
+			continue
+		}
+		pub := isPublic(in.you.Addr())
+		if !best.IsValid() || (pub && !bestPublic) || (pub == bestPublic && in.lastReply.After(bestAt)) {
+			best, bestAt, bestPublic = in.you, in.lastReply, pub
+		}
+	}
+	return best
+}
+
+func isPublic(a netip.Addr) bool {
+	return a.IsGlobalUnicast() && !a.IsPrivate()
+}
+
+// attempt starts a connection to node unless one is up, in flight, or under a
+// penalty for the same addresses.
+func (m *Manager) attempt(ctx context.Context, node string) {
+	now := time.Now()
+	m.mu.Lock()
+	if m.peers[node] != nil || m.trying[node] {
+		m.mu.Unlock()
+		return
+	}
+	cands := m.candidatesLocked(node, now)
+	back := m.backoff[node]
+	if !shouldTry(back, cands, now) {
+		m.mu.Unlock()
+		return
+	}
+	m.trying[node] = true
+	m.mu.Unlock()
+
+	go func() {
+		defer m.doneTrying(node)
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		if err := m.connect(cctx, node, cands); err != nil {
+			m.noPath(node, err, candKey(cands))
+		}
+	}()
+}
+
+// candidatesLocked is what to try for node: what it published, then what
+// other members vouched for.
+func (m *Manager) candidatesLocked(node string, now time.Time) []string {
+	out := append([]string(nil), m.cands[node]...)
+	if h, ok := m.hints[node]; ok && now.Sub(h.at) <= hintTTL {
+		seen := map[string]bool{}
+		for _, c := range out {
+			if pc, err := direct.ParseCandidate(c); err == nil {
+				seen[pc.Addr.String()] = true
+			}
+		}
+		for _, c := range h.cands {
+			if pc, err := direct.ParseCandidate(c); err == nil && !seen[pc.Addr.String()] {
+				seen[pc.Addr.String()] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// Hint offers addresses for node that another member vouched for (signed
+// gossip). They join the candidates tried for it, and an unlinked node is
+// tried at once: this is how members find each other again when no
+// introducer can introduce them (F34). Each candidate is the wire form
+// ("lan:10.0.0.2:4243") or a bare host:port, taken as gossip.
+func (m *Manager) Hint(node string, candidates []string) {
+	if node == "" || node == m.node() {
+		return
+	}
+	var cands []string
+	for _, c := range candidates {
+		if _, err := direct.ParseCandidate(c); err == nil {
+			cands = append(cands, c)
+			continue
+		}
+		if ap, err := netip.ParseAddrPort(c); err == nil {
+			cands = append(cands, string(direct.KindGossip)+":"+ap.String())
+			continue
+		}
+		m.cfg.Log("ignoring the hinted address %q for %s: not host:port", c, short(node))
+	}
+	if len(cands) == 0 {
+		return
+	}
+	m.mu.Lock()
+	m.hints[node] = hint{cands: cands, at: time.Now()}
+	ctx := m.ctx
+	m.mu.Unlock()
+	if ctx != nil {
+		m.attempt(ctx, node)
+	}
+}
+
+// sync registers with every introducer and retries vouched-for peers.
 func (m *Manager) sync(ctx context.Context) {
 	m.mu.Lock()
 	reflex := m.reflex
@@ -388,15 +701,225 @@ func (m *Manager) sync(ctx context.Context) {
 
 	pkt, err := rendezvous.RegisterPacket(m.cfg.Cluster, m.node(), direct.Strings(cands))
 	if err != nil {
+		m.cfg.Log("building the introducer registration: %v", err)
 		return
 	}
-	addr, err := net.ResolveUDPAddr("udp", m.cfg.Rendezvous)
+	now := time.Now()
+	m.mu.Lock()
+	intros := append([]*introducer(nil), m.intros...)
+	m.mu.Unlock()
+	for _, in := range intros {
+		if in.hidden {
+			continue
+		}
+		at, err := resolve(in.addr)
+		m.mu.Lock()
+		if err == nil {
+			in.at = at
+		}
+		if in.waiting.IsZero() {
+			in.waiting = now
+		}
+		m.mu.Unlock()
+		if err != nil {
+			m.introducerFailed(in, err.Error())
+			continue
+		}
+		if _, err := m.endpoint.Conn().WriteToUDP(pkt, net.UDPAddrFromAddrPort(at)); err != nil {
+			m.introducerFailed(in, err.Error())
+		}
+	}
+	m.checkSilence(now)
+	m.retryHinted(ctx, now)
+}
+
+func resolve(addr string) (netip.AddrPort, error) {
+	ua, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		m.cfg.Log("introducer address %q: %v", m.cfg.Rendezvous, err)
+		return netip.AddrPort{}, err
+	}
+	ap := ua.AddrPort()
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()), nil
+}
+
+// introducerFailed records why an introducer could not be reached, logging
+// only when the reason changes.
+func (m *Manager) introducerFailed(in *introducer, reason string) {
+	m.mu.Lock()
+	changed := in.lastErr != reason
+	in.lastErr = reason
+	m.mu.Unlock()
+	if changed {
+		m.cfg.Log("introducer %s: %s", in.addr, reason)
+	}
+}
+
+// checkSilence reports introducers that stopped answering, once per change
+// (F36/F37: a registration that is never answered used to go unnoticed).
+func (m *Manager) checkSilence(now time.Time) {
+	var silent []*introducer
+	m.mu.Lock()
+	for _, in := range m.intros {
+		if in.hidden || in.silent || in.waiting.IsZero() || now.Sub(in.waiting) < silentAfter {
+			continue
+		}
+		in.silent = true
+		if in.lastErr == "" {
+			in.lastErr = fmt.Sprintf("no answer for %s", silentAfter)
+		}
+		silent = append(silent, in)
+	}
+	m.mu.Unlock()
+	for _, in := range silent {
+		m.cfg.Log("introducer %s has not answered for %s", in.addr, silentAfter)
+	}
+}
+
+// retryHinted tries vouched-for peers no introducer lists; listed ones are
+// tried from the listing.
+func (m *Manager) retryHinted(ctx context.Context, now time.Time) {
+	var nodes []string
+	m.mu.Lock()
+	for node, h := range m.hints {
+		if now.Sub(h.at) > hintTTL {
+			delete(m.hints, node)
+			continue
+		}
+		if !m.listed[node] {
+			nodes = append(nodes, node)
+		}
+	}
+	m.mu.Unlock()
+	for _, node := range nodes {
+		m.attempt(ctx, node)
+	}
+}
+
+// watchInterfaces notices this machine's addresses changing, re-registers at
+// once and moves the links: a laptop that changes networks would otherwise
+// wait a poll to be findable and an idle timeout to notice its links are dead.
+func (m *Manager) watchInterfaces(ctx context.Context) {
+	last, err := localAddrs()
+	lastErr := ""
+	if err != nil {
+		lastErr = err.Error()
+		m.cfg.Log("listing this machine's addresses: %v", err)
+	}
+	t := time.NewTicker(ifacePoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		cur, err := localAddrs()
+		if err != nil {
+			if err.Error() != lastErr {
+				lastErr = err.Error()
+				m.cfg.Log("listing this machine's addresses: %v", err)
+			}
+			continue
+		}
+		lastErr = ""
+		if cur == last {
+			continue
+		}
+		m.cfg.Log("this machine's addresses changed (%s -> %s); re-registering and moving links",
+			orNone(last), orNone(cur))
+		last = cur
+		m.sync(ctx)
+		m.moveLinks(ctx)
+	}
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "none"
+	}
+	return s
+}
+
+// interfaceAddrs is this machine's non-loopback addresses, sorted.
+func interfaceAddrs() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+	var out []string
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(ipnet.IP)
+		if !ok {
+			continue
+		}
+		ip = ip.Unmap()
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			continue
+		}
+		out = append(out, ip.String())
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
+}
+
+// moveLinks carries every link over an address change. A connection this end
+// dialled migrates (QUIC path probe, then switch); one the peer dialled cannot
+// be migrated from here (RFC 9000: only the client moves), so it is redialled
+// and the new connection replaces it. A failed migration redials too.
+func (m *Manager) moveLinks(ctx context.Context) {
+	type move struct {
+		node    string
+		conn    *quic.Conn
+		dialled bool
+	}
+	var moves []move
+	m.mu.Lock()
+	for node, l := range m.peers {
+		if l.conn != nil {
+			moves = append(moves, move{node, l.conn, l.dialled})
+		}
+	}
+	m.mu.Unlock()
+	for _, mv := range moves {
+		go func() {
+			if mv.dialled {
+				err := m.endpoint.Migrate(ctx, mv.conn, migrateTimeout)
+				if err == nil {
+					m.cfg.Log("moved the link to %s onto the new address", short(mv.node))
+					return
+				}
+				m.cfg.Log("could not move the link to %s (%v); redialling", short(mv.node), err)
+			}
+			m.redial(ctx, mv.node)
+		}()
+	}
+}
+
+// redial makes a fresh connection to a linked peer; linkUp swaps it in.
+func (m *Manager) redial(ctx context.Context, node string) {
+	m.mu.Lock()
+	cands := m.candidatesLocked(node, time.Now())
+	busy := m.trying[node]
+	if !busy {
+		m.trying[node] = true
+	}
+	m.mu.Unlock()
+	if busy {
 		return
 	}
-	if _, err := m.endpoint.Conn().WriteToUDP(pkt, addr); err != nil {
-		m.cfg.Log("introducer %s: %v", m.cfg.Rendezvous, err)
+	defer m.doneTrying(node)
+	if len(cands) == 0 {
+		m.cfg.Log("no known address to redial %s; waiting for its next registration", short(node))
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := m.connect(cctx, node, cands); err != nil {
+		m.cfg.Log("redialling %s: %v; the old link stays until it times out", short(node), err)
 	}
 }
 
@@ -413,9 +936,20 @@ func (m *Manager) connect(ctx context.Context, node string, candidates []string)
 	// error (Go 1.24+); it crashes the process instead.
 	nonce := make([]byte, 8)
 	_, _ = rand.Read(nonce)
-	if err := rendezvous.RequestPunch(m.endpoint.Conn(), m.cfg.Rendezvous,
-		m.cfg.Cluster, m.node(), node, hex.EncodeToString(nonce)); err != nil {
-		m.cfg.Log("asking the introducer to wake %s: %v", short(node), err)
+	// Every introducer, since the peer may be registered with only some.
+	m.mu.Lock()
+	var ats []netip.AddrPort
+	for _, in := range m.intros {
+		if in.at.IsValid() {
+			ats = append(ats, in.at)
+		}
+	}
+	m.mu.Unlock()
+	for _, at := range ats {
+		if err := rendezvous.RequestPunch(m.endpoint.Conn(), at.String(),
+			m.cfg.Cluster, m.node(), node, hex.EncodeToString(nonce)); err != nil {
+			m.cfg.Log("asking the introducer %s to wake %s: %v", at, short(node), err)
+		}
 	}
 
 	at, err := m.raceOrCollide(ctx, node, cands)
@@ -578,6 +1112,15 @@ func (m *Manager) raceOrCollide(ctx context.Context, node string, cands []direct
 }
 
 // linkUp gives a connected peer a local port and tells the daemon about it.
+//
+// A second authenticated connection from a key that already has a link
+// replaces the old connection (F33): a peer that changed address comes back
+// from the new one while this side still holds the old, which used to be
+// kept - refusing the new one as "already connected" - until its idle timeout
+// ran out, about three minutes. The forwarder and its address stay, so the
+// daemon sees no leave and join. Inside raceWindow of the link being made,
+// both ends punching at once is the likelier story; then both ends keep the
+// connection dialled by the lower fingerprint, so they agree on one.
 func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path string) error {
 	// A link to ourselves. Two networks that both use 192.168.0.0/24 make a
 	// peer's LAN candidate one of this machine's own addresses; dialling it
@@ -592,12 +1135,47 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 		m.cfg.Log("dropped a connection to ourselves (%s path); one of a peer's addresses is also ours", path)
 		return nil
 	}
+	now := time.Now()
+	dialled := path != pathInbound
+
+	m.mu.Lock()
+	if old := m.peers[node]; old != nil {
+		if conn != nil && old.conn == conn {
+			m.mu.Unlock()
+			return nil
+		}
+		if old.alive() && now.Sub(old.since) < raceWindow && !m.newWins(node, dialled) {
+			// Both ends raced and both won; this one loses on both ends.
+			m.mu.Unlock()
+			if conn != nil {
+				conn.CloseWithError(codeReplaced, "already connected")
+			}
+			return nil
+		}
+		prev := old.conn
+		old.conn, old.dialled, old.path = conn, dialled, path
+		old.since, old.lastSeen = now, now
+		delete(m.backoff, node)
+		m.mu.Unlock()
+		if prev != nil {
+			prev.CloseWithError(codeReplaced, "replaced by a newer connection")
+		}
+		if conn != nil {
+			go m.watchConn(node, conn)
+		}
+		m.cfg.Log("peer %s: a newer connection replaced the old one (%s), still at %s", short(node), path, old.addr)
+		return nil
+	}
+	m.mu.Unlock()
+
 	// Port zero: the kernel picks. Fixed ports would collide as soon as a
 	// second peer appeared, and the number is never typed by anybody - it
 	// goes straight to the node store.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		conn.CloseWithError(1, "")
+		if conn != nil {
+			conn.CloseWithError(1, "")
+		}
 		return fmt.Errorf("no local port for peer %s: %w", short(node), err)
 	}
 	// Detached from the caller's deadline, and this is load-bearing.
@@ -616,20 +1194,19 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 	linkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	link := &peerLink{
 		listener: ln, addr: ln.Addr().String(), conn: conn,
-		stop: cancel, lastSeen: time.Now(), path: path,
+		stop: cancel, lastSeen: now, since: now, dialled: dialled, path: path,
 	}
 	link.announced.Add(1)
 	defer link.announced.Done()
 
 	m.mu.Lock()
-	if old := m.peers[node]; old != nil {
-		// Already connected by the other side's punch, which is ordinary:
-		// both ends race at once and both can win.
+	if m.peers[node] != nil {
+		// Another connection linked while the port was being opened; let
+		// the replacement rule above decide between them.
 		m.mu.Unlock()
 		cancel()
 		_ = ln.Close()
-		conn.CloseWithError(0, "already connected")
-		return nil
+		return m.linkUp(ctx, node, conn, path)
 	}
 	m.peers[node] = link
 	delete(m.backoff, node)
@@ -641,6 +1218,17 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 		m.cfg.OnPeer(node, link.addr)
 	}
 	return nil
+}
+
+// newWins is the tie-break for two live connections made at once: the one
+// dialled by the lower fingerprint stays, decided the same way on both ends.
+func (m *Manager) newWins(node string, dialled bool) bool {
+	self := m.node()
+	dialler := node
+	if dialled {
+		dialler = self
+	}
+	return dialler == min(self, node)
 }
 
 // noPath records that a peer cannot be reached, and why.
@@ -680,10 +1268,7 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 	// A connection that dies takes its streams with it; drop the link so the
 	// next poll reconnects rather than forwarding into nothing.
 	if conn != nil {
-		go func() {
-			<-conn.Context().Done()
-			m.dropLinkIf(node, ln)
-		}()
+		go m.watchConn(node, conn)
 	}
 	// When the forwarder stops accepting, this link cannot carry anything
 	// more, and the manager has to be told. Returning quietly left the link
@@ -698,49 +1283,86 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 		if err != nil {
 			return
 		}
-		go func(local net.Conn) {
-			defer local.Close()
-			st, err := conn.OpenStreamSync(ctx)
-			if err != nil {
-				return
-			}
-			defer st.Close()
-			done := make(chan struct{}, 2)
-			go func() {
-				_, _ = io.Copy(st, local)
-				// Half-close: the far daemon sees the end of the request and
-				// answers, instead of waiting for a body that is not coming.
-				_ = st.Close()
-				done <- struct{}{}
-			}()
-			go func() {
-				_, _ = io.Copy(local, st)
-				done <- struct{}{}
-			}()
-			<-done
-			<-done
-		}(c)
+		go m.forward(ctx, node, ln, c)
 	}
 }
 
-func (m *Manager) dropLink(node string) { m.dropLinkIf(node, nil) }
+// forward carries one local connection over the link's current connection,
+// which may have been replaced since the forwarder started.
+func (m *Manager) forward(ctx context.Context, node string, ln net.Listener, local net.Conn) {
+	defer local.Close()
+	m.mu.Lock()
+	var conn *quic.Conn
+	if link := m.peers[node]; link != nil && link.listener == ln {
+		conn = link.conn
+	}
+	m.mu.Unlock()
+	if conn == nil {
+		m.cfg.Log("peer %s: no connection behind its forwarder; dropping a local request", short(node))
+		return
+	}
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		m.cfg.Log("peer %s: opening a stream: %v", short(node), err)
+		return
+	}
+	defer st.Close()
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(st, local)
+		// Half-close: the far daemon sees the end of the request and
+		// answers, instead of waiting for a body that is not coming.
+		_ = st.Close()
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(local, st)
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+}
+
+// watchConn drops node's link when conn dies, unless conn was replaced.
+//
+// A connection the far end closed because it kept another one of this pair
+// is given replaceGrace for that other one to link here too. Dropping at once
+// tore the link down between the two - the far end links the winner the
+// moment it accepts it, this end only when its own dial returns - and the
+// daemon saw a leave and a join for a peer that never went anywhere.
+func (m *Manager) watchConn(node string, conn *quic.Conn) {
+	<-conn.Context().Done()
+	var ae *quic.ApplicationError
+	if errors.As(context.Cause(conn.Context()), &ae) && ae.Remote && ae.ErrorCode == codeReplaced {
+		time.Sleep(replaceGrace)
+	}
+	m.dropWhere(node, func(l *peerLink) bool { return l.conn == conn })
+}
+
+func (m *Manager) dropLink(node string) { m.dropWhere(node, nil) }
 
 // dropLinkIf drops node's link only if it is the one serving ln (nil: any).
 // A dead link's watchers fire after a reconnect may have replaced it, and
 // must not tear down the replacement.
 func (m *Manager) dropLinkIf(node string, ln net.Listener) {
+	m.dropWhere(node, func(l *peerLink) bool { return ln == nil || l.listener == ln })
+}
+
+// dropWhere drops node's link when match accepts it (nil: always).
+func (m *Manager) dropWhere(node string, match func(*peerLink) bool) {
 	m.mu.Lock()
 	link := m.peers[node]
-	if link == nil || (ln != nil && link.listener != ln) {
+	if link == nil || (match != nil && !match(link)) {
 		m.mu.Unlock()
 		return
 	}
 	delete(m.peers, node)
+	conn := link.conn
 	m.mu.Unlock()
 	link.stop()
 	_ = link.listener.Close()
-	if link.conn != nil {
-		link.conn.CloseWithError(0, "")
+	if conn != nil {
+		conn.CloseWithError(0, "")
 	}
 	m.cfg.Log("peer %s stopped checking in; released %s", short(node), link.addr)
 	m.gone(node, link)
@@ -784,34 +1406,48 @@ func (m *Manager) Peers() map[string]string {
 	return out
 }
 
-// Paths reports how each peer is reached, keyed by the local address it is
-// reachable at.
-//
-// Keyed by address rather than by node, because the two halves of the system
-// name a peer differently: this manager knows it by the fingerprint of its
-// key, and the node store knows it by the UUID its daemon reports. The
-// forwarder address is the one thing both have, so it is what joins them.
+// Paths reports how each peer is reached, by node id (the key fingerprint).
 func (m *Manager) Paths() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make(map[string]string, len(m.peers))
-	for _, link := range m.peers {
-		out[link.addr] = link.path
+	for node, link := range m.peers {
+		out[node] = link.path
 	}
 	return out
 }
 
-// Unreachable reports, by fingerprint, why each peer the introducer still
-// lists has no direct path. A peer drops out once it links or stops being
-// listed.
+// Unreachable reports, by node id, why each peer that an introducer still
+// lists, or another member vouches for, has no direct path. A peer drops out
+// once it links or stops being listed and vouched for.
 func (m *Manager) Unreachable() map[string]string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
 	out := map[string]string{}
 	for node, b := range m.backoff {
-		if m.listed[node] && m.peers[node] == nil {
+		h, hinted := m.hints[node]
+		known := m.listed[node] || (hinted && now.Sub(h.at) <= hintTTL)
+		if known && m.peers[node] == nil {
 			out[node] = b.reason
 		}
+	}
+	return out
+}
+
+// Introducers reports every configured introducer: when it last answered,
+// why it is failing, and how many other members it listed.
+func (m *Manager) Introducers() []IntroducerState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []IntroducerState
+	for _, in := range m.intros {
+		if in.self || in.hidden {
+			continue
+		}
+		out = append(out, IntroducerState{
+			Addr: in.addr, LastReply: in.lastReply, LastErr: in.lastErr, Members: in.members,
+		})
 	}
 	return out
 }

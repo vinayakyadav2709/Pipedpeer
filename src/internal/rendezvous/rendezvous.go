@@ -21,8 +21,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -118,6 +120,16 @@ type bucket struct {
 }
 
 type Server struct {
+	// Log, when set, receives the errors a datagram server otherwise drops:
+	// a reply or a forward that could not be sent.
+	Log func(format string, args ...any)
+
+	// only, when set, is the one cluster this server answers. A daemon's own
+	// introducer serves its own cluster and nobody else's (ADR-0004): it runs
+	// on somebody's laptop, not on a public box, and must not become an
+	// address book for strangers.
+	only string
+
 	mu sync.Mutex
 	// clusters is cluster -> node -> entry. Nothing is persisted: an address
 	// that survived a restart of this process would be an address a router
@@ -135,6 +147,34 @@ func NewServer(ttl time.Duration) *Server {
 		ttl = 2 * time.Minute
 	}
 	return &Server{clusters: map[string]map[string]entry{}, ttl: ttl}
+}
+
+// NewClusterServer is a rendezvous that answers one cluster only and stays
+// silent to every other cluster id, as it does to junk.
+func NewClusterServer(ttl time.Duration, cluster string) *Server {
+	s := NewServer(ttl)
+	s.only = cluster
+	return s
+}
+
+// visibleAddr is a member's registered address as another member may see it.
+//
+// A loopback source means the member registered from this very machine - a
+// daemon registering with the introducer it runs itself. That address reaches
+// only this machine, so it is shown only to another requester on this machine
+// (which is also how the tests run several daemons on one host). Handing it to
+// a remote peer made the remote peer probe its own loopback and race against
+// itself.
+func visibleAddr(addr string, to net.Addr) string {
+	if !isLoopback(addr) || isLoopback(to.String()) {
+		return addr
+	}
+	return ""
+}
+
+func isLoopback(addr string) bool {
+	ap, err := netip.ParseAddrPort(addr)
+	return err == nil && ap.Addr().Unmap().IsLoopback()
 }
 
 // Handle processes one datagram and returns the reply, or nil to stay silent.
@@ -166,6 +206,11 @@ func (s *Server) handle(payload []byte, from net.Addr) ([]byte, *Forward) {
 	if req.Cluster == "" || req.Node == "" {
 		return nil, nil
 	}
+	if s.only != "" && req.Cluster != s.only {
+		// Silent, as for junk: answering would confirm to a stranger that
+		// something lives here, and naming the cluster would leak it.
+		return nil, nil
+	}
 	if req.Op == "connect" {
 		return s.connect(req, from)
 	}
@@ -192,7 +237,7 @@ func (s *Server) handle(payload []byte, from net.Addr) ([]byte, *Forward) {
 			continue
 		}
 		peers = append(peers, Peer{
-			Node: node, Addr: e.addr, AgeSec: int(age.Seconds()),
+			Node: node, Addr: visibleAddr(e.addr, from), AgeSec: int(age.Seconds()),
 			Candidates: e.candidates,
 		})
 	}
@@ -316,17 +361,34 @@ func (s *Server) Serve(pc net.PacketConn, stop <-chan struct{}) error {
 				return nil
 			default:
 			}
+			if errors.Is(err, net.ErrClosed) {
+				s.logf("introducer: socket closed: %v", err)
+				return err
+			}
+			s.logf("introducer: read: %v", err)
 			continue
 		}
 		reply, fwd := s.handle(buf[:n], from)
 		if reply != nil {
-			_, _ = pc.WriteTo(reply, from)
-		}
-		if fwd != nil {
-			if to, err := net.ResolveUDPAddr("udp", fwd.To); err == nil {
-				_, _ = pc.WriteTo(fwd.Body, to)
+			if _, err := pc.WriteTo(reply, from); err != nil {
+				s.logf("introducer: reply to %s: %v", from, err)
 			}
 		}
+		if fwd != nil {
+			to, err := net.ResolveUDPAddr("udp", fwd.To)
+			if err == nil {
+				_, err = pc.WriteTo(fwd.Body, to)
+			}
+			if err != nil {
+				s.logf("introducer: forwarding a punch request to %s: %v", fwd.To, err)
+			}
+		}
+	}
+}
+
+func (s *Server) logf(format string, args ...any) {
+	if s.Log != nil {
+		s.Log(format, args...)
 	}
 }
 

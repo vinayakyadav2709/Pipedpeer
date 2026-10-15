@@ -66,6 +66,10 @@ const (
 	// punch at once, and fails when the far router allocates a fresh port
 	// per destination.
 	KindReflex Kind = "reflex"
+	// KindGossip is an address another member vouched for in its signed
+	// address record. Tried after everything the peer published itself: it
+	// is second-hand, but it is what finds a peer when no introducer can.
+	KindGossip Kind = "gossip"
 )
 
 // rank is the order candidates are tried in. Lower is better: a LAN path
@@ -79,12 +83,14 @@ func (k Kind) rank() int {
 		return 1
 	case KindReflex:
 		return 2
-	default:
+	case KindGossip:
 		return 3
+	default:
+		return 4
 	}
 }
 
-// String is the wire form: "lan:192.168.0.10:38447".
+// String is the wire form: "lan:192.168.0.10:4243".
 func (c Candidate) String() string { return string(c.Kind) + ":" + c.Addr.String() }
 
 // ParseCandidate reads the wire form.
@@ -98,7 +104,7 @@ func ParseCandidate(s string) (Candidate, error) {
 		return Candidate{}, fmt.Errorf("candidate %q: %w", s, err)
 	}
 	switch Kind(kind) {
-	case KindLAN, KindMapped, KindReflex:
+	case KindLAN, KindMapped, KindReflex, KindGossip:
 		return Candidate{Kind: Kind(kind), Addr: ap}, nil
 	}
 	return Candidate{}, fmt.Errorf("candidate %q has an unknown kind %q", s, kind)
