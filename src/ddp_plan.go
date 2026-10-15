@@ -190,6 +190,40 @@ func ddpForwardedLead(n registry.NodeRecord, selfMachine string) bool {
 	return key == "" || key != selfMachine
 }
 
+// ddpLeadAddrFor is the lead daemon's host:port as the machine running rank
+// node n reaches it, or "" when n is not behind one of our forwarders and the
+// lead address everybody else gets stands.
+//
+// A rank on an internet peer cannot use that address: localIPFor answers with
+// our LAN address, which is on a network the peer is not on (a real run lost
+// every rank 1 to "No route to host" in 7 s), and 127.0.0.1 there is the peer
+// itself. The peer's own daemon has the lead as a node too, at its own
+// forwarder over the same direct link (or a LAN path if it has one), so its
+// node list is the answer. No relay: the sync goes rank -> its forwarder ->
+// the link -> the lead daemon.
+func ddpLeadAddrFor(n, lead registry.NodeRecord, selfMachine string,
+	fetch func(host string, port int) ([]registry.NodeRecord, error)) (string, error) {
+	if !ddpForwardedLead(n, selfMachine) || n.NodeID == lead.NodeID {
+		return "", nil
+	}
+	nodes, err := fetch(ddpExtractHost(n.SSHEndpoint), n.DaemonPort)
+	if err != nil {
+		return "", fmt.Errorf("asking %s how it reaches the lead: %w", ddpHostName(n), err)
+	}
+	for _, r := range nodes {
+		if r.NodeID != lead.NodeID || r.DaemonPort == 0 {
+			continue
+		}
+		host := ddpExtractHost(r.SSHEndpoint)
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		return net.JoinHostPort(host, strconv.Itoa(r.DaemonPort)), nil
+	}
+	return "", fmt.Errorf("%s has no path to the lead machine %s; check `pipedpeer status` there",
+		ddpHostName(n), ddpHostName(lead))
+}
+
 // ddpLeadIndex picks the ring member to lead it: one every rank can reach,
 // and a GPU node whenever one can lead, so a mixed set never puts the sync
 // and the reference model on a CPU (Finding 22: the CPU lead built a

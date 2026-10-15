@@ -179,9 +179,14 @@ func runDDP(o ddpRunOptions) error {
 		// route to a peer beats picking one address for everybody, which on a
 		// machine that is on both a LAN and a Tailscale network picks the LAN
 		// one and hangs the run.
+		// A peer behind our forwarder (127.0.0.1) says nothing about routes;
+		// it gets its own address to the lead (ddpLeadAddrFor).
 		peerHost := ""
-		if len(peers) > 0 {
-			peerHost = ddpExtractHost(peers[0].SSHEndpoint)
+		for _, p := range peers {
+			if h := ddpExtractHost(p.SSHEndpoint); h != "" && h != "127.0.0.1" && h != "localhost" && h != "::1" {
+				peerHost = h
+				break
+			}
 		}
 		masterAddr = localIPFor(peerHost)
 	}
@@ -285,6 +290,16 @@ func runDDP(o ddpRunOptions) error {
 			if rankGPUDevices == "" && !join && ddpSharesNode(ring, i) {
 				rankGPUDevices = strconv.Itoa(ringSlots[i])
 			}
+			// A rank on an internet peer reaches the lead through its own
+			// forwarder, not through any address we could name for it.
+			leadAddr := net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))
+			if via, err := ddpLeadAddrFor(n, rank0, selfMachine, ddpFetchNodesAt); err != nil {
+				up.ended(n.NodeID, ctx.Err() == nil, time.Now())
+				errs <- ddpRankResult{rank: i, err: err}
+				return
+			} else if via != "" {
+				leadAddr = via
+			}
 			rankEnvs := append([]string(nil), o.Envs...)
 			rankEnvs = append(rankEnvs,
 				"PIPEDPEER_DDP=1",
@@ -306,8 +321,7 @@ func runDDP(o ddpRunOptions) error {
 				// Sync rides the lead rank's daemon on the one port that
 				// already works between every pair of nodes; ranks never
 				// open sockets of their own.
-				fmt.Sprintf("PIPEDPEER_DDP_SYNC=http://%s/v1/ddp/sync",
-					net.JoinHostPort(masterAddr, strconv.Itoa(rank0.DaemonPort))),
+				fmt.Sprintf("PIPEDPEER_DDP_SYNC=http://%s/v1/ddp/sync", leadAddr),
 				fmt.Sprintf("PIPEDPEER_DDP_GROUP=%s", jobSet),
 				// How many machines, not how many ranks. The ring's
 				// worth-it verdict compares against "this machine doing
