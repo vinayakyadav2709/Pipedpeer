@@ -48,6 +48,7 @@ The shim tests need pandas, scikit-learn, joblib and torch; without them they sk
 ## Traps
 
 - The Python shim lives in `src/internal/nixgen/shim/*.py`, embedded with go:embed; keep it importable without torch/numpy/pandas. `scripts/shim-check.sh` runs ruff and pytest on it.
+- Keep source and test files under about 800 lines: big files make every edit slow. New code that would push a file past that goes in a new file of the same package, split by responsibility.
 - Every `PIPEDPEER_*` variable the shim names must be read somewhere; a test fails otherwise.
 - Never name a temp dir: ask `internal/userdir` for paths. `src/tmpfs_guard_test.go` enforces it.
 - A node is its node id (the node key's fingerprint), never its address: it can have several paths (lan, internet at `127.0.0.1:<forwarder port>`, gossip). Never decide "this machine" from the host; use the machine key.
