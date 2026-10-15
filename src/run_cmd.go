@@ -196,10 +196,9 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 					say.Warnf("could not list the cluster's nodes to see whether any has a GPU (%v); preferring GPU nodes\n", nerr)
 				}
 				var why string
-				preferGPU, why = inferGPU(gpu.Detect().Vendor != gpu.VendorNone, nodes, nerr)
+				preferGPU, why = inferGPU(gpu.Detect().Vendor == gpu.VendorNVIDIA, nodes, nerr)
 				say.Println("[coordinator] " + why)
 			}
-			requestGPU := requireGPU || preferGPU
 			requiredGPUMem := resourceest.ParseMemString(gpuMemStr)
 
 			// --offload: distributed pieces (pool/joblib chunks, pandas and
@@ -402,6 +401,10 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 						decision = r.Decision
 						leaseID = r.LeaseID
 					}
+					var targetCaps map[string]string
+					if r := placed.Load(); r != nil && r.Decision.ChosenNode.NodeID == targetNodeID {
+						targetCaps = r.Decision.ChosenNode.Capabilities
+					}
 					devices := gpuID
 					if devices == "" {
 						if idx := reservedGPU.Load(); idx >= 0 {
@@ -418,7 +421,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 						JobName:           jobName,
 						Isolate:           isolate,
 						Intercept:         true,
-						GPU:               requestGPU,
+						GPU:               envGPU(requireGPU, preferGPU, daemonPort, nodeID.NodeID, targetNodeID, targetCaps),
 						GPUDevices:        devices,
 						PythonVersion:     pythonVersion,
 						Envs:              envs,
@@ -506,7 +509,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 				JobName:           jobName,
 				Isolate:           isolate,
 				Intercept:         true,
-				GPU:               requestGPU,
+				GPU:               envGPU(requireGPU, preferGPU, daemonPort, nodeID.NodeID, targetID, nil),
 				GPUDevices:        gpuID,
 				PythonVersion:     pythonVersion,
 				Envs:              envs,
@@ -575,20 +578,59 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 
 // inferGPU decides whether a script that imports GPU libraries, run without
 // --gpu, prefers GPU nodes: only when this machine or a healthy node reports
-// a usable GPU. A failed node listing (fetchErr) keeps the old preference.
+// an NVIDIA GPU. A failed node listing (fetchErr) keeps the old preference.
+//
+// NVIDIA only: the one GPU build an environment carries is CUDA torch. An
+// AMD card ran the CPU build anyway, and a lab container that saw the host's
+// APU iGPU made every CPU-only lab node fetch the cu126 wheel set (~4 GB).
 func inferGPU(localGPU bool, nodes []clusterNode, fetchErr error) (bool, string) {
 	if localGPU {
-		return true, "GPU libraries imported and this machine has a GPU — preferring GPU nodes"
+		return true, "GPU libraries imported and this machine has an NVIDIA GPU — preferring GPU nodes"
 	}
 	if fetchErr != nil {
 		return true, "GPU libraries imported; node list unavailable — preferring GPU nodes"
 	}
 	for _, n := range nodes {
-		if n.State == "healthy" && nodeHasGPU(n) {
-			return true, "GPU libraries imported and " + nodeLabel(n) + " has a GPU — preferring GPU nodes"
+		if n.State == "healthy" && hasCUDA(n.Capabilities) {
+			return true, "GPU libraries imported and " + nodeLabel(n) + " has an NVIDIA GPU — preferring GPU nodes"
 		}
 	}
-	return false, "GPU libraries imported but no machine in the cluster has a usable GPU — building the CPU environment"
+	return false, "GPU libraries imported but no machine in the cluster has an NVIDIA GPU — building the CPU environment"
+}
+
+// hasCUDA reports whether a node's capabilities name an NVIDIA GPU, the only
+// kind the CUDA environment can drive.
+func hasCUDA(caps map[string]string) bool { return caps["gpu"] == string(gpu.VendorNVIDIA) }
+
+// envGPU is whether the environment built for targetID carries CUDA torch:
+// always under --gpu force, and under a preference only when that node has
+// an NVIDIA GPU. A preference used to build CUDA wherever the run landed, so
+// a CPU-only node got the cu126 wheel set (~4 GB) to run on its CPU; it gets
+// the CPU build of the same torch version instead.
+func envGPU(requireGPU, preferGPU bool, daemonPort int, selfID, targetID string, caps map[string]string) bool {
+	if requireGPU || !preferGPU {
+		return requireGPU
+	}
+	if targetID != "" && targetID == selfID {
+		return gpu.Detect().Vendor == gpu.VendorNVIDIA
+	}
+	if caps == nil && targetID != "" {
+		nodes, err := fetchClusterNodes(daemonPort)
+		if err != nil {
+			say.Warnf("could not list the cluster's nodes to see whether %s has a GPU (%v); building the GPU environment\n", targetID, err)
+			return true
+		}
+		for _, n := range nodes {
+			if n.NodeID == targetID {
+				caps = n.Capabilities
+			}
+		}
+	}
+	if caps == nil {
+		say.Warnf("cannot tell whether the target node %q has a GPU; building the GPU environment\n", targetID)
+		return true
+	}
+	return hasCUDA(caps)
 }
 
 // runDaemonPort is this machine's daemon API port: the one the running (or

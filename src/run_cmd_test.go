@@ -47,6 +47,12 @@ func TestInferGPUNeedsAGPUSomewhere(t *testing.T) {
 	if got, _ := inferGPU(false, []clusterNode{cpu, deadGPU}, nil); got {
 		t.Error("no healthy GPU anywhere: want the CPU environment")
 	}
+	// The environment's only GPU build is CUDA: an AMD card (a lab container
+	// sees the host's APU iGPU) gets the CPU one.
+	amd := clusterNode{NodeID: "d", State: "healthy", Capabilities: map[string]string{"gpu": "amd"}}
+	if got, _ := inferGPU(false, []clusterNode{cpu, amd}, nil); got {
+		t.Error("only an AMD GPU: want the CPU environment")
+	}
 	if got, _ := inferGPU(false, []clusterNode{cpu, liveGPU}, nil); !got {
 		t.Error("a healthy peer has a GPU: want GPU preferred")
 	}
@@ -55,5 +61,24 @@ func TestInferGPUNeedsAGPUSomewhere(t *testing.T) {
 	}
 	if got, _ := inferGPU(false, nil, errors.New("down")); !got {
 		t.Error("node list failed: want the old preference kept")
+	}
+}
+
+// The environment follows the node it runs on: under a GPU preference a
+// CPU-only target gets the CPU build, never the cu126 wheel set.
+func TestEnvGPUFollowsTheTarget(t *testing.T) {
+	nv := map[string]string{"gpu": "nvidia"}
+	none := map[string]string{"gpu": "none"}
+	if !envGPU(true, true, 0, "self", "x", none) {
+		t.Error("--gpu force must build the GPU environment")
+	}
+	if envGPU(false, false, 0, "self", "x", nv) {
+		t.Error("no GPU wanted: want the CPU environment")
+	}
+	if !envGPU(false, true, 0, "self", "x", nv) {
+		t.Error("preferred and the target has an NVIDIA GPU: want CUDA")
+	}
+	if envGPU(false, true, 0, "self", "x", none) {
+		t.Error("preferred but the target is CPU-only: want the CPU environment")
 	}
 }

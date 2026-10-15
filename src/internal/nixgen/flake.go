@@ -77,6 +77,39 @@ typing-extensions==4.16.0
 // torchWheelsHash is the recursive sha256 of the torchRequirements wheel set.
 const torchWheelsHash = "sha256-0C73Ki7qj6q3wK78ocYCu0AhcSsBtZvidwS4pG33zS8="
 
+// torchCPURequirements is the CPU build of the same torch: what a node
+// without an NVIDIA GPU gets, so every node of a job (a DDP ring of a GPU
+// laptop and CPU-only peers, a CPU-only lab) runs one torch version. nixpkgs'
+// ps.torch was a different version (2.12.0 at nixpkgs pin vs 2.13.0 here).
+// Bump together with torchRequirements, the same way.
+const torchCPURequirements = `torch==2.13.0+cpu
+filelock==3.32.4
+fsspec==2026.7.0
+jinja2==3.1.6
+markupsafe==3.0.3
+mpmath==1.3.0
+networkx==3.6.1
+setuptools==84.0.0
+sympy==1.14.0
+typing-extensions==4.16.0
+`
+
+// torchCPUWheelsHash is the recursive sha256 of the torchCPURequirements set.
+const torchCPUWheelsHash = "sha256-xp57wYwHjc3QaaNswLRQakFnqqqisnx9Y7EhC/R3lr8="
+
+// torchWheelSet is one pinned torch build: its requirement list, the FOD
+// hash, the index it comes from and the check its site dir must pass.
+type torchWheelSet struct {
+	name, reqs, hash, index, check string
+}
+
+var (
+	torchCUDAWheels = torchWheelSet{"cu126", torchRequirements, torchWheelsHash,
+		"https://download.pytorch.org/whl/cu126", "assert torch.version.cuda, 'no cuda torch'"}
+	torchCPUWheels = torchWheelSet{"cpu", torchCPURequirements, torchCPUWheelsHash,
+		"https://download.pytorch.org/whl/cpu", "assert torch.__version__ == '2.13.0+cpu', torch.__version__"}
+)
+
 // GenerateFlake builds the environment. gpu selects torch's build: the CUDA
 // wheel set costs several gigabytes, so a script that imports torch without
 // wanting a GPU should not pay for it.
@@ -89,7 +122,7 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 		pythonVersion = "python3"
 	}
 	var psPkgs []string
-	torchCUDA := false
+	var wheels *torchWheelSet
 	hasTorch := false
 	for _, pkg := range nixPkgs {
 		if pkg == "torch" {
@@ -103,27 +136,25 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 			psPkgs = append(psPkgs, pin.expr())
 			continue
 		}
-		if pkg == "torch" && nixSystem == "x86_64-linux" && gpu {
-			// nixpkgs' ps.torch builds from source (nvcc + triton-llvm: hours).
-			// Instead fetch the official CUDA wheels (cu126) in a fixed-output
-			// derivation — FODs are allowed network even under nix's default
-			// sandbox, which is what lets this build on a stock nix install —
-			// then pip-install them offline into a site dir. The run wrapper
-			// prepends the site to PYTHONPATH. Requires the host NVIDIA
-			// driver; the daemon bind-mounts it into sandboxed jobs.
+		if pkg == "torch" && nixSystem == "x86_64-linux" {
+			// nixpkgs' ps.torch builds from source with CUDA (nvcc +
+			// triton-llvm: hours), and its CPU build is another version.
+			// Instead fetch the official wheels in a fixed-output derivation
+			// — FODs are allowed network even under nix's default sandbox,
+			// which is what lets this build on a stock nix install — then
+			// pip-install them offline into a site dir. The run wrapper
+			// prepends the site to PYTHONPATH.
 			//
-			// Only when a GPU was actually asked for. This used to fire on
-			// the mere presence of the import, so a script that never touched
-			// a device still shipped the whole CUDA wheel set - cuBLAS, cuDNN,
-			// NCCL, triton, the toolkit - to every node that ran it.
-			//
-			// Without a GPU the closure falls through to nixpkgs' ps.torch.
-			// The warning above about building from source is about the
-			// CUDA-enabled variant; the default CPU build substitutes: a
-			// dry-run against this pinned revision fetches 208 MiB for 940
-			// MiB unpacked and builds only the env derivation, against 6.6 GB
-			// unpacked for the wheel set.
-			torchCUDA = true
+			// The CUDA set (cu126, ~6.6 GB unpacked; needs the host NVIDIA
+			// driver, which the daemon bind-mounts into sandboxed jobs) only
+			// when a GPU was asked for: it once fired on the mere import, and
+			// a script that never touched a device shipped cuBLAS, cuDNN,
+			// NCCL, triton and the toolkit to every node. Otherwise the CPU
+			// build of the same version.
+			wheels = &torchCPUWheels
+			if gpu {
+				wheels = &torchCUDAWheels
+			}
 			continue
 		}
 		psPkgs = append(psPkgs, "ps."+pkg)
@@ -134,9 +165,8 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 		// tensors through .numpy(). Without it a DDP run dies at the first
 		// sync with "Numpy is not available", having already trained a step.
 		//
-		// The CUDA wheels do not carry numpy (pip installs only torch's own
-		// tree), and neither does nixpkgs' CPU torch, so both builds need it
-		// added here - it was previously added only for CUDA.
+		// Neither the wheel sets (pip installs only torch's own tree) nor
+		// nixpkgs' torch carry numpy, so every build needs it added here.
 		hasNumpy := false
 		for _, p := range psPkgs {
 			if p == "ps.numpy" {
@@ -167,7 +197,8 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
 	psPkgs = append(psPkgs, "ps.cloudpickle")
 
 	pkgsList := strings.Join(psPkgs, "\n          ")
-	if torchCUDA {
+	if wheels != nil {
+		w := *wheels
 		return fmt.Sprintf(`{
   inputs.nixpkgs.url = "`+nixpkgsRef+`";
 
@@ -185,29 +216,29 @@ func GenerateFlakeForArch(nixPkgs []string, pythonVersion string, nixSystem stri
         # network access even when the nix sandbox is on, so this builds on a
         # stock nix install. Bumping torch means regenerating this list and
         # the hash (see nixgen: torchRequirements / torchWheelsHash).
-        torchreqs = pkgs.writeText "torch-cu126-reqs.txt" ''
-`+torchRequirements+`'';
-        torchwheels = pkgs.runCommand "torch-cu126-wheels" {
+        torchreqs = pkgs.writeText "torch-`+w.name+`-reqs.txt" ''
+`+w.reqs+`'';
+        torchwheels = pkgs.runCommand "torch-`+w.name+`-wheels" {
           nativeBuildInputs = [ pythonpip pkgs.cacert ];
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          outputHash = "`+torchWheelsHash+`";
+          outputHash = "`+w.hash+`";
           SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         } ''
           mkdir -p $out
           python -m pip download --no-cache-dir --no-deps --only-binary=:all: \
             --dest $out -r ${torchreqs} \
-            --index-url https://download.pytorch.org/whl/cu126 \
+            --index-url `+w.index+` \
             --extra-index-url https://pypi.org/simple
         '';
-        torchsite = pkgs.runCommand "torch-cu126-site" {
+        torchsite = pkgs.runCommand "torch-`+w.name+`-site" {
           nativeBuildInputs = [ pythonpip stdenvcc ];
         } ''
           mkdir -p $out/lib
           python -m pip install --no-cache-dir --no-index \
             --find-links ${torchwheels} --target $out/lib torch
           LD_LIBRARY_PATH=${stdenvcc}/lib PYTHONPATH=$out/lib \
-            python -c "import torch; assert torch.version.cuda, 'no cuda torch'"
+            python -c "import torch; `+w.check+`"
         '';
       in
       pkgs.writeShellScriptBin "run" ''

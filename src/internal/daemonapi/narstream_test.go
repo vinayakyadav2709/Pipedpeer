@@ -105,10 +105,10 @@ func TestAGPUClosureGoesOnlyToGPUPeers(t *testing.T) {
 	peers := []PeerHealth{
 		{Host: "10.0.0.1", Port: 1, GPU: "nvidia"},
 		{Host: "10.0.0.2", Port: 1},
-		{Host: "10.0.0.3", Port: 1},
+		{Host: "10.0.0.3", Port: 1, GPU: "amd"}, // cannot use CUDA torch
 	}
 	keep, skipped := gpuPeersOnly(peers)
-	if len(keep) != 1 || keep[0].Host != "10.0.0.1" || skipped != 2 {
-		t.Errorf("gpuPeersOnly kept %v, skipped %d; want only 10.0.0.1, 2 skipped", keep, skipped)
+	if len(keep) != 1 || keep[0].Host != "10.0.0.1" || len(skipped) != 2 {
+		t.Errorf("gpuPeersOnly kept %v, skipped %v; want only 10.0.0.1, 2 skipped", keep, skipped)
 	}
 }
