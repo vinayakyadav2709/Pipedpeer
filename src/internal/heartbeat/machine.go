@@ -1,9 +1,13 @@
 package heartbeat
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/rs/zerolog/log"
 )
 
 // MachineCapability is the key under which a node advertises which physical
@@ -27,24 +31,51 @@ var machineOnce struct {
 // worker beside its host's daemon is an ordinary arrangement, and the lab
 // scripts here create exactly it.
 //
-// The kernel's boot id is the right identifier. Containers share the host
-// kernel, so a container and its host read the same value, which is precisely
-// the co-location this needs to detect; two real machines never share one; and
-// it needs no configuration and no privilege. /etc/machine-id is not a
-// substitute - a container usually has its own, or none at all.
+// The key is a hash of /etc/machine-id and the kernel's boot id, whichever
+// exist. Boot id alone made every container on one host one machine (they
+// share the kernel), which skewed the co-machine memory logic and the DDP
+// decisions in the emulated lab; machine-id alone is not safe either, since
+// cloned PC images share it. Together: containers with their own machine-id
+// differ, and cloned PCs still differ by boot id. A container with no
+// machine-id of its own no longer matches its host.
 //
-// Empty when it cannot be read, which callers must treat as "unknown", never
-// as "same machine": guessing co-location where there is none would shrink
-// every node's usable memory for no reason.
+// Empty when neither can be read, which callers must treat as "unknown",
+// never as "same machine": guessing co-location where there is none would
+// shrink every node's usable memory for no reason.
 func Machine() string {
 	machineOnce.Do(func() {
-		b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
-		if err != nil {
-			return
-		}
-		machineOnce.id = strings.TrimSpace(string(b))
+		machineOnce.id = machineKey(machineIDPath, bootIDPath)
 	})
 	return machineOnce.id
+}
+
+// Where Machine reads its two parts; variables so a test can point them at
+// fake files.
+var (
+	machineIDPath = "/etc/machine-id"
+	bootIDPath    = "/proc/sys/kernel/random/boot_id"
+)
+
+// machineKey hashes the contents of whichever of the two files exist; "" when
+// neither does. A missing machine-id is normal in a container, so it is not
+// logged; a missing boot id is (Linux always has one).
+func machineKey(machineIDFile, bootIDFile string) string {
+	read := func(path string) string {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+	mid, boot := read(machineIDFile), read(bootIDFile)
+	if boot == "" {
+		log.Warn().Str("path", bootIDFile).Msg("no boot id; machine key from machine-id alone")
+	}
+	if mid == "" && boot == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("pipedpeer-machine/1\x00" + mid + "\x00" + boot))
+	return hex.EncodeToString(sum[:16])
 }
 
 // SameMachine reports whether two advertised machine ids are the same physical
