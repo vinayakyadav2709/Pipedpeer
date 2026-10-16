@@ -243,33 +243,33 @@ Table~\ref{tab:litsummary} summarises the surveyed work.
 \endhead
 \bottomrule
 \endlastfoot
-Zaharia et~al.\ \cite{zaharia2010spark} & 2010 & In-memory resilient datasets rebuilt from lineage & Program written against the dataset API; cluster with a master \\
-Moritz et~al.\ \cite{moritz2018ray} & 2018 & Tasks and actors over a distributed scheduler & Changed import; cluster with a head node on one network \\
-Rocklin \cite{rocklin2015dask} & 2015 & Blocked task graphs for array and dataframe work & Program written against Dask's collections \\
-Petersohn et~al.\ \cite{petersohn2020modin} & 2020 & pandas API over a partitioned, parallel dataframe & Changed import; running Ray or Dask engine \\
-Douillard et~al.\ \cite{douillard2023diloco} & 2023 & Local training with an outer Nesterov merge & Intervals of hundreds of steps; outer step fails at short ones \\
 Anderson \cite{anderson2004boinc} & 2004 & Volunteer computing on idle machines & Platform for specific projects, not a general executor \\
 Dolstra et~al.\ \cite{dolstra2004nix} & 2004 & Store paths named by a hash of their build inputs & No placement or transfer between machines \\
+Zaharia et~al.\ \cite{zaharia2010spark} & 2010 & In-memory resilient datasets rebuilt from lineage & Dataset API; cluster with a master \\
+Seide et~al.\ \cite{seide2014onebit} & 2014 & 1-bit quantisation with error feedback & Synchronisation still every step \\
+Rocklin \cite{rocklin2015dask} & 2015 & Blocked task graphs for array and dataframe work & Program written against Dask's collections \\
+Dettmers \cite{dettmers2016eightbit} & 2016 & 8-bit gradient approximation & Synchronisation still every step \\
+Moritz et~al.\ \cite{moritz2018ray} & 2018 & Tasks and actors over a distributed scheduler & Changed import; cluster with a head node on one network \\
+Vogels et~al.\ \cite{vogels2019powersgd} & 2019 & Low-rank gradient compression with error feedback & More bytes than 8-bit on small matrices \\
+Petersohn et~al.\ \cite{petersohn2020modin} & 2020 & pandas API over a partitioned, parallel dataframe & Changed import; running Ray or Dask engine \\
 OCI \cite{oci2021}, \texttt{crun} \cite{crun} & 2020 & Container runtime specification and a light runtime & Isolation only; no environment or placement \\
 Li et~al.\ \cite{li2020pytorchddp} & 2020 & Bucketed all-reduce overlapped with the backward pass & Ranks must reach one another directly \\
-Dettmers \cite{dettmers2016eightbit} & 2016 & 8-bit gradient approximation & Synchronisation still every step \\
-Seide et~al.\ \cite{seide2014onebit} & 2014 & 1-bit quantisation with error feedback & Synchronisation still every step \\
 Lin et~al.\ \cite{lin2020localsgd} & 2020 & Local steps between averages & Ranks within one cluster \\
-Vogels et~al.\ \cite{vogels2019powersgd} & 2019 & Low-rank gradient compression with error feedback & More bytes than 8-bit on small matrices \\
-Sekigawa et~al.\ \cite{sekigawa2023} & 2023 & WebAssembly containers at the extreme edge & Cannot host CPython with native extensions \\
 Hoque and Harras \cite{hoque2022} & 2022 & WebAssembly against containers and VMs & Immature system interface; no GPU \\
-Kakati and Brorsson \cite{kakati2024} & 2024 & WebAssembly across three architectures & 70--90\% of native speed \\
 Li and Fujita \cite{li2023elixir} & 2022 & Elixir/OTP edge server with supervisor trees & Needs a supervisor process \\
-Li and Fujita \cite{zhou2024} & 2024 & Elixir, event-driven design and MQTT & Broker messaging, not bulk transfer \\
-Bachmeier et~al.\ \cite{bachmeier2025} & 2025 & wasi-nn for edge inference & Immature GPU acceleration \\
-Khelifa et~al.\ \cite{khelifa2024} & 2024 & Four WebAssembly runtimes for AI inference & Inference only; memory the main limit \\
-Spenger \cite{kth2025thesis} & 2025 & Failure-transparent programming models & Proved for dataflow streaming, not scripts \\
+Douillard et~al.\ \cite{douillard2023diloco} & 2023 & Local training with an outer Nesterov merge & Intervals of hundreds of steps; outer step fails at short ones \\
+Sekigawa et~al.\ \cite{sekigawa2023} & 2023 & WebAssembly containers at the extreme edge & Cannot host CPython with native extensions \\
 Meurer et~al.\ \cite{arrayapi2023} & 2023 & A standard array API across libraries & Libraries and users must adopt the interface \\
-Guan et~al.\ \cite{idds2025} & 2025 & Scored dispatch of workflow task graphs & Central scheduler; task graphs, not scripts \\
 Deng et~al.\ \cite{deng2023} & 2023 & Joint assignment and relay selection in MEC & Assumes a channel model \\
-He et~al.\ \cite{he2024} & 2024 & Multi-agent reinforcement-learned offloading & Needs training data and a training phase \\
 Yong et~al.\ \cite{yong2023} & 2023 & Optimised partial offloading & Environment, program and network path not modelled \\
-Wang et~al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks towards edge servers & Learned policy; edge servers assumed \\
 Li et~al.\ \cite{li2023blockchain} & 2023 & Smart-contract service agreements & Blockchain infrastructure required \\
+Kakati and Brorsson \cite{kakati2024} & 2024 & WebAssembly across three architectures & 10--30\% below native speed \\
+Li and Fujita \cite{zhou2024} & 2024 & Elixir, event-driven design and MQTT & Broker messaging, not bulk transfer \\
+Khelifa et~al.\ \cite{khelifa2024} & 2024 & Four WebAssembly runtimes for AI inference & Inference only; memory the main limit \\
+He et~al.\ \cite{he2024} & 2024 & Multi-agent reinforcement learning for offloading & Needs training data and a training phase \\
 Zhao et~al.\ \cite{zhao2023} & 2024 & Graph-neural-network offloading policies & A learned model that must first be trained \\
+Bachmeier et~al.\ \cite{bachmeier2025} & 2025 & wasi-nn for edge inference & Immature GPU acceleration \\
+Spenger \cite{kth2025thesis} & 2025 & Failure-transparent programming models & Proved for dataflow streaming, not scripts \\
+Guan et~al.\ \cite{idds2025} & 2025 & Scored dispatch of workflow task graphs & Central scheduler; task graphs, not scripts \\
+Wang et~al.\ \cite{adhoc2025} & 2025 & Cooperative relaying of tasks towards edge servers & Learned policy; edge servers assumed \\
 \end{longtable}}

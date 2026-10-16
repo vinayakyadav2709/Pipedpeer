@@ -86,3 +86,28 @@ Verbatim lines:
 About 15 s after the network came back, the sender (pc3 in V2) had the result file without any
 command, and its history showed the job once
 ```
+
+### Two-site testbed: a node's link cut during a parallel map
+
+`scripts/lab-net-e6.sh` failover check (lines 322-338): node A runs `cpu.py --items 240`; 10 s after
+it starts, B's router drops all forwarded traffic until the job ends. The check passes when the
+output holds the checksum of an uncut 240-item run. Logs: `~/.local/state/pipedpeer/lab-net-e6/20261016-034831/`
+(`18-failover.log`, `daemon-a.log` lines 162-168; daemon times UTC).
+
+| Drill | Result | Source |
+|---|---|---|
+| A node's link cut during a parallel map, two-site testbed | its 53 items run again on the submitting node once it overran its predicted 18 s; checksum unchanged | lines below |
+
+```
+daemon-a.log:162-168
+2026/10/15 22:27:37 [pool] received pool/map from 127.0.0.1:47756: items=53 b64=false cache_keys=0 required_mem=64 forwarded=""
+2026/10/15 22:27:37 [pool] plan: 127.0.0.1:39709=53 (predicted 18.05s, best single device 18.05s)
+2026/10/15 22:27:37 [pool] chunk: 53 items -> 1 part(s), 1 remote, 0 local
+{"level":"info","peer":"6ab75a999fde650b","host":"ppnode-b","at":"127.0.0.1:39709","source":"internet","time":"2026-10-15T22:27:59Z","message":"peer down"}
+2026/10/15 22:28:58 [pool] 6ab75a999fde650b did not finish 53 items in 81.2s (expected 18.0s); counting that as its time
+2026/10/15 22:28:58 [pool] cancelled: 53 items from 127.0.0.1:47756 after 81.2s; requester went away, local workers stopped, peer forwards dropped
+
+18-failover.log
+Pool: 240 items, checksum 7199999008
+  Pool took 83.1s
+```
