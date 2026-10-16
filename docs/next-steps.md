@@ -115,12 +115,6 @@ Parked by the user on 2026-10-15:
 - Two homes that both lack a reachable introducer (no UPnP or port forward,
   double NAT) cannot meet without an overlay such as Tailscale; there is no
   relay by design. A hosted introducer on any public machine removes this.
-- The numpy offload cost gate assumes every node runs at six times this
-  machine's speed (R' = 6R for all K nodes, the submitter included) when any
-  peer reports a GPU, although matmul row blocks run on the peers' CPU NumPy
-  (`numpy_ops.py:33`, `:350-352`, `:404`). Fix: sum per-node CPU rates.
-- The placement health factor h is always 1.0 (`nodestore/store.go:669`);
-  nothing lowers it for a flaky node, though `coordinator/nodes.go:136` says so.
 
 Dropped: Optuna interception, NPU support.
 
@@ -128,15 +122,25 @@ Dropped: Optuna interception, NPU support.
 
 1. Whatever the verification pass and the real-hardware runs (section 2)
    found.
-2. **DiLoCo in automatic mode**, only if its benchmark passes (validation loss
+2. **Two small model bugs** found by the external paper review (both
+   described as they are in the paper and report):
+   - The numpy offload cost gate assumes every node runs at six times this
+     machine's speed (R' = 6R for all K nodes, the submitter included) when
+     any peer reports a GPU, although matmul row blocks run on the peers'
+     CPU NumPy (`numpy_ops.py:33`, `:350-352`, `:404`). Fix: sum per-node
+     CPU rates.
+   - The placement health factor h is always 1.0 (`nodestore/store.go:669`);
+     nothing lowers it for a flaky node, though `coordinator/nodes.go:136`
+     says so. Fix: lower it on recent failures, or drop the term.
+3. **DiLoCo in automatic mode**, only if its benchmark passes (validation loss
    within 1% of one GPU on every test model, mean of 3 seeds, spread
    reported), then **Streaming DiLoCo** if it is cheap on top of the overlap
    thread.
-3. Superlinear steps the scaling map flagged (`docs/benchmarks/scaling.md`).
-4. DDP-LEAD, then the memory ladder.
-5. AMD through ROCm.
-6. Locality- and topology-aware placement.
-7. **`pipedpeer explain <script>`**, like SQL's EXPLAIN: before running, print
+4. Superlinear steps the scaling map flagged (`docs/benchmarks/scaling.md`).
+5. DDP-LEAD, then the memory ladder.
+6. AMD through ROCm.
+7. Locality- and topology-aware placement.
+8. **`pipedpeer explain <script>`**, like SQL's EXPLAIN: before running, print
    the plan: the environment it would build (imports found, CPU or CUDA
    torch), the machines considered and the chosen one, each Pool / joblib /
    pandas / torch call the shim will take over (file:line, from a static
