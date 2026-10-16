@@ -561,7 +561,8 @@ gradient is returned (Figure~\ref{fig:ddp}). An earlier all-to-all design, in wh
 gradient, ran a two-machine job in 62.9\,s against 2.9\,s on one machine. Gradients
 travel as 8-bit integers with one scale per block of 4096 values, the rounding
 error carried into the next step in both directions (error feedback)
-\cite{dettmers2016eightbit, seide2014onebit}. In exact mode a ring of three or
+\cite{dettmers2016eightbit, seide2014onebit}; \texttt{PIPEDPEER\_DDP\_INT8=0}
+sends 16-bit floats instead. In exact mode a ring of three or
 more machines, each reachable directly, reduces in a butterfly instead: each
 rank's daemon averages one shard of the gradient, so each machine's link carries
 $2(N-1)/N$ of a gradient in each direction (its rank's shards and its daemon's
@@ -758,8 +759,7 @@ split into sequential parts, and a request body is capped at the smaller of
 yields a value winning: an explicit \texttt{-{}-mem}; 1.2 times the largest peak
 memory of the recent runs of the same script; or per-library baselines plus
 100\,MiB for the interpreter. The default when nothing is known is 512\,MiB. The
-historical tier closes a feedback loop: the worker samples the job's process tree
-while it runs and records the peak, which sizes the next run's admission request.
+worker records each job's peak, which sizes the next run's admission request.
 
 \textbf{Commands.} The CLI has fifteen commands, two of them hidden (\texttt{events} and
 \texttt{map}); the visible ones include setup, invite,

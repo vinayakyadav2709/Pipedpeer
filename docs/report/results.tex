@@ -184,9 +184,8 @@ matters in both directions. In the lab, a small model with heavy steps on a LAN
 trained in 9.1\,s split across two containers of two processors against
 11.8\,s on one such container, while a 9\,MB model with light steps on Wi-Fi
 took 80.7\,s split against 8.0\,s on one container. A GPU widens the gap: the
-training job of Table~\ref{tab:recorded}, 54.9\,s there on one machine's
-processors, took 1.5\,s on an RTX~3060 against 55.0\,s on that machine's
-processors in a separate measurement.
+training job of Table~\ref{tab:recorded}, measured in one run on one machine,
+took 1.5\,s on an RTX~3060 against 55.0\,s on its processors.
 
 \textbf{Fast synchronisation.} At the default interval for two ranks, 32
 steps, in-process runs kept every model within the 1\% bar: MLP-G $+0.06\%$,
@@ -275,7 +274,7 @@ still returns the correct result (Section~\ref{sec:res-tests}).
 \toprule
 \textbf{Drill} & \textbf{Result} \\
 \midrule
-% source: scripts/lab-net-e6.sh failover check; logs ~/.local/state/pipedpeer/lab-net-e6/20261016-034831 (18-failover.log, daemon-a.log 22:27-22:29).
+% source: docs/benchmarks/rehearsal.md "Two-site testbed: a node's link cut during a parallel map" (log lines copied there).
 A node's link cut during a parallel map, two-site testbed & its \textbf{53} items run again on the submitting node once it overran its predicted 18\,s; checksum unchanged \\
 A worker killed during a remote job & node reported gone \textbf{16}\,s after the kill \\
 A training rank killed during a run & survivor finished all 80 epochs, \textbf{90.5}\,s \\
@@ -401,7 +400,7 @@ few times.
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
 Parallel map, 20-core machine and 16-core peer over Tailscale, plain Python against PipedPeer & 5.8--6.4\,s against 4.9--5.4\,s; 116 of 256 items on the peer \\
-Training on two machines over a home link of about 54\,Mbit/s: one machine~/ two ranks \mbox{16-bit~/} two ranks 8-bit & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
+Training over a home link of about 54\,Mbit/s: one machine, two ranks with 16-bit gradients, two ranks with 8-bit gradients & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
 Introducer traffic during a cross-network run & 0.2\,MB, against about 30\,MB between the peers \\
 Introducer suspended during a run & live peer still reached in 0.03\,s \\
 Signed closure on a host that requires signatures & imported when the sender's key was trusted; refused when it was removed \\

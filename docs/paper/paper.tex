@@ -171,7 +171,7 @@ line of the program, because substitution happens before the first user
 statement, and it decides per call whether to distribute. Table~\ref{tab:cmp}
 summarises the differences.
 BOINC~\cite{anderson2004boinc} pioneered volunteer computing, but as a platform
-for specific projects rather than a general executor.
+for specific projects, not a general executor.
 
 \begin{table}[t]
 \centering
@@ -222,14 +222,14 @@ DiLoCo~\cite{douillard2023diloco} and local SGD~\cite{lin2020localsgd}.
 \section{System Design}
 
 \textbf{Design goals.} (G1) The script runs unchanged. (G2) Joining needs one
-setup command, plus one code across networks. (G3) No machine is special:
+setup command and, across networks, one invite code. (G3) No machine is special:
 there is no head node, scheduler or registry, and every machine both submits
 and works. (G4) Distribution never changes the result and is declined when it
 would be slower. (G5) No job data passes through a third machine.
 
 Coordination is \emph{decentralised}: every daemon serves the introducer for
 its cluster, placement is computed in the submitting client, and a training
-ring's lead is simply the node that runs rank~0 of that job. A node that cannot hold a map forwards it whole,
+ring's lead is the node running its rank~0. A node that cannot hold a map forwards it whole,
 once, to a peer that can, and that peer makes the split; a part already split
 off is never split across machines or forwarded again.
 
@@ -244,8 +244,7 @@ printed, carrying the cluster secret and a few introducer addresses.
 \centering
 \includegraphics[width=0.85\columnwidth]{\figpath{fig_1_paper_arch.png}}
 \caption{System design. Both roles are the same binary; peers on other networks
-are reached over direct links that the introducer helps establish but never
-carries.}
+are reached over direct links the introducer helps set up but never carries.}
 \label{fig:arch}
 \end{figure}
 
@@ -349,7 +348,7 @@ The node that holds a map splits it once among its peers, and each peer runs
 its part on its own cores. The split is a makespan solver: each device is modelled
 as a setup time plus a rate, fitted from the parts it has returned, and a
 device whose setup alone exceeds the makespan is declined. A part unfinished
-past its prediction counts as taking at least that long, a part waiting or
+past its prediction counts as at least that long, a part waiting or
 overdue is copied to a free peer, and the first copy to finish wins.
 
 \textbf{DataFrame operations.} pandas grouping and joining hash rows by key, so each key is
@@ -379,11 +378,12 @@ validation loss at most 1\% above one device's (mean over seeds, every test
 model). DiLoCo's outer Nesterov step (lr 0.7, momentum 0.9) settles at
 $0.7/(1-0.9)=7$ times the averaged change, which suits syncs every few hundred
 steps; at our intervals of 2--64 steps PipedPeer uses plain averaging (outer lr
-1, no momentum), chooses $H$ by ring size (Section~\ref{sec:train}), and uses
-no interval past four ranks. Under automatic sync the lead switches a ring to
+1, no momentum) and chooses $H$ by ring size (Section~\ref{sec:train}).
+Automatic mode never picks fast sync past four ranks; an explicit fast ring
+above four runs at $H=4$ with a warning. Under automatic sync the lead switches a ring to
 fast mode once, when the predicted fast step with a 10\% margin beats the exact
 split and, for a ring not fixed by \texttt{-{}-ddp~$N$}, also the fastest rank
-alone; under \texttt{-{}-ddp~$N$} auto chooses only the sync mode.
+alone; under \texttt{-{}-ddp~$N$}, only the sync mode.
 
 \subsection{The Cost Model}
 \label{sec:cost}
@@ -439,11 +439,11 @@ PipedPeer is a single Go~1.25 binary that is both client and daemon, built from
 46 Go packages and an embedded Python interception shim. The daemon serves an HTTP API, makes
 direct links with quic-go, builds environments with Nix flakes, and runs each
 job in a \texttt{crun}~\cite{crun} sandbox. A mutation audit breaks each of 95 features in
-turn; every mutation fails a test.
+turn; every mutation is caught.
 
 \section{Evaluation}
 
-We ask four questions. \textbf{Q1:} What does interception cost, including when
+We ask four questions.\footnote{Measurement records: \texttt{docs/benchmarks/} in the project repository.} \textbf{Q1:} What does interception cost, including when
 it declines? \textbf{Q2:} How much do the environment cache and the closure diff
 save? \textbf{Q3:} Does work cross machines with correct results, and does it pay
 between physical machines? \textbf{Q4:} Does split training keep accuracy, and
@@ -474,7 +474,7 @@ Training accuracy is measured against one device trained on the same data:
 two-rank rings in the lab, larger rings in-process, with the ranks side by side
 on a single machine. Lab wall times are medians of three to five runs; training
 wall times are one seed. Lab accuracy is a mean of three seeds. In-process
-accuracy is a mean of seeds 0--2 and, where run, of seeds 0--5. MiB and GiB are binary, MB and GB decimal.
+accuracy: seeds 0--2 and, where run, 0--5. MiB and GiB are binary, MB and GB decimal.
 
 \subsection{Microbenchmarks (Q1, Q2)}
 
@@ -499,9 +499,9 @@ adding one package to an environment the peer held sent 29\,MB instead of
 
 \textbf{Work split.} On a lab limited to 8, 2 and 1 CPUs, a headcount split took
 3.6\,s, $1.6\times$ slower than local; the measured split declined the 1-CPU
-worker and took 2.9\,s, which by those two figures is still slower than local. With one peer at a tenth of the CPU,
-the slowdown against an equal cluster fell from $1.6\times$ on the first run to
-$1.08\times$ by the fourth as the rate estimates converged.
+worker and took 2.9\,s, about $1.3\times$ slower than local (derived). With one peer at a tenth of the CPU,
+the slowdown against an equal cluster fell from $1.6\times$ on run one to
+$1.08\times$ by run four as the rate estimates converged.
 
 \textbf{Introducer.} Between two physical machines the
 introducer's host carried 0.2\,MB, the peers about 30\,MB, and
@@ -511,32 +511,32 @@ with the introducer suspended a known peer was reached in 0.03\,s.
 
 With distribution forced in the three-worker lab, the node running a 48-item
 parallel map sent 18 items to three other daemons, one of them the submitter's,
-with results identical to a local run. In the second lab (records:
-\texttt{docs/benchmarks/rehearsal.md}) a parallel map took 43.5\,s on its
+with results identical to a local run. In the second lab a parallel map took 43.5\,s on its
 first run and 17.0\,s with its environment cached, and a GPU job submitted from
 a node without a GPU ran on the GPU node in 7.6\,s cached. An interrupt stopped
 work on every peer within 2\,s. After the introducer changed address, a
 three-node cluster reconnected with no command in about 12\,s. A detached job
-was reattached and returned its results, and a two-rank ring finished its 80
-epochs after one rank was killed, in 90.5\,s.
+returned its results on reattach, and a two-rank ring finished its 80
+epochs in 90.5\,s after a rank was killed.
 
 Table~\ref{tab:phys} lists the physical-machine results. A parallel map and a
 mixed CPU script (pool, joblib, NumPy, pandas) ran faster on two machines than
-on one (a job of about 5\,s is dominated by setup and serialisation), the latter with about half its items on the second laptop. The first
+on one, the latter with half its items on the second laptop; the map fell short
+of what the core counts allow, as a job of about 5\,s is mostly setup and serialisation. The first
 run of the combined script took 506\,s from submission, 487\,s of it building
-its GPU environment (mostly CUDA PyTorch); a repeat took 17.7\,s (15.6\,s in the script). On the phone, a laptop's CPU script spread over
+its GPU environment (mostly CUDA PyTorch); a repeat took 17.7\,s (15.6\,s in the script). With a phone added, a laptop's CPU script spread over
 both laptops and the phone gave the phone 8 of 192 items with an unchanged
 result, after the phone had built the environment from the cache in 27\,s.
 
-\textbf{Across two NATs.} On the two-site testbed (Section~\ref{sec:setup}),
-scripts, parallel maps, remote runs and both training sync modes ran across the
-sites, and a node whose link was cut mid-run was replaced.
+\textbf{Across two NATs.} On the two-site testbed, scripts, parallel maps,
+remote runs and both training sync modes ran across the sites; a node cut off
+mid-run was replaced.
 
 \begin{table}[t]
 \centering
 \caption{Results between physical machines, all over Tailscale. Times are
-the scripts' own except the last row, from submission. Exact sync was not rerun
-in session~2 (records: \texttt{docs/benchmarks/real-hardware.md})}
+the scripts' own except the last row, from submission. Session~2 ran a later
+build; exact sync was not rerun there}
 \label{tab:phys}
 \renewcommand{\arraystretch}{1.15}
 \footnotesize
@@ -585,8 +585,8 @@ epoch.
 
 \textbf{Many ranks.} In-process runs, on up to six seeds, set the interval $H(n)$ as the largest that passed on every model: 32 at
 two ranks, 16 at three and 4 at four; at
-eight ranks the transformer failed at every interval down to 2, so no interval
-is used for five or more ranks. Of ten methods tested at 4, 8 and 11 ranks, only
+eight ranks the transformer failed at every interval down to 2, so automatic
+mode never picks fast sync past four ranks. Of ten methods tested at 4, 8 and 11 ranks, only
 exact synchronisation with rank-16 PowerSGD~\cite{vogels2019powersgd}
 compression and error feedback kept every model within 1\% (worst mean
 $+0.18\%$), with $3.2\times$ fewer bytes than 8-bit values on the MLPs but $1.7\times$
