@@ -115,6 +115,7 @@ Parked by the user on 2026-10-15:
 - Two homes that both lack a reachable introducer (no UPnP or port forward,
   double NAT) cannot meet without an overlay such as Tailscale; there is no
   relay by design. A hosted introducer on any public machine removes this.
+
 Parked by the user on 2026-10-16 (found by the external paper review; the
 paper and report describe both as they are):
 
