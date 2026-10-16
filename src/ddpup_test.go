@@ -12,7 +12,7 @@ import (
 
 func ddpTestNode(id, state string) registry.NodeRecord {
 	return registry.NodeRecord{NodeID: id, State: state, SSHEndpoint: "root@10.0.0." + id + ":22",
-		DaemonPort: 38080, Capabilities: map[string]string{"hostname": "pc-" + id}}
+		DaemonPort: 4242, Capabilities: map[string]string{"hostname": "pc-" + id}}
 }
 
 func anyNode(registry.NodeRecord) bool { return true }
