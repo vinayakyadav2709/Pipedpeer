@@ -47,6 +47,18 @@ changed import and a running engine. BOINC \cite{anderson2004boinc} showed that
 volunteers' idle machines can serve real computation, but as a platform for
 specific projects with their own servers rather than a general executor.
 
+Condor, now HTCondor, introduced cycle scavenging: Litzkow \textit{et~al.}
+\cite{litzkow1988condor} ran batch jobs on workstations whose owners were not
+using them, returned each machine as soon as its owner came back, and
+checkpointed a job so that it could resume elsewhere; Thain \textit{et~al.}
+\cite{thain2005condor} describe the system's growth into a matchmaking scheduler
+for pools of thousands of machines. Its premise, that idle machines nearby are
+worth harvesting and that the owner comes first, is PipedPeer's, and placement
+likewise leaves a busy machine to its user (Section~\ref{sec:placement}).
+HTCondor, however, relies on a central manager that matches jobs to machines,
+and a job is submitted through a description file rather than run as an
+unmodified script.
+
 ``Nix: A Safe and Policy-Free System for Software Deployment''
 \cite{dolstra2004nix} by E.~Dolstra \textit{et~al.} stores every package under
 a path named by a cryptographic hash of all its build inputs, so that versions
@@ -75,8 +87,9 @@ GPU support as the blocking gaps; Kakati and Brorsson \cite{kakati2024} report
 constraint for AI inference. The argument that a lightweight sandbox can replace
 a full container runtime carries over, but CPython with native extensions and
 CUDA libraries cannot run under WebAssembly, so a native environment is shipped
-as a Nix closure and run under an OCI runtime instead, at 15 to 21\,ms more per job than
-\texttt{bwrap} (Section~\ref{sec:res-sandbox}).
+as a Nix closure and run under an OCI runtime instead, at 15 to 21\,ms more per
+job than the unprivileged Bubblewrap sandbox (\texttt{bwrap}) \cite{bubblewrap}
+(Section~\ref{sec:res-sandbox}).
 
 ``PyTorch Distributed: Experiences on Accelerating Data Parallel Training''
 \cite{li2020pytorchddp} by S.~Li \textit{et~al.} describes DDP, which
@@ -85,7 +98,13 @@ backward pass, scaling near-linearly to 256 GPUs. It assumes ranks that open
 connections to one another on their own ports, usually inside one data centre.
 Machines behind different routers cannot, so PipedPeer leaves the model and
 optimiser to the script and routes the gradient exchange through its daemons
-(Section~\ref{sec:ddp}).
+(Section~\ref{sec:ddp}). Horovod \cite{sergeev2018horovod} by A.~Sergeev and
+M.~Del~Balso made the ring all-reduce, in which each of $N$ workers sends and
+receives $2(N-1)/N$ of the gradient, the standard way to synchronise data-parallel
+training with a few changed lines; it too assumes that every rank can reach its
+neighbours in the ring. PipedPeer's butterfly reduction through the daemons
+gives each machine the same per-link volume over connections that the daemons
+have already established.
 
 ``8-Bit Approximations for Parallelism in Deep Learning''
 \cite{dettmers2016eightbit} by T.~Dettmers compresses gradients to 8 bits for
@@ -107,10 +126,10 @@ can finish slightly below one device's loss (Section~\ref{sec:res-train}).
 PipedPeer's training path, trains replicas independently for hundreds of steps
 and merges their parameter changes with an outer Nesterov step, matching
 synchronous training on a language model while communicating about 500 times
-less. Fast synchronisation takes the same structure for links between homes,
-but at its intervals of 2 to 64 steps the outer momentum multiplies the
-script's learning rate, so the merge is a plain average
-(Section~\ref{sec:ddp}).
+less. PipedPeer's fast synchronisation applies the same structure to links
+between homes. At its intervals of 2 to 64 steps, however, DiLoCo's outer
+momentum amplifies each averaged update about sevenfold, which failed the
+accuracy bar, so the merge is a plain average (Section~\ref{sec:ddp}).
 
 ``PowerSGD: Practical Low-Rank Gradient Compression for Distributed
 Optimization'' \cite{vogels2019powersgd} by T.~Vogels \textit{et~al.}
@@ -220,7 +239,10 @@ mapping and filtering behaviour is classified in the terms of RFC~5780
 socket that will carry the connection is hole punching, as analysed by
 Ford, Srisuresh and Kegel \cite{ford2005p2p}, whose observation that a router's
 mapping belongs to a socket shapes PipedPeer's shared-socket design. Links are
-QUIC \cite{rfc9000} secured by TLS~1.3 \cite{rfc8446}, node identities are
+QUIC \cite{rfc9000} secured by TLS~1.3 \cite{rfc8446} rather than a kernel
+tunnel such as WireGuard \cite{donenfeld2017wireguard}, which underlies the
+Tailscale overlay used between physical machines in Chapter~\ref{chap:results};
+node identities are
 Ed25519 keys \cite{bernstein2012ed25519}, and archives are compressed with
 Zstandard \cite{rfc8878}.
 
@@ -243,12 +265,14 @@ Table~\ref{tab:litsummary} summarises the surveyed work.
 \endhead
 \bottomrule
 \endlastfoot
+Litzkow et~al.\ \cite{litzkow1988condor} & 1988 & Batch jobs on idle workstations, owner first & Central manager; jobs described for submission, not scripts \\
 Anderson \cite{anderson2004boinc} & 2004 & Volunteer computing on idle machines & Platform for specific projects, not a general executor \\
 Dolstra et~al.\ \cite{dolstra2004nix} & 2004 & Store paths named by a hash of their build inputs & No placement or transfer between machines \\
 Zaharia et~al.\ \cite{zaharia2010spark} & 2010 & In-memory resilient datasets rebuilt from lineage & Dataset API; cluster with a master \\
 Seide et~al.\ \cite{seide2014onebit} & 2014 & 1-bit quantisation with error feedback & Synchronisation still every step \\
 Rocklin \cite{rocklin2015dask} & 2015 & Blocked task graphs for array and dataframe work & Program written against Dask's collections \\
 Dettmers \cite{dettmers2016eightbit} & 2016 & 8-bit gradient approximation & Synchronisation still every step \\
+Sergeev and Del~Balso \cite{sergeev2018horovod} & 2018 & Ring all-reduce for data-parallel training & Ranks must reach their ring neighbours \\
 Moritz et~al.\ \cite{moritz2018ray} & 2018 & Tasks and actors over a distributed scheduler & Changed import; cluster with a head node on one network \\
 Vogels et~al.\ \cite{vogels2019powersgd} & 2019 & Low-rank gradient compression with error feedback & More bytes than 8-bit on small matrices \\
 Petersohn et~al.\ \cite{petersohn2020modin} & 2020 & pandas API over a partitioned, parallel dataframe & Changed import; running Ray or Dask engine \\

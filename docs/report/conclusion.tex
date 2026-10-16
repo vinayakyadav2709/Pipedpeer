@@ -50,8 +50,13 @@ synchronisation is chosen only for ring sizes where it kept accuracy.
   \item \textbf{Measurement.} Speedup comes from containers with fixed processor
   quotas and a few real machines; the success rate of hole punching across many networks, two
   GPUs in one machine and fast synchronisation at five to seven ranks are not
-  measured. NAT traversal is evaluated on the two-site testbed on one host and
-  over an overlay between real homes.
+  measured. NAT traversal is evaluated on the two-site testbed on one host;
+  the runs between real homes used an overlay and measure distribution, not
+  traversal. No wall-time comparison against Ray, Dask or \texttt{torchrun} was
+  run: the comparison of Table~\ref{tab:comparison} is qualitative.
+  \item \textbf{Fixed cost constants.} The cost model prices each operation with
+  fixed throughputs and intensities, and a single GPU peer raises the assumed
+  remote throughput of every node (Section~\ref{sec:cost}).
   \item \textbf{Seed spread.} The 1\% accuracy bar applies to the mean over
   seeds; single seeds spread wider, from $-3.9\%$ (the lab run at 64 steps) to
   $+2.2\%$ (in-process at 32 steps) against one device, so one run can miss the

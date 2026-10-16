@@ -20,8 +20,8 @@ digraph Sandbox {
   ct [shape=plain, style="", label=<
     <table border="1" cellborder="0" cellspacing="0" cellpadding="4" color="#a33333" bgcolor="#fdf6f6">
       <tr><td colspan="2" align="left"><font color="#a33333">crun container</font></td></tr>
-      <tr><td port="nix" align="left">/nix</td><td align="left">read only</td></tr>
-      <tr><td port="work" align="left">/work</td><td align="left">read write</td></tr>
+      <tr><td port="nix" align="left">/nix</td><td align="left">read-only</td></tr>
+      <tr><td port="work" align="left">/work</td><td align="left">read-write</td></tr>
       <tr><td align="left">/dev/shm</td><td align="left">mode 1777</td></tr>
       <tr><td align="left">/tmp, home</td><td align="left">scratch, private</td></tr>
       <tr><td port="dev" align="left">/dev/nvidia*</td><td align="left">device nodes</td></tr>

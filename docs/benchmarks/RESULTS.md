@@ -138,14 +138,14 @@ anything. It is therefore not evidence of recovery either.
 
 ## R6 Sandbox start cost [Aug]
 
-Not repeated. Median of 20, with the first 5 iterations as warm-up
-(`raw/B2_sandbox_bench.*`):
+Not repeated. Mean of 20, with the first 5 iterations as warm-up, the
+statistic the benchmark itself reports (`raw/B2_sandbox_bench.*`):
 
-| Task | bwrap | crun |
-|---|---|---|
-| trivial | 5.1 ms | 21.7 ms |
-| medium | 8.0 ms | 23.7 ms |
-| python | 16.9 ms | 36.8 ms |
+| Task | bwrap | crun | crun - bwrap |
+|---|---|---|---|
+| trivial | 5.1 ms | 22.4 ms | +17.3 ms |
+| medium | 8.2 ms | 23.5 ms | +15.4 ms |
+| python | 17.1 ms | 38.0 ms | +20.9 ms |
 
 ## R7 Between real machines [commit]
 
