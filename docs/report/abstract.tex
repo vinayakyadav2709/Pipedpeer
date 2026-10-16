@@ -33,11 +33,13 @@ for parallel chunks.
 \noindent In a container lab, a job whose environment is already in place
 starts in a median of 0.83\,s against 23.4\,s for its first submission. Between
 two laptops in different homes, joined over Tailscale, a mixed CPU script
-finished in about 14\,s against 18\,s on one laptop. On a two-rank training ring, synchronising
-every 32 steps instead of every step kept the validation loss no more than 1\%
-above one device's on every test model, with all ranks in one process (mean of
-three seeds), and in a separate container-lab run (one seed) each rank sent 7.6 to
-9.2 times fewer bytes. Each of 95 features was broken in turn; the suite caught every mutation.
+finished in about 14\,s against 18\,s on one laptop. On a two-rank training
+ring simulated with all ranks in one process, synchronising every 32 steps
+instead of every step kept the mean validation loss over three seeds no more
+than 1\% above one device's on every test model, and in a separate
+container-lab run (one seed) each rank sent 7.6 to 9.2 times fewer bytes. A
+mutation audit that disables each of 95 features in turn found that the test
+suite detects every one.
 
 \vspace{0.6cm}
 \noindent\textbf{Keywords:} Distributed Computing, Peer-to-Peer, NAT Traversal,

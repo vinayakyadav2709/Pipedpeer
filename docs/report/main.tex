@@ -38,6 +38,8 @@
 \usepackage{microtype}
 \usepackage{etoolbox}
 \usepackage{multicol}
+\usepackage[chapter]{algorithm}
+\usepackage{algpseudocode}
 \usepackage{hyperref}
 
 % -- Fields the authors fill before printing: blank space in the PDF; find them
@@ -157,6 +159,10 @@
 
 \clearpage
 \listoftables
+
+\vspace{1.5em}
+{\let\clearpage\relax\let\cleardoublepage\relax\listofalgorithms}
+\addcontentsline{toc}{chapter}{List of Algorithms}
 
 \input{list_abbreviations.tex}
 

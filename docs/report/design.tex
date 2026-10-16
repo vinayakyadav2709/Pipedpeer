@@ -23,7 +23,7 @@ find each other unaided. Across networks they meet through an
 other and carries no job data. Every daemon is an introducer for its own
 cluster. Two optional roles exist: \texttt{chunks-only}, for a phone that takes
 parallel chunks but not whole jobs, and \texttt{introducer-only}, for a hosted
-server that runs nothing.
+server that introduces machines but runs no jobs.
 
 \begin{figure}[!htbp]
     \centering
@@ -112,7 +112,7 @@ Figure~\ref{fig:dfd1} decomposes the system into seven processes:
   \item \textbf{2 Find and link peers.} Probe the subnet; across networks,
   publish candidates to the introducer, punch, and register each direct link as a
   node.
-  \item \textbf{3 Place task.} Apply hard filters, score the survivors, reserve
+  \item \textbf{3 Place task.} Apply hard filters, score the remaining candidates, reserve
   a lease on the best.
   \item \textbf{4 Transfer.} Upload the workspace, and of the closure only the
   store paths the worker lacks; signed between daemons.
@@ -159,35 +159,33 @@ actors as well as people.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=120mm]{\figpath{fig_3.5_sequence.png}}
+    \includegraphics[width=96mm]{\figpath{fig_3.5_sequence.png}}
     \caption[Sequence diagram of one job]{End-to-end execution of one job.}
     \label{fig:sequence}
 \end{figure}
 
 Figure~\ref{fig:sequence} follows one job from submission to results:
 
-\begin{enumerate}[leftmargin=*]
+\begin{enumerate}[leftmargin=*, nosep]
   \item The user runs \texttt{pipedpeer run script.py}.
   \item The client scans imports, builds a Nix closure locally, and estimates
   the job's memory requirement.
   \item It asks its own daemon for the healthy peers, including peers on other
   networks, reached through local forwarders onto direct links.
   \item The coordinator filters and scores them and sends \texttt{accept} to the
-  best candidate, which checks its capacity and reserves it.
-  \item The client sends \texttt{commit}, which turns the reservation into a
-  running lease.
+  best candidate, which reserves capacity; \texttt{commit} turns the
+  reservation into a running lease.
   \item It asks whether the worker can already run the closure; if not, it asks
   which store paths are missing and sends only those, then uploads the
   workspace.
   \item The worker pushes the closure to peers that lack it, so that they can
   take a share of the parallel work.
   \item Execution proceeds inside a sandbox under a per-job memory ceiling, with
-  output streamed back as it is written.
-  \item If the script uses a parallel primitive, the shim distributes it subject
-  to the cost model.
+  output streamed back; the shim distributes any parallel primitive subject to
+  the cost model.
   \item On exit, changed files and a deletion manifest return as a compressed
   archive and are extracted into the user's directory.
 \end{enumerate}
 
-Every request in this sequence carries the cluster's shared secret and travels
-over pinned TLS on a local network or inside a QUIC link across networks.
+Every request carries the cluster secret, over pinned TLS on a local network or
+a QUIC link across networks.

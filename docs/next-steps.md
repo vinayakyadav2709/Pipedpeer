@@ -58,8 +58,8 @@ The emulated lab measures overhead growth and emulated speedup; these need
 real machines:
 
 - **The two laptops over Tailscale** running `cpu.py`, `gpu.py`, `both.py`, and
-  `--ddp 1` against automatic mode (the manual checklist in the worktree's
-  `testing-log.md`). TODO(verify).
+  `--ddp 1` against automatic mode (the manual checklist in
+  [pipedpeer-demo/TESTING.md](../pipedpeer-demo/TESTING.md)). TODO(verify).
 - **The phone** (Samsung S20 FE 5G, Snapdragon 865): run on 2026-10-16 with
   Play Termux, Debian + Nix in proot: pool and torch chunks from laptop A
   verified (numbers in the report's results table). Still open: a run
@@ -115,6 +115,12 @@ Parked by the user on 2026-10-15:
 - Two homes that both lack a reachable introducer (no UPnP or port forward,
   double NAT) cannot meet without an overlay such as Tailscale; there is no
   relay by design. A hosted introducer on any public machine removes this.
+- The numpy offload cost gate assumes every node runs at six times this
+  machine's speed (R' = 6R for all K nodes, the submitter included) when any
+  peer reports a GPU, although matmul row blocks run on the peers' CPU NumPy
+  (`numpy_ops.py:33`, `:350-352`, `:404`). Fix: sum per-node CPU rates.
+- The placement health factor h is always 1.0 (`nodestore/store.go:669`);
+  nothing lowers it for a flaky node, though `coordinator/nodes.go:136` says so.
 
 Dropped: Optuna interception, NPU support.
 

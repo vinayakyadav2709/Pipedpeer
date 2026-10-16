@@ -68,6 +68,10 @@ per job by the machine that submits it. The contributions of this work are:
   (Section~\ref{sec:ft}).
   \item \textbf{Speed-weighted data-parallel training through the daemon}, with
   exact or fast synchronisation chosen by ring size (Section~\ref{sec:ddp}).
+  \item \textbf{An unprivileged per-job sandbox and a phone worker.} Each job
+  runs in a \texttt{crun} container under its own memory ceiling, with the GPU
+  driver files bound in one by one, and an Android phone under Termux joins as a
+  worker for parallel chunks (Section~\ref{sec:sandbox}).
 \end{enumerate}
 
 The two words of the title are used in a precise sense. Coordination is
@@ -94,8 +98,11 @@ level, machines and then cores (Section~\ref{sec:intercept}).
   command, with no VPN, no port forwarding and no relay in the data path.
   \item To authenticate every request, encrypt traffic between machines, isolate
   each job, and survive the loss of any worker without losing the run.
-  \item To require no manual installation on a new machine: a single binary, whose
-  setup command installs what else is needed, without root if necessary.
+  \item To require no manual installation on a new machine: a single binary
+  whose setup command installs the remaining dependencies, without root
+  privileges where the machine does not grant them.
+  \item To admit an Android phone as a worker for parallel chunks, alongside
+  laptops and desktops.
 \end{enumerate}
 
 \section{Scope}

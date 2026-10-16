@@ -6,7 +6,7 @@ digraph Trust {
         fillcolor="#eef3fb", color="#3b6ea5", penwidth=1.2, margin="0.18,0.11"];
   edge [fontname="Helvetica", fontsize=13, color="#555555"];
 
-  tok  [label="Shared secret\n32 random bytes,\nfrom set-up or invite;\nrequired on every route,\nsent only to a host\nthat proved it (HMAC)", fillcolor="#fdf6e3", color="#8a6d1f"];
+  tok  [label="Shared secret\n32 random bytes,\nfrom setup or invite;\nrequired on every route,\nsent only to a host\nthat proved it (HMAC)", fillcolor="#fdf6e3", color="#8a6d1f"];
   tls  [label="On a LAN: pinned TLS\ncertificate from the node key,\npinned by node id on first\ncontact; may fall back to HTTP"];
   quic [label="Across networks: QUIC\nsigned hello bound to\nthe session, checks the\nnode's fingerprint"];
   key  [label="Node key\nEd25519;\nfingerprint\nis the node id", fillcolor="#e3f3e9", color="#2f7d4f", penwidth=1.6];

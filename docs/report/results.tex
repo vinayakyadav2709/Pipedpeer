@@ -15,9 +15,10 @@ different networks (Section~\ref{sec:res-recorded})?
 \section{Evaluation Setup}
 \label{sec:res-setup}
 
-\textbf{Hosts.} Laboratory measurements ran on two development hosts: an Intel
-i5-13420H with 12 hardware threads and 15\,GiB of memory under Fedora~43, and a
-16-thread laptop with an RTX~3060 laptop GPU under Fedora~44.
+\textbf{Hosts.} Laboratory measurements ran on two laptops: one with a
+13th-generation Intel Core i5-13420H (12 hardware threads) and 15\,GiB of memory
+under Fedora~43, and one with an AMD Ryzen~7 5800H (16 hardware threads), an
+RTX~3060 laptop GPU and about 14\,GiB of usable memory under Fedora~44.
 
 \textbf{Container labs.} Worker daemons run in containers on one host.
 In the \emph{plain lab} (three workers) the containers share the host's
@@ -40,40 +41,98 @@ packets, with the introducer on a third network standing for the internet. Every
 user command is run across it.
 
 \textbf{Training accuracy.} The accuracy of each synchronisation setting is
-measured on three models --- a four-layer perceptron sized for a GPU (MLP-G), the
-same perceptron at a CPU sizing (MLP-C), and a small transformer --- against
-one device trained on the same data and seeds: two-rank rings in
-the lab, larger rings in-process, with the ranks side by side on a single machine.
+measured on three models (Table~\ref{tab:models}) --- a four-layer perceptron
+sized for a GPU (MLP-G), the same perceptron at a CPU sizing (MLP-C), and a
+small transformer --- against one device trained on the same data and seeds:
+two-rank rings in the lab, larger rings in-process, with the ranks side by side
+on a single machine. Every model keeps its batch, learning rate and epochs in
+every arm.
 
-\textbf{Real machines.} Two laptops in different homes (RTX~3060 and RTX~3050)
-connected over a direct Tailscale path \cite{anderson2020nat}, a Samsung
-Galaxy S20~FE phone under Termux, and further measurements between a 20-core
-machine and a 16-core peer joined over Tailscale, with a public cloud host
-acting as introducer.
+\begin{table}[!htbp]
+\centering
+\caption{The three test models}
+\label{tab:models}
+\renewcommand{\arraystretch}{1.2}
+\rowcolors{2}{}{rowgray}
+\small
+\begin{tabularx}{\textwidth}{L{2.1cm} X C{2.25cm} C{1.5cm} C{1.1cm} C{1.7cm}}
+\toprule
+\textbf{Model} & \textbf{Network and optimiser} & \textbf{Parameters} & \textbf{Samples} & \textbf{Batch} & \textbf{Epochs (steps)} \\
+\midrule
+MLP-G & MLP 64--512--512--512--1; SGD 0.05, mom.\ 0.9 & 559{,}105 & 200{,}000 & 4096 & 3 (147) \\
+MLP-C & Same MLP; SGD 0.1, mom.\ 0.9 & 559{,}105 & 60{,}000 & 2048 & 6 (180) \\
+Transformer & 2 layers, width 64, 4 heads, 32 tokens; AdamW & 70{,}211 & 40{,}000 & 256 & 2 (314) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{Real machines.} Two sets of measurements used physical machines. The
+first joined two laptops in different homes over a direct Tailscale path
+\cite{anderson2020nat}, which runs over WireGuard \cite{donenfeld2017wireguard}
+--- the Ryzen~7 5800H laptop and one with an Intel Core i5-13420H (12 threads),
+an RTX~3050 6\,GB laptop GPU and 15.3\,GiB --- and a Samsung Galaxy S20~FE phone
+under Termux. The second set is that of Table~\ref{tab:recorded}: a
+parallel map between a 20-core 13th-generation Intel Core i9 machine and the
+Ryzen~7 5800H laptop over Tailscale, training runs over a home link of about
+54\,Mbit/s, and introducer measurements in which a public cloud host served as
+the introducer. Per-run records of every measurement are in the project
+repository \cite{pipedpeerrepo}, under \texttt{docs/benchmarks}.
 
 \textbf{Workloads.} Seven example workloads cover a standard-library parallel
 map, a map over a lambda, scikit-learn with \texttt{joblib}, NumPy linear algebra,
 out-of-core pandas, torch data-parallel training and file synchronisation; one
 script combines every kind of intercepted work, and five idiomatic, unoptimised
-user scripts stand in for unseen workloads. Lab
-wall times are medians of three to five runs, except training rings, which are
-one seed. Lab accuracy is the mean of three seeds; in-process accuracy is the
-mean of seeds 0--2 and, where run, of seeds 0--5, and both must pass. Sizes in
+user scripts stand in for unseen workloads.
+
+\textbf{Statistics.} Lab wall times are medians of three to five runs, and
+training rings one seed. Two microbenchmarks use their tool's statistic:
+interpreter startup is the best of five runs, sandbox start the mean of 20 runs
+after five warm-up runs. Lab accuracy is the mean of three
+seeds; in-process accuracy is the mean of seeds 0--2 and, for MLP-C and the
+transformer, also of seeds 0--5, and both means must pass (seeds 3--5 were run
+for MLP-C and the transformer only). Sizes in
 KiB, MiB and GiB are binary ($2^{10}$, $2^{20}$ and $2^{30}$ bytes); KB, MB and
 GB are decimal.
 
 \section{Functional Verification}
 \label{sec:res-tests}
 
-The test suite exercises the properties the design relies on, with every
-optional Python library present --- among them that a hash-shuffled aggregation
-equals local pandas, that a parallel map whose every remote part fails still
-returns the correct result, that the daemon's average is weighted by samples,
-and that a link hello replayed on another session is refused. % source: docs/benchmarks/raw/T3_audit_tests.txt (95 caught, 0 missed).
-A mutation audit
-guards against a suite that passes without proving anything: it breaks each of
-95 features in turn, from the sample-weighted gradient fold to the
-router-mapping checks, and requires a test to fail. Every mutation was caught.
+Correctness is checked at three levels: a unit and integration suite, a
+mutation audit of that suite, and whole-system runs --- every user command
+across the two-site testbed, the end-to-end runs of
+Section~\ref{sec:res-lablayout} and the failure drills of
+Section~\ref{sec:res-ft}, which remove machines, links and terminals during a
+run.
+
+\textbf{The suite.} The Go test suite, run with every optional Python library
+present (NumPy, pandas, scikit-learn, joblib and torch), passed its 615 tests;
+the two it skipped need a container runtime and run under a separate
+integration flag. A check fails the build when any of the 15 tests that
+exercise distribution was skipped, so a missing library cannot turn them into
+silent passes. The suite checks that a hash-shuffled aggregation equals local
+pandas, that a parallel map whose every remote part fails still returns the
+correct result, that the daemon's average is weighted by samples, and that a
+link hello replayed on another session is refused.
+
+\textbf{The mutation audit.} A suite can pass without proving anything, so a
+mutation audit disables each of 95 features in turn and requires a named test to
+fail. The features span every area: in training, the sample-weighted gradient
+fold, equal step counts across unequal shares and the rule for dropping a rank;
+in joining across networks, the refusal to publish a router mapping behind a
+second NAT, the nonce a PCP reply must carry, an introducer that forwards only
+within its cluster, and one socket for probes and QUIC; in trust, that a
+signing key must belong to the node offering it, that a peer that leaves stops
+being trusted, and that setup never disables Nix's signature checking; in
+shipping work, that a kernel that cannot be serialised runs on local threads;
+and the cost model's out-of-memory branch, memory accounting between daemons on
+one machine, and eviction from both closure caches. Every mutation was caught.
+
+\textbf{Continuous integration.} Every pull request runs formatting and static
+checks, the suite under the race detector, the skip check, a parallel-map
+benchmark that fails if PipedPeer is more than three times slower than plain
+Python on one machine, and the startup benchmark of
+Section~\ref{sec:res-shim}, which fails if interception raises the startup of
+a trivial job above three times that of plain Python.
 
 \section{Environment Cache}
 \label{sec:res-cache}
@@ -86,20 +145,19 @@ only the workspace and took a median of 0.83\,s.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=87mm]{\figpath{fig_5.1_closure_cache.png}}
+    \includegraphics[width=78mm]{\figpath{fig_5.1_closure_cache.png}}
     \caption[Cold and warm submissions]{Left: first submission against the median of the submissions that
     sent nothing. Right: every run, coloured by what its log says was sent.}
     \label{fig:rescache}
 \end{figure}
 
 Against a container peer on the submitting laptop, the path-level difference
-sent 29\,MB (7 of 43 store paths) instead of 206\,MB when one package was added
-to an environment the peer held, and a peer holding an environment fetched
-0.43\,MiB of a 444\,MiB closure for one that differed from it by one small
-pure-Python package. In the LAN lab, a dry-run build of an unseen script's
-environment took 4\,s on a container that had built the common packages ahead
-of time, against 54\,s on one that had not
-(\texttt{docs/benchmarks/rehearsal.md}).
+sent 28.6\,MB (7 of 43 store paths) instead of 206.0\,MB when one package was
+added to an environment the peer held, 86\% fewer bytes, and a peer holding an
+environment fetched 0.45\,MB of a 466\,MB closure for one that differed from it
+by one small pure-Python package. In the LAN lab, a dry-run build of an unseen
+script's environment took 4\,s on a container that had built the common packages
+ahead of time, against 54\,s on one that had not.
 
 % source: commit a56e4de body (closure broadcast): late run 2.1 s.
 With one of two nodes held to 800\,kbit/s, the first run waited the upload's
@@ -118,41 +176,48 @@ dispatch, so the decline is the model's choice and not a dead cluster.
 Declining costs about 0.12\,s per job, the measurement of the head of the map
 plus the decision: a median of 0.80\,s against 0.68\,s with interception
 disabled. Interpreter startup for a job that imports nothing heavy, best of five
-runs, is $1.24\times$ that of plain Python when NumPy, pandas, torch and joblib are
-patched on first import, and $20.0\times$ when they were patched at startup,
-measured on another host (Figure~\ref{fig:resshim}). A continuous-integration check fails any
+runs on the Core i5-13420H laptop, is $1.24\times$ that of plain Python when
+NumPy, pandas, torch and joblib are patched on first import; patching them at
+startup instead cost $20.0\times$, measured on a different machine
+(Figure~\ref{fig:resshim}). A continuous-integration check fails any
 change that raises this ratio above $3\times$.
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=150mm]{\figpath{fig_5.2_shim_overhead.png}}
+    \includegraphics[width=120mm]{\figpath{fig_5.2_shim_overhead.png}}
     \caption[Cost of interception]{Left: the declined 16-item parallel map, median
     and range; the enabled side's cold first run is left out of its range. Right: interpreter
-    startup with libraries patched at startup and on first import.}
+    startup with libraries patched at startup and on first import, best of five
+    runs.}
     \label{fig:resshim}
 \end{figure}
 
-\begin{figure}[!htbp]
+\textbf{Sandbox start.}\label{sec:res-sandbox} The OCI runtime \texttt{crun}
+costs 15 to 21\,ms more per job than the lighter Bubblewrap (\texttt{bwrap})
+\cite{bubblewrap} across three tasks (means of 20 runs), which is small beside a
+warm job of under a second, and its device model is what makes GPU passthrough
+possible (Figure~\ref{fig:ressandbox}).
+
+\begin{figure}[H]
     \centering
-    \includegraphics[width=101mm]{\figpath{fig_5.3_sandbox_overhead.png}}
-    \caption[Sandbox start cost]{Sandbox start cost, median of 20 iterations.}
+    \includegraphics[width=84mm]{\figpath{fig_5.3_sandbox_overhead.png}}
+    \caption[Sandbox start cost]{Sandbox start cost, mean of 20 runs after five
+    warm-up runs.}
     \label{fig:ressandbox}
 \end{figure}
-
-\textbf{Sandbox start.}\label{sec:res-sandbox} The OCI runtime costs 15 to 21\,ms more per job than the lighter
-\texttt{bwrap} (averages of 20 iterations, three tasks), small beside a warm job of under a second, and its device model
-is what makes GPU passthrough possible (Figure~\ref{fig:ressandbox}).
 
 \section{Distribution Across Machines}
 \label{sec:res-dist}
 
 \textbf{Work crosses nodes.} With distribution forced, the node running a
 48-item parallel map sent 18 items to three other daemons of the plain lab, one
-of them the submitting machine's own, with results identical to a local run. The NumPy workload moved its 34\,MB singular value decomposition to one
-worker. Because the plain lab's containers share the host's processor,
-distribution there can only add overhead, and the pool benchmark shows how
-much: plain Python took 0.17\,s, a hand-tuned pool 0.17\,s, and the untouched
-script under PipedPeer 0.24\,s with a quarter of the items on the cluster.
+of them the submitting machine's own, with results identical to a local run.
+The NumPy workload moved its 34\,MB singular value decomposition to one worker.
+Because the plain lab's containers share the host's processor, distribution
+there can only add overhead. A separate, unforced run of the pool benchmark
+shows how much: plain Python took 0.17\,s, a hand-tuned pool 0.17\,s, and the
+untouched script under PipedPeer 0.24\,s, with 12 of its 48 items on the
+cluster.
 
 \textbf{Sharing by measured speed.} On a lab cluster limited to 8, 2 and
 1 CPUs, dividing a map by headcount took 3.6\,s (median of five), 1.6 times slower
@@ -190,13 +255,16 @@ took 1.5\,s on an RTX~3060 against 55.0\,s on its processors.
 \textbf{Fast synchronisation.} At the default interval for two ranks, 32
 steps, in-process runs kept every model within the 1\% bar: MLP-G $+0.06\%$,
 MLP-C $+0.64\%$ and the transformer $+0.73\%$ over seeds 0--2, and MLP-C
-$+0.35\%$ and the transformer $-1.02\%$ over seeds 0--5. Table~\ref{tab:fastsync}
+$+0.35\%$ and the transformer $-1.02\%$ over seeds 0--5 (seeds 3--5 were run
+for MLP-C and the transformer only). Table~\ref{tab:fastsync}
 gives one lab run of a two-rank ring at that interval: each rank sent 7.6 to
 9.2 times fewer bytes than under exact synchronisation, and the ring finished
-1.2--1.4 times faster than exact on the LAN and 1.6--3.1 times on Wi-Fi. A
-separate lab run at 64 steps, three seeds per cell
-(Figure~\ref{fig:ressync}, right), also stayed within the bar on both
-profiles: MLP-G $+0.64\%$/$+0.61\%$, MLP-C $-2.14\%$/$-2.09\%$ and the
+1.2--1.4 times faster than exact on the LAN and 1.6--3.1 times on Wi-Fi
+(Figure~\ref{fig:ressync}). Exact synchronisation sends one 8-bit gradient of
+about 0.55\,MiB per step for either perceptron, so MLP-C sends more than MLP-G
+only because it runs 180 steps against 147; under fast synchronisation the
+number of synchronisations, not of steps, sets the bytes. A separate lab run at
+64 steps, three seeds per cell, also stayed within the bar on both profiles: MLP-G $+0.64\%$/$+0.61\%$, MLP-C $-2.14\%$/$-2.09\%$ and the
 transformer $+0.18\%$/$+0.50\%$ (LAN/Wi-Fi), each within the spread of exact
 synchronisation's own gap; MLP-C's negative gap reflects that periodic
 averaging can generalise slightly better than exact synchronisation
@@ -224,12 +292,13 @@ Transformer & 26.7 & 21.7 / 2.4 & 22.7 / 35.9 & 19.1 / 22.9 \\
 
 \begin{figure}[!htbp]
     \centering
-    \includegraphics[width=150mm]{\figpath{fig_5.4_sync_modes.png}}
-    \caption[Exact and fast synchronisation]{Left: wall time of one device and of a two-rank ring under exact and
-    fast synchronisation on Wi-Fi, from the run of Table~\ref{tab:fastsync}.
-    Right: validation-loss gap to one device under fast synchronisation every
-    64 steps, mean of three seeds, from the separate three-seed lab run; the
-    dashed line is the 1\% bar.}
+    \includegraphics[width=122mm]{\figpath{fig_5.4_sync_modes.png}}
+    \caption[Exact and fast synchronisation]{Fast synchronisation at the
+    two-rank default of 32 steps. Left: lab wall time of one device and of a
+    two-rank ring under exact and fast synchronisation on Wi-Fi, one seed, from
+    the run of Table~\ref{tab:fastsync}. Right: in-process validation-loss gap
+    to one device, mean of seeds 0--2 and of seeds 0--5 where run; the dashed
+    line is the 1\% bar.}
     \label{fig:ressync}
 \end{figure}
 
@@ -258,8 +327,7 @@ then to 70:30 after it recovered.
 \label{sec:res-ft}
 
 Table~\ref{tab:drills} lists the failure drills run in the LAN lab and its
-two-container GPU variant (records in \texttt{docs/benchmarks/rehearsal.md}),
-and the cut link on the two-site testbed. They exercise rescheduling
+two-container GPU variant, and the cut link on the two-site testbed. They exercise rescheduling
 (Section~\ref{sec:ft}), re-sharding at an epoch boundary (Section~\ref{sec:ddp}),
 the cancel frame and the logged output stream. The tests add that a parallel map whose every remote chunk fails
 still returns the correct result (Section~\ref{sec:res-tests}).
@@ -277,7 +345,7 @@ still returns the correct result (Section~\ref{sec:res-tests}).
 % source: docs/benchmarks/rehearsal.md "Two-site testbed: a node's link cut during a parallel map" (log lines copied there).
 A node's link cut during a parallel map, two-site testbed & its \textbf{53} items run again on the submitting node once it overran its predicted 18\,s; checksum unchanged \\
 A worker killed during a remote job & node reported gone \textbf{16}\,s after the kill \\
-A training rank killed during a run & survivor finished all 80 epochs, \textbf{90.5}\,s \\
+A training rank killed during a run & remaining rank finished all 80 epochs, \textbf{90.5}\,s \\
 A training rank's machine back during a run & rejoined at the next epoch, \textbf{4}\,s after its daemon started \\
 Interrupt during a parallel map & peers stopped within \textbf{2}\,s \\
 Terminal closed during a run & stopped everywhere, as an interrupt \\
@@ -294,7 +362,7 @@ Introducer's address changed, no commands run & recovered in about \textbf{12}\,
 The whole system was run end to end in the LAN lab for the processor steps and
 its two-container GPU variant for the GPU steps. The containers
 share one laptop, so Table~\ref{tab:lablayout} shows what each step costs and
-that it works, not speedup (records in \texttt{docs/benchmarks/rehearsal.md}).
+that it works, not speedup.
 A cold run is the first ever on fresh containers; a cached run follows it. The
 GPU job's first run is not given, because that run measured a closure
 broadcast to nodes without a GPU rather than the step itself. The last row ran eight jobs at once on containers with
@@ -332,8 +400,7 @@ download CUDA torch.
 
 \textbf{Two laptops in different homes.} Table~\ref{tab:twolaptops} gives runs
 between two laptops connected over a direct Tailscale path with a 6--8\,ms round
-trip. Times are the script's own unless marked from submission; per-run records
-are in \texttt{docs/benchmarks/real-hardware.md}.
+trip. Times are the script's own unless marked from submission.
 
 \begin{table}[!htbp]
 \centering
@@ -365,8 +432,11 @@ rank alone outruns. The first four rows come from one session, in which fast
 synchronisation ran 5.0 times faster than exact (7.4 against 37.1\,s) at about
 the same loss. The last two come from a second session on the build whose automatic
 choice can switch a fixed ring to fast mode; exact synchronisation was not
-rerun there. In it the automatic choice, which starts exact and switches once,
-took 14.6\,s against 8.5\,s for fast.
+repeated in it. There the automatic choice took 14.6\,s against 8.5\,s for fast
+synchronisation. The automatic choice starts exact and is first evaluated at
+the twentieth synchronisation, so it synchronised exactly for 19 steps before
+switching, 25 times in all, whereas the fast run's exact warm-up is a tenth of
+its 147 steps, 15 steps.
 
 \textbf{Across two NATs.} On the two-site testbed of
 Section~\ref{sec:res-setup}, scripts, parallel maps, remote runs and both
@@ -384,9 +454,9 @@ phone had built the job's environment from the binary cache in 27\,s. A torch
 script training 160 small models gave the phone 6 of them, all converged;
 with 32, it took none.
 
-\textbf{Further measurements.} Table~\ref{tab:recorded} collects measurements
-between a 20-core machine, a 16-core peer and a public cloud host, each taken a
-few times.
+\textbf{Further measurements.} Table~\ref{tab:recorded} collects the second
+set of physical-machine measurements of Section~\ref{sec:res-setup}, each taken
+a few times.
 
 \begin{table}[!htbp]
 \centering
@@ -399,9 +469,9 @@ few times.
 \toprule
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
-Parallel map, 20-core machine and 16-core peer over Tailscale, plain Python against PipedPeer & 5.8--6.4\,s against 4.9--5.4\,s; 116 of 256 items on the peer \\
+Parallel map, Core i9 machine and Ryzen~7 laptop over Tailscale, plain Python against PipedPeer & 5.8--6.4\,s against 4.9--5.4\,s; 116 of 256 items on the peer \\
 Training over a home link of about 54\,Mbit/s: one machine, two ranks with 16-bit gradients, two ranks with 8-bit gradients & 54.9 / 69.4 / 56.1\,s; loss 0.0875 / 0.0875 / 0.0877 \\
-Introducer traffic during a cross-network run & 0.2\,MB, against about 30\,MB between the peers \\
+Introducer traffic during a cross-network run, public cloud host as introducer & 0.2\,MB, against about 30\,MB between the peers \\
 Introducer suspended during a run & live peer still reached in 0.03\,s \\
 Signed closure on a host that requires signatures & imported when the sender's key was trusted; refused when it was removed \\
 Daemon memory ceiling, 3\,GiB allocation under a 1\,GiB ceiling & child killed in seconds, out-of-memory recorded \\
@@ -411,7 +481,7 @@ Daemon memory ceiling, 3\,GiB allocation under a 1\,GiB ceiling & child killed i
 
 A parallel map ran faster across two machines than on one, though short of
 what the core counts allow, since a job of about 5\,s is dominated by setup and
-serialisation; exact training over a home link did not beat one machine; the
+serialisation; exact training over a home link was not faster than one machine; the
 introducer carried a negligible share of the traffic.
 
 \section{Comparative Analysis}
@@ -452,11 +522,8 @@ training ring's rank~0.
 \end{table}
 
 Table~\ref{tab:comparison} sets PipedPeer against Spark, Ray, Dask, BOINC and
-plain \texttt{ssh}. The upper block lists the criteria on which PipedPeer was designed to differ, so
-it meets them by design; the lower block is the more informative half
-(Section~\ref{sec:security}). Spark, Ray and Dask are far more capable at scale,
-with mature schedulers and tooling; PipedPeer trades maturity and scale for the
-elimination of setup, code change and network configuration. BOINC
-\cite{anderson2004boinc}, closest in spirit, is a platform for specific projects
-with their own servers rather than a general executor. No benchmark was run
-against these systems; their entries come from their published designs.
+plain \texttt{ssh}. The upper block lists the criteria PipedPeer was designed
+to meet; the lower block is the more informative half
+(Section~\ref{sec:security}). The others are far more capable at scale;
+PipedPeer trades maturity and scale for removing setup, code change and network
+configuration. The entries come from published designs, not benchmarks.

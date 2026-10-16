@@ -99,8 +99,8 @@ def fig_shim_overhead():
     ax.set_title(f"16-item map the cost model declines\n(median of {len(offs)} runs each; line: min-max)",
                  fontsize=15, loc="left")
 
-    # Startup tax with libraries patched at start-up (raw/B3) and on first import (O2).
-    ax2.bar(["patched at\nstart-up", "patched on\nfirst import"], [before, after], color=[RED, GREEN], width=0.5)
+    # Startup tax with libraries patched at startup (raw/B3) and on first import (O2).
+    ax2.bar(["patched at\nstartup", "patched on\nfirst import"], [before, after], color=[RED, GREEN], width=0.5)
     ax2.axhline(3.0, color=GOLD, linestyle="--", linewidth=1.5)
     ax2.text(0.5, 5.6, "3x limit", color=GOLD, fontsize=14, ha="center", va="bottom", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     for i, v in enumerate([before, after]):
@@ -113,8 +113,9 @@ def fig_shim_overhead():
 
 
 def fig_sandbox():
-    """5.3 - Sandbox start cost, measured on this host. Warmup iterations
-    (the first 5 of each series) are excluded, matching bench/main.go."""
+    """5.3 - Sandbox start cost. Warmup iterations (the first 5 of each
+    series) are excluded, and each bar is the mean of the 20 measured runs,
+    the statistic bench/main.go reports (raw/B2_sandbox_bench.md)."""
     import collections, statistics
     data = json.loads((BENCH / "raw" / "B2_sandbox_bench.json").read_text())
     agg = collections.defaultdict(list)
@@ -122,8 +123,9 @@ def fig_sandbox():
         if r["iteration"] >= 5 and r["exit_code"] == 0:
             agg[(r["sandbox"], r["task_name"])].append(r["total_ms"])
     tasks = ["trivial", "medium", "python"]
-    bw = [statistics.median(agg[("bwrap", t)]) for t in tasks]
-    cr = [statistics.median(agg[("crun", t)]) for t in tasks]
+    bw = [statistics.mean(agg[("bwrap", t)]) for t in tasks]
+    cr = [statistics.mean(agg[("crun", t)]) for t in tasks]
+    print("sandbox means", bw, cr, [c - b for b, c in zip(bw, cr)])
 
     x = np.arange(len(tasks)); w = 0.36
     fig, ax = plt.subplots(figsize=(7.4, 3.6))
@@ -138,7 +140,7 @@ def fig_sandbox():
     ax.set_ylim(0, max(cr) * 1.25)
     ax.legend(frameon=True, framealpha=1.0, edgecolor="none",
               fontsize=14, loc="upper left")
-    ax.set_title("Sandbox start cost, median of 20 runs",
+    ax.set_title("Sandbox start cost, mean of 20 runs",
                  fontsize=15, loc="left")
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
     fig.savefig(OUT / "fig_5.3_sandbox_overhead.png"); plt.close(fig)
@@ -156,9 +158,9 @@ def _md_rows(text, first_cell):
 
 def fig_sync_modes():
     """5.4 - Two-rank ring under exact and fast synchronisation against one
-    device (diloco.md). Left: wall time on Wi-Fi from the one-seed wall-time
-    table. Right: mean validation-loss gap of fast sync over three seeds, from
-    the loss table of the plain-averaging defaults."""
+    device (diloco.md), both at the default two-rank interval H=32. Left: lab
+    wall time on Wi-Fi from the one-seed wall-time table. Right: in-process
+    validation-loss gap, mean over seeds 0-2 and, where run, 0-5."""
     md = (BENCH / "diloco.md").read_text()
     models = [("gpu", "MLP-G"), ("ddp04", "MLP-C"), ("tfm", "Transformer")]
     secs = lambda v: float(v.replace("s", "").strip())
@@ -166,13 +168,16 @@ def fig_sync_modes():
     for key, _ in models:
         row = [r for r in _md_rows(md, key) if len(r) == 7][-1]   # model | single | exact lan | exact wifi | fast lan | fast wifi | MiB
         wall[key] = (secs(row[1]), secs(row[3]), secs(row[5]))
+    # Right: in-process two-rank runs at H=32 (the default), from the ranks
+    # table: "seeds 0-2 / seeds 0-5" where seeds 3-5 were run, else 0-2 only.
+    ranks = md[md.index("| model | ranks | H=2"):]
     gaps = {}
-    start = md.index("Every model passes under both profiles") if "Every model passes under both profiles" in md else len(md)
-    loss = md[:start]
     for key, _ in models:
-        for prof in ("lan", "wifi"):
-            r = [x for x in _md_rows(loss, key) if len(x) > 7 and x[1] == "fast" and x[2] == prof][-1]
-            gaps[(key, prof)] = float(r[7].replace("%", ""))
+        row = [r for r in _md_rows(ranks, key) if r[1] == "2"][0]
+        cell = row[6].replace("*", "").split("/")
+        gaps[(key, "0-2")] = float(cell[0])
+        gaps[(key, "0-5")] = float(cell[1]) if len(cell) > 1 else None
+    print("H=32 gaps", gaps)
     x = np.arange(len(models)); w = 0.26
     fig, (ax, ax2) = plt.subplots(1, 2, figsize=(11.6, 4.2), gridspec_kw={"width_ratios": [1.3, 1], "wspace": 0.3})
     for i, (lab, col) in enumerate([("one device", "#9bb8dd"), ("exact, Wi-Fi", RED), ("fast, Wi-Fi", GREEN)]):
@@ -184,18 +189,23 @@ def fig_sync_modes():
     ax.set_ylabel("seconds, end to end"); ax.set_ylim(0, max(max(v) for v in wall.values()) * 1.5)
     ax.legend(frameon=False, fontsize=14, loc="upper left", ncol=2, columnspacing=0.8, handlelength=1.2)
     ax.grid(axis="y", alpha=0.25); ax.set_axisbelow(True)
-    ax.set_title("Wall time, two ranks (one seed)", fontsize=15, loc="left")
-    for i, (prof, col) in enumerate([("lan", BLUE), ("wifi", GREEN)]):
-        vals = [gaps[(k, prof)] for k, _ in models]
-        ax2.bar(x + (i - 0.5) * 0.36, vals, 0.36, label={"lan": "LAN", "wifi": "Wi-Fi"}[prof], color=col)
-    ax2.axhline(1.0, color=GOLD, linestyle="--", linewidth=1.5)
+    ax.set_title("Lab wall time, H=32 (one seed)", fontsize=15, loc="left")
+    for i, (seeds, col) in enumerate([("0-2", BLUE), ("0-5", GOLD)]):
+        for j, (k, _) in enumerate(models):
+            v = gaps[(k, seeds)]
+            xpos = j + (i - 0.5) * 0.36
+            if v is None:
+                ax2.text(xpos, 0.05, "not\nrun", ha="center", va="bottom", fontsize=12, color="#555555")
+                continue
+            ax2.bar(xpos, v, 0.36, color=col, label=("seeds " + seeds.replace("-", "\u2013")) if j == 1 else None)
+    ax2.axhline(1.0, color=RED, linestyle="--", linewidth=1.5)
     ax2.axhline(0.0, color="#333333", linewidth=0.8)
-    ax2.text(2.45, 1.1, "1% bar", color=GOLD, fontsize=14, ha="right", va="bottom")
+    ax2.text(2.45, 1.05, "1% bar", color=RED, fontsize=14, ha="right", va="bottom")
     ax2.set_xticks(x); ax2.set_xticklabels([n for _, n in models])
-    ax2.set_ylabel("val. loss vs one device, %"); ax2.set_ylim(-3, 2)
-    ax2.legend(frameon=False, fontsize=14, loc="lower right")
+    ax2.set_ylabel("val. loss vs one device, %"); ax2.set_ylim(-1.5, 1.5)
+    ax2.legend(frameon=False, fontsize=14, loc="lower left")
     ax2.grid(axis="y", alpha=0.25); ax2.set_axisbelow(True)
-    ax2.set_title("Fast sync gap (mean of 3 seeds)", fontsize=15, loc="left")
+    ax2.set_title("Fast sync gap, H=32 (in-process)", fontsize=15, loc="left")
     fig.savefig(OUT / "fig_5.4_sync_modes.png"); plt.close(fig)
 
 

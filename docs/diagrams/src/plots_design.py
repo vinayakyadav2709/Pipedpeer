@@ -171,7 +171,7 @@ def fig_cost_model():
     MIN_BYTES = 32 * 1024**2  # hard floor
     LOW_F, LOW_CAP = 8, 512 * 1024**2   # low-intensity carve-out
 
-    mb = np.logspace(np.log10(4), np.log10(9000), 700)      # payload, MB
+    mb = np.logspace(np.log10(4), np.log10(9000), 700)      # payload, MiB
     f = np.logspace(np.log10(0.5), np.log10(2000), 700)     # flop per byte
     MB, F = np.meshgrid(mb, f)
     nb = MB * 1024**2
@@ -194,18 +194,24 @@ def fig_cost_model():
             ha="center", va="center",
             bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
     ax.text(150, 700, "distributed", color=GREEN, fontsize=16, weight="bold", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
-    ax.annotate("below 32 MB", xy=(17, 60), fontsize=16, color=RED, rotation=90,
+    ax.annotate("below 32 MiB", xy=(17, 60), fontsize=16, color=RED, rotation=90,
                 ha="center", va="center", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+    # Above 512 MiB the inequality alone decides: phi > rho*R / (B*(1 - 1.3/K)).
+    phi_star = 1e9 / (BW * (1 - 1.3 / K))
+    ax.axhline(phi_star, xmin=0, xmax=1, color=GREY, linestyle=":", linewidth=1.2)
+    ax.text(5, phi_star * 1.12, "φ ≈ %.1f" % phi_star, fontsize=14, color=GREY,
+            va="bottom", bbox=dict(facecolor="white", edgecolor="none", pad=1.0))
 
-    for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 4, 300)):
+    # Constants: pandas_ops.py groupby (4 FLOP/B) and merge (2 FLOP/B).
+    for name, fv, mbv in (("pandas join", 2, 900), ("pandas groupby", 4, 900)):
         ax.plot(mbv, fv, "o", color="#1e50a0", markersize=7, zorder=5)
-        off = {"pandas join": (8, -22), "pandas groupby": (8, 4)}[name]
+        off, ha = {"pandas join": ((-10, -24), "right"), "pandas groupby": ((8, 10), "center")}[name]
         ax.annotate(name, (mbv, fv), textcoords="offset points", xytext=off,
-                    ha="left", fontsize=16, color="#1e50a0", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
+                    ha=ha, fontsize=16, color="#1e50a0", bbox=dict(facecolor="white", edgecolor="none", pad=1.6))
 
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("payload (MB)")
-    ax.set_ylabel("flop per byte")
+    ax.set_xlabel("payload (MiB)")
+    ax.set_ylabel("FLOP per byte")
     ax.set_xlim(4, 9000); ax.set_ylim(0.5, 2000)
     ax.grid(alpha=0.2, which="both")
     fig.savefig(OUT / "fig_4.11_cost_model.png"); plt.close(fig)
