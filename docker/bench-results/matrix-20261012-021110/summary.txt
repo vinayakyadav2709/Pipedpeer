@@ -1,0 +1,5 @@
+script                        local        warm 3w
+00_pool.py                        -      16.6 / 17
+01_sklearn_rf.py                  -      19.0 / 25
+
+cells are  script TOTAL / wall clock, in seconds (median of runs that exited 0)

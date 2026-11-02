@@ -1,0 +1,2 @@
+workers,mode,script,run,exit,wall_s,script_s,nix_build_ms,upload_ms,seed_ms,run_ms,sync_ms,items,items_elsewhere
+3,warm,00_pool.py,1,0,35.90,22.7,483,3540,1,22872,0,96,45

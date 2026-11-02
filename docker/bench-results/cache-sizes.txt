@@ -1,0 +1,42 @@
+== after cold 00_pool.py
+== after cold 00_pool.py
+1.2G	/var/lib/pipedpeer-nixstore
+worker1 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker1 12K	/root/.cache/pipedpeer
+worker2 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker2 12K	/root/.cache/pipedpeer
+worker3 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker3 0	/root/.cache/pipedpeer
+== after cold 01_sklearn_rf.py
+worker1 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker1 12K	/root/.cache/pipedpeer
+worker2 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker2 12K	/root/.cache/pipedpeer
+worker3 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker3 0	/root/.cache/pipedpeer
+== after cold 02_numpy_heavy.py
+== after cold 02_numpy_heavy.py
+1.4G	/var/lib/pipedpeer-nixstore
+worker1 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker1 12K	/root/.cache/pipedpeer
+worker2 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker2 12K	/root/.cache/pipedpeer
+worker3 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker3 0	/root/.cache/pipedpeer
+== after cold 03_pandas_ooc.py
+== after cold 03_pandas_ooc.py
+1.5G	/var/lib/pipedpeer-nixstore
+worker1 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker1 24K	/root/.cache/pipedpeer
+worker2 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker2 24K	/root/.cache/pipedpeer
+worker3 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker3 24K	/root/.cache/pipedpeer
+== after cold 06_pool_lambda.py
+1.2G	/var/lib/pipedpeer-nixstore
+worker1 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker1 12K	/root/.cache/pipedpeer
+worker2 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker2 12K	/root/.cache/pipedpeer
+worker3 4.0K	/root/.local/share/pipedpeer/closure-cache
+worker3 0	/root/.cache/pipedpeer

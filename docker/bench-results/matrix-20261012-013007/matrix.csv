@@ -1,0 +1,4 @@
+workers,mode,script,run,exit,wall_s,script_s,nix_build_ms,upload_ms,seed_ms,run_ms,sync_ms,items,items_elsewhere
+0,local,06_pool_lambda.py,1,1,12.90,,497,3411,2,235,,,
+1,cold,06_pool_lambda.py,1,0,19.34,4.9,685,3655,,5883,1,32,0
+1,warm,06_pool_lambda.py,1,0,18.96,5.0,520,3463,,5938,2,32,0
