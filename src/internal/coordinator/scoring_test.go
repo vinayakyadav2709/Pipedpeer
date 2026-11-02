@@ -217,3 +217,15 @@ func TestExecRetryBackoffGrowsAndCaps(t *testing.T) {
 			capped, execRetryBackoff(0, 100))
 	}
 }
+
+// A flaky node (lowered health) ranks below an equal healthy one.
+func TestScoreNodeRanksFlakyBelowHealthy(t *testing.T) {
+	load := registry.LoadInfo{CPUPercent: 50, MemPercent: 50, TotalCPUs: 8}
+	caps := map[string]string{"cpu_cores": "8"}
+	healthy := mkNode(caps, load)
+	flaky := mkNode(caps, load)
+	flaky.HealthScore = 0.5
+	if scoreNode(flaky) >= scoreNode(healthy) {
+		t.Fatalf("flaky (%.4f) should rank below healthy (%.4f)", scoreNode(flaky), scoreNode(healthy))
+	}
+}

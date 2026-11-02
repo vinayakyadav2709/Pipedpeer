@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -266,6 +267,22 @@ func (c *Coordinator) CommitLease(daemonURL, leaseID string, nodeID ...string) e
 		return fmt.Errorf("commit rejected: %s", result.Reason)
 	}
 	return nil
+}
+
+// reportNodeFailed tells this machine's daemon that work failed on nodeID, so
+// its health factor drops and later placements prefer an equal node. A miss is
+// logged, never fatal: it only costs ranking accuracy.
+func (c *Coordinator) reportNodeFailed(nodeID string) {
+	if c.selfDaemon <= 0 || nodeID == "" {
+		return
+	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/v1/nodes/%s/failed", c.selfDaemon, nodeID)
+	resp, err := c.httpClient.Post(url, "application/json", nil)
+	if err != nil {
+		log.Printf("coordinator: could not report failed work on %s to the local daemon: %v", nodeID, err)
+		return
+	}
+	resp.Body.Close()
 }
 
 // CompleteLease sends a complete request (status succeeded, failed or

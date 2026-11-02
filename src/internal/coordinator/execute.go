@@ -98,6 +98,7 @@ func (c *Coordinator) ExecuteWithRetry(ctx context.Context, executor ExecutorFun
 
 		// Execution failed — complete as failed and reschedule
 		_ = c.CompleteLease(daemonURL, result.LeaseID, "failed", result.NodeID)
+		c.reportNodeFailed(result.NodeID)
 		name := placedName(result)
 
 		// A node that refused the closure refuses it on every retry, but
