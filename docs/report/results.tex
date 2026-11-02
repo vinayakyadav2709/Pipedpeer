@@ -105,9 +105,13 @@ Section~\ref{sec:res-ft}, which remove machines, links and terminals during a
 run.
 
 \textbf{The suite.} The Go test suite, run with every optional Python library
-present (NumPy, pandas, scikit-learn, joblib and torch), passed its 615 tests;
-the two it skipped need a container runtime and run under a separate
-integration flag. A check fails the build when any of the 15 tests that
+present (NumPy, pandas, scikit-learn, joblib and torch), passed 1{,}012 of its
+1{,}017 top-level tests at commit \texttt{6bc0ef0}. Four were skipped: two need
+a container runtime and run under a separate integration flag, one needs a
+Termux environment and one a system-wide Nix. One failed: a test that requires
+a cancelled job to stop within one second took 1.56\,s, and it failed one of
+five isolated reruns, so it is timing-sensitive rather than consistently
+broken. A check fails the build when any of the 15 tests that
 exercise distribution was skipped, so a missing library cannot turn them into
 silent passes. The suite checks that a hash-shuffled aggregation equals local
 pandas, that a parallel map whose every remote part fails still returns the
@@ -236,7 +240,9 @@ fixed --- payload from 1\,KB to 64\,MB, 8 to 2048 items, per-item cost from
 $10^3$ to $3\times10^6$ operations, two to four nodes, and a speed spread of up to
 ten times --- and fits each step's growth on a log-log scale from the run
 records. No CPU step grew faster than its expected order. Four equal nodes ran a
-map 2.9 times faster than one (0.81\,s against 2.37\,s): quotas that together
+map 2.9 times faster than one (0.81\,s against 2.37\,s, medians of three on a
+host that was also running other work, so the wall times are inflated
+unevenly; the growth fits use processor time): quotas that together
 stay within the host's processor let this map measure how the cost grows with
 the node count, which the shared plain lab cannot; it is not a speedup between
 physical machines.
@@ -318,7 +324,10 @@ four machines of a small group.
 
 \textbf{Adapting the ring.} Offered ranks of 16, 8 and 2 CPUs, containers
 with those CPU quotas sharing one host, admission took the 16 and the 8, shared
-the work 66:34, and ran in 23.6\,s against 25.4\,s with equal batches.
+the work 66:34, and ran in 23.6\,s against 25.4\,s with equal batches. That compares two
+rings, not a ring with one machine: in the same session a three-rank ring of
+those containers took 36.4\,s against 6.9\,s for the single machine the
+admission rule picks.
 Throttling one rank's container from 8 CPUs to 1 and back moved the shares from
 64:36 to 84:16, as the step-time window saw the throttled rank slow down, and
 then to 70:30 after it recovered.
@@ -351,9 +360,13 @@ Interrupt during a parallel map & peers stopped within \textbf{2}\,s \\
 Terminal closed during a run & stopped everywhere, as an interrupt \\
 Detach, then attach while running and after it finished & followed live; replayed in \textbf{1.0}\,s once finished \\
 Submitter's network removed during a remote job & \textbf{200}\,s outage: job ran once, results back \textbf{15}\,s after reconnect \\
-Introducer's address changed, no commands run & recovered in about \textbf{12}\,s \\
+Introducer's address changed, no commands run & links held or re-formed with no command; read at 12.1--12.6\,s, the harness's 12\,s floor$^{\ddagger}$ \\
 \bottomrule
 \end{tabularx}
+
+\smallskip
+\raggedright\footnotesize $^{\ddagger}$When the path survives the move outright, the harness counts a
+recovery no earlier than 12\,s after it, so this reading does not measure a recovery time.
 \end{table}
 
 \section{End-to-End Runs in the LAN Lab}
@@ -412,11 +425,12 @@ trip. Times are the script's own unless marked from submission.
 \toprule
 \textbf{Run} & \textbf{Result} \\
 \midrule
-CPU script (pool, joblib, NumPy, pandas) & about 14\,s split, half the items on the peer, against 18\,s on one laptop \\
+CPU script (pool, joblib, NumPy, pandas), three runs each & 13.3--14.6\,s split, about half the items on the peer, against 17.4--18.1\,s on one laptop \\
 Whole job sent to the peer & 9.1\,s; 11.7\,s from submission \\
 Small training model, one GPU & 4.2\,s, validation loss 0.0794 \\
 Same, \texttt{-{}-ddp~2}, exact synchronisation & 37.1\,s, loss 0.0797 \\
 Same, \texttt{-{}-ddp~2}, fast synchronisation & 7.4\,s, loss 0.0796 \\
+Same, \texttt{-{}-ddp~2}, automatic choice (first build) & 32.9\,s; that build could not switch a fixed ring to fast mode \\
 Second session: \texttt{-{}-ddp~2}, fast synchronisation & 8.5\,s, loss 0.0797 \\
 Second session: \texttt{-{}-ddp~2}, automatic choice & 14.6\,s, fast after a short exact warm-up; loss 0.0796 \\
 Combined script, from submission: first run and repeat & 506\,s (487\,s environment build, CUDA torch download); 17.7\,s, of which the script 15.6\,s \\
@@ -428,7 +442,7 @@ The mixed CPU script ran faster across the two laptops than on one. The small
 training model did not: one GPU finished first. The rings were fixed with
 \texttt{-{}-ddp~2}, so the automatic choice could pick only the sync mode, not
 release a rank; without \texttt{-{}-ddp~$N$} the lead releases a ring that one
-rank alone outruns. The first four rows come from one session, in which fast
+rank alone outruns. The first five rows come from one session, in which fast
 synchronisation ran 5.0 times faster than exact (7.4 against 37.1\,s) at about
 the same loss. The last two come from a second session on the build whose automatic
 choice can switch a fixed ring to fast mode; exact synchronisation was not
@@ -440,8 +454,8 @@ its 147 steps, 15 steps.
 
 \textbf{Across two NATs.} On the two-site testbed of
 Section~\ref{sec:res-setup}, scripts, parallel maps, remote runs and both
-training sync modes ran across the sites, and a node whose link was cut mid-run
-was replaced. Two machines meet directly when one introducer is reachable;
+training sync modes ran across the sites, and when a node's link was cut
+mid-run its items re-ran on the submitting node with the result unchanged. Two machines meet directly when one introducer is reachable;
 otherwise a public address or an overlay such as Tailscale is required. The
 two laptops above ran over Tailscale for that reason: neither home offered a
 reachable introducer (one router refuses port mapping, the other machine sits
@@ -452,7 +466,10 @@ CPU script spread over that laptop, a second laptop over the internet and the
 phone gave the phone 8 of 192 parallel items with an unchanged result, after the
 phone had built the job's environment from the binary cache in 27\,s. A torch
 script training 160 small models gave the phone 6 of them, all converged;
-with 32, it took none.
+with 32, it took none. Run on the phone alone, the CPU script without its
+pandas step took 62.4--66.0\,s with Nix's Python under \texttt{proot} and
+72.8--80.8\,s with Termux's own Python. Whether adding the phone shortened a
+run was not measured.
 
 \textbf{Further measurements.} Table~\ref{tab:recorded} collects the second
 set of physical-machine measurements of Section~\ref{sec:res-setup}, each taken

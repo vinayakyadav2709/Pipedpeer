@@ -21,6 +21,8 @@ speed and choosing exact or fast synchronisation by ring size. In the evaluation
 environment started a job in 0.83\,s against 23.4\,s cold, one that held part
 of it received 86\% fewer bytes, and at 32 steps on two ranks fast
 synchronisation held accuracy while each rank sent 7.6 to 9.2 times fewer bytes.
+It was also slower than one machine where the work was small: short parallel
+maps, small models on a GPU, and exact training over a home link.
 
 The principle that runs through the design is that the cluster is used only when
 a measurement says it will help: work is divided by measured speed rather than

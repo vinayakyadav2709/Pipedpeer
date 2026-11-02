@@ -97,7 +97,8 @@ the \textbf{birthday collision} \cite{anderson2020nat} runs: that side opens 256
 sockets towards the peer, the other sends 600 probes to random ports among the
 64{,}511 above 1024, and the socket that is hit is kept, since its mapping is
 the reachable one. A round hits one of the 256 mappings with probability
-$1-(1-256/64511)^{600} \approx 91\%$.
+$1-(1-256/64511)^{600} \approx 91\%$ if the NAT draws ports uniformly. This
+is a computed figure; the success rate was not measured.
 
 \textbf{The link.} The winning path carries QUIC \cite{rfc9000} with TLS~1.3.
 Inside it each side sends a hello signed with its Ed25519 node key, and each

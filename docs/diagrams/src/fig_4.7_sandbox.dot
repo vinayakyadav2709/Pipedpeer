@@ -41,4 +41,11 @@ digraph Sandbox {
   gpu  -> ct:lib  [label="libraries"];
   cg   -> ct:mem  [label="child cgroup"];
   net  -> ct:net  [label="shared", style=dashed, color="#a33333", fontcolor="#a33333"];
+
+  // Android gives apps no namespaces or cgroups, so a phone has no crun. Its
+  // job sandbox is a nested proot, which Play-Store Termux cannot start, so
+  // phones take chunks only (docs/phone.md).
+  phone [shape=box, style="rounded,filled,dashed", fillcolor="#efedf7", color="#5b4b8a",
+         label="On a phone (Termux): no crun, namespaces or cgroups.\lJob sandbox = proot view of the job dir and /nix,\laddress-space limit, nice 10; it does not start on\lPlay Termux, so phones take chunks only.\l"];
+  cg -> phone [style=invis];
 }

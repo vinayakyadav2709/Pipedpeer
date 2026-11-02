@@ -1,0 +1,5 @@
+Runs an unmodified Python script on peer machines with no cluster to configure.
+Ships environments as Nix closures; a peer receives only the store paths it lacks.
+Divides parallel maps by a makespan model over measured peer throughput.
+Joins machines behind different NATs directly, with no relay for job data.
+Reports when distributing was slower than one machine, as well as when it won.

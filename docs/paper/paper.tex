@@ -87,7 +87,7 @@ dd\_ambawade@spit.ac.in}
 \begin{abstract}
 Distributed computing frameworks presuppose a configured cluster, a program
 written against their API, and machines that can reach one another. PipedPeer
-removes all three for Python: a single command runs an unmodified script on other
+addresses all three for Python: a single command runs an unmodified script on other
 machines, each running the same daemon, with no head node and no scheduler
 process. The script's environment is built as a Nix closure against a pinned
 package set, so it has the same store path on every machine, and a peer
@@ -248,7 +248,7 @@ printed, carrying the cluster secret and a few introducer addresses.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.72\columnwidth]{\figpath{fig_1_paper_arch.png}}
+\includegraphics[width=0.64\columnwidth]{\figpath{fig_1_paper_arch.png}}
 \caption{System design. Both roles are the same binary; peers on other networks
 are reached over direct links the introducer helps set up but never carries.}
 \label{fig:arch}
@@ -323,7 +323,8 @@ router's mapping belongs to the socket that opened it; both sides probe every
 candidate pair every 250\,ms for 15\,s. When one side's NAT allocates a new port
 per destination, that side opens 256 sockets towards the peer while the other
 sends 600 probes to random ports, and the socket that is hit is
-kept~\cite{anderson2020nat}, about 91\% of rounds over 64{,}511 ports.
+kept~\cite{anderson2020nat}: about 91\% of rounds over 64{,}511 ports by
+calculation, not measured.
 
 The winning path carries QUIC with a hello signed by each node's
 Ed25519~\cite{bernstein2012ed25519} key and checked against the node it meant to
@@ -420,11 +421,10 @@ dense products stay local.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.72\columnwidth]{\figpath{fig_4.11_cost_model.png}}
+\includegraphics[width=0.62\columnwidth]{\figpath{fig_4.11_cost_model.png}}
 \caption{Decision regions for pandas work ($\rho=1$, $R=R'=1$\,GFLOP/s) with
 three nodes on a 500\,MB/s link. Above 512\,MiB, Equation~\ref{eq:cost}
-distributes work above about 3.5 FLOP/B: a 900\,MiB grouping moves, a join of
-the same size stays local.}
+distributes work above about 3.5 FLOP/B.}
 \label{fig:cost}
 \end{figure}
 
@@ -502,7 +502,7 @@ adding one package to an environment the peer held sent 28.6\,MB instead of
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.85\columnwidth]{\figpath{fig_5.1_closure_cache.png}}
+\includegraphics[width=0.75\columnwidth]{\figpath{fig_5.1_closure_cache.png}}
 \caption{Five submissions of the same environment in the container lab.}
 \label{fig:cache}
 \end{figure}
@@ -525,22 +525,24 @@ with results identical to a local run. In a LAN lab of four containers on the Ry
 laptop, a parallel map took 43.5\,s on its first run and 17.0\,s with its environment cached, and a GPU job submitted from
 a node without a GPU ran on the GPU node in 7.6\,s cached. An interrupt stopped
 work on every peer within 2\,s. After the introducer changed address, a
-three-node cluster reconnected with no command in about 12\,s. A detached job
+three-node cluster kept or re-formed its links with no command. A detached job
 returned its results on reattach, and a two-rank ring finished its 80
 epochs in 90.5\,s after a rank was killed.
 
 Table~\ref{tab:phys} lists the physical-machine results (first row: second
 set). A parallel map and a mixed CPU script (pool, joblib, NumPy, pandas) ran
 faster on two machines than on one, the latter with half its items on the
-second laptop; the 5\,s map is mostly setup and serialisation. The first
+second laptop. The first
 run of the combined script took 506\,s from submission, 487\,s of it building
 its GPU environment (mostly CUDA PyTorch); a repeat took 17.7\,s (15.6\,s in the script). With a phone added, a laptop's CPU script spread over
 both laptops and the phone gave the phone 8 of 192 items with an unchanged
-result, after the phone had built the environment from the cache in 27\,s.
+result, after the phone had built the environment from the cache in 27\,s;
+of 160 small torch models it trained 6, and of 32 none.
 
 \textbf{Across two NATs.} On the two-site testbed, scripts, parallel maps,
-remote runs and both training sync modes ran across the sites; a node cut off
-mid-run was replaced.
+remote runs and both training sync modes ran across the sites; when a node's
+link was cut mid-run, its items re-ran on the submitter with the result
+unchanged.
 
 \begin{table}[t]
 \centering
@@ -554,9 +556,9 @@ row (from submission); session~2 ran a later build}
 \textbf{Measurement} & \textbf{Result} \\
 \midrule
 Pool map, Core i9 alone vs.\ with Ryzen peer & 5.8--6.4 vs.\ 4.9--5.4\,s \\
-CPU script, one vs.\ two laptops & 18 vs.\ 14\,s \\
-Training, session 1: 1 GPU / exact / fast & 4.2 / 37.1 / 7.4\,s \\
-\quad validation loss & 0.0794\,/\,0.0797\,/\,0.0796 \\
+CPU script, one vs.\ two laptops & 17.4--18.1 vs.\ 13.3--14.6\,s \\
+Training, session 1: 1 GPU / exact / fast / auto (could not switch yet) & 4.2 / 37.1 / 7.4 / 32.9\,s \\
+\quad validation loss & 0.0794\,/\,0.0797\,/\,0.0796\,/\,--- \\
 Training, session 2: fast / auto & 8.5 / 14.6\,s \\
 \quad validation loss & 0.0797 / 0.0796 \\
 Combined script, first run vs.\ repeat & 506 vs.\ 17.7\,s \\
@@ -577,7 +579,7 @@ then switched (25 syncs in all) and finished in 14.6\,s, against 8.5\,s for fast
 15 of the 147 steps; without \texttt{-{}-ddp~$N$} the lead releases a ring that one rank
 alone outruns. Offered 16-, 8- and 2-CPU ranks (containers with CPU quotas
 on one host), admission took the first two, which ran in 23.6\,s with measured batch sizes against
-25.4\,s with equal ones.
+25.4\,s with equal ones; one machine beat a three-rank ring there (6.9 vs.\ 36.4\,s).
 
 \textbf{Fast synchronisation.} At the default two-rank interval, plain
 averaging every 32 steps kept validation loss within
@@ -701,7 +703,7 @@ its submitter and rank~0, and to run a controlled evaluation on more machines.
 \bibitem{donenfeld2017wireguard} J.~A.~Donenfeld, ``WireGuard: Next generation kernel network tunnel,'' in \textit{Proc. Network and Distributed System Security Symp. (NDSS)}, 2017.
 
 
-\bibitem{pipedpeerrepo} Y.~Vaviya, V.~Yadav, and S.~Gupta, ``PipedPeer,'' source code and measurement records. [Online]. Available: \url{https://github.com/vinayakyadav2709/Pipedpeer}. Accessed: Oct.~16, 2026.
+\bibitem{pipedpeerrepo} Y.~Vaviya, V.~Yadav, and S.~Gupta, ``PipedPeer,'' 2026. [Online]. Available: \url{https://github.com/vinayakyadav2709/Pipedpeer}
 
 \end{thebibliography}
 
