@@ -19,7 +19,13 @@ func TestBothSidesRelinkAtOnceAfterAnOutage(t *testing.T) {
 	a := run(t, "A", Config{Key: newKey(t), DirectPort: portA,
 		ServeIntroducer: true, IntroducerPort: introPort})
 	b := run(t, "B", Config{Key: newKey(t), DirectPort: portB, Introducers: []string{intro}})
-	waitFor(t, 15*time.Second, "A and B link", func() bool { return linked(a, b) })
+	// Linked is not enough: both ends punch at once, and the losing
+	// connection can still be on its way into linkUp on either side. One
+	// that lands after the links are dropped below relinks without any
+	// attempt, and the penalties are never tested.
+	waitFor(t, 15*time.Second, "A and B link and stop dialling each other", func() bool {
+		return linked(a, b) && idle(a, b) && idle(b, a)
+	})
 
 	// The outage: nothing between the two direct ports gets through either
 	// way (the introducer, on its own port, still answers), penalties as
@@ -63,4 +69,13 @@ func TestBothSidesRelinkAtOnceAfterAnOutage(t *testing.T) {
 	b.mu.Unlock()
 
 	waitFor(t, 5*time.Second, "A and B relink, not after the 5 min penalty", func() bool { return linked(a, b) })
+}
+
+// idle reports that m has no connection to peer in progress: no dial of its
+// own, and no inbound connection still on its way to linkUp.
+func idle(m, peer *Manager) bool {
+	m.mu.Lock()
+	trying := m.trying[peer.node()]
+	m.mu.Unlock()
+	return !trying && m.endpoint.Accepting() == 0
 }

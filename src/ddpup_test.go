@@ -117,12 +117,20 @@ func TestAJoinerIsAddedToTheRing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	got := make(chan int, 1)
+	st := newDDPUpState(nil)
 	g := &ddpGrower{
-		st:       newDDPUpState(nil),
+		st:       st,
 		want:     anyNode,
 		nextRank: func() int { return 3 },
-		start:    func(rank int, n registry.NodeRecord) bool { got <- rank; cancel(); return true },
-		out:      &bytes.Buffer{},
+		// Like the real launch, mark the rank running before returning, so
+		// the grower does not offer the same machine a second rank.
+		start: func(rank int, n registry.NodeRecord) bool {
+			st.started(n.NodeID)
+			got <- rank
+			cancel()
+			return true
+		},
+		out: &bytes.Buffer{},
 		fetch: func(int) ([]registry.NodeRecord, error) {
 			return []registry.NodeRecord{ddpTestNode("7", "healthy")}, nil
 		},

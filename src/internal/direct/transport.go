@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/identity"
@@ -174,6 +175,10 @@ type Endpoint struct {
 
 	mu    sync.Mutex
 	peers map[string]*quic.Conn
+
+	// accepting counts inbound connections not yet verified and handed to
+	// onInbound.
+	accepting atomic.Int32
 }
 
 // Config is what an Endpoint needs.
@@ -377,66 +382,23 @@ func (e *Endpoint) Serve(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		e.accepting.Add(1)
 		go e.accept(ctx, conn)
 	}
 }
 
+// Accepting reports how many inbound connections are still being verified
+// or handed to OnInbound. The dialler's Dial returns once our hello arrives,
+// before OnInbound has run here, so a caller that needs both ends settled
+// waits for this to reach zero as well as for its own dials to return.
+func (e *Endpoint) Accepting() int { return int(e.accepting.Load()) }
+
 // accept verifies who dialled before letting them do anything.
 func (e *Endpoint) accept(ctx context.Context, conn *quic.Conn) {
-	st, err := conn.AcceptStream(ctx)
-	if err != nil {
-		conn.CloseWithError(1, "no hello")
+	node, ok := e.admit(ctx, conn)
+	e.accepting.Add(-1)
+	if !ok {
 		return
-	}
-	var h hello
-	if err := readJSON(st, &h); err != nil {
-		conn.CloseWithError(1, "bad hello")
-		return
-	}
-	ekm, err := sessionEKM(conn)
-	if err != nil {
-		e.log("direct: no TLS exporter on the session from %s: %v", conn.RemoteAddr(), err)
-		conn.CloseWithError(1, "")
-		return
-	}
-	node, err := h.verify(ekm, e.secret)
-	if err != nil {
-		e.log("direct: refused a hello from %s: %v", conn.RemoteAddr(), err)
-		conn.CloseWithError(1, "unauthenticated: "+err.Error())
-		return
-	}
-	if h.Cluster != e.cluster {
-		// Different cluster: not ours to talk to, and saying which cluster
-		// this is would leak it.
-		conn.CloseWithError(1, "unknown cluster")
-		return
-	}
-	_ = st.Close()
-
-	// Prove who we are in turn: the dialler raced several addresses and has
-	// to know it reached the one it meant.
-	mine, err := signHello(e.cluster, e.secret, e.key, ekm)
-	if err != nil {
-		conn.CloseWithError(1, "")
-		return
-	}
-	ours, err := conn.OpenStreamSync(ctx)
-	if err != nil {
-		conn.CloseWithError(1, "")
-		return
-	}
-	if err := writeJSON(ours, mine); err != nil {
-		conn.CloseWithError(1, "")
-		return
-	}
-	_ = ours.Close()
-
-	e.mu.Lock()
-	e.peers[node] = conn
-	e.mu.Unlock()
-	e.log("direct: %s connected from %s", short(node), conn.RemoteAddr())
-	if e.onInbound != nil {
-		e.onInbound(node, conn)
 	}
 
 	defer func() {
@@ -448,6 +410,67 @@ func (e *Endpoint) accept(ctx context.Context, conn *quic.Conn) {
 	}()
 
 	e.serveStreams(ctx, conn)
+}
+
+// admit checks the dialler's hello, answers with ours, and hands the
+// connection to onInbound. False when the connection was refused.
+func (e *Endpoint) admit(ctx context.Context, conn *quic.Conn) (string, bool) {
+	st, err := conn.AcceptStream(ctx)
+	if err != nil {
+		conn.CloseWithError(1, "no hello")
+		return "", false
+	}
+	var h hello
+	if err := readJSON(st, &h); err != nil {
+		conn.CloseWithError(1, "bad hello")
+		return "", false
+	}
+	ekm, err := sessionEKM(conn)
+	if err != nil {
+		e.log("direct: no TLS exporter on the session from %s: %v", conn.RemoteAddr(), err)
+		conn.CloseWithError(1, "")
+		return "", false
+	}
+	node, err := h.verify(ekm, e.secret)
+	if err != nil {
+		e.log("direct: refused a hello from %s: %v", conn.RemoteAddr(), err)
+		conn.CloseWithError(1, "unauthenticated: "+err.Error())
+		return "", false
+	}
+	if h.Cluster != e.cluster {
+		// Different cluster: not ours to talk to, and saying which cluster
+		// this is would leak it.
+		conn.CloseWithError(1, "unknown cluster")
+		return "", false
+	}
+	_ = st.Close()
+
+	// Prove who we are in turn: the dialler raced several addresses and has
+	// to know it reached the one it meant.
+	mine, err := signHello(e.cluster, e.secret, e.key, ekm)
+	if err != nil {
+		conn.CloseWithError(1, "")
+		return "", false
+	}
+	ours, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		conn.CloseWithError(1, "")
+		return "", false
+	}
+	if err := writeJSON(ours, mine); err != nil {
+		conn.CloseWithError(1, "")
+		return "", false
+	}
+	_ = ours.Close()
+
+	e.mu.Lock()
+	e.peers[node] = conn
+	e.mu.Unlock()
+	e.log("direct: %s connected from %s", short(node), conn.RemoteAddr())
+	if e.onInbound != nil {
+		e.onInbound(node, conn)
+	}
+	return node, true
 }
 
 // serveStreams splices everything a peer opens to the local service.
