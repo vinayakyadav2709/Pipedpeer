@@ -50,6 +50,7 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Audit B1: `PIPEDPEER_DDP_SYNC_EVERY=auto` crashed DDP set-up, and the failure was swallowed | Read as `auto` before `int()`; patch failures are always printed |
 | Audit B3: internet peers appeared twice (fingerprint and UUID rows) | One identity: node id = key fingerprint ([ADR-0008](adr/0008-pinned-tls-and-key-addressed-nodes.md)) |
 | Audit B4: a daemon restarted by `run` after a reboot forgot its introducer | The daemon reads `cluster.json` itself |
+| Observed 7: the idle-interception benchmark (`bench.py` N7) distributed 18 of 48 items while labelled "the cost model declines" | N7 runs `pool_idle.py`, small enough that the shim declines, and every enabled run must report 0 dispatched items (`expect_dispatched=0`) |
 
 ## Not bugs, recorded so they are not reported again
 
@@ -70,22 +71,14 @@ Paths are relative to `src/`. Each entry says how it was established:
    - The shim then ran all 80 items locally, and the harness failed.
    - Raw evidence: `benchmarks/raw/O4_lab_fail.txt`.
    - The cause is inferred from the log.
-7. **The idle-interception benchmark no longer measures idle interception.**
-   - `bench.py` N7 is labelled "the cost model declines", but at this commit
-     the shim distributed 18 of 48 items in every enabled run.
 
 ## Read in the code, not exercised
 
 | Area | Issue | Where |
 |---|---|---|
-| Pool | The forwarded body lacks `no_fanout`, so the peer can fan out again | `daemonapi/pool.go:983-1001, 894` |
-| Pool | `imap_unordered` returns results in order | `nixgen/shim/pool.py` (`imap_unordered`) |
-| numpy | The `@` operator is not intercepted (only module functions are patched) | `nixgen/shim/numpy_ops.py` |
 | Security | Trusted Nix keys are collected from every node in the node store, and are not bound to an authenticated identity | `daemonapi/server.go:1578-1615` |
 | Security | The legacy closure import uses `--no-check-sigs`, and the submitter's own upload uses that format | `daemonapi/execution.go:1029-1066` |
 | Setup | Keys appended to `nix.conf` are a snapshot; peers added later are not trusted until setup runs again | `setup/setup.go:250-253` |
-| Private store | `pathExists` checks the host `/nix/store`, not the private store | `daemonapi/execution.go:191-194` |
-| Temp files | `closurediff.go` still uses `os.CreateTemp("", …)` | `daemonctl/closurediff.go:61` |
 
 ## Limitations by design
 
