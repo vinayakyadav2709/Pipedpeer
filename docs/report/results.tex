@@ -353,6 +353,7 @@ still returns the correct result (Section~\ref{sec:res-tests}).
 \midrule
 % source: docs/benchmarks/rehearsal.md "Two-site testbed: a node's link cut during a parallel map" (log lines copied there).
 A node's link cut during a parallel map, two-site testbed & its \textbf{53} items run again on the submitting node once it overran its predicted 18\,s; checksum unchanged \\
+A worker killed with map chunks in flight (plain lab, 80 items)$^{\S}$ & \textbf{33} items had run on peers; no chunk lost; result correct \\
 A worker killed during a remote job & node reported gone \textbf{16}\,s after the kill \\
 A training rank killed during a run & remaining rank finished all 80 epochs, \textbf{90.5}\,s \\
 A training rank's machine back during a run & rejoined at the next epoch, \textbf{4}\,s after its daemon started \\
@@ -367,6 +368,8 @@ Introducer's address changed, no commands run & links held or re-formed with no 
 \smallskip
 \raggedright\footnotesize $^{\ddagger}$When the path survives the move outright, the harness counts a
 recovery no earlier than 12\,s after it, so this reading does not measure a recovery time.
+\par $^{\S}$Recorded in commit \texttt{a9c715d} (3 November 2026), after an October run of
+the same harness had distributed nothing; its raw output is not stored in the repository.
 \end{table}
 
 \section{End-to-End Runs in the LAN Lab}

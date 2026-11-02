@@ -343,8 +343,10 @@ S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200} - 0.05\,n_{\mathr
 with utilisations $u$ in percent, $n_{\text{jobs}}$ running jobs, capacity
 terms $\hat{c}=\min(\text{cores}/32,1)$ and $\hat{f}=\min(\text{MHz}/4000,1)$,
 headroom terms $\hat{m}=\min(\text{free GiB}/32,1)$ and $\hat{r}$ (free fraction
-of cores), $0.5$ for a missing metric, and $h$ the stored health score (1.0 for
-a node that answers). $S$ is clamped at zero; a GPU request adds up to 0.8 from
+of cores), $0.5$ for a missing metric, and $h$ a health factor that halves each time the
+node fails a job or stops answering (floor 0.1) and regains 0.1 per healthy
+poll, up to 1.0, so a flaky node loses to an equal healthy one.
+% source: commit 23137d0 (nodestore.MarkFailed, HealthFloor, HealthRecovery). $S$ is clamped at zero; a GPU request adds up to 0.8 from
 VRAM, device count and compute capability. The weights are hand-set: the
 utilisation terms can subtract up to 1.0 and the four normalised terms move $S$
 by at most 0.18 either way, so current load dominates hardware. We did not run
@@ -908,12 +910,11 @@ $^{b}$First run after the common packages were built ahead of time.
 \paragraph{Failure drills} Table~\ref{tab:drills} lists drills that remove
 machines, links and terminals during a run. They exercise rescheduling,
 re-sharding at an epoch boundary, the cancel frame and the logged output
-stream. One earlier fault-injection run in the plain lab tested nothing,
-because no worker held the closure and the map stayed local; we report it as a
-failed experiment, superseded by the two-site drill in the table's first row.
-The test suite adds that a parallel map whose every remote part fails still
+stream. A fault-injection run in the plain lab first tested nothing, because
+no worker held the closure and the map stayed local; once every upload seeded
+the peers, the same harness passed (second row). The test suite adds that a parallel map whose every remote part fails still
 returns the correct result.
-% source: RESULTS.md R5 (FAILED); rehearsal.md "Failure drills" and "Two-site testbed".
+% source: RESULTS.md R5 (failed in October; passed per commit a9c715d); rehearsal.md "Failure drills" and "Two-site testbed".
 
 \begin{table*}[t]
 \centering
@@ -925,6 +926,7 @@ returns the correct result.
 \textbf{Drill} & \textbf{Result} \\
 \midrule
 A node's link cut during a 240-item map, two-site testbed & its 53 items re-run on the submitting node once the part overran its predicted 18\,s (detected at 81\,s); checksum unchanged; map took 83.1\,s \\
+A worker killed with map chunks in flight (plain lab, 80 items)$^{d}$ & 33 items had run on peers; no chunk lost; result correct \\
 A worker killed during a remote job & node reported gone 16\,s after the kill \\
 A training rank killed during a run & remaining rank finished all 80 epochs, 90.5\,s \\
 A training rank's machine back during a run & rejoined at the next epoch, 4\,s after its daemon started \\
@@ -939,6 +941,8 @@ Introducer's address changed, no command run$^{c}$ & links held or re-formed wit
 $^{c}$The harness counts a recovery no earlier than 12\,s after the move when
 the path survives outright, so these readings sit at its floor and do not
 measure a recovery time.
+$^{d}$Recorded in commit a9c715d (3 November 2026); its raw output is not stored
+in the repository.
 \end{table*}
 % source: lab-net.sh recover() (12 s floor); commit c785275 body (12.1-12.6 s).
 

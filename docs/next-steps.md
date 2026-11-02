@@ -123,7 +123,7 @@ paper and report describe both as they are):
   machine's speed (R' = 6R for all K nodes, the submitter included) when any
   peer reports a GPU, although matmul row blocks run on the peers' CPU NumPy
   (`numpy_ops.py:33`, `:350-352`, `:404`). Fix: sum per-node CPU rates.
-- ~~The placement health factor h is always 1.0.~~ Fixed 2026-11-03 (a580ae9): halved on an
+- ~~The placement health factor h is always 1.0.~~ Fixed 2026-11-03 (23137d0): halved on an
   unreachable mark or failed job (floor 0.1), +0.1 per healthy poll.
 
 Dropped: Optuna interception, NPU support.

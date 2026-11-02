@@ -431,6 +431,7 @@ picture(s, DIAG / "fig_4.3_placement_flow.png", L, T, Inches(6.4), Inches(3.9))
 text(s, L, T + Inches(4.0), Inches(6.4), Inches(1.6), [
     "Filters: architecture, GPU, free memory, cores, VRAM.",
     "Score: load terms subtract up to 1.0; hardware terms move it ±0.18.",
+    "× health factor: halves when a node fails, regains 0.1 per healthy poll.",
 ], size=15)
 picture(s, DIAG / "fig_4.11_cost_model.png", Inches(7.2), T, Inches(5.6), Inches(3.9))
 text(s, Inches(7.2), T + Inches(4.0), Inches(5.6), Inches(1.6), [
@@ -523,14 +524,15 @@ s = new_slide("Fault Tolerance and Recovery", notes=(
 table(s, L, T, CW, [
     ["Drill", "Result"],
     ["Node's link cut during a 240-item map (two-site NAT testbed)", "its 53 items re-ran on the submitter; checksum unchanged"],
+    ["A worker killed with map chunks in flight (80 items)", "33 items had run on peers; no chunk lost; result correct"],
     ["A worker killed during a remote job", "node reported gone 16 s after the kill"],
     ["A training rank killed", "remaining rank finished all 80 epochs (90.5 s)"],
     ["A rank's machine back during training", "rejoined at the next epoch, 4 s after its daemon started"],
     ["Ctrl+C during a parallel map", "peers stopped within 2 s"],
     ["Submitter's network removed for 200 s", "job ran once; result back ~15 s after reconnecting"],
     ["Detach, then attach", "followed live; replayed in 1.0 s once finished"],
-], col_w=[5.8, 6.4], size=14, row_h=0.55)
-text(s, L, T + Inches(4.7), CW, Inches(0.8),
+], col_w=[5.8, 6.4], size=14, row_h=0.5)
+text(s, L, T + Inches(4.85), CW, Inches(0.6),
      "!Single points of failure remain: the submitter of a parallel script and the machine of a training "
      "ring's rank 0.", size=15, color=GREY)
 

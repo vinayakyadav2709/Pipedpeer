@@ -697,6 +697,9 @@ Two properties matter:
   four hardware terms move the score by at most 0.36.
 - **A missing value is neutral.** `normalized` returns 0.5 for a missing value,
   so uneven telemetry neither rewards nor punishes a node.
+- **A flaky node loses.** `HealthScore` starts at 1.0, halves when the node is
+  marked unreachable or a job on it fails (floor 0.1), and regains 0.1 per
+  answered poll (`nodestore.MarkFailed`, `23137d0`).
 
 See `fig_4.4_scoring_weights.png`. When a GPU is wanted, `scoreGPUNode` adds up
 to 0.8 more from VRAM, device count, free VRAM, compute capability and a
@@ -1673,7 +1676,13 @@ See `fig_5.2_shim_overhead.png`.
 - This is slower on one host, as it must be, but within the 3× never-slower
   budget.
 
-### 5.5 Fault tolerance [Oct]: the harness failed
+### 5.5 Fault tolerance [Oct]: the harness failed, then passed
+
+**Update, 2026-11-03 [commit]: passed.** After every upload began seeding the
+closure to peers (`f182b0f`, `a8c50db`), `lab-fail.sh` passed on the plain lab:
+33 of 80 items ran on peers, a worker was killed with chunks in flight, no chunk
+was lost and the sum matched (commit `a9c715d`). That run's raw output is not
+stored here; the October failure below is kept as the record it replaced.
 
 `scripts/lab-fail.sh` (`raw/O4_lab_fail.txt`) **failed**:
 - The job was placed on the submitting host, which already held its closure
@@ -1755,7 +1764,7 @@ See `fig_5.4_comparison.png`.
 | Wanted | Why absent |
 |---|---|
 | Controlled, repeated multi-machine benchmark | one machine available for this report |
-| Fault injection that distributes | the October run did not distribute (5.5) |
+| Fault injection with its raw output kept | the passing run (5.5, `a9c715d`) is recorded only in its commit |
 | Hole-punch success rate across many NATs | links observed one at a time |
 | Two GPUs in one machine | no such machine available |
 | Discovery latency | containers share loopback |
@@ -1921,7 +1930,8 @@ what has happened to each since (details in `known-issues.md`):
 3. **Fresh lab never distributes.** A job placed on a node that already holds
    its closure never seeds its peers, so the fault-injection harness could not
    run (inferred). *Cause found and fixed:* every worker refused the broadcast
-   closure for want of a trusted key (4.3; `8484714`, `eeacb55`, `ee8a1ee`).
+   closure for want of a trusted key (4.3; `8484714`, `eeacb55`, `ee8a1ee`). With every upload now seeding
+   peers, `lab-fail.sh` passes (`a9c715d`, 2026-11-03).
 4. **Suspected defects found by reading the code, not exercised.**
    - Compressed pool items: the daemon drops the `items_zlib` flag. *Fixed in
      `049a1aa`.*
@@ -1977,8 +1987,8 @@ See 4.3. In summary:
   rank 0's machine.
 - **A cluster-wide events view.**
 - **Other runtimes.**
-- **A controlled multi-machine evaluation.** Include the fault-injection run and
-  a two-GPU machine.
+- **A controlled multi-machine evaluation.** Include a two-GPU machine, and keep
+  the fault-injection run's raw output.
 
 ---
 
