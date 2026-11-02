@@ -63,6 +63,8 @@ Paths are relative to `src/`. Each entry says how it was established:
 
 ## Observed
 
+None open.
+
 ## Read in the code, not exercised
 
 | Area | Issue | Where |
