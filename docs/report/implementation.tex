@@ -218,9 +218,10 @@ S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200}
 Each term is normalised against a saturation point: $\hat{c} = \min(c/32, 1)$
 for $c$ cores, $\hat{f} = \min(f/4000, 1)$ for a clock of $f$\,MHz, and
 $\hat{m} = \min(m/32, 1)$ for $m$\,GiB of free memory, while $\hat{r}$ is the
-fraction of the node's cores that are free. The health score $h$ is the value
-the node store holds for the node, $1.0$ for every node that answers its health
-check. Two properties matter more than the individual coefficients.
+fraction of the node's cores that are free. The health factor $h$ is the value
+the node store holds for the node: it starts at $1.0$, halves each time the node
+fails a job or stops answering (never below $0.1$), and regains $0.1$ with each
+health check it answers, so a flaky node loses to an equal healthy one. Two properties matter more than the individual coefficients.
 \textbf{Utilisation dominates capacity}: the two utilisation terms can subtract
 $1.0$, while the four normalised terms together move the score by at most $0.18$
 in either direction, so a fast but busy machine ranks below a slower idle one

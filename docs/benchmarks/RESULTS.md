@@ -116,7 +116,13 @@ the 3× budget. August, before patching was deferred, measured 20.0×
   The receipt shows 12 items on the cluster and 12 local. It passed the 3×
   never-slower budget. One host cannot be faster.
 
-## R5 Fault tolerance [Oct]: FAILED
+## R5 Fault tolerance [Oct]: FAILED, then passed
+
+**Update, 2026-11-03 [commit]: passed.** After every upload began seeding the
+closure to peers (`f182b0f`, `a8c50db`), `lab-fail.sh` passed on the plain lab:
+33 of 80 items ran on peers, a worker was killed with chunks in flight, no chunk
+was lost and the sum matched (commit `a9c715d`). That run's raw output is not
+stored here; the October failure below is kept as the record it replaced.
 
 `scripts/lab-fail.sh` (`raw/O4_lab_fail.txt`) printed:
 
@@ -175,7 +181,7 @@ commits that matter most:
 | Wanted | How to get it |
 |---|---|
 | Repeated multi-machine benchmark | `scripts/bench-pool.sh`, `bench-split.sh` and `bench-ddp.sh` on real machines |
-| Fault injection that distributes | `scripts/lab-fail.sh` once the seeding issue is resolved, or on a lab whose workers already hold the closure |
+| Fault injection that distributes, with raw output kept | `scripts/lab-fail.sh` (passed per `a9c715d`; rerun and save its output under `raw/`) |
 | Cross-network acceptance | `scripts/net-verify.sh` on three networks (`pipedpeer-demo/DEMO.md`) |
 | Two GPUs on one node | `scripts/bench-multigpu.sh` (exits 3, "NOT VERIFIED", without the hardware) |
 | Demo workloads end to end | `docker/demo-test.sh` |

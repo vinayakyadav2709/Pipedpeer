@@ -273,8 +273,8 @@ S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200}
 with utilisations $u$ in percent, $n_{\text{jobs}}$ running jobs, capacity
 terms $\hat{c}=\min(\text{cores}/32,1)$ and $\hat{f}=\min(\text{MHz}/4000,1)$,
 headroom terms $\hat{m}=\min(\text{free GiB}/32,1)$ and $\hat{r}$ (free fraction
-of cores), $0.5$ for a missing metric, and $h$ the stored health score (1.0 for a
-node that answers). $S$ is clamped at zero; a GPU request adds up to 0.8 from
+of cores), $0.5$ for a missing metric, and $h$ a health factor that halves when the node
+fails or stops answering (floor 0.1) and regains 0.1 per healthy poll. $S$ is clamped at zero; a GPU request adds up to 0.8 from
 VRAM, devices and compute capability. The utilisation terms can subtract 1.0,
 the four normalised terms only 0.18 either way. Free memory is what a node
 can \emph{grant}: where a user \texttt{systemd} is available, each daemon runs under a cgroup ceiling of half the machine,
