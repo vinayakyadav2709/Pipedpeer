@@ -47,7 +47,7 @@ jobs:
         run: go test -race -count=1 ./...
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Shim lint and unit tests
         working-directory: ${{ github.workspace }}
