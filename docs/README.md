@@ -1,10 +1,10 @@
 # Paper and report source
 
-Everything needed to produce the major project report and the conference paper.
-The documents are written against commit `4c91ef3` (2026-09-01), were
-re-measured and checked against the code on 2026-10-02, and were extended for
-the address-book phase after the 2026-10-14 demo (numbers still to be measured
-are marked TODO).
+Everything needed to produce the major project report, the conference paper and
+the journal manuscript. The documents are written against commit `4c91ef3`
+(2026-09-01), were re-measured and checked against the code on 2026-10-02,
+extended for the address-book phase after the 2026-10-14 demo, and had every
+number traced to its record on 2026-11-02 (`77d194e`).
 
 ## Layout
 
@@ -13,7 +13,8 @@ are marked TODO).
 | `system-report.md` | The content document. Its chapters match `report/main.tex` one to one, with file references for every non-obvious claim. Start here. |
 | `report/main.tex` | Major project report, `report` class. |
 | `report/be_title.tex`, `report/be_certificate2.tex` | Title page and approval certificate. |
-| `paper/paper.tex` | Conference paper, IEEEtran two-column. |
+| `paper/paper.tex` | Conference paper, IEEEtran two-column (6 pages). |
+| `paper/journal/manuscript.tex`, `highlights.txt` | Journal manuscript, Elsevier `elsarticle`, aimed at JPDC. Each number cites its record in a `% source:` comment; red `[AUTHORS: ...]` fields are for the authors. |
 | `diagrams/*.png` | 21 figures at 300 dpi, numbered in order of appearance. |
 | `diagrams/src/` | The Graphviz and matplotlib sources that generate them. |
 | `benchmarks/RESULTS.md` | Measured results. Each one is tagged with its source (October run, August run, or commit message), and the test bed and its limits are stated. |
@@ -39,14 +40,24 @@ for f in diagrams/src/*.dot; do
   magick "$out" -background white -alpha remove -alpha off "$out"
 done
 
-# Documents (tectonic fetches the packages it needs and runs the passes itself)
-tectonic --outdir <scratch dir> report/main.tex
-tectonic --outdir <scratch dir> paper/paper.tex
+# Documents (tectonic fetches the packages it needs and runs the passes itself;
+# each PDF lands next to its .tex)
+tectonic report/main.tex
+tectonic paper/paper.tex
+tectonic paper/journal/manuscript.tex
 ```
 
-A full TeX Live works too (`pdflatex` three times for the report, twice for the
-paper): `nix shell nixpkgs#texliveFull nixpkgs#graphviz -c`. Numbers still to
-be measured are marked `\todo{}` and render in red.
+When tectonic's package server refuses (HTTP 429), use a full TeX Live:
+
+```sh
+nix shell nixpkgs#texliveFull -c sh -c '
+  (cd report && pdflatex main && pdflatex main && pdflatex main)
+  (cd paper && pdflatex paper && pdflatex paper)
+  (cd paper/journal && pdflatex manuscript && pdflatex manuscript)'
+```
+
+Graphviz and ImageMagick come from `nix shell nixpkgs#graphviz nixpkgs#imagemagick`;
+the plot scripts need python3 with matplotlib and numpy.
 
 ## Re-running the measurements
 
