@@ -32,3 +32,7 @@ pipedpeer-demo/demo/finale-logs/
 
 # first machine writes it; holds the cluster secret
 pipedpeer-demo/join-command.txt
+
+# Local exam references (other people's work) and generated demo data; never commit.
+/major/
+/data.csv

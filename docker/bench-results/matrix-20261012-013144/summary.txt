@@ -1,0 +1,4 @@
+script                        local        warm 3w
+00_pool.py                        -      22.7 / 36
+
+cells are  script TOTAL / wall clock, in seconds (median of runs that exited 0)

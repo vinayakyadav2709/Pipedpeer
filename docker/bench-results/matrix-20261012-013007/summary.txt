@@ -1,0 +1,4 @@
+script                        local        cold 1w        warm 1w
+06_pool_lambda.py            failed       4.9 / 19       5.0 / 19
+
+cells are  script TOTAL / wall clock, in seconds (median of runs that exited 0)

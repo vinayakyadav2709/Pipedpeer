@@ -1,0 +1,9 @@
+script                        local        cold 1w        warm 1w        cold 2w        warm 2w        cold 3w        warm 3w
+00_pool.py                34.0 / 35      23.2 / 24      23.3 / 24      21.8 / 23      22.0 / 23      22.2 / 23      23.3 / 24
+06_pool_lambda.py            failed        4.8 / 6        4.8 / 6        4.8 / 6        4.8 / 6        4.7 / 6        4.8 / 6
+01_sklearn_rf.py          34.1 / 42      38.9 / 46      38.7 / 45      38.8 / 45      39.5 / 46      42.0 / 48      41.1 / 48
+02_numpy_heavy.py         48.4 / 54      54.5 / 59         failed      57.7 / 63      58.0 / 62      61.3 / 66      56.0 / 60
+03_pandas_ooc.py           9.1 / 21      35.2 / 48      34.1 / 46      32.7 / 44      25.5 / 37      29.7 / 41      26.1 / 38
+07_capstone.py            13.1 / 22      21.2 / 31      19.9 / 29      22.3 / 32      18.4 / 27      20.6 / 30      18.9 / 28
+
+cells are  script TOTAL / wall clock, in seconds (median of runs that exited 0)

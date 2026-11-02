@@ -1,0 +1,357 @@
+% ============================================================
+\chapter{Literature Survey}
+% ============================================================
+
+This chapter surveys foundational and recent literature across the key technical
+domains that PipedPeer builds upon: edge computing sandboxing and environment
+portability, distributed messaging frameworks, failure-transparent distributed
+systems, Python ecosystem portability, intelligent task scheduling, and
+collaborative task offloading in edge networks.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 1: \textit{Web Application-Based WebAssembly Container Platform
+for Extreme Edge Computing}}
+\addcontentsline{toc}{subsection}{Paper 1}
+\textbf{Authors:} S.~Sekigawa, C.~Sasaki, and A.~Tagami \quad
+\textbf{Published In:} Proc.\ IEEE GLOBECOM, 2023~\cite{sekigawa2023}
+
+\noindent\textbf{Summary:}
+Sekigawa et al.\ propose a platform that deploys WebAssembly (Wasm) modules as
+isolated compute containers on extreme-edge nodes. A Wasm runtime host receives,
+sandboxes, and executes user-submitted binaries without a full container daemon
+such as Docker or Kubernetes. Evaluation on resource-constrained hardware shows
+acceptable latency and throughput with strong isolation, demonstrating that
+bytecode-level sandboxing is viable at the network edge.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer similarly executes user-submitted scripts on LAN nodes with isolated
+sandboxes. The paper's insight that lightweight sandboxing can replace heavyweight
+container runtimes directly motivates PipedPeer's use of \texttt{bubblewrap}
+unprivileged Linux namespaces — achieving the same isolation goal without
+requiring root, a container daemon, or Wasm bytecode compilation of the user's
+script.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 2: \textit{WebAssembly for Edge Computing: Potential and
+Challenges}}
+\addcontentsline{toc}{subsection}{Paper 2}
+\textbf{Authors:} M.~N.~Hoque and K.~A.~Harras \quad
+\textbf{Published In:} IEEE Commun.\ Standards Mag., vol.~6, no.~4, 2022~\cite{hoque2022}
+
+\noindent\textbf{Summary:}
+This survey analyses Wasm's properties — near-native speed, memory sandboxing,
+and platform-agnostic bytecode — against containers and VMs for edge deployment.
+Key challenges identified include WebAssembly System Interface (WASI) immaturity,
+limited file-system and networking APIs, and absence of GPU support.
+
+\noindent\textbf{Relevance to PipedPeer:}
+The paper's identification of WASI's inability to support arbitrary native Python
+libraries motivates PipedPeer's decision to use Nix \texttt{.nar} archives for
+environment portability rather than compiling scripts to Wasm. Nix content-addressed
+packages carry full native dependencies, overcoming the library-support limitations
+that prevent Wasm from being a drop-in Python execution environment.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 3: \textit{A Cross-Architecture Evaluation of WebAssembly in the
+Cloud-Edge Continuum}}
+\addcontentsline{toc}{subsection}{Paper 3}
+\textbf{Authors:} S.~Kakati and M.~Brorsson \quad
+\textbf{Published In:} Proc.\ IEEE/ACM CCGrid, 2024~\cite{kakati2024}
+
+\noindent\textbf{Summary:}
+This paper benchmarks Wasm runtimes (Wasmtime, WasmEdge, WAMR) across x86\_64,
+ARM64, and RISC-V in cloud-edge environments. A single Wasm binary achieves
+70--90\% of native performance across all architectures, with startup times under
+10\,ms. The authors identify I/O-bound workloads as suffering disproportionate
+overhead due to WASI syscall translation.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer must run Python workloads on workers with heterogeneous architectures
+(x86\_64, aarch64, armv7l). Rather than a single platform-agnostic bytecode binary,
+PipedPeer's \texttt{internal/nixgen/} generates \emph{architecture-specific} Nix
+flakes for all four target platforms, ensuring full native performance and library
+compatibility on each worker without the I/O overhead Wasm incurs via WASI.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 4: \textit{Design of Elixir-Based Edge Server for Responsive IoT
+Applications}}
+\addcontentsline{toc}{subsection}{Paper 4}
+\textbf{Authors:} Y.~Li and S.~Fujita \quad
+\textbf{Published In:} Proc.\ IEEE CANDARW, 2023~\cite{li2023elixir}
+
+\noindent\textbf{Summary:}
+This paper builds an IoT edge server using Elixir and OTP (Open Telecom Platform).
+GenServer actors handle sensor data aggregation, while supervisor trees provide
+automatic process restart on failure. The system achieves sub-millisecond message
+processing and maintains availability during individual process crashes.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer's daemon architecture mirrors the actor model: each node runs an
+independent daemon, tasks are dispatched as messages over NATS, and
+\texttt{ExecuteWithRetry} in \texttt{internal/coordinator/} implements supervisor-style
+retry-on-failure. The paper's analysis of lightweight, fault-tolerant edge server
+design informed PipedPeer's choice to embed all logic in a single Go daemon rather
+than distributing it across microservices.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 5: \textit{A Synergistic Elixir-EDA-MQTT Framework for Advanced
+Smart Transportation Systems}}
+\addcontentsline{toc}{subsection}{Paper 5}
+\textbf{Authors:} Y.~Zhou and X.~Chen \quad
+\textbf{Published In:} \textit{Computers}, vol.~16, no.~3, 2024~\cite{zhou2024}
+
+\noindent\textbf{Summary:}
+This paper combines Elixir's concurrency model, event-driven architecture (EDA), and
+MQTT pub/sub messaging to build a smart transportation management system. GenStage
+pipelines provide backpressure-aware event processing, and MQTT reduces communication
+overhead compared to REST for high-frequency telemetry.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer uses NATS as its pub/sub transport for task dispatch and job event
+publishing, analogous to MQTT in this framework. The paper's comparative analysis
+of pub/sub vs.\ request-response for distributed task coordination directly supports
+PipedPeer's choice of NATS over HTTP for payload delivery, and the event-driven job
+lifecycle model (\texttt{internal/jobhistory/events.go}) reflects the EDA patterns
+the paper evaluates.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 6: \textit{WebAssembly with wasi-nn for Edge Machine Learning
+Inference: Experiences and Lessons Learned}}
+\addcontentsline{toc}{subsection}{Paper 6}
+\textbf{Authors:} J.~Bachmeier, V.~Yussupov, J.~Henß, and H.~Koziolek \quad
+\textbf{Published In:} Proc.\ ECSA, 2025~\cite{bachmeier2025}
+
+\noindent\textbf{Summary:}
+This paper evaluates Wasm with the wasi-nn API for ML inference at the edge. The
+authors port image-classification and object-detection models to Wasm and benchmark
+inference latency, energy consumption, and portability across runtimes. Key lessons
+include wasi-nn's effective portability for CPU inference and its immaturity for GPU
+acceleration.
+
+\noindent\textbf{Relevance to PipedPeer:}
+ML workloads are a primary PipedPeer use case, evidenced by the memory baselines in
+\texttt{internal/resourceest/} (torch: 2\,GB, tensorflow: 3\,GB). The paper
+demonstrates that Wasm is not yet viable for ML workloads requiring full CPython,
+CUDA, or native libraries — validating PipedPeer's approach of shipping the complete
+Python environment via Nix \texttt{.nar} archives rather than targeting a Wasm
+bytecode format.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 7: \textit{Case Study of WebAssembly Runtimes for AI Applications
+on the Edge}}
+\addcontentsline{toc}{subsection}{Paper 7}
+\textbf{Authors:} S.~E.~Khelifa, M.~Bagaa, A.~O.~Messaoud, and A.~Ksentini \quad
+\textbf{Published In:} 2024~\cite{khelifa2024}
+
+\noindent\textbf{Summary:}
+This case study compares Wasmtime, WasmEdge, WAMR, and Wasmer for AI inference
+on edge devices. The authors measure execution time, memory overhead, and throughput
+for neural network tasks, finding substantial runtime-specific variation and
+identifying memory consumption as the dominant constraint on resource-limited edge
+hardware.
+
+\noindent\textbf{Relevance to PipedPeer:}
+The paper's profiling of AI workload memory usage at the edge directly informs the
+per-library memory baselines in PipedPeer's \texttt{internal/resourceest/} package.
+The comparative runtime analysis also contextualises PipedPeer's decision to route
+ML tasks to workers with sufficient free RAM using the resource estimation cascade,
+rather than blindly offloading without capacity checking.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 8: \textit{Programming Models for Failure-Transparent Distributed
+Systems}}
+\addcontentsline{toc}{subsection}{Paper 8}
+\textbf{Authors:} [Fill in from DiVA portal] \quad
+\textbf{Published In:} M.S.\ Thesis, KTH Royal Institute of Technology, 2025~\cite{author2025thesis}
+
+\noindent\textbf{Summary:}
+This thesis surveys programming abstractions that make distributed system failures
+transparent to application developers. The author evaluates actors, reactive streams,
+and process supervision trees for handling crash, omission, and Byzantine failures
+through automatic retry, state replication, and task migration — without exposing
+failure semantics to the application layer.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer implements a practical failure-transparent execution model:
+\texttt{ExecuteWithRetry} in \texttt{internal/coordinator/} automatically migrates
+tasks to the next-best worker on rejection or failure, and the hard local-fallback
+guarantee ensures task completion regardless of remote node availability. The
+three-phase lease protocol (accept $\to$ commit $\to$ complete) in
+\texttt{internal/daemonapi/} directly reflects the thesis's framework for atomic
+task reservation under partial failure.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 9: \textit{Python Array API Standard: Toward Array
+Interoperability in the Scientific Python Ecosystem}}
+\addcontentsline{toc}{subsection}{Paper 9}
+\textbf{Authors:} [Fill in from proceedings] \quad
+\textbf{Published In:} Proc.\ SciPy, 2023~\cite{author2023python}
+
+\noindent\textbf{Summary:}
+This paper proposes and evaluates a standardised array computation API enabling
+Python scripts to run transparently on NumPy, CuPy, JAX, and other backends without
+modification. The authors demonstrate that array-interoperable scripts can be
+dispatched to CPUs, GPUs, or distributed backends, supporting scientific computing
+portability across heterogeneous hardware.
+
+\noindent\textbf{Relevance to PipedPeer:}
+The paper's goal — making Python scripts portable across computational backends
+without modification — directly parallels PipedPeer's goal of making scripts
+portable across physical nodes without code changes. PipedPeer's static import
+scanner (\texttt{internal/pythondeps/}) must correctly identify array library
+imports (numpy, torch, jax) and resolve them to Nix packages, ensuring that scripts
+targeting the Python Array API standard are correctly packaged for remote execution.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 10: \textit{iDDS: Intelligent Distributed Dispatch and Scheduling
+for Workflow Orchestration}}
+\addcontentsline{toc}{subsection}{Paper 10}
+\textbf{Authors:} [Fill in from arXiv] \quad
+\textbf{Published In:} arXiv:2510.02930, 2025~\cite{author2025idds}
+
+\noindent\textbf{Summary:}
+iDDS proposes an intelligent workflow orchestration system that dynamically assigns
+scientific computing tasks to heterogeneous resources based on real-time CPU,
+memory, data locality, and task-dependency constraints. A graph-based task DAG
+representation drives a dynamic scheduling engine that maximises throughput while
+minimising data movement.
+
+\noindent\textbf{Relevance to PipedPeer:}
+iDDS addresses the same core problem as PipedPeer — intelligent dynamic assignment
+of compute tasks to heterogeneous nodes — but targets large-scale scientific
+workflows rather than LAN-local script execution. The paper's scoring-based worker
+selection model directly parallels PipedPeer's HealthScore dispatch model.
+PipedPeer can be understood as a zero-configuration, single-binary specialisation
+of this paradigm for small-team and LAN deployments.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 11: \textit{Task Offloading in Multi-Hop Relay-Aided Multi-Access
+Edge Computing}}
+\addcontentsline{toc}{subsection}{Paper 11}
+\textbf{Authors:} Y.~Deng, Z.~Chen, X.~Chen, and Y.~Fang \quad
+\textbf{Published In:} IEEE Trans.\ Veh.\ Technol., vol.~72, no.~1, 2023~\cite{deng2023}
+
+\noindent\textbf{Summary:}
+This paper studies computation offloading in multi-hop wireless relay networks
+reaching MEC servers. The authors formulate a joint optimisation problem for task
+assignment and relay selection, minimising task completion time subject to
+transmission-rate and energy constraints, and propose an iterative algorithm with
+near-optimal performance.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer's task dispatch is conceptually analogous to single-hop MEC offloading:
+the sender evaluates available worker nodes and routes the task to the best fit.
+The paper's latency trade-off analysis between local execution and remote offloading
+directly informs PipedPeer's HealthScore model, which penalises over-loaded workers
+(poor remote execution time) and excludes unreachable ones (infinite latency),
+and its local fallback guarantee (prefer local when offloading is infeasible).
+
+% ------------------------------------------------------------------
+\subsection*{Paper 12: \textit{Multi-Agent Deep Reinforcement Learning Based Dynamic
+Task Offloading in a D2D Mobile-Edge Computing Network}}
+\addcontentsline{toc}{subsection}{Paper 12}
+\textbf{Authors:} H.~He, X.~Yang, X.~Mi, H.~Shen, and X.~Liao \quad
+\textbf{Published In:} \textit{Sensors}, vol.~24, no.~16, 2024~\cite{he2024}
+
+\noindent\textbf{Summary:}
+This paper proposes a multi-agent deep reinforcement learning (MADRL) framework for
+dynamic computation offloading in D2D MEC networks. Each device independently learns
+an offloading policy from local observations (battery, channel quality, queue length)
+without a central coordinator, achieving better energy-delay trade-offs than
+centralised heuristics.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer uses a deterministic HealthScore model for worker selection rather than
+learned policies. This paper provides a theoretical reference for what an optimal
+adaptive policy could achieve, contextualising the design trade-off: PipedPeer
+prioritises zero-configuration and zero training-data overhead over optimal
+scheduling, accepting a simpler rule-based model that is immediately deployable
+without historical data collection.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 13: \textit{Joint Optimization of Multi-User Partial Offloading
+Strategy and Resource Allocation in D2D-Enabled MEC}}
+\addcontentsline{toc}{subsection}{Paper 13}
+\textbf{Authors:} D.~Yong, R.~Liu, X.~Jia, and Y.~Gu \quad
+\textbf{Published In:} \textit{Sensors}, vol.~23, no.~5, 2023~\cite{yong2023}
+
+\noindent\textbf{Summary:}
+This paper jointly optimises task partition ratios (local vs.\ offloaded), transmission
+power, and resource allocation in a D2D-assisted MEC network using Lyapunov
+optimisation. Partial offloading consistently outperforms all-or-nothing strategies,
+with energy savings of up to 35\%.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer currently uses all-or-nothing dispatch — a script runs entirely on one
+worker. The paper's partial offloading analysis motivates a direct future extension:
+splitting a script's data processing stages across multiple workers and merging
+results at the sender. The resource allocation model also informed PipedPeer's
+multi-tier memory estimation, which matches tasks to workers with sufficient RAM
+rather than blindly offloading.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 14: \textit{Energy-Efficient Collaborative Task Offloading in
+Multi-Access Edge Computing Based on Deep Reinforcement Learning}}
+\addcontentsline{toc}{subsection}{Paper 14}
+\textbf{Authors:} [Fill in from ScienceDirect] \quad
+\textbf{Published In:} \textit{Ad Hoc Networks}, vol.~169, 2025~\cite{anon2025energy}
+
+\noindent\textbf{Summary:}
+This paper proposes a collaborative task offloading scheme for MEC that minimises
+system-wide energy consumption using deep reinforcement learning. Devices cooperate
+by relaying tasks through each other to reach edge servers, and the DRL agent learns
+cooperative policies that reduce total energy by up to 40\% compared to non-cooperative
+baselines.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer's collaborative compute model — where any node acts as both sender and
+worker — mirrors the cooperative offloading architecture described here. The paper's
+result that cooperative offloading consistently outperforms isolated local execution
+validates PipedPeer's design: evaluate all available workers before falling back to
+local execution, rather than defaulting to local computation immediately.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 15: \textit{Blockchain Enabled Task Offloading Based on Edge
+Cooperation in the Digital Twin Vehicular Edge Network}}
+\addcontentsline{toc}{subsection}{Paper 15}
+\textbf{Authors:} C.~Li, Q.~Chen, M.~Chen, Z.~Su, Y.~Ding, D.~Lan, and
+A.~Taherkordi \quad
+\textbf{Published In:} \textit{J.\ Cloud Comput.}, vol.~12, no.~120, 2023~\cite{li2023blockchain}
+
+\noindent\textbf{Summary:}
+This paper introduces a blockchain-based trust framework for cooperative task
+offloading in vehicular edge networks. Smart contracts enforce service-level
+agreements between task submitters and edge workers. Digital twin technology models
+network state for predictive scheduling, and the blockchain prevents free-riding by
+rewarding workers for verified computation.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer currently assumes cooperative, trusted participation. The paper's
+trust and incentive framework directly maps onto PipedPeer's planned token-based
+incentive system (Future Work, \S\ref{sec:future}), where smart contracts could
+enforce execution commitments — mirroring PipedPeer's three-phase lease protocol
+(accept/commit/complete) in a trustless, economically incentivised setting across
+untrusted participants.
+
+% ------------------------------------------------------------------
+\subsection*{Paper 16: \textit{Congestion-Aware Distributed Task Offloading in
+Wireless Multi-Hop Networks Using Graph Neural Networks}}
+\addcontentsline{toc}{subsection}{Paper 16}
+\textbf{Authors:} Z.~Zhao, J.~Perazzone, G.~Verma, and S.~Segarra \quad
+\textbf{Published In:} arXiv:2312.02471, 2023~\cite{zhao2023}
+
+\noindent\textbf{Summary:}
+This paper models multi-hop wireless task offloading as a graph problem and trains
+a graph neural network (GNN) to produce distributed offloading policies from local
+neighbourhood observations. Each node makes offloading decisions using
+GNN-aggregated topology information, significantly outperforming greedy baselines in
+congested networks.
+
+\noindent\textbf{Relevance to PipedPeer:}
+PipedPeer's peer discovery subsystem constructs a dynamic graph of available workers
+(via mDNS, registry, and peer cache), and the coordinator currently scores workers
+independently using scalar HealthScore metrics. The paper's GNN-based approach
+demonstrates that graph-aware placement — accounting for network topology and
+inter-node latency — can substantially improve task routing. This motivates a future
+PipedPeer extension in which the coordinator incorporates graph-structured worker
+representations to replace independent scalar scoring.
