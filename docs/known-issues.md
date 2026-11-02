@@ -50,6 +50,7 @@ Paths are relative to `src/`. Each entry says how it was established:
 | Audit B1: `PIPEDPEER_DDP_SYNC_EVERY=auto` crashed DDP set-up, and the failure was swallowed | Read as `auto` before `int()`; patch failures are always printed |
 | Audit B3: internet peers appeared twice (fingerprint and UUID rows) | One identity: node id = key fingerprint ([ADR-0008](adr/0008-pinned-tls-and-key-addressed-nodes.md)) |
 | Audit B4: a daemon restarted by `run` after a reboot forgot its introducer | The daemon reads `cluster.json` itself |
+| Observed 3: on a fresh lab a job whose closure was already present never seeded its peers | Every upload now broadcasts the closure to peers (`execupload.go:175`, reworked in f182b0f / a8c50db). `scripts/lab-fail.sh` passes on the plain lab: 33 of 80 items ran on peers, a worker killed mid-run, 0 chunks lost, result correct |
 | Observed 7: the idle-interception benchmark (`bench.py` N7) distributed 18 of 48 items while labelled "the cost model declines" | N7 runs `pool_idle.py`, small enough that the shim declines, and every enabled run must report 0 dispatched items (`expect_dispatched=0`) |
 
 ## Not bugs, recorded so they are not reported again
@@ -61,16 +62,6 @@ Paths are relative to `src/`. Each entry says how it was established:
 - **A forwarded request can fan out again.** It is meant to: the origin forwarded because it lacked the memory to run the work, and the peer spreading it further is how the work gets done. A sub-chunk landing back on the origin carries no forwarding mark, so it can be forwarded once more, but never in a loop.
 
 ## Observed
-
-3. **On a fresh lab, a job whose closure is already present never seeds its
-   peers.**
-   - `scripts/lab-fail.sh` placed its job on the submitting host, which said
-     "nothing to send".
-   - The new workers never received the closure, so `EnablePoolSpill` offered
-     no peers.
-   - The shim then ran all 80 items locally, and the harness failed.
-   - Raw evidence: `benchmarks/raw/O4_lab_fail.txt`.
-   - The cause is inferred from the log.
 
 ## Read in the code, not exercised
 
