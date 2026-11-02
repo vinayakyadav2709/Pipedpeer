@@ -51,6 +51,7 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/roundrobin", s.handleRoundRobin)
 	r.Get("/v1/jobs", s.handleJobs)
 	r.Get("/v1/nodes", s.handleNodes)
+	r.Post("/v1/nodes/{id}/failed", s.handleNodeFailed)
 	r.Get("/v1/peers/unreachable", s.handleUnreachable)
 	r.Get("/v1/reserved", s.handleReserved)
 	r.Get("/v1/store", s.handleStoreCheck)
@@ -561,6 +562,18 @@ func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	var req completeRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	s.processComplete(req)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleNodeFailed lowers a peer's health factor after a job or chunk failed
+// on it (the coordinator reports to its own daemon, whose store ranks peers).
+func (s *Server) handleNodeFailed(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.store.MarkFailed(id); err != nil {
+		log.Warn().Err(err).Str("peer", id).Msg("could not record failed work on peer")
+		http.Error(w, "could not record failure", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 

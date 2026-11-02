@@ -666,14 +666,38 @@ func (s *Store) PruneStale() error {
 func (s *Store) MarkHealthy(n Node) error {
 	n.State = "healthy"
 	n.LastSeen = now().Unix()
-	if n.HealthScore == 0 {
-		n.HealthScore = 1.0
+	// Health recovers a step per answered poll; a node never seen before
+	// starts at 1.0. The caller's value is ignored: only this store lowers it.
+	n.HealthScore = 1.0
+	var prev float64
+	switch err := s.db.QueryRow(`SELECT health_score FROM nodes WHERE node_id=?`, n.NodeID).Scan(&prev); {
+	case err == nil:
+		n.HealthScore = min(1.0, prev+HealthRecovery)
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("nodestore: read health of %s: %w", n.NodeID, err)
 	}
 	return s.UpsertNode(n)
 }
 
+// Health factor bounds: a failure halves it down to HealthFloor, each healthy
+// poll adds HealthRecovery back up to 1.0.
+const (
+	HealthFloor    = 0.1
+	HealthRecovery = 0.1
+)
+
+// MarkFailed records a failed chunk or job on the node: its health halves
+// (floor HealthFloor) so scoring prefers an equal node that has not failed.
+func (s *Store) MarkFailed(nodeID string) error {
+	_, err := s.db.Exec(`UPDATE nodes SET health_score=MAX(?, health_score/2) WHERE node_id=?`, HealthFloor, nodeID)
+	if err != nil {
+		return fmt.Errorf("nodestore: mark %s failed: %w", nodeID, err)
+	}
+	return nil
+}
+
 func (s *Store) MarkUnreachable(nodeID string) error {
-	_, err := s.db.Exec(`UPDATE nodes SET state='unreachable', active_jobs=0, available_mem=0 WHERE node_id=?`, nodeID)
+	_, err := s.db.Exec(`UPDATE nodes SET state='unreachable', active_jobs=0, available_mem=0, health_score=MAX(?, health_score/2) WHERE node_id=?`, HealthFloor, nodeID)
 	if err != nil {
 		return fmt.Errorf("nodestore: mark %s unreachable: %w", nodeID, err)
 	}
