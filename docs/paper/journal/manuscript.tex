@@ -6,7 +6,7 @@
 %  arXiv or source upload: they are notes for the authors.
 %  Build: tectonic manuscript.tex   (or pdflatex twice)
 % ============================================================
-\documentclass[preprint,12pt]{elsarticle}
+\documentclass[5p,times,twocolumn]{elsarticle}
 
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
@@ -17,7 +17,6 @@
 \usepackage{algpseudocode}
 \usepackage{xcolor}
 \usepackage[hidelinks]{hyperref}
-\usepackage{lineno}
 
 \newcommand{\figpath}[1]{../../diagrams/#1}
 % Marks a field only the authors can fill. The manuscript must contain none
@@ -90,7 +89,6 @@ heterogeneous scheduling \sep data-parallel training
 
 \end{frontmatter}
 
-\linenumbers
 
 % ============================================================
 \section{Introduction}
@@ -174,15 +172,18 @@ schedule whole jobs through a central manager and explicit job descriptions.
 Fiber~\cite{zhi2020fiber} replaces \texttt{multiprocessing} with processes on a
 cluster manager; PyWren~\cite{jonas2017pywren} and its successor
 Lithops~\cite{sampe2021lithops} run maps on serverless functions, and Lithops
-exposes a \texttt{multiprocessing}-compatible API. Parsl~\cite{babuji2019parsl}
+exposes a \texttt{multiprocessing}-compatible API; Arjona
+et~al.~\cite{arjona2023transparent} extend it to run unmodified
+\texttt{multiprocessing} applications, shared state included, on serverless
+functions. Parsl~\cite{babuji2019parsl}
 and funcX~\cite{chard2020funcx} turn decorated Python functions into tasks on
-remote resources. All of these require an import or decorator change and a
-provisioned back end (a cluster manager or a cloud account). PipedPeer's
+remote resources. All of these require a provisioned back end (a cluster manager or a cloud
+account), and all but Arjona et~al.'s an import or decorator change. PipedPeer's
 substitution happens before the script's first statement, so no line changes,
-and it decides per call whether to distribute at all. The closest systems in
-intent are therefore Fiber and Lithops; the differences are that PipedPeer
-needs no back end beyond the peers themselves, ships the environment, and may
-decline to distribute.
+and it decides per call whether to distribute at all. The closest system in
+intent is therefore Arjona et~al.'s; the differences are that PipedPeer
+needs no back end beyond the peers themselves, ships the environment to them,
+crosses NATs between them, and may decline to distribute.
 
 \paragraph{Reproducible environments} Nix~\cite{dolstra2004nix,dolstra2006thesis}
 and Guix~\cite{courtes2013guix} name each build by a hash of its inputs, which
@@ -250,7 +251,7 @@ fall back to a local one (Section~\ref{sec:ft}).
 Table~\ref{tab:cmp} summarises the comparison. Its entries come from published
 designs, not from benchmarks.
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
 \caption{PipedPeer against existing systems (qualitative). The lower block is
 where PipedPeer is partial or the weaker system.}
@@ -278,7 +279,7 @@ $^{\dagger}$When one introducer is reachable; otherwise a public address or an
 overlay network is needed.
 $^{*}$Any worker; not the submitter of a parallel script nor the machine of a
 training ring's rank~0.
-\end{table}
+\end{table*}
 
 % ============================================================
 \section{Design overview}
@@ -304,14 +305,14 @@ each other by broadcast; across networks a participant runs
 \texttt{pipedpeer invite}, which carries the cluster secret and up to six
 introducer addresses with a checksum.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=0.85\textwidth]{\figpath{fig_3.1_system_design.png}}
+\includegraphics[width=0.75\textwidth]{\figpath{fig_3.1_system_design.png}}
 \caption{System design. Submitter and worker are the same binary. Peers on
 other networks are reached over direct links that the introducer helps set up
 but never carries. Phones take parallel-map and torch chunks only.}
 \label{fig:arch}
-\end{figure}
+\end{figure*}
 
 \paragraph{Life of a job} (1) The client scans the script's imports and builds
 or reuses its closure. (2) It places the job and leases a slot on the chosen
@@ -335,7 +336,8 @@ cores and VRAM --- and the remaining candidates are scored:
 \label{eq:score}
 \begin{split}
 S = \Bigl(1 &- \frac{u_{\mathrm{cpu}} + u_{\mathrm{mem}}}{200} - 0.05\,n_{\mathrm{jobs}} \\
-    &+ 0.10(\hat{c}-0.5) + 0.06(\hat{f}-0.5) + 0.10(\hat{m}-0.5) + 0.10(\hat{r}-0.5)\Bigr)\cdot h ,
+    &+ 0.10(\hat{c}-0.5) + 0.06(\hat{f}-0.5) \\
+    &+ 0.10(\hat{m}-0.5) + 0.10(\hat{r}-0.5)\Bigr)\cdot h ,
 \end{split}
 \end{equation}
 with utilisations $u$ in percent, $n_{\text{jobs}}$ running jobs, capacity
@@ -390,7 +392,7 @@ once, caching it by flake hash.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.8\textwidth]{\figpath{fig_4.1_nat_traversal.png}}
+\includegraphics[width=\columnwidth]{\figpath{fig_4.1_nat_traversal.png}}
 \caption{Joining across networks. The introducer exchanges candidate addresses
 and forwards one punch request; the two nodes then race their candidate pairs
 over one UDP socket.}
@@ -444,7 +446,7 @@ TLS~\cite{rfc8446} and HTTP on one port.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.8\textwidth]{\figpath{fig_4.8_shim_injection.png}}
+\includegraphics[width=\columnwidth]{\figpath{fig_4.8_shim_injection.png}}
 \caption{Interception. The package is placed on the interpreter's path so that
 it is imported before the script; libraries are patched on first import.}
 \label{fig:shim}
@@ -536,7 +538,7 @@ transport, so dense products stay local.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.6\textwidth]{\figpath{fig_4.11_cost_model.png}}
+\includegraphics[width=\columnwidth]{\figpath{fig_4.11_cost_model.png}}
 \caption{Decision regions of Eq.~\eqref{eq:cost} for pandas work ($\rho=1$,
 $R=R'=1$\,GFLOP/s) with three nodes on a 500\,MB/s link. Above 512\,MiB,
 work above about 3.5\,FLOP/B is distributed: a 900\,MiB grouping moves, a join
@@ -549,7 +551,7 @@ of the same size stays local.}
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.75\textwidth]{\figpath{fig_4.10_ddp.png}}
+\includegraphics[width=\columnwidth]{\figpath{fig_4.10_ddp.png}}
 \caption{Training through the daemons. Ranks post gradients (or weights) to
 daemons rather than to one another and receive one sample-weighted average.}
 \label{fig:ddp}
@@ -724,7 +726,7 @@ device trained on the same data and seeds. MiB is binary, MB decimal.
 \paragraph{Test models} Three models (Table~\ref{tab:models}) keep their batch,
 learning rate and epochs in every arm.
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
 \caption{Test models for training accuracy}
 \label{tab:models}
@@ -738,20 +740,20 @@ MLP-C & Same MLP; SGD 0.1, momentum 0.9 & 559{,}105 & 60{,}000 & 2048 & 6 (180) 
 Transformer & 2 layers, width 64, 4 heads, 32 tokens; AdamW & 70{,}211 & 40{,}000 & 256 & 2 (314) \\
 \bottomrule
 \end{tabularx}
-\end{table}
+\end{table*}
 
 \subsection{Q1: Interception cost}
 \label{sec:eval-shim}
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=0.9\textwidth]{\figpath{fig_5.2_shim_overhead.png}}
+\includegraphics[width=0.8\textwidth]{\figpath{fig_5.2_shim_overhead.png}}
 \caption{Cost of interception. Left: a declined 16-item map, median and range
 of five runs (the enabled side's cold first run is excluded from the range).
 Right: interpreter startup with libraries patched at startup and on first
 import, best of five.}
 \label{fig:shimcost}
-\end{figure}
+\end{figure*}
 
 On the Core~i5 laptop, startup of a job that imports nothing heavy took
 0.117\,s with interception against 0.094\,s without, a ratio of $1.24\times$
@@ -779,7 +781,7 @@ its device model is what enables GPU passthrough.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.6\textwidth]{\figpath{fig_5.1_closure_cache.png}}
+\includegraphics[width=\columnwidth]{\figpath{fig_5.1_closure_cache.png}}
 \caption{Five submissions of the same environment in the plain lab.}
 \label{fig:cache}
 \end{figure}
@@ -856,7 +858,7 @@ median of three runs on a host also carrying other work (one-minute load in
 the last column), so wall times are inflated unevenly. Not a physical-machine
 speedup.}
 \label{tab:scaling}
-\small
+\footnotesize
 \begin{tabular}{ccccc}
 \toprule
 \textbf{Nodes} & \textbf{Wall (s)} & \textbf{vs.\ one node} & \textbf{Total CPU (s)} & \textbf{Host load} \\
@@ -882,8 +884,8 @@ downloading CUDA PyTorch.
 \centering
 \caption{End-to-end steps in the LAN lab, first run and cached (one host)}
 \label{tab:e2e}
-\small
-\begin{tabularx}{\textwidth}{X C{2.6cm} C{2.6cm}}
+\footnotesize
+\begin{tabularx}{\columnwidth}{X C{1.7cm} C{1.7cm}}
 \toprule
 \textbf{Step} & \textbf{First run} & \textbf{Cached} \\
 \midrule
@@ -913,7 +915,7 @@ The test suite adds that a parallel map whose every remote part fails still
 returns the correct result.
 % source: RESULTS.md R5 (FAILED); rehearsal.md "Failure drills" and "Two-site testbed".
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
 \caption{Failure drills (LAN lab unless stated)}
 \label{tab:drills}
@@ -937,7 +939,7 @@ Introducer's address changed, no command run$^{c}$ & links held or re-formed wit
 $^{c}$The harness counts a recovery no earlier than 12\,s after the move when
 the path survives outright, so these readings sit at its floor and do not
 measure a recovery time.
-\end{table}
+\end{table*}
 % source: lab-net.sh recover() (12 s floor); commit c785275 body (12.1-12.6 s).
 
 \subsection{Q4: Training}
@@ -964,7 +966,7 @@ fast ring was faster on every model and profile here (for example MLP-G
 15.2\,s on LAN against 27.9\,s), because each 2-CPU container is CPU-bound;
 these are equal-quota containers on one host, not physical machines.
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
 \caption{Two-rank ring in the quota lab at $H=32$ (one seed): bytes sent per
 rank and wall time, against one container}
@@ -979,18 +981,18 @@ MLP-C & 16.9 & 98.9 / 10.7 & 14.6 / 43.7 & 10.4 / 14.1 \\
 Transformer & 26.7 & 21.7 / 2.4 & 22.7 / 35.9 & 19.1 / 22.9 \\
 \bottomrule
 \end{tabularx}
-\end{table}
+\end{table*}
 % source: docs/benchmarks/diloco.md (quiet rerun); report Table tab:fastsync.
 
-\begin{figure}[t]
+\begin{figure*}[t]
 \centering
-\includegraphics[width=0.9\textwidth]{\figpath{fig_5.4_sync_modes.png}}
+\includegraphics[width=0.8\textwidth]{\figpath{fig_5.4_sync_modes.png}}
 \caption{Fast synchronisation at $H=32$. Left: quota-lab wall time of one
 device and a two-rank ring under exact and fast synchronisation on Wi-Fi, one
 seed. Right: in-process validation-loss gap to one device, mean of seeds 0--2
 and of seeds 0--5 where run; the dashed line is the 1\% bar.}
 \label{fig:sync}
-\end{figure}
+\end{figure*}
 
 At 64 steps, a separate lab run with three seeds per cell also stayed within
 the bar on both profiles (worst $+0.64\%$), but in-process the transformer
@@ -1024,7 +1026,7 @@ from 64:36 to 84:16 and then to 70:30 after it recovered.
 \subsection{Q5: Physical machines and a phone}
 \label{sec:eval-phys}
 
-\begin{table}[t]
+\begin{table*}[t]
 \centering
 \caption{Set~A: two laptops in different homes over Tailscale. Script time
 unless marked ``from submission''. Sessions~1 and~2 ran different builds.}
@@ -1046,7 +1048,7 @@ Same, \texttt{-{}-ddp 2}, automatic (session 2) & 14.6\,s; loss 0.0796 \\
 Combined CPU+GPU script, from submission: first run / repeat & 506.0\,s (487.4\,s building the environment, mostly CUDA PyTorch) / 17.7\,s \\
 \bottomrule
 \end{tabularx}
-\end{table}
+\end{table*}
 % source: docs/benchmarks/real-hardware.md (exports with run ids).
 
 \paragraph{Set A} Table~\ref{tab:phys} lists the two-laptop runs. The mixed CPU
@@ -1217,6 +1219,8 @@ paper are available in the project repository~\cite{pipedpeerrepo}, under
 \bibitem{jonas2017pywren} E.~Jonas, Q.~Pu, S.~Venkataraman, I.~Stoica, B.~Recht, Occupy the cloud: Distributed computing for the 99\%, in: Proc. ACM Symp. on Cloud Computing (SoCC), 2017, pp. 445--451.
 
 \bibitem{sampe2021lithops} J.~Samp\'e, P.~Garc\'ia-L\'opez, M.~S\'anchez-Artigas, G.~Par\'is, D.~Barcelona-Pons, D.~Arroyo-Pinto, Toward multicloud access transparency in serverless computing, IEEE Software 38~(1) (2021) 68--74.
+
+\bibitem{arjona2023transparent} A.~Arjona, G.~Finol, P.~Garc\'ia-L\'opez, Transparent serverless execution of Python multiprocessing applications, Future Gener. Comput. Syst. 140 (2023) 436--449. \url{https://doi.org/10.1016/j.future.2022.10.038}
 
 \bibitem{babuji2019parsl} Y.~Babuji, A.~Woodard, Z.~Li, D.~S.~Katz, B.~Clifford, R.~Kumar, L.~Lacinski, R.~Chard, J.~M.~Wozniak, I.~Foster, M.~Wilde, K.~Chard, Parsl: Pervasive parallel programming in Python, in: Proc. 28th Int. Symp. on High-Performance Parallel and Distributed Computing (HPDC), 2019, pp. 25--36.
 
