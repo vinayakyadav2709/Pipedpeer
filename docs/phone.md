@@ -5,8 +5,13 @@ setup` tries the full-node route first and falls back to a pool-only worker.
 
 | Route | What it takes | How |
 |---|---|---|
-| **Full node** (main) | whole jobs from aarch64 machines (other phones, itself), Pool/joblib chunks from every machine | Debian in `proot-distro` with single-user Nix; pipedpeer runs inside it |
+| **Full node** (main) | Pool/joblib and torch chunks from every machine, each in the job's own environment built on the phone | Debian in `proot-distro` with single-user Nix; pipedpeer runs inside it |
 | **Pool-only worker** (fallback) | Pool/joblib chunks only | Termux's own Python |
+
+Both routes are **chunks-only**: the phone takes no whole jobs and no DDP
+ranks. Those need the job sandbox, a second proot nested inside the
+`proot-distro` session, and on Play-Store Termux's proot the inner one starts
+nothing (`docs/next-steps.md` §3). `pipedpeer doctor` and the daemon log say so.
 
 CPU only on both. The pool-only worker is tested in
 `termux/termux-docker:aarch64` under qemu. The full node is not: proot needs
@@ -19,8 +24,9 @@ from containers are not performance numbers.
 
 ## One-time phone setup
 
-1. Install **Termux from F-Droid** (or its GitHub releases), not from the Play
-   Store. The Play build is outdated.
+1. Install Termux. The real-phone runs (Samsung S20 FE, Android 13) used the
+   **Play Store** build, which pipedpeer handles (it starts programs through
+   Android's linker). The F-Droid build is untested.
 2. Turn off Android's phantom process killer. On Android 12 and later it kills
    anything past 32 child processes, which kills pool workers. Any one of:
    - **Android 14+:** Developer options, "Disable child process restrictions".
@@ -68,9 +74,10 @@ everyone down.
 
 ## What runs where
 
-- A laptop's job never runs whole on a phone: its environment is built for
-  x86_64. A job submitted on the phone builds its environment there with Nix
-  (aarch64, mostly fetched from cache.nixos.org) and runs on aarch64 nodes.
+- No job runs whole on a phone (chunks-only, above). A job submitted on the
+  phone builds its environment there for aarch64 and is placed like
+  `--remote`, but an x86_64 laptop refuses it ("arch mismatch"), so today it
+  needs another aarch64 machine that is not a phone.
 - Pool chunks from a laptop run, on a full node, in the job's own environment
   built on the phone: the laptop's node sends the job's package list, the
   phone builds it for aarch64 with Nix (cached, by flake hash, under
@@ -94,7 +101,8 @@ directory and `/nix` (plus `/dev`, `/proc`, `/sys` and DNS files), with an
 address-space limit of the job's memory plus 2 GiB and `nice 10`. That is
 weaker than crun: no PID or network isolation and no exact memory cap. The
 daemon log and `pipedpeer doctor` say so. Android's app boundary still keeps
-jobs away from the rest of the phone.
+jobs away from the rest of the phone. This second proot is the one that does
+not start on Play-Store Termux, which is why phones are chunks-only today.
 
 ## Troubleshooting
 
