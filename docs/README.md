@@ -32,6 +32,8 @@ number traced to its record on 2026-11-02 (`77d194e`).
 # Figures
 python3 diagrams/src/plots_design.py
 python3 diagrams/src/plots_results.py
+# Nix's graphviz ignores system font aliases; this maps Helvetica to Nimbus Sans.
+export FONTCONFIG_FILE="$PWD/diagrams/src/fonts.conf"
 for f in diagrams/src/*.dot; do
   out="diagrams/$(basename "${f%.dot}").png"
   dot -Tpng -Gdpi=300 -Gmargin=0.14 "$f" -o "$out"
