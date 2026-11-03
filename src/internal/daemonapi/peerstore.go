@@ -217,4 +217,3 @@ func (s *Server) handlePeerNar(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-

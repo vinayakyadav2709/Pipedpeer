@@ -371,6 +371,7 @@ func runCheckOnly(o checkOnlyOptions) error {
 			Pkgs:          o.Pkgs,
 			Intercept:     true,
 			GPU:           envGPU(o.RequireGPU, o.PreferGPU, o.DaemonPort, o.NodeID.NodeID, targetNodeID, targetCaps),
+			CachePort:     runDaemonPort(),
 		}, nil)
 		if err != nil {
 			c.block("environment", fmt.Sprintf("build failed: %v", err))

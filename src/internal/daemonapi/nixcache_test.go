@@ -391,4 +391,3 @@ func TestNixCacheNar(t *testing.T) {
 		}
 	})
 }
-

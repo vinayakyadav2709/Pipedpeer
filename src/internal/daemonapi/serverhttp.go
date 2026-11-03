@@ -23,6 +23,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
 	"github.com/pipedpeer/pipedpeer/internal/nixtrust"
+	"github.com/pipedpeer/pipedpeer/internal/peercache"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -34,7 +35,7 @@ func (s *Server) buildRouter() {
 	// No-op until a token is configured, so an existing cluster keeps working
 	// until its operator opts in. Once one is set, every endpoint here is
 	// behind it — including /health, which is how peers decide who exists.
-	r.Use(exceptUIPage(authtoken.Middleware))
+	r.Use(exceptLocalNixCache(exceptUIPage(authtoken.Middleware)))
 
 	r.Get("/ui", s.handleUI)
 	r.Get("/v1/stats", s.handleStats)
@@ -57,6 +58,9 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/store", s.handleStoreCheck)
 	r.Post("/v1/store/missing", s.handleStoreMissing)
 	r.Post("/v1/store/import", s.handleStoreImport)
+	r.Get("/v1/store/narinfo/{hash}", s.handlePeerNarinfo)
+	r.Get("/v1/store/nar/{hash}", s.handlePeerNar)
+	r.Mount(peercache.Route, s.nixCacheRouter())
 	r.Post("/v1/env/foreign", s.handleForeignEnv)
 	r.Post("/v1/pool/map", s.handlePoolMap)
 	r.Get("/v1/pool/stats", s.handlePoolStats)

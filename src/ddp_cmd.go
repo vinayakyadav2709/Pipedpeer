@@ -246,6 +246,7 @@ func runDDP(o ddpRunOptions) error {
 			Intercept:     true, // DDP transparency lives in the sitecustomize shim
 			GPU:           cuda,
 			Verbose:       say.Verbose,
+			CachePort:     runDaemonPort(),
 		}, func(step int, title string) {
 			if step == 1 {
 				say.Printf("[%d/7] %s\n", step, title)

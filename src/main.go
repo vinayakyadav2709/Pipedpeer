@@ -288,6 +288,7 @@ func newMapCmd() *cobra.Command {
 				PythonVersion: pythonVersion,
 				Pkgs:          pkgs,
 				Verbose:       say.Verbose,
+				CachePort:     runDaemonPort(),
 			}, func(step int, title string) {
 				say.Printf("[%d/7] %s\n", step, title)
 			})

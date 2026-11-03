@@ -21,6 +21,7 @@ func fakePhone(t *testing.T) string {
 	pre := t.TempDir()
 	t.Setenv("PREFIX", pre)
 	t.Setenv("TERMUX_VERSION", "0.118")
+	t.Setenv("HOME", t.TempDir()) // TermuxPrep writes ~/.termux/boot
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	oldMarker, oldStep, oldLaunch, oldRun, oldLook, oldVer := marker, runStep, launch, runCmd, lookPython, pyVersionOf

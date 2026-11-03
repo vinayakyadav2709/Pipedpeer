@@ -124,6 +124,7 @@ func Run(ctx context.Context, opts Options) (runErr error) {
 		Intercept:     opts.Intercept,
 		GPU:           opts.GPU,
 		Verbose:       say.Verbose,
+		CachePort:     selfPort(opts.SelfDaemonPort),
 	}, func(step int, title string) {
 		if step == 1 {
 			say.Printf("[%d/7] %s\n", step, title)
@@ -663,4 +664,13 @@ func runName(opts Options) string {
 		return "this machine"
 	}
 	return nodeNames(opts.DaemonHost, opts.DaemonPort)[opts.TargetID]
+}
+
+// selfPort is this machine's daemon port, whose /nix-cache route serves
+// as the peer-cache substituter; 0 means the default port.
+func selfPort(p int) int {
+	if p <= 0 {
+		return daemonctl.DefaultPort
+	}
+	return p
 }

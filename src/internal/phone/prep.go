@@ -1,8 +1,8 @@
 package phone
 
 // TermuxPrep: what setup does Termux-side before (and instead of) the
-// Debian: the wake lock, adb, and the phantom-process killer. Every step
-// checks first and says so when there is nothing to do.
+// Debian: the wake lock, adb, the phantom-process killer, and the boot script.
+// Every step checks first and says so when there is nothing to do.
 
 import (
 	"bufio"
@@ -81,6 +81,11 @@ func TermuxPrep(w io.Writer, o PrepOpts) error {
 		err = prepAdb(w, rd, hasTerm, o)
 	}
 	if err != nil {
+		errs = append(errs, err)
+	}
+	if err := writeBoot(w, os.Getenv("TERMUX_APP__APP_VERSION_NAME")); err != nil {
+		log.Warn().Err(err).Msg("phone: start-on-boot script not written")
+		term.Warn(w, "start on boot: %v", err)
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
