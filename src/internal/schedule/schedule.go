@@ -313,3 +313,25 @@ func predict(shares []Share, opts Options) float64 {
 	}
 	return worst
 }
+
+// Even splits items equally across devices, ignoring their speed: the
+// headcount split the scheduler replaced (commit 8c9284c), kept only as the
+// baseline it is measured against. The first items%len(devices) devices get
+// one item more; devices left with nothing are omitted.
+func Even(items int, devices []Device) []Share {
+	if len(devices) == 0 {
+		return nil
+	}
+	base, extra := items/len(devices), items%len(devices)
+	var shares []Share
+	for i, d := range devices {
+		n := base
+		if i < extra {
+			n++
+		}
+		if n > 0 {
+			shares = append(shares, Share{Device: d, Items: n})
+		}
+	}
+	return shares
+}

@@ -208,3 +208,23 @@ func TestNoDevicesIsNotACrash(t *testing.T) {
 		t.Errorf("unmeasured device was dropped without a reason")
 	}
 }
+
+func TestEvenSplitsByHeadcount(t *testing.T) {
+	devs := []Device{{ID: "a", Rate: 100}, {ID: "b", Rate: 1}, {ID: "c", Rate: 1}}
+	got := Even(10, devs)
+	want := []int{4, 3, 3}
+	if len(got) != 3 {
+		t.Fatalf("got %d shares, want 3: %+v", len(got), got)
+	}
+	for i, s := range got {
+		if s.Items != want[i] || s.Device.ID != devs[i].ID {
+			t.Errorf("share %d = %s:%d, want %s:%d", i, s.Device.ID, s.Items, devs[i].ID, want[i])
+		}
+	}
+	if got := Even(2, devs); len(got) != 2 {
+		t.Errorf("2 items over 3 devices: %d shares, want 2 (empty shares omitted)", len(got))
+	}
+	if Even(5, nil) != nil {
+		t.Error("no devices should give no shares")
+	}
+}
