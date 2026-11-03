@@ -1,5 +1,5 @@
 # Driver collector, on the operator's laptop. telemetry.sh renders it:
-# @RESULTS@ (absolute results/lab), @STORAGE@, @R2_ACCOUNT_ID@. The awss3
+# @RESULTS@ (absolute results/lab), @STORAGE@, @R2_ACCOUNT_ID@, @OTLP_PORT@. The awss3
 # exporter is wired into pipelines only by the driver-r2.yaml overlay, which
 # telemetry.sh adds when ~/.config/pipedpeer-lab/r2.env exists; its keys reach
 # the collector as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the
@@ -12,8 +12,8 @@ receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 0.0.0.0:4317
-        max_recv_msg_size_mib: 32
+        endpoint: 0.0.0.0:@OTLP_PORT@
+        max_recv_msg_size_mib: 64
 
   # One JSON line per run, appended by scripts/campaign/run.sh.
   file_log/runs:
@@ -34,20 +34,28 @@ receivers:
 processors:
   batch:
     timeout: 1s
-  # Fewer, larger objects in R2: one per signal every 30 s.
+  # Fewer, larger objects in R2: one per signal per minute, or sooner at
+  # 200k items (about 30 s of 33 PCs; README, Volume). Class A operations
+  # stay near 3 per minute however many PCs send.
   batch/r2:
-    timeout: 30s
-    send_batch_size: 50000
+    timeout: 60s
+    send_batch_size: 200000
+    send_batch_max_size: 400000
 
 exporters:
+  # zstd: each write is a 4-byte big-endian length and one zstd frame holding
+  # one OTLP JSON document (not a plain .zst file). otel/otelread.py reads
+  # these and plain .jsonl alike.
   file/metrics:
-    path: @RESULTS@/otel/metrics.jsonl
+    path: @RESULTS@/otel/metrics.zjsonl
+    compression: zstd
     flush_interval: 1s
     rotation:
       max_megabytes: 256
       max_backups: 1000
   file/logs:
-    path: @RESULTS@/otel/logs.jsonl
+    path: @RESULTS@/otel/logs.zjsonl
+    compression: zstd
     flush_interval: 1s
     rotation:
       max_megabytes: 256
@@ -59,6 +67,7 @@ exporters:
       s3_force_path_style: true
       s3_bucket: pipedpeer-lab
       s3_prefix: otel
+      compression: gzip
     marshaler: otlp_json
 
 service:

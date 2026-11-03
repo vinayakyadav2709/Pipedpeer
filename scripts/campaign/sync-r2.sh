@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # sync-r2.sh [sync|final|count]: copy results/lab to the pipedpeer-lab R2
-# bucket after every experiment.
+# bucket after every experiment. results/lab/pcap/<pc_id>/ (node.sh --pcap,
+# gitignored) goes up with the rest; results/lab/serve/ never does.
 #
 # Two ways in, whichever is configured:
 #   ingest (default): ~/.config/pipedpeer-lab/ingest.env, through the Worker in
@@ -16,7 +17,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-results="$repo/results/lab"
+results="${LAB_RESULTS:-$repo/results/lab}"
 ingest="$here/ingest/ingest.sh"
 ingest_env="${PIPEDPEER_LAB_INGEST_ENV:-$HOME/.config/pipedpeer-lab/ingest.env}"
 # On pc00 the decrypted bundle's r2.env (PIPEDPEER_LAB_R2_ENV) carries the

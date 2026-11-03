@@ -16,6 +16,9 @@ RCLONE_SHA256_arm64=7e1e8d69654941b7b7df84ee74c5f7fb09cce7d5496947fb7bf16b55ff42
 LAB_HOME="${PIPEDPEER_LAB_HOME:-$HOME/.local/share/pipedpeer-lab}"
 LAB_BIN="$LAB_HOME/bin"
 LAB_OTEL="$LAB_HOME/otel"
+# Logs the node collector reads (README, Runner integration): ray/, dask/,
+# pipedpeer-run/<run_id>.log, and pp-poll.py's JSON lines.
+LAB_LOGS="$LAB_HOME/logs"
 R2_ENV="${PIPEDPEER_LAB_R2_ENV:-$HOME/.config/pipedpeer-lab/r2.env}"
 R2_BUCKET=pipedpeer-lab
 

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # telemetry.sh up|down|status|check [seconds]: the driver's OpenTelemetry
-# collector (otel/driver.yaml.tmpl). It receives OTLP/gRPC on :4317 from the
-# node collectors (otel/node.sh) and tails results/lab/runs.jsonl; it writes
-# rotating OTLP JSON into results/lab/otel/ and, when
+# collector (otel/driver.yaml.tmpl). It receives OTLP/gRPC on :4317
+# (PIPEDPEER_LAB_OTLP_PORT) from the node collectors (otel/node.sh) and tails
+# results/lab/runs.jsonl; it writes rotating zstd-framed OTLP JSON
+# (otel/otelread.py reads it) into results/lab/otel/ and, when
 # ~/.config/pipedpeer-lab/r2.env exists, also uploads to R2
 # (pipedpeer-lab/otel/). Without r2.env it runs file-only and says so.
 #
-# check: metric datapoints and log records per lab.pc_id in the last minute
-# (or [seconds]), read from the file output; with R2, the objects under otel/.
+# check: metric datapoints and log records per lab.pc_id and source in the
+# last minute (or [seconds]), read from the file output; with R2, the objects
+# under otel/.
 #
 # Binary, rendered config, pid and log: ~/.local/share/pipedpeer-lab/otel.
 set -euo pipefail
@@ -15,7 +17,8 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 source "$here/otel/lib.sh"
 
-results="$repo/results/lab"
+results="${LAB_RESULTS:-$repo/results/lab}"
+otlp_port="${PIPEDPEER_LAB_OTLP_PORT:-4317}"
 pidfile="$LAB_OTEL/driver.pid"
 logfile="$LAB_OTEL/driver.log"
 config="$LAB_OTEL/driver.yaml"
@@ -30,7 +33,7 @@ up() {
 	lab_install_otelcol
 	lab_r2_load && r2=1 || echo "WARNING: telemetry goes to $results/otel only, not to R2" >&2
 	mkdir -p "$results/otel" "$LAB_OTEL/storage-driver"
-	sed -e "s|@RESULTS@|$results|g" -e "s|@STORAGE@|$LAB_OTEL/storage-driver|g" \
+	sed -e "s|@RESULTS@|$results|g" -e "s|@STORAGE@|$LAB_OTEL/storage-driver|g" -e "s|@OTLP_PORT@|$otlp_port|g" \
 		-e "s|@R2_ACCOUNT_ID@|${R2_ACCOUNT_ID:-not-configured}|g" \
 		"$here/otel/driver.yaml.tmpl" >"$config"
 	if [[ -n "${PIPEDPEER_LAB_S3_ENDPOINT:-}" ]]; then
@@ -56,7 +59,7 @@ up() {
 		rm -f "$pidfile"
 		return 1
 	fi
-	echo "driver collector up: pid $(cat "$pidfile"), OTLP/gRPC :4317, files in $results/otel, R2 $( ((r2)) && echo on || echo OFF)"
+	echo "driver collector up: pid $(cat "$pidfile"), OTLP/gRPC :$otlp_port, files in $results/otel, R2 $( ((r2)) && echo on || echo OFF)"
 }
 
 status() {
@@ -71,67 +74,9 @@ status() {
 
 check() {
 	local window="${1:-60}"
-	python3 -I - "$results/otel" "$window" <<'PY'
-import collections, json, os, sys, time
-
-d, window = sys.argv[1], int(sys.argv[2])
-since = time.time_ns() - window * 10**9
-TAIL = 128 << 20  # the last minute is near the end; do not read gigabytes
-
-
-def lines(path):
-    if not os.path.exists(path):
-        return
-    with open(path, "rb") as f:
-        size = f.seek(0, 2)
-        f.seek(max(0, size - TAIL))
-        if size > TAIL:
-            f.readline()  # partial line
-        for line in f:
-            if line.strip():
-                try:
-                    yield json.loads(line)
-                except ValueError:
-                    pass  # a line still being written
-
-
-def pc_id(resource):
-    attrs = {a["key"]: a["value"] for a in resource.get("attributes", [])}
-    for k in ("lab.pc_id", "service.name"):
-        if k in attrs:
-            v = attrs[k].get("stringValue", "?")
-            return v if k == "lab.pc_id" else f"({v})"
-    return "(none)"
-
-
-points = collections.Counter()
-for doc in lines(os.path.join(d, "metrics.jsonl")):
-    for rm in doc.get("resourceMetrics", []):
-        who = pc_id(rm.get("resource", {}))
-        for sm in rm.get("scopeMetrics", []):
-            for m in sm.get("metrics", []):
-                for kind in ("gauge", "sum", "histogram", "summary", "exponentialHistogram"):
-                    for dp in m.get(kind, {}).get("dataPoints", []):
-                        if int(dp.get("timeUnixNano", 0)) >= since:
-                            points[who] += 1
-
-records = collections.Counter()
-for doc in lines(os.path.join(d, "logs.jsonl")):
-    for rl in doc.get("resourceLogs", []):
-        who = pc_id(rl.get("resource", {}))
-        for sl in rl.get("scopeLogs", []):
-            for r in sl.get("logRecords", []):
-                if int(r.get("observedTimeUnixNano") or r.get("timeUnixNano") or 0) >= since:
-                    records[who] += 1
-
-print(f"last {window} s, from {d}")
-print(f"{'lab.pc_id':<20} {'datapoints':>10} {'log records':>12}")
-for who in sorted(set(points) | set(records)):
-    print(f"{who:<20} {points[who]:>10} {records[who]:>12}")
-if not points and not records:
-    print("nothing arrived")
-    sys.exit(1)
-PY
+	# Counts per lab.pc_id and source (otel/otelread.py; host.<scraper>,
+	# prom.<job>, and each log source/kind), plus the run ids seen.
+	python3 -I "$here/otel/otelread.py" check "$results/otel" "$window"
 	if lab_r2_load 2>/dev/null; then
 		lab_install_rclone
 		lab_rclone_env
