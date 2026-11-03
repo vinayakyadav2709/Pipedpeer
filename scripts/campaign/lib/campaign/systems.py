@@ -48,6 +48,33 @@ class StepError(Exception):
         self.log = log
 
 
+# Process globs over /proc/<pid>/cmdline (NUL turned to spaces). The lab
+# image has no pgrep or pkill, and a pkill that is not there fails in
+# silence: the rehearsal's E6 "killed" daemons that kept running. Each glob
+# brackets one letter ([p]ipedpeer) so it never matches the command line of
+# the shell that runs the scan, which contains the glob itself.
+DAEMON = "[p]ipedpeer __daemon__*|*/[p]ipedpeer __daemon__*"
+CLI_RUN = "[p]ipedpeer run *|*/[p]ipedpeer run *"
+RAYLET = "*/[r]aylet *"
+TORCHRUN = "*[t]orchrun *"
+
+
+def proc_scan(globs, action):
+    """Shell: run action (with $p the pid) for every process whose command
+    line matches globs, then print "PLPROC <count>"."""
+    return ("n=0; for d in /proc/[0-9]*; do p=${d#/proc/}; c=$({ tr '\\0' ' ' < $d/cmdline; } 2>/dev/null); "
+            "case \"$c\" in %s) n=$((n + 1)); %s;; esac; done; echo \"PLPROC $n\"") % (
+                globs.replace(" ", "?"), action)  # an unquoted case pattern cannot hold a space
+
+
+def proc_kill(globs, sig="TERM"):
+    return proc_scan(globs, "kill -%s $p 2>/dev/null" % sig)
+
+
+def proc_count(globs):
+    return proc_scan(globs, ":")
+
+
 def cpus(c):
     return "0" if c <= 1 else "0-%d" % (c - 1)
 
@@ -183,7 +210,7 @@ class PipedPeer(Backend):
         stop = [h for h in rest if self.daemons.get(h.id) is not None or h.id not in self.daemons]
         if stop:
             self.sh_ok(pattern(stop), "pipedpeer stop >/dev/null 2>&1 || true; "
-                       "pkill -f '[p]ipedpeer __daemon__' 2>/dev/null; true", "pipedpeer stop")
+                       + proc_kill(DAEMON) + "; true", "pipedpeer stop")
             for h in stop:
                 self.daemons[h.id] = None
         for i, h in enumerate(want):
@@ -425,7 +452,7 @@ class Torchrun(Backend):
         return self.hosts_for(n)
 
     def release(self):
-        self.remote.sh(pattern(self.inv.all), "pkill -f '[t]orchrun' 2>/dev/null; true", timeout=60)
+        self.remote.sh(pattern(self.inv.all), proc_kill(TORCHRUN) + "; true", timeout=60)
 
     def run(self, wl, size, logdir, n):
         hosts = self.hosts_for(n)

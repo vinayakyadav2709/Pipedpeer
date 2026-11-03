@@ -23,9 +23,9 @@ import time
 from campaign import systems
 
 KILL = {
-    "pipedpeer": "pkill -9 -f '[p]ipedpeer __daemon__'",
-    "ray": "pkill -9 -f '[r]aylet'",
-    "dask": systems.kill_marked("KILL"),  # the worker's nanny and all its processes
+    "pipedpeer": systems.proc_kill(systems.DAEMON, "KILL"),
+    "ray": systems.proc_kill(systems.RAYLET, "KILL"),
+    "dask": systems.kill_marked("KILL") + "; echo PLPROC marked",  # the worker's nanny and all its processes
 }
 JOB_LOG = "$HOME/.local/share/pipedpeer-lab/logs/e6-job.log"
 
@@ -57,12 +57,18 @@ def kill_run(ctx, at_s, victim):
         # after the end is no fault at all, and the line must say so.
         rc, out = ctx.remote.sh(ctx.inv.head.id, "grep -c __PL_TIMES %s || true" % JOB_LOG, timeout=60)
         landed = out.strip().splitlines()[-1:] == ["0"]
-        ctx.remote.sh(victim.id, KILL[b.kind] + "; true", timeout=60)
-        ctx.log("killed %s on %s at %.1f s%s" % (b.kind, victim.id, time.time() - t0,
-                                                "" if landed else " (job had already finished)"))
+        _, kout = ctx.remote.sh(victim.id, KILL[b.kind] + "; true", timeout=60)
+        killed = next((ln.split()[1] for ln in kout.splitlines() if ln.startswith("PLPROC ")), "0")
+        landed = landed and killed != "0"
+        ctx.log("killed %s %s on %s at %.1f s%s" % (killed, b.kind, victim.id, time.time() - t0,
+                                                   "" if landed else " (did not land mid-run)"))
         t = ctx.remote.wait_job(ctx.inv.head.id, JOB_LOG, timeout=ctx.run_timeout)
         res = {"rc": t.rc, "out": t.out, "start_ns": t.start_ns, "end_ns": t.end_ns,
-               "killed_pc": victim.id, "kill_ns": k0, "kill_at_s": round(at_s, 2), "kill_landed": landed}
+               "killed_pc": victim.id, "kill_ns": k0, "kill_at_s": round(at_s, 2),
+               "kill_landed": landed, "killed_processes": killed}
+        if killed == "0":  # raised after the job ended, so the next run starts clean
+            raise systems.StepError("the kill on %s found no %s process: no fault was injected"
+                                    % (victim.id, b.kind), host=victim.id)
         if b.kind == "pipedpeer":
             res.update(b.collect(ws, logdir))
             rc2, unit = ctx.remote.sh(victim.id, "test -f ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/"
@@ -97,20 +103,19 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
     # until `pipedpeer run` is gone and every PC's own /health reports no
     # active job or lease (each daemon asked directly: the peer table on pc00
     # is only as fresh as its last poll).
-    # ^([^ ]*/)?pipedpeer run matches the CLI and not the shells around it
-    # (nor this one), whose command lines start with sh or timeout.
     tok = systems.API.split("; curl")[0]
     busy = " ".join(
         "$(curl -sf --max-time 2 -H \"X-Pipedpeer-Token: $tok\" http://%s:4242/health | "
         "grep -o '\"active_[a-z]*\":[0-9]*' | head -2 | cut -d: -f2)"
         % ("127.0.0.1" if h is ctx.inv.head else h.ip) for h in hosts)
-    script = ("%s; echo PLRUNNING $(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); "
-              "s=$(date +%%s%%N); pkill -INT -f '^([^ ]*/)?pipedpeer run' ; "
-              "while :; do r=$(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); a=0; "
+    count = systems.proc_count(systems.CLI_RUN)
+    script = ("%s; %s; s=$(date +%%s%%N); %s >/dev/null; "
+              "while :; do r=$(%s | cut -d' ' -f2); a=0; "
               "for x in %s; do a=$((a + ${x:-0})); done; "
               "[ \"$r\" -eq 0 ] && [ \"$a\" -eq 0 ] && break; "
               "[ $(( ($(date +%%s%%N) - s) / 1000000000 )) -gt 300 ] && { echo PLTIMEOUT; break; }; "
-              "sleep 0.1; done; e=$(date +%%s%%N); echo \"PLCTRLC $s $e\"") % (tok, busy)
+              "sleep 0.1; done; e=$(date +%%s%%N); echo \"PLCTRLC $s $e\"") % (
+                  tok, count, systems.proc_kill(systems.CLI_RUN, "INT"), count, busy)
     rc, out = ctx.remote.sh(ctx.inv.head.id, script, timeout=400)
     t = ctx.remote.wait_job(ctx.inv.head.id, JOB_LOG, timeout=120)
     with open(os.path.join(logdir, "output.log"), "w") as f:
@@ -121,7 +126,7 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
                      "failing_pc": ctx.inv.head.id, "result_ok": False})
     else:
         s, e = int(m[0][1]), int(m[0][2])
-        running = [ln.split()[1] for ln in out.splitlines() if ln.startswith("PLRUNNING ")]
+        running = [ln.split()[1] for ln in out.splitlines() if ln.startswith("PLPROC ")]
         line["interrupt_landed"] = bool(running) and running[0] != "0"
         line.update({"start_ns": s, "end_ns": e, "ctrlc_latency_s": round((e - s) / 1e9, 3),
                      "interrupt_at_s": round(at_s, 2), "result_ok": True, "rc": t.rc})
