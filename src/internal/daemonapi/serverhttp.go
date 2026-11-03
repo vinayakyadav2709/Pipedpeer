@@ -611,7 +611,7 @@ func (s *Server) diffNARFor(ph *PeerHealth, storePath string) (string, bool) {
 			Msg("cannot list closure paths; sending the whole archive")
 		return "", false
 	}
-	missing, ok := peerMissingPaths(ph.Host, ph.Port, paths)
+	missing, ok := peerMissingPaths(ph.Host, ph.Port, paths, ph.substitutesItself())
 	if !ok {
 		log.Info().Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).
 			Msg("peer did not answer which paths it lacks; sending the whole archive")

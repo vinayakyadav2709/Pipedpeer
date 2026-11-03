@@ -35,7 +35,7 @@ import os
 import shlex
 import time
 
-from . import systems
+from . import receipts, systems
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROBE = os.path.normpath(os.path.join(HERE, "..", "..", "experiments", "scripts", "timeline_probe.py"))
@@ -275,7 +275,7 @@ def collect(ctx, b, res, nodes, items_total, actors, logdir, dask_dump=None):
     start = res.get("start_ns") or 0
     wall = ((res.get("end_ns") or start) - start) / 1e9
     if b.kind == "pipedpeer":
-        chunks, src = pipedpeer_chunks(res.get("receipt"), nodes, start, items_total, ctx.inv.head.id, wall)
+        chunks, src = pipedpeer_chunks(receipts.full(res), nodes, start, items_total, ctx.inv.head.id, wall)
     elif b.kind == "dask":
         chunks, src = dask_chunks(dask_dump, ip_map(ctx), start)
     else:
@@ -294,7 +294,7 @@ def rerun_items(b, res, items_total, dask_dump=None, counted=None):
     """Items computed more than once, as far as the system's records show
     (rerun_source says which records)."""
     if b.kind == "pipedpeer":
-        r = res.get("receipt") or {}
+        r = receipts.full(res)
         steps = [s for s in r.get("steps") or [] if s.get("step") == "compute"]
         mapped = r.get("mapped_items") or items_total
         if steps and all("items" in s for s in steps):

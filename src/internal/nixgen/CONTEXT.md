@@ -60,6 +60,9 @@ _Avoid_: stats, log
 **Run record**:
 Timed steps (pickle, compress, send, queue, compute, receive, unpickle, env_build, env_send, ddp_sync, script) per machine and chunk; `shim/pipedpeer_shim/record.py` `step()` on the job side, `runrec` on the Go side. Shim work is never folded into `script`.
 
+**Pacing**:
+How the daemon wants a map paced (`/v1/pool/stats?store=`): chunks in flight, part length, the peers holding the closure and those still getting it (`pending`). A running race re-reads it every second, so a peer that finishes importing or joins mid-map gets work; chunks are capped at a few seconds of work so most of the map stays queued for whoever is free ([work-reaches-every-pc](../../../docs/benchmarks/work-reaches-every-pc.md)).
+
 **In-flight depth**:
 Copies a node may hold at once, from its measured round trip (at most 3); losing race copies are cancelled, and a peer that lost its last 3 races stops being raced.
 
@@ -97,7 +100,7 @@ Steps between syncs; 1 by default. `--ddp-sync fast` (`PIPEDPEER_DDP_SYNC_MODE=f
 ## Invariants
 
 - Never slower than local ([ADR-0002](../../../docs/adr/0002-never-slower-than-local.md)); local cores keep pulling while peers work.
-- Spill goes only to peers that already hold the closure (`daemonapi/server.go` `peerHasStore`).
+- Spill goes only to peers that already hold the closure (`daemonapi/server.go` `peerHasStore`, cached by `peerHolds`). `PIPEDPEER_CLOSURE_NODES` is who held it at exec; the shim asks the daemon again when it says nobody did (`core._cluster_ready`).
 - A reply uses the format the request asked for (`0cffbbb`).
 - Every `PIPEDPEER_*` variable the shim names must be read somewhere; a test fails otherwise (`8492458`).
 - The shim modules stay importable without torch/numpy/pandas (they import lazily); `scripts/shim-check.sh` runs ruff and pytest.
@@ -106,7 +109,7 @@ Steps between syncs; 1 by default. `--ddp-sync fast` (`PIPEDPEER_DDP_SYNC_MODE=f
 ## Entry points
 
 - Shim source and install order: `nixgen/embed.go` `ShimFS`, `WriteShimDir`, `ShimSource`; `shim/sitecustomize.py`.
-- Pool: `shim/pipedpeer_shim/pool.py` `_ClusterPool`, `_race`, `_pool_width`, `_func_payload`; transfer `shim/pipedpeer_shim/transfer.py` `_pool_send`; daemon wire `daemonapi/poolwire.go`.
+- Pool: `shim/pipedpeer_shim/pool.py` `_ClusterPool`, `_race`, `_pool_width`, `_func_payload`; race and its re-pacing `shim/pipedpeer_shim/pool_race.py` `_race_items`; pacing `pool_pacing.py` `_cluster_pacing`, `_chunk_cap`; transfer `shim/pipedpeer_shim/transfer.py` `_pool_send`; daemon wire `daemonapi/poolwire.go`; peers that arrive mid-map `daemonapi/poolelastic.go`.
 - Cost gates: `_should_spill` (`shim/pipedpeer_shim/transfer.py`), `_numpy_should_offload` (`shim/pipedpeer_shim/numpy_ops.py`); per-machine rates across runs `daemonapi/poolstats.go`.
 - Libraries: `shim/pipedpeer_shim/numpy_ops.py`, `shim/pipedpeer_shim/pandas_ops.py` (incl. out-of-core), `shim/pipedpeer_shim/ddp.py` `_install_ddp`, `shim/pipedpeer_shim/pool.py` (joblib).
 - Injection into a job: `daemonapi/execution.go` `handleJobExec`.

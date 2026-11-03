@@ -103,9 +103,11 @@ func exportPaths(paths []string, destPath string) error {
 
 // peerMissingPaths asks a peer which of these store paths it lacks. A peer
 // that does not understand the question (older build, or any error) yields
-// nil and the caller falls back to sending the closure whole.
-func peerMissingPaths(host string, port int, paths []string) ([]string, bool) {
-	body, err := json.Marshal(map[string]any{"paths": paths, "substitute": true})
+// nil and the caller falls back to sending the closure whole. With
+// substitute the peer leaves out, and fetches itself, what the binary cache
+// serves (PeerHealth.substitutesItself says when).
+func peerMissingPaths(host string, port int, paths []string, substitute bool) ([]string, bool) {
+	body, err := json.Marshal(map[string]any{"paths": paths, "substitute": substitute})
 	if err != nil {
 		return nil, false
 	}

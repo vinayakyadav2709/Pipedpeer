@@ -11,8 +11,8 @@ from pipedpeer_shim import pool, pool_func, pool_pacing, pool_race, stats
 @pytest.fixture
 def pacing(monkeypatch):
     def set_(inflight=2, part_s=0.5, cores=0, peers=1):
-        v = {"inflight": inflight, "part_s": part_s, "cores": cores, "peers": peers}
-        monkeypatch.setattr(pool_race, "_cluster_pacing", lambda: v)
+        v = {"inflight": inflight, "part_s": part_s, "cores": cores, "peers": peers, "pending": 0}
+        monkeypatch.setattr(pool_race, "_cluster_pacing", lambda *a, **k: v)
     set_()
     return set_
 

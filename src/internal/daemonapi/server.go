@@ -111,6 +111,9 @@ type Server struct {
 	// instead of starting another one to the same peer.
 	seedsMu sync.Mutex
 	seeds   map[string]*seed
+	// held caches which peers can run which closures, for the per-second
+	// pacing of a map in progress (poolelastic.go).
+	held heldCache
 
 	// importing counts the closure imports this node is receiving, by store
 	// path; /v1/store reports it so no other node sends the same closure.
@@ -532,7 +535,7 @@ func (s *Server) EnablePoolSpill() {
 			// Only forward to peers that already imported this closure, else
 			// the remote POST fails with a missing-store 400. Checking the
 			// store endpoint is cheap (local cache) and keeps spill correct.
-			if !s.peerHasStore(ph, storePath, need) {
+			if !s.peerHolds(ph, storePath, need) {
 				continue
 			}
 			out = append(out, cand{peer: fmt.Sprintf("%s:%d", ph.Host, ph.Port), activeJobs: ph.ActiveJobs, availMem: ph.AvailableMem})

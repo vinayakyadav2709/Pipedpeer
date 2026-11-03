@@ -50,7 +50,6 @@ class _ClusterPool:
 
     def __init__(self, processes=None, initializer=None, initargs=(), maxtasksperchild=None):
         import multiprocessing.pool as _mp
-        self._remote = _cluster_ready()
         self._requested = processes
         self._init = (initializer, initargs, maxtasksperchild)
         self._procs = _pool_width(processes)
@@ -66,6 +65,13 @@ class _ClusterPool:
         self._threads = None
         self._batcher = None
         atexit.register(self.close)
+
+    @property
+    def _remote(self):
+        """Asked at each call, not once when the pool is built: a peer that
+        finishes importing this closure after the job started, or a machine
+        that joins mid-run, is a cluster for the next map."""
+        return _cluster_ready()
 
     def _resize(self):
         """Re-size the local pool to what the machine can run right now.

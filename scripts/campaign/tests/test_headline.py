@@ -109,3 +109,22 @@ def test_headline_csvs_and_figures(tmp_path):
     e15 = {(r["system"], r["rtt_added_ms"]): r["slowdown_vs_0ms"] for r in ah.e15_rows(runs[4:])}
     assert e15[("dask", 80)] == 1.5
     assert json.load(open(tmp_path / "e14_summary.json"))["pcs_with_first_work"] == 2
+
+
+def test_timeline_reads_the_steps_from_the_receipt_file(tmp_path):
+    """runs.jsonl's inline receipt is a summary without steps; the timeline
+    and the rerun count read the whole receipt the backend kept."""
+    import gzip
+    import json
+    from campaign import receipts
+    whole = {"mapped_items": 10, "steps": [{"step": "compute", "items": 8}, {"step": "compute", "items": 5}]}
+    path = tmp_path / "receipt.json.gz"
+    with gzip.open(path, "wt") as f:
+        json.dump(whole, f)
+    res = {"receipt": receipts.summary(whole), "receipt_path": str(path)}
+
+    class B:
+        kind = "pipedpeer"
+    assert "steps" not in res["receipt"]
+    assert receipts.full(res)["steps"] == whole["steps"]
+    assert timeline.rerun_items(B(), res, 10) == (3, "receipt-steps")

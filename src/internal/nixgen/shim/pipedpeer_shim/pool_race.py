@@ -4,7 +4,7 @@ import time
 
 from pipedpeer_shim import record
 from pipedpeer_shim.core import (
-    _OFFLOAD_HERE, _offload_warn,
+    _OFFLOAD_HERE, _log, _offload_warn,
 )
 from pipedpeer_shim.stats import (
     _add_stat, _record_local,
@@ -13,8 +13,10 @@ from pipedpeer_shim.pool_func import (
     _chunk,
 )
 from pipedpeer_shim.pool_pacing import (
+    _RACE_REPACE_S,
     _Flight,
     _TLS,
+    _chunk_cap,
     _chunk_floor,
     _cluster_pacing,
     _fac2_size,
@@ -89,14 +91,35 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
     # taken, FAC2-style: each round hands out half of what is left, so the
     # first chunks amortise start-up and the last are small and the tail
     # short. The floor keeps a chunk wide enough to fill the cores that get it
-    # and long enough to pay for its round trip.
-    pacing = _cluster_pacing()
-    inflight = max(1, pacing["inflight"])
-    floor = _chunk_floor(per_item_cost, width, pacing)
-    pullers = 1 + inflight
-    # Threads beyond one per peer only prefetch; they stop in the tail, when
-    # the queue can no longer fill everyone (bind late).
-    base = max(1, pacing["peers"])
+    # and long enough to pay for its round trip; the cap keeps it short
+    # enough that most of the map stays queued, for whoever is free.
+    #
+    # The pacing is read again every _RACE_REPACE_S while the race runs
+    # (repace, from remote_run): the peers holding this closure are whoever
+    # holds it NOW. A peer that finished importing after the job started (the
+    # first job after a join) or a machine that joined mid-map raises the
+    # depth, and remote_run starts a dispatch thread per new slot. Read once
+    # at the start, a map never used anyone who arrived after it began.
+    pace = {}
+
+    def repace(pacing):
+        peers = max(0, int(pacing.get("peers", 0)))
+        with lock:
+            pace["peers"] = peers
+            # No peer holds the closure: a chunk would run on our own
+            # daemon, beside the local pool. Hold until one does. A daemon
+            # that did not say (an older build) is sent to as before.
+            hold = not peers and pacing.get("known", True)
+            pace["inflight"] = 0 if hold else max(1, pacing["inflight"])
+            pace["pullers"] = 1 + max(1, pacing["inflight"])
+            # Threads beyond one per peer only prefetch; they stop in the
+            # tail, when the queue can no longer fill everyone (bind late).
+            pace["base"] = max(1, peers)
+            pace["floor_r"] = _chunk_floor(per_item_cost, width, pacing)
+            pace["floor_l"] = _chunk_floor(per_item_cost, width, dict(pacing, cores=0))
+            pace["cap_r"] = _chunk_cap(per_item_cost, max(width, pacing.get("cores") or 0), pacing)
+            pace["cap_l"] = _chunk_cap(per_item_cost, width, pacing)
+
     queue = list(enumerate(items))      # [(orig_idx, item), ...]
     pos = [0]
     seq = [0]
@@ -105,7 +128,7 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
     remote_secs = []   # how long finished remote chunks took
     flights = {}       # id(chunk) -> _Flight while its request is out
 
-    def take(remote=False, prefetch=False):
+    def take(remote=False, slot=0):
         # Popping and recording a remote claim happen under one lock: split,
         # local could find the queue empty and the claim not yet listed, and
         # return with that chunk's slots still empty.
@@ -116,9 +139,16 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
             left = n - pos[0]
             if not left or done.is_set():
                 return None
-            if remote and (_remote_paused() or (prefetch and left < inflight * floor)):
+            floor = pace["floor_r"] if remote else pace["floor_l"]
+            if remote and (_remote_paused() or slot >= pace["inflight"]
+                           or (slot >= pace["base"] and left < pace["inflight"] * floor)):
                 return None
-            size = _fac2_size(left, pullers, floor)
+            size = _fac2_size(left, pace["pullers"], floor)
+            cap = pace["cap_r"] if remote else pace["cap_l"]
+            if cap is not None:
+                # Never under the floor, nor under 4 rounds of the local
+                # pool: a chunk is a barrier for the cores that run it.
+                size = min(size, max(cap, floor, 4 * width))
             chunk = queue[pos[0]:pos[0] + size]
             pos[0] += size
             k = seq[0]
@@ -163,8 +193,15 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
     # slots, and pulls the next. A failed chunk stops that thread pulling;
     # local re-runs what it held. A cancelled one (local won it) lost a race.
     def deliver_loop(j):
+        try:
+            deliver(j)
+        finally:
+            with lock:
+                live.discard(j)
+
+    def deliver(j):
         while True:
-            chunk = take(remote=True, prefetch=j >= base)
+            chunk = take(remote=True, slot=j)
             if chunk is None:
                 return
             flight = _Flight()
@@ -186,6 +223,7 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
                     continue
                 with lock:
                     claimed[id(chunk)] = None
+                    broken[0] += 1   # this slot stays closed; local re-runs the chunk
                 return
             won = 0
             with lock:
@@ -230,16 +268,37 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
         expected = sum(remote_secs) / len(remote_secs)
         return now + here < start + expected or now > start + 1.5 * expected + 0.2
 
-    def remote_run():
+    live = set()     # dispatch slots with a thread running
+    broken = [0]     # slots closed by a failed chunk
+
+    def open_slots():
+        """Start a dispatch thread for each slot the pacing allows that has
+        none. A slot whose chunk failed stays closed, as before the pacing
+        was re-read: a failing cluster must not be retried every second."""
+        with lock:
+            want = min(pace["inflight"] - broken[0], n) - len(live)
+            new = []
+            if pos[0] < n and not done.is_set() and not _remote_paused():
+                free = (j for j in range(pace["inflight"]) if j not in live)
+                new = [j for _, j in zip(range(max(0, want)), free)]
+            live.update(new)
         # Daemons, unlike the local side: once the race is done a chunk still
         # in flight is a loser whose answer is thrown away, and as a non-daemon
         # it held the interpreter open at exit for as long as a slow peer took
         # (up to the 600 s request timeout). t_local below is what keeps a
         # live race - and the receipt of what it kept - alive at exit.
-        threads = [threading.Thread(target=deliver_loop, args=(j,), daemon=True)
-                   for j in range(max(1, min(inflight, n)))]
-        for t in threads:
-            t.start()
+        for j in new:
+            threading.Thread(target=deliver_loop, args=(j,), daemon=True).start()
+
+    def remote_run():
+        open_slots()
+        while not done.wait(_RACE_REPACE_S):
+            before = (pace["peers"], pace["inflight"])
+            repace(_cluster_pacing(max_age=_RACE_REPACE_S))
+            if (pace["peers"], pace["inflight"]) != before:
+                _log("map in progress: %d peer(s) hold this closure now; %d chunk(s) in flight"
+                     % (pace["peers"], pace["inflight"]))
+            open_slots()
 
     # Local pulls until the queue is empty, then re-runs any chunk a peer
     # still holds (straggler tail). done is set once local has given every
@@ -280,11 +339,14 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
                 f.cancel()
 
     done = threading.Event()
-    # Explicitly not daemons: a thread inherits daemon from its creator,
-    # and a batch of submits runs on the daemon batcher thread, so a live
-    # race would be killed at exit and its results never reach the caller.
+    repace(_cluster_pacing())
+    # t_local is explicitly not a daemon: a thread inherits daemon from its
+    # creator, and a batch of submits runs on the daemon batcher thread, so
+    # a live race would be killed at exit and its results never reach the
+    # caller. t_remote only paces; it must not hold the exit for a pacing
+    # request still out when the race ends.
     t_local = threading.Thread(target=local_run, daemon=False)
-    t_remote = threading.Thread(target=remote_run, daemon=False)
+    t_remote = threading.Thread(target=remote_run, daemon=True)
     t_local.start()
     t_remote.start()
     done.wait()  # local guarantees a complete result

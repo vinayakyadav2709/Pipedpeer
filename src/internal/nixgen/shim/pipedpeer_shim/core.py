@@ -159,15 +159,23 @@ def _usable_cores():
 
 
 def _cluster_ready():
-    """True when there is a cluster to spill to. NUM_SHARDS counts this node
-    too, so "1" means there is nobody: dispatching then posts work to our own
+    """True when there is a cluster to spill to: another node holds this
+    closure, or is getting it. NUM_SHARDS counts this node too and is fixed
+    when the job starts, so "1" only means nobody had it then. A peer still
+    importing it (the first job after a join) or a machine that joins later
+    gets it during the run, so then the daemon is asked (its pacing, cached a
+    few seconds). With nobody at all, dispatching would post work to our own
     daemon, which runs it through a single serialised warm worker while the
     local pool sits idle - strictly slower than doing it here."""
     try:
         shards = int(_NUM_SHARDS)
     except ValueError:
         shards = 0
-    ready = bool(_URL) and _ENABLED and shards >= 2
+    ready = bool(_URL) and _ENABLED
+    if ready and shards < 2:
+        from pipedpeer_shim.pool_pacing import _cluster_pacing
+        pace = _cluster_pacing()
+        ready = pace.get("known", True) and (pace["peers"] > 0 or pace["pending"] > 0)
     if not ready:
         _offload_warn("distributed work", "no other machine is in the cluster")
     return ready

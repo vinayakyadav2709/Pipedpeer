@@ -13,7 +13,7 @@ day/timeline.sh. analyse_headline.py turns them into the staircase.
 import json
 import os
 
-from campaign import timeline
+from campaign import receipts, timeline
 
 
 def main(ctx):
@@ -26,7 +26,7 @@ def main(ctx):
         res = b.run(wl, env, logdir, n)
         nodes = timeline.node_map(ctx, b.hosts_for(n))
         first = {}
-        for s in (res.get("receipt") or {}).get("steps") or []:
+        for s in receipts.full(res).get("steps") or []:
             if s.get("step") != "compute":
                 continue
             pc = nodes.get(s.get("machine")) or nodes.get(s.get("node"))

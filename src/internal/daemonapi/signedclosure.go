@@ -116,7 +116,7 @@ func (s *Server) signedClosureFor(ph *PeerHealth, storePath string) (path string
 	// What the peer lacks. A peer that cannot answer gets everything: a
 	// missing answer is not an empty one, and treating it as one would send
 	// metadata with no archives and break the import on the far side.
-	missing, answered := peerMissingPaths(ph.Host, ph.Port, paths)
+	missing, answered := peerMissingPaths(ph.Host, ph.Port, paths, ph.substitutesItself())
 	if !answered {
 		missing = nil
 		log.Info().Str("peer", fmt.Sprintf("%s:%d", ph.Host, ph.Port)).

@@ -21,6 +21,15 @@ from pipedpeer_shim.transfer import (
 
 _PACING = {"t": -1e9, "v": None}
 _PACING_TTL = 5.0
+# How often a running race re-reads the pacing, so peers that become ready
+# mid-map (an import that finished, a machine that joined) get work.
+_RACE_REPACE_S = 1.0
+# The longest a chunk should take where it runs, in multiples of the
+# daemon's target part length (and never under _CHUNK_MAX_S). Work in a
+# chunk is bound to the machines that took it; work still queued goes to
+# whoever is free, including a machine that joined a second ago.
+_CHUNK_MAX_PARTS = 4
+_CHUNK_MAX_S = 2.0
 # Remote chunks in a row that won nothing, after which this process stops
 # sending chunks out for _LOST_PAUSE seconds (F20: on a fast origin local won
 # all 300 races and every remote copy was wasted peer time). A win resets it.
@@ -55,16 +64,26 @@ def _race_lost(secs):
              "pool work here for %.0f s" % (_LOST_LIMIT, _LOST_PAUSE))
 
 
-def _cluster_pacing():
+def _cluster_pacing(max_age=_PACING_TTL):
     """How the daemon wants a map paced, from /v1/pool/stats?store=:
     inflight (chunks to keep in flight: the sum over peers of each node's
-    depth), part_s (target seconds of one part), cores (the peers' cores) and
-    peers. Cached a few seconds; without an answer one peer's worth (2 in
-    flight, half a second a part) is assumed, said in a log line."""
+    depth), part_s (target seconds of one part), cores (the peers' cores),
+    peers (those holding this closure) and pending (those still getting it,
+    which join the map when they have it). Cached for max_age seconds; a
+    running race asks every _RACE_REPACE_S, so a peer that becomes ready
+    mid-map is used. known says the daemon answered. Without an answer (an
+    older daemon, or none) one peer's worth (2 in flight, half a second a
+    part) is assumed, said in a log line, the peers are those
+    PIPEDPEER_CLOSURE_NODES named at exec, and a race sends as it always
+    did."""
     now = time.monotonic()
-    if _PACING["v"] is not None and now - _PACING["t"] < _PACING_TTL:
+    if _PACING["v"] is not None and now - _PACING["t"] < max_age:
         return _PACING["v"]
-    v = {"inflight": 2, "part_s": 0.5, "cores": 0, "peers": 0}
+    try:
+        named = max(0, int(core._NUM_SHARDS) - 1)
+    except ValueError:
+        named = 0
+    v = {"inflight": 2, "part_s": 0.5, "cores": 0, "peers": named, "pending": 0, "known": False}
     if core._URL:
         import json
         import urllib.parse
@@ -80,7 +99,9 @@ def _cluster_pacing():
                 v = {"inflight": max(1, int(got["inflight"])),
                      "part_s": max(0.25, int(got.get("part_ms", 500)) / 1000.0),
                      "cores": int(got.get("cores", 0)),
-                     "peers": int(got.get("peers", 0))}
+                     "peers": int(got.get("peers", 0)),
+                     "pending": int(got.get("pending", 0)),
+                     "known": True}
             else:
                 _log("the daemon sent no pacing (an older build); keeping %d chunks in flight"
                      % v["inflight"])
@@ -102,6 +123,19 @@ def _fac2_size(remaining, pullers, floor):
     pullers = max(1, pullers)
     size = max(floor, -(-remaining // (2 * pullers)))
     return max(1, min(size, -(-remaining // pullers), remaining))
+
+
+def _chunk_cap(per_item_cost, lanes, pacing):
+    """The largest chunk worth binding to the machines that take it: about
+    _CHUNK_MAX_S (or _CHUNK_MAX_PARTS target parts, if longer) of work on
+    lanes cores. FAC2's first round hands out half the map at once; uncapped,
+    a 60000-item W1 put 8-14 s chunks on the peers present at t=0, and a
+    peer that joined later could only take what was left. None when the cost
+    is unknown (no cap)."""
+    if per_item_cost <= 0:
+        return None
+    secs = max(_CHUNK_MAX_S, _CHUNK_MAX_PARTS * pacing.get("part_s", 0.5))
+    return max(1, round(secs * max(1, lanes) / per_item_cost))
 
 
 def _chunk_floor(per_item_cost, width, pacing):
