@@ -121,7 +121,9 @@ for p in "${pcs[@]}"; do
   done
   # Each PC its own machine id, as on real PCs (the image ships one, and the
   # daemon's machine key hashes it).
-  x "$p" 'tr -d - </proc/sys/kernel/random/uuid >/etc/machine-id'
+  # journald writes under the machine id it started with: restart it, or
+  # journalctl finds no journal and the head line shows no log.
+  x "$p" 'tr -d - </proc/sys/kernel/random/uuid >/etc/machine-id; systemctl restart systemd-journald'
   # 2-core PCs for Python (multiprocessing, joblib) in every session and unit.
   x "$p" 'echo PYTHON_CPU_COUNT=2 >>/etc/environment; mkdir -p /etc/systemd/system.conf.d
     printf "[Manager]\nDefaultEnvironment=PYTHON_CPU_COUNT=2\n" >/etc/systemd/system.conf.d/cpus.conf; systemctl daemon-reexec'
@@ -272,12 +274,20 @@ print("runs:", dict(by), "failed:", dict(bad))
 vers = {r.get("pipedpeer_version") for r in runs}
 assert vers == {"pipedpeer version lab-rehearsal"} or all("lab-rehearsal" in (v or "") for v in vers), vers
 e1 = [r for r in runs if r["experiment"] == "e1"]
-# W1-W3 x (N=1: 4 systems, N=2 and 4: 3 systems) x (warm-up + 1): once, not twice.
-assert len(e1) == 3 * (4 + 3 + 3) * 2, len(e1)
+# W1-W4 x (N=1: 4 systems, N=2 and 4: 3 systems) x (warm-up + 1): once, not twice.
+assert len(e1) == 4 * (4 + 3 + 3) * 2, len(e1)
+# pipedpeer really spreads: every W1 run at N >= 2 sent items to peers.
+pp = [r for r in e1 if r["workload"] == "W1" and r["system"] == "pipedpeer" and r["n"] >= 2]
+assert pp and all((r.get("receipt") or {}).get("remote_items", 0) > 0 for r in pp), \
+    [(r["n"], (r.get("receipt") or {}).get("remote_items")) for r in pp]
+assert all(len(json.dumps(r)) < 20000 for r in runs), max(len(json.dumps(r)) for r in runs)   # receipts are summaries
 short = [r for r in e1 if r["n"] == 4 and r["system"] in ("ray", "dask")]
 assert short and all("inventory has 3 workers" in (r.get("error") or "") for r in short), short[:1]
-ok = [r for r in e1 if not r.get("error")]
-assert len(ok) == len(e1) - len(short), [(r["system"], r["n"], r.get("error")) for r in e1 if r.get("error") and r not in short]
+other = [(r["workload"], r["system"], r["n"], (r.get("error") or "")[:90]) for r in e1 if r.get("error") and r not in short]
+print("e1 failures besides N=4 > workers:", other)
+# Known, not the day's: W4 under pipedpeer gives another best_score (HEADLESS.md, "Rehearsal");
+# Ray's memory monitor kills W3 tasks in 1.25 GB containers.
+assert all((w, sy) in (("W4", "pipedpeer"), ("W3", "ray")) for w, sy, _, _ in other), other
 cache = json.load(open(d + "/result-cache.json"))
 weak = {k: v for k, v in cache.items() if v["source"].startswith("plain-precomputed:")}
 print("weak references:", sorted(weak))
@@ -298,7 +308,8 @@ grep -q 'calibrated on pc01' "$got/workloads.json" && pass "workloads.json calib
 
 say "traces"
 if python3 -I "$camp/otel/otelread.py" check "$raw/otel" 1000000 >"$work/otel-check.txt" 2>&1; then
-  for src in host.cpu host.process pp-poll/api net/sockets net/snmp node-state/procs daemon-log ray-log dask-log pipedpeer-run prom.ray prom.dask; do
+  awk '$3=="pipedpeer-run"{print $1}' "$work/otel-check.txt" | grep -qx pc00 && pass "trace pipedpeer-run from pc00, the submitter" || fail "no pipedpeer-run trace from pc00"
+  for src in host.cpu host.process pp-poll/api net/sockets net/snmp node-state/procs daemon-log ray-log dask-log prom.ray prom.dask; do
     n=$(awk -v s="$src" '$3==s{c++} END{print c+0}' "$work/otel-check.txt")
     ((n == 4)) && pass "trace $src from all 4 PCs" ||
       { ((n > 0)) && echo "NOTE: trace $src from $n of 4 PCs: $(awk -v s="$src" '$3==s{printf "%s ", $1}' "$work/otel-check.txt")" || fail "no trace $src"; }

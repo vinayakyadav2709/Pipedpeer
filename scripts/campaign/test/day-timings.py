@@ -22,7 +22,7 @@ def phase(step):
         return "prepare"
     if step.startswith("exp."):
         return "run"
-    if step in ("pull.pcap", "clean.workers", "undo.workers", "final.sync", "clean.pc00"):
+    if step in ("clocks.end", "pull.pcap", "clean.workers", "undo.workers", "final.sync", "clean.pc00"):
         return "cleanup"
     return PHASE.get(step, "other")
 

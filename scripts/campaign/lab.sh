@@ -41,11 +41,14 @@ PORTS=(22/tcp 4242/tcp 4242/udp 4243/udp 4244/udp 4317/tcp 5201/tcp 8137/tcp)
 # What the campaign may create in the lab user's home. undo removes each one
 # that did not exist before setup (and parents it made, when empty).
 # (motd.legal-displayed: Ubuntu writes it on the first ssh login; snowflake,
-# pip, virtualenv: the day's Ansible venv; rclone: sync-r2.sh.)
+# pip, virtualenv: the day's Ansible venv; rclone: sync-r2.sh; matplotlib:
+# analyse.py on pc00; .local/bin: crun from pipedpeer setup; detsys-ids-client:
+# the Determinate Nix installer. The rehearsal's snapshot diff found the last four.)
 HOME_PATHS=(pipedpeer-lab .ansible .nix-profile .nix-defexpr .nix-channels .ssh/known_hosts
   .cache/nix .cache/pipedpeer .cache/pip .cache/virtualenv .cache/snowflake .cache/motd.legal-displayed
   .local/state/nix .local/state/pipedpeer .local/share/pipedpeer .local/share/pipedpeer-lab
-  .config/pipedpeer .config/pipedpeer-lab .config/nix .config/rclone)
+  .config/pipedpeer .config/pipedpeer-lab .config/nix .config/rclone
+  .cache/matplotlib .config/matplotlib .local/bin .local/state/systems.determinate.detsys-ids-client)
 HOME_PARENTS=(.cache .local/state .local/share .local .config)
 
 log()  { echo "[lab] $*"; }

@@ -110,6 +110,10 @@ prep_machines() {
 # the PCs without it now, rather than E15 failing on them hours later.
 netem_check() {
   local h lacking=()
+  # tc itself: Fedora ships it apart (iproute-tc); through lab.sh pkg, so undo removes it.
+  ans tc all 'export PATH=$PATH:/usr/sbin:/sbin; command -v tc >/dev/null && exit 0
+    if command -v apt-get >/dev/null; then p=iproute2; else p=iproute-tc; fi; sudo -n bash '"$LABSH"' pkg $p' ||
+    blocker "tc did not install on ${BAD_HOSTS[*]}: E15 cannot add delay there"
   ans netem all 'if [ -d /sys/module/sch_netem ] || sudo -n modprobe -n -q sch_netem 2>/dev/null; then echo PLNETEM yes; else echo "PLNETEM no $(uname -r)"; fi' || true
   {
     echo "pc_id,netem,kernel"
