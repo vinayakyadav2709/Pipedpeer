@@ -330,7 +330,7 @@ e5a() {
 	t0="$(now)"
 	out="$(x b "timeout 120 pipedpeer connect '$code'" 2>&1)"
 	rc=$?
-	if [[ "$rc" == 1 ]] && grep -qiE "introducer.*(not|n't|never) answer|no answer.*introducer|nobody answered" <<<"$out"; then
+	if [[ "$rc" == 1 ]] && grep -qiE "introducer.*(not|n't|never) answer|no answer.*introducer|no introducer answered|nobody answered" <<<"$out"; then
 		result e5a PASS "$(since "$t0")s" 90s "exit 1, names the introducer"
 	else
 		result e5a FAIL "rc=$rc" 90s "want exit 1 and 'introducer did not answer'"
