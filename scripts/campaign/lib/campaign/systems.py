@@ -329,7 +329,18 @@ class Ray(Backend):
         return {"rc": t.rc, "out": t.out, "start_ns": t.start_ns, "end_ns": t.end_ns}
 
 
-DASK_PROCS = "dask[a-z-]* (scheduler|worker)"
+# Every Dask process the runner starts carries this variable, and so does
+# every process they spawn (the nanny's workers are multiprocessing children
+# whose command lines name nothing Dask). Stopping kills by it: a pattern
+# kill of the nanny left its workers running, and they joined the next
+# scheduler (the rehearsal saw 14 processes where it wanted 2).
+DASK_MARK = "PL_CAMPAIGN_DASK=1"
+
+
+def kill_marked(sig="TERM"):
+    """Shell: signal every process of this user whose environment has DASK_MARK."""
+    return ("for d in /proc/[0-9]*; do grep -qa '%s' $d/environ 2>/dev/null && "
+            "kill -%s ${d#/proc/} 2>/dev/null; done; true") % (DASK_MARK, sig)
 
 
 class Dask(Backend):
@@ -339,9 +350,9 @@ class Dask(Backend):
         return [self.inv.head] + self.inv.workers[:n]
 
     def stop_all(self):
-        cmd = ("pkill -f -- '%s' 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do "
-               "pgrep -f -- '%s' >/dev/null || exit 0; sleep 1; done; "
-               "pkill -9 -f -- '%s' 2>/dev/null; true") % (DASK_PROCS, DASK_PROCS, DASK_PROCS)
+        alive = "grep -lqa '%s' /proc/[0-9]*/environ 2>/dev/null" % DASK_MARK
+        cmd = "%s; for i in 1 2 3 4 5 6 7 8 9 10; do %s || exit 0; sleep 1; done; %s" % (
+            kill_marked("TERM"), alive, kill_marked("KILL"))
         self.sh_ok(pattern(self.inv.all), cmd, "dask stop", timeout=120)
         self.up_n = None
 
@@ -354,8 +365,8 @@ class Dask(Backend):
         self.stop_all()
         head = self.inv.head
         addr = "tcp://%s:%d" % (head.ip, DASK_PORT)
-        self.remote.bg(head.id, STATE + "/logs/dask-scheduler.log", "%s scheduler --port %d --dashboard-address :8787" % (
-            self.env_bin("dask"), DASK_PORT))
+        self.remote.bg(head.id, STATE + "/logs/dask-scheduler.log", "env %s %s scheduler --port %d --dashboard-address :8787" % (
+            DASK_MARK, self.env_bin("dask"), DASK_PORT))
         expect = 0
         for i, w in enumerate(self.inv.workers[:n]):
             c = caps[i] if caps else None
@@ -363,8 +374,8 @@ class Dask(Backend):
             pre = ("taskset -c %s " % cpus(c)) if c else ""
             expect += nw
             self.remote.bg(w.id, STATE + "/logs/dask-worker.log",
-                           "%s%s worker %s --nworkers %d --nthreads 1 --no-dashboard %s" % (
-                               pre, self.env_bin("dask"), addr, nw, self.ctx.dask_worker_args))
+                           "env %s %s%s worker %s --nworkers %d --nthreads 1 --no-dashboard %s" % (
+                               DASK_MARK, pre, self.env_bin("dask"), addr, nw, self.ctx.dask_worker_args))
         probe = ("%s -c \"from distributed import Client; c = Client('%s', timeout=20); "
                  "w = c.scheduler_info()['workers'].values(); "
                  "print('PLN', len({x['host'] for x in w}), len(w))\"" % (self.env_bin("python3"), addr))

@@ -71,7 +71,7 @@ class FakeCluster:
         if "ray.nodes()" in cmd:
             n = sum(1 for v in self.ray.values() if not str(v).startswith("head"))
             return 0, "PLN %d\n" % n
-        if "pkill -f -- 'dask" in cmd:
+        if "PL_CAMPAIGN_DASK=1' $d/environ" in cmd:
             self.dask.pop(host, None)
             return 0, ""
         if "scheduler_info" in cmd:

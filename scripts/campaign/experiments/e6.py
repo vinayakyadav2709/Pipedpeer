@@ -6,7 +6,7 @@ killed with SIGKILL at about 30% of the reference wall:
              a daemon installed as a service may be restarted by systemd
              after 5 s, which the line records as restart_policy)
   ray        the raylet on the last worker (its worker processes go with it)
-  dask       the `dask worker` process tree on the last worker
+  dask       every Dask process on the last worker (nanny and workers)
 
 result_ok says whether the answer was still right; wall_s is compared with
 the no-kill wall in analyse.py. Then PipedPeer's Ctrl-C, three times: SIGINT
@@ -23,7 +23,7 @@ from campaign import systems
 KILL = {
     "pipedpeer": "pkill -9 -f '[p]ipedpeer __daemon__'",
     "ray": "pkill -9 -f '[r]aylet'",
-    "dask": "pkill -9 -f -- '%s'" % systems.DASK_PROCS.replace("(scheduler|worker)", "worker"),
+    "dask": systems.kill_marked("KILL"),  # the worker's nanny and all its processes
 }
 JOB_LOG = "$HOME/.local/share/pipedpeer-lab/logs/e6-job.log"
 
