@@ -239,7 +239,7 @@ def _fits_locally(working_set):
     return working_set <= free * 0.9
 
 
-_GPU_PEERS = {"t": 0.0, "any": None}
+_GPU_PEERS = {"t": None, "any": None}  # "t" None: never asked (see _BW_CACHE)
 
 
 def _cluster_has_gpu():
@@ -252,7 +252,7 @@ def _cluster_has_gpu():
     times over.
     """
     now = time.monotonic()
-    if now - _GPU_PEERS["t"] < _BW_TTL:
+    if _GPU_PEERS["t"] is not None and now - _GPU_PEERS["t"] < _BW_TTL:
         return _GPU_PEERS["any"]
     _GPU_PEERS["t"] = now
     _GPU_PEERS["any"] = False
