@@ -52,6 +52,7 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 
 	w := &poolWorker{
 		cmd:    cmd,
+		dir:    dir,
 		stdin:  bufio.NewWriter(stdin),
 		stdout: bufio.NewScanner(stdout),
 	}
@@ -74,6 +75,11 @@ func (w *poolWorker) killOnce() bool {
 	}
 	if err := killProcessGroup(w.cmd.Process); err != nil {
 		log.Printf("[pool] stopping warm worker pid %d: %v", w.cmd.Process.Pid, err)
+	}
+	if w.dir != "" {
+		if err := os.RemoveAll(w.dir); err != nil {
+			log.Printf("[pool] removing warm worker dir %s: %v", w.dir, err)
+		}
 	}
 	return true
 }

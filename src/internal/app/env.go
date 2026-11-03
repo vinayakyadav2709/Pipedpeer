@@ -56,6 +56,10 @@ func (e *Environment) Close() {
 	}
 }
 
+// AllowLargeWorkspace lifts the workspace size limit for this process; set
+// from `run --allow-large-workspace`.
+var AllowLargeWorkspace bool
+
 // EnvOptions controls how the environment is built.
 type EnvOptions struct {
 	PythonVersion string
@@ -73,6 +77,9 @@ type EnvOptions struct {
 	// CachePort is the local daemon's API port, whose /nix-cache nix may
 	// fetch from. 0 leaves the peer cache out of the build.
 	CachePort int
+	// BuildOnly builds the Nix environment and stops: the workspace is
+	// neither measured nor packed (check-only and the warm-up).
+	BuildOnly bool
 }
 
 // StageFn reports build progress. Callers own the numbering so a single run
@@ -159,6 +166,12 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 		detail("      Using Nix package: %s\n", pkg)
 	}
 
+	// Before anything is built or written: a workspace that is really a home
+	// directory must stop here, not after a nix build and a 150 GB tar.
+	if err := checkWorkspaceSize(opts, projectRoot); err != nil {
+		return nil, err
+	}
+
 	// On disk, not in RAM: the exported closure is written here and a torch
 	// closure is several gigabytes.
 	tmpDir, err := userdir.Scratch("build-*")
@@ -234,24 +247,46 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 	// target daemon lacks the closure (shared stores mean most uploads skip it
 	// entirely), so a 6GB gzip export doesn't run on every repeated run.
 
-	env.WorkspaceTar = filepath.Join(tmpDir, "workspace.tar")
-	var shim fs.FS
-	if opts.Intercept {
-		shim = nixgen.ShimDir()
-	}
-	if err := daemonctl.CreateWorkspaceTar(projectRoot, env.WorkspaceTar, shim); err != nil {
+	if err := packWorkspace(ctx, env, opts, projectRoot, absScriptPath); err != nil {
 		env.Close()
-		return nil, fmt.Errorf("workspace tar failed: %v", err)
-	}
-
-	env.ScriptRel, err = filepath.Rel(projectRoot, absScriptPath)
-	if err != nil {
-		env.ScriptRel = filepath.Base(absScriptPath)
+		return nil, err
 	}
 
 	endStep()
 	env.Stages = timeline.Stages
 	return env, nil
+}
+
+// checkWorkspaceSize refuses a workspace over the limit. A BuildOnly caller
+// never packs the workspace, so it is not measured either.
+func checkWorkspaceSize(opts EnvOptions, projectRoot string) error {
+	if opts.BuildOnly || AllowLargeWorkspace {
+		return nil
+	}
+	return daemonctl.CheckWorkspaceSize(projectRoot, daemonctl.MaxWorkspaceBytes)
+}
+
+// packWorkspace writes the workspace tar and sets env.WorkspaceTar and
+// env.ScriptRel. BuildOnly leaves both empty: only the Nix environment is
+// wanted.
+func packWorkspace(ctx context.Context, env *Environment, opts EnvOptions, projectRoot, absScriptPath string) error {
+	if opts.BuildOnly {
+		return nil
+	}
+	env.WorkspaceTar = filepath.Join(env.tmpDir, "workspace.tar")
+	var shim fs.FS
+	if opts.Intercept {
+		shim = nixgen.ShimDir()
+	}
+	if err := daemonctl.CreateWorkspaceTarContext(ctx, projectRoot, env.WorkspaceTar, shim); err != nil {
+		return fmt.Errorf("workspace tar failed: %v", err)
+	}
+	var err error
+	env.ScriptRel, err = filepath.Rel(projectRoot, absScriptPath)
+	if err != nil {
+		env.ScriptRel = filepath.Base(absScriptPath)
+	}
+	return nil
 }
 
 // PlanPackages turns a script's imports, its --pkg values and its
@@ -345,12 +380,23 @@ func buildStageName(step int, title string) string {
 	return strings.TrimSuffix(strings.ToLower(title), "...")
 }
 
+// findProjectRoot walks up from the script's directory to the nearest
+// .pipedpeerignore or .git. A marker at $HOME or above it is not a project
+// for a script that lives below $HOME: a dotfiles repo in $HOME would make
+// the whole home directory the workspace (a warm-up once packed 151 GB that
+// way). Such a script gets its own directory, with one warning.
 func findProjectRoot(scriptDir string) string {
+	home, _ := os.UserHomeDir()
+	below := home != "" && scriptDir != home && strings.HasPrefix(scriptDir, home+string(filepath.Separator))
 	for dir := scriptDir; ; dir = filepath.Dir(dir) {
-		if _, err := os.Stat(filepath.Join(dir, ".pipedpeerignore")); err == nil {
-			return dir
-		}
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		for _, m := range []string{".pipedpeerignore", ".git"} {
+			if _, err := os.Stat(filepath.Join(dir, m)); err != nil {
+				continue
+			}
+			if below && (dir == home || !strings.HasPrefix(dir, home+string(filepath.Separator))) {
+				fmt.Fprintf(os.Stderr, "      warning: %s has a %s but is not treated as a project; using %s as the workspace (add a .pipedpeerignore there to choose)\n", dir, m, scriptDir)
+				return scriptDir
+			}
 			return dir
 		}
 		parent := filepath.Dir(dir)

@@ -257,3 +257,21 @@ func TestFailedBackoffDevAndOverride(t *testing.T) {
 		})
 	}
 }
+
+// The warm-up dir carries an ignore file so findProjectRoot stops there
+// instead of walking up to a .git in $HOME and packing the whole home.
+func TestStartWritesIgnoreFile(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	data := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", data)
+	exe := filepath.Join(t.TempDir(), "fake")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\ntrue\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Start(exe, "v1", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(data, "pipedpeer", "warmup", ".pipedpeerignore")); err != nil {
+		t.Fatalf("no ignore file in the warm-up dir: %v", err)
+	}
+}

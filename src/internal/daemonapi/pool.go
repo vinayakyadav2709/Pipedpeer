@@ -177,6 +177,8 @@ type poolWorker struct {
 	stdin  *bufio.Writer
 	stdout *bufio.Scanner
 	id     int64
+	// dir is the worker's scratch dir; kill removes it.
+	dir string
 	// killed is set once the worker was stopped (its request was cancelled,
 	// or the server shut down); a killed worker is never reused.
 	killed atomic.Bool

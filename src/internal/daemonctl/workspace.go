@@ -107,6 +107,22 @@ func ignoreExcludes(line string) []string {
 // interception shim can put that dir on PYTHONPATH and Python auto-imports it
 // before the user's first line. A nil shim means no shim is embedded.
 func CreateWorkspaceTar(projectDir, destPath string, shim fs.FS) error {
+	return CreateWorkspaceTarContext(context.Background(), projectDir, destPath, shim)
+}
+
+// CreateWorkspaceTarContext is CreateWorkspaceTar that stops tar when ctx is
+// cancelled. A failed or cancelled pack removes its partial archive.
+func CreateWorkspaceTarContext(ctx context.Context, projectDir, destPath string, shim fs.FS) (err error) {
+	defer func() {
+		if err != nil {
+			if rmErr := os.Remove(destPath); rmErr != nil && !os.IsNotExist(rmErr) {
+				fmt.Fprintf(os.Stderr, "      warning: cannot remove partial %s: %v\n", destPath, rmErr)
+			}
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	ignoreFile := filepath.Join(projectDir, ".pipedpeerignore")
 
 	args := []string{"--exclude=.git", "--exclude=__pycache__", "--exclude=.venv",
@@ -119,8 +135,11 @@ func CreateWorkspaceTar(projectDir, destPath string, shim fs.FS) error {
 	}
 
 	args = append(args, "-cf", destPath, "-C", projectDir, ".")
-	if err := termuxexec.Command("tar", args...).Run(); err != nil {
-		return err
+	if runErr := termuxexec.CommandContext(ctx, "tar", args...).Run(); runErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return runErr
 	}
 
 	if shim != nil {

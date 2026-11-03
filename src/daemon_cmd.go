@@ -322,6 +322,7 @@ func runDaemon(args []string) {
 
 	log.Info().Int("port", port).Str("node_id", nodeID.ShortID()).
 		Int("max_concurrent", maxConcurrent).Str("role", heartbeat.Role).Msg("daemon starting")
+	pruneScratch(func(f string, a ...any) { log.Info().Msgf(f, a...) })
 	// Builds on this machine fetch from this daemon's /nix-cache (see phone.CachePort).
 	phone.CachePort = port
 	if err := server.ListenAndServe(port); err != nil {

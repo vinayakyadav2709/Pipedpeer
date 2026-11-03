@@ -54,7 +54,15 @@ func Scratch(prefix string) (string, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
 	}
-	return os.MkdirTemp(root, prefix)
+	dir, err := os.MkdirTemp(root, prefix)
+	if err != nil {
+		return "", err
+	}
+	if err := markOwner(dir); err != nil {
+		os.RemoveAll(dir)
+		return "", err
+	}
+	return dir, nil
 }
 
 // Bin is where pipedpeer puts helper binaries it installs for itself, so that

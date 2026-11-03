@@ -21,6 +21,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // Default lease configuration
@@ -348,6 +349,9 @@ func (s *Server) StartSweeper() {
 					case n > 0:
 						log.Info().Int("n", n).Msg("pruned stale job dir(s)")
 					}
+					userdir.PruneScratch(userdir.ScratchMaxAge, time.Now(), func(f string, a ...any) {
+						log.Info().Msgf(f, a...)
+					})
 				}
 			case <-s.stopSweep:
 				return

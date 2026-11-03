@@ -370,6 +370,7 @@ func runCheckOnly(o checkOnlyOptions) error {
 			PythonVersion: o.PythonVersion,
 			Pkgs:          o.Pkgs,
 			Intercept:     true,
+			BuildOnly:     true,
 			GPU:           envGPU(o.RequireGPU, o.PreferGPU, o.DaemonPort, o.NodeID.NodeID, targetNodeID, targetCaps),
 			CachePort:     runDaemonPort(),
 		}, nil)

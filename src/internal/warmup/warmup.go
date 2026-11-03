@@ -185,6 +185,11 @@ func Start(exe, version string, nvidia bool) (Result, error) {
 	if err := os.WriteFile(script, commonPy, 0o644); err != nil {
 		return Started, fmt.Errorf("writing %s: %w", script, err)
 	}
+	// An empty ignore file marks this dir as the project root; without it
+	// run walks up to a .git in $HOME and packs the whole home directory.
+	if err := os.WriteFile(filepath.Join(dir, ".pipedpeerignore"), nil, 0o644); err != nil {
+		return Started, fmt.Errorf("writing warm-up ignore file: %w", err)
+	}
 	// The earlier log (a failure's details) survives one rerun.
 	if err := os.Rename(LogPath(), LogPath()+".prev"); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		fmt.Fprintf(os.Stderr, "pipedpeer: keeping the earlier warm-up log: %v\n", err)

@@ -29,6 +29,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/say"
+	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
 // placementWait is how long a run waits for a node to become able to take
@@ -107,6 +108,8 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 			}
 			verbose, _ := cmd.Flags().GetBool("verbose")
 			say.Verbose = verbose
+			app.AllowLargeWorkspace, _ = cmd.Flags().GetBool("allow-large-workspace")
+			pruneScratch(func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
 			daemonHost, _ := cmd.Flags().GetString("host")
 			daemonPort := runDaemonPort()
 			jobName, _ := cmd.Flags().GetString("job-name")
@@ -572,6 +575,7 @@ the script itself: pipedpeer run -v train.py --epochs 3`,
 	cmd.Flags().String("gpu-id", "", "Pin specific GPU device IDs, e.g. '0' or '0,1' (default: whichever device the node reserves)")
 	cmd.Flags().String("gpu-mem", "", "Minimum free VRAM required on a single GPU, e.g. '4G'")
 	cmd.Flags().Int("cores", 0, "Minimum free CPU cores required on the target node")
+	cmd.Flags().Bool("allow-large-workspace", false, "Pack and send a workspace over 2 GiB (default: refuse and name the biggest entries; list them in .pipedpeerignore instead)")
 	cmd.Flags().Bool("check-only", false, "Check imports, environment, placement and closure without running the script")
 	cmd.Flags().Bool("cold", false, "Send the environment as if the node had none, to time a first run")
 	_ = cmd.Flags().MarkHidden("cold")
@@ -787,4 +791,10 @@ func exitOnSecondSignal(ctx context.Context, stop context.CancelFunc) {
 	<-sig
 	fmt.Fprintln(os.Stderr, "\nsecond interrupt: exiting now")
 	os.Exit(130)
+}
+
+// pruneScratch removes scratch dirs older than a day whose owner is gone;
+// left over from killed runs they otherwise pile up for good.
+func pruneScratch(logf func(string, ...any)) {
+	userdir.PruneScratch(userdir.ScratchMaxAge, time.Now(), logf)
 }
