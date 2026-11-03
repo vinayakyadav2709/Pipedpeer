@@ -30,7 +30,7 @@
 # pc00 through a pty, kills the pipedpeer-lab-day unit during e4, runs the
 # head line again, and checks: the resume, the uploads, the traces, the
 # summary, and that every PC's snapshot after the day equals the one before.
-# Needs rootless podman; about 5.5 GB of RAM and 25 GB of disk.
+# Needs rootless podman; about 6 GB of RAM (pc00 2 GB: it is the head of everything) and 25 GB of disk.
 # shellcheck disable=SC2015,SC2016  # pass||fail lines; remote snippets
 set -euo pipefail
 
@@ -76,7 +76,7 @@ trap cleanup EXIT
 
 # Memory: every container is capped (no swap); the set waits for room.
 source "$repo/scripts/lib/lab.sh"
-pp_lab_mem_check "$(( (1536 + 3 * 1280) * 1048576 ))" headless-test
+pp_lab_mem_check "$(( (2048 + 3 * 1280) * 1048576 ))" headless-test
 
 say "build images and pipedpeer"
 for os in ubuntu fedora; do
@@ -107,7 +107,7 @@ run_pc() {  # run_pc <name> <image> <memory> [podman args]
   podman run -d --name "$tag-$n" --hostname "$n" --network "$net" --memory "$mem" --memory-swap "$mem" \
     --cpus 2 --shm-size 256m --pids-limit 32768 --privileged --systemd=always "$@" "$img" >/dev/null
 }
-run_pc pc00 pipedpeer-labpc-ubuntu 1536m -v "$nixvol:/nix"
+run_pc pc00 pipedpeer-labpc-ubuntu 2048m -v "$nixvol:/nix"
 run_pc w1 pipedpeer-labpc-ubuntu 1280m
 run_pc w2 pipedpeer-labpc-fedora 1280m
 run_pc w3 pipedpeer-labpc-ubuntu 1280m
