@@ -69,3 +69,15 @@ def test_offload_here_without_a_machine_key_falls_back_to_boot_id(monkeypatch):
         return
     assert core._offload_here(boot) is True
     assert core._offload_here("not-" + boot) is False
+
+
+def test_main_only_lines_stay_out_of_worker_processes(monkeypatch, capsys):
+    monkeypatch.setattr(core, "_ENABLED", True)
+    monkeypatch.setattr(core, "_VERBOSE", True)
+    monkeypatch.setattr(core, "_MAIN_PROCESS", False)   # a forkserver worker
+    core._log("numpy interception installed", main_only=True)
+    core._log("chunk detail")
+    assert capsys.readouterr().err == "[pipedpeer] chunk detail\n"
+    monkeypatch.setattr(core, "_MAIN_PROCESS", True)
+    core._log("numpy interception installed", main_only=True)
+    assert capsys.readouterr().err == "[pipedpeer] numpy interception installed\n"

@@ -68,7 +68,7 @@ func Simple(r Record) Summary {
 }
 
 // WriteSimple prints the one-line view, e.g.
-// "pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%, fedora 40%".
+// "pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%, fedora 40% of compute".
 func WriteSimple(w io.Writer, s Summary) {
 	line := fmt.Sprintf("pipedpeer: %.1f s total — script %.1f s, pipedpeer %.1f s",
 		s.Total.Seconds(), s.Script.Seconds(), s.Overhead.Seconds())
@@ -77,7 +77,10 @@ func WriteSimple(w io.Writer, s Summary) {
 		for i, p := range s.Where {
 			parts[i] = fmt.Sprintf("%s %.0f%%", p.Machine, p.Share*100)
 		}
-		line += " — ran on " + strings.Join(parts, ", ")
+		// "of compute": the shares weigh compute time, not items; next to the
+		// summary's "spread N items: …" line two unlabelled splits read as a
+		// contradiction (27 of 32 items on fedora vs fedora 58%).
+		line += " — ran on " + strings.Join(parts, ", ") + " of compute"
 	}
 	fmt.Fprintln(w, line)
 }

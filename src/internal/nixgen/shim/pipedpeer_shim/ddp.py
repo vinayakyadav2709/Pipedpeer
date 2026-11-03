@@ -247,7 +247,7 @@ class _Ring(_RingState, _Sync, _Fast, _Membership, _Loader):
                 for name in ("step", "update", "unscale_"):
                     if name in cls.__dict__:
                         setattr(cls, name, self._catchup_noop(cls.__dict__[name]))
-        _log("ddp interception installed")
+        _log("ddp interception installed", main_only=True)
 
 
 def _install_ddp():

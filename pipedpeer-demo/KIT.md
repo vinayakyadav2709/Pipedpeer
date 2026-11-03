@@ -132,7 +132,7 @@ ranks or GPU work. Keep it plugged in, Termux in the foreground or its notificat
 Run everything from this folder (`pipedpeer-demo/`) on the user's laptop unless a step says otherwise. pipedpeer's
 flags go before the script, the script's own flags after it. Output is the script's own prints; when work left this
 machine one more line follows on stderr:
-`pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on <machine> 60%, <machine> 40%`.
+`pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on <machine> 60%, <machine> 40% of compute`.
 `pipedpeer run -v …` adds placement, build steps and the full summary; `pipedpeer jobs last --steps` shows every step
 of every chunk on every machine afterwards. The first run of a script on a machine is silent for a while (building
 its environment); add `-v` to watch it.

@@ -336,7 +336,7 @@ def _install_pandas():
 
     _pd.DataFrame.merge = _merge
     _pd.DataFrame.join = _join
-    _log("pandas groupby/merge/join interception installed")
+    _log("pandas groupby/merge/join interception installed", main_only=True)
 
 
 def _install_io():
@@ -371,4 +371,4 @@ def _install_io():
 
     _pd.read_csv = _read_csv
     _pd.read_parquet = _read_parquet
-    _log("pandas read_csv/read_parquet interception installed")
+    _log("pandas read_csv/read_parquet interception installed", main_only=True)

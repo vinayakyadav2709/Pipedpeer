@@ -1830,7 +1830,7 @@ the script itself) per machine and chunk, written by the shim
 script's time; it used to be, which is how the quadratic request body hid.
 - *Simple view*, printed after every run that used another machine:
   `pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%,
-  fedora 40%`.
+  fedora 40% of compute`.
 - *Detailed view*: `run -v`, `jobs <id> --steps` (`jobs last --steps` for the latest run), the web run view, and CSV or
   JSON (`jobs <id> --export csv|json`, `jobs --export-all <dir>` for every run).
 

@@ -16,9 +16,19 @@ _NUM_SHARDS = os.environ.get("PIPEDPEER_CLOSURE_NODES", "0")  # closure node cou
 _VERBOSE = os.environ.get("PIPEDPEER_VERBOSE") == "1"
 
 
-def _log(msg):
-    """Progress detail: shown only under run -v."""
-    if _ENABLED and _VERBOSE:
+# The job's first Python process names itself here; its multiprocessing
+# workers inherit the variable. Under forkserver (Python 3.14's default)
+# every worker re-runs sitecustomize, so a line about installing the shim
+# printed once per worker as well.
+if "PIPEDPEER_SHIM_MAIN_PID" not in os.environ:
+    os.environ["PIPEDPEER_SHIM_MAIN_PID"] = str(os.getpid())
+_MAIN_PROCESS = os.environ.get("PIPEDPEER_SHIM_MAIN_PID") == str(os.getpid())
+
+
+def _log(msg, main_only=False):
+    """Progress detail: shown only under run -v. main_only: a line about the
+    whole job (an interception installed), said by its main process only."""
+    if _ENABLED and _VERBOSE and (_MAIN_PROCESS or not main_only):
         sys.stderr.write("[pipedpeer] " + msg + "\n")
 
 

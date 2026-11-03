@@ -196,7 +196,7 @@ def _install_numpy():
     _np.tensordot = _tensordot
     _np.linalg.svd = _linalg("svd")
     _np.linalg.eig = _linalg("eig")
-    _log("numpy matmul/dot/tensordot/svd/eig interception installed")
+    _log("numpy matmul/dot/tensordot/svd/eig interception installed", main_only=True)
 
 
 def _local_free_bytes():

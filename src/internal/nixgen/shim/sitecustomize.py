@@ -422,7 +422,7 @@ def _install_joblib():
     try:
         _jp.Parallel.__init__ = _parallel_init
         _jp.Parallel.__call__ = _parallel_call
-        _log("joblib interception installed")
+        _log("joblib interception installed", main_only=True)
     except Exception as e:
         _log("joblib interception failed: %s" % e)
 _install()

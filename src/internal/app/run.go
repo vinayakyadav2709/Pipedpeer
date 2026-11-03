@@ -321,7 +321,12 @@ func RunTask(ctx context.Context, env *Environment, task Task) (runErr error) {
 		opts.Envs = append(opts.Envs, "PIPEDPEER_SUBMITTER_NODE="+me.NodeID)
 	}
 
-	stage(7, "Executing on remote...")
+	// Name where it runs: "remote" was printed for runs on this machine too.
+	where := historyRecord.RunName
+	if where == "" {
+		where = "node " + node
+	}
+	stage(7, "Executing on "+where+"...")
 	jobhistory.UpdateStage(historyDir, "executing")
 	if opts.EstimatedMemBytes <= 0 {
 		say.Printf("      Note: no memory estimate for %s; capping the job at %s (raise with --mem)\n",

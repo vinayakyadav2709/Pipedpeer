@@ -62,7 +62,7 @@ new · worker: U22 demo kit
 ### `pipedpeer run cpu.py` — laptop A (+ laptop B working)
 changed: plain output by default, honest exit code, work spreads · worker: U22 demo kit
 1. [ ] `python3 cpu.py` → expect four result lines and `TOTAL <s>`; note it.
-2. [ ] `pipedpeer run cpu.py` → expect the same lines (`Pool: 128 items, checksum 3839999232`, `joblib: 64 Mandelbrot tiles, 217451260 points inside`, …), no `[1/7]`/`[coordinator]`/`[pipedpeer]` lines, a lower TOTAL, then `pipedpeer: <s> s total — script <s> s, pipedpeer <s> s — ran on <laptop A> N%, <laptop B> M%`.
+2. [ ] `pipedpeer run cpu.py` → expect the same lines (`Pool: 128 items, checksum 3839999232`, `joblib: 64 Mandelbrot tiles, 217451260 points inside`, …), no `[1/7]`/`[coordinator]`/`[pipedpeer]` lines, a lower TOTAL, then `pipedpeer: <s> s total — script <s> s, pipedpeer <s> s — ran on <laptop A> N%, <laptop B> M% of compute`.
 3. [ ] `echo $?` → `0`. A script ending in `raise SystemExit(3)` run through `pipedpeer run` → `echo $?` gives `3`.
 4. [ ] `pipedpeer jobs last --steps` → expect chunk steps on both machines.
 

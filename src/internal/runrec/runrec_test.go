@@ -41,7 +41,7 @@ func TestSimpleSplitsScriptAndOverhead(t *testing.T) {
 	}
 	var b bytes.Buffer
 	WriteSimple(&b, s)
-	want := "pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%, fedora 40%\n"
+	want := "pipedpeer: 41.2 s total — script 38.0 s, pipedpeer 3.2 s — ran on yeet 60%, fedora 40% of compute\n"
 	if b.String() != want {
 		t.Fatalf("got %q", b.String())
 	}
