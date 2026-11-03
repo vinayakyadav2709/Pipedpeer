@@ -59,7 +59,7 @@ A gzipped `nix-store --export` stream; drops signatures and is imported with `--
 The daemon's on-disk LRU of closure archives, bounded at startup and on every transfer.
 
 **Seeding**:
-Pushing a closure to peers after an upload so pool spill can use them; only peers that hold the closure get spill work.
+Pushing a closure to peers after an upload so pool spill can use them; only peers that hold the closure get spill work. A peer that still lacks the closure of a map in progress (it joined mid-run) is seeded by that map's pacing request (`daemonapi/poolelastic.go` `seedLate`). A LAN peer takes every path from the sender; only a peer behind an internet forwarder fetches what cache.nixos.org serves itself (`PeerHealth.substitutesItself`).
 _Avoid_: broadcast (the function name, not the concept)
 
 **Trusted keys**:

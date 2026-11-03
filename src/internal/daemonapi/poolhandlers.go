@@ -45,6 +45,12 @@ func (s *Server) handlePoolStats(w http.ResponseWriter, r *http.Request) {
 		for k, v := range s.pool.pacing(store, s.poolSubmitter(r)) {
 			out[k] = v
 		}
+		// pending (additive): peers getting this closure now, which join
+		// the map when they have it. Only a job on this node asks, for its
+		// own closure; one this node does not hold is not sent anywhere.
+		if isLoopback(r.RemoteAddr) && pathExists(store) {
+			out["pending"] = int64(s.seedLate(store))
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
