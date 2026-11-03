@@ -201,4 +201,11 @@ The runner contract of [otel/README.md](otel/README.md) ("Runner integration"):
 | 8, process, Ray and Dask metrics | Present since lab/traces (`host.process`, `prom.ray`, `prom.dask`); headless-test.sh checks them per PC. |
 | 16, harness restarts | Not applicable to the day (a systemd unit). |
 
+Found by the rehearsal, in the product:
+
+- **The daemon died with the ssh session that started it.** `pipedpeer start` (and `setup`) left the daemon in the caller's session; over `ssh -t`, which is how Ansible's raw module runs every command, the pty's hangup killed it seconds after `start` reported it running. Every worker's daemon was down after the install, and after each of the runner's restarts. `daemonctl` now starts it with `Setsid`.
+- **Jobs failed where the daemon had no `XDG_RUNTIME_DIR`** (pc00's daemon runs inside the day's system unit): crun fell back to `/run/crun`. The daemon now gives crun `$XDG_STATE_HOME/pipedpeer/run`.
+
+And in the baselines: Ray's Pool and joblib actors asked for no CPU, so pc00, the zero-CPU Ray head, ran a share of every Ray job (16 Pool actors, 86 CPU seconds in one rehearsal). The ports now ask for one CPU per actor, and `test/ray-placement.py` checks it from the process metrics.
+
 Also fixed on the way: `bootstrap-ssh.sh` still fetched the laptop-era `lab-pc.sh` from `serve.sh`; it now runs the published worker line (`LAB_SITE` moves it), so it works from pc00. `calibrate.sh` counts the CPUs it may use (`PL_NPROC`, else affinity), as `nproc` and the runner do. The day's calibration window follows the target (±25 %) instead of the plan's 100-150 s.
