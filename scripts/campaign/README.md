@@ -66,7 +66,9 @@ Starting Ray or Dask first stops whichever of the two is running, so neither idl
 
 ## Telemetry and R2
 
-At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if the script exists. lab/telemetry owns that script. With no R2 keys it exits 0 with a warning.
+At the end of a campaign experiment the runner calls `scripts/campaign/sync-r2.sh`, which uploads through the ingest Worker (or R2 keys). A rehearsal never does: with `--rehearsal`, or with `PL_RESULTS` anywhere but `results/lab`, nothing is uploaded, because `~/.config/pipedpeer-lab/ingest.env` on the machine would send rehearsal data to the campaign's bucket. `PL_SYNC=1` forces the upload (point `PIPEDPEER_LAB_INGEST_ENV` at a stand-in first); `PL_SYNC=0` leaves it to the caller, as the lab day does.
+
+PipedPeer runs keep the shim's receipt whole in `logs/<run_id>/receipt.json.gz`; the `receipt` field in runs.jsonl is a summary (`lib/campaign/receipts.py`): the receipt's small fields and its steps per (step, node).
 
 ## Environment knobs
 
