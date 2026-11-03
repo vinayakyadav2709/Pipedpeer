@@ -131,6 +131,9 @@ Use --no-install to only check without modifying the system.
 Use -y to answer yes to every question.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Without it setup never sees a running daemon as another build,
+			// and an upgrade leaves the old daemon running.
+			setup.Version = version
 			autoYes, _ := cmd.Flags().GetBool("yes")
 			noInstall, _ := cmd.Flags().GetBool("no-install")
 			if cmd.Flags().Changed("public-address") {
