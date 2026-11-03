@@ -732,23 +732,19 @@ text(s, Inches(7.0), T, Inches(5.8), CH, [
     "Controlled, repeated evaluation on more machines against Ray, Dask and Lithops.",
 ], size=17)
 
-# 28 Execution plan, budget, distribution of work
-s = new_slide("Execution Plan, Budget and Distribution of Work", notes=(
-    "FILL BEFORE THE EXAM: each member's responsibilities in the table. The project ran from April to "
-    "November 2026 in phases, each merged after review. The budget was nil: all software is open source and "
-    "we used our own laptops and a phone."))
-table(s, L, T, Inches(7.4), [
-    ["Member", "Responsibilities"],
-    ["Yateen Vaviya", "[fill in before the exam]"],
-    ["Vinayak Yadav", "[fill in before the exam]"],
-    ["Sahil Gupta", "[fill in before the exam]"],
-], col_w=[2.2, 5.2], size=15, row_h=0.7)
-text(s, Inches(8.3), T, Inches(4.5), CH, [
+# 28 Execution plan and budget
+s = new_slide("Execution Plan and Budget", notes=(
+    "The project ran from April to November 2026 in phases, each on its own branch and merged into dev after "
+    "review. All three of us worked on every part together. No hardware was bought: the software is open "
+    "source, and we used our own laptops and a phone, plus one rented cloud server as an introducer during "
+    "the cross-network tests, since shut down."))
+text(s, L, T, CW, CH, [
     "**Timeline:** 12 April – November 2026 (first to latest commit); each phase on its own branch, "
     "merged into dev after review.",
-    "**Budget:** no hardware bought — open-source software, our own laptops and phone. "
-    "[confirm: any cost of the cloud host used as introducer]",
-], size=16)
+    "**Team:** all three members worked jointly on design, implementation, evaluation and writing.",
+    "**Budget:** no hardware bought — open-source software, our own laptops and phone, and one rented "
+    "cloud server as introducer during the cross-network tests (since shut down).",
+], size=18)
 
 # 29 Publication
 s = new_slide("Research Publication", notes=(

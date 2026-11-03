@@ -15,7 +15,7 @@ number traced to its record on 2026-11-02 (`77d194e`).
 | `report/be_title.tex`, `report/be_certificate2.tex` | Title page and approval certificate. |
 | `paper/paper.tex` | Conference paper, IEEEtran two-column (6 pages). |
 | `paper/journal/manuscript.tex`, `highlights.txt`, `cover-letter.md` | Journal manuscript, Elsevier `elsarticle`, submitted to JPDC on 3 November 2026 (under review); highlights and cover letter as submitted. Each number cites its record in a `% source:` comment. |
-| `presentation/PipedPeer-ESE.pptx` (+ `.pdf`) | ESE slide deck, 31 slides with speaker notes, built by `presentation/build_deck.py` (`uv run --with python-pptx --with pillow python presentation/build_deck.py`). One red `[fill in]` item: work distribution. |
+| `presentation/PipedPeer-ESE.pptx` (+ `.pdf`) | ESE slide deck, 31 slides with speaker notes, built by `presentation/build_deck.py` (`uv run --with python-pptx --with pillow python presentation/build_deck.py`). |
 | `diagrams/*.png` | 21 figures at 300 dpi, numbered in order of appearance. |
 | `diagrams/src/` | The Graphviz and matplotlib sources that generate them. |
 | `benchmarks/RESULTS.md` | Measured results. Each one is tagged with its source (October run, August run, or commit message), and the test bed and its limits are stated. |
