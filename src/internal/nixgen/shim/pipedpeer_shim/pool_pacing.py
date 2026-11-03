@@ -134,9 +134,25 @@ def _relay_steps(receipt):
     """Put the daemons' own steps from a chunk receipt (queue at a node,
     compute there) into this job's run record as they are: each names the
     machine that ran it, a peer's node id for a remote part. A step without
-    one is a peer's part as far as the receipt says (where "peer:<addr>")."""
+    one is a peer's part as far as the receipt says (where "peer:<addr>").
+
+    A part with items but no compute step (the daemon re-ran it here after a
+    peer failed, or a backup copy won a race; it leaves those unmeasured for
+    its speed stats) gets one from the part's own ms, ending now, marked
+    "fallback": without it a per-machine throughput timeline loses those
+    items. It has no "bytes", so speed_index and op_cost never read it."""
+    now = time.time_ns()
     for p in (receipt or {}).get("parts", []):
         where = str(p.get("where", ""))
+        if p.get("items") and not any(st.get("step") == "compute" for st in p.get("steps") or []):
+            try:
+                dur = int(float(p.get("ms", 0)) * 1e6)
+                machine = where[5:] if where.startswith("peer:") else str(receipt.get("node", ""))
+                _RELAYED_STEPS.append({"machine": machine, "node": machine, "chunk": -1, "step": "compute",
+                                       "start_ns": now - dur, "dur_ns": dur, "items": int(p["items"]),
+                                       "fallback": True})
+            except (TypeError, ValueError) as e:
+                _log("skipped an unreadable part in a chunk receipt (%s): %r" % (e, p))
         for st in p.get("steps") or []:
             try:
                 machine = (st.get("machine") or st.get("node")
@@ -147,6 +163,8 @@ def _relay_steps(receipt):
                      "dur_ns": int(st["dur_ns"])}
                 if st.get("bytes"):
                     s["bytes"] = int(st["bytes"])
+                if s["step"] == "compute" and p.get("items"):
+                    s["items"] = int(p["items"])  # the part's items, for per-chunk throughput
             except (KeyError, TypeError, ValueError) as e:
                 _log("skipped an unreadable step in a chunk receipt (%s): %r" % (e, st))
                 continue

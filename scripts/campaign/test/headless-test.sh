@@ -193,13 +193,19 @@ for a in att:
 print(dict(st))
 assert st["e4"] == ["interrupted", "ok"], st["e4"]
 assert all(v[-1] == "ok" for v in st.values()), st
-assert sorted(st) == sorted(["e1", "e1b", "e4", "e5", "e6", "e7", "e8"]), sorted(st)
+assert sorted(st) == sorted(["e1", "e1b", "e4", "e5", "e6", "e7", "e8", "e12", "e13", "e15"]), sorted(st)
 runs = [json.loads(l) for l in open(raw + "/runs.jsonl")]
 e1 = [r for r in runs if r["experiment"] == "e1"]
 assert len(e1) == 3 * 3 * 4, len(e1)   # N 1,4,16 x 3 systems x (1 warm-up + 3): once, not twice
 cache = json.load(open(raw + "/result-cache.json"))
 assert {k for k in cache if k.startswith("W1|")} == {"W1|BENCH_ITEMS=40", "W1|BENCH_ITEMS=160", "W1|BENCH_ITEMS=640"}, cache
 assert all(v["source"].startswith("plain-precomputed:") for v in cache.values()), cache
+EOF
+python3 - "$raw/timeline.jsonl" <<'EOF' && pass "timeline.jsonl has every E14 event the day writes" || fail "timeline.jsonl (E14)"
+import json, sys
+ev = {json.loads(l)["event"] for l in open(sys.argv[1])}
+need = {"head_start", "setup_start", "labpc", "ssh_ok", "pc_map", "install_start", "install_end", "join_end", "cluster_ready"}
+assert need <= ev, sorted(need - ev)
 EOF
 grep -q 'calibrated on pc01' "$raw/workloads.json" && pass "workloads.json calibrated on pc01" || fail "workloads.json not calibrated"
 grep -q '^| W1 | `BENCH_ITEMS=240`' "$raw/workloads.md" && pass "workloads.md sizes table rewritten" || fail "workloads.md table"

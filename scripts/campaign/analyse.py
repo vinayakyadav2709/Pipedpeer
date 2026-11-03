@@ -17,6 +17,8 @@ Figures (results/lab/figures/, PNG and PDF):
   e4_uneven         median wall per system, IQR as error bars
   e5_env            wall and MB per method, cold and update
   e11_membership    membership bytes per PC per minute vs N
+  e12_join … e15_network  the headline figures, from analyse_headline.py
+                    (scripts/campaign/FIGURES.md)
 and e8_table.md, the training table. A figure whose experiment has no
 usable runs is skipped with a note.
 """
@@ -37,7 +39,7 @@ COLORS = {
 }
 ORDER = ["plain", "pipedpeer", "pipedpeer-headcount", "pipedpeer-exact", "pipedpeer-fast",
          "pipedpeer-shim", "pipedpeer-noshim", "ray", "dask", "torchrun", "pip"]
-GROUP_EXTRA = ["mode", "variant", "phase", "fault", "extra_package"]
+GROUP_EXTRA = ["mode", "variant", "phase", "fault", "extra_package", "rtt_added_ms"]
 INK, INK2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
@@ -295,6 +297,11 @@ def main(argv=None):
         for exp, fn in figs:
             if exp in tables and not fn(tables[exp]):
                 skipped.append(exp)
+    # E12-E15, the headline figures: analyse_headline.py (FIGURES.md).
+    import analyse_headline
+    m, sk = analyse_headline.run(runs, out, csvdir, figdir, None if a.no_figures else plt, save)
+    made += m
+    skipped += sk
     with open(os.path.join(out, "summary.txt"), "w") as f:
         f.write("\n".join(summary) + "\n")
     print("\n".join(summary))

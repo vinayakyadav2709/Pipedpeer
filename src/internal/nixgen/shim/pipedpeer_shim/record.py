@@ -16,14 +16,15 @@ NAMES = frozenset((
     "env_build", "env_send", "ddp_sync", "script"))
 
 # list.append is atomic under the GIL, so producers on several threads need
-# no lock here. Each entry: (name, seconds, nbytes, chunk, node, end_ns).
+# no lock here. Each entry: (name, seconds, nbytes, chunk, node, end_ns, items).
 _STEPS = []
 _now = time.time_ns
 
 
-def step(name, seconds, nbytes=0, chunk=-1, node=""):
-    """Record one finished step of the given length, ending now."""
-    _STEPS.append((name, seconds, nbytes, chunk, node, _now()))
+def step(name, seconds, nbytes=0, chunk=-1, node="", items=0):
+    """Record one finished step of the given length, ending now. items is
+    how many map items a compute step finished (additive key "items")."""
+    _STEPS.append((name, seconds, nbytes, chunk, node, _now(), items))
 
 
 def steps(machine=None):
@@ -32,12 +33,14 @@ def steps(machine=None):
     if machine is None:
         machine = os.environ.get("PIPEDPEER_NODE_ID", "")
     out = []
-    for name, seconds, nbytes, chunk, node, end_ns in list(_STEPS):
+    for name, seconds, nbytes, chunk, node, end_ns, items in list(_STEPS):
         dur = int(seconds * 1e9)
         s = {"machine": machine, "node": node, "chunk": chunk, "step": name,
              "start_ns": end_ns - dur, "dur_ns": dur}
         if nbytes:
             s["bytes"] = int(nbytes)
+        if items:
+            s["items"] = int(items)
         out.append(s)
     return out
 

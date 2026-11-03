@@ -107,7 +107,7 @@ def apply(repo, caldir, pc):
     for wid, c in sorted(cals.items()):
         var = c["var"]
         weak_s = f"`{var}={c['weak_per_pc'][var]}` × N" if "weak_per_pc" in c else "none"
-        unit = {"BENCH_ITEMS": "items", "CPU_ITEMS": "items", "RF_TREES": "trees"}.get(var, var)
+        unit = {"BENCH_ITEMS": "items", "CPU_ITEMS": "items", "RF_TREES": "trees", "GS_SAMPLES": "rows"}.get(var, var)
         verify = f"{c['verify_s']:.1f} s" if "verify_s" in c else "not run"
         rows.append(f"| {wid} | `{var}={c['strong'][var]}` | {weak_s} | "
                     f"{c['c0_s']:.2f} s + {c['c1_s']:.3g} s × {unit} | {verify} |")

@@ -11,6 +11,10 @@ W3,plain,0
 W3,pipedpeer,0
 W3,ray,8
 W3,dask,6
+W4,plain,0
+W4,pipedpeer,0
+W4,ray,8
+W4,dask,6
 T1,plain,0
 T1,pipedpeer,0
 T1,torchrun,18
