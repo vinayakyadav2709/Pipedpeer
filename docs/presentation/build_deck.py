@@ -752,14 +752,15 @@ text(s, Inches(8.3), T, Inches(4.5), CH, [
 
 # 29 Publication
 s = new_slide("Research Publication", notes=(
-    "Our paper is written in IEEE conference format, with the plagiarism report attached as the "
-    "evaluation requires. We also prepared a longer journal version for the Journal of Parallel and "
-    "Distributed Computing. Every number in both comes from a recorded measurement."))
+    "Our journal paper was submitted to the Journal of Parallel and Distributed Computing, an "
+    "Elsevier journal, on 3 November 2026, and is under review. A shorter IEEE conference-format "
+    "version accompanies the report, with the plagiarism report attached as the evaluation "
+    "requires. Every number in both comes from a recorded measurement."))
 text(s, L, T, CW, CH, [
-    "**\"PipedPeer: Zero-Configuration Distributed Computing via Recursive, Decentralised Coordination\"**",
-    (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant — IEEE conference format, 6 pages."),
-    (1, "Status: [fill in — e.g. submitted to <conference>, <date>]; plagiarism report attached."),
-    "Journal version prepared for the **Journal of Parallel and Distributed Computing** (Elsevier).",
+    "**\"PipedPeer: Running Unmodified Python Across a Small Group's Machines Without a Configured Cluster\"**",
+    (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant."),
+    (1, "Submitted to the **Journal of Parallel and Distributed Computing** (Elsevier), 3 November 2026; under review."),
+    "Shorter IEEE conference-format version (6 pages) with the report; plagiarism report attached.",
     "Every number in the paper and report traces to a recorded measurement in the repository.",
 ], size=19)
 
