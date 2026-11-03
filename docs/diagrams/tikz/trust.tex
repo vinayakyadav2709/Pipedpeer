@@ -1,0 +1,22 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[rb/.style={box, minimum width=5.25cm, minimum height=0.74cm},
+  kb/.style={box, minimum width=2.35cm, minimum height=0.95cm}]
+  \def\xl{1.22} \def\xr{6.13}
+  \node[rb] (R1) at (\xr,0)     {Daemon API, every route\\[-1pt]\ppnote\ppsec{sent only to a host that proved it (HMAC)}};
+  \node[rb] (R2) at (\xr,-0.95) {QUIC link, across networks\\[-1pt]\ppnote\ppsec{signed hello, bound to its session}};
+  \node[rb] (R3) at (\xr,-1.9)  {Pinned TLS, on a LAN\\[-1pt]\ppnote\ppsec{pinned by node id; may fall back to HTTP}};
+  \node[rb] (R4) at (\xr,-2.85) {Signed closures\\[-1pt]\ppnote\ppsec{imported under the receiver's Nix policy}};
+
+  \node[kb, fill=ppfill] (S) at (\xl,-0.475) {Cluster secret\\[-1pt]\ppnote\ppsec{32 random bytes}};
+  \node[kb, pbox] (K) at (\xl,-2.375) {Node key\\[-1pt]\ppnote\ppsec{Ed25519; the node id}\\[-2pt]\ppnote\ppsec{is its fingerprint}};
+
+  \draw[data] (S.east) -- ++(0.3,0) |- (R1.west);
+  \draw[data] (S.east) -- ++(0.3,0) |- ([yshift=2pt]R2.west);
+  \draw[pdata] (K.east) -- ++(0.55,0) |- ([yshift=-2pt]R2.west);
+  \draw[pdata] (K.east) -- ++(0.55,0) |- (R3.west);
+  \draw[pdata] (K.east) -- ++(0.55,0) |- (R4.west);
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

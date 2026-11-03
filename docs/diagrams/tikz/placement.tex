@@ -1,0 +1,34 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[fb/.style={minimum width=3.0cm, minimum height=0.62cm},
+  an/.style={plain, anchor=west, align=left, font=\ppnote, text=ppsec}]
+  \def\x{2.12} \def\ax{3.92}
+  \node[box, fb] (F0) at (\x,0)     {Gather candidates};
+  \node[box, fb] (F1) at (\x,-1.05) {Filter in order: architecture,\\GPU, memory, cores, VRAM};
+  \node[pbox, fb] (F2) at (\x,-2.45) {Score survivors; best first};
+  \node[box, fb] (F3) at (\x,-3.75) {Lease: \textit{accept}, \textit{commit}};
+  \node[box, fb, fill=ppfill] (F4) at (\x,-4.85) {Execute};
+  \draw[data] (F0) -- (F1);
+  \draw[data] (F1) -- (F2);
+  \draw[data] (F2) -- (F3);
+  \draw[data] (F3) -- node[elab, right] {committed} (F4);
+  % retries
+  \draw[ctrl] (F3.west) -- ++(-0.22,0) |- ([yshift=-1.5pt]F2.west);
+  \draw[ctrl] (F4.west) -- ++(-0.42,0) |- ([yshift=1.5pt]F2.west);
+  \node[ppmark] at ($(F3.west)+(-0.22,0.38)$) {a};
+  \node[ppmark] at ($(F4.west)+(-0.42,0.38)$) {b};
+
+  \node[an] at (\ax,0) {node store, LAN discovery, linked peers\\and self, one entry per node id};
+  \node[an] at (\ax,-1.05) {a rejected node keeps its reason;\\none left: retry every 30\,s, for 10\,min};
+  \node[an, text=ppink] (S) at (\ax,-2.45) {%
+    $S = h\,(1 - \frac{u_\mathrm{cpu}+u_\mathrm{mem}}{200} - 0.05\,n_\mathrm{jobs} + \Delta)$\\[2pt]
+    \textcolor{ppsec}{load terms: up to $-1.0$}\\
+    \textcolor{ppsec}{$\Delta$: cores, MHz, free GiB, free cores, $\pm0.18$}\\
+    \textcolor{ppsec}{$h$: health, halved on a failure (floor 0.1)}\\
+    \textcolor{ppsec}{a GPU request adds up to $+0.8$}};
+  \node[an] at (\ax,-3.75) {\ppstep{a} refused: lease the next node};
+  \node[an] at (\ax,-4.85) {\ppstep{b} failed: place again, at most 3 runs,\\untried nodes first};
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

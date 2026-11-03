@@ -1,0 +1,29 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}
+  \node[circle, fill=pprule, inner sep=0pt, minimum size=5pt] (init) at (0.1,0) {};
+  \node[state, minimum width=2.2cm] (res) at (2.15,0)
+    {Reserved\\[-1pt]\ppnote\ppsec{capacity held}};
+  \node[state, pbox, rounded corners=4pt, minimum width=2.2cm] (run) at (6.4,0)
+    {Running\\[-1pt]\ppnote\ppsec{job in its sandbox}};
+  \node[circle, draw=pprule, inner sep=0pt, minimum size=9pt] (end) at (6.4,-1.75) {};
+  \node[circle, fill=pprule, inner sep=0pt, minimum size=5pt] at (end) {};
+  \node[plain, anchor=north, font=\ppnote, text=ppsec] at (end.south) {released};
+
+  \draw[data] (init) -- node[elab, above] {\textit{accept}} (res);
+  \draw[data] (res) -- node[elab, above] {\textit{commit}}
+    node[elab, below] {resources\\[-1pt]re-checked} (run);
+
+  \draw[ctrl] ([xshift=-0.5cm]res.north east) arc[start angle=-10, end angle=190, radius=0.28]
+    node[pos=0.5, elab, above] {\textit{renew}: expiry +30\,s};
+  \draw[ctrl] ([xshift=-0.5cm]run.north east) arc[start angle=-10, end angle=190, radius=0.28]
+    node[pos=0.5, elab, above] {\textit{renew} every 30\,s};
+
+  \draw[data] (res.south) |- node[elab, pos=0.68, below]
+    {expiry (30\,s + 5\,s grace),\\[-1pt]commit refused, or \textit{complete}} (end.west);
+  \draw[data] (run.south) -- node[elab, right, align=left, xshift=1pt]
+    {\textit{complete}, or no\\[-1pt]renewal for 5\,min\\[-1pt]and no live job} (end.north);
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

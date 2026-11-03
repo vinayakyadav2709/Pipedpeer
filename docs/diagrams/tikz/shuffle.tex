@@ -1,0 +1,33 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[cell/.style={draw=pprule, line width=0.5pt, minimum width=0.42cm, minimum height=0.3cm, inner sep=0pt, font=\ppnote},
+  bb/.style={box, minimum width=1.75cm, minimum height=0.8cm},
+  hd/.style={font=\ppnote, text=ppsec, anchor=south, align=center, execute at end node=\strut}]
+  % input frame: key column
+  \def\x{0.6}
+  \foreach \k [count=\i] in {a,c,b,a,b,c,a,b} \node[cell] (in\i) at (\x,{-0.3*\i}) {$\k$};
+  \node[hd] at (\x,0.08) {input\\frame};
+  % buckets
+  \def\xb{2.75}
+  \node[bb, pbox] (b0) at (\xb,-0.5) {bucket 0: $a$\\[-1pt]\ppnote\ppsec{kept here}};
+  \node[bb] (b1) at (\xb,-1.35) {bucket 1: $b$\\[-1pt]\ppnote\ppsec{to peer 1}};
+  \node[bb] (b2) at (\xb,-2.2) {bucket 2: $c$\\[-1pt]\ppnote\ppsec{to peer 2}};
+  \node[hd] at (\xb,0.08) {rows bucketed by\\a hash of the key};
+  \foreach \i/\b in {1/b0,4/b0,7/b0,3/b1,5/b1,8/b1,2/b2,6/b2}
+    \draw[data, line width=0.45pt, draw=ppgrey] (in\i.east) -- (\b.west);
+  % aggregate
+  \def\xa{5.15}
+  \node[bb, pbox] (a0) at (\xa,-0.5) {aggregate\\[-1pt]\ppnote\ppsec{this node}};
+  \node[bb] (a1) at (\xa,-1.35) {aggregate\\[-1pt]\ppnote\ppsec{peer 1}};
+  \node[bb] (a2) at (\xa,-2.2) {aggregate\\[-1pt]\ppnote\ppsec{peer 2}};
+  \node[hd] at (\xa,0.08) {each key whole\\on one node};
+  \foreach \i in {0,1,2} \draw[data] (b\i) -- (a\i);
+  % result
+  \def\xr{7.75}
+  \node[box, minimum width=1.6cm, minimum height=2.5cm] (res) at (\xr,-1.35) {concatenate\\at the origin};
+  \node[hd] at (\xr,0.08) {exact for any\\aggregation};
+  \foreach \i in {0,1,2} \draw[data] (a\i.east) -- (a\i.east -| res.west);
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

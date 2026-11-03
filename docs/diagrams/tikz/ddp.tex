@@ -1,0 +1,39 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[rk/.style={box, minimum width=2.3cm, minimum height=0.62cm},
+  tlab/.style={anchor=west, font=\ppnote\scshape, text=ppsec, inner sep=0pt}]
+  \def\xa{1.45} \def\xb{4.43} \def\xc{7.41}
+  % (a) PipedPeer
+  \node[tlab] at (0.02,0.62) {\normalfont(a) \scshape pipedpeer};
+  \foreach \x/\i in {\xa/0, \xb/1, \xc/2}
+    \node[rk] (a\i) at (\x,0) {rank \i\\[-1pt]\ppnote\ppsec{share of the batch}};
+  \node[pbox, minimum width=8.3cm, minimum height=0.62cm] (lead) at (\xb,-1.45)
+    {lead daemon (rank 0's machine), \ppcode{/v1/ddp/sync} on 4242/tcp:\\[-1pt]
+     one average weighted by samples, $\sum_i n_i x_i / \sum_i n_i$};
+  \foreach \i in {0,1,2} {
+    \draw[pdata] ([xshift=-0.28cm]a\i.south) -- node[elab, left] {$x_i$} ([xshift=-0.28cm]a\i.south |- lead.north);
+    \draw[pdata] ([xshift=0.28cm]a\i.south |- lead.north) -- node[elab, right] {avg} ([xshift=0.28cm]a\i.south);
+  }
+  \node[plain, anchor=north west, font=\ppnote, align=left] at (0.08,-2.0) {%
+    \begin{tabular}{@{}l@{\hspace{6pt}}l@{}}
+      exact & $x_i$ = gradients every step, int8 with error feedback\\
+      fast  & $x_i$ = weights every $H$ steps, after an exact warm-up\\
+      auto  & exact, then fast once when predicted faster
+    \end{tabular}};
+
+  % (b) torchrun
+  \def\yb{-4.45}
+  \node[tlab] at (0.02,\yb+1.12) {\normalfont(b) \scshape torchrun, the baseline};
+  \foreach \x/\i in {\xa/0, \xb/1, \xc/2}
+    \node[rk, draw=pptorch] (b\i) at (\x,\yb) {rank \i};
+  \draw[data, <->, draw=pptorch] (b0) -- (b1);
+  \draw[data, <->, draw=pptorch] (b1) -- (b2);
+  \draw[data, <->, draw=pptorch] (b0.north) .. controls +(0,0.42) and +(0,0.42) .. node[elab, above, pos=0.5] {} (b2.north);
+  \node[elab, above, inner sep=0.5pt] at (\xb,\yb+0.64) {\ppcode{gloo} all-reduce, rank to rank};
+  \node[nbox, minimum width=4.2cm] (rdv) at (\xb,\yb-1.0) {c10d rendezvous on pc00};
+  \foreach \i in {0,2} \draw[ctrl, -] (b\i.south) |- (rdv);
+  \draw[ctrl, -] (b1.south) -- (rdv.north);
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

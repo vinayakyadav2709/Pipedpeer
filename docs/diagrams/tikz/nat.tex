@@ -1,0 +1,38 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[hd/.style={box, minimum width=2.0cm, minimum height=0.72cm},
+  life/.style={draw=ppgrey, line width=0.5pt, dash pattern=on 1.5pt off 1.5pt},
+  msg/.style={data}, ml/.style={elabw, above, inner sep=1pt, yshift=1.2pt}]
+  \def\xa{1.05} \def\xi{4.445} \def\xb{7.84} \def\bot{-4.66}
+  \node[hd] (A) at (\xa,0) {Node A\\[-1pt]\ppnote\ppsec{joining\strut}};
+  \node[nbox, hd] (I) at (\xi,0) {Introducer\\[-1pt]\ppnote\ppsec{4244/udp\strut}};
+  \node[hd] (B) at (\xb,0) {Node B\\[-1pt]\ppnote\ppsec{member\strut}};
+  \foreach \n/\x in {A/\xa, B/\xb} \draw[life] (\n.south) -- (\x,\bot);
+  \draw[life] (I.south) -- (\xi,-2.6);
+  \draw[ppgrey, line width=0.6pt] (\xi-0.12,-2.6) -- (\xi+0.12,-2.6);
+
+  % invite, out of band
+  \draw[opt] (\xb,-0.85) -- node[ml] {\ppstep{1} \ppcode{invite} code: secret, introducers} (\xa,-0.85);
+  % registration
+  \draw[msg] (\xa,-1.5) -- node[ml] {\ppstep{2} register} (\xi,-1.5);
+  \draw[msg] (\xb,-1.5) -- node[ml] {register, every 30\,s} (\xi,-1.5);
+  \node[plain, fill=white, font=\ppnote, text=ppsec, anchor=north] at (\xi,-1.56)
+    {candidates (lan, mapped, reflexive) under a hash of the secret};
+  % punch request
+  \draw[ctrl] (\xa,-2.35) -- node[ml] {\ppstep{3} connect to B} (\xi,-2.35);
+  \draw[ctrl] (\xi,-2.35) -- node[ml] {punch: A's addresses} (\xb,-2.35);
+  % race
+  \draw[msg] (\xa,-3.0) -- node[ml, pos=0.25] {\ppstep{4} probes} (\xb,-3.0);
+  \draw[msg] (\xb,-3.15) -- (\xa,-3.15);
+  \node[plain, fill=white, font=\ppnote, text=ppsec, anchor=north] at ($(\xa,-3.18)!0.5!(\xb,-3.18)$)
+    {every candidate pair every 250\,ms for 15\,s, on one UDP socket (4243)};
+  \node[ghost, fill=white, font=\ppnote, text=ppsec, minimum height=0.4cm, inner ysep=1.5pt] at ($(\xa,-3.95)!0.5!(\xb,-3.95)$)
+    {if a NAT maps per destination: 256 sockets on one side, 600 random probes};
+  % link
+  \draw[pdata, <->, line width=1.1pt] (\xa,-4.65) -- node[ml] {\ppstep{5} direct QUIC link: TLS 1.3, signed hello} (\xb,-4.65);
+  \node[plain, fill=white, font=\ppnote, text=ppsec, anchor=north] at ($(\xa,-4.7)!0.5!(\xb,-4.7)$)
+    {no job data passes the introducer; with no path, nothing is relayed};
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

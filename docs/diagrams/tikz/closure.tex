@@ -1,0 +1,39 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[cb/.style={minimum width=2.54cm, minimum height=0.8cm}]
+  \def\xa{1.47} \def\xb{4.428} \def\xc{7.386}
+  % submitter
+  \node[box, cb] (S1) at (\xa,0) {Scan imports,\\map to packages};
+  \node[box, cb] (S2) at (\xb,0) {Build the closure\\on pinned nixpkgs};
+  \node[pbox, cb] (S3) at (\xc,0) {Store path: one\\name everywhere};
+  \draw[data] (S1) -- (S2); \draw[data] (S2) -- (S3);
+  \coordinate (St) at ($(S1.north)+(0,0.3)$);
+  \ppgroup{sub}{submitter}{(St)(S1)(S3)}
+
+  % worker
+  \def\yw{-3.3}
+  \node[box, cb] (W1) at (\xa,\yw) {Import under its\\own Nix policy};
+  \node[box, cb] (W2) at (\xb,\yw) {Closure caches,\\LRU, 8\,GiB each};
+  \node[box, cb] (W3) at (\xc,\yw) {Push, signed, to\\peers that lack it};
+  \draw[data] (W1) -- (W2); \draw[data] (W2) -- (W3);
+  \coordinate (Wt) at ($(W1.north)+(0,0.3)$);
+  \ppgroup{wrk}{worker}{(Wt)(W1)(W3)}
+
+  % exchange
+  \draw[ctrl] (S1.south |- sub.south) -- node[elab, left, align=right, pos=0.5]
+    {\ppstep{1} can it\\run it?\\[1pt]\ppstep{2} which\\paths?} (S1.south |- wrk.north);
+  \draw[pdata] (S3.south |- sub.south) -- node[elab, right, pos=0.5] {\ppstep{3} send} (S3.south |- wrk.north);
+  \node[plain, font=\ppnote, align=left] at ($(sub.south)!0.5!(wrk.north)+(0.05,0)$) {%
+    \renewcommand\arraystretch{1.12}%
+    \begin{tabular}{@{}l@{\hspace{8pt}}l@{}}
+      \multicolumn{2}{@{}l@{}}{\textcolor{ppsec}{sent with the workspace:}}\\[1pt]
+      \hline
+      runnable there (warm) & nothing more\\
+      lacks some paths & only those, e.g.\ 7 of 43\\
+      holds none, or \ppcode{--cold} & every path of the closure\\
+      \hline
+    \end{tabular}};
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

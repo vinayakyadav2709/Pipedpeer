@@ -1,0 +1,41 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[
+  band/.style={box, anchor=west, text width=6.47cm, minimum height=0.5cm, align=flush left, inner xsep=4pt},
+  chip/.style={box, anchor=west, minimum height=0.38cm, inner xsep=2.5pt, inner ysep=1pt, font=\ppnote},
+  lab/.style={anchor=east, font=\ppnote\scshape, text=ppsec, inner sep=0pt}]
+  \def\x{2.05} \def\lx{1.92}
+  % rows, top to bottom
+  \node[band, draw=ppblue, fill=pplight] (P) at (\x,0) {\ppcode{python3} from the closure; the shim, then the script};
+  \node[lab] at (\lx,0) {process};
+
+  \node[band, minimum height=0.98cm, text width=6.75cm, inner xsep=0pt] (M) at (\x,-0.86) {};
+  \node[lab] at (\lx,-0.86) {mounts};
+  \node[chip] (m1) at ($(M.west)+(0.1,0.22)$) {\ppcode{/nix} read-only};
+  \node[chip, right=3pt of m1] (m2) {\ppcode{/work} read-write};
+  \node[chip, right=3pt of m2] (m3) {home, private};
+  \node[chip] (m4) at ($(M.west)+(0.1,-0.22)$) {tmpfs \ppcode{/tmp}, \ppcode{/dev/shm}};
+  \node[chip, right=3pt of m4, draw=ppgrey, dashed] (m5) {GPU: device nodes, driver libraries};
+
+  \node[band] (R) at (\x,-1.72) {read-only, minimal root filesystem};
+  \node[lab] at (\lx,-1.72) {root};
+  \node[band] (N) at (\x,-2.34) {pid, ipc, mount, uts; user when rootless};
+  \node[lab] at (\lx,-2.34) {namespaces};
+
+  \node[band] (C) at (\x,-3.06) {\ppcode{memory.max} = 2 $\times$ estimate, floor 512\,MiB};
+  \node[lab] at (\lx,-3.06) {job cgroup};
+  \node[band, fill=ppfill] (D) at (\x,-3.68) {\ppcode{MemoryMax} half of RAM, no swap; else a watchdog};
+  \node[lab] at (\lx,-3.68) {daemon scope};
+  \node[band, fill=ppfill] (H) at (\x,-4.3) {kernel, network and Nix store (system or private)};
+  \node[lab] at (\lx,-4.3) {host};
+
+  % crun spans mounts..namespaces
+  \draw[ppblue, line width=0.6pt] (0.46,0 |- P.north) -- ++(-0.08,0) |- (0.46,0 |- N.south);
+  \node[font=\ppnote, text=ppblue, rotate=90, anchor=north] at (0.04,-1.17) {\ppcode{crun} container};
+
+  \node[plain, anchor=north west, align=left, font=\ppnote, text=ppsec] at (\x,-4.65)
+    {Not provided: a network namespace, a seccomp filter,\\a capability list. The job runs as uid 0 inside.};
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

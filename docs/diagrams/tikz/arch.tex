@@ -1,0 +1,55 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[mb/.style={minimum width=4.3cm, minimum height=0.78cm},
+                    wb/.style={minimum width=4.1cm, minimum height=0.78cm},
+                    rb/.style={minimum width=3.9cm, minimum height=0.78cm}]
+  \def\xL{2.52} \def\xM{9.45} \def\xR{16.0}
+  \def\yA{0} \def\yB{-1.0} \def\yC{-2.0} \def\yD{-3.0} \def\yE{-4.3}
+
+  % submitting machine
+  \node[box, mb] (L1) at (\xL,\yA) {Scan imports; build the Nix\\closure from a pinned flake};
+  \node[box, mb] (L2) at (\xL,\yB) {Coordinator (a library): filter,\\score, lease the best node};
+  \node[box, mb] (L3) at (\xL,\yC) {Send the store paths the\\node lacks, and the workspace};
+  \node[box, mb] (L4) at (\xL,\yD) {Stream the output; unpack\\the changed files};
+  \node[nbox, mb] (L5) at (\xL,\yE) {Own daemon: node store, peer list,\\LAN discovery on 4242/udp};
+  \coordinate (Lt) at ($(L1.north)+(0,0.3)$);
+  \ppgroup{cli}{client, short-lived}{(Lt)(L1)(L4)}
+  \coordinate (St) at ($(cli.north)+(0,0.3)$);
+  \ppgroup[group, inner sep=4pt]{sub}{submitting machine}{(St)(cli)(L5)}
+
+  % worker machine
+  \node[nbox, wb] (M1) at (\xM,\yA) {Daemon API on 4242/tcp:\\shared secret, pinned TLS};
+  \node[box, wb] (M2) at (\xM,\yB) {Admit: cores, jobs, memory\\and GPU under one lock};
+  \node[box, wb] (M3) at (\xM,\yC) {Closure cache,\\keyed by store path};
+  \node[pbox, wb] (M4) at (\xM,\yD) {\ppcode{crun} sandbox: script and\\Python shim, memory ceiling};
+  \coordinate (Mt) at ($(M1.north)+(0,0.3)$);
+  \ppgroup{wrk}{worker machine: daemon}{(Mt)(M1)(M4)}
+
+  % peers
+  \node[ghost, rb] (I) at (\xR,\yA) {Introducer, in every daemon:\\addresses only, 4244/udp};
+  \node[box, rb] (P1) at (\xR,\yB) {Peer daemon, same LAN};
+  \node[box, rb] (P2) at (\xR,\yC) {Peer daemon, other network:\\direct QUIC link, 4243/udp};
+  \node[box, rb] (P3) at (\xR,\yD) {Phone, pool-only:\\\ppcode{Pool} chunks only};
+  \coordinate (Pt) at ($(I.north)+(0,0.3)$);
+  \ppgroup{peers}{peers: the same binary}{(Pt)(I)(P3)}
+  
+
+  % submitter <-> worker
+  \draw[ctrl] (L2.east) -- node[elab, above] {\ppstep{1} accept, commit} (L2.east -| wrk.west);
+  \draw[pdata] (L3.east) -- node[elab, above] {\ppstep{2} paths, workspace} (L3.east -| wrk.west);
+  \draw[pdata] (M4.west -| wrk.west) -- node[elab, above] {\ppstep{3} output, files} (M4.west -| cli.east);
+
+  % worker -> peers
+  \draw[data] (M3.east -| wrk.east) -- node[elab, above] {\ppstep{4} signed closure} (M3.east -| peers.west);
+  \draw[pdata] (M4.east -| wrk.east) -- node[elab, above] {\ppstep{5} parts, gradients} (M4.east -| peers.west);
+
+  % ports key
+  \node[plain, anchor=west, font=\ppnote, text=ppsec] at ($(wrk.west |- L5)$)
+    {Ports:\quad \textcolor{ppink}{4242/tcp} daemon API\quad
+     \textcolor{ppink}{4242/udp} LAN discovery\quad
+     \textcolor{ppink}{4243/udp} direct links\quad
+     \textcolor{ppink}{4244/udp} introducer};
+  \ppwidth{\ppdouble}
+\end{tikzpicture}
+\end{document}

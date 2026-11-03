@@ -1,0 +1,86 @@
+# One look for every evaluation figure of the IEEE paper. style.py loads it;
+# sizes are the paper's: 8 pt labels, 7 pt ticks and legends, 9 pt at most.
+
+font.family: STIXGeneral
+font.size: 8
+mathtext.fontset: stix
+axes.titlesize: 8
+axes.labelsize: 8
+xtick.labelsize: 7
+ytick.labelsize: 7
+legend.fontsize: 7
+legend.title_fontsize: 7
+figure.titlesize: 9
+
+pdf.fonttype: 42
+ps.fonttype: 42
+svg.fonttype: none
+pdf.compression: 9
+
+figure.facecolor: white
+axes.facecolor: white
+savefig.facecolor: white
+savefig.dpi: 600
+savefig.bbox: standard
+savefig.pad_inches: 0
+
+figure.constrained_layout.use: True
+figure.constrained_layout.h_pad: 0.02
+figure.constrained_layout.w_pad: 0.02
+figure.constrained_layout.hspace: 0.04
+figure.constrained_layout.wspace: 0.04
+
+text.color: 1A1A1A
+axes.edgecolor: 333333
+axes.labelcolor: 1A1A1A
+axes.linewidth: 0.6
+axes.spines.top: False
+axes.spines.right: False
+axes.grid: False
+axes.axisbelow: True
+axes.titlepad: 3
+axes.labelpad: 2
+axes.prop_cycle: cycler('color', ['0072B2', 'D55E00', '009E73', '595959', 'CC79A7'])
+
+grid.color: E3E3E3
+grid.linewidth: 0.4
+grid.linestyle: -
+
+xtick.color: 333333
+ytick.color: 333333
+xtick.labelcolor: 1A1A1A
+ytick.labelcolor: 1A1A1A
+xtick.direction: out
+ytick.direction: out
+xtick.major.size: 2.5
+ytick.major.size: 2.5
+xtick.major.width: 0.6
+ytick.major.width: 0.6
+xtick.minor.size: 1.5
+ytick.minor.size: 1.5
+xtick.minor.width: 0.4
+ytick.minor.width: 0.4
+xtick.major.pad: 1.5
+ytick.major.pad: 1.5
+xtick.minor.visible: False
+ytick.minor.visible: False
+
+lines.linewidth: 1.0
+lines.markersize: 3.6
+lines.markeredgewidth: 0.6
+lines.solid_capstyle: butt
+lines.dash_capstyle: butt
+patch.linewidth: 0.5
+hatch.linewidth: 0.45
+hatch.color: edge
+errorbar.capsize: 0
+
+legend.frameon: False
+legend.borderpad: 0.2
+legend.borderaxespad: 0.2
+legend.handlelength: 1.8
+legend.handletextpad: 0.4
+legend.columnspacing: 1.0
+legend.labelspacing: 0.25
+
+image.interpolation: nearest
