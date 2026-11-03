@@ -69,6 +69,33 @@ func TestParseSRV(t *testing.T) {
 	}
 }
 
+func TestParseGoodbye(t *testing.T) {
+	zero := func(owner string) dnsmessage.Resource { r := srv(owner, 42965); r.Header.TTL = 0; return r }
+	ptr0 := dnsmessage.Resource{
+		Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(ConnectService), Class: dnsmessage.ClassINET},
+		Body:   &dnsmessage.PTRResource{PTR: dnsmessage.MustNewName(connOwn)},
+	}
+	for _, c := range []struct {
+		name string
+		pkt  []byte
+		want bool
+	}{
+		{"g1 TTL 0 connect SRV", pack(t, []dnsmessage.Resource{zero(connOwn)}, nil), true},
+		{"g1b TTL 0 connect PTR", pack(t, []dnsmessage.Resource{ptr0}, nil), true},
+		{"g2 TTL 120 connect SRV", pack(t, []dnsmessage.Resource{srv(connOwn, 42965)}, nil), false},
+		{"g3 TTL 0 pairing SRV", pack(t, []dnsmessage.Resource{zero(pairOwn)}, nil), false},
+		{"g4 garbage", []byte{1, 2, 3}, false},
+	} {
+		if got := ParseGoodbye(c.pkt); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+	// A goodbye's port is not a port to dial.
+	if _, k, _ := ParseSRV(pack(t, []dnsmessage.Resource{zero(connOwn)}, nil)); len(k) != 0 {
+		t.Errorf("TTL 0 SRV port returned: %v", k)
+	}
+}
+
 func TestQuery(t *testing.T) {
 	b, err := Query()
 	if err != nil {
@@ -120,7 +147,7 @@ func TestDiscover(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		p, err := Discover(ctx, true)
-		if err != nil || p != (Ports{41913, 42965}) {
+		if err != nil || p != (Ports{Pair: 41913, Connect: 42965}) {
 			t.Fatalf("%v %v", p, err)
 		}
 	})
@@ -130,7 +157,7 @@ func TestDiscover(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		p, err := Discover(ctx, false)
-		if err != nil || p != (Ports{0, 42965}) {
+		if err != nil || p != (Ports{Connect: 42965}) {
 			t.Fatalf("%v %v", p, err)
 		}
 	})
@@ -140,7 +167,7 @@ func TestDiscover(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
 		p, err := Discover(ctx, true)
-		if !errors.Is(err, context.DeadlineExceeded) || p != (Ports{0, 42965}) {
+		if !errors.Is(err, context.DeadlineExceeded) || p != (Ports{Connect: 42965}) {
 			t.Fatalf("%v %v", p, err)
 		}
 	})
@@ -179,6 +206,35 @@ func TestDiscover(t *testing.T) {
 		defer cancel()
 		p, err := Discover(ctx, false)
 		if err != nil || p.Connect != 42965 {
+			t.Fatalf("%v %v", p, err)
+		}
+	})
+	goodbye := func(t *testing.T) []byte {
+		r := srv(connOwn, 42965)
+		r.Header.TTL = 0
+		return pack(t, []dnsmessage.Resource{r}, nil)
+	}
+	t.Run("g1 goodbye before the announcement: Goodbye set", func(t *testing.T) {
+		send := rig(t, 42965)
+		go func() {
+			send(goodbye(t))
+			time.Sleep(30 * time.Millisecond)
+			send(pack(t, []dnsmessage.Resource{srv(connOwn, 42965)}, nil))
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p, err := Discover(ctx, false)
+		if err != nil || p != (Ports{Connect: 42965, Goodbye: true}) {
+			t.Fatalf("%v %v", p, err)
+		}
+	})
+	t.Run("g2 announcement only: Goodbye clear", func(t *testing.T) {
+		send := rig(t, 42965)
+		go send(pack(t, []dnsmessage.Resource{srv(connOwn, 42965)}, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p, err := Discover(ctx, false)
+		if err != nil || p.Goodbye || p.Connect != 42965 {
 			t.Fatalf("%v %v", p, err)
 		}
 	})

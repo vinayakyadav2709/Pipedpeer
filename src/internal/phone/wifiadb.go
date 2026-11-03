@@ -35,7 +35,7 @@ var (
 		c.Close()
 		return true
 	}
-	probeFor  = 4 * time.Second  // is Wireless debugging on already?
+	probeFor  = 5 * time.Second  // is Wireless debugging on already?
 	waitFor   = 60 * time.Second // the user switches it on / opens the pairing dialog
 	settleFor = 3 * time.Second  // the connect port stops dialing after "off"
 	pollEvery = 100 * time.Millisecond
@@ -81,17 +81,32 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 		if !ask {
 			return "", s.done, errNoWireless
 		}
-		fmt.Fprintln(w, "Settings > Developer options > Wireless debugging: switch it on for a moment (pipedpeer switches it off again afterwards)")
-		ask1(w, in, "press Enter when it is on: ")
+		// The phone does not answer its own queries while Wireless debugging
+		// is already on, but a toggle announces it. Listen from now on, so
+		// the goodbye of "off" is heard before the announcement of "on".
+		type found struct {
+			p   adbmdns.Ports
+			err error
+		}
+		res := make(chan found, 1)
 		wctx, cancel := context.WithTimeout(ctx, waitFor)
-		p, derr = discoverPorts(wctx, false)
-		cancel()
-		if p.Connect != 0 {
-			s.port = p.Connect
-		} else {
-			log.Warn().Err(derr).Msg("phone: no Wireless debugging connect port found")
+		defer cancel()
+		go func() {
+			p, err := discoverPorts(wctx, false)
+			res <- found{p, err}
+		}()
+		fmt.Fprintln(w, "Settings > Developer options > Wireless debugging: switch it off and on again (on for a moment if it is off; pipedpeer switches it off afterwards if it was off)")
+		ask1(w, in, "press Enter when it is on: ")
+		f := <-res
+		switch {
+		case f.p.Connect != 0:
+			s.port = f.p.Connect
+			s.wasOn = f.p.Goodbye // a goodbye came first: it was on
+		default:
+			log.Warn().Err(f.err).Msg("phone: no Wireless debugging connect port found")
 			term.Warn(w, "no Wireless debugging port found within %s", waitFor)
-			return "", s.done, errNoWireless
+			// State unknown: ask for the port below and leave it as it is.
+			s.wasOn = true
 		}
 	}
 	if s.port == 0 { // no mDNS: ask

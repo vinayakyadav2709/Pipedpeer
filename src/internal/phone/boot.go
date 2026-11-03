@@ -18,7 +18,7 @@ const bootScript = "#!/data/data/com.termux/files/usr/bin/sh\n" +
 	"termux-wake-lock\n" +
 	"exec pipedpeer start\n"
 
-// playVersionPrefix is the start of TERMUX_APP__APP_VERSION_NAME on the Play
+// playVersionPrefix is the start of TERMUX_VERSION on the Play
 // Store build (for example "googleplay.2026.10.09").
 const playVersionPrefix = "googleplay."
 
@@ -33,7 +33,7 @@ func bootPath() string {
 
 // writeBoot installs the boot script. It is rewritten only when the content
 // or mode differs, so a second run prints "already". The path is recorded so
-// uninstall removes it (its Paths loop). appVersion is TERMUX_APP__APP_VERSION_NAME;
+// uninstall removes it (its Paths loop). appVersion is TERMUX_VERSION;
 // a non-Play build gets a note about Termux:Boot.
 func writeBoot(w io.Writer, appVersion string) error {
 	p := bootPath()

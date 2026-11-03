@@ -22,8 +22,13 @@ const (
 	ConnectService = "_adb-tls-connect._tcp.local."
 )
 
-// Ports holds the discovered local ports; 0 means not found.
-type Ports struct{ Pair, Connect int }
+// Ports holds the discovered local ports; 0 means not found. Goodbye is set
+// when a TTL=0 record for the connect service was heard before the ports were
+// found: Wireless debugging was switched off, so it had been on.
+type Ports struct {
+	Pair, Connect int
+	Goodbye       bool
+}
 
 // ErrNoMulticast is returned when the multicast socket cannot be opened.
 var ErrNoMulticast = errors.New("mDNS: cannot listen on 224.0.0.251:5353")
@@ -66,27 +71,13 @@ func Query() ([]byte, error) {
 // the Answer and Additional sections, deduplicated, owner names matched
 // case-insensitively.
 func ParseSRV(pkt []byte) (pair, connect []int, err error) {
-	var p dnsmessage.Parser
-	if _, err = p.Start(pkt); err != nil {
-		return nil, nil, fmt.Errorf("mDNS packet: %w", err)
-	}
-	if err = p.SkipAllQuestions(); err != nil {
-		return nil, nil, fmt.Errorf("mDNS packet: %w", err)
-	}
-	ans, err := p.AllAnswers()
+	rs, err := records(pkt)
 	if err != nil {
-		return nil, nil, fmt.Errorf("mDNS packet: %w", err)
+		return nil, nil, err
 	}
-	if err = p.SkipAllAuthorities(); err != nil {
-		return nil, nil, fmt.Errorf("mDNS packet: %w", err)
-	}
-	extra, err := p.AllAdditionals()
-	if err != nil {
-		return nil, nil, fmt.Errorf("mDNS packet: %w", err)
-	}
-	for _, r := range append(ans, extra...) {
+	for _, r := range rs {
 		srv, ok := r.Body.(*dnsmessage.SRVResource)
-		if !ok {
+		if !ok || r.Header.TTL == 0 { // TTL 0: the service is going away
 			continue
 		}
 		name := strings.ToLower(r.Header.Name.String())
@@ -99,6 +90,44 @@ func ParseSRV(pkt []byte) (pair, connect []int, err error) {
 		}
 	}
 	return pair, connect, nil
+}
+
+// records returns the Answer and Additional records of a packet.
+func records(pkt []byte) ([]dnsmessage.Resource, error) {
+	var p dnsmessage.Parser
+	if _, err := p.Start(pkt); err != nil {
+		return nil, fmt.Errorf("mDNS packet: %w", err)
+	}
+	if err := p.SkipAllQuestions(); err != nil {
+		return nil, fmt.Errorf("mDNS packet: %w", err)
+	}
+	ans, err := p.AllAnswers()
+	if err != nil {
+		return nil, fmt.Errorf("mDNS packet: %w", err)
+	}
+	if err = p.SkipAllAuthorities(); err != nil {
+		return nil, fmt.Errorf("mDNS packet: %w", err)
+	}
+	extra, err := p.AllAdditionals()
+	if err != nil {
+		return nil, fmt.Errorf("mDNS packet: %w", err)
+	}
+	return append(ans, extra...), nil
+}
+
+// ParseGoodbye reports whether the packet carries a TTL=0 (goodbye) record of
+// the connect service. A packet that does not parse is not a goodbye.
+func ParseGoodbye(pkt []byte) bool {
+	rs, err := records(pkt)
+	if err != nil {
+		return false
+	}
+	for _, r := range rs {
+		if r.Header.TTL == 0 && strings.HasSuffix(strings.ToLower(r.Header.Name.String()), ConnectService) {
+			return true
+		}
+	}
+	return false
 }
 
 func addUnique(l []int, v int) []int {
@@ -174,6 +203,9 @@ func Discover(ctx context.Context, wantPair bool) (Ports, error) {
 		case b, ok := <-pkts:
 			if !ok {
 				return found, fmt.Errorf("%w: socket closed", ErrNoMulticast)
+			}
+			if ParseGoodbye(b) && found.Connect == 0 {
+				found.Goodbye = true
 			}
 			pair, conn, err := ParseSRV(b)
 			if err != nil {

@@ -28,6 +28,8 @@ type rig struct {
 	stuck    bool // the connect port keeps dialing after "off"
 	noMcast  bool
 	noPair   bool // mDNS never finds the pairing port
+	silent   bool // Wireless debugging is on but mDNS stays silent until it is toggled (goodbye + announcement)
+	deaf     bool // mDNS never hears anything
 	discover int
 	props    map[string]string
 	sdk      int
@@ -54,13 +56,16 @@ func newRig(t *testing.T, sdk int) *rig {
 		if r.noMcast {
 			return adbmdns.Ports{}, adbmdns.ErrNoMulticast
 		}
+		if r.deaf || r.silent && r.discover == 1 {
+			return adbmdns.Ports{}, context.DeadlineExceeded
+		}
 		if !r.wifiOn && r.discover >= 2 && r.userOn {
 			r.wifiOn = true
 		}
 		if !r.wifiOn {
 			return adbmdns.Ports{}, context.DeadlineExceeded
 		}
-		p := adbmdns.Ports{Connect: 42965}
+		p := adbmdns.Ports{Connect: 42965, Goodbye: r.silent}
 		if wantPair && !r.noPair {
 			p.Pair = 41913
 		}
@@ -419,5 +424,49 @@ func mustWrite(t *testing.T, p string) {
 	}
 	if err := os.WriteFile(p, nil, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPrepSilentOn(t *testing.T) { // P5b: on already, mDNS silent until toggled; the goodbye says it was on
+	r := newRig(t, 33)
+	r.wifiOn, r.silent = true, true
+	out, err := prep(r, "\n123456\n", PrepOpts{})
+	if err != nil || !strings.Contains(out, "off and on again") || !r.had("pair 127.0.0.1:41913 123456") {
+		t.Errorf("err %v out %q calls %q", err, out, r.calls)
+	}
+	if r.had("adb_wifi_enabled") || !r.had("disconnect") {
+		t.Errorf("it was on: must be left on: %q", r.calls)
+	}
+}
+
+func TestPrepToggledFromOff(t *testing.T) { // P5b opposite: no goodbye, so it was off and goes off again
+	r := newRig(t, 33)
+	out, err := prep(r, "\n123456\n", PrepOpts{})
+	if err != nil || !strings.Contains(out, "off and on again") || !r.had("adb_wifi_enabled 0") {
+		t.Errorf("err %v out %q calls %q", err, out, r.calls)
+	}
+}
+
+func TestPrepDeafAsksPort(t *testing.T) { // P5b: neither goodbye nor announcement: ask the port, leave the state alone
+	r := newRig(t, 33)
+	r.wifiOn, r.deaf, r.paired = true, true, true
+	out, err := prep(r, "\n42965\n", PrepOpts{})
+	if err != nil || !r.had("connect 127.0.0.1:42965") || !strings.Contains(out, "IP address & Port") || r.had("adb_wifi_enabled") {
+		t.Errorf("err %v out %q calls %q", err, out, r.calls)
+	}
+}
+
+func TestPrepPlayBuildNoBootNote(t *testing.T) { // P5a: TERMUX_VERSION carries googleplay.
+	for _, c := range []struct {
+		ver  string
+		note bool
+	}{{"googleplay.2026.10.09", false}, {"0.118.3", true}} {
+		r := newRig(t, 30)
+		t.Setenv("TERMUX_VERSION", c.ver)
+		t.Setenv("TERMUX_APP__APP_VERSION_NAME", "")
+		out, err := prep(r, "", PrepOpts{})
+		if got := strings.Contains(out, "Termux:Boot"); err != nil || got != c.note {
+			t.Errorf("%s: Termux:Boot note %v, want %v (err %v, out %q)", c.ver, got, c.note, err, out)
+		}
 	}
 }

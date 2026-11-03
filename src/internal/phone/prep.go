@@ -83,7 +83,7 @@ func TermuxPrep(w io.Writer, o PrepOpts) error {
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if err := writeBoot(w, os.Getenv("TERMUX_APP__APP_VERSION_NAME")); err != nil {
+	if err := writeBoot(w, os.Getenv("TERMUX_VERSION")); err != nil {
 		log.Warn().Err(err).Msg("phone: start-on-boot script not written")
 		term.Warn(w, "start on boot: %v", err)
 		errs = append(errs, err)
