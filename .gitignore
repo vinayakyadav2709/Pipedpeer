@@ -41,3 +41,7 @@ pipedpeer-demo/join-command.txt
 /results/lab/otel/
 r2.env
 *.r2.env
+# lab campaign: what serve.sh serves to the lab PCs, its pid and log
+results/lab/serve/
+results/lab/serve.pid
+results/lab/serve.log
