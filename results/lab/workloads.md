@@ -11,6 +11,7 @@ The workloads, sizes and per-system settings for every experiment in [docs/bench
 | W1 | `docs/benchmarks/workloads/pool_map.py` | `baselines/w1_ray.py` | `baselines/w1_dask.py` | `BENCH_ITEMS` | `items=… checksum=…` |
 | W2 | `pipedpeer-demo/cpu.py` | `baselines/w2_ray.py` | `baselines/w2_dask.py` | `CPU_ITEMS` (the Pool section's items) | the `Pool:`, `joblib:`, `numpy:` and `pandas:` lines, without the timings |
 | W3 | `pipedpeer-demo/01_sklearn_rf.py` | `baselines/w3_ray.py` | `baselines/w3_dask.py` | `RF_TREES` (`RF_SAMPLES` stays 200,000) | `data: …` and `accuracy: …` |
+| W4 | `docs/benchmarks/workloads/grid_search.py` (`GridSearchCV(n_jobs=-1)`, 64 settings × 4 folds = 256 fits) | `baselines/w4_ray.py` | `baselines/w4_dask.py` | `GS_SAMPLES` (dataset rows; `GS_TREES` stays 100 except in the smoke size) | `best_params={…}` and `best_score=…` |
 | T1 | `baselines/t1_train.py`, `BENCH_MODEL=ddp04` (MLP-C) or `tfm` (transformer) | none | none (torchrun: `baselines/t1_torchrun.py`) | `BENCH_EPOCHS` (smoke only) | `BENCH_LOSS …`, present only |
 
 Paths under `baselines/` are in `docs/benchmarks/workloads/baselines/`. Its [README](../../docs/benchmarks/workloads/baselines/README.md) says what each port changed and why.
@@ -43,6 +44,7 @@ Strong scaling: one PC alone takes about 60 s (target 60 s). The plan asks for 1
 | W1 | `BENCH_ITEMS=73946` | `BENCH_ITEMS=73759` × N | 0.29 s + 0.00081 s × items | 133.5 s |
 | W2 | `CPU_ITEMS=580` | none | 5.80 s + 0.0986 s × items | 113.5 s |
 | W3 | `RF_TREES=760` | none | 1.51 s + 0.078 s × trees | 128.7 s |
+| W4 | `GS_SAMPLES=1500` (target 30 s, provisional, not measured on the laptop) | none | not fitted yet | not measured |
 
 Provisional, laptop; recalibrate on pc01 in session 1. The laptop has 20 threads and 31 GB, and it was shared with other agents during the runs. Runs were in the `nixos/nix:2.31.3` container on the campaign env, with a 4 GiB memory limit and no CPU limit. Two calibrations 20 minutes apart gave W1 sizes of 164,307 and 154,055 (7 % apart), W2 1,118 and 1,209, and W3 1,578 and 1,583. Read the laptop's noise as about ±8 %.
 

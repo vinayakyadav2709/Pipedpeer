@@ -4,8 +4,9 @@
 #
 #   discover   scan pc00's subnet until LAB_PCS PCs (pc00 included) log in
 #              with the campaign key, or LAB_DISCOVER_TIMEOUT (1800 s) passes
-#   prepare    machines.csv, network.csv, clocks, pipedpeer + join, the Nix
-#              env (pc00 builds it, the rest pull it from pc00), telemetry
+#   prepare    machines.csv, network.csv, clocks, pipedpeer + join, the first
+#              distributed job (E14), the Nix env (pc00 builds it, the rest
+#              pull it from pc00), telemetry
 #   calibrate  W1-W3 sizes on pc01; then the weak-scaling plain references
 #   run        the profile's experiments through run.sh, syncing R2 after each
 #   analyse    analyse.py, then sync
@@ -28,6 +29,8 @@ source "$CAMP/day/lib.sh"
 source "$CAMP/day/prepare.sh"
 # shellcheck source=day/finish.sh
 source "$CAMP/day/finish.sh"
+# shellcheck source=day/timeline.sh
+source "$CAMP/day/timeline.sh"
 
 LAB_PCS=${LAB_PCS:-17}
 PROFILE=${LAB_PROFILE:-$CAMP/profile-minimal.tsv}
@@ -49,9 +52,10 @@ prep.clocks 1
 prep.code 2
 prep.pipedpeer 8
 prep.join 2
+prep.firstjob 3
 prep.nixenv 20
 prep.otel 3
-calibrate 12
+calibrate 14
 weakrefs 17
 $(for r in "${EXPS[@]}"; do read -r id min _ <<<"$r"; echo "exp.$id $min"; done)
 analyse 3
@@ -91,7 +95,7 @@ main() {
   fi
   if ! aborted; then
     local s
-    for s in machines network clocks code pipedpeer join nixenv otel; do
+    for s in machines network clocks code pipedpeer join firstjob nixenv otel; do
       ensure_services
       step "prep.$s" prepare "prep_$s" || { abort "prepare $s failed on pc00"; break; }
     done

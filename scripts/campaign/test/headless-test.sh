@@ -83,9 +83,10 @@ for os in ubuntu fedora; do
   $rt build -q -t "pipedpeer-labpc-$os" -f "$here/Dockerfile.$os" "$here" >"$work/build-$os.log" 2>&1 \
     || { cat "$work/build-$os.log"; echo "image build failed"; exit 1; }
 done
-rel=$work/site/releases/download/nightly-rehearsal
+rel=$work/site/releases/download/lab-rehearsal
 mkdir -p "$rel"
-(cd "$repo/src" && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -o "$rel/pipedpeer-linux-amd64" .)
+# As publish.sh builds the lab's pipedpeer, served as its release lab-rehearsal.
+(cd "$repo/src" && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -trimpath -ldflags "-s -w -X main.version=lab-rehearsal" -o "$rel/pipedpeer-linux-amd64" .)
 (cd "$rel" && sha256sum pipedpeer-linux-amd64 >checksums.txt)
 echo "pipedpeer $("$rel/pipedpeer-linux-amd64" --version 2>&1 | tail -n1)"
 
@@ -139,7 +140,7 @@ commit=$(git -C "$repo" rev-parse HEAD)
 (cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -cf - 2>/dev/null) | tar -xf - -C "$work/tree"
 rm -rf "$work/tree/results/lab/rehearsal" "$work/tree/results/lab/runs.jsonl"
 tar -C "$work" -czf "$work/site/code.tar.gz" --transform "s|^tree|Pipedpeer-$commit|" tree
-bash "$camp/lab-fill.sh" fill "$camp/lab.sh" "$work/site/lab.sh" "$(cat "$work/cfg/campaign_ed25519.pub")" "$commit" "$site" rehearsal
+bash "$camp/lab-fill.sh" fill "$camp/lab.sh" "$work/site/lab.sh" "$(cat "$work/cfg/campaign_ed25519.pub")" "$commit" "$site" lab-rehearsal
 bash "$camp/lab-fill.sh" check "$work/site/lab.sh" >/dev/null && pass "site lab.sh is lab.sh with the published lines filled" || fail "site lab.sh"
 tar -C "$work/cfg" -czf - campaign_ed25519 r2.env |
   openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt -out "$work/site/lab-secrets.enc" -pass fd:3 3< <(printf '%s\n' "$pass_phrase")
@@ -251,6 +252,7 @@ done
 grep -q '^local:' "$work/head2.log" && pass "final count: $(grep -E '^(local|remote):' "$work/head2.log" | tail -n2 | tr '\n' ' ')" || fail "no final count"
 
 say "attempts, runs and the weak references"
+cp "$here/profile-rehearsal.tsv" "$got/profile.tsv"
 python3 - "$got" <<'EOF' && pass "attempts and runs as expected" || fail "attempts/runs"
 import collections, json, sys
 d = sys.argv[1]
@@ -261,11 +263,14 @@ for a in att:
 print("attempts:", dict(st))
 assert st["e4"] == ["interrupted", "ok"], st["e4"]
 assert all(v[-1] == "ok" for v in st.values()), st
-assert sorted(st) == sorted(["e1", "e1b", "e4", "e5", "e6", "e7", "e8"]), sorted(st)
+want = sorted(l.split()[0] for l in open(d + "/profile.tsv") if l.strip() and not l.startswith("#"))
+assert sorted(st) == want, (sorted(st), want)
 runs = [json.loads(l) for l in open(d + "/runs.jsonl")]
 by = collections.Counter(r["experiment"] for r in runs)
 bad = collections.Counter(r["experiment"] for r in runs if r.get("error"))
 print("runs:", dict(by), "failed:", dict(bad))
+vers = {r.get("pipedpeer_version") for r in runs}
+assert vers == {"pipedpeer version lab-rehearsal"} or all("lab-rehearsal" in (v or "") for v in vers), vers
 e1 = [r for r in runs if r["experiment"] == "e1"]
 # W1-W3 x (N=1: 4 systems, N=2 and 4: 3 systems) x (warm-up + 1): once, not twice.
 assert len(e1) == 3 * (4 + 3 + 3) * 2, len(e1)
@@ -280,6 +285,13 @@ assert len(weak) == 2, weak   # N = 1 and 3
 e1b = [r for r in runs if r["experiment"] == "e1b" and not r.get("warmup")]
 assert e1b and all((r.get("result_ref") or "").startswith("plain-precomputed:") or r["system"] == "plain" for r in e1b), \
     [(r["system"], r["n"], r.get("result_ref")) for r in e1b]
+EOF
+gzip -dc "$raw/timeline.jsonl.gz" >"$got/timeline.jsonl" 2>/dev/null || true
+python3 - "$got/timeline.jsonl" <<'EOF' && pass "timeline.jsonl has every E14 event the day writes" || fail "timeline.jsonl (E14)"
+import json, sys
+ev = {json.loads(l)["event"] for l in open(sys.argv[1])}
+need = {"head_start", "setup_start", "labpc", "ssh_ok", "pc_map", "install_start", "install_end", "join_end", "cluster_ready"}
+assert need <= ev, sorted(need - ev)
 EOF
 grep -q 'e4: ' "$got/summary.txt" && pass "analyse.py summary: $(grep '^e4: ' "$got/summary.txt")" || fail "no e4 in summary.txt"
 grep -q 'calibrated on pc01' "$got/workloads.json" && pass "workloads.json calibrated on pc01" || fail "workloads.json not calibrated"
@@ -296,6 +308,10 @@ else
   fail "otelread.py check failed"; tail -5 "$work/otel-check.txt"
 fi
 
+say "Ray work stays off pc00 (Pool and joblib actors ask for a CPU)"
+python3 -I "$here/ray-placement.py" "$raw/otel" pc00 | tee "$work/ray-placement.txt" | tail -n 12
+[[ ${PIPESTATUS[0]} == 0 ]] && pass "no Ray Pool actor or task ran on pc00" || fail "Ray work ran on pc00 ($work/ray-placement.txt)"
+
 say "every PC as it was"
 for p in "${pcs[@]}"; do
   snapshot "$p" >"$work/after-$p"
@@ -306,7 +322,7 @@ say "phase timings (lab-day.log)"
 python3 "$here/day-timings.py" "$got/logs/day/lab-day.log" | tee "$work/timings.txt"
 echo "rehearsal wall: $(( ($(date +%s) - t_start) / 60 )) min"
 mkdir -p "$repo/results/lab/rehearsal-day"
-cp "$work/timings.txt" "$work/otel-check.txt" "$got/summary.txt" "$got/attempts.jsonl" "$repo/results/lab/rehearsal-day/" 2>/dev/null || true
+cp "$work/timings.txt" "$work/otel-check.txt" "$work/ray-placement.txt" "$got/summary.txt" "$got/attempts.jsonl" "$repo/results/lab/rehearsal-day/" 2>/dev/null || true
 gzip -dc "$raw/logs/day/lab-day.log.gz" >"$repo/results/lab/rehearsal-day/lab-day.log" 2>/dev/null || true
 
 echo

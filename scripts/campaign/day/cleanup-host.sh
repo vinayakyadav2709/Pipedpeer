@@ -45,6 +45,13 @@ if [[ $had_nix != 1 && -e /nix ]]; then
   fi
 fi
 
+# E15's netem qdisc: experiments/e15.py names the interface in $L/netem.dev
+# (and removes it itself; this is for a cut-off day). Only that interface.
+if [[ -f $L/netem.dev ]]; then
+  $( ((EUID == 0)) || echo sudo -n ) tc qdisc del dev "$(cat "$L/netem.dev")" root 2>/dev/null
+  tc qdisc show dev "$(cat "$L/netem.dev")" 2>/dev/null | grep -q netem && left+=("netem qdisc still on $(cat "$L/netem.dev")")
+fi
+
 # Temp dirs Ray, Dask and torchrun make, owned by this user only.
 find /tmp -maxdepth 1 -user "$USER" \( -name ray -o -name 'dask-*' -o -name 'dask-scratch-space' \
   -o -name 'torchelastic_*' -o -name 'pipedpeer-lab*' \) -exec rm -rf {} + 2>/dev/null

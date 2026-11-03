@@ -78,6 +78,7 @@ A job whose closure is already on the submitting node must still seed the peers,
 | W1 | `docs/benchmarks/workloads/pool_map.py` | `multiprocessing.Pool` map, CPU bound |
 | W2 | `pipedpeer-demo/cpu.py` | mixed: Pool, joblib, NumPy, pandas |
 | W3 | `pipedpeer-demo/01_sklearn_rf.py` | joblib / scikit-learn |
+| W4 | `docs/benchmarks/workloads/grid_search.py` | scikit-learn `GridSearchCV(n_jobs=-1)`, 256 fits (strong size 30 s on one PC) |
 | T1 | `scripts/bench-train.py`, MLP-C and the transformer | data-parallel training on CPU |
 
 Strong-scaling size: one lab PC alone takes 100-150 s. Weak-scaling size (W1 only): about 60 s of work per PC, items proportional to N. Record sizes in `results/lab/workloads.md`; never change a size between systems.
@@ -144,6 +145,10 @@ Session 2 is E1/E2 (about 4 h, unattended runs; the operator stays). Session 3 i
 | E9 | Across networks: the operator's laptop on a phone hotspot joins the lab cluster through the introducer and submits W1. Path type in `pipedpeer status`, wall, introducer bytes; `scripts/net-verify.sh` | Once |
 | E10 | If time: 4-6 classmates new to both tools do the E3 task for PipedPeer and Dask, order alternated. Minutes, success, where stuck. Consent; IDs p1..p6 only | Once each |
 | E11 | Cluster size: run the setup line on every available PC (target 60). Time until `pipedpeer status` on pc00 shows all nodes; membership and gossip bytes per node per minute at 8, 16, 32, 60 nodes (10 min idle each); introducer bytes; one W1 run at 60 | Once per size |
+| E12 | Elastic join: W1 (13 x the strong size) starts on 4 PCs; 4 more join every 20 s up to 16 (daemons, Dask workers or `ray start` the runner had stopped). Items per second per PC over time, join events marked (`scripts/campaign/FIGURES.md`) | Once per system |
+| E13 | Churn: W1 at N=16, E1b's weak size; every 20 s `kill -9` one random worker (daemon, raylet, Dask worker), restart it 10 s later. Result correct, wall vs E1b's no-churn wall, items re-run, throughput timeline with the kills | Once per system |
+| E14 | Curl to cluster: when each PC printed LAB-PC, answered SSH, had pipedpeer, joined, and ran its first work in the day's first distributed job (W1 on all PCs, right after the join). No extra runs | Once (the day) |
+| E15 | Network sensitivity: W1 at N=4 with `tc netem` adding 0, 20, 80 ms RTT between the PCs | 2 repeats per RTT |
 
 Upload to R2 after each experiment. A failed experiment is a result: record what, which PC, the log path, and continue.
 

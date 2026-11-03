@@ -1,14 +1,20 @@
 # The minimal lab-day profile, the default (HEADLESS.md): 17 PCs (pc00 + 16
 # workers), N = 1, 4, 16, 3 repeats after 1 warm-up per (system, N).
+# e1 includes W4 (GridSearchCV, 30 s strong size); e12 elastic join 4 -> 16,
+# e13 churn at 16, e15 netem at 4 (lab/headline, scripts/campaign/FIGURES.md).
+# E14 is not a row: lab-day.sh's prep.firstjob runs it right after the join.
 # Skipped: e3, e9, e10, e11 (they need a person, a second network, or 60 PCs).
 # lab-day.sh runs the rows in order: scripts/campaign/run.sh <step> <arguments>.
 # est_min is the planning estimate behind the ETA in `lab.sh status`, worked
 # out from the 60 s strong size in results/lab/workloads.md.
 # step	est_min	arguments
-e1	75	--n 1,4,16 --repeats 3
+e1	90	--n 1,4,16 --repeats 3
 e1b	46	--n 1,4,16 --repeats 3
 e4	15	--n 4 --repeats 3
 e5	25	--n 16 --repeats 3
 e6	20	--n 16 --repeats 3
+e12	8	--n 4,16
+e13	10	--n 16
+e15	12	--n 4
 e7	5	--repeats 3
 e8	72	--n 2,4,8 --repeats 3

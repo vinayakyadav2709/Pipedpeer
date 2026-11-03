@@ -42,6 +42,7 @@ discover() {
     LAB_RESULTS=$RESULTS bash "$CAMP/scan.sh" "$sub" --head "$ip" --user "$USER" >"$DAY/logs/scan.log" 2>&1 ||
       say "scan: $(tail -n1 "$DAY/logs/scan.log")"
     n=$(grep -c '^pc[0-9]* ansible_host=' "$INV" 2>/dev/null || echo 0)
+    tl_seen   # E14: day/timeline.sh
     progress discover "$n of $LAB_PCS PCs answered"
     say "discover: $n of $LAB_PCS PCs answered"
     ((n >= LAB_PCS)) && break
@@ -102,8 +103,35 @@ prep_machines() {
   python3 "$CAMP/day/tables.py" machines "$DAY/out/machines" "$INV_ALL" "$RESULTS/machines.csv"
 }
 
+# netem_check: E15 adds delay with tc's netem qdisc, a kernel module
+# (sch_netem; on Ubuntu it is in linux-modules-extra-<kernel>). Each PC is
+# asked whether it is loaded or loadable (modprobe -n: a dry run, nothing
+# changes), results/lab/netem.csv records the answer, and a blocker names
+# the PCs without it now, rather than E15 failing on them hours later.
+netem_check() {
+  local h lacking=()
+  ans netem all 'if [ -d /sys/module/sch_netem ] || sudo -n modprobe -n -q sch_netem 2>/dev/null; then echo PLNETEM yes; else echo "PLNETEM no $(uname -r)"; fi' || true
+  {
+    echo "pc_id,netem,kernel"
+    for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do
+      local line; line=$(out_of netem "$h" | grep '^PLNETEM ' | tail -n1)
+      case $line in
+        "PLNETEM yes") echo "$h,yes," ;;
+        "PLNETEM no "*) echo "$h,no,${line#PLNETEM no }"; lacking+=("$h") ;;
+        *) echo "$h,unknown,"; lacking+=("$h") ;;
+      esac
+    done | sort
+  } >"$RESULTS/netem.csv"
+  if ((${#lacking[@]})); then
+    blocker "no sch_netem kernel module on ${lacking[*]} (results/lab/netem.csv): E15's runs that use them will fail; on Ubuntu it comes with linux-modules-extra-<kernel> (kernels in netem.csv)"
+  else
+    say "netem: available on every PC"
+  fi
+}
+
 prep_network() {
   local ip h; ip=$(pc00_ip)
+  netem_check
   ans_drop iperf all 'command -v iperf3 >/dev/null || sudo -n bash '"$LABSH"' pkg iperf3' "iperf3 install failed" || return 1
   pkill -u "$USER" -x iperf3 2>/dev/null || true
   iperf3 -s -D -p 5201 --pidfile "$DAY/iperf3.pid" || return 1
@@ -158,6 +186,22 @@ for r in json.load(sys.stdin):
   cat "$DAY/pipedpeer-version"
 }
 
+# mirror_release <tag>: the release's binaries and checksums.txt into
+# $DAY/serve/releases/download/<tag>/, verified, for install-pipedpeer.sh.
+mirror_release() {
+  local tag=$1 src=${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}
+  local d=$DAY/serve/releases/download/$tag a
+  dist_up || return 1
+  mkdir -p "$d"
+  [[ -s $d/checksums.txt ]] || curl -fsSL --retry 3 "$src/download/$tag/checksums.txt" -o "$d/checksums.txt" || return 1
+  for a in amd64 arm64; do
+    grep -q " pipedpeer-linux-$a\$" "$d/checksums.txt" || continue
+    [[ -s $d/pipedpeer-linux-$a ]] || curl -fsSL --retry 3 "$src/download/$tag/pipedpeer-linux-$a" -o "$d/pipedpeer-linux-$a" || return 1
+  done
+  (cd "$d" && sha256sum -c --quiet --ignore-missing checksums.txt) || { rm -f "$d"/pipedpeer-linux-*; return 1; }
+  say "pipedpeer $tag on pc00's file server ($(du -sh "$d" | cut -f1))"
+}
+
 prep_pipedpeer() {
   local v h; v=$(pipedpeer_version)
   [[ -n $v ]] || blocker "could not pin a pipedpeer version; installing the latest nightly"
@@ -167,7 +211,18 @@ prep_pipedpeer() {
     [[ -f $HOSTREC/$h ]] || out_of pre "$h" | grep '^had-' >"$HOSTREC/$h" || true
     grep -q had-pipedpeer "$HOSTREC/$h" && blocker "$h already had pipedpeer; the day upgrades it and leaves it installed"
   done
-  ans_drop install all "${PIPEDPEER_RELEASE_BASE_URL:+PIPEDPEER_RELEASE_BASE_URL=$PIPEDPEER_RELEASE_BASE_URL }bash $R/../install-pipedpeer.sh ${v:+--version $v} -y" "pipedpeer install failed" || return 1
+  # The campaign's own build (publish.sh: release lab-<commit12>) comes down
+  # once to pc00's file server, checksum-checked, and every PC installs it
+  # from there; a nightly comes from GitHub on each PC.
+  local base=${PIPEDPEER_RELEASE_BASE_URL:-}
+  if [[ $v == lab-* ]]; then
+    mirror_release "$v" || { say "could not fetch pipedpeer $v"; return 1; }
+    base=http://$(pc00_ip):$DIST_PORT/releases
+  fi
+  local irc=0   # E14: timed per PC (day/timeline.sh)
+  ans_drop install all "$(tl_wrap install "${base:+PIPEDPEER_RELEASE_BASE_URL=$base }bash $R/../install-pipedpeer.sh ${v:+--version $v} -y")" "pipedpeer install failed" || irc=1
+  tl_from_out install install
+  ((irc == 0)) || return 1
   ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
   mkdir -p "$RESULTS/doctor"
   for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
@@ -180,7 +235,8 @@ prep_join() {
   line=$(pipedpeer invite 2>"$DAY/logs/invite.err") || { say "pipedpeer invite: $(cat "$DAY/logs/invite.err")"; return 1; }
   code=$(sed -n 's/^pipedpeer connect //p' <<<"$line" | tail -n1)
   [[ -n $code ]] || { say "no code in: $line"; return 1; }
-  ans_drop join workers "pipedpeer connect $code" "pipedpeer connect failed" || true
+  ans_drop join workers "$(tl_wrap join "pipedpeer connect $code")" "pipedpeer connect failed" || true
+  tl_from_out join join   # E14 (day/timeline.sh)
   local want n i; want=$(workers | wc -l)
   for i in $(seq 40); do
     # Healthy nodes in pc00's view (its own entry may be among them).
@@ -192,6 +248,7 @@ prep_join() {
     sleep 3
   done
   say "pc00 sees $n healthy nodes for $want workers"
+  tl pc00 cluster_ready "$(date +%s%N)" pc00 "" "healthy=$n workers=$want"
   pipedpeer status >"$RESULTS/join-status.txt" 2>&1 || true
   node_ids
   return 0
@@ -278,13 +335,13 @@ prep_otel() {
 }
 
 # calibrate: W1-W3 sizes on the first worker (pc01 unless it was dropped).
-# The strong and weak targets are calibrate.sh's 60 s unless LAB_CAL_STRONG_S
-# and LAB_CAL_WEAK_S say otherwise (the rehearsal uses a few seconds).
+# The targets are each workload's own (calibrate.sh: 60 s, W4 30 s) unless
+# LAB_CAL_STRONG_S and LAB_CAL_WEAK_S set one for all (the rehearsal's few seconds).
 calibrate() {
   local h w js ok=1; h=$(workers | head -n1)
-  local targets="${LAB_CAL_STRONG_S:-60} ${LAB_CAL_WEAK_S:-60}"
+  local targets="${LAB_CAL_STRONG_S:+$LAB_CAL_STRONG_S ${LAB_CAL_WEAK_S:-$LAB_CAL_STRONG_S}}"
   mkdir -p "$RESULTS/calibration"
-  for w in W1 W2 W3; do
+  for w in W1 W2 W3 W4; do
     [[ -s $RESULTS/calibration/$w.json ]] && continue
     local try
     for try in 1 2; do
@@ -292,11 +349,11 @@ calibrate() {
       out_of "cal.$w" "$h" >"$RESULTS/calibration/$w-$try.log"
       js=$(sed -n 's/^CALIBRATE //p' "$RESULTS/calibration/$w-$try.log" | tail -n1)
       [[ -n $js ]] || continue
-      # The verify run must land within 25 % of the strong target (60 s: 45-75 s).
-      if python3 -c 'import json,sys; c=json.loads(sys.argv[1]); v=c.get("verify_s"); t=c["strong_target_s"]; sys.exit(0 if v is None or 0.75*t<=v<=1.25*t else 1)' "$js" || ((try == 2)); then
+      # One PC alone should take the target (60 s; W4 30 s) give or take a sixth.
+      if python3 -c 'import json,sys; j=json.loads(sys.argv[1]); v=j.get("verify_s"); t=j.get("strong_target_s", 60); sys.exit(0 if v is None or abs(v-t)<=t/6 else 1)' "$js" || ((try == 2)); then
         printf '%s\n' "$js" >"$RESULTS/calibration/$w.json"; break
       fi
-      say "$w: the strong size ran outside 25 % of the target on $h; calibrating again"
+      say "$w: the strong size ran outside its target on $h; calibrating again"
     done
     [[ -s $RESULTS/calibration/$w.json ]] || { blocker "calibrating $w on $h failed (results/lab/calibration/$w-*.log)"; ok=0; }
   done

@@ -145,7 +145,7 @@ def _race_items(items, per_item_cost, width, run_local, run_remote):
         vals = [p[1] for p in pairs]
         t0 = time.monotonic()
         res = run_local(vals)
-        record.step("compute", time.monotonic() - t0)
+        record.step("compute", time.monotonic() - t0, items=len(pairs))
         won = 0
         with lock:
             for i, v in zip(idxs, res):

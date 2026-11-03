@@ -4,8 +4,10 @@
 # the per-PC size that is about 60 s of work on one PC (the runner multiplies
 # it by N). docs/benchmarks/lab-campaign.md 1.2; results/lab/workloads.md.
 #
-#   scripts/campaign/calibrate.sh W1|W2|W3 [strong_s] [weak_s]
+#   scripts/campaign/calibrate.sh W1|W2|W3|W4 [strong_s] [weak_s]
 #
+# strong_s defaults to the workload's strong_target_s in workloads.json (W4:
+# 30 s, so E1's W4 fits 15 min of the lab day), else 60.
 # Runs the plain workload with the campaign env's python (PY, default
 # ~/.local/share/pipedpeer-lab/env/bin/python3), doubling the size from the
 # smoke size until one run takes at least CAL_MIN_S (8) seconds, then once
@@ -18,13 +20,13 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 PY="${PY:-$HOME/.local/share/pipedpeer-lab/env/bin/python3}"
 [[ -x $PY ]] || { echo "no python at $PY; run scripts/campaign/env/install.sh or set PY" >&2; exit 2; }
-[[ $# -ge 1 ]] || { echo "usage: $0 W1|W2|W3 [strong_s] [weak_s]" >&2; exit 2; }
+[[ $# -ge 1 ]] || { echo "usage: $0 W1|W2|W3|W4 [strong_s] [weak_s]" >&2; exit 2; }
 
 exec "$PY" - "$@" <<'PY'
 import json, os, re, subprocess, sys, time
 
 wid = sys.argv[1]
-strong_s = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
+strong_s = float(sys.argv[2]) if len(sys.argv) > 2 else None
 weak_s = float(sys.argv[3]) if len(sys.argv) > 3 else 60.0
 min_s = float(os.environ.get("CAL_MIN_S", "8"))
 reps = int(os.environ.get("CAL_REPS", "2"))
@@ -37,6 +39,8 @@ w = next((w for w in spec["workloads"] if w["id"] == wid), None)
 if w is None or w["strong"] is None:
     sys.exit(f"{wid}: not a workload with a calibrated size")
 var = w["size_var"]
+if strong_s is None:
+    strong_s = float(w.get("strong_target_s", 60))
 
 
 def wall(size):
