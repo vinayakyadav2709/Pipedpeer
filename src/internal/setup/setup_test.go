@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -386,4 +387,53 @@ func TestPeerCacheCheckOnly(t *testing.T) {
 			t.Errorf("no hint: %q", out.String())
 		}
 	}
+}
+
+// TestUninstallScript runs the root uninstall script against temp files: what
+// setup wrote (keys file with the substituter line, include line) is removed
+// and nix-daemon restarted; on a machine setup never touched nothing happens.
+func TestUninstallScript(t *testing.T) {
+	run := func(t *testing.T, setup bool) (dir string, restarted bool) {
+		dir = t.TempDir()
+		sudoers, helper, keys, conf := dir+"/sudoers", dir+"/helper", dir+"/keys.conf", dir+"/nix.conf"
+		body := "max-jobs = 4\n"
+		if setup {
+			for _, f := range []string{sudoers, helper} {
+				os.WriteFile(f, []byte("x"), 0o644)
+			}
+			os.WriteFile(keys, []byte(nixtrust.FileContent(nil)), 0o644)
+			body += nixtrust.IncludeLine + "\n"
+		}
+		os.WriteFile(conf, []byte(body), 0o644)
+		marker := dir + "/restarted"
+		script := uninstallScript(sudoers, helper, keys, []string{conf, dir + "/missing.conf"}, "touch "+shq(marker))
+		if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+			t.Fatalf("script: %v\n%s", err, out)
+		}
+		_, err := os.Stat(marker)
+		return dir, err == nil
+	}
+	t.Run("present is removed and daemon restarted", func(t *testing.T) {
+		dir, restarted := run(t, true)
+		if !restarted {
+			t.Error("nix-daemon not restarted")
+		}
+		if _, err := os.Stat(dir + "/keys.conf"); err == nil {
+			t.Error("keys file (substituter line) still there")
+		}
+		got, _ := os.ReadFile(dir + "/nix.conf")
+		if string(got) != "max-jobs = 4\n" {
+			t.Errorf("nix.conf = %q", got)
+		}
+	})
+	t.Run("absent is a no-op", func(t *testing.T) {
+		dir, restarted := run(t, false)
+		if restarted {
+			t.Error("nix-daemon restarted though nothing was removed")
+		}
+		got, _ := os.ReadFile(dir + "/nix.conf")
+		if string(got) != "max-jobs = 4\n" {
+			t.Errorf("nix.conf = %q", got)
+		}
+	})
 }

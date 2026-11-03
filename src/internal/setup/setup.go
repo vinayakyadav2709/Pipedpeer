@@ -397,18 +397,35 @@ func helperInstallScript(src, login, target string) string {
 // helperUninstallScript undoes helperInstallScript and drops the keys it
 // trusted; nix-daemon restarts so it stops trusting them.
 func helperUninstallScript() string {
+	return uninstallScript(nixtrust.SudoersFile, nixtrust.HelperPath, nixtrust.KeysFile,
+		[]string{"/etc/nix/nix.conf", "/etc/nix/nix.custom.conf"}, "systemctl try-restart nix-daemon")
+}
+
+// uninstallScript removes the sudoers rule, the helper, the keys file (which
+// also carries the peer-cache extra-trusted-substituters line) and the include
+// line from each conf. restart runs only when something was actually removed,
+// so a machine setup never touched is left alone.
+func uninstallScript(sudoers, helper, keys string, confs []string, restart string) string {
 	inc := shq(nixtrust.IncludeLine)
+	quoted := make([]string, len(confs))
+	for i, c := range confs {
+		quoted[i] = shq(c)
+	}
 	return strings.Join([]string{
 		"set -eu",
-		"rm -f " + shq(nixtrust.SudoersFile) + " " + shq(nixtrust.HelperPath) + " " + shq(nixtrust.KeysFile),
-		"for f in /etc/nix/nix.conf /etc/nix/nix.custom.conf; do",
+		"changed=0",
+		"for f in " + shq(sudoers) + " " + shq(helper) + " " + shq(keys) + "; do",
+		`  if [ -e "$f" ] || [ -L "$f" ]; then rm -f "$f"; changed=1; fi`,
+		"done",
+		"for f in " + strings.Join(quoted, " ") + "; do",
 		"  if grep -qxF " + inc + ` "$f" 2>/dev/null; then`,
 		"    grep -vxF " + inc + ` "$f" > "$f.pipedpeer-new" || true`,
 		`    cat "$f.pipedpeer-new" > "$f"`,
 		`    rm -f "$f.pipedpeer-new"`,
+		"    changed=1",
 		"  fi",
 		"done",
-		"systemctl try-restart nix-daemon",
+		`if [ "$changed" = 1 ]; then ` + restart + "; fi",
 	}, "\n") + "\n"
 }
 

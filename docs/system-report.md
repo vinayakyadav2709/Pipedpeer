@@ -247,7 +247,7 @@ The subsystems, all under `src/internal/` (plus `main`):
 | `authtoken` | Shared-secret middleware and outbound injection |
 | `tlsid` | Daemon certificate made from the node key, pins keyed by node id, TLS and HTTP on one port |
 | `identity` | ed25519 node key; node id = its fingerprint |
-| `peercache` | Verifying a peer's narinfo (hash, size, trusted signature or content address) and the per-command nix options that make the local daemon's `/nix-cache` a fallback substituter |
+| `peercache` | Verifying a peer's narinfo (hash, size, trusted signature, or a content address whose recomputed store path matches), the per-command nix options that make the local daemon's `/nix-cache` a fallback substituter, and the retry of a failed build without them |
 | `adbmdns` | Android Wireless-debugging pairing and connect ports over multicast DNS, for Termux where netlink is denied |
 | `nixsign` | Signing closures with the node key; the trusted-key list |
 | `narpack` | Signed closure archives; LRU pruning of closure caches |
@@ -276,7 +276,7 @@ Large packages are split by responsibility; one line per file:
 | `internal/daemonapi/pool.go`, `poolhandlers.go`, `poolrun.go`, `poolremote.go`, `poolworker.go`, `poolwire.go`, `poolcompress.go`, `poolscripts.go` | the pool manager state; `/v1/pool/*` handlers and body limit; chunk placement and peer choice; remote runs and racing; local worker processes; frame wire format; per-link compression; the embedded worker Python |
 | `internal/daemonapi/ddpsync.go`, `ddpboard.go`, `ddprequest.go`, `ddplocal.go`, `ddppacing.go`, `ddpreduce.go`, `ddprebalance.go` | one DDP sync round trip; the per-run board (expected ranks, drops); request parsing; the single-machine path; pacing and per-rank times; the weighted reduction; rebalance and the DiLoCo plan |
 | `internal/daemonapi/nodes.go`, `nodespeers.go`, `nodespoll.go`, `narcache.go`, `narimport.go`, `narsubstitute.go`, `cas.go` | `/v1/nodes` and staleness; peer add, remove and path verification; the poller; the signed-archive cache; store import and missing-path checks; substitution from cache.nixos.org; content-addressed workspace files |
-| `internal/daemonapi/nixcache.go`, `nixcache_peers.go`, `peerstore.go` | the loopback `/nix-cache` router and its token exemption; fan-out to same-architecture peers, hit and miss memory; the token-gated `/v1/store/narinfo` and `/v1/store/nar` handlers that answer from this node's store |
+| `internal/daemonapi/nixcache.go`, `nixcache_peers.go`, `peerstore.go` | the loopback `/nix-cache` router and its token exemption (loopback `Host` only, not for forwarder-spliced connections, read-only); fan-out to same-architecture peers, hit and miss memory, NAR fallback to peers with the same NarHash; the token-gated `/v1/store/narinfo` and `/v1/store/nar` handlers that answer from this node's store, each with its own 8-slot pool and 503 when full |
 | `internal/nixgen/shim/pipedpeer_shim/pool.py`, `pool_func.py`, `pool_pacing.py`, `pool_race.py`, `pool_resources.py` | the `Pool` drop-in; function payloads and chunking; pacing and cancellation; racing local against remote (and the joblib backend); pool width and memory probes |
 | `.../pandas_ops.py`, `pandas_frame.py`, `pandas_combine.py`, `pandas_ooc.py` | install hooks and shuffles; the partitioned frame; combining partial aggregates; out-of-core reads |
 | `.../ddp.py`, `ddp_state.py`, `ddp_sync.py`, `ddp_ring.py`, `ddp_loader.py`, `ddp_fast.py`, `ddp_wire.py`, `ddp_diloco.py`, `ddp_sampler.py` | the DDP interception and install; the run-state object; every sync with the lead daemon; ring changes and releases; DataLoader wiring; the fast-sync driver; wire pieces (exit codes, int8 codec, frames); DiLoCo schedule and outer step; weighted batch split and shard sampler |
@@ -1479,7 +1479,7 @@ handful.
 
 **Ports.** One block, one hard cut ([ADR-0020](adr/0020-ports-block-hard-cut.md)):
 4242/tcp daemon API, 4242/udp discovery, 4243/udp direct links, 4244/udp
-introducer. The same 4242/tcp port also serves the loopback-only `/nix-cache` route for the peer Nix cache. The gloo training ports are gone with the gloo backend.
+introducer. The same 4242/tcp port also serves the loopback-only (not for forwarder-spliced connections) `/nix-cache` route for the peer Nix cache. The gloo training ports are gone with the gloo backend.
 
 **Install and setup.** Every nightly build is published under its own version
 (`nightly-<version>`), and `install-pipedpeer.sh --version <v>` gives every

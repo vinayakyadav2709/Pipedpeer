@@ -23,12 +23,12 @@ The command is run without `--json-format`. The private store pins nix 2.31.3, w
 |---|---|---|---|
 | 2.1 | Real: cache.nixos.org, bash (the sample, not the daemon's output) | `StorePath`, `URL: nar/0i3p…p634.nar.zst`, `Compression: zstd`, `FileHash`, `FileSize`, `NarHash: sha256:0i3p…p634`, `NarSize: 1856848`, `References: 0d8g…-glibc-2.42-67 byi2…-bash-5.3p15` (basenames), `Deriver: yxs8…drv` (basename), `Sig: cache.nixos.org-1:L1O9…` | The sample above, kept for its field set. |
 | 2.1a | Rendered by the daemon from a peer's narinfo | as 2.1 | It sets `URL: nar/<storehash>.nar.zst` and `Compression: zstd`, and omits `FileHash`/`FileSize` because the NAR is compressed while streaming. |
-| 2.2 | Rendered by a peer, CA path | as 2.1 with `CA: fixed:r:sha256:…` and no `Sig` | Accepted when the CA field is present: nix checks CA paths by content. |
+| 2.2 | Rendered by a peer, CA path | as 2.1 with `CA: fixed:r:sha256:…` and no `Sig` | Accepted only when the store path recomputed from the CA hash, name and references equals `StorePath`. A CA that is unsupported or gives another path is treated as unsigned: it needs a trusted signature (2.3), else it is rejected. |
 | 2.3 | Rendered by a peer, signed by a cluster key or by a key in nix's `trusted-public-keys` (cache.nixos.org's included) | `Sig: <node>-1:<b64>` | Accepted when the signature verifies against a key in `nixsign.TrustedKeysFile()` or nix's `trusted-public-keys`. The fingerprint is `1;<StorePath>;<NarHash>;<NarSize>;<full refs comma-joined>`. |
 | 2.4 | Synthetic: signed by a key nobody trusts | | Reject it, warn with the peer and key name, and try the next peer. |
 | 2.5 | Synthetic: the `StorePath` hash differs from the hash asked for | | Reject and warn. This guards against a confused or hostile peer. |
 | 2.6 | Synthetic: a peer from an older build | 404 on `/v1/store/narinfo/…` | Count it as a miss, with no warning: the route is additive (ADR-0006). |
-| 2.7 | Synthetic: the peer is unreachable or times out | | Warn once per peer per 30 s. Count it as a miss. |
+| 2.7 | Synthetic: the peer is unreachable or times out | | Warn at most once per peer per 30 s (the same limit applies to rejected narinfos). Count it as a miss. |
 
 ## 3. Binary-cache requests nix makes to `http://127.0.0.1:<port>/nix-cache`
 
@@ -36,17 +36,21 @@ The command is run without `--json-format`. The private store pins nix 2.31.3, w
 |---|---|---|
 | 3.1 | `GET /nix-cache/nix-cache-info` | 200 `StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 60\n`. cache.nixos.org answers Priority 40 (real), so nix asks it first. |
 | 3.2 | `GET /nix-cache/<32 nix32 chars>.narinfo` | 200 with the first acceptable peer answer, or 404. |
-| 3.3 | `GET /nix-cache/nar/<hash>.nar.zst` | The peer's zstd stream, passed through. Retried on the other eligible peers not yet recorded as failed (including ones that had not answered the narinfo), else 404. |
+| 3.3 | `GET /nix-cache/nar/<hash>.nar.zst` | The peer's zstd stream, passed through. Retried on the other peers that answered the narinfo with the same `NarHash` and are not recorded as failed; a peer with a different `NarHash`, or one that never answered the narinfo, is not tried. Else 404. |
 | 3.4 | `GET /nix-cache/<bad>.narinfo` (wrong length, or a char outside `0123456789abcdfghijklmnpqrsvwxyz`) | 400. No fan-out. |
 | 3.5 | `HEAD` of any of these (nix probes with HEAD for some stores) | As GET without the body. |
-| 3.6 | `PUT` or any write | 405. The cache is read-only. |
+| 3.6 | `PUT`, `POST`, `DELETE` or any write from loopback | 405 with `Allow: GET, HEAD`. The cache is read-only. A `Host` header that does not name loopback falls through to the token check (401), so a rebinding web page cannot read the cache. |
 | 3.7 | From a non-loopback address without the cluster token | 401 (the normal token middleware). |
-| 3.8 | `/nix-cache/log/…`, `/nix-cache/*.ls`, `realisations/…` | 404 |
+| 3.8 | `/nix-cache/log/…`, `/nix-cache/*.ls`, `realisations/…`, any other unknown name | 404 |
 | 3.9 | Peers of another nix system (an `aarch64-linux` phone asked by an `x86_64-linux` PC) | Not asked. Store paths differ by system. Arch-independent sources are then not shared across arches, which should cost little because cache.nixos.org has them (not measured). |
 | 3.10 | A peer with no arch reported (a build older than the cache) | Not asked. It has no `/v1/store` and would only miss. |
 | 3.11 | A same-arch peer that is a phone (Termux) | Asked and served like any node. There is no phone special case. A pool-only node has no nix, so it serves nothing and never asks; an introducer-only node asks nothing. |
 | 3.12 | A peer whose status is not healthy, or that has no host or port | Not asked. |
 | 3.13 | A peer on the same machine (same boot id), such as a second daemon on one host | Not asked, so two daemons on one host do not share paths. |
+| 3.14 | A peer-layer request (`/v1/store/narinfo`, `/v1/store/nar`) while that route's pool of 8 is full | 503 at once. The narinfo and NAR routes have separate pools, so long NAR streams do not block narinfo lookups. The asker counts it as a failed peer for this attempt and moves on. |
+| 3.15 | A 17th concurrent `/nix-cache` lookup that would fan out | 404 now, not remembered; nix builds the path itself. |
+| 3.16 | A peer answers the narinfo, then fails or vanishes before the NAR, on a multi-user nix-daemon (which ignores the client's `fallback`) | The build fails once with the cache options; pipedpeer runs it again without them (`peercache.RunWithFallback`), logs the first error, and returns the second. A build that carried no cache options is not retried. |
+| 3.17 | A request on loopback that arrived through the QUIC forwarder from a remote peer | The forwarder marks the connection (`direct.Spliced`), so it loses the no-token exemption and gets the normal token check (401 without the token). |
 
 ## 4. Finding the Wireless debugging ports (mDNS, done in Go inside Termux)
 
