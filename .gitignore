@@ -36,3 +36,8 @@ pipedpeer-demo/join-command.txt
 # Local exam references (other people's work) and generated demo data; never commit.
 /major/
 /data.csv
+
+# lab campaign: collector output (it goes to R2 itself) and anything secret
+/results/lab/otel/
+r2.env
+*.r2.env

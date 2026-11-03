@@ -1,0 +1,72 @@
+# Node collector, one per lab PC. node.sh renders it: @PC_ID@, @DRIVER@,
+# @STORAGE@, @DAEMON_LOG_RECEIVER@ (file_log or journald, chosen by how the
+# daemon was installed) and @DAEMON_LOG_FILE@.
+extensions:
+  # Remembers how far the daemon log was read, so a restart neither drops nor
+  # repeats lines.
+  file_storage:
+    directory: @STORAGE@
+
+receivers:
+  host_metrics:
+    collection_interval: 1s
+    scrapers:
+      cpu:
+      memory:
+      network:
+      load:
+
+  # `pipedpeer setup` without --boot: the daemon appends to
+  # $XDG_STATE_HOME/pipedpeer/daemon.log (internal/daemonctl).
+  file_log/daemon:
+    include: [@DAEMON_LOG_FILE@]
+    start_at: beginning
+    storage: file_storage
+    resource:
+      service.name: pipedpeer-daemon
+
+  # `pipedpeer setup --boot`: systemd's user unit pipedpeer.service, which
+  # sends the daemon's stderr to the user journal.
+  journald/daemon:
+    matches:
+      - _SYSTEMD_USER_UNIT: pipedpeer.service
+    start_at: beginning
+    storage: file_storage
+    operators:
+      - type: add
+        field: resource["service.name"]
+        value: pipedpeer-daemon
+
+processors:
+  resource/lab:
+    attributes:
+      - key: lab.pc_id
+        value: @PC_ID@
+        action: upsert
+  # Bounded, so a first read of a long daemon log or journal never makes an
+  # OTLP message over the driver's receive limit (the driver drops those).
+  batch:
+    timeout: 1s
+    send_batch_size: 1000
+    send_batch_max_size: 2000
+
+exporters:
+  otlp_grpc:
+    endpoint: @DRIVER@:4317
+    tls:
+      insecure: true
+
+service:
+  extensions: [file_storage]
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics:
+      receivers: [host_metrics]
+      processors: [resource/lab, batch]
+      exporters: [otlp_grpc]
+    logs:
+      receivers: [@DAEMON_LOG_RECEIVER@/daemon]
+      processors: [resource/lab, batch]
+      exporters: [otlp_grpc]
