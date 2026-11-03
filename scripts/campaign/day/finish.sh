@@ -65,13 +65,13 @@ final_sync() {
   dist_down
   local out loc rem
   for _ in 1 2 3; do
-    bash "$CAMP/sync-r2.sh" || true
+    bash "$CAMP/sync-r2.sh" final || true
     out=$(bash "$CAMP/sync-r2.sh" count 2>&1) || true
     echo "$out" | tee "$DAY/final-count.txt"
     loc=$(sed -n 's/^local: *\([0-9]*\) .*/\1/p' <<<"$out")
     rem=$(sed -n 's/^remote: *\([0-9]*\) .*/\1/p' <<<"$out")
     if [[ -n $loc && $loc == "$rem" ]]; then return 0; fi
-    if grep -q 'R2 not configured' <<<"$out"; then blocker "R2 is not configured; nothing was uploaded"; return 1; fi
+    if grep -qE 'R2 not configured|stay local only|no ingest credentials' <<<"$out"; then blocker "R2 is not configured; nothing was uploaded"; return 1; fi
     say "R2 count differs (local ${loc:-?}, remote ${rem:-?}); syncing again"
     sleep 20
   done

@@ -173,12 +173,15 @@ cmd_sync() {
 	((failed == 0))
 }
 
+# Same two lines as the rclone mode of sync-r2.sh ("local: N ..." and
+# "remote: N ..."), which day/finish.sh parses. "remote" counts the files the
+# Worker accepted (HTTP 200), from the manifest.
 cmd_count() {
-	local dir="$1" local_n synced
+	local dir="$1" local_n synced=0
 	local_n="$(find "$dir" -type f ! -name .ingest-manifest ! -path "$dir/serve/*" | wc -l)"
-	synced=0
 	[[ -f "$dir/.ingest-manifest" ]] && synced="$(wc -l <"$dir/.ingest-manifest")"
-	echo "local files: $local_n, synced per manifest: $synced"
+	echo "local:  $local_n objects in $dir (serve/ excluded)"
+	echo "remote: $synced objects accepted by the ingest Worker"
 	usage_json | python3 -c 'import json,sys; d=json.load(sys.stdin); u=d["usage"]; print("worker: %d objects, %.3f GB of %.1f GB cap, %d of %d uploads" % (u["objects"], u["bytes"]/1e9, d["caps"]["bytes"]/1e9, u["puts"], d["caps"]["puts"]))'
 	[[ "$local_n" == "$synced" ]]
 }

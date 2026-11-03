@@ -27,7 +27,10 @@ repo=$(cd "$here/../.." && pwd)
 site=${LAB_SITE:-https://vinayakyadav2709.github.io/Pipedpeer}
 cfg=${LAB_CONFIG:-$HOME/.config/pipedpeer-lab}
 key=$cfg/campaign_ed25519
-r2=$cfg/r2.env
+# Upload credentials for the bundle's "r2.env": the ingest Worker's
+# (ingest/README.md), else R2 S3 keys.
+r2=$cfg/ingest.env
+[[ -f $r2 ]] || r2=$cfg/r2.env
 pub_dir=$repo/landing/public
 die() { echo "publish.sh: $*" >&2; exit 1; }
 
@@ -72,8 +75,8 @@ decrypt_check() {  # decrypt_check <bundle> <pubkey file>
     why="cannot decrypt $1 with that passphrase"
   elif [[ $(ssh-keygen -y -f "$work/campaign_ed25519" | awk '{print $2}') != "$(awk '{print $2}' "$2")" ]]; then
     why="the key in the bundle is not the published key"
-  elif ! grep -q '^R2_SECRET_ACCESS_KEY=.' "$work/r2.env"; then
-    why="r2.env in the bundle lacks R2_SECRET_ACCESS_KEY"
+  elif ! grep -qE '^(INGEST_TOKEN|R2_SECRET_ACCESS_KEY)=.' "$work/r2.env"; then
+    why="r2.env in the bundle has neither INGEST_TOKEN nor R2_SECRET_ACCESS_KEY"
   fi
   rm -rf "$work"
   [[ -z $why ]] || die "$why"

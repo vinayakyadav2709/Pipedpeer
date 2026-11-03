@@ -19,6 +19,12 @@ repo="$(cd "$here/../.." && pwd)"
 results="$repo/results/lab"
 ingest="$here/ingest/ingest.sh"
 ingest_env="${PIPEDPEER_LAB_INGEST_ENV:-$HOME/.config/pipedpeer-lab/ingest.env}"
+# On pc00 the decrypted bundle's r2.env (PIPEDPEER_LAB_R2_ENV) carries the
+# ingest credentials when publish.sh was given ingest.env.
+if [[ ! -r "$ingest_env" && -n "${PIPEDPEER_LAB_R2_ENV:-}" ]] && grep -q '^INGEST_TOKEN=.' "$PIPEDPEER_LAB_R2_ENV" 2>/dev/null; then
+	ingest_env="$PIPEDPEER_LAB_R2_ENV"
+fi
+export PIPEDPEER_LAB_INGEST_ENV="$ingest_env"
 mode="${1:-sync}"
 
 if [[ -r "$ingest_env" || -n "${INGEST_TOKEN:-}" ]]; then
