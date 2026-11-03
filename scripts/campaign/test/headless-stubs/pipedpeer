@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Rehearsal stand-in for the pipedpeer binary: the commands lab-day.sh and the
+# stub run.sh use, with state in the same places the real one keeps it.
+set -euo pipefail
+cfg=$HOME/.config/pipedpeer data=$HOME/.local/share/pipedpeer
+case "${1:-}" in
+  --version) echo "pipedpeer version 0.0.0-rehearsal" ;;
+  setup) mkdir -p "$cfg" "$data"; [[ -f $data/cluster.json ]] || echo '{"token":"t-'"$(uname -n)"'"}' >"$data/cluster.json"; echo "setup done" ;;
+  doctor) echo "doctor: ok (rehearsal stand-in)" ;;
+  invite) echo "pipedpeer connect REHEARSAL-$(cat /etc/machine-id)" ;;
+  connect) [[ ${2:-} == REHEARSAL-* ]] || { echo "bad code" >&2; exit 1; }; echo "{\"joined\":\"$2\"}" >"$data/cluster.json"; echo "joined" ;;
+  status) echo "daemon running (pid=1 node-id=x port=4242 version=rehearsal)" ;;
+  start|stop) echo "$1 ok" ;;
+  uninstall) rm -rf "$cfg" "$data"; sudo -n rm -f /usr/local/bin/nix /usr/local/bin/pipedpeer; echo "uninstalled" ;;
+  *) echo "fake pipedpeer: $*" ;;
+esac

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Rehearsal stand-in for nix: just enough of `copy` and `flake archive` for
+# lab-day.sh's binary cache on pc00 to be written, served and fetched.
+set -euo pipefail
+args=("$@")
+to="" from=""
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in --to) to=${args[i+1]} ;; --from) from=${args[i+1]} ;; esac
+done
+if [[ " $* " == *" flake archive "* ]]; then
+  [[ -n $to ]] && { d=${to#file://}; d=${d%%\?*}; mkdir -p "$d/nar"; head -c 65536 /dev/urandom >"$d/nar/source.nar"; }
+  echo '{"path":"/nix/store/rehearsal-source","inputs":{"nixpkgs":{"path":"/nix/store/rehearsal-nixpkgs","inputs":{}}}}'
+elif [[ " $* " == *" copy "* && -n $to ]]; then
+  d=${to#file://}; d=${d%%\?*}; mkdir -p "$d/nar"
+  echo "StoreDir: /nix/store" >"$d/nix-cache-info"; head -c 1048576 /dev/urandom >"$d/nar/env.nar"
+  echo "copied to $d"
+elif [[ " $* " == *" copy "* && -n $from ]]; then
+  curl -fsS "$from/nix-cache-info" >/dev/null && curl -fsS "$from/nar/env.nar" -o /dev/null && echo "fetched from $from (rehearsal: nothing stored)"
+else
+  echo "fake nix: $*" >&2
+fi
