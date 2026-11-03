@@ -83,3 +83,59 @@ CSV: `csv/e14_pcs.csv`, one row per PC, with seconds from `head_start` to each o
 ## W4 in E1
 
 W4 (`GridSearchCV`) is one more workload in `e1` (`workload: "W4"`). The existing `e1_speedup` figure gets a W4 panel, and `csv/e1.csv` gets W4 rows; nothing new is needed. The result line compared across systems is `best_params={...} | best_score=...`.
+
+# More benchmarks: E16-E20 (lab/more-bench)
+
+`analyse_more.py` (called by `analyse.py`) writes the data below; it draws no figures. Each section names the records, their fields, and the figure they are for. Every E16-E20 line also has the usual runs.jsonl fields (README.md).
+
+## E16 energy to solution: `e16_energy`
+
+**Source.** `otel/energy.sh` on every PC: the package counters (`/sys/class/powercap/intel-rapl:<n>/energy_uj`, top-level zones; hwmon `amd_energy` `Esocket<n>` on old AMD kernels) read once a second as root (`sudo -n`), appended to `~/.local/share/pipedpeer-lab/logs/energy.jsonl`. `node.sh start` starts it with the collector, so every run of the day is sampled, and the collector ships the file (`lab.source: energy`). E16 starts it on any PC where it is not running. A PC that cannot read the counters writes one line with `available: false` and the reason: no RAPL zone, no root, or a container (the counters there are the host's package, shared by every container; `PL_ENERGY_IN_CONTAINER=1` reads them anyway).
+
+`energy.jsonl` lines (`ts_ns` on the PC's own clock): `{kind: "energy-start", available, source: "powercap"|"hwmon-amd_energy", period_s, zones: {id: {name, max_uj}}}` or `{kind: "energy-start", available: false, reason}`, then `{kind: "energy", ts_ns, uj: {id: counter}}`. E16 copies each PC's whole file to `results/lab/energy/<pc>.jsonl` at its end.
+
+**Joules** (`lib/campaign/energy.py`): per PC, the growth of every `package-*` zone between a run's `start_ns` and `end_ns`, each end interpolated between the two samples around it, counter wraps (`max_uj`) undone. psys and the subzones (core, uncore, dram) are not added: they overlap the package.
+
+**Data (experiment `e16`):**
+
+- One line `phase: "idle-power"`, `workload: "E16-idle"`, `system: "idle"`: `power_w {pc: W}` over `PL_ENERGY_IDLE_S` (10 s) with the daemons up and Ray and Dask stopped; `energy_per_pc_j`, `energy_unavailable {pc: reason}`.
+- W1 at its strong size: plain at N=1, pipedpeer, ray and dask at N=16 (one warm-up, `--repeats` 1). Each line adds `energy_available` (every PC the run used had samples), `energy_j` (the PCs in `hosts`: pipedpeer N, ray and dask N + 1 with their head), `energy_all_pcs_j` (every PC in the inventory, idle ones too: the lab's bill for the job, and the fairest comparison), `energy_per_pc_j {pc: J|null}`, `energy_source`, `energy_sampler {pc: started|running|unavailable: why}`, `energy_unavailable`.
+
+CSV `csv/e16_energy.csv`, one row per run that has joules, from any experiment: `run_id, experiment, workload, system, n, repeat, warmup, result_ok, wall_s, hosts, host_ids, energy_j, energy_all_pcs_j, energy_from` (`inline`: the run line had them, E16 and E17; `archive`: computed from `results/lab/energy/`, which covers E1 and E1b because E16 runs right after them). `e16_summary.json`: `available`, `idle_power_w {pc: W}`, `unavailable {pc: reason}`, and `groups`, one per (experiment, workload, system, n): `runs, median_wall_s, median_energy_j, median_energy_all_pcs_j, median_energy_above_idle_j` (`energy_j` minus the hosts' idle power times the wall).
+
+**Figure:** two panels. Left, W1 from E1: x N (1, 4, 16), y median `energy_all_pcs_j` (kJ), one line per system with plain as a point at N=1; the dashed line is plain's joules. Right: energy-to-solution against wall, one point per (system, N), both axes log, so "faster and cheaper" is the bottom-left corner. Title `Energy to solution, W1 (package energy, RAPL)`. When `available` is false, no figure; the summary's reasons go in the caption instead.
+
+## E17 idle footprint and cluster start: `e17_footprint`, `e17_ready`
+
+**Data (experiment `e17`, `workload: "E17-idle"`, one line per system):** `system, n` (workers), `hosts` (pc00 plus the workers), `commands` (`[{pcs, command, runner_command}]`: what a user types, and what the runner ran), `commands_typed` (pipedpeer 0 with `pipedpeer setup --boot`, ray and dask 1 + n), `commands_typed_note`, `start_ns, ready_ns`, `ready_s` (seconds from the first start command until the runner's check first passed), `ready_after_s` (the last failed check: the truth lies between), `start_call_s` (the start calls alone, mostly Ansible), `idle_s` (`PL_IDLE_S`, 60), `idle_start_ns, idle_end_ns`, `footprint {pc: {cpu_s, cpu_pct, rss_mb_avg, rss_mb_max, pss_mb_avg, pss_mb_max, procs, names {comm: count}, samples, seconds}}`, `cpu_s_total, cpu_pct_mean_per_pc, rss_mb_total, pss_mb_total, procs_total`, `idle_energy_j, idle_power_w` (all PCs, null without RAPL). The processes counted: pipedpeer's daemon and its children; every process carrying the runner's mark for Ray (`PL_CAMPAIGN_RAY=1`: raylet, gcs_server, the idle workers, the agents) and Dask (`PL_CAMPAIGN_DASK=1`: scheduler, nanny, worker).
+
+CSV `csv/e17_footprint.csv`, one row per (system, PC): `run_id, system, pc, cpu_s, cpu_pct, rss_mb_avg, pss_mb_avg, rss_mb_max, procs, seconds`. `e17_summary.json` per system: the line's fields above, `commands` as a list of strings.
+
+**Figures:**
+
+- `e17_footprint`: two bar panels, one bar per system in its colour: idle CPU (`cpu_pct_mean_per_pc`, % of one core per PC) and memory (`pss_mb_total / (n + 1)`, MB per PC, with `rss_mb_total` as a thin outline). Title `Idle cost per PC, 60 s`.
+- `e17_ready`: horizontal bars of `ready_s` per system, with a whisker down to `ready_after_s`, and the number of commands typed written at the bar's end (`0`, `17`, `17`). Title `Nothing to cluster ready, 17 PCs`.
+
+## E18 noisy neighbour: `e18_hog`
+
+**Data (experiment `e18`):** per system two runs (`PL_HOG_REPEATS` pairs): `fault: "none"`, then `fault: "hog"`: `PL_HOG_AT_S` (5 s) after the job starts, one busy python loop per core on half the cores (`taskset -c 0..k-1`) of `hog_pcs` (pc01; `PL_HOG_PCS` more). W1 at N=4, twice its strong size (`PL_HOG_SCALE`). Fields: `fault, hog_pcs, hog_cores, hog_at_s, events` (`{kind: "hog", t_ns, done_ns, pcs, cores}`), the throughput fields of E12/E13 (`timeline, timeline_source, items_total, items_counted, chunks_path`), `items_per_pc {pc: items}`, `hog_share` (the hogged PCs' part of the items), `fair_share` (their part of the PCs that do work: pipedpeer counts pc00, Ray's and Dask's head does none).
+
+CSV `csv/e18_hog.csv` (`run_id, system, n, repeat, fault, hog_pcs, hog_cores, wall_s, result_ok, hog_share, fair_share, items_counted, error`). `e18_summary.json` per system: `wall_none_s, wall_hog_s, slowdown, hog_share_none, hog_share_hog, fair_share`.
+
+**Figure:** two panels. Left: grouped bars per system, wall without and with the hog (light and full system colour), the slowdown printed above. Right: the hog run's timeline as in E13, items per second per PC stacked, the hogged PC's layer hatched, a vertical line at the hog's `t_ns`. Reading: a system that moves work off the loaded PC shows `hog_share` falling below `fair_share` and a small slowdown; Ray's Pool, whose actors take fixed batches, waits for the slow PC.
+
+## E19 cold vs warm ship: `e19_ship`
+
+**Data (experiment `e19`):** pipedpeer and ray at N=16, four lines each, `phase` (also `variant`) in order `cold` (a networkx Pool.map never run on the cluster: a new environment), `warm` (the same again), `edit` (one constant changed: a new workspace, the same environment), `newdep` (plus `import rich`: a new environment). `ttfr_s` (time to first result: the wall from the command to the result; the script prints only at the end and computes little), `result`, `result_ok` (pipedpeer and ray agree per phase). pipedpeer adds `env_build_s, env_send_s, env_send_bytes, script_step_s` from `pipedpeer jobs last --export json`. The generated scripts are in `results/lab/e19/<phase>/`. Ray uses `runtime_env={"working_dir": ".", "pip": [...]}`. Dask is not run (no per-job environment; E5 measures pip).
+
+CSV `csv/e19_ship.csv` (`run_id, system, n, phase, ttfr_s, wall_s, script_s, env_build_s, env_send_s, env_send_bytes, script_step_s, result, result_ok, error`). `e19_summary.json`: `{system: {phase: ttfr_s}}`.
+
+**Figure:** grouped bars, x the four phases, one bar per system, y `ttfr_s` (s). pipedpeer's bars split into `env_build_s`, `env_send_s` and the rest. Title `Time to first result while iterating, 16 PCs`.
+
+## E20 one-liner real workloads: `e20_speedup`
+
+**Data (experiment `e20`):** W5 (`group_fits.py`: pandas groupby, each group to `joblib.Parallel(n_jobs=-1)`) and W6 (`cross_val.py`: `cross_val_score(n_jobs=-1)`, 64 fits). plain at N=1, pipedpeer, ray and dask at N=16, one warm-up and 2 repeats. Each line adds `script_lines_changed` (0 for plain and pipedpeer, which run the original; the port's changed lines for Ray and Dask). `result_ok` is the equality check against plain (W5 within 1e-9 relative, W6 exact). `csv/e20.csv` comes from analyse.py's generic table.
+
+`e20_summary.json`: one entry per (workload, system, n): `runs, ok_runs, median_wall_s, speedup_vs_plain, result_ok_all, script_lines_changed, result`.
+
+**Figure:** one panel per workload, bars per system of `speedup_vs_plain` at N=16, a ✓ or ✗ above each bar from `result_ok_all`, and `script_lines_changed` under the system name (`0 lines`, `6 lines`). Title `Unmodified pandas and scikit-learn, 16 PCs`.

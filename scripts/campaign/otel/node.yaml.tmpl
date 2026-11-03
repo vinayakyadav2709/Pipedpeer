@@ -220,6 +220,13 @@ receivers:
     storage: file_storage
     resource: {service.name: pp-poll, lab.source: node-state}
     operators: *json_line
+  # energy.sh's RAPL samples (E16): one line a second, the counters as read.
+  file_log/energy:
+    include: ['@LOGS@/energy.jsonl*']
+    start_at: beginning
+    storage: file_storage
+    resource: {service.name: energy, lab.source: energy}
+    operators: *json_line
 
 processors:
   resource/lab:
@@ -284,6 +291,6 @@ service:
       processors: [resource/lab, resource/prom, batch]
       exporters: [otlp_grpc]
     logs:
-      receivers: [@DAEMON_LOG_RECEIVER@/daemon, file_log/ray, file_log/dask, file_log/pprun, file_log/poll, file_log/net, file_log/state]
+      receivers: [@DAEMON_LOG_RECEIVER@/daemon, file_log/ray, file_log/dask, file_log/pprun, file_log/poll, file_log/net, file_log/state, file_log/energy]
       processors: [resource/lab, batch]
       exporters: [otlp_grpc]

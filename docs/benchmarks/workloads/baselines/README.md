@@ -12,6 +12,10 @@ Ray and Dask versions of the lab campaign's workloads ([lab-campaign.md](../../l
 | `w3_dask.py` | same | `Client($DASK_SCHEDULER)`, `parallel_backend("dask")` around `clf.fit` |
 | `w4_ray.py` | `docs/benchmarks/workloads/grid_search.py` | `ray.init`, `register_ray()`, `parallel_backend("ray")` around `search.fit` |
 | `w4_dask.py` | same | `Client($DASK_SCHEDULER)`, `parallel_backend("dask")` around `search.fit` |
+| `w5_ray.py` | `docs/benchmarks/workloads/group_fits.py` (E20) | `ray.init`, `register_ray()`, `parallel_backend("ray")` around the `Parallel(n_jobs=-1)` over the groups |
+| `w5_dask.py` | same | `Client($DASK_SCHEDULER)`, `parallel_backend("dask")` around the same line |
+| `w6_ray.py` | `docs/benchmarks/workloads/cross_val.py` (E20) | `ray.init`, `register_ray()`, `parallel_backend("ray")` around `cross_val_score` |
+| `w6_dask.py` | same | `Client($DASK_SCHEDULER)`, `parallel_backend("dask")` around `cross_val_score` |
 | `t1_train.py` | not a port | A verbatim copy of the `diloco.py` heredoc in `scripts/bench-diloco.sh`, which holds MLP-C (`BENCH_MODEL=ddp04`) and the transformer (`BENCH_MODEL=tfm`). `port-lines.sh` fails if the two drift apart. |
 | `t1_torchrun.py` | `t1_train.py` | `init_process_group("gloo")`, `DistributedDataParallel`, `DistributedSampler` with `set_epoch`, per-rank batch `batch // world` (the same global batch pipedpeer's ring trains), and `RANK`/`WORLD_SIZE` in place of `PIPEDPEER_RANK`/`PIPEDPEER_WORLD_SIZE` |
 

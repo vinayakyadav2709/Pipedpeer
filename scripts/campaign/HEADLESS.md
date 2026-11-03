@@ -99,6 +99,8 @@ If the day stops early (pc00 rebooted, power cut, the unit was killed), type the
 
 The headline additions cost about 50 minutes: W4 in e1 15, e12 8, e13 10, e15 12, `prep.firstjob` 3, and W4's calibration 2. With them the step estimates in `lab-day.sh` add up to about 6.8 hours: 5.05 hours of profile rows and 1.75 hours of setup, calibration, the weak references and cleanup.
 
+The more-benchmarks rows (lab/more-bench, [FIGURES.md](FIGURES.md) "More benchmarks") add about 32 minutes: e16 energy to solution 6 (right after e1b, so its archive of the RAPL samples also covers E1's runs), e17 idle footprint and cluster start 6, e18 noisy neighbour 6, e19 cold vs warm ship 6, e20 pandas and scikit-learn one-liners 8. The profile rows then add up to 5.6 hours, and the day to about 7.3 hours. RAPL needs root: `otel/energy.sh` reads the counters through `sudo -n`, which `lab.sh` grants; `node.sh start` starts it and `node.sh stop` (which cleanup runs) stops it. E18's CPU hogs end themselves after 300 s and carry `PL_CAMPAIGN_HOG=1`, so a cut-off E18 leaves none behind.
+
 The estimates in the profile add up to about 5.5 hours of experiments plus about 1 hour of setup and cleanup. That is more than the three hours the operator expects. Most of the time is e1 at N=1, where each workload's 125 s strong size runs 16 times (4 systems × 4 runs). To fit three hours, either lower the strong target (`calibrate.sh W1 60` gives a 60 s size), or drop W3 from e1 (`--workloads W1,W2`), or reduce e8.
 
 ### Distributing the Nix env

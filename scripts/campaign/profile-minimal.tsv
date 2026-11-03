@@ -2,6 +2,10 @@
 # workers), N = 1, 4, 16, 3 repeats after 1 warm-up per (system, N).
 # e1 includes W4 (GridSearchCV, 30 s strong size); e12 elastic join 4 -> 16,
 # e13 churn at 16, e15 netem at 4 (lab/headline, scripts/campaign/FIGURES.md).
+# lab/more-bench (FIGURES.md, "More benchmarks"): e16 energy right after e1b
+# (it archives the RAPL samples, so E1's runs get joules too), e17 idle
+# footprint and cluster start, e18 noisy neighbour at 4, e19 cold vs warm
+# ship at 16, e20 pandas/scikit-learn one-liners at 16: about 32 min.
 # E14 is not a row: lab-day.sh's prep.firstjob runs it right after the join.
 # Skipped: e3, e9, e10, e11 (they need a person, a second network, or 60 PCs).
 # lab-day.sh runs the rows in order: scripts/campaign/run.sh <step> <arguments>.
@@ -10,11 +14,16 @@
 # step	est_min	arguments
 e1	90	--n 1,4,16 --repeats 3
 e1b	46	--n 1,4,16 --repeats 3
+e16	6	--n 16
 e4	15	--n 4 --repeats 3
 e5	25	--n 16 --repeats 3
 e6	20	--n 16 --repeats 3
 e12	8	--n 4,16
 e13	10	--n 16
 e15	12	--n 4
+e17	6	--n 16
+e18	6	--n 4
+e19	6	--n 16
+e20	8	--n 16 --repeats 2
 e7	5	--repeats 3
 e8	72	--n 2,4,8 --repeats 3
