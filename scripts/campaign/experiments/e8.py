@@ -51,7 +51,8 @@ def main(ctx):
                 size = dict(wl.smoke if ctx.rehearsal else {}, **venv)
                 size["BENCH_SEED"] = str(max(seed, 1))
                 ctx.size_override[wl.id] = size
-                order = ctx.rng.sample(SYSTEMS, len(SYSTEMS))
+                enabled = [x for x in SYSTEMS if ctx.enabled(x)]
+                order = ctx.rng.sample(enabled, len(enabled))
                 for s in order:
                     ctx.one_run(wl, s, n, seed, warmup=(seed == 0), extra={"variant": vname},
                                 run=measured(ctx, runs[s]))

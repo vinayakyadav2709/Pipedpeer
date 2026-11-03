@@ -42,6 +42,14 @@ class Context:
         self.wait_timeout = float(os.environ.get("PL_WAIT_TIMEOUT", "300"))
         self.ray_start_args = os.environ.get(
             "PL_RAY_START_ARGS", "--object-store-memory=200000000" if args.rehearsal else "")
+        self.dask_worker_args = os.environ.get(
+            "PL_DASK_WORKER_ARGS", "--memory-limit 0" if args.rehearsal else "")
+        # PL_NPROC: the cores each PC offers Ray and Dask, and the {nproc_*}
+        # placeholders (the rehearsal's containers see all of the host's).
+        self.nproc_override = int(os.environ["PL_NPROC"]) if os.environ.get("PL_NPROC") else None
+        # PL_SYSTEMS: only these system kinds run (the rest are skipped and
+        # logged), for a rehearsal before the Ray/Dask env exists.
+        self.only_systems = [x for x in os.environ.get("PL_SYSTEMS", "").split(",") if x]
         self.seed = args.seed if args.seed is not None else int(time.time())
         self.rng = random.Random(self.seed)
         self.workloads, self.have_workloads = workloads_mod.load(REPO, os.environ.get("PL_WORKLOADS"))
@@ -101,7 +109,15 @@ class Context:
             if b is not active and b.kind in ("ray", "dask") and b.kind != active.kind:
                 b.deactivate()
 
+    def enabled(self, system):
+        ok = not self.only_systems or system.split("-")[0] in self.only_systems
+        if not ok:
+            self.log("%s skipped: PL_SYSTEMS=%s" % (system, ",".join(self.only_systems)))
+        return ok
+
     def nproc(self, host):
+        if self.nproc_override:
+            return self.nproc_override
         if host.id not in self._nproc:
             rc, out = self.remote.sh(host.id, "nproc", timeout=30)
             self._nproc[host.id] = int(out.strip().splitlines()[-1]) if rc == 0 else 1
@@ -271,6 +287,7 @@ class Context:
                 self.log("workload %s not in workloads.json; skipped" % wid)
                 continue
             wl = self.workloads[wid]
+            systems_ = [s for s in systems_ if self.enabled(s)]
             for n in ns:
                 here = [s for s in systems_ if s != "plain" or n == 1]
                 if not here:

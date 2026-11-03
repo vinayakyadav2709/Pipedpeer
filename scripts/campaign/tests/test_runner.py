@@ -153,7 +153,7 @@ def test_ray_head_does_no_work_and_n_workers_join(make):
     ctx, cluster = make()
     hosts = ctx.backend("ray").activate(2)
     assert [h.id for h in hosts] == ["pc00", "pc01", "pc02"]
-    assert cluster.ray == {"pc00": "head:0", "pc01": "$(nproc)", "pc02": "$(nproc)"}
+    assert cluster.ray == {"pc00": "head:0", "pc01": "4", "pc02": "4"}
     ctx.backend("dask").activate(2)
     assert cluster.ray == {}, "starting Dask must stop Ray"
     assert set(cluster.dask) == {"pc00", "pc01", "pc02"} and cluster.dask["pc00"] == "scheduler"

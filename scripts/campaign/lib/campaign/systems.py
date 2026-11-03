@@ -295,7 +295,7 @@ class Ray(Backend):
                    "ray start --head", timeout=180)
         for i, w in enumerate(self.inv.workers[:n]):
             c = caps[i] if caps else None
-            ncpu = str(c) if c else "$(nproc)"
+            ncpu = str(c or self.ctx.nproc(w))
             pre = ("taskset -c %s " % cpus(c)) if c else ""
             self.sh_ok(w.id, "%s%s start --address=%s:%d --num-cpus=%s --disable-usage-stats %s" % (
                 pre, self.env_bin("ray"), head.ip, RAY_PORT, ncpu, extra), "ray start (worker)", timeout=180)
@@ -359,14 +359,12 @@ class Dask(Backend):
         expect = 0
         for i, w in enumerate(self.inv.workers[:n]):
             c = caps[i] if caps else None
-            if c:
-                nw, pre = str(c), "taskset -c %s " % cpus(c)
-                expect += c
-            else:
-                nw, pre = "$(nproc)", ""
-                expect += self.ctx.nproc(w)
-            self.remote.bg(w.id, STATE + "/logs/dask-worker.log", "%s%s worker %s --nworkers %s --nthreads 1 --no-dashboard" % (
-                pre, self.env_bin("dask"), addr, nw))
+            nw = c or self.ctx.nproc(w)
+            pre = ("taskset -c %s " % cpus(c)) if c else ""
+            expect += nw
+            self.remote.bg(w.id, STATE + "/logs/dask-worker.log",
+                           "%s%s worker %s --nworkers %d --nthreads 1 --no-dashboard %s" % (
+                               pre, self.env_bin("dask"), addr, nw, self.ctx.dask_worker_args))
         probe = ("%s -c \"from distributed import Client; c = Client('%s', timeout=20); "
                  "w = c.scheduler_info()['workers'].values(); "
                  "print('PLN', len({x['host'] for x in w}), len(w))\"" % (self.env_bin("python3"), addr))

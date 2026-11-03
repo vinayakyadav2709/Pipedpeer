@@ -124,7 +124,7 @@ class FakeRemote:
             self.c.dask[host] = "scheduler"
         elif " worker " in cmd:
             n = re.search(r"--nworkers (\S+)", cmd).group(1)
-            self.c.dask[host] = 4 if n == "$(nproc)" else int(n)
+            self.c.dask[host] = int(n)
         return 0, "123\n"
 
     def put(self, pattern, src, dest):

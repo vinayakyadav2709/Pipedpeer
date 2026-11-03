@@ -168,6 +168,7 @@ def main(ctx):
         pinlist = None
     ctx.log("E5 at N=%d, pins %s" % (n, pinlist))
     methods = ["pipedpeer", "pip", "ray"] if pinlist else ["pipedpeer"]
+    methods = [m for m in methods if m == "pip" or ctx.enabled(m)]
 
     def one(method, phase, repeat, extra):
         if method == "pipedpeer":

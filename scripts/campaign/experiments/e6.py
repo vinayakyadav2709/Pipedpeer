@@ -118,7 +118,8 @@ def main(ctx):
     n = ctx.ns([16])[-1]
     wl = ctx.workloads[ctx.wl_ids(["W1"])[0]]
     kills = ctx.repeats(3)
-    for system in ctx.rng.sample(["pipedpeer", "ray", "dask"], 3):
+    chosen = [s for s in ["pipedpeer", "ray", "dask"] if ctx.enabled(s)]
+    for system in ctx.rng.sample(chosen, len(chosen)):
         b = ctx.backend(system)
         victim = b.hosts_for(n)[-1]
         ctx.one_run(wl, system, n, 0, warmup=True)
