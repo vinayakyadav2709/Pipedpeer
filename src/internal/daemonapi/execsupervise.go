@@ -297,13 +297,18 @@ func gpuVisibleEnv(info gpu.Info, leased string) []string {
 }
 
 // jobInfoEnv is what a job is told about where it runs: this node's id (the
-// shim's run record names machines by it) and, when the node is limited, its
-// CPU limit in cores. The sandbox mounts no /sys, so the shim cannot read the
-// cgroup itself. A value the submitter set wins.
+// shim's run record names machines by it), this machine's key (run --offload
+// compares it with the submitter's; the shim cannot hash /etc/machine-id from
+// inside the sandbox) and, when the node is limited, its CPU limit in cores.
+// The sandbox mounts no /sys, so the shim cannot read the cgroup itself. A
+// value the submitter set wins.
 func jobInfoEnv(envs []string, nodeID string, cpuCores float64) []string {
 	var out []string
 	if nodeID != "" && !envsContain(envs, "PIPEDPEER_NODE_ID=") {
 		out = append(out, "PIPEDPEER_NODE_ID="+nodeID)
+	}
+	if m := selfMachine(); m != "" && !envsContain(envs, "PIPEDPEER_MACHINE=") {
+		out = append(out, "PIPEDPEER_MACHINE="+m)
 	}
 	if cpuCores > 0 && !envsContain(envs, "PIPEDPEER_CPU_LIMIT=") {
 		out = append(out, "PIPEDPEER_CPU_LIMIT="+strconv.FormatFloat(cpuCores, 'f', -1, 64))

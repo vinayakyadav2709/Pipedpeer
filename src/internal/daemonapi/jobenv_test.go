@@ -4,11 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
 // The job learns its node id and the tightest CPU quota on its cgroup chain.
 func TestJobInfoEnv(t *testing.T) {
+	old := selfMachine
+	selfMachine = func() string { return "" }
+	defer func() { selfMachine = old }()
 	root := t.TempDir()
 	write := func(rel, content string) {
 		dir := filepath.Join(root, rel)
@@ -52,5 +56,27 @@ func TestBLASThreadsFollowTheJobsCPULimit(t *testing.T) {
 	}
 	if env := blasThreadEnv(nil, 16, 16); env != nil {
 		t.Errorf("limit = every core: %v", env)
+	}
+}
+
+// The job learns this machine's key, so run --offload can tell it is on the
+// submitter's machine; a key the submitter set wins and an unknown key is
+// left out (unknown is never "same machine").
+func TestJobInfoEnvMachineKey(t *testing.T) {
+	old := selfMachine
+	defer func() { selfMachine = old }()
+
+	selfMachine = func() string { return "key-me" }
+	if env := jobInfoEnv(nil, "", 0); !slices.Contains(env, "PIPEDPEER_MACHINE=key-me") {
+		t.Errorf("env %v lacks PIPEDPEER_MACHINE=key-me", env)
+	}
+	if env := jobInfoEnv([]string{"PIPEDPEER_MACHINE=theirs"}, "", 0); slices.ContainsFunc(env, func(e string) bool {
+		return strings.HasPrefix(e, "PIPEDPEER_MACHINE=")
+	}) {
+		t.Errorf("env %v overrides the submitter's PIPEDPEER_MACHINE", env)
+	}
+	selfMachine = func() string { return "" }
+	if env := jobInfoEnv(nil, "", 0); len(env) != 0 {
+		t.Errorf("env %v, want nothing for an unknown key", env)
 	}
 }

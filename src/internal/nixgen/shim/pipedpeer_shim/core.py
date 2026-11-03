@@ -37,17 +37,25 @@ _FORCE = os.environ.get("PIPEDPEER_DISTRIBUTE", "auto") == "force"
 # request; the daemon drops that machine's peers, and takes no share itself
 # when it runs there. When this job runs on that machine itself (--offload
 # without --remote) the shim keeps no share either: every cost model ships,
-# and anything that still has to run here says why. The key is the kernel's
-# boot id, the daemon's machine key; a sandbox shares the host's kernel.
+# and anything that still has to run here says why. The key is the daemon's
+# machine key (a hash of machine-id and boot id, heartbeat.Machine), which the
+# shim cannot recompute: the sandbox's /etc/machine-id is not the host's. The
+# daemon that runs the job passes its own key as PIPEDPEER_MACHINE.
 _OFFLOAD = os.environ.get("PIPEDPEER_OFFLOAD", "")
 
 
-def _offload_here():
-    if not _OFFLOAD:
+def _offload_here(offload=None):
+    offload = _OFFLOAD if offload is None else offload
+    if not offload:
         return False
+    machine = os.environ.get("PIPEDPEER_MACHINE", "")
+    if machine:
+        return machine == offload
+    # A daemon that passes no key: daemons before 5407e5e keyed a machine by
+    # its bare boot id; later ones without PIPEDPEER_MACHINE never match here.
     try:
         with open("/proc/sys/kernel/random/boot_id") as f:
-            return f.read().strip() == _OFFLOAD
+            return f.read().strip() == offload
     except OSError as e:
         # Unknown: keep the promise rather than guess this is elsewhere.
         _warn("--offload: cannot read this machine's key (%s); "

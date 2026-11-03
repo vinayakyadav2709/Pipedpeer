@@ -48,3 +48,24 @@ def test_log_only_under_verbose_warn_always(monkeypatch, capsys):
     monkeypatch.setattr(core, "_VERBOSE", True)
     core._log("detail")
     assert capsys.readouterr().err == "[pipedpeer] detail\n"
+
+
+def test_offload_here_compares_the_daemons_machine_key(monkeypatch):
+    # The submitter's key is heartbeat.Machine (a hash), never the boot id;
+    # the daemon running the job says which machine it is.
+    monkeypatch.setenv("PIPEDPEER_MACHINE", "key-fedora")
+    assert core._offload_here("key-fedora") is True
+    assert core._offload_here("key-yeet") is False
+    monkeypatch.delenv("PIPEDPEER_MACHINE")
+    assert core._offload_here("") is False
+
+
+def test_offload_here_without_a_machine_key_falls_back_to_boot_id(monkeypatch):
+    monkeypatch.delenv("PIPEDPEER_MACHINE", raising=False)
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            boot = f.read().strip()
+    except OSError:
+        return
+    assert core._offload_here(boot) is True
+    assert core._offload_here("not-" + boot) is False
