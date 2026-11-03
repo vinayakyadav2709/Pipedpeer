@@ -13,7 +13,7 @@
       },
       "size_var": "BENCH_ITEMS",
       "strong": {
-        "BENCH_ITEMS": "154055"
+        "BENCH_ITEMS": "73946"
       },
       "weak_per_pc": {
         "BENCH_ITEMS": "73759"
@@ -47,7 +47,7 @@
       },
       "size_var": "CPU_ITEMS",
       "strong": {
-        "CPU_ITEMS": "1209"
+        "CPU_ITEMS": "580"
       },
       "weak_per_pc": null,
       "smoke": {
@@ -73,7 +73,7 @@
       },
       "size_var": "RF_TREES",
       "strong": {
-        "RF_TREES": "1583"
+        "RF_TREES": "760"
       },
       "weak_per_pc": null,
       "smoke": {

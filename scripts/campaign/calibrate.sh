@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Find a workload's campaign sizes on this machine: the strong-scaling size
-# one PC alone runs in about 125 s, and for workloads with weak scaling (W1)
+# one PC alone runs in about 60 s (the plan says 100-150 s; cut to fit one lab session, 2026-11-03), and for workloads with weak scaling (W1)
 # the per-PC size that is about 60 s of work on one PC (the runner multiplies
 # it by N). docs/benchmarks/lab-campaign.md 1.2; results/lab/workloads.md.
 #
@@ -24,7 +24,7 @@ exec "$PY" - "$@" <<'PY'
 import json, os, re, subprocess, sys, time
 
 wid = sys.argv[1]
-strong_s = float(sys.argv[2]) if len(sys.argv) > 2 else 125.0
+strong_s = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
 weak_s = float(sys.argv[3]) if len(sys.argv) > 3 else 60.0
 min_s = float(os.environ.get("CAL_MIN_S", "8"))
 reps = int(os.environ.get("CAL_REPS", "2"))

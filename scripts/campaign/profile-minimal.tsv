@@ -3,9 +3,9 @@
 # Skipped: e3, e9, e10, e11 (they need a person, a second network, or 60 PCs).
 # lab-day.sh runs the rows in order: scripts/campaign/run.sh <step> <arguments>.
 # est_min is the planning estimate behind the ETA in `lab.sh status`, worked
-# out from the 125 s strong size in results/lab/workloads.md.
+# out from the 60 s strong size in results/lab/workloads.md.
 # step	est_min	arguments
-e1	150	--n 1,4,16 --repeats 3
+e1	75	--n 1,4,16 --repeats 3
 e1b	46	--n 1,4,16 --repeats 3
 e4	15	--n 4 --repeats 3
 e5	25	--n 16 --repeats 3

@@ -36,17 +36,17 @@ T1's loss differs between 1 and R ranks by design: the sharding and shuffling di
 
 ## Sizes
 
-Strong scaling: one PC alone takes 100–150 s (target 125 s). Weak scaling (W1 only): about 60 s of work per PC, so items = per-PC size × N.
+Strong scaling: one PC alone takes about 60 s (target 60 s). The plan asks for 100–150 s; the operator chose 60 s on 2026-11-03 so the minimal day fits one lab session (about 4 h instead of 6.5 h). At N=16 a run then holds about 4 s of work per PC, so fixed costs weigh more than they would at 125 s; the write-up must say so. Weak scaling (W1 only): about 60 s of work per PC, so items = per-PC size × N.
 
 | Workload | Strong size | Weak size per PC | Fit on the laptop | Strong size measured on the laptop |
 |---|---|---|---|---|
-| W1 | `BENCH_ITEMS=154055` | `BENCH_ITEMS=73759` × N | 0.29 s + 0.00081 s × items | 133.5 s |
-| W2 | `CPU_ITEMS=1209` | none | 5.80 s + 0.0986 s × items | 113.5 s |
-| W3 | `RF_TREES=1583` | none | 1.51 s + 0.078 s × trees | 128.7 s |
+| W1 | `BENCH_ITEMS=73946` | `BENCH_ITEMS=73759` × N | 0.29 s + 0.00081 s × items | 133.5 s |
+| W2 | `CPU_ITEMS=580` | none | 5.80 s + 0.0986 s × items | 113.5 s |
+| W3 | `RF_TREES=760` | none | 1.51 s + 0.078 s × trees | 128.7 s |
 
 Provisional, laptop; recalibrate on pc01 in session 1. The laptop has 20 threads and 31 GB, and it was shared with other agents during the runs. Runs were in the `nixos/nix:2.31.3` container on the campaign env, with a 4 GiB memory limit and no CPU limit. Two calibrations 20 minutes apart gave W1 sizes of 164,307 and 154,055 (7 % apart), W2 1,118 and 1,209, and W3 1,578 and 1,583. Read the laptop's noise as about ±8 %.
 
-`calibrate.sh` doubles the size from the smoke size until one run takes at least 8 s, then runs once more at 3× that size. Each point is the best of 2 runs. It fits wall = c0 + c1 × size and solves for 125 s and 60 s. With `CAL_VERIFY=1` it also runs the strong size once, which gives the last column above. Run it on pc01 with `CAL_VERIFY=1`, and if the check falls outside 100–150 s, run it again.
+`calibrate.sh` doubles the size from the smoke size until one run takes at least 8 s, then runs once more at 3× that size. Each point is the best of 2 runs. It fits wall = c0 + c1 × size and solves for 60 s (strong) and 60 s per PC (weak). With `CAL_VERIFY=1` it also runs the strong size once, which gives the last column above. Run it on pc01 with `CAL_VERIFY=1`, and if the check falls outside 50–70 s, run it again.
 
 ## Per-system settings (fairness)
 
