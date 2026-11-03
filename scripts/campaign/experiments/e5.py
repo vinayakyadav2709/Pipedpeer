@@ -26,9 +26,10 @@ join and the first job (which brought only python), before the env. The
 E5 row later skips pipedpeer's cold run when that line is in runs.jsonl,
 and runs pip's and Ray's cold cases, which are cold by construction (a
 fresh venv with --no-cache-dir; a fresh Ray session). Every pipedpeer line
-records the proof: closure_paths (the job closure's store paths, from
-pc00) and present_before {pc: how many of them that PC held before the
-run}, from a /nix/store listing taken just before it (probes.py), and
+records the proof: closure_paths and closure_mb (the job closure, from
+pc00) and present_before {pc: {paths, mb, python_packages}}, the part of
+it that PC held before the run, from a /nix/store listing taken just
+before it (probes.py), and
 whether pc00 had to build the env ("closure_on_pc00": built / already
 built). before_campaign_env is true on the early line.
 """
@@ -120,17 +121,20 @@ def run_pipedpeer(ctx, n, phase, repeat, extra, script, early=False):
                 break
             time.sleep(2)
     after = probes.netdev(ctx, hosts)
-    names = probes.closure(ctx, ctx.inv.head.id, store) if store else []
-    present = probes.present_before(ctx, hosts, names)
-    ctx.log("E5 pipedpeer %s: closure %d paths; held before the run: %s" % (
-        phase, len(names), ", ".join("%s %s" % kv for kv in sorted(present.items())) or "unknown"))
+    sizes = probes.closure(ctx, ctx.inv.head.id, store) if store else {}
+    present = probes.present_before(ctx, hosts, sizes)
+    ctx.log("E5 pipedpeer %s: closure %d paths, %.1f MB; held before the run: %s" % (
+        phase, len(sizes), sum(sizes.values()) / 1e6, ", ".join(
+            "%s %d paths %.1f MB %s" % (h, v["paths"], v["mb"], v["python_packages"]) for h, v in present.items())
+        or "unknown"))
     # The job runs on pc00, which builds the env (cold) or finds it built.
     on_pc00 = "built" if "Built successfully" in res["out"] else "already built"
     ok = res["rc"] == 0 and not missing and "E5-ENV-OK" in res["out"]
     more = {"store_path": store, "closure_on_pc00": on_pc00, "receipt": res.get("receipt"),
             "record_path": res.get("record_path"), "rc": res["rc"],
             "all_have_s": round((all_have_ns - res["start_ns"]) / 1e9, 3) if all_have_ns else None,
-            "missing_pcs": missing or None, "closure_paths": len(names) or None,
+            "missing_pcs": missing or None, "closure_paths": len(sizes) or None,
+            "closure_mb": round(sum(sizes.values()) / 1e6, 1) if sizes else None,
             "present_before": present or None, "store_entries_before": stores or None,
             "before_campaign_env": early}
     if missing:

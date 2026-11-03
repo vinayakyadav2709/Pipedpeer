@@ -31,23 +31,12 @@ def delta(before, after):
 
 # Which store paths a PC already holds, to prove a cold ship was cold
 # (E5): a listing of /nix/store before the run, kept on the PC, then the
-# run's closure counted against it there, so only counts cross Ansible.
+# run's closure matched against it there; only the matches come back.
 STORE_LIST = "$HOME/.local/share/pipedpeer-lab/store-before.txt"
-NIX_STORE = ('for x in "$(command -v nix-store)" /nix/var/nix/profiles/default/bin/nix-store '
-             '"$HOME/.nix-profile/bin/nix-store"; do [ -x "$x" ] && exec "$x" -qR "$1"; done; exit 127')
-
-
-def _per_host(hosts, out, tag):
-    res = {}
-    for line in out.splitlines():
-        if len(hosts) == 1:
-            host, rest = hosts[0].id, line
-        else:
-            host, _, rest = line.partition(": ")
-        parts = rest.split()
-        if len(parts) == 2 and parts[0] == tag and parts[1].isdigit():
-            res[host] = int(parts[1])
-    return res
+CLOSURE_LIST = "$HOME/.local/share/pipedpeer-lab/closure.txt"
+NIX_STORE = ('n=; for x in "$(command -v nix-store)" /nix/var/nix/profiles/default/bin/nix-store '
+             '"$HOME/.nix-profile/bin/nix-store"; do [ -x "$x" ] && n=$x && break; done; '
+             '[ -n "$n" ] || exit 127; for p in $("$n" -qR "$1"); do echo "PLPATH $p $("$n" -q --size "$p")"; done')
 
 
 def store_snapshot(ctx, hosts):
@@ -55,23 +44,53 @@ def store_snapshot(ctx, hosts):
     cmd = ('mkdir -p "$(dirname %s)"; ls /nix/store 2>/dev/null | grep -v "\\.drv$" >%s; '
            'echo "PLSTORE $(wc -l <%s)"') % (STORE_LIST, STORE_LIST, STORE_LIST)
     rc, out = ctx.remote.sh(":".join(h.id for h in hosts), cmd, timeout=120)
-    return _per_host(hosts, out, "PLSTORE")
+    res = {}
+    for host, rest in _lines(hosts, out):
+        parts = rest.split()
+        if len(parts) == 2 and parts[0] == "PLSTORE" and parts[1].isdigit():
+            res[host] = int(parts[1])
+    return res
 
 
 def closure(ctx, host, store_path):
-    """The store path's closure (basenames) as host's nix-store lists it; [] if it cannot."""
-    rc, out = ctx.remote.sh(host, "sh -c %s _ %s" % (shlex.quote(NIX_STORE), shlex.quote(store_path)), timeout=120)
-    if rc != 0:
-        return []
-    return sorted({ln.strip().rsplit("/", 1)[-1] for ln in out.splitlines() if ln.strip().startswith("/nix/store/")})
+    """{basename: nar bytes} of the store path's closure, as host's nix-store lists it; {} if it cannot."""
+    rc, out = ctx.remote.sh(host, "sh -c %s _ %s" % (shlex.quote(NIX_STORE), shlex.quote(store_path)), timeout=300)
+    res = {}
+    for ln in out.splitlines():
+        parts = ln.split()
+        if len(parts) == 3 and parts[0] == "PLPATH" and parts[2].isdigit():
+            res[parts[1].rsplit("/", 1)[-1]] = int(parts[2])
+    return res
 
 
-def present_before(ctx, hosts, names):
-    """{host: how many of names were in its STORE_LIST}."""
-    if not names:
+def present_before(ctx, hosts, sizes):
+    """{host: {"paths", "mb", "python_packages"}}: the part of the closure
+    (sizes, from closure()) that host's STORE_LIST held."""
+    if not sizes:
         return {}
-    lst = STORE_LIST.replace("store-before.txt", "closure.txt")
-    cmd = "printf '%%s\\n' %s >%s; echo \"PLPRESENT $(grep -cxFf %s %s || true)\"" % (
-        " ".join(shlex.quote(n) for n in names), lst, lst, STORE_LIST)
+    cmd = "printf '%%s\\n' %s >%s; grep -xFf %s %s | sed 's/^/PLHAVE /'; echo PLDONE" % (
+        " ".join(shlex.quote(n) for n in sorted(sizes)), CLOSURE_LIST, CLOSURE_LIST, STORE_LIST)
     rc, out = ctx.remote.sh(":".join(h.id for h in hosts), cmd, timeout=120)
-    return _per_host(hosts, out, "PLPRESENT")
+    have, done = {}, set()
+    for host, rest in _lines(hosts, out):
+        parts = rest.split()
+        if parts[:1] == ["PLHAVE"] and len(parts) == 2 and parts[1] in sizes:
+            have.setdefault(host, []).append(parts[1])
+        elif parts == ["PLDONE"]:
+            done.add(host)
+    res = {}
+    for host in sorted(done):
+        names = have.get(host, [])
+        res[host] = {"paths": len(names), "mb": round(sum(sizes[n] for n in names) / 1e6, 1),
+                     "python_packages": sorted(n.split("-", 1)[1] for n in names
+                                               if n.split("-", 1)[-1].startswith("python3."))}
+    return res
+
+
+def _lines(hosts, out):
+    for line in out.splitlines():
+        if len(hosts) == 1:
+            yield hosts[0].id, line
+        else:
+            host, _, rest = line.partition(": ")
+            yield host, rest

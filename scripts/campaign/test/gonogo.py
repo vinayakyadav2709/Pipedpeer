@@ -4,7 +4,8 @@ attempts.jsonl (headless-test.sh):
   python3 gonogo.py <dir with runs.jsonl, attempts.jsonl> <out.json> [pc ...]
 
   E5   pipedpeer's cold ship ran before the campaign env (prep.e5cold),
-       once, right, and no worker held more than half of its closure
+       once, right, and no worker held any Python package of its closure
+       (only the interpreter and system libraries the first job brought)
   E14  every PC computed part of the first job; share and first work per PC
   E12  pipedpeer's joiner did more than 5 % of the items and worked for at
        least half the run; share, first work and wall for every system
@@ -39,15 +40,18 @@ def e5(runs, out, notes, bad):
         bad.append("e5: want one pipedpeer cold line, before the env and right; got %s" % out["e5_cold"])
         return
     c = cold[0]
-    pres = {pc: k for pc, k in (c.get("present_before") or {}).items() if pc != "pc00"}
+    pres = {pc: v for pc, v in (c.get("present_before") or {}).items() if pc != "pc00"}
     if not c.get("closure_paths") or not pres:
         bad.append("e5: no closure presence recorded: %s" % c)
         return
-    notes.append("E5 cold: closure %d paths; held before: %s; wall %s s, all PCs had it at %s s, %s MB" % (
-        c["closure_paths"], pres, c.get("wall_s"), c.get("all_have_s"), c.get("mb_down")))
-    worst = max(pres.values()) / c["closure_paths"]
-    if worst > 0.5:
-        bad.append("e5: a worker held %.0f %% of the closure before the cold ship" % (100 * worst))
+    notes.append("E5 cold: closure %s paths, %s MB; workers held before: %s; wall %s s, all PCs had it at %s s, "
+                 "%s MB received" % (c["closure_paths"], c.get("closure_mb"), pres, c.get("wall_s"),
+                                     c.get("all_have_s"), c.get("mb_down")))
+    warm = {pc: v["python_packages"] for pc, v in pres.items() if isinstance(v, dict) and v["python_packages"]}
+    if warm:
+        bad.append("e5: workers held Python packages of the closure before the cold ship: %s" % warm)
+    if not all(isinstance(v, dict) for v in pres.values()):
+        notes.append("E5 cold: present_before has counts only (an older build); check the bytes by hand")
 
 
 def e14(runs, out, notes, bad, pcs):

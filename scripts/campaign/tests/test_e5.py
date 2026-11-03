@@ -12,7 +12,7 @@ sys.path.insert(0, HERE)
 from campaign import runner  # noqa: E402
 from fakecluster import FakeCluster, FakeRemote, no_sleep  # noqa: E402
 
-CLOSURE = ["/nix/store/aaa-python3", "/nix/store/bbb-numpy", "/nix/store/ccc-e5-env"]
+CLOSURE = ["/nix/store/aaa-python3-3.14.7", "/nix/store/bbb-python3.14-numpy-2.5.1", "/nix/store/ccc-e5-env"]
 
 
 def respond(host, cmd):
@@ -21,10 +21,11 @@ def respond(host, cmd):
     if "PLSTORE" in cmd:
         return 0, "PLSTORE 40\n"
     if "-qR" in cmd:
-        return 0, "\n".join(CLOSURE) + "\n"
-    if "PLPRESENT" in cmd:
+        return 0, "".join("PLPATH %s %d\n" % (p, 100_000_000) for p in CLOSURE)
+    if "PLHAVE" in cmd:
         # The listing was taken before the run: workers held only python.
-        return 0, "PLPRESENT %d\n" % (3 if host == "pc00" else 1)
+        held = CLOSURE if host == "pc00" else CLOSURE[:1]
+        return 0, "".join("PLHAVE %s\n" % p.rsplit("/", 1)[1] for p in held) + "PLDONE\n"
     if "/v1/store?path=" in cmd:
         return 0, '{"cached": true}'
     if "PLPIN" in cmd:
@@ -49,8 +50,9 @@ def test_early_cold_ship_records_what_each_pc_held(tmp_path, monkeypatch):
     assert [(x["system"], x["phase"]) for x in got] == [("pipedpeer", "cold")]
     line = got[0]
     assert line["before_campaign_env"] is True and line["result_ok"] is True
-    assert line["closure_paths"] == 3
-    assert line["present_before"] == {"pc00": 3, "pc01": 1, "pc02": 1}
+    assert line["closure_paths"] == 3 and line["closure_mb"] == 300.0
+    assert line["present_before"]["pc01"] == {"paths": 1, "mb": 100.0, "python_packages": []}
+    assert line["present_before"]["pc00"]["python_packages"] == ["python3.14-numpy-2.5.1"]
     # No pins read and no pip: the env is not on the PCs yet.
     assert not any("PLPIN" in c or "pip install" in c for _, c in cluster.calls)
     # The listing is taken before the job starts.
