@@ -1,0 +1,22 @@
+{
+ "E7-trivial|PL_E7=1": {
+  "result": "TRIVIAL-OK",
+  "source": "pipedpeer-noshim"
+ },
+ "W1|BENCH_ITEMS=2400": {
+  "result": "items=2400 | checksum=24149392322.896679",
+  "source": "plain"
+ },
+ "W1|BENCH_ITEMS=4800": {
+  "result": "items=4800 | checksum=49462404143.870926",
+  "source": "pipedpeer"
+ },
+ "W2|CPU_ITEMS=8": {
+  "result": "Pool: 8 items, checksum 239999952 | joblib: 64 Mandelbrot tiles, 217451260 points inside | numpy: largest singular value 1152.7576 | pandas: 3,000,000 rows -> 50 cities, total rain 5996596.8",
+  "source": "plain"
+ },
+ "W3|RF_TREES=40": {
+  "result": "data: (200000, 20), classes: [ 30506 169494] | accuracy: 0.9716",
+  "source": "plain"
+ }
+}
