@@ -235,3 +235,25 @@ func TestStartIsExclusive(t *testing.T) {
 		t.Fatalf("unlocked: %v %v", r, err)
 	}
 }
+
+// M6: dev builds back off too; the retry variable skips the backoff.
+func TestFailedBackoffDevAndOverride(t *testing.T) {
+	for _, c := range []struct {
+		name, version, env string
+		want               Result
+	}{
+		{"dev build, fresh failure", "dev", "", RecentlyFailed},
+		{"dev build, retry requested", "dev", "1", Started},
+		{"release build, retry requested", "v1", "1", Started},
+		{"release build, fresh failure, no retry", "v1", "", RecentlyFailed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			failed := header(c.version, "CPU") + "failed (exit 1); details above\n"
+			setLog(t, &failed, time.Minute)
+			t.Setenv(RetryEnv, c.env)
+			if got, err := Start(fakeExe(t), c.version, false); err != nil || got != c.want {
+				t.Fatalf("Start = %v, %v; want %v", got, err, c.want)
+			}
+		})
+	}
+}

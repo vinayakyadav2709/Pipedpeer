@@ -233,3 +233,18 @@ func TestPhantomNoteOverWifi(t *testing.T) { // 17: ports from mDNS, only the co
 		t.Errorf("-y: ran adb %q, want only the lines printed", r.calls)
 	}
 }
+
+func TestPhantomNoteClearsMark(t *testing.T) { // M7 case B: any SDK, the record of "off" is dropped
+	fakePhone(t)
+	markPhantom(34)
+	PhantomNote(io.Discard, bufio.NewReader(strings.NewReader("")), false, false)
+	if phantomMarked(34) {
+		t.Error("mark survived the uninstall note")
+	}
+	// opposite: a dry run changes nothing
+	markPhantom(34)
+	PhantomNote(io.Discard, bufio.NewReader(strings.NewReader("")), true, false)
+	if !phantomMarked(34) {
+		t.Error("dry run removed the mark")
+	}
+}

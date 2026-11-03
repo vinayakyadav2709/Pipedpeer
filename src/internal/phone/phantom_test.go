@@ -579,7 +579,7 @@ func TestInterruptRestores(t *testing.T) { // H4
 	r := newRig(t, 33)
 	var raised int
 	var out syncBuf
-	interrupt = func() { raised++ }
+	interrupt = func(syscall.Signal) { raised++ }
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { pw.Close() })
 	go func() {
@@ -607,7 +607,7 @@ func TestInterruptRestores(t *testing.T) { // H4
 func TestNoInterruptWhenNormal(t *testing.T) { // H4 opposite
 	r := newRig(t, 33)
 	var raised int
-	interrupt = func() { raised++ }
+	interrupt = func(syscall.Signal) { raised++ }
 	if _, err := prep(r, "\n123456\n", PrepOpts{}); err != nil || raised != 0 {
 		t.Errorf("err %v raised %d", err, raised)
 	}
@@ -702,3 +702,82 @@ type syncBuf struct {
 
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// Ctrl-C while waiting for Enter, after Wireless debugging came on (phone
+// test: it stayed on and "turn off" was printed).
+func TestInterruptBeforeConnectSwitchesOff(t *testing.T) {
+	r := newRig(t, 33)
+	r.paired = true
+	var out syncBuf
+	var sigs []syscall.Signal
+	interrupt = func(s syscall.Signal) { sigs = append(sigs, s) }
+	pr, pw := io.Pipe() // Enter never comes
+	t.Cleanup(func() { pw.Close() })
+	go func() {
+		for i := 0; i < 500 && !strings.Contains(out.String(), "press Enter"); i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
+		syscall.Kill(os.Getpid(), syscall.SIGINT)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- TermuxPrep(&out, PrepOpts{In: pr}) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Ctrl-C at the Enter prompt did not end the wait")
+	}
+	if !r.had("adb_wifi_enabled 0") || r.wifiOn || strings.Contains(out.String(), wifiOffNote) {
+		t.Errorf("Wireless debugging left on: calls %q out %q", r.calls, out.String())
+	}
+	if len(sigs) != 1 || sigs[0] != syscall.SIGINT {
+		t.Errorf("re-raised %v", sigs)
+	}
+}
+
+func TestInterruptSigtermReraisedAsSigterm(t *testing.T) { // M2 (opposite of the SIGINT rows)
+	_ = newRig(t, 33)
+	var out syncBuf
+	var sigs []syscall.Signal
+	interrupt = func(s syscall.Signal) { sigs = append(sigs, s) }
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	go func() {
+		pw.Write([]byte("\n"))
+		for i := 0; i < 500 && !strings.Contains(out.String(), "pairing code: "); i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- TermuxPrep(&out, PrepOpts{In: pr}) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("SIGTERM did not end the wait")
+	}
+	if len(sigs) != 1 || sigs[0] != syscall.SIGTERM {
+		t.Errorf("re-raised %v, want [SIGTERM]", sigs)
+	}
+}
+
+func TestInterruptStopsCommandLoop(t *testing.T) { // M1
+	r := newRig(t, 33)
+	interrupt = func(syscall.Signal) {}
+	inner := adb
+	adb = func(w io.Writer, args ...string) error {
+		err := inner(w, args...)
+		if strings.Contains(strings.Join(args, " "), "set_sync_disabled_for_tests") {
+			syscall.Kill(os.Getpid(), syscall.SIGINT)
+			time.Sleep(100 * time.Millisecond)
+		}
+		return err
+	}
+	prep(r, "\n123456\n", PrepOpts{})
+	if r.had("max_phantom_processes 2147483647") || r.had("settings_enable_monitor_phantom_procs false") {
+		t.Errorf("settings still changed after Ctrl-C: %q", r.calls)
+	}
+	if !r.had("adb_wifi_enabled 0") {
+		t.Errorf("not restored: %q", r.calls)
+	}
+}

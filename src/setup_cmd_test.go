@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -146,5 +147,32 @@ func TestConnectBadCodeFails(t *testing.T) { // row 11
 	}
 	if !strings.Contains(out.String(), "not connected") || !strings.Contains(out.String(), "copy the whole") {
 		t.Fatalf("messages missing: %q", out.String())
+	}
+}
+
+func TestTakeConnectCodeEnv(t *testing.T) {
+	cases := []struct {
+		name, code, marker, want string
+		warns                    bool
+	}{
+		{"installer code with marker is used", "PP1-x", "1", "PP1-x", false},
+		{"stale profile code without marker is ignored", "PP1-x", "", "", true},
+		{"no code", "", "1", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv(connectCodeEnv, c.code)
+			t.Setenv(connectMarkerEnv, c.marker)
+			var w strings.Builder
+			if got := takeConnectCodeEnv(&w); got != c.want {
+				t.Fatalf("code = %q, want %q", got, c.want)
+			}
+			if (w.Len() > 0) != c.warns {
+				t.Fatalf("warning = %q, want warn=%v", w.String(), c.warns)
+			}
+			if os.Getenv(connectCodeEnv) != "" || os.Getenv(connectMarkerEnv) != "" {
+				t.Fatal("variables must be unset after reading (children would inherit the secret)")
+			}
+		})
 	}
 }

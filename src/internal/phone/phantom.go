@@ -172,8 +172,8 @@ func PhantomState(ctx context.Context, w io.Writer, in io.Reader, ask bool) Phan
 // adbPhantom reads the state over Wireless debugging and, when set and it is
 // on, runs the three off commands. already: it was off before.
 func adbPhantom(ctx context.Context, w io.Writer, in *bufio.Reader, pair, ask, set bool) (st Phantom, already bool, err error) {
-	dev, done, err := wifiADB(ctx, w, in, pair, ask)
-	defer done()
+	dev, sess, err := wifiADB(ctx, w, in, pair, ask)
+	defer sess.done()
 	if err != nil {
 		return PhantomUnknown, false, err
 	}
@@ -190,6 +190,9 @@ func adbPhantom(ctx context.Context, w io.Writer, in *bufio.Reader, pair, ask, s
 	term.Action(w, "this also stops the phone syncing server-side flags (device_config set_sync_disabled_for_tests) until `pipedpeer uninstall` puts it back")
 	var errs []error
 	for _, a := range phantomOffCmds {
+		if err := sess.interrupted(); err != nil {
+			return st, false, errors.Join(append(errs, err)...)
+		}
 		if err := adb(w, append([]string{"-s", dev}, a...)...); err != nil {
 			errs = append(errs, fmt.Errorf("adb %s: %w", strings.Join(a, " "), err))
 		}

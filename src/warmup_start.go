@@ -47,7 +47,7 @@ func startWarmup(out io.Writer) {
 	case warmup.AlreadyDone:
 		term.OK(out, "common environment: already built")
 	case warmup.RecentlyFailed:
-		term.Warn(out, "common environment: the last build failed a moment ago, not retrying yet (log: %s; earlier log: %s.prev)",
+		term.Warn(out, "common environment: the last build failed a moment ago, not retrying yet; set PIPEDPEER_WARMUP_RETRY=1 to retry now (log: %s; earlier log: %s.prev)",
 			warmup.LogPath(), warmup.LogPath())
 	default:
 		term.OK(out, "common environment: building in the background (`pipedpeer status` shows progress)")

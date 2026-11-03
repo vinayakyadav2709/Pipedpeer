@@ -18,9 +18,35 @@ import (
 // bootScript is ~/.termux/boot/pipedpeer: Termux runs every script in that
 // directory on BOOT_COMPLETED. The Play Store Termux has the boot receiver
 // built in; F-Droid and GitHub builds need the Termux:Boot app (opened once).
-const bootScript = "#!/data/data/com.termux/files/usr/bin/sh\n" +
-	"termux-wake-lock\n" +
-	"exec pipedpeer start\n"
+//
+// It starts the binary by absolute path: the PATH of a boot script does not
+// include ~/bin or any other directory the user installed it to.
+func bootScript() string {
+	return "#!/data/data/com.termux/files/usr/bin/sh\n" +
+		"termux-wake-lock\n" +
+		"exec " + shQuote(binaryPath()) + " start\n"
+}
+
+// executable is os.Executable; a variable for tests.
+var executable = os.Executable
+
+// binaryPath is this binary's resolved absolute path, else "pipedpeer" (found
+// through PATH, with a warning).
+func binaryPath() string {
+	exe, err := executable()
+	if err == nil {
+		if r, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = r
+		}
+		return exe
+	}
+	log.Warn().Err(err).Msg("phone: cannot resolve the pipedpeer binary; the boot script relies on PATH")
+	return "pipedpeer"
+}
+
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // playVersionPrefix is the start of TERMUX_VERSION on the Play
 // Store build (for example "googleplay.2026.10.09").
@@ -52,12 +78,12 @@ func writeBoot(w io.Writer, appVersion string) error {
 			return fmt.Errorf("boot: cannot read %s: %w", p, err)
 		}
 		ours := slices.Contains(recorded().Paths, p)
-		same := bytes.Equal(have, []byte(bootScript))
+		same := bytes.Equal(have, []byte(bootScript()))
 		switch {
 		case !same && !ours:
 			// The user's own script: not ours to replace or to delete later.
 			log.Warn().Str("path", p).Msg("phone: boot script exists with other content; left alone")
-			term.Warn(w, "start on boot: %s exists with other content and is left as it is; add `exec pipedpeer start` to it if you want pipedpeer to start at boot", p)
+			term.Warn(w, "start on boot: %s exists with other content and is left as it is; add `exec %s start` to it if you want pipedpeer to start at boot", p, shQuote(binaryPath()))
 			return nil
 		case same && fi.Mode().Perm() == 0o755:
 			term.OK(w, "start on boot: already set (%s)", p)
@@ -78,7 +104,7 @@ func writeBoot(w io.Writer, appVersion string) error {
 		return nil
 	}
 	record(installed{Paths: []string{p}})
-	if err := os.WriteFile(p, []byte(bootScript), 0o755); err != nil {
+	if err := os.WriteFile(p, []byte(bootScript()), 0o755); err != nil {
 		return fmt.Errorf("boot: cannot write %s: %w", p, err)
 	}
 	// WriteFile keeps the mode of an existing file, so set it explicitly.

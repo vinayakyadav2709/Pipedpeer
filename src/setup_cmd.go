@@ -143,7 +143,9 @@ Use -y to answer yes to every question.`,
 			if code == "" {
 				// The invite carries the cluster secret; the installer passes
 				// it here to keep it out of the process list.
-				code = os.Getenv(connectCodeEnv)
+				code = takeConnectCodeEnv(cmd.ErrOrStderr())
+			} else {
+				_ = takeConnectCodeEnv(io.Discard)
 			}
 			o := setup.Options{AutoYes: autoYes, NoInstall: noInstall,
 				Port: daemonctl.DefaultPort, Joining: code != ""}
@@ -167,8 +169,27 @@ Use -y to answer yes to every question.`,
 	return cmd
 }
 
-// connectCodeEnv is read when --connect is not given.
-const connectCodeEnv = "PIPEDPEER_CONNECT_CODE"
+// connectCodeEnv is read when --connect is not given, and only together with
+// connectMarkerEnv, which the installer sets: a variable left in a shell
+// profile must not turn a later `pipedpeer setup` into a join.
+const (
+	connectCodeEnv   = "PIPEDPEER_CONNECT_CODE"
+	connectMarkerEnv = "PIPEDPEER_CONNECT_FROM_INSTALLER"
+)
+
+// takeConnectCodeEnv returns the installer's invite code and removes both
+// variables, so no child (warm-up, daemon, proot login) inherits the secret.
+// A code without the installer's marker is ignored with a note on warn.
+func takeConnectCodeEnv(warn io.Writer) string {
+	code, marked := os.Getenv(connectCodeEnv), os.Getenv(connectMarkerEnv) == "1"
+	os.Unsetenv(connectCodeEnv)
+	os.Unsetenv(connectMarkerEnv)
+	if code != "" && !marked {
+		fmt.Fprintf(warn, "ignoring %s from the environment (only the installer's use is honoured); use `pipedpeer connect <code>` or --connect\n", connectCodeEnv)
+		return ""
+	}
+	return code
+}
 
 // Seam: tests replace setup.Run so no system is touched.
 var setupRun = setup.Run

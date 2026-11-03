@@ -110,10 +110,17 @@ func readLog() []string {
 // sameBuild reports whether the header carries "build=<version>
 // torch=<kind>" for this build.
 func sameBuild(header, version string, nvidia bool) bool {
+	return buildable(version) && headerMatches(header, version, nvidia)
+}
+
+func headerMatches(header, version string, nvidia bool) bool {
 	f := strings.Fields(header)
 	n := len(f)
-	return buildable(version) && n >= 2 && f[n-2] == "build="+version && f[n-1] == "torch="+kind(nvidia)
+	return n >= 2 && f[n-2] == "build="+version && f[n-1] == "torch="+kind(nvidia)
 }
+
+// RetryEnv, when set, skips the failure backoff: the user has fixed the cause.
+const RetryEnv = "PIPEDPEER_WARMUP_RETRY"
 
 // Done reports whether the log is a finished warm-up for this build and torch
 // kind: the last line is "done" and the header ends with the marker
@@ -130,13 +137,16 @@ func Done(version string, nvidia bool) bool {
 // recentlyFailed: the last line is a failure of this same build, written
 // less than failBackoff ago.
 func recentlyFailed(version string, nvidia bool) bool {
+	if os.Getenv(RetryEnv) != "" {
+		return false
+	}
 	fi, err := os.Stat(LogPath())
 	if err != nil || time.Since(fi.ModTime()) > failBackoff {
 		return false
 	}
 	lines := readLog()
 	return len(lines) >= 2 && strings.HasPrefix(lines[len(lines)-1], "failed") &&
-		sameBuild(lines[0], version, nvidia)
+		headerMatches(lines[0], version, nvidia)
 }
 
 // Start launches the warm-up detached from this process (it outlives the
@@ -190,6 +200,13 @@ func Start(exe, version string, nvidia bool) (Result, error) {
 	cmd.Env = append(os.Environ(), "PIPEDPEER_WARMUP_LOG="+LogPath())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
+		// A header-only log would read as "building" for an hour.
+		if f, ferr := os.OpenFile(LogPath(), os.O_APPEND|os.O_WRONLY, 0o644); ferr == nil {
+			fmt.Fprintf(f, "failed (could not start: %v)\n", err)
+			f.Close()
+		} else {
+			fmt.Fprintf(os.Stderr, "pipedpeer: recording the failed warm-up start: %v\n", ferr)
+		}
 		return Started, fmt.Errorf("starting the warm-up: %w", err)
 	}
 	return Started, cmd.Process.Release()

@@ -343,6 +343,11 @@ func PhantomNote(w io.Writer, in *bufio.Reader, dry, ask bool) {
 	for _, a := range phantomRevert {
 		fmt.Fprintf(w, "  adb %s\n", strings.Join(a, " "))
 	}
+	if !dry {
+		// Whatever the Android version: the record of "killer off" is stale
+		// once the user reverts it.
+		clearPhantomMark()
+	}
 	if dry || !ask {
 		fmt.Fprintln(w, "or from this phone: Wireless debugging on, then adb pair and adb connect to 127.0.0.1 (see scripts/phone-phantom-off.sh)")
 		return
@@ -459,22 +464,25 @@ func phantomOverWifi(w io.Writer, in *bufio.Reader) error {
 			return fmt.Errorf("pkg install android-tools: %w: %s", err, tail(out))
 		}
 	}
-	dev, done, err := wifiADB(context.Background(), w, in, true, true)
-	defer done()
+	dev, sess, err := wifiADB(context.Background(), w, in, true, true)
+	defer sess.done()
 	if err != nil {
 		return err
 	}
+	// The mark goes first: a revert that stops half way must not leave
+	// "already off" behind.
+	clearPhantomMark()
 	var errs []error
 	for _, a := range phantomRevert {
+		if err := sess.interrupted(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		if err := adb(w, append([]string{"-s", dev}, a...)...); err != nil {
 			errs = append(errs, fmt.Errorf("adb %s: %w", strings.Join(a, " "), err))
 		}
 	}
-	err = errors.Join(errs...)
-	if err == nil {
-		clearPhantomMark()
-	}
-	return err
+	return errors.Join(errs...)
 }
 
 // lookAdb finds adb; a variable for tests.

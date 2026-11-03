@@ -92,7 +92,7 @@ STUB_EXIT=1 run_case 6.2c --connect PP1-abc
 if [[ $rc -eq 1 && "$out" != *"joined;"* && "$out" == *"NOT joined"* ]]; then ok 6.2c; else bad 6.2c "rc=$rc out=$out"; fi
 # ... and exit 2 (partly) is passed through
 STUB_EXIT=2 run_case 6.2d --connect PP1-abc
-if [[ $rc -eq 2 && "$out" == *"NOT joined"* ]]; then ok 6.2d; else bad 6.2d "rc=$rc out=$out"; fi
+if [[ $rc -eq 2 && "$out" == *"Joined only partly"* && "$out" != *"NOT joined"* ]]; then ok 6.2d; else bad 6.2d "rc=$rc out=$out"; fi
 
 # 6.3 --connect=PP1-abc -y → setup gets -y and the code in its environment
 run_case 6.3 --connect=PP1-abc -y

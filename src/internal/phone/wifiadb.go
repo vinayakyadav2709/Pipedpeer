@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,9 +33,14 @@ var (
 	discoverPorts = adbmdns.Discover
 	discoverPair  = adbmdns.DiscoverPair
 	// interrupt re-raises the signal that ended a session, once Wireless
-	// debugging is restored.
-	interrupt = func() { syscall.Kill(os.Getpid(), syscall.SIGINT) }
-	dialPort  = func(port int) bool {
+	// debugging is restored. If the process ignores it (nohup, a
+	// non-interactive shell), it exits with the shell's 128+n.
+	interrupt = func(sig syscall.Signal) {
+		syscall.Kill(os.Getpid(), sig)
+		time.Sleep(200 * time.Millisecond)
+		os.Exit(128 + int(sig))
+	}
+	dialPort = func(port int) bool {
 		c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 300*time.Millisecond)
 		if err != nil {
 			return false
@@ -66,7 +72,10 @@ type wifiSession struct {
 
 	ctx    context.Context // ends on Ctrl-C / SIGTERM
 	parent context.Context
-	stop   context.CancelFunc
+	stop   func()
+
+	mu  sync.Mutex
+	sig syscall.Signal // the signal that ended ctx; 0 = none
 }
 
 // interrupted is non-nil once a signal ended the session.
@@ -83,14 +92,34 @@ func (s *wifiSession) interrupted() error {
 // debugging that is off is errNoWireless. done is never nil and always safe
 // to call, also after an error: it puts Wireless debugging back (off, if it
 // was off at the start) and disconnects.
-func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask bool) (dev string, done func(), err error) {
-	sctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	s := &wifiSession{w: w, ctx: sctx, parent: ctx, stop: stop}
+func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask bool) (dev string, sess *wifiSession, err error) {
+	sctx, cancelS := context.WithCancel(ctx)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	s := &wifiSession{w: w, ctx: sctx, parent: ctx}
+	quit := make(chan struct{})
+	var once sync.Once
+	s.stop = func() { once.Do(func() { signal.Stop(ch); close(quit); cancelS() }) }
+	go func() {
+		select {
+		case sg := <-ch:
+			if n, ok := sg.(syscall.Signal); ok {
+				s.mu.Lock()
+				s.sig = n
+				s.mu.Unlock()
+			}
+			// Handled once: a second Ctrl-C finds the default action again
+			// and ends the process, however long adb hangs.
+			signal.Stop(ch)
+			cancelS()
+		case <-quit:
+		}
+	}()
 	pctx, cancel := context.WithTimeout(sctx, probeFor)
 	p, derr := discoverPorts(pctx, false)
 	cancel()
 	if err := s.interrupted(); err != nil {
-		return "", s.done, err
+		return "", s, err
 	}
 	noMcast := errors.Is(derr, adbmdns.ErrNoMulticast)
 	switch {
@@ -103,7 +132,7 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 	}
 	if s.port == 0 && !noMcast {
 		if !ask {
-			return "", s.done, errNoWireless
+			return "", s, errNoWireless
 		}
 		// The phone does not answer its own queries while Wireless debugging
 		// is already on, but a toggle announces it. Listen from now on, so
@@ -122,15 +151,27 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 		fmt.Fprintln(w, "Settings > Developer options > Wireless debugging: switch it off and on again (on for a moment if it is off; pipedpeer switches it off afterwards if it was off)")
 		askCtx(sctx, w, in, "press Enter when it is on: ")
 		var f found
+		got := false
 		select {
 		case f = <-res:
+			got = true
 		case <-time.After(graceFor):
 			// Enter was pressed and nothing was heard: stop waiting.
 			cancel()
-			f = <-res
+			f, got = <-res, true
+		case <-sctx.Done():
 		}
 		if err := s.interrupted(); err != nil {
-			return "", s.done, err
+			// Ctrl-C while the toggle was being switched: what the listener
+			// heard so far is needed to switch it off again.
+			cancel()
+			if !got {
+				f = <-res
+			}
+			if f.p.Connect != 0 {
+				s.port, s.wasOn = f.p.Connect, f.p.Goodbye
+			}
+			return "", s, err
 		}
 		switch {
 		case f.p.Connect != 0:
@@ -145,29 +186,29 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 	}
 	if s.port == 0 { // no mDNS: ask
 		if !ask {
-			return "", s.done, errNoWireless
+			return "", s, errNoWireless
 		}
 		if s.port = askPort(sctx, w, in, "port under 'IP address & Port' on the Wireless debugging screen: "); s.port == 0 {
-			return "", s.done, errNoWireless
+			return "", s, errNoWireless
 		}
 	}
 	if err := s.interrupted(); err != nil {
-		return "", s.done, err
+		return "", s, err
 	}
 	s.dev = "127.0.0.1:" + strconv.Itoa(s.port)
 	err = s.connect()
 	if err != nil && errors.Is(err, errUnauthorized) && needPair {
 		if !ask {
-			return "", s.done, err
+			return "", s, err
 		}
 		if err = s.pair(in); err == nil {
 			err = s.connect()
 		}
 	}
 	if err != nil {
-		return "", s.done, err
+		return "", s, err
 	}
-	return s.dev, s.done, nil
+	return s.dev, s, nil
 }
 
 func (s *wifiSession) connect() error {
@@ -224,13 +265,24 @@ func (s *wifiSession) done() {
 		return
 	}
 	s.ended = true
-	signalled := s.ctx.Err() != nil && s.parent.Err() == nil
+	s.mu.Lock()
+	sig := s.sig
+	s.mu.Unlock()
 	defer func() {
 		s.stop()
-		if signalled {
-			interrupt()
+		if sig != 0 && s.parent.Err() == nil {
+			interrupt(sig)
 		}
 	}()
+	if !s.wasOn && s.dev == "" && s.port != 0 {
+		// Interrupted after Wireless debugging came on but before adb was
+		// connected: connect now, so it can be switched off again.
+		dev := "127.0.0.1:" + strconv.Itoa(s.port)
+		s.dev = dev
+		if err := adb(io.Discard, "connect", dev); err != nil {
+			log.Warn().Err(err).Str("device", dev).Msg("phone: adb connect for switching Wireless debugging off failed")
+		}
+	}
 	if !s.wasOn {
 		if s.dev != "" {
 			// May end with the transport closing: the dial check decides.

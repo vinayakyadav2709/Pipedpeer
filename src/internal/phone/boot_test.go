@@ -16,6 +16,44 @@ func bootFixture(t *testing.T) {
 	t.Helper()
 	fakePhone(t)
 	t.Setenv("HOME", t.TempDir())
+	old := executable
+	executable = func() (string, error) { return "/data/data/com.termux/files/home/bin/pipedpeer", nil }
+	t.Cleanup(func() { executable = old })
+}
+
+func TestBootAbsolutePath(t *testing.T) { // phone test: Termux:Boot's PATH lacks ~/bin
+	bootFixture(t)
+	if err := writeBoot(&bytes.Buffer{}, "googleplay.1"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(bootPath())
+	if !strings.Contains(string(b), "exec '/data/data/com.termux/files/home/bin/pipedpeer' start\n") {
+		t.Errorf("script relies on PATH: %q", b)
+	}
+}
+
+func TestBootRewritesOldPathScript(t *testing.T) { // opposite: ours is rewritten, a user's is not
+	const old = "#!/data/data/com.termux/files/usr/bin/sh\ntermux-wake-lock\nexec pipedpeer start\n"
+	bootFixture(t)
+	if err := writeBoot(&bytes.Buffer{}, "googleplay.1"); err != nil { // records the path
+		t.Fatal(err)
+	}
+	os.WriteFile(bootPath(), []byte(old), 0o755)
+	if err := writeBoot(&bytes.Buffer{}, "googleplay.1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(bootPath()); string(b) != bootScript() {
+		t.Errorf("old script not rewritten: %q", b)
+	}
+	bootFixture(t)
+	os.MkdirAll(filepath.Dir(bootPath()), 0o755)
+	os.WriteFile(bootPath(), []byte(old), 0o755)
+	if err := writeBoot(&bytes.Buffer{}, "googleplay.1"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(bootPath()); string(b) != old {
+		t.Errorf("a script not recorded as ours was replaced: %q", b)
+	}
 }
 
 // Case table for the boot script (P6): no script, same content, different
@@ -34,8 +72,8 @@ func TestWriteBootCases(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(b) != bootScript {
-			t.Errorf("content = %q, want %q", b, bootScript)
+		if string(b) != bootScript() {
+			t.Errorf("content = %q, want %q", b, bootScript())
 		}
 		if !strings.Contains(out.String(), "boot") {
 			t.Errorf("no OK line about the boot script: %q", out.String())
@@ -101,7 +139,7 @@ func TestWriteBootCases(t *testing.T) {
 		if err := writeBoot(&bytes.Buffer{}, play); err != nil {
 			t.Fatal(err)
 		}
-		if b, _ := os.ReadFile(bootPath()); string(b) != bootScript {
+		if b, _ := os.ReadFile(bootPath()); string(b) != bootScript() {
 			t.Errorf("content = %q, want the new script", b)
 		}
 	})
@@ -109,7 +147,7 @@ func TestWriteBootCases(t *testing.T) {
 	t.Run("3d user's identical script: not recorded", func(t *testing.T) {
 		bootFixture(t)
 		os.MkdirAll(filepath.Dir(bootPath()), 0o755)
-		os.WriteFile(bootPath(), []byte(bootScript), 0o755)
+		os.WriteFile(bootPath(), []byte(bootScript()), 0o755)
 		if err := writeBoot(&bytes.Buffer{}, play); err != nil {
 			t.Fatal(err)
 		}
@@ -123,7 +161,7 @@ func TestWriteBootCases(t *testing.T) {
 		if err := os.MkdirAll(filepath.Dir(bootPath()), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(bootPath(), []byte(bootScript), 0o644); err != nil {
+		if err := os.WriteFile(bootPath(), []byte(bootScript()), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := writeBoot(&bytes.Buffer{}, play); err != nil {

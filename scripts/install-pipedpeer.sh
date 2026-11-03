@@ -50,12 +50,12 @@ esac
 # The code carries the cluster secret. It goes to setup in the environment, not
 # on its command line (visible in `ps`). Termux re-runs setup inside proot from
 # its argv, which must therefore carry it.
-SETUP_ENV=()
+SETUP_CODE=""
 if [[ -n "$CONNECT_CODE" ]]; then
   if [[ -n "${TERMUX_VERSION:-}" ]]; then
     SETUP_ARGS+=("--connect" "$CONNECT_CODE")
   else
-    SETUP_ENV=("PIPEDPEER_CONNECT_CODE=$CONNECT_CODE")
+    SETUP_CODE="$CONNECT_CODE"
   fi
 fi
 
@@ -165,7 +165,14 @@ fi
 # Its exit code is kept (1 failed, 2 joined only partly) so the closing line
 # can say what happened.
 run_setup() {
-  env ${SETUP_ENV[@]+"${SETUP_ENV[@]}"} "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+  # export inside a subshell: `env VAR=code cmd` would show the code in env's argv.
+  # The marker tells setup the variable is the installer's, not a stale one.
+  (
+    if [[ -n "$SETUP_CODE" ]]; then
+      export PIPEDPEER_CONNECT_CODE="$SETUP_CODE" PIPEDPEER_CONNECT_FROM_INSTALLER=1
+    fi
+    exec "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+  )
 }
 rc=0
 if [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
@@ -176,7 +183,9 @@ fi
 
 echo
 if [[ $rc -ne 0 ]]; then
-  if [[ -n "$CONNECT_CODE" ]]; then
+  if [[ -n "$CONNECT_CODE" && $rc -eq 2 ]]; then
+    echo "Joined only partly (setup exit 2): the daemon runs but not every path to the cluster is up; see the messages above, then 'pipedpeer status'." >&2
+  elif [[ -n "$CONNECT_CODE" ]]; then
     echo "NOT joined (setup exit $rc): see the messages above; then run 'pipedpeer connect <code>'." >&2
   else
     echo "Setup did not finish (exit $rc): see the messages above." >&2
