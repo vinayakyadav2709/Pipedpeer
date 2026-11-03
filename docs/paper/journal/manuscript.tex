@@ -62,8 +62,8 @@ Without a Configured Cluster}
 Cluster frameworks (Spark, Ray, Dask) assume a configured cluster, a
 program written against their interface, and machines that can reach one
 another. This leaves a small group's idle laptops, desktops and phones out of reach,
-especially behind different home or campus routers. PipedPeer runs an unmodified Python script on other machines.
-Every machine runs the same daemon and there is no head node. The script's
+especially behind different routers. PipedPeer runs an unmodified Python script on other machines.
+Every machine runs the same daemon; there is no head node. The script's
 environment is built as a Nix closure pinned to one package-set revision, and a
 peer receives only the store paths it lacks. Parallel maps, joblib, pandas
 grouping and joins, NumPy products and PyTorch data-parallel training are
