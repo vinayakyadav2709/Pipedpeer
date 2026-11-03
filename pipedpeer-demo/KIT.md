@@ -156,11 +156,11 @@ its environment); add `-v` to watch it.
    pipedpeer run --ddp 2 --ddp-sync fast gpu.py   # split, syncing less often
    ```
    Needs two machines with an NVIDIA GPU (the ring is GPU-only when any GPU exists; PCs and the phone never join it).
-   With only the RTX 3060 the `--ddp` runs fall back to one machine and nothing splits. Expect: `--ddp 2` starts split, measures the first steps, then prints `pipedpeer: one machine is faster alone:
-   <machine> takes about N ms a step by itself against M ms split across 2 machines, so it trains on alone from the
-   next epoch. To keep the split: --ddp 2`, then the `epoch 0..2` lines and `validation loss …`. (If no ring can
-   possibly win, it runs on one machine from the start; `-v` shows why.) The `--ddp 2` run is clearly slower, which is the point: the
-   automatic choice was right. The `--ddp-sync fast` run closes most of that gap; its validation loss should be close
+   With only the RTX 3060 the `--ddp` runs fall back to one machine and nothing splits. Expect: the plain run prints
+   the `epoch 0..2` lines and `validation loss …` from one GPU. `--ddp 2` fixes the ring at two machines and stays
+   split for the whole run (the "one machine is faster alone" release never happens under `--ddp N`,
+   `src/internal/daemonapi/ddprebalance.go:268-303`); it is clearly slower, which is the point: running on one
+   machine was the right choice. The `--ddp-sync fast` run closes most of that gap; its validation loss should be close
    to the one-GPU run's.
 4. **Both.** `pipedpeer run both.py`
    Expect: `CPU phase: 256,000 rows …` (spread over every machine, phone included), then `GPU phase on: NVIDIA …`.
