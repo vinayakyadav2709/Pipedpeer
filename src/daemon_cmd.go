@@ -140,6 +140,11 @@ func runDaemon(args []string) {
 	if v := os.Getenv("PIPEDPEER_PPROF"); v != "" {
 		startPprof(v)
 	}
+	if dir, err := daemonapi.EnsureCrunStateDir(); err != nil {
+		log.Warn().Err(err).Msg("no state dir for crun; jobs may fail to start")
+	} else {
+		log.Debug().Str("dir", dir).Msg("crun state root")
+	}
 
 	cfg, token := daemonCluster()
 	heartbeat.Role = daemonRole(cfg)
