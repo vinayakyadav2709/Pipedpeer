@@ -4,7 +4,10 @@
 # the campaign env in each, run every experiment at N=1 and 2 with one
 # repeat through the real run.sh, run analyse.py, and tear the lab down.
 #
-#   scripts/campaign/rehearse.sh [--keep] [--only "e1 e4"]
+#   scripts/campaign/rehearse.sh [--keep] [--reuse] [--only "e1 e4"]
+#
+# --keep leaves the lab up; --reuse runs on a lab that is already up with the
+# env in place (a previous --keep), appending to the same results.
 #
 # Results go to results/lab/rehearsal/ (never the campaign's runs.jsonl):
 # runs.jsonl, logs/, csv/, figures/, REHEARSAL.md (pass/fail per experiment).
@@ -24,12 +27,14 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 keep=0
+reuse=0
 only=""
 while (($#)); do
 	case "$1" in
 	--keep) keep=1 ;;
+	--reuse) reuse=1 ;;
 	--only) only="$2"; shift ;;
-	*) echo "usage: rehearse.sh [--keep] [--only \"e1 e4\"]" >&2; exit 2 ;;
+	*) echo "usage: rehearse.sh [--keep] [--reuse] [--only \"e1 e4\"]" >&2; exit 2 ;;
 	esac
 	shift
 done
@@ -49,10 +54,18 @@ if [[ $keep -eq 0 ]]; then
 	trap 'log "tearing the lab down"; "$repo/scripts/lab-down.sh" >/dev/null 2>&1 || true' EXIT
 fi
 
-log "bringing up $LAB_CTR-1..3 ($LAB_MEM each)"
-"$repo/scripts/lab-up.sh" >>"$out/rehearse.log" 2>&1
-
 w() { "$rt" exec "$LAB_CTR-$1" sh -c "$2"; }
+envlink=/root/.local/share/pipedpeer-lab/env
+if [[ $reuse -eq 1 ]]; then
+	for i in 1 2 3; do
+		w "$i" "test -x $envlink/bin/python3" || { log "ERROR: --reuse but $LAB_CTR-$i has no env"; exit 1; }
+	done
+	log "reusing $LAB_CTR-1..3 and their env"
+else
+	log "bringing up $LAB_CTR-1..3 ($LAB_MEM each)"
+	"$repo/scripts/lab-up.sh" >>"$out/rehearse.log" 2>&1
+fi
+
 for i in 1 2 3; do
 	for _ in $(seq 1 90); do
 		w "$i" 'curl -sf --max-time 3 -H "X-Pipedpeer-Token: $LAB_TOKEN" http://127.0.0.1:4242/health' >/dev/null 2>&1 && break
@@ -77,10 +90,11 @@ bash "$here/lib/ansible.sh" install >>"$out/rehearse.log" 2>&1
 PL_INVENTORY="$inv" bash "$here/lib/ansible.sh" sh all 'cat /etc/hostname' | tee -a "$out/rehearse.log" >&2 ||
 	{ log "ERROR: Ansible cannot reach the containers"; exit 1; }
 
-envlink=/root/.local/share/pipedpeer-lab/env
 src="${PL_ENV_FROM:-ppl-baselines}"
 srcpath="$("$rt" exec "$src" readlink -f "$envlink" 2>/dev/null || true)"
-if [[ -n $srcpath ]] && "$rt" exec "$src" test -x "$srcpath/bin/ray"; then
+if [[ $reuse -eq 1 ]]; then
+	[[ -x $here/env/install.sh || -n $srcpath ]] || export PL_SYSTEMS="${PL_SYSTEMS:-plain,pipedpeer}"
+elif [[ -n $srcpath ]] && "$rt" exec "$src" test -x "$srcpath/bin/ray"; then
 	log "copying the campaign env $srcpath from $src into each container"
 	for i in 1 2 3; do
 		"$rt" exec "$src" sh -c "nix-store --export \$(nix-store -qR $srcpath)" |
