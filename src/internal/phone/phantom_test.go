@@ -1,6 +1,7 @@
 package phone
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -8,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -16,33 +19,35 @@ import (
 
 // rig is a fake phone: adb, mDNS, the connect port and getprop, no real one.
 type rig struct {
-	t        *testing.T
-	calls    []string
-	wifiOn   bool // Wireless debugging; the user switches it on at the first prompt
-	userOn   bool // the user does switch it on when asked
-	paired   bool
-	code     string
-	maxV     string
-	monV     string
-	putErr   bool // adb_wifi_enabled 0 returns an error
-	stuck    bool // the connect port keeps dialing after "off"
-	noMcast  bool
-	noPair   bool // mDNS never finds the pairing port
-	silent   bool // Wireless debugging is on but mDNS stays silent until it is toggled (goodbye + announcement)
-	deaf     bool // mDNS never hears anything
-	discover int
-	props    map[string]string
-	sdk      int
-	pkgs     []string
+	t         *testing.T
+	calls     []string
+	wifiOn    bool // Wireless debugging; the user switches it on at the first prompt
+	userOn    bool // the user does switch it on when asked
+	paired    bool
+	code      string
+	maxV      string
+	monV      string
+	putErr    bool // adb_wifi_enabled 0 returns an error
+	stuck     bool // the connect port keeps dialing after "off"
+	noMcast   bool
+	noPair    bool // mDNS never finds the pairing port
+	silent    bool // Wireless debugging is on but mDNS stays silent until it is toggled (goodbye + announcement)
+	deaf      bool // mDNS never hears anything
+	discover  int
+	pairCalls int
+	hang      bool // mDNS blocks until its context ends
+	props     map[string]string
+	sdk       int
+	pkgs      []string
 }
 
 func newRig(t *testing.T, sdk int) *rig {
 	fakePhone(t)
 	r := &rig{t: t, sdk: sdk, userOn: true, code: "123456", maxV: "null", monV: "true", props: map[string]string{}}
-	oldAdb, oldLook, oldDisc, oldDial, oldGet, oldSdk, oldOpen := adb, lookAdb, discoverPorts, dialPort, getprop, sdkLevel, openTTY
+	oldAdb, oldLook, oldDisc, oldDial, oldGet, oldSdk, oldOpen, oldPair, oldInt := adb, lookAdb, discoverPorts, dialPort, getprop, sdkLevel, openTTY, discoverPair, interrupt
 	oldS, oldP, oldPrep := settleFor, pollEvery, prepped
 	t.Cleanup(func() {
-		adb, lookAdb, discoverPorts, dialPort, getprop, sdkLevel, openTTY = oldAdb, oldLook, oldDisc, oldDial, oldGet, oldSdk, oldOpen
+		adb, lookAdb, discoverPorts, dialPort, getprop, sdkLevel, openTTY, discoverPair, interrupt = oldAdb, oldLook, oldDisc, oldDial, oldGet, oldSdk, oldOpen, oldPair, oldInt
 		settleFor, pollEvery, prepped = oldS, oldP, oldPrep
 	})
 	settleFor, pollEvery, prepped = 40*time.Millisecond, 5*time.Millisecond, false
@@ -51,10 +56,21 @@ func newRig(t *testing.T, sdk int) *rig {
 	lookAdb = func() (string, error) { return "/bin/adb", nil }
 	openTTY = func() (io.ReadCloser, error) { return nil, errors.New("no tty") }
 	dialPort = func(p int) bool { return p == 42965 && (r.wifiOn || r.stuck) }
+	discoverPair = func(ctx context.Context) (adbmdns.Ports, error) {
+		r.pairCalls++
+		if r.noPair {
+			return adbmdns.Ports{}, context.DeadlineExceeded
+		}
+		return adbmdns.Ports{Pair: 41913}, nil // the dialog announces only the pairing service
+	}
 	discoverPorts = func(ctx context.Context, wantPair bool) (adbmdns.Ports, error) {
 		r.discover++
 		if r.noMcast {
 			return adbmdns.Ports{}, adbmdns.ErrNoMulticast
+		}
+		if r.hang && r.discover >= 2 {
+			<-ctx.Done()
+			return adbmdns.Ports{}, ctx.Err()
 		}
 		if r.deaf || r.silent && r.discover == 1 {
 			return adbmdns.Ports{}, context.DeadlineExceeded
@@ -283,12 +299,24 @@ func TestPrepSdk34(t *testing.T) { // 8, 9, 9b
 		t.Errorf("9: err %v out %q calls %q", err, out, r.calls)
 	}
 	r = newRig(t, 34)
-	out, err = prep(r, "\n", PrepOpts{})
-	if err != nil || !strings.Contains(out, "taken as done") || !strings.Contains(out, "cannot confirm") || len(r.adbCalls()) != 0 || r.had("android-tools") {
+	// H2: prop unset or unreadable, the user says yes: recorded, doctor reports it.
+	out, err = prep(r, "\ny\n", PrepOpts{})
+	if err != nil || !strings.Contains(out, "your answer") || len(r.adbCalls()) != 0 || r.had("android-tools") {
 		t.Errorf("9b: err %v out %q", err, out)
 	}
-	if st := PhantomState(context.Background(), io.Discard, nil, true); st != PhantomUnknown || len(r.adbCalls()) != 0 { // 15f
+	if st := PhantomState(context.Background(), io.Discard, nil, true); st != PhantomOff || len(r.adbCalls()) != 0 { // 15f
 		t.Errorf("15f: %v", st)
+	}
+	// H2 opposite: Enter without the toggle, the user says no (or nothing): not done.
+	for _, in := range []string{"\nn\n", "\n\n", "\n"} {
+		r = newRig(t, 34)
+		out, err = prep(r, in, PrepOpts{})
+		if err == nil || strings.Contains(out, "your answer") || strings.Contains(out, "phantom-process killer off") {
+			t.Errorf("9b opposite %q: err %v out %q", in, err, out)
+		}
+		if st := PhantomState(context.Background(), io.Discard, nil, true); st != PhantomUnknown {
+			t.Errorf("15f opposite %q: %v", in, st)
+		}
 	}
 }
 
@@ -470,3 +498,207 @@ func TestPrepPlayBuildNoBootNote(t *testing.T) { // P5a: TERMUX_VERSION carries 
 		}
 	}
 }
+
+func TestPrepRerunSkipsAfterVerified(t *testing.T) { // H3
+	r := newRig(t, 33)
+	if _, err := prep(r, "\n123456\n", PrepOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	r.calls, prepped = nil, false
+	out, err := prep(r, "-", PrepOpts{})
+	if err != nil || !strings.Contains(out, "recorded by an earlier run") || len(r.adbCalls()) != 0 {
+		t.Errorf("rerun: err %v out %q calls %q", err, out, r.calls)
+	}
+	if st := PhantomState(context.Background(), io.Discard, nil, false); st != PhantomOff || len(r.adbCalls()) != 0 {
+		t.Errorf("doctor with the record: %v %q", st, r.calls)
+	}
+	// On request the phone is asked again.
+	t.Setenv(verifyEnv, "1")
+	r.calls, prepped = nil, false
+	r.wifiOn, r.paired = true, true
+	if st := PhantomState(context.Background(), io.Discard, strings.NewReader(""), true); st != PhantomOff || !r.had("get global settings_enable_monitor_phantom_procs") {
+		t.Errorf("verify: %v %q", st, r.calls)
+	}
+	// A new Android version invalidates the record.
+	t.Setenv(verifyEnv, "")
+	r.sdk, r.wifiOn, r.userOn = 32, false, false
+	if st := PhantomState(context.Background(), io.Discard, nil, false); st != PhantomUnknown {
+		t.Errorf("other sdk: %v", st)
+	}
+}
+
+func TestPrepNotRecordedWhenNotOff(t *testing.T) { // H3 opposite
+	r := newRig(t, 33)
+	prep(r, "\n1\n2\n3\n", PrepOpts{}) // pairing fails
+	r.calls, prepped = nil, false
+	if st := PhantomState(context.Background(), io.Discard, nil, false); st != PhantomUnknown {
+		t.Errorf("a failed run left a record: %v", st)
+	}
+}
+
+func TestPairUsesPairingServiceOnly(t *testing.T) { // H1
+	r := newRig(t, 33)
+	out, err := prep(r, "\n123456\n", PrepOpts{})
+	if err != nil || r.pairCalls != 1 || !r.had("pair 127.0.0.1:41913 123456") {
+		t.Errorf("err %v pairCalls %d out %q", err, r.pairCalls, out)
+	}
+	r = newRig(t, 33) // opposite: no pairing port announced: the port is asked
+	r.noPair = true
+	out, err = prep(r, "\n41913\n123456\n", PrepOpts{})
+	if err != nil || !strings.Contains(out, "pairing port: ") {
+		t.Errorf("err %v out %q", err, out)
+	}
+}
+
+func TestAskTimeout(t *testing.T) { // H3
+	old := askTimeout
+	askTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { askTimeout = old })
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	in := bufioReader(pr)
+	var out bytes.Buffer
+	start := time.Now()
+	if a := ask(&out, in, "q: "); a != "" || time.Since(start) > 2*time.Second || !strings.Contains(out.String(), "no answer within") {
+		t.Errorf("timeout: %q after %v out %q", a, time.Since(start), out.String())
+	}
+	// The abandoned read still owns the reader: the late answer goes to the next question.
+	go pw.Write([]byte("Yes\n"))
+	if a := ask(&out, in, "q: "); a != "yes" {
+		t.Errorf("late answer: %q", a)
+	}
+	// Opposite: an answer in time is returned.
+	askTimeout = time.Minute
+	go pw.Write([]byte("ok\n"))
+	if a := ask(&out, in, "q: "); a != "ok" {
+		t.Errorf("answer: %q", a)
+	}
+}
+
+func TestInterruptRestores(t *testing.T) { // H4
+	r := newRig(t, 33)
+	var raised int
+	var out syncBuf
+	interrupt = func() { raised++ }
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.Close() })
+	go func() {
+		pw.Write([]byte("\n")) // Enter at "switch it on"; then the pairing code is awaited
+		for i := 0; i < 500 && !strings.Contains(out.String(), "pairing code: "); i++ {
+			time.Sleep(10 * time.Millisecond)
+		}
+		syscall.Kill(os.Getpid(), syscall.SIGINT)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- TermuxPrep(&out, PrepOpts{In: pr}) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Ctrl-C at the pairing code did not end the wait")
+	}
+	if !r.had("adb_wifi_enabled 0") || !r.had("disconnect 127.0.0.1:42965") || raised != 1 {
+		t.Errorf("not restored: raised %d calls %q", raised, r.calls)
+	}
+	if r.had("persistent") {
+		t.Errorf("settings changed after the interrupt: %q", r.calls)
+	}
+}
+
+func TestNoInterruptWhenNormal(t *testing.T) { // H4 opposite
+	r := newRig(t, 33)
+	var raised int
+	interrupt = func() { raised++ }
+	if _, err := prep(r, "\n123456\n", PrepOpts{}); err != nil || raised != 0 {
+		t.Errorf("err %v raised %d", err, raised)
+	}
+}
+
+func TestEnterGrace(t *testing.T) { // M1
+	oW, oG := waitFor, graceFor
+	waitFor, graceFor = 30*time.Second, 50*time.Millisecond
+	t.Cleanup(func() { waitFor, graceFor = oW, oG })
+	r := newRig(t, 33)
+	r.hang = true
+	r.paired = true
+	start := time.Now()
+	out, _ := prep(r, "\n42965\n", PrepOpts{})
+	if time.Since(start) > 5*time.Second || !strings.Contains(out, "no Wireless debugging port found") || !r.had("connect 127.0.0.1:42965") {
+		t.Errorf("after %v out %q calls %q", time.Since(start), out, r.calls)
+	}
+}
+
+func TestEnterGraceNotNeeded(t *testing.T) { // M1 opposite: the announcement came: no grace wait
+	oG := graceFor
+	graceFor = 30 * time.Second
+	t.Cleanup(func() { graceFor = oG })
+	r := newRig(t, 33)
+	start := time.Now()
+	if _, err := prep(r, "\n123456\n", PrepOpts{}); err != nil || time.Since(start) > 5*time.Second {
+		t.Errorf("err %v after %v", err, time.Since(start))
+	}
+}
+
+func TestAdbTimeout(t *testing.T) { // M10
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "adb"), []byte("#!/bin/sh\nsleep 5\n"), 0o755)
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	old := adbTimeout
+	adbTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { adbTimeout = old })
+	start := time.Now()
+	err := realAdb(io.Discard, "connect", "127.0.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), "no answer within") || time.Since(start) > 3*time.Second {
+		t.Errorf("err %v after %v", err, time.Since(start))
+	}
+	os.WriteFile(filepath.Join(dir, "adb"), []byte("#!/bin/sh\necho ok\n"), 0o755) // opposite
+	adbTimeout = 5 * time.Second
+	var b bytes.Buffer
+	if err := realAdb(&b, "version"); err != nil || !strings.Contains(b.String(), "ok") {
+		t.Errorf("fast adb: %v %q", err, b.String())
+	}
+}
+
+func TestFlagSyncDisclosed(t *testing.T) { // M11
+	r := newRig(t, 33)
+	out, _ := prep(r, "\n123456\n", PrepOpts{})
+	if !strings.Contains(out, "server-side flags") {
+		t.Errorf("no disclosure: %q", out)
+	}
+	r = newRig(t, 33) // opposite: already off, nothing is changed, nothing is announced
+	r.wifiOn, r.paired, r.monV, r.maxV = true, true, "false", "2147483647"
+	if out, _ = prep(r, "", PrepOpts{}); strings.Contains(out, "server-side flags") {
+		t.Errorf("disclosure without a change: %q", out)
+	}
+}
+
+func TestReadPhantomValueLine(t *testing.T) { // L4
+	r := newRig(t, 33)
+	adb = func(w io.Writer, args ...string) error {
+		if strings.Contains(strings.Join(args, " "), "settings get") {
+			io.WriteString(w, "false\nadb server version (41) doesn't match this client (40); killing...\n")
+		} else {
+			io.WriteString(w, "2147483647\n* daemon started successfully\n")
+		}
+		return nil
+	}
+	if st, err := readPhantom("x"); err != nil || st != PhantomOff {
+		t.Errorf("%v %v", st, err)
+	}
+	adb = func(w io.Writer, args ...string) error { io.WriteString(w, "error: closed\n"); return nil } // opposite
+	if st, err := readPhantom("x"); err == nil || st == PhantomOff {
+		t.Errorf("garbage read as a value: %v %v", st, err)
+	}
+	_ = r
+}
+
+func bufioReader(r io.Reader) *bufio.Reader { return bufio.NewReader(r) }
+
+var realAdb = adb
+
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }

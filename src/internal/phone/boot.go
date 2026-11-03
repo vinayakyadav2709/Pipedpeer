@@ -2,11 +2,15 @@ package phone
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/term"
 )
@@ -40,8 +44,6 @@ func writeBoot(w io.Writer, appVersion string) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return fmt.Errorf("boot: cannot create %s: %w", filepath.Dir(p), err)
 	}
-	record(installed{Paths: []string{p}})
-
 	fi, statErr := os.Stat(p)
 	switch {
 	case statErr == nil:
@@ -49,7 +51,15 @@ func writeBoot(w io.Writer, appVersion string) error {
 		if err != nil {
 			return fmt.Errorf("boot: cannot read %s: %w", p, err)
 		}
-		if bytes.Equal(have, []byte(bootScript)) && fi.Mode().Perm() == 0o755 {
+		ours := slices.Contains(recorded().Paths, p)
+		same := bytes.Equal(have, []byte(bootScript))
+		switch {
+		case !same && !ours:
+			// The user's own script: not ours to replace or to delete later.
+			log.Warn().Str("path", p).Msg("phone: boot script exists with other content; left alone")
+			term.Warn(w, "start on boot: %s exists with other content and is left as it is; add `exec pipedpeer start` to it if you want pipedpeer to start at boot", p)
+			return nil
+		case same && fi.Mode().Perm() == 0o755:
 			term.OK(w, "start on boot: already set (%s)", p)
 			bootNote(w, appVersion)
 			return nil
@@ -58,6 +68,16 @@ func writeBoot(w io.Writer, appVersion string) error {
 		return fmt.Errorf("boot: cannot stat %s: %w", p, statErr)
 	}
 
+	if !errors.Is(statErr, os.ErrNotExist) && !slices.Contains(recorded().Paths, p) {
+		// Same content, wrong mode, not recorded: fix the mode, own nothing.
+		if err := os.Chmod(p, 0o755); err != nil {
+			return fmt.Errorf("boot: cannot set mode on %s: %w", p, err)
+		}
+		term.OK(w, "start on boot: already set (%s)", p)
+		bootNote(w, appVersion)
+		return nil
+	}
+	record(installed{Paths: []string{p}})
 	if err := os.WriteFile(p, []byte(bootScript), 0o755); err != nil {
 		return fmt.Errorf("boot: cannot write %s: %w", p, err)
 	}
@@ -76,4 +96,10 @@ func bootNote(w io.Writer, appVersion string) {
 	if !strings.HasPrefix(appVersion, playVersionPrefix) {
 		term.Action(w, "install Termux:Boot (F-Droid) and open it once, so the start-on-boot script runs")
 	}
+}
+
+// recorded is what setup has recorded as its own.
+func recorded() installed {
+	r, _ := loadRecord()
+	return r
 }

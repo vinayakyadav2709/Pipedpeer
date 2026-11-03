@@ -14,8 +14,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -27,7 +30,11 @@ import (
 // Seams and timings; variables so tests need no phone.
 var (
 	discoverPorts = adbmdns.Discover
-	dialPort      = func(port int) bool {
+	discoverPair  = adbmdns.DiscoverPair
+	// interrupt re-raises the signal that ended a session, once Wireless
+	// debugging is restored.
+	interrupt = func() { syscall.Kill(os.Getpid(), syscall.SIGINT) }
+	dialPort  = func(port int) bool {
 		c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 300*time.Millisecond)
 		if err != nil {
 			return false
@@ -36,6 +43,7 @@ var (
 		return true
 	}
 	probeFor  = 5 * time.Second  // is Wireless debugging on already?
+	graceFor  = 5 * time.Second  // after Enter: how long to wait for the announcement
 	waitFor   = 60 * time.Second // the user switches it on / opens the pairing dialog
 	settleFor = 3 * time.Second  // the connect port stops dialing after "off"
 	pollEvery = 100 * time.Millisecond
@@ -55,6 +63,18 @@ type wifiSession struct {
 	port  int  // connect port; 0 = none found
 	dev   string
 	ended bool
+
+	ctx    context.Context // ends on Ctrl-C / SIGTERM
+	parent context.Context
+	stop   context.CancelFunc
+}
+
+// interrupted is non-nil once a signal ended the session.
+func (s *wifiSession) interrupted() error {
+	if s.ctx.Err() != nil {
+		return errors.New("interrupted")
+	}
+	return nil
 }
 
 // wifiADB connects this phone's adb to itself. needPair: when the connection
@@ -64,10 +84,14 @@ type wifiSession struct {
 // to call, also after an error: it puts Wireless debugging back (off, if it
 // was off at the start) and disconnects.
 func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask bool) (dev string, done func(), err error) {
-	s := &wifiSession{w: w}
-	pctx, cancel := context.WithTimeout(ctx, probeFor)
+	sctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	s := &wifiSession{w: w, ctx: sctx, parent: ctx, stop: stop}
+	pctx, cancel := context.WithTimeout(sctx, probeFor)
 	p, derr := discoverPorts(pctx, false)
 	cancel()
+	if err := s.interrupted(); err != nil {
+		return "", s.done, err
+	}
 	noMcast := errors.Is(derr, adbmdns.ErrNoMulticast)
 	switch {
 	case p.Connect != 0:
@@ -89,15 +113,25 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 			err error
 		}
 		res := make(chan found, 1)
-		wctx, cancel := context.WithTimeout(ctx, waitFor)
+		wctx, cancel := context.WithTimeout(sctx, waitFor)
 		defer cancel()
 		go func() {
 			p, err := discoverPorts(wctx, false)
 			res <- found{p, err}
 		}()
 		fmt.Fprintln(w, "Settings > Developer options > Wireless debugging: switch it off and on again (on for a moment if it is off; pipedpeer switches it off afterwards if it was off)")
-		ask1(w, in, "press Enter when it is on: ")
-		f := <-res
+		askCtx(sctx, w, in, "press Enter when it is on: ")
+		var f found
+		select {
+		case f = <-res:
+		case <-time.After(graceFor):
+			// Enter was pressed and nothing was heard: stop waiting.
+			cancel()
+			f = <-res
+		}
+		if err := s.interrupted(); err != nil {
+			return "", s.done, err
+		}
 		switch {
 		case f.p.Connect != 0:
 			s.port = f.p.Connect
@@ -113,9 +147,12 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 		if !ask {
 			return "", s.done, errNoWireless
 		}
-		if s.port = askPort(w, in, "port under 'IP address & Port' on the Wireless debugging screen: "); s.port == 0 {
+		if s.port = askPort(sctx, w, in, "port under 'IP address & Port' on the Wireless debugging screen: "); s.port == 0 {
 			return "", s.done, errNoWireless
 		}
+	}
+	if err := s.interrupted(); err != nil {
+		return "", s.done, err
 	}
 	s.dev = "127.0.0.1:" + strconv.Itoa(s.port)
 	err = s.connect()
@@ -123,7 +160,7 @@ func wifiADB(ctx context.Context, w io.Writer, in *bufio.Reader, needPair, ask b
 		if !ask {
 			return "", s.done, err
 		}
-		if err = s.pair(ctx, in); err == nil {
+		if err = s.pair(in); err == nil {
 			err = s.connect()
 		}
 	}
@@ -153,21 +190,25 @@ func (s *wifiSession) connect() error {
 	return fmt.Errorf("adb connect: %s", out)
 }
 
-func (s *wifiSession) pair(ctx context.Context, in *bufio.Reader) error {
+func (s *wifiSession) pair(in *bufio.Reader) error {
 	fmt.Fprintln(s.w, "Wireless debugging > \"Pair device with pairing code\" (Termux and Settings in split screen)")
-	wctx, cancel := context.WithTimeout(ctx, waitFor)
-	p, err := discoverPorts(wctx, true)
+	// Only the pairing service is announced while the dialog is open.
+	wctx, cancel := context.WithTimeout(s.ctx, waitFor)
+	p, err := discoverPair(wctx)
 	cancel()
 	pp := p.Pair
 	if pp == 0 {
 		log.Warn().Err(err).Msg("phone: no pairing port found by mDNS; asking")
-		if pp = askPort(s.w, in, "pairing port: "); pp == 0 {
+		if pp = askPort(s.ctx, s.w, in, "pairing port: "); pp == 0 {
 			return errors.New("no pairing port")
 		}
 	}
 	var perr error
 	for i := 0; i < 3; i++ {
-		code := ask(s.w, in, "pairing code: ")
+		code := askCtx(s.ctx, s.w, in, "pairing code: ")
+		if err := s.interrupted(); err != nil {
+			return err
+		}
 		if perr = adb(s.w, "pair", "127.0.0.1:"+strconv.Itoa(pp), code); perr == nil {
 			return nil
 		}
@@ -183,6 +224,13 @@ func (s *wifiSession) done() {
 		return
 	}
 	s.ended = true
+	signalled := s.ctx.Err() != nil && s.parent.Err() == nil
+	defer func() {
+		s.stop()
+		if signalled {
+			interrupt()
+		}
+	}()
 	if !s.wasOn {
 		if s.dev != "" {
 			// May end with the transport closing: the dial check decides.
@@ -214,8 +262,8 @@ func (s *wifiSession) offSoon() bool {
 	}
 }
 
-func askPort(w io.Writer, in *bufio.Reader, q string) int {
-	s := ask(w, in, q)
+func askPort(ctx context.Context, w io.Writer, in *bufio.Reader, q string) int {
+	s := askCtx(ctx, w, in, q)
 	n, err := strconv.Atoi(s)
 	if err != nil || n <= 0 || n > 65535 {
 		log.Warn().Str("answer", s).Msg("phone: not a port number")
@@ -223,6 +271,3 @@ func askPort(w io.Writer, in *bufio.Reader, q string) int {
 	}
 	return n
 }
-
-// ask1 reads one line and drops it (press Enter).
-func ask1(w io.Writer, in *bufio.Reader, q string) { ask(w, in, q) }

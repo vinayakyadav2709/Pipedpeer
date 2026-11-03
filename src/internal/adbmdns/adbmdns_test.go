@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -235,6 +236,53 @@ func TestDiscover(t *testing.T) {
 		defer cancel()
 		p, err := Discover(ctx, false)
 		if err != nil || p.Goodbye || p.Connect != 42965 {
+			t.Fatalf("%v %v", p, err)
+		}
+	})
+	t.Run("H1 DiscoverPair returns on the pairing port alone", func(t *testing.T) {
+		send := rig(t) // nothing dials: the pairing port is not dialed
+		go send(pack(t, []dnsmessage.Resource{srv(pairOwn, 41913)}, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p, err := DiscoverPair(ctx)
+		if err != nil || p != (Ports{Pair: 41913}) {
+			t.Fatalf("%v %v", p, err)
+		}
+	})
+	t.Run("H1 opposite: only the connect port announced, DiscoverPair times out", func(t *testing.T) {
+		send := rig(t, 42965)
+		go send(pack(t, []dnsmessage.Resource{srv(connOwn, 42965)}, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+		p, err := DiscoverPair(ctx)
+		if !errors.Is(err, context.DeadlineExceeded) || p.Pair != 0 {
+			t.Fatalf("%v %v", p, err)
+		}
+	})
+	t.Run("M4 port announced before its listener is up is retried", func(t *testing.T) {
+		send := rig(t)
+		var calls atomic.Int32
+		dialLocal = func(int) bool { return calls.Add(1) >= 3 }
+		go func() {
+			for i := 0; i < 10; i++ {
+				send(pack(t, []dnsmessage.Resource{srv(connOwn, 42965)}, nil))
+				time.Sleep(25 * time.Millisecond)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p, err := Discover(ctx, false)
+		if err != nil || p.Connect != 42965 {
+			t.Fatalf("%v %v", p, err)
+		}
+	})
+	t.Run("M4 opposite: a port that never dials is never returned", func(t *testing.T) {
+		send := rig(t)
+		go send(pack(t, []dnsmessage.Resource{srv(connOwn, 42965)}, nil))
+		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+		defer cancel()
+		p, err := Discover(ctx, false)
+		if !errors.Is(err, context.DeadlineExceeded) || p.Connect != 0 {
 			t.Fatalf("%v %v", p, err)
 		}
 	})

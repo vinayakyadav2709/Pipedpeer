@@ -357,7 +357,7 @@ func TestMachinePhone(t *testing.T) {
 // The phone's phantom-process killer, read Termux-side and passed in as
 // PhoneKiller. "" means no line at all (not a phone, or not read).
 func TestPhoneKiller(t *testing.T) {
-	const unknownFix = "run `pipedpeer doctor` in a terminal; it asks you to turn on Wireless debugging for a moment"
+	const unknownFix = "run `pipedpeer setup` in a terminal (Android 14+: it asks about the \"Disable child process restrictions\" toggle; Android 12-13: it needs Wireless debugging on for a moment). Check again with PIPEDPEER_PHONE_VERIFY=1 pipedpeer doctor"
 	rows := []struct {
 		name, kill string
 		level      Level

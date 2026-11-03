@@ -70,7 +70,7 @@ func TestWriteBootCases(t *testing.T) {
 		}
 	})
 
-	t.Run("3 different content: rewritten", func(t *testing.T) {
+	t.Run("3 user's own different script: left alone, not recorded", func(t *testing.T) {
 		bootFixture(t)
 		if err := os.MkdirAll(filepath.Dir(bootPath()), 0o755); err != nil {
 			t.Fatal(err)
@@ -82,8 +82,39 @@ func TestWriteBootCases(t *testing.T) {
 			t.Fatal(err)
 		}
 		b, _ := os.ReadFile(bootPath())
-		if string(b) != bootScript {
+		if string(b) != "#!/bin/sh\necho old\n" {
+			t.Errorf("content = %q, want the user's script untouched", b)
+		}
+		if slices.Contains(recorded().Paths, bootPath()) {
+			t.Errorf("a script the user wrote must not be recorded for uninstall")
+		}
+	})
+
+	t.Run("3c our recorded script, content differs: rewritten", func(t *testing.T) {
+		bootFixture(t)
+		if err := writeBoot(&bytes.Buffer{}, play); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bootPath(), []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeBoot(&bytes.Buffer{}, play); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(bootPath()); string(b) != bootScript {
 			t.Errorf("content = %q, want the new script", b)
+		}
+	})
+
+	t.Run("3d user's identical script: not recorded", func(t *testing.T) {
+		bootFixture(t)
+		os.MkdirAll(filepath.Dir(bootPath()), 0o755)
+		os.WriteFile(bootPath(), []byte(bootScript), 0o755)
+		if err := writeBoot(&bytes.Buffer{}, play); err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(recorded().Paths, bootPath()) {
+			t.Errorf("a pre-existing script must not be recorded")
 		}
 	})
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -82,6 +83,10 @@ func newDoctorCmd() *cobra.Command {
 			// Set Termux-side and forwarded into the Debian (PIPEDPEER_*).
 			if kill, ok := phone.PhantomFromEnv(); ok {
 				m.PhoneKiller = string(kill)
+			} else if phone.IsTermux() && !phone.InProot() {
+				// A pool-only phone never ran the Debian hook: ask here, without
+				// a prompt (a recorded setup answer or a readable property).
+				m.PhoneKiller = string(phone.PhantomState(ctx, io.Discard, nil, false))
 			}
 
 			out := cmd.OutOrStdout()

@@ -93,8 +93,14 @@ func TermuxPrep(w io.Writer, o PrepOpts) error {
 
 // prepToggle is the SDK 34+ route: the user flips a Developer options toggle.
 func prepToggle(w io.Writer, in *bufio.Reader, hasTerm bool, o PrepOpts) error {
-	if propState() == PhantomOff {
+	sdk := sdkLevel()
+	switch st := propState(); {
+	case st == PhantomOff:
+		markPhantom(sdk)
 		term.OK(w, "phantom-process killer already off")
+		return nil
+	case st == PhantomUnknown && phantomMarked(sdk):
+		term.OK(w, "phantom-process killer already off (as you said earlier)")
 		return nil
 	}
 	if o.NoInstall {
@@ -109,19 +115,30 @@ func prepToggle(w io.Writer, in *bufio.Reader, hasTerm bool, o PrepOpts) error {
 	ask(w, in, "press Enter when it is on: ")
 	switch propState() {
 	case PhantomOff:
+		markPhantom(sdk)
 		term.OK(w, "phantom-process killer off")
 	case PhantomOn:
 		term.Fail(w, "the toggle still reads off; turn on %s and run `pipedpeer setup` again", toggleName)
 		return errors.New("phantom-process killer still on")
 	default:
-		term.OK(w, "phantom-process killer: taken as done")
-		term.Warn(w, "this phone's property cannot be read, so `pipedpeer doctor` cannot confirm the toggle")
+		// Unset (never touched) and unreadable look the same from here.
+		if a := ask(w, in, "this phone does not show the toggle's state; did you turn it on? [y/N] "); a != "y" && a != "yes" {
+			term.Fail(w, "turn on %s and run `pipedpeer setup` again", toggleName)
+			return errors.New("phantom-process killer not confirmed off")
+		}
+		markPhantom(sdk)
+		term.OK(w, "phantom-process killer off (your answer)")
+		term.Warn(w, "this phone's property cannot be read, so `pipedpeer doctor` reports it from your answer")
 	}
 	return nil
 }
 
 // prepAdb is the SDK 31-33 route: Wireless debugging and the pairing code.
 func prepAdb(w io.Writer, in *bufio.Reader, hasTerm bool, o PrepOpts) error {
+	if phantomMarked(sdkLevel()) {
+		term.OK(w, "phantom-process killer already off (recorded by an earlier run)")
+		return nil
+	}
 	if _, err := lookAdb(); err != nil {
 		if o.NoInstall {
 			term.Warn(w, "adb (android-tools) is missing; the phantom-process killer is not checked")

@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -361,20 +363,79 @@ func yes(w io.Writer, in *bufio.Reader, q string) bool {
 	return a == "y" || a == "yes"
 }
 
-func ask(w io.Writer, in *bufio.Reader, q string) string {
-	fmt.Fprint(w, q)
-	s, err := in.ReadString('\n')
-	if err != nil && s == "" {
-		log.Warn().Err(err).Str("question", q).Msg("phone: no answer read")
-	}
-	return strings.ToLower(strings.TrimSpace(s))
+// askTimeout is how long a question waits for an answer; a variable for tests.
+var askTimeout = 5 * time.Minute
+
+type askRes struct {
+	s   string
+	err error
 }
+
+// pendingAsk holds a line read still in flight per reader, so a question that
+// timed out does not leave a second reader on the same terminal.
+var pendingAsk = struct {
+	sync.Mutex
+	m map[*bufio.Reader]chan askRes
+}{m: map[*bufio.Reader]chan askRes{}}
+
+func ask(w io.Writer, in *bufio.Reader, q string) string {
+	return askCtx(context.Background(), w, in, q)
+}
+
+// askCtx asks one question and returns the lowercased answer; "" on EOF, on
+// ctx ending (Ctrl-C) and after askTimeout without an answer.
+func askCtx(ctx context.Context, w io.Writer, in *bufio.Reader, q string) string {
+	fmt.Fprint(w, q)
+	pendingAsk.Lock()
+	ch := pendingAsk.m[in]
+	if ch == nil {
+		ch = make(chan askRes, 1)
+		pendingAsk.m[in] = ch
+		go func() {
+			s, err := in.ReadString('\n')
+			ch <- askRes{s, err}
+		}()
+	}
+	pendingAsk.Unlock()
+	t := time.NewTimer(askTimeout)
+	defer t.Stop()
+	select {
+	case r := <-ch:
+		pendingAsk.Lock()
+		delete(pendingAsk.m, in)
+		pendingAsk.Unlock()
+		if r.err != nil && r.s == "" {
+			log.Warn().Err(r.err).Str("question", q).Msg("phone: no answer read")
+		}
+		return strings.ToLower(strings.TrimSpace(r.s))
+	case <-ctx.Done():
+		fmt.Fprintln(w)
+		return ""
+	case <-t.C:
+		log.Warn().Str("question", q).Dur("after", askTimeout).Msg("phone: no answer in time")
+		term.Warn(w, "no answer within %s; going on without one", askTimeout)
+		return ""
+	}
+}
+
+// adbTimeout bounds every adb call: a connect to a port that accepts but
+// stalls, or a shell on a half-closed transport, must not hang setup.
+var adbTimeout = 30 * time.Second
 
 // adb runs adb with its output to w; a variable for tests.
 var adb = func(w io.Writer, args ...string) error {
-	cmd := termuxexec.Command("adb", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), adbTimeout)
+	defer cancel()
+	cmd := termuxexec.CommandContext(ctx, "adb", args...)
 	cmd.Stdout, cmd.Stderr = w, w
-	return cmd.Run()
+	cmd.WaitDelay = time.Second
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("adb %s: no answer within %s: %w", args[0], adbTimeout, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // phantomOverWifi connects this phone's own adb (wifiADB: ports from mDNS,
@@ -409,7 +470,11 @@ func phantomOverWifi(w io.Writer, in *bufio.Reader) error {
 			errs = append(errs, fmt.Errorf("adb %s: %w", strings.Join(a, " "), err))
 		}
 	}
-	return errors.Join(errs...)
+	err = errors.Join(errs...)
+	if err == nil {
+		clearPhantomMark()
+	}
+	return err
 }
 
 // lookAdb finds adb; a variable for tests.

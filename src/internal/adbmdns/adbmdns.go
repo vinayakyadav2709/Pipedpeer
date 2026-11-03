@@ -143,6 +143,19 @@ func addUnique(l []int, v int) []int {
 // returns once Connect (and Pair when wantPair) is set, or ctx.Err() with what
 // was found.
 func Discover(ctx context.Context, wantPair bool) (Ports, error) {
+	return discover(ctx, true, wantPair)
+}
+
+// DiscoverPair returns as soon as the pairing port is announced: opening the
+// "Pair device with pairing code" dialog announces only that service, so
+// waiting for the connect port as well would block until ctx ends. The
+// pairing port is not dialed (a connection closed mid-handshake can reset the
+// dialog's code).
+func DiscoverPair(ctx context.Context) (Ports, error) {
+	return discover(ctx, false, true)
+}
+
+func discover(ctx context.Context, wantConnect, wantPair bool) (Ports, error) {
 	var found Ports
 	pc, err := Listen()
 	if err != nil {
@@ -169,13 +182,18 @@ func Discover(ctx context.Context, wantPair bool) (Ports, error) {
 			}
 		}
 	}()
-	done := func() bool { return found.Connect != 0 && (!wantPair || found.Pair != 0) }
+	done := func() bool { return (!wantConnect || found.Connect != 0) && (!wantPair || found.Pair != 0) }
+	// tried is cleared on every re-query: a port announced before its
+	// listener is up dials fine a few seconds later.
 	tried := map[int]bool{}
-	pick := func(cands []int, cur int) int {
+	pick := func(cands []int, cur int, dial bool) int {
 		if cur != 0 {
 			return cur
 		}
 		for _, c := range cands {
+			if !dial {
+				return c
+			}
 			if tried[c] {
 				continue
 			}
@@ -199,6 +217,7 @@ func Discover(ctx context.Context, wantPair bool) (Ports, error) {
 		case <-ctx.Done():
 			return found, ctx.Err()
 		case <-tick.C:
+			clear(tried)
 			send()
 		case b, ok := <-pkts:
 			if !ok {
@@ -212,8 +231,12 @@ func Discover(ctx context.Context, wantPair bool) (Ports, error) {
 				log.Printf("adbmdns: skipping packet: %v", err)
 				continue
 			}
-			found.Pair = pick(pair, found.Pair)
-			found.Connect = pick(conn, found.Connect)
+			if wantPair {
+				found.Pair = pick(pair, found.Pair, false)
+			}
+			if wantConnect {
+				found.Connect = pick(conn, found.Connect, true)
+			}
 			if done() {
 				return found, nil
 			}

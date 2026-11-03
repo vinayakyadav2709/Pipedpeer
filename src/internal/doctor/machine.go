@@ -99,7 +99,7 @@ func (m Machine) phoneKiller() []Check {
 		return []Check{{Fail, "phone: phantom-process killer is on (background Termux services get killed)", "pipedpeer setup"}}
 	case "unknown":
 		return []Check{{Warn, "phone: phantom-process killer state unknown",
-			"run `pipedpeer doctor` in a terminal; it asks you to turn on Wireless debugging for a moment"}}
+			"run `pipedpeer setup` in a terminal (Android 14+: it asks about the \"Disable child process restrictions\" toggle; Android 12-13: it needs Wireless debugging on for a moment). Check again with PIPEDPEER_PHONE_VERIFY=1 pipedpeer doctor"}}
 	}
 	return []Check{{Warn, "phone: phantom-process killer state " + m.PhoneKiller + " is not recognised", "pipedpeer setup"}}
 }

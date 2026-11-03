@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -73,6 +75,51 @@ var phantomOffCmds = [][]string{
 	{"shell", "settings", "put", "global", "settings_enable_monitor_phantom_procs", "false"},
 }
 
+// verifyEnv set (non-empty) makes setup and doctor check the phone again even
+// when an earlier run recorded the killer as off.
+const verifyEnv = "PIPEDPEER_PHONE_VERIFY"
+
+// phantomMarkPath records, Termux-side, that the killer was verified off (or,
+// on SDK 34+ where the property cannot always be read, that the user said so).
+// The settings persist across reboots, so setup and doctor need not ask the
+// phone again; the Android version is stored so an OS upgrade invalidates it.
+func phantomMarkPath() string {
+	return filepath.Join(prefix(), "var", "lib", "pipedpeer", "phone-phantom-off")
+}
+
+func markPhantom(sdk int) {
+	p := phantomMarkPath()
+	err := os.MkdirAll(filepath.Dir(p), 0o700)
+	if err == nil {
+		err = os.WriteFile(p, []byte(strconv.Itoa(sdk)+"\n"), 0o600)
+	}
+	if err != nil {
+		log.Warn().Err(err).Str("path", p).Msg("phone: cannot record the phantom-process step; it will be checked again next time")
+	}
+}
+
+// phantomMarked reports a mark for this Android version, unless a re-check is
+// requested.
+func phantomMarked(sdk int) bool {
+	if os.Getenv(verifyEnv) != "" {
+		return false
+	}
+	b, err := os.ReadFile(phantomMarkPath())
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Warn().Err(err).Msg("phone: cannot read the phantom-process record")
+		}
+		return false
+	}
+	return strings.TrimSpace(string(b)) == strconv.Itoa(sdk)
+}
+
+func clearPhantomMark() {
+	if err := os.Remove(phantomMarkPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Warn().Err(err).Msg("phone: cannot remove the phantom-process record")
+	}
+}
+
 // propState is the SDK 34+ state: the override prop, no adb.
 func propState() Phantom {
 	switch getprop(overrideProp) {
@@ -96,7 +143,14 @@ func PhantomState(ctx context.Context, w io.Writer, in io.Reader, ask bool) Phan
 	case sdk < 31:
 		return PhantomNotNeeded
 	case sdk >= 34:
-		return propState()
+		// The property is unset when the toggle was never touched and also
+		// unreadable by this app: only a recorded answer tells them apart.
+		if st := propState(); st != PhantomUnknown || !phantomMarked(sdk) {
+			return st
+		}
+		return PhantomOff
+	case phantomMarked(sdk):
+		return PhantomOff
 	}
 	if _, err := lookAdb(); err != nil {
 		log.Warn().Err(err).Msg("phone: adb missing; cannot read the phantom-process state")
@@ -125,11 +179,15 @@ func adbPhantom(ctx context.Context, w io.Writer, in *bufio.Reader, pair, ask, s
 	}
 	st, err = readPhantom(dev)
 	if err != nil || st == PhantomOff {
+		if st == PhantomOff {
+			markPhantom(sdkLevel())
+		}
 		return st, st == PhantomOff, err
 	}
 	if !set {
 		return st, false, nil
 	}
+	term.Action(w, "this also stops the phone syncing server-side flags (device_config set_sync_disabled_for_tests) until `pipedpeer uninstall` puts it back")
 	var errs []error
 	for _, a := range phantomOffCmds {
 		if err := adb(w, append([]string{"-s", dev}, a...)...); err != nil {
@@ -137,27 +195,37 @@ func adbPhantom(ctx context.Context, w io.Writer, in *bufio.Reader, pair, ask, s
 		}
 	}
 	st, rerr := readPhantom(dev)
+	if rerr == nil && st == PhantomOff {
+		markPhantom(sdkLevel())
+	}
 	return st, false, errors.Join(append(errs, rerr)...)
 }
 
+var (
+	monRe = regexp.MustCompile(`^(true|false|null)$`)
+	maxRe = regexp.MustCompile(`^(null|-?\d+)$`)
+)
+
 // readPhantom reads both settings over adb.
 func readPhantom(dev string) (Phantom, error) {
-	get := func(args ...string) (string, error) {
+	get := func(re *regexp.Regexp, args ...string) (string, error) {
 		var b bytes.Buffer
 		if err := adb(&b, append([]string{"-s", dev, "shell"}, args...)...); err != nil {
 			return "", fmt.Errorf("adb %s: %w", strings.Join(args, " "), err)
 		}
-		lines := strings.Fields(b.String())
-		if len(lines) == 0 {
-			return "", fmt.Errorf("adb %s: empty answer", strings.Join(args, " "))
+		// Only a line that is a value counts: adb may add warnings around it.
+		for _, l := range strings.Split(b.String(), "\n") {
+			if l = strings.TrimSpace(l); re.MatchString(l) {
+				return l, nil
+			}
 		}
-		return lines[len(lines)-1], nil
+		return "", fmt.Errorf("adb %s: no value in %q", strings.Join(args, " "), strings.TrimSpace(b.String()))
 	}
-	mon, err := get("settings", "get", "global", "settings_enable_monitor_phantom_procs")
+	mon, err := get(monRe, "settings", "get", "global", "settings_enable_monitor_phantom_procs")
 	if err != nil {
 		return PhantomUnknown, err
 	}
-	max, err := get("device_config", "get", "activity_manager", "max_phantom_processes")
+	max, err := get(maxRe, "device_config", "get", "activity_manager", "max_phantom_processes")
 	if err != nil {
 		return PhantomUnknown, err
 	}
