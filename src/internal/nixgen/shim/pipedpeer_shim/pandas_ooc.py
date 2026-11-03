@@ -17,7 +17,7 @@ from pipedpeer_shim.pandas_frame import (
 # ---- out-of-core reads: chunked parse + partitioned frame ----
 _OOC_CHUNK = 64 * 1024 * 1024   # bytes of CSV per parsed chunk
 _OOC_BATCH_MAX = 8               # most chunks one request carries
-_OOC_BATCH_CACHE = {"t": 0.0, "n": 2}
+_OOC_BATCH_CACHE = {"t": None, "n": 2}  # "t" None: never asked (see transfer._BW_CACHE)
 
 
 def _ooc_batch():
@@ -26,7 +26,7 @@ def _ooc_batch():
     Probes the local daemon's /health available_mem, clamped to
     [1, _OOC_BATCH_MAX]; falls back to 2 when the daemon is unreachable."""
     now = time.monotonic()
-    if now - _OOC_BATCH_CACHE["t"] < 5.0:
+    if _OOC_BATCH_CACHE["t"] is not None and now - _OOC_BATCH_CACHE["t"] < 5.0:
         return _OOC_BATCH_CACHE["n"]
     n = 2
     if core._URL:
