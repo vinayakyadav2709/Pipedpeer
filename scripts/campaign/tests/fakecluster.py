@@ -81,7 +81,7 @@ class FakeCluster:
             return 0, "4\n"
         if "base64 -d" in cmd or "rm -rf" in cmd:
             return 0, ""
-        if "cat " in cmd and "receipt.json" in cmd:
+        if cmd.startswith("cat ") and "receipt.json" in cmd:
             return 0, json.dumps({"remote_items": 3, "local_items": 5})
         if "jobs last --export json" in cmd:
             return 0, json.dumps({"steps": []})

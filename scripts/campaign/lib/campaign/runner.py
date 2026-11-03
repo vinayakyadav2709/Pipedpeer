@@ -59,6 +59,8 @@ class Context:
         self._staged = set()
         self._nproc = {}
         self.recorder = None
+        self.run_id = None    # the run in flight, for the per-run log names on the PCs
+        self._marker = None   # the Ansible call writing current-run, still running
         self.logfile = os.path.join(self.out_dir, "logs", "%s.log" % self.experiment)
         os.makedirs(os.path.dirname(self.logfile), exist_ok=True)
 
@@ -154,9 +156,33 @@ class Context:
             except systems.StepError as e:
                 self.log("warning: release of %s failed: %s" % (b.name, e))
 
+    def mark(self, value):
+        """Write value (a run id, or "idle") to $LAB_HOME/current-run on every
+        PC, so pp-poll.py stamps its lines with the run (otel/README.md,
+        "Runner integration"). One Ansible fan-out in the background: the
+        previous one is waited for first, so the writes land in order."""
+        self.mark_wait()
+        if not isinstance(self.remote, Remote):
+            return  # a test double: nothing to reach
+        cmd = "mkdir -p %s && printf '%%s\\n' %s > %s/current-run" % (REMOTE_HOME, shlex.quote(value), REMOTE_HOME)
+        env = dict(os.environ, PL_INVENTORY=self.inventory_path)
+        self._marker = subprocess.Popen(["bash", os.path.join(CAMPAIGN, "lib", "ansible.sh"), "sh", "all", cmd],
+                                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def mark_wait(self, timeout=60):
+        if self._marker is not None:
+            try:
+                self._marker.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                self._marker.kill()
+                self.log("warning: writing current-run on the PCs took over %ds" % timeout)
+            self._marker = None
+
     def sync(self):
         script = os.path.join(CAMPAIGN, "sync-r2.sh")
-        if os.path.exists(script):
+        if os.environ.get("PL_SYNC") == "0":
+            self.log("PL_SYNC=0: the caller syncs to R2")
+        elif os.path.exists(script):
             rc = subprocess.call(["bash", script])
             self.log("sync-r2.sh exited %d" % rc)
         else:
@@ -225,6 +251,13 @@ class Context:
     def one_run(self, wl, system, n, repeat, warmup=False, mode="strong", caps=None,
                 reference="plain", extra=None, run=None):
         """Activate system at N, run wl once, append one line. Never raises."""
+        try:
+            return self._one_run(wl, system, n, repeat, warmup, mode, caps, reference, extra, run)
+        finally:
+            self.run_id = None
+            self.mark("idle")
+
+    def _one_run(self, wl, system, n, repeat, warmup, mode, caps, reference, extra, run):
         rec = self.recorder
         run_id = rec.new_run_id()
         logdir = rec.log_dir(run_id)
@@ -236,11 +269,14 @@ class Context:
         line.update(extra or {})
         b = self.backend(system)
         self.log("%s %s n=%d repeat=%d%s" % (wl.id, system, n, repeat, " (warm-up)" if warmup else ""))
+        self.run_id = run_id
+        self.mark(run_id)
         try:
             size = line["size"] = self.size_for(wl, mode, n)
             hosts = b.activate(n, caps)
             line["hosts"] = [h.id for h in hosts]
             env = dict(self.system_env(wl, system, n, hosts, caps), **size)
+            self.mark_wait()
             res = run(b, wl, env, logdir, n) if run else b.run(wl, env, logdir, n)
         except systems.StepError as e:
             line.update({"error": str(e), "failing_pc": e.host or self.inv.head.id, "result_ok": False})
@@ -369,6 +405,7 @@ def main(argv=None):
         ctx.log("interrupted")
         status = 130
     finally:
+        ctx.mark_wait()
         ctx.release_all()
         ctx.log("%d run(s) recorded, %d failed -> %s" % (ctx.recorder.count, ctx.recorder.failed, ctx.recorder.path))
         ctx.sync()

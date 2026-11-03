@@ -29,8 +29,15 @@ import time
 
 STATE = "$HOME/.local/share/pipedpeer-lab"
 WORK = STATE + "/work"
+LOGS = STATE + "/logs"  # the node collector reads ray/, dask/ and pipedpeer-run/ here (otel/README.md)
 RAY_PORT = 6379
 DASK_PORT = 8786
+# Fixed ports, so net/sockets sees Ray's traffic and the metrics agent is at a
+# known address (otel/README.md, "Runner integration" 4 and 5).
+RAY_PORTS = ("--metrics-export-port=8090 --node-manager-port=6380 --object-manager-port=6381 "
+             "--dashboard-agent-listen-port=6382 --dashboard-agent-grpc-port=6383 "
+             "--runtime-env-agent-port=6384 --min-worker-port=10002 --max-worker-port=10999")
+DASK_WORKER_PORTS = "--worker-port 9000:9099 --nanny-port 9100:9199"
 
 # The daemon's API on this PC, with the token from the environment or the
 # one config file (the lab containers have PIPEDPEER_TOKEN set).
@@ -64,7 +71,8 @@ def proc_scan(globs, action):
     line matches globs, then print "PLPROC <count>"."""
     return ("n=0; for d in /proc/[0-9]*; do p=${d#/proc/}; c=$({ tr '\\0' ' ' < $d/cmdline; } 2>/dev/null); "
             "case \"$c\" in %s) n=$((n + 1)); %s;; esac; done; echo \"PLPROC $n\"") % (
-                globs.replace(" ", "?"), action)  # an unquoted case pattern cannot hold a space
+                globs.replace(" ", "[[:space:]]"), action)  # an unquoted case pattern cannot hold a space;
+    # "?" would also match the "-" of logs/pipedpeer-run/ in the wrapping shell's command line
 
 
 def proc_kill(globs, sig="TERM"):
@@ -129,6 +137,12 @@ class Backend:
 
     def envs(self, size):
         return " ".join("%s=%s" % (k, shlex.quote(str(v))) for k, v in sorted(size.items()))
+
+    def logged(self, cmd, sub, prefix=""):
+        """cmd with its output also in LOGS/<sub>/<prefix><run id>.log on the
+        PC, where the node collector reads it; the exit status is cmd's."""
+        log = "%s/%s/%s%s.log" % (LOGS, sub, prefix, self.ctx.run_id or "norun")
+        return "mkdir -p %s/%s; { %s; } > %s 2>&1; rc=$?; cat %s; exit $rc" % (LOGS, sub, cmd, log, log)
 
 
 def _tail(out, n=3):
@@ -271,8 +285,8 @@ class PipedPeer(Backend):
         es = " ".join("-e %s" % shlex.quote("%s=%s" % kv) for kv in sorted(run_env.items()))
         args = " ".join(shlex.quote(a) for a in wl.args)
         script = shlex.quote(wl.script.rsplit("/", 1)[-1])
-        cmd = "cd %s && rm -f receipt.json && pipedpeer run %s -e PIPEDPEER_RECEIPT=receipt.json %s %s %s" % (
-            ws, " ".join(shlex.quote(f) for f in flags), es, script, args)
+        cmd = "cd %s && rm -f receipt.json && %s" % (ws, self.logged("pipedpeer run %s -e PIPEDPEER_RECEIPT=receipt.json %s %s %s" % (
+            " ".join(shlex.quote(f) for f in flags), es, script, args), "pipedpeer-run"))
         t = self.remote.timed(self.inv.head.id, cmd, timeout=timeout or self.ctx.run_timeout)
         res = {"rc": t.rc, "out": t.out, "start_ns": t.start_ns, "end_ns": t.end_ns}
         res.update(self.collect(ws, logdir))
@@ -317,15 +331,18 @@ class Ray(Backend):
         self.stop_all()
         head = self.inv.head
         extra = self.ctx.ray_start_args
-        self.sh_ok(head.id, "%s start --head --port=%d --num-cpus=0 --disable-usage-stats "
-                   "--include-dashboard=false %s" % (self.env_bin("ray"), RAY_PORT, extra),
+        group = "%s-n%d" % (self.ctx.experiment, n)
+        self.sh_ok(head.id, self.logged("%s start --head --port=%d --num-cpus=0 --disable-usage-stats "
+                                        "--include-dashboard=false %s %s" % (self.env_bin("ray"), RAY_PORT, RAY_PORTS, extra),
+                                        "ray", "start-%s-" % group),
                    "ray start --head", timeout=180)
         for i, w in enumerate(self.inv.workers[:n]):
             c = caps[i] if caps else None
             ncpu = str(c or self.ctx.nproc(w))
             pre = ("taskset -c %s " % cpus(c)) if c else ""
-            self.sh_ok(w.id, "%s%s start --address=%s:%d --num-cpus=%s --disable-usage-stats %s" % (
-                pre, self.env_bin("ray"), head.ip, RAY_PORT, ncpu, extra), "ray start (worker)", timeout=180)
+            self.sh_ok(w.id, self.logged("%s%s start --address=%s:%d --num-cpus=%s --disable-usage-stats %s %s" % (
+                pre, self.env_bin("ray"), head.ip, RAY_PORT, ncpu, RAY_PORTS, extra), "ray", "start-%s-" % group),
+                "ray start (worker)", timeout=180)
         probe = ("RAY_ADDRESS=%s:%d %s -c \"import ray; ray.init(address='auto', logging_level='ERROR'); "
                  "print('PLN', sum(1 for x in ray.nodes() if x['Alive'] and x['Resources'].get('CPU', 0) > 0))\""
                  % (head.ip, RAY_PORT, self.env_bin("python3")))
@@ -350,8 +367,8 @@ class Ray(Backend):
         ws = self.stage(wl, "ray")
         script = shlex.quote(wl.script_for("ray").rsplit("/", 1)[-1])
         args = " ".join(shlex.quote(a) for a in wl.args)
-        cmd = "cd %s && env RAY_ADDRESS=%s:%d %s %s %s %s" % (
-            ws, self.inv.head.ip, RAY_PORT, self.envs(size), self.env_bin("python3"), script, args)
+        cmd = "cd %s && %s" % (ws, self.logged("env RAY_ADDRESS=%s:%d %s %s %s %s" % (
+            self.inv.head.ip, RAY_PORT, self.envs(size), self.env_bin("python3"), script, args), "ray", "run-"))
         t = self.remote.timed(self.inv.head.id, cmd, timeout=self.ctx.run_timeout)
         return {"rc": t.rc, "out": t.out, "start_ns": t.start_ns, "end_ns": t.end_ns}
 
@@ -392,17 +409,20 @@ class Dask(Backend):
         self.stop_all()
         head = self.inv.head
         addr = "tcp://%s:%d" % (head.ip, DASK_PORT)
-        self.remote.bg(head.id, STATE + "/logs/dask-scheduler.log", "env %s %s scheduler --port %d --dashboard-address :8787" % (
-            DASK_MARK, self.env_bin("dask"), DASK_PORT))
+        # Appended, so the collector's read offset stays valid across restarts.
+        self.remote.bg(head.id, "/dev/null", "mkdir -p %s/dask; exec env %s %s scheduler --port %d --dashboard-address :8787 >> %s/dask/scheduler.log 2>&1" % (
+            LOGS, DASK_MARK, self.env_bin("dask"), DASK_PORT, LOGS))
         expect = 0
         for i, w in enumerate(self.inv.workers[:n]):
             c = caps[i] if caps else None
             nw = c or self.ctx.nproc(w)
             pre = ("taskset -c %s " % cpus(c)) if c else ""
             expect += nw
-            self.remote.bg(w.id, STATE + "/logs/dask-worker.log",
-                           "env %s %s%s worker %s --nworkers %d --nthreads 1 --no-dashboard %s" % (
-                               DASK_MARK, pre, self.env_bin("dask"), addr, nw, self.ctx.dask_worker_args))
+            # Each worker keeps its dashboard on a random port: pp-poll.py finds it.
+            self.remote.bg(w.id, "/dev/null",
+                           "mkdir -p %s/dask; exec env %s %s%s worker %s --nworkers %d --nthreads 1 %s %s >> %s/dask/worker.log 2>&1" % (
+                               LOGS, DASK_MARK, pre, self.env_bin("dask"), addr, nw, DASK_WORKER_PORTS,
+                               self.ctx.dask_worker_args, LOGS))
         probe = ("%s -c \"from distributed import Client; c = Client('%s', timeout=20); "
                  "w = c.scheduler_info()['workers'].values(); "
                  "print('PLN', len({x['host'] for x in w}), len(w))\"" % (self.env_bin("python3"), addr))
@@ -429,8 +449,8 @@ class Dask(Backend):
         ws = self.stage(wl, "dask")
         script = shlex.quote(wl.script_for("dask").rsplit("/", 1)[-1])
         args = " ".join(shlex.quote(a) for a in wl.args)
-        cmd = "cd %s && env DASK_SCHEDULER=tcp://%s:%d %s %s %s %s" % (
-            ws, self.inv.head.ip, DASK_PORT, self.envs(size), self.env_bin("python3"), script, args)
+        cmd = "cd %s && %s" % (ws, self.logged("env DASK_SCHEDULER=tcp://%s:%d %s %s %s %s" % (
+            self.inv.head.ip, DASK_PORT, self.envs(size), self.env_bin("python3"), script, args), "dask", "run-"))
         t = self.remote.timed(self.inv.head.id, cmd, timeout=self.ctx.run_timeout)
         return {"rc": t.rc, "out": t.out, "start_ns": t.start_ns, "end_ns": t.end_ns}
 

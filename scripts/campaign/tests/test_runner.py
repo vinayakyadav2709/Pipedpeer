@@ -213,3 +213,21 @@ def test_guided_timer_records_one_line_per_attempt(tmp_path):
         ("p1", "pipedpeer", True), ("p1", "dask", False)]
     assert got[0]["commands_typed"] == 7 and got[1]["script_lines_changed"] == 2
     assert got[1]["error"] == "gave up" and all(x["experiment"] == "e10" for x in got)
+
+
+def test_runs_log_where_the_node_collector_reads(make):
+    """otel/README.md "Runner integration" 3-5: each run's output in
+    logs/<system>/…<run_id>.log on pc00, Ray on fixed ports with the metrics
+    agent on 8090, Dask workers on fixed port ranges and appending logs."""
+    ctx, cluster = make()
+    ctx.scaling(["W1"], ["pipedpeer", "ray", "dask"], [2], 1)
+    got = {ln["system"]: ln["run_id"] for ln in lines(ctx) if ln["repeat"] == 1}
+    cmds = [c for _, c in cluster.calls]
+    assert any("logs/pipedpeer-run/%s.log" % got["pipedpeer"] in c and "pipedpeer run" in c for c in cmds)
+    assert any("logs/ray/run-%s.log" % got["ray"] in c for c in cmds)
+    assert any("logs/dask/run-%s.log" % got["dask"] in c for c in cmds)
+    starts = [c for c in cmds if " start --head" in c or " start --address=" in c]
+    assert starts and all("--metrics-export-port=8090" in c and "--node-manager-port=6380" in c for c in starts)
+    bg = [c for c in cmds if c.startswith("bg: ")]
+    assert any(" worker " in c and "--worker-port 9000:9099" in c and ">> " in c and "dask/worker.log" in c for c in bg)
+    assert all("--no-dashboard" not in c for c in bg)

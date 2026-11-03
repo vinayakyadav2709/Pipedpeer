@@ -8,6 +8,9 @@ N and whatever else tells runs apart: mode, variant, phase, fault), with the
 median and interquartile range of wall_s over the repeats. Warm-ups and
 failed runs (error set, or result_ok false) are excluded and counted in
 every row (warmups_excluded, failed_excluded), and summary.txt totals them.
+Lines of an experiment the lab day cut off and ran again are dropped: each
+attempts.jsonl entry (beside runs.jsonl) with status "interrupted" names them
+as the 0-based line range [runs_from_line, runs_to_line).
 
 Figures (results/lab/figures/, PNG and PDF):
   e1_speedup        strong scaling: speedup vs N, a line per system, a panel
@@ -41,10 +44,30 @@ GROUP_EXTRA = ["mode", "variant", "phase", "fault", "extra_package"]
 INK, INK2, GRID = "#0b0b0b", "#52514e", "#e4e3df"
 
 
+def interrupted(runs_path):
+    """0-based runs.jsonl line numbers that belong to cut-off attempts."""
+    path = os.path.join(os.path.dirname(os.path.abspath(runs_path)), "attempts.jsonl")
+    drop = set()
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                try:
+                    a = json.loads(line)
+                except ValueError:
+                    continue
+                if a.get("status") == "interrupted":
+                    drop.update(range(int(a["runs_from_line"]), int(a["runs_to_line"])))
+    return drop
+
+
 def load(path):
-    runs = []
+    runs, drop = [], interrupted(path)
+    if drop:
+        print("dropped %d line(s) of interrupted attempts (attempts.jsonl)" % len(drop), file=sys.stderr)
     with open(path) as f:
         for i, line in enumerate(f, 1):
+            if i - 1 in drop:
+                continue
             line = line.strip()
             if not line:
                 continue

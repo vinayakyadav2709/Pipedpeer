@@ -88,3 +88,20 @@ def test_empty_experiment_skips_its_figure(tmp_path):
     assert p.returncode == 0, p.stderr
     assert "skipped (no usable runs): e4" in p.stdout
     assert not (tmp_path / "figures" / "e4_uneven.png").exists()
+
+
+def test_interrupted_attempt_lines_are_dropped(tmp_path):
+    """A cut-off e4 left two lines (0 and 1); its rerun wrote lines 2-4. Only
+    the rerun counts, so the repeats are not counted twice."""
+    runs = tmp_path / "runs.jsonl"
+    with open(runs, "w") as f:
+        for rep, wall in ((1, 999.0), (2, 999.0), (1, 41.0), (2, 42.0), (3, 43.0)):
+            f.write(json.dumps({"experiment": "e4", "workload": "W1", "system": "ray", "n": 4, "repeat": rep,
+                                "warmup": False, "result_ok": True, "wall_s": wall}) + "\n")
+    (tmp_path / "attempts.jsonl").write_text(
+        json.dumps({"experiment": "e4", "status": "interrupted", "runs_from_line": 0, "runs_to_line": 2}) + "\n"
+        + json.dumps({"experiment": "e4", "status": "ok", "runs_from_line": 2, "runs_to_line": 5}) + "\n")
+    p = subprocess.run([sys.executable, ANALYSE, "--runs", str(runs), "--no-figures"], capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    (row,) = rows(tmp_path / "csv" / "e4.csv")
+    assert row["runs_used"] == "3" and float(row["median_wall_s"]) == 42.0
