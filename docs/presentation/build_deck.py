@@ -194,8 +194,8 @@ HALF = Inches(6.0)
 
 # 1 Title
 s = new_slide(None, notes=(
-    "Good morning. We are Yateen, Vinayak and Sahil. Our guide is Dr. Rupali Sawant and our mentor "
-    "Prof. Dayanand Ambawade. Our project is PipedPeer: it runs an ordinary Python script on the other "
+    "Good morning. We are Yateen, Vinayak and Sahil. Our guide is Dr. Rupali Sawant. "
+    "Our project is PipedPeer: it runs an ordinary Python script on the other "
     "machines around you, without setting up a cluster, without changing the script, and across "
     "different home or college networks."))
 s.shapes.add_picture(str(LOGO), int((W - Inches(1.4)) / 2), Inches(0.45), height=Inches(1.4))
@@ -207,7 +207,7 @@ text(s, Inches(1), Inches(3.5), Inches(11.33), Inches(1.4), [
     "!Vinayak Yadav (UCID 2023300264)",
     "!Sahil Gupta (UCID 2023300072)"], size=20, align=PP_ALIGN.CENTER, spacing=2)
 text(s, Inches(1), Inches(5.0), Inches(11.33), Inches(0.9), [
-    "!Guide: Dr. Rupali Sawant      Mentor: Prof. Dayanand Ambawade"], size=18,
+    "!Guide: Dr. Rupali Sawant"], size=18,
     align=PP_ALIGN.CENTER)
 text(s, Inches(1), Inches(5.8), Inches(11.33), Inches(1.0), [
     "!" + FOOTER + ", Mumbai",
@@ -757,7 +757,7 @@ s = new_slide("Research Publication", notes=(
     "Distributed Computing. Every number in both comes from a recorded measurement."))
 text(s, L, T, CW, CH, [
     "**\"PipedPeer: Zero-Configuration Distributed Computing via Recursive, Decentralised Coordination\"**",
-    (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant, D. Ambawade — IEEE conference format, 6 pages."),
+    (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant — IEEE conference format, 6 pages."),
     (1, "Status: [fill in — e.g. submitted to <conference>, <date>]; plagiarism report attached."),
     "Journal version prepared for the **Journal of Parallel and Distributed Computing** (Elsevier).",
     "Every number in the paper and report traces to a recorded measurement in the repository.",
@@ -787,7 +787,7 @@ text(s, Inches(1), Inches(2.9), Inches(11.33), Inches(1.0), "!Thank You", size=4
 text(s, Inches(1), Inches(4.0), Inches(11.33), Inches(2.0), [
     "!Questions?",
     "!Yateen Vaviya, Vinayak Yadav, Sahil Gupta",
-    "!Guide: Dr. Rupali Sawant   ·   Mentor: Prof. Dayanand Ambawade",
+    "!Guide: Dr. Rupali Sawant",
 ], size=20, align=PP_ALIGN.CENTER)
 
 prs.save(OUT)
