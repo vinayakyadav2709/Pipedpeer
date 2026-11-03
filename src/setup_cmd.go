@@ -140,6 +140,11 @@ Use -y to answer yes to every question.`,
 				}
 			}
 			code, _ := cmd.Flags().GetString("connect")
+			if code == "" {
+				// The invite carries the cluster secret; the installer passes
+				// it here to keep it out of the process list.
+				code = os.Getenv(connectCodeEnv)
+			}
 			o := setup.Options{AutoYes: autoYes, NoInstall: noInstall,
 				Port: daemonctl.DefaultPort, Joining: code != ""}
 			outcome, err := runSetup(cmd.OutOrStdout(), o, code)
@@ -162,26 +167,39 @@ Use -y to answer yes to every question.`,
 	return cmd
 }
 
+// connectCodeEnv is read when --connect is not given.
+const connectCodeEnv = "PIPEDPEER_CONNECT_CODE"
+
 // Seam: tests replace setup.Run so no system is touched.
 var setupRun = setup.Run
 
 // runSetup runs setup, then joins with code when one was given, or else
-// starts the warm-up itself. The returned outcome is the exit code: only a
-// join that was not fully connected makes it non-zero.
+// starts the warm-up itself (neither under --no-install). The returned
+// outcome is the exit code: a join that was not fully connected, or that did
+// not run because setup stopped, is non-zero. A bad code is refused before
+// setup changes anything.
 func runSetup(out io.Writer, o setup.Options, code string) (connOutcome, error) {
+	if code != "" {
+		if _, ok := decodeInvite(out, code); !ok {
+			return connFailed, nil
+		}
+	}
 	port, err := setupRun(o)
 	if err != nil {
 		return connFailed, err
 	}
 	if port <= 0 {
 		if code != "" {
-			term.Action(out, "once setup has completed, run `pipedpeer connect %s`", code)
+			term.Action(out, "setup did not finish, so this machine has not joined: once it has, run `pipedpeer connect <code>`")
+			return connFailed, nil
 		}
 		return connConnected, nil
 	}
 	if code != "" {
-		return runConnectFn(out, code)
+		return runConnectFn(out, code, !o.NoInstall)
 	}
-	startWarmupFn(out)
+	if !o.NoInstall {
+		startWarmupFn(out)
+	}
 	return connConnected, nil
 }

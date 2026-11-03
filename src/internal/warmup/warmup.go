@@ -73,58 +73,124 @@ func Running() bool {
 	return last != "done" && !strings.HasPrefix(last, "failed")
 }
 
-// Done reports whether the log is a finished warm-up for this build and torch
-// kind: the last line is "done" and the header ends with the marker
-// "build=<version> torch=<CPU|CUDA>". A log from a build without the marker
-// is not Done, so the first run after an upgrade rebuilds once.
-func Done(version string, nvidia bool) bool {
+// Result says what Start did.
+type Result int
+
+const (
+	Started        Result = iota // a new build was launched
+	AlreadyRunning               // another warm-up is running (or starting)
+	AlreadyDone                  // finished for this build and torch kind
+	RecentlyFailed               // this build failed within failBackoff; not retried yet
+)
+
+// failBackoff is how long a failed build is not retried: setup and connect
+// would otherwise re-launch the same multi-GB build on every run.
+const failBackoff = 10 * time.Minute
+
+// buildable reports whether version identifies one build. "dev" and an
+// empty version name every local build alike, and a version with spaces
+// cannot be read back from the header, so none of them is ever Done or
+// backed off: they rebuild (the run itself is cached by nix).
+func buildable(version string) bool {
+	return version != "" && version != "dev" && !strings.ContainsAny(version, " \t\r\n")
+}
+
+// readLog returns the log's lines, or nil when absent or unreadable.
+func readLog() []string {
 	body, err := os.ReadFile(LogPath())
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			fmt.Fprintf(os.Stderr, "pipedpeer: reading %s: %v\n", LogPath(), err)
 		}
-		return false
+		return nil
 	}
-	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	return strings.Split(strings.TrimSpace(string(body)), "\n")
+}
+
+// sameBuild reports whether the header carries "build=<version>
+// torch=<kind>" for this build.
+func sameBuild(header, version string, nvidia bool) bool {
+	f := strings.Fields(header)
+	n := len(f)
+	return buildable(version) && n >= 2 && f[n-2] == "build="+version && f[n-1] == "torch="+kind(nvidia)
+}
+
+// Done reports whether the log is a finished warm-up for this build and torch
+// kind: the last line is "done" and the header ends with the marker
+// "build=<version> torch=<CPU|CUDA>". A log from a build without the marker
+// is not Done, so the first run after an upgrade rebuilds once.
+func Done(version string, nvidia bool) bool {
+	lines := readLog()
 	if len(lines) < 2 || lines[len(lines)-1] != "done" {
 		return false
 	}
-	f := strings.Fields(lines[0])
-	n := len(f)
-	return n >= 2 && f[n-2] == "build="+version && f[n-1] == "torch="+kind(nvidia)
+	return sameBuild(lines[0], version, nvidia)
+}
+
+// recentlyFailed: the last line is a failure of this same build, written
+// less than failBackoff ago.
+func recentlyFailed(version string, nvidia bool) bool {
+	fi, err := os.Stat(LogPath())
+	if err != nil || time.Since(fi.ModTime()) > failBackoff {
+		return false
+	}
+	lines := readLog()
+	return len(lines) >= 2 && strings.HasPrefix(lines[len(lines)-1], "failed") &&
+		sameBuild(lines[0], version, nvidia)
 }
 
 // Start launches the warm-up detached from this process (it outlives the
-// CLI) and returns at once. It does nothing when a warm-up is Running or
-// Done for this version and torch kind.
-func Start(exe, version string, nvidia bool) error {
-	if Running() || Done(version, nvidia) {
-		return nil
+// CLI) and returns at once. It does nothing when a warm-up is Running, Done
+// for this version and torch kind, or failed a moment ago. A lock file makes
+// the check and the launch one step across processes.
+func Start(exe, version string, nvidia bool) (Result, error) {
+	if err := os.MkdirAll(userdir.State(), 0o755); err != nil {
+		return Started, fmt.Errorf("state dir: %w", err)
+	}
+	lock, err := os.OpenFile(filepath.Join(userdir.State(), "warmup.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return Started, fmt.Errorf("warm-up lock: %w", err)
+	}
+	defer lock.Close() // closing releases the flock
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return AlreadyRunning, nil
+		}
+		return Started, fmt.Errorf("warm-up lock: %w", err)
+	}
+	switch {
+	case Running():
+		return AlreadyRunning, nil
+	case Done(version, nvidia):
+		return AlreadyDone, nil
+	case recentlyFailed(version, nvidia):
+		return RecentlyFailed, nil
 	}
 	// Its own directory: run ships the working directory as the workspace.
 	dir := filepath.Join(userdir.Data(), "warmup")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("warm-up dir: %w", err)
+		return Started, fmt.Errorf("warm-up dir: %w", err)
 	}
 	script := filepath.Join(dir, "common.py")
 	if err := os.WriteFile(script, commonPy, 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", script, err)
+		return Started, fmt.Errorf("writing %s: %w", script, err)
 	}
-	if err := os.MkdirAll(userdir.State(), 0o755); err != nil {
-		return fmt.Errorf("state dir: %w", err)
+	// The earlier log (a failure's details) survives one rerun.
+	if err := os.Rename(LogPath(), LogPath()+".prev"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(os.Stderr, "pipedpeer: keeping the earlier warm-up log: %v\n", err)
 	}
 	head := fmt.Sprintf("%s building the common environment (numpy, pandas, scikit-learn, scipy, "+
 		"matplotlib, seaborn, tqdm, torch %s) build=%s torch=%s\n",
 		time.Now().Format(time.RFC3339), kind(nvidia), version, kind(nvidia))
 	if err := os.WriteFile(LogPath(), []byte(head), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", LogPath(), err)
+		return Started, fmt.Errorf("writing %s: %w", LogPath(), err)
 	}
 	cmd := termuxexec.Command("sh", append([]string{"-c", shell, exe}, Args(script, nvidia)...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PIPEDPEER_WARMUP_LOG="+LogPath())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting the warm-up: %w", err)
+		return Started, fmt.Errorf("starting the warm-up: %w", err)
 	}
-	return cmd.Process.Release()
+	return Started, cmd.Process.Release()
 }

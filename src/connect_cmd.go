@@ -38,7 +38,7 @@ func newConnectCmd() *cobra.Command {
 		Short: "Join the cluster of the machine that printed this code (pipedpeer invite)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			outcome, err := runConnect(cmd.OutOrStdout(), args[0])
+			outcome, err := runConnect(cmd.OutOrStdout(), args[0], true)
 			if err != nil {
 				return err
 			}
@@ -50,10 +50,8 @@ func newConnectCmd() *cobra.Command {
 	}
 }
 
-// runConnect is connect's body: it joins the cluster the code names and
-// returns how that went. A bad code is connFailed with a nil error; it never
-// exits, so setup --connect can call it. The warm-up starts unless failed.
-func runConnect(out io.Writer, code string) (connOutcome, error) {
+// decodeInvite decodes the code, or says what is wrong with it and what to do.
+func decodeInvite(out io.Writer, code string) (invite.Invite, bool) {
 	inv, err := invite.Decode(code)
 	if err != nil {
 		term.Fail(out, "not connected: %v", err)
@@ -62,6 +60,18 @@ func runConnect(out io.Writer, code string) (connOutcome, error) {
 		} else {
 			term.Action(out, "copy the whole `pipedpeer connect ...` line from `pipedpeer invite` again")
 		}
+		return inv, false
+	}
+	return inv, true
+}
+
+// runConnect is connect's body: it joins the cluster the code names and
+// returns how that went. A bad code is connFailed with a nil error; it never
+// exits, so setup --connect can call it. The warm-up starts unless failed or
+// warm is false (setup --no-install).
+func runConnect(out io.Writer, code string, warm bool) (connOutcome, error) {
+	inv, ok := decodeInvite(out, code)
+	if !ok {
 		return connFailed, nil
 	}
 	nodeID, err := identity.GetOrCreate()
@@ -94,8 +104,10 @@ func runConnect(out io.Writer, code string) (connOutcome, error) {
 		return connFailed, err
 	}
 	term.OK(out, "joining through %s", strings.Join(inv.Addrs, ", "))
-	if err := setup.TrustAfterJoin(); err != nil {
-		term.Warn(out, "system nix does not trust the cluster's keys yet: %v", err)
+	if err := setup.TrustAfterJoin(); errors.Is(err, setup.ErrNeedsSetup) {
+		term.Action(out, "run `pipedpeer setup` so nix can fetch from the other machines")
+	} else if err != nil {
+		term.Warn(out, "nix is not fully set up for the cluster yet: %v", err)
 		term.Action(out, "run `pipedpeer setup` so this machine accepts the other machines' environments")
 	}
 
@@ -103,7 +115,7 @@ func runConnect(out io.Writer, code string) (connOutcome, error) {
 	res := waitConnected(base, connectWait)
 	printConnResult(out, res)
 	pruneIntroducers(base, inv.Addrs)
-	if res.outcome != connFailed {
+	if warm && res.outcome != connFailed {
 		startWarmupFn(out)
 	}
 	return res.outcome, nil

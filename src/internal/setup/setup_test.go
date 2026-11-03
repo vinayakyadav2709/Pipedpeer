@@ -1,7 +1,9 @@
 package setup
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,6 +191,9 @@ func fakeTrust(t *testing.T, untrusted func([]string) ([]string, bool, error)) (
 	runAsRoot = func(script string) error { *ran = append(*ran, script); return nil }
 	helperReady = func() bool { return len(*ran) > 0 }
 	helperAdd = func(keys []string) error { *added = append(*added, keys...); return nil }
+	es := ensureSubstituter
+	t.Cleanup(func() { ensureSubstituter = es })
+	ensureSubstituter = func(io.Writer, bool, bool) error { return nil }
 	return ran, added
 }
 
@@ -320,5 +325,65 @@ func TestSetupPrefersTheSystemNix(t *testing.T) {
 	canBecomeRoot = func() bool { return false }
 	if err := installNix(); err != nil || strings.Join(did, ",") != "private" {
 		t.Errorf("without root: err=%v did=%v, want private only", err, did)
+	}
+}
+
+// TestJoinSubstituterErrors (L1, M7): join reports a peer-cache failure as
+// such, and a machine that needs setup as ErrNeedsSetup; success is nil.
+func TestJoinSubstituterErrors(t *testing.T) {
+	boom := errors.New("boom")
+	for _, c := range []struct {
+		name       string
+		ret        error
+		wantNeeds  bool
+		wantSubstr string
+	}{
+		{"needs setup", ErrNeedsSetup, true, ""},
+		{"helper sync failed", boom, false, "peer cache for nix"},
+		{"fine", nil, false, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			writeClusterKeys(t, "pipedpeer-self:AAAA=")
+			fakeTrust(t, func([]string) ([]string, bool, error) { return nil, false, nil })
+			calls := 0
+			ensureSubstituter = func(_ io.Writer, interactive, autoYes bool) error {
+				calls++
+				if interactive || autoYes {
+					t.Errorf("join must not prompt: interactive=%v autoYes=%v", interactive, autoYes)
+				}
+				return c.ret
+			}
+			err := TrustAfterJoin()
+			if calls != 1 {
+				t.Fatalf("ensureSubstituter called %d times", calls)
+			}
+			if errors.Is(err, ErrNeedsSetup) != c.wantNeeds {
+				t.Fatalf("err = %v, ErrNeedsSetup want %v", err, c.wantNeeds)
+			}
+			if c.ret == boom && (err == nil || !errors.Is(err, boom) || !strings.Contains(err.Error(), c.wantSubstr)) {
+				t.Fatalf("err = %v", err)
+			}
+			if c.ret == nil && err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// TestPeerCacheCheckOnly (L2): --no-install neither asks nor sets up; the
+// opposite row does.
+func TestPeerCacheCheckOnly(t *testing.T) {
+	for _, noInstall := range []bool{true, false} {
+		fakeTrust(t, func([]string) ([]string, bool, error) { return nil, false, nil })
+		calls := 0
+		ensureSubstituter = func(io.Writer, bool, bool) error { calls++; return nil }
+		var out bytes.Buffer
+		peerCache(&out, false, noInstall)
+		if want := map[bool]int{true: 0, false: 1}[noInstall]; calls != want {
+			t.Errorf("noInstall=%v: %d calls, want %d", noInstall, calls, want)
+		}
+		if noInstall && !strings.Contains(out.String(), "without --no-install") {
+			t.Errorf("no hint: %q", out.String())
+		}
 	}
 }

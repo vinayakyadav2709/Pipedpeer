@@ -47,8 +47,16 @@ case "$CHANNEL" in
   *) echo "Unknown channel: $CHANNEL (expected 'nightly' or 'stable')" >&2; exit 1 ;;
 esac
 
+# The code carries the cluster secret. It goes to setup in the environment, not
+# on its command line (visible in `ps`). Termux re-runs setup inside proot from
+# its argv, which must therefore carry it.
+SETUP_ENV=()
 if [[ -n "$CONNECT_CODE" ]]; then
-  SETUP_ARGS+=("--connect" "$CONNECT_CODE")
+  if [[ -n "${TERMUX_VERSION:-}" ]]; then
+    SETUP_ARGS+=("--connect" "$CONNECT_CODE")
+  else
+    SETUP_ENV=("PIPEDPEER_CONNECT_CODE=$CONNECT_CODE")
+  fi
 fi
 
 BINARY_NAME="pipedpeer"
@@ -154,14 +162,27 @@ fi
 # Under `curl | bash` stdin is the script pipe, so setup reads the terminal from
 # /dev/tty when there is one. Without a terminal (CI, ssh without -t) setup keeps
 # the inherited stdin and its prompts take their non-interactive answers.
+# Its exit code is kept (1 failed, 2 joined only partly) so the closing line
+# can say what happened.
+run_setup() {
+  env ${SETUP_ENV[@]+"${SETUP_ENV[@]}"} "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+}
+rc=0
 if [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
-  "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"} </dev/tty
+  run_setup </dev/tty || rc=$?
 else
-  "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+  run_setup || rc=$?
 fi
 
 echo
-if [[ -n "$CONNECT_CODE" ]]; then
+if [[ $rc -ne 0 ]]; then
+  if [[ -n "$CONNECT_CODE" ]]; then
+    echo "NOT joined (setup exit $rc): see the messages above; then run 'pipedpeer connect <code>'." >&2
+  else
+    echo "Setup did not finish (exit $rc): see the messages above." >&2
+  fi
+  exit "$rc"
+elif [[ -n "$CONNECT_CODE" ]]; then
   echo "joined; \`pipedpeer status\`"
 else
   echo "Next: run 'pipedpeer invite' on the first machine; on every other machine run 'pipedpeer connect <invite>'."

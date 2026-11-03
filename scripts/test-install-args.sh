@@ -30,7 +30,9 @@ stub_src="$work/stub-src"
 cat > "$stub_src" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$@" > "$STUB_OUT"
+printf '%s' "${PIPEDPEER_CONNECT_CODE:-}" > "$STUB_OUT.env"
 if [ -t 0 ]; then echo tty > "$STUB_OUT.stdin"; else echo notty > "$STUB_OUT.stdin"; fi
+exit "${STUB_EXIT:-0}"
 EOF
 cp "$stub_src" "$rel/download/nightly-v0.9.1/$artifact"
 (cd "$rel/download/nightly-v0.9.1" && sha256sum "$artifact" > checksums.txt)
@@ -67,19 +69,35 @@ else
   bad 6.1 "rc=$rc args=[$(echo "$args" | tr '\n' ' ')]"
 fi
 
-# 6.2 --version v0.9.1 --connect PP1-abc → setup runs with --connect PP1-abc
+# 6.2 --version v0.9.1 --connect PP1-abc → setup runs with the code in its
+# environment, not on its command line (M5)
 run_case 6.2 --version v0.9.1 --connect PP1-abc
-if [[ $rc -eq 0 && "$args" == "$(printf 'setup\n--connect\nPP1-abc')" \
+if [[ $rc -eq 0 && "$args" == "setup" && "$(cat "$STUB_OUT.env")" == "PP1-abc" \
       && "$out" == *"joined; \`pipedpeer status\`"* && "$out" != *"Next:"* ]]; then
   ok 6.2
 else
   bad 6.2 "rc=$rc args=[$(echo "$args" | tr '\n' ' ')]"
 fi
 
-# 6.3 --connect=PP1-abc -y → setup gets -y and --connect PP1-abc, any order
+# 6.2b on Termux the code stays in argv (proot re-run) and not in the env
+TERMUX_VERSION=0.118 PREFIX="$work/prefix" run_case 6.2b --connect PP1-abc
+if [[ "$args" == "$(printf 'setup\n--connect\nPP1-abc')" && -z "$(cat "$STUB_OUT.env" 2>/dev/null)" ]]; then
+  ok 6.2b
+else
+  bad 6.2b "rc=$rc args=[$(echo "$args" | tr '\n' ' ')]"
+fi
+
+# 6.2c setup exits 1 with --connect (declined or failed) → installer fails, no "joined" (H1)
+STUB_EXIT=1 run_case 6.2c --connect PP1-abc
+if [[ $rc -eq 1 && "$out" != *"joined;"* && "$out" == *"NOT joined"* ]]; then ok 6.2c; else bad 6.2c "rc=$rc out=$out"; fi
+# ... and exit 2 (partly) is passed through
+STUB_EXIT=2 run_case 6.2d --connect PP1-abc
+if [[ $rc -eq 2 && "$out" == *"NOT joined"* ]]; then ok 6.2d; else bad 6.2d "rc=$rc out=$out"; fi
+
+# 6.3 --connect=PP1-abc -y → setup gets -y and the code in its environment
 run_case 6.3 --connect=PP1-abc -y
-want_sorted="$(printf '%s\n' setup -y --connect PP1-abc | sort | tr '\n' ' ')"
-if [[ $rc -eq 0 && "$(sorted_args)" == "$want_sorted" ]]; then
+want_sorted="$(printf '%s\n' setup -y | sort | tr '\n' ' ')"
+if [[ $rc -eq 0 && "$(sorted_args)" == "$want_sorted" && "$(cat "$STUB_OUT.env")" == "PP1-abc" ]]; then
   ok 6.3
 else
   bad 6.3 "rc=$rc args=[$(echo "$args" | tr '\n' ' ')]"
@@ -131,13 +149,16 @@ sys.exit(os.waitstatus_to_exitcode(st))
     bad 6.6 "rc=$rc stdin=$stdin_kind args=[$(echo "$args" | tr '\n' ' ')]"
   fi
 else
-  bad 6.6 "python3 not available to make a pty"
+  echo "skip 6.6 (no python3 to make a pty)"
 fi
 
 # 6.7 no terminal (setsid: no controlling tty) → setup gets stdin as today
 dir7="$work/case-6.7"; mkdir -p "$dir7/bin"
 export STUB_OUT="$dir7/args"
 export PIPEDPEER_RELEASE_BASE_URL="file://$rel" PIPEDPEER_INSTALL_DIR="$dir7/bin"
+if ! command -v setsid >/dev/null 2>&1; then
+  echo "skip 6.7 (no setsid)"
+else
 setsid -w sh -c 'cat "$1" | bash -s -- "${@:2}"' sh "$installer" --version v0.9.1 </dev/null >"$dir7/out" 2>&1
 rc=$?
 args="$(cat "$STUB_OUT" 2>/dev/null || true)"
@@ -146,6 +167,7 @@ if [[ $rc -eq 0 && "$args" == "setup" && "$stdin_kind" == "notty" ]]; then
   ok 6.7
 else
   bad 6.7 "rc=$rc stdin=$stdin_kind args=[$(echo "$args" | tr '\n' ' ')] out=$(cat "$dir7/out")"
+fi
 fi
 
 echo "---"

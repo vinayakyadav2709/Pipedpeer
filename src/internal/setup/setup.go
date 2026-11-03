@@ -273,12 +273,15 @@ func TrustAfterJoin() error {
 }
 
 // joinSubstituter lets the peer cache be set up after a join, without
-// prompting; a machine that needs `pipedpeer setup` for it is not an error.
+// prompting. A machine that needs `pipedpeer setup` for it returns
+// ErrNeedsSetup (the caller says so); any other failure is wrapped so it is
+// not mistaken for a trust problem.
 func joinSubstituter() error {
-	if err := ensureSubstituter(io.Discard, false, false); err != nil && !errors.Is(err, ErrNeedsSetup) {
+	err := ensureSubstituter(io.Discard, false, false)
+	if err == nil || errors.Is(err, ErrNeedsSetup) {
 		return err
 	}
-	return nil
+	return fmt.Errorf("peer cache for nix: %w", err)
 }
 
 // applyTrust has the key helper add keys, installing it first (the one sudo
@@ -757,11 +760,21 @@ func Run(o Options) (int, error) {
 	// Ports before the daemon: peers that find it should be able to reach it.
 	networkReport(autoYes)
 
-	if err := ensureSubstituter(os.Stdout, true, autoYes); err != nil {
-		term.Warn(os.Stdout, "peer cache for nix not set up: %v", err)
-	}
+	peerCache(os.Stdout, autoYes, noInstall)
 
 	return startAndReport(daemonPort, profileLoaded || serviceNew, o.Joining)
+}
+
+// peerCache sets up nix's access to the peers' builds. Check-only mode
+// (--no-install) changes and asks nothing.
+func peerCache(w io.Writer, autoYes, noInstall bool) {
+	if noInstall {
+		term.Action(w, "run `pipedpeer setup` without --no-install to let nix fetch from the other machines")
+		return
+	}
+	if err := ensureSubstituter(w, true, autoYes); err != nil {
+		term.Warn(w, "peer cache for nix not set up: %v", err)
+	}
 }
 
 // startAndReport starts the daemon under this machine's identity and prints

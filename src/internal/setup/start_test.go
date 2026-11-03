@@ -1,6 +1,8 @@
 package setup
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -124,5 +126,28 @@ func TestPublicAddressFirst(t *testing.T) {
 	}
 	if publicHint("203.0.113.7", []string{"10.0.0.2"}) || publicHint("", []string{"10.0.0.2", "203.0.113.9"}) {
 		t.Error("hint printed although a public address exists")
+	}
+}
+
+// TestJoiningPrintsNoInviteLine (M7): a machine that creates a cluster while
+// joining another prints no invite line; one that does not join prints it.
+func TestJoiningPrintsNoInviteLine(t *testing.T) {
+	for _, joining := range []bool{true, false} {
+		isolate(t)
+		(&fakeDaemon{}).install(t)
+		r, w, _ := os.Pipe()
+		old := os.Stdout
+		os.Stdout = w
+		_, err := startAndReport(daemonctl.DefaultPort, false, joining)
+		os.Stdout = old
+		w.Close()
+		out, _ := io.ReadAll(r)
+		has := strings.Contains(string(out), "cluster created")
+		if joining && (err != nil || has) {
+			t.Errorf("joining: err=%v output %q", err, out)
+		}
+		if !joining && err == nil && !has {
+			t.Errorf("not joining: no invite line in %q", out)
+		}
 	}
 }
