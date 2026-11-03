@@ -40,9 +40,12 @@ SUDOERS=/etc/sudoers.d/pipedpeer-lab
 PORTS=(22/tcp 4242/tcp 4242/udp 4243/udp 4244/udp 4317/tcp 5201/tcp 8137/tcp)
 # What the campaign may create in the lab user's home. undo removes each one
 # that did not exist before setup (and parents it made, when empty).
+# (motd.legal-displayed: Ubuntu writes it on the first ssh login; snowflake,
+# pip, virtualenv: the day's Ansible venv; rclone: sync-r2.sh.)
 HOME_PATHS=(pipedpeer-lab .ansible .nix-profile .nix-defexpr .nix-channels .ssh/known_hosts
-  .cache/nix .cache/pipedpeer .local/state/nix .local/state/pipedpeer
-  .local/share/pipedpeer .local/share/pipedpeer-lab .config/pipedpeer .config/pipedpeer-lab .config/nix)
+  .cache/nix .cache/pipedpeer .cache/pip .cache/virtualenv .cache/snowflake .cache/motd.legal-displayed
+  .local/state/nix .local/state/pipedpeer .local/share/pipedpeer .local/share/pipedpeer-lab
+  .config/pipedpeer .config/pipedpeer-lab .config/nix .config/rclone)
 HOME_PARENTS=(.cache .local/state .local/share .local .config)
 
 log()  { echo "[lab] $*"; }
@@ -415,13 +418,13 @@ launch_day() {
     --setenv=LAB_PIPEDPEER_VERSION="$PIPEDPEER_VERSION")
   local v
   # Tests and overrides, passed through only when set.
-  for v in LAB_DISCOVER_TIMEOUT LAB_PROFILE LAB_SUBNET PIPEDPEER_LAB_S3_ENDPOINT LAB_DAY_TEST; do
+  for v in LAB_DISCOVER_TIMEOUT LAB_PROFILE LAB_SUBNET PIPEDPEER_LAB_S3_ENDPOINT; do
     [[ -n ${!v:-} ]] && envs+=(--setenv="$v=${!v}")
   done
   # A system unit owned by the lab user: it survives closing the terminal,
   # logging out and the screen lock, and needs no linger.
   systemd-run --quiet --unit="$UNIT" --uid="$LAB_USER" --gid="$(id -g "$LAB_USER")" \
-    -p WorkingDirectory="$REPO" -p KillMode=control-group "${envs[@]}" \
+    -p WorkingDirectory="$REPO" -p KillMode=control-group -p SyslogIdentifier="$UNIT" "${envs[@]}" \
     /bin/bash "$REPO/scripts/campaign/lab-day.sh" || die "systemd-run failed"
   log "started the lab day as the systemd unit $UNIT"
 }
@@ -431,7 +434,8 @@ follow_day() {
     "You may close this terminal. To look again later, type:" \
     "  curl -fsSL $SITE/lab.sh | sudo bash -s -- status" \
     "or follow the full log:  sudo journalctl -fu $UNIT"
-  journalctl -fu "$UNIT" -o cat -n 30 &
+  # The day's own output only (sudo logs into the same unit).
+  journalctl -fu "$UNIT" -t "$UNIT" -o cat -n 30 &
   local jp=$!
   while unit_active; do sleep 5; done
   sleep 2; kill "$jp" 2>/dev/null || true; wait "$jp" 2>/dev/null || true
@@ -469,7 +473,7 @@ status() {
   local prog=${home:-/nonexistent}/pipedpeer-lab/progress.txt
   echo "unit $UNIT: $(systemctl is-active "$UNIT" 2>/dev/null || true)"
   if [[ -f $prog ]]; then cat "$prog"
-  else journalctl -u "$UNIT" -o cat -n 40 --no-pager 2>/dev/null || echo "no lab day on this PC"; fi
+  else journalctl -u "$UNIT" -t "$UNIT" -o cat -n 40 --no-pager 2>/dev/null || echo "no lab day on this PC"; fi
 }
 
 # --- undo ------------------------------------------------------------------

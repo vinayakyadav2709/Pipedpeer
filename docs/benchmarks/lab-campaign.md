@@ -6,6 +6,8 @@ The lab: 60+ Linux PCs, CPU only, root on all, anything may be installed. The ca
 
 ## Part 1: for the operator
 
+> **Superseded by the headless lab day** ([scripts/campaign/HEADLESS.md](../../scripts/campaign/HEADLESS.md)): no laptop; one `curl … | sudo bash` line on every PC, `… -s -- head` on pc00, and pc00 runs the whole day. The laptop flow below remains as the fallback (`scripts/campaign/serve.sh` serves `lab.sh` for worker setup).
+
 Your agent does the code, the scripts, the runs and the analysis. You get lab time, sit at each PC once, and do the hand-timed tasks (E3, E10).
 
 ### What you need
@@ -113,7 +115,7 @@ One pinned Nix environment holds Python, NumPy, pandas, scikit-learn, joblib, to
 
 #### 1.6 Setup script and rehearsal
 
-- Put Appendix A at `scripts/campaign/lab-pc.sh`. Fill in `DRIVER` and serve it with your public key from `results/lab/serve/` on port 8000 (`python3 -m http.server`).
+- Put Appendix A at `scripts/campaign/lab-pc.sh` (now `scripts/campaign/lab.sh`). Fill in `DRIVER` and serve it with your public key from `results/lab/serve/` on port 8000 (`python3 -m http.server`).
 - Find the PCs afterwards with `nmap -p22 --open <lab subnet>` plus a key login test; build the inventory.
 - Rehearse on `make lab-up`: every experiment at N=1 and 2, one repeat, through the real runner and telemetry; all must pass.
 - Write `results/lab/OPERATOR.md`: what to bring, the exact line to type on each PC, what each session does and prints, which hand jobs come when.
@@ -166,7 +168,7 @@ Upload to R2 after each experiment. A failed experiment is a result: record what
 
 Runs as root on each lab PC (`curl ... | sudo bash -s -- setup`). Opens SSH for the driver, lets the lab user run sudo without a password for the campaign, opens the ports, prints one `LAB-PC` line. `undo` reverses exactly what setup recorded. The agent fills in `DRIVER` and may fix the script; keep `undo` exact.
 
-The working copy is `scripts/campaign/lab-pc.sh`; the original as written is:
+The working copy is `scripts/campaign/lab.sh` (it was `lab-pc.sh`); the original as written is:
 
 ```bash
 #!/usr/bin/env bash
