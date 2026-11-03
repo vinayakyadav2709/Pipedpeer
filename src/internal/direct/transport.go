@@ -155,6 +155,7 @@ func readJSON(r io.Reader, v any) error {
 // the QUIC transport over it, and the prober that punches.
 type Endpoint struct {
 	conn      *net.UDPConn
+	port      int // the configured port, for when the socket cannot report its own
 	shared    *sharedConn
 	transport *quic.Transport
 	listener  *quic.Listener
@@ -234,6 +235,7 @@ func Listen(cfg Config) (*Endpoint, error) {
 
 	e := &Endpoint{
 		conn:      conn,
+		port:      cfg.Port,
 		key:       cfg.Key,
 		cluster:   cfg.Cluster,
 		secret:    cfg.Secret,
@@ -296,7 +298,13 @@ func LocalDialer(addr string) func(context.Context) (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		key := c.LocalAddr().String()
+		key, ok := addrKey(c.LocalAddr())
+		if !ok {
+			// Unmarked, the request would pass for a process on this machine;
+			// refusing is the safe side.
+			_ = c.Close()
+			return nil, fmt.Errorf("no local address on the spliced connection to %s (getsockname failed)", addr)
+		}
 		spliced.Store(key, struct{}{})
 		return &splicedConn{Conn: c, key: key}, nil
 	}
@@ -409,7 +417,12 @@ func (e *Endpoint) Conn() *net.UDPConn { return e.conn }
 
 // Port is the shared port.
 func (e *Endpoint) Port() uint16 {
-	return uint16(e.conn.LocalAddr().(*net.UDPAddr).Port)
+	p, ok := udpPort(e.conn.LocalAddr())
+	if !ok {
+		e.log("direct: the direct socket cannot report its port (getsockname failed); using the configured port %d", e.port)
+		return uint16(e.port)
+	}
+	return uint16(p)
 }
 
 // Serve accepts direct connections until ctx ends.

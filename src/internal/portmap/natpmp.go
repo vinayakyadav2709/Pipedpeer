@@ -41,7 +41,11 @@ func pcpMap(ctx context.Context, gw netip.Addr, internal uint16, lifetime time.D
 
 	// The client address the router should map. PCP has the client state it
 	// explicitly, so a request relayed through anything is still unambiguous.
-	local, ok := netip.AddrFromSlice(conn.LocalAddr().(*net.UDPAddr).IP)
+	ip, err := localIP(conn.LocalAddr())
+	if err != nil {
+		return netip.AddrPort{}, 0, fmt.Errorf("the PCP request: %w", err)
+	}
+	local, ok := netip.AddrFromSlice(ip)
 	if !ok {
 		return netip.AddrPort{}, 0, fmt.Errorf("no local address for the PCP request")
 	}
@@ -206,4 +210,15 @@ func exchange(ctx context.Context, conn *net.UDPConn, req []byte, min int) ([]by
 		lastErr = fmt.Errorf("no reply")
 	}
 	return nil, fmt.Errorf("no usable reply from the router: %w", lastErr)
+}
+
+// localIP is the IP of a UDP socket's local address. Under proot on Android
+// getsockname can fail and Go leaves the address nil; asserting on it
+// crashed the daemon.
+func localIP(a net.Addr) (net.IP, error) {
+	ua, ok := a.(*net.UDPAddr)
+	if !ok || ua == nil {
+		return nil, fmt.Errorf("no local address on the socket (getsockname failed)")
+	}
+	return ua.IP, nil
 }

@@ -297,7 +297,11 @@ func localAddrToward(controlURL string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	return conn.LocalAddr().(*net.UDPAddr).IP.String(), nil
+	ip, err := localIP(conn.LocalAddr())
+	if err != nil {
+		return "", fmt.Errorf("the source address towards %s: %w", host, err)
+	}
+	return ip.String(), nil
 }
 
 func headerValue(resp, key string) string {

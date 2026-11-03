@@ -304,20 +304,29 @@ func ReflectPair(ctx context.Context, pc net.PacketConn, other net.PacketConn) e
 			// proves the test ran; the other comes from an address the client
 			// has never written to, and whether it arrives is the answer.
 			ack, _ := json.Marshal(Reflection{
-				You: from.String(), From: pc.LocalAddr().String(), Ack: true,
+				You: from.String(), From: addrString(pc.LocalAddr()), Ack: true,
 			})
 			_, _ = pc.WriteTo(ack, from)
 
 			cross, _ := json.Marshal(Reflection{
-				You: from.String(), From: other.LocalAddr().String(),
+				You: from.String(), From: addrString(other.LocalAddr()),
 			})
 			_, _ = other.WriteTo(cross, from)
 			continue
 		}
 		reply, _ := json.Marshal(Reflection{
 			You:  from.String(),
-			From: pc.LocalAddr().String(),
+			From: addrString(pc.LocalAddr()),
 		})
 		_, _ = pc.WriteTo(reply, from)
 	}
+}
+
+// addrString is a.String(), or "" when a is nil: under proot on Android
+// getsockname can fail and Go leaves a socket's local address nil.
+func addrString(a net.Addr) string {
+	if a == nil {
+		return ""
+	}
+	return a.String()
 }
