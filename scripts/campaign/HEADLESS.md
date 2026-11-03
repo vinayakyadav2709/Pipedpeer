@@ -14,7 +14,7 @@ The lab campaign ([docs/benchmarks/lab-campaign.md](../../docs/benchmarks/lab-ca
 
 ## Before the lab (the project lead, at home)
 
-1. Put the R2 credentials in `~/.config/pipedpeer-lab/r2.env` (mode 600): `R2_ACCOUNT_ID=…`, `R2_ACCESS_KEY_ID=…`, `R2_SECRET_ACCESS_KEY=…`. Make the token an R2 API token with **Object Read & Write on the `pipedpeer-lab` bucket only**: anyone who learns the passphrase gets it.
+1. Put the ingest Worker's URL and token in `~/.config/pipedpeer-lab/ingest.env` (mode 600): `INGEST_URL=…`, `INGEST_TOKEN=…` ([ingest/README.md](ingest/README.md)). `publish.sh` puts this file in the bundle as `r2.env`; `sync-r2.sh` finds the ingest credentials there. The Worker holds the only write access to the bucket and refuses uploads past the free tier, so the token is all the passphrase exposes. (R2 S3 keys in `r2.env` still work, without the cap.)
 2. Merge the campaign branches, commit, and push the commit to GitHub. The lab PCs download the code at exactly that commit from codeload.
 3. Run `scripts/campaign/publish.sh` (optionally `--version <pipedpeer nightly version>`; without it the day pins the newest nightly when it starts). Press Enter to get a generated passphrase, and write it down outside the repo.
 4. Commit `landing/public/lab.sh` and `landing/public/lab-secrets.enc` to `dev` and push. The Pages workflow deploys `landing/` from `dev`.
@@ -87,11 +87,11 @@ If the day stops early (pc00 rebooted, power cut, the unit was killed), type the
 |---|---|
 | setup | Ansible in a venv on pc00 (`virtualenv.pyz` when Ubuntu lacks `python3-venv`), plus `ansible.posix`, which provides the json callback run.sh reads |
 | discover | `scan.sh` on pc00's own subnet every 15 s, until `LAB_PCS` PCs log in with the campaign key; pc00 is pinned to `pc00` and reached with `ansible_connection=local` |
-| prepare | `machines.csv`; `network.csv` (iperf3 both ways to pc00, one PC at a time; ping RTT); `clocks.txt` (chrony only on PCs over 10 ms); the code to every PC; `install-pipedpeer.sh --version <v> -y` and `pipedpeer doctor`; `pipedpeer invite` / `connect`; the Nix env; otelcol and the node collectors, the driver collector on pc00 |
-| calibrate | `calibrate.sh W1/W2/W3` on pc01 with `CAL_VERIFY=1`, again if the strong size runs outside 100-150 s; writes `workloads.json` and `results/lab/workloads.md`. Then the plain W1 result at each e1b weak size, one per idle worker, in parallel, into run.sh's `result-cache.json` |
-| run | Each row of the profile: `run.sh <id> --inventory results/lab/inventory.ini <args>`, then `sync-r2.sh` |
+| prepare | `machines.csv`; `network.csv` (iperf3 both ways to pc00, one PC at a time; ping RTT); `clocks.txt` (chrony only on PCs over 10 ms); the code to every PC; `install-pipedpeer.sh --version <v> -y` and `pipedpeer doctor`; `pipedpeer invite` / `connect`; the Nix env; tcpdump (`lab.sh pkg`, so undo removes it), otelcol and every PC's collector, poller and capture (`node.sh start <pc> <pc00> --session s1 --pcap`, the session also in `~/.local/share/pipedpeer-lab/session`), the driver collector on pc00 (file only with ingest credentials: `sync-r2.sh` uploads its rotated files) |
+| calibrate | `calibrate.sh W1/W2/W3` on pc01 with `CAL_VERIFY=1` at a 60 s strong target (`LAB_CAL_STRONG_S`), again if the verify run lands more than 25 % off it; writes `workloads.json` and `results/lab/workloads.md`. Then the plain W1 result at each e1b weak size, one per idle worker, in parallel, into run.sh's `result-cache.json` |
+| run | Each row of the profile: a health check, then `PL_SYNC=0 run.sh <id> --inventory results/lab/inventory.ini <args>`, a line in `attempts.jsonl`, then `sync-r2.sh` |
 | analyse | `analyse.py`, then `sync-r2.sh` |
-| cleanup | Every worker: `cleanup-host.sh`, then `lab.sh undo`. Driver collector down, final sync, `sync-r2.sh count` must match. Then pc00: `cleanup-host.sh`, summary, `lab.sh undo` |
+| cleanup | Every PC: `node.sh pcap-stop`, and its pcap files pulled into `results/lab/pcap/<pc>/` over ssh. Every worker: `cleanup-host.sh`, then `lab.sh undo`. Driver collector down, final sync, `sync-r2.sh count` must match. Then pc00: `cleanup-host.sh`, summary, `lab.sh undo` |
 
 ### The minimal profile
 
@@ -147,29 +147,32 @@ The rehearsal uses stand-ins (in `test/headless-stubs/`) for:
 
 Everything else is real: lab.sh, the passphrase on `/dev/tty`, the decryption, the systemd unit, scan.sh, Ansible over SSH, iperf3 installed and removed through `lab.sh pkg`, clocks.sh, the weak references, otelcol on every container with the driver uploading to the S3 stand-in, sync-r2.sh and its count, cleanup, and undo.
 
-## Integration needed
+## Integration (lab/integrate)
 
-lab/runner (`run.sh`, `lib/`, `experiments/`, `analyse.py`):
+What the merge of lab/runner, lab/traces and lab/headless needed, and where each item went. The rehearsal below runs all of it.
 
-1. **The json callback.** `lib/ansible.sh` `_pl_adhoc` sets `ANSIBLE_STDOUT_CALLBACK=json`, but ansible-core 2.22 has no json callback; it lives in the `ansible.posix` collection. `pl_install` installs only `community.docker`. The day's bootstrap installs `ansible.posix` into `$VENV/collections` and then calls `lib/ansible.sh install`. Add `ansible.posix` to `pl_install` too, so run.sh works outside the day.
-2. **The venv on Ubuntu.** `pl_install` runs `python3 -m venv`, which fails on stock Ubuntu (no `python3-venv`). The day creates the venv first (with the `virtualenv.pyz` fallback), so `pl_install` skips that step. For run.sh outside the day, use the same fallback.
-3. **pc00 is local.** The inventory has `ansible_connection=local` on the `pc00` line. `inventory.py` keeps unknown host vars, and `lab_ip` defaults to `ansible_host` (pc00's lab address). Check that nothing in `systems.py` assumes pc00 is reached over SSH.
-4. **SSH options.** The day exports `ANSIBLE_SSH_ARGS` (the campaign key, `UserKnownHostsFile=~/pipedpeer-lab/known_hosts`, no user ssh config). `pl_ansible_env` keeps an exported value. Keep that, so run.sh never writes to the user's `~/.ssh`.
-5. **Weak references.** Before e1b, the day writes `results/lab/result-cache.json` entries `W1|BENCH_ITEMS=<per-PC size × N>` with `source: "plain-precomputed:<pc>"`, using `record.ResultCache.key` and `workloads.extract` when importable. `runner.check()` reads the cache first, so e1b compares against them.
-6. **Cut-off attempts.** `analyse.py` should drop the `runs.jsonl` lines in `[runs_from_line, runs_to_line)` (0-based line numbers) of every `attempts.jsonl` entry with `status: "interrupted"`. Without that, a resumed experiment counts its first repeats twice.
-7. **Exit status.** The day treats a non-zero exit of `run.sh` as "experiment failed" (BLOCKERS.md, summary). Failed runs inside a finished experiment should still exit 0.
-8. **Profile arguments.** Check that `e5 --n 16`, `e6 --n 16`, `e4 --n 4`, `e7 --repeats 3` and `e8 --n 2,4,8 --repeats 3` mean what the profile says. e5 and e6 default to 32 and 16.
-9. **Fewer workers than N.** A dropped worker can leave fewer than 16 workers. run.sh should record the N=16 runs as failed (or run at the largest N it can, and say so), not stop.
-10. **What run.sh leaves on a PC.** `cleanup-host.sh` removes `~/.local/share/pipedpeer-lab` and `~/pipedpeer-lab`, and in `/tmp` only `ray`, `dask-*`, `dask-scratch-space`, `torchelastic_*` and `pipedpeer-lab*` owned by the lab user. It also stops `ray`, `dask` and `torchrun` processes. If run.sh writes anywhere else (E5's pip venvs, a pip cache in `~/.cache/pip`), add the path to `cleanup-host.sh` or to `HOME_PATHS` in `lab.sh`.
-11. **`analyse.py`** runs as `$VENV/bin/python scripts/campaign/analyse.py` from the repo root, with no arguments. The venv has matplotlib.
-12. **sync after each experiment.** run.sh calls `sync-r2.sh` at the end of each experiment, and the day calls it again. Both are harmless; either one may be dropped.
+| # | Item | Resolution |
+|---|---|---|
+| 1 | json callback | `lib/ansible.sh install` installs `ansible.posix` beside `community.docker`, into the venv's collections dir the day also uses. |
+| 2 | venv on Ubuntu | `pl_install` falls back to `virtualenv.pyz` when `python3 -m venv` fails, as the day's bootstrap does. |
+| 3 | pc00 is local | Nothing in `systems.py` assumes ssh: every command is the raw module, and `Host.ip` is `ansible_host`. The rehearsal runs pc00 with `ansible_connection=local` throughout. |
+| 4 | SSH options | `pl_ansible_env` keeps the exported `ANSIBLE_SSH_ARGS`; the day's `~/pipedpeer-lab/known_hosts` is the only one written. |
+| 5 | weak references | `day/sizes.py` uses `record.ResultCache.key`; the rehearsal checks that every e1b run's `result_ref` is `plain-precomputed:<pc>`. |
+| 6 | cut-off attempts | `analyse.py` drops the `[runs_from_line, runs_to_line)` lines of every `interrupted` entry in `attempts.jsonl` (test: `test_interrupted_attempt_lines_are_dropped`); the summary counts runs the same way. |
+| 7 | exit status | `run.sh` exits 0 when the experiment finished, failed runs included; non-zero only on a crash or Ctrl-C. |
+| 8 | profile arguments | `e5 --n 16` and `e6 --n 16` take N from the last `--n` value; `e4 --n 4` caps 8/4/2/1; `e7` always runs at N=2; `e8 --n 2,4,8 --repeats 3` is ranks 2, 4, 8 with seeds 1-3 after a seed-1 warm-up; `e1`/`e1b --n 1,4,16` applies to every workload. |
+| 9 | fewer workers than N | Each run at that N is recorded as failed (`inventory has 15 workers, N=16 asked`) and the experiment goes on; E5's pip method now does the same instead of running on fewer PCs. The rehearsal's e1 at N=4 on 3 workers exercises it. |
+| 10 | what run.sh leaves | Everything is under `~/.local/share/pipedpeer-lab` (work dirs, E5's venv, logs, `current-run`, `session`, pcap), `/tmp/ray`, `/tmp/dask-*`; E5's pip uses `--no-cache-dir`. `cleanup-host.sh` now stops the poller and tcpdump (`node.sh stop`) and checks they are gone; `install-otelcol.sh remove` does the same. The rehearsal's snapshot diff found the home leftovers listed in `lab.sh`'s `HOME_PATHS`. |
+| 11 | analyse.py | Runs from the repo root with no arguments, in the Ansible venv (matplotlib). |
+| 12 | double sync | The day sets `PL_SYNC=0`, so `run.sh` leaves the upload to the day's own `sync-r2.sh`, after `attempts.jsonl` has the attempt. |
+| 13-15 | otel hooks | Unchanged names. The day now starts every PC with `--session s1 --pcap`, installs tcpdump with `lab.sh pkg`, and pulls the pcaps (step `pull.pcap`) before cleanup. |
+| 16 | docs | Part 1 of `lab-campaign.md` is the no-laptop flow; `results/lab/OPERATOR.md` is the operator's page. |
 
-lab/traces (`otel/`):
+The runner contract of [otel/README.md](otel/README.md) ("Runner integration"):
 
-13. The day calls `telemetry.sh up` (with `OTELCOL_TARBALL=<pc00's copy>`) and `telemetry.sh down`; `otel/install-otelcol.sh` (with `OTELCOL_TARBALL`) and `install-otelcol.sh remove`; and `otel/node.sh start <pc_id> <pc00 ip>` and `node.sh status`. It also reads `lab_fetch`, `lab_arch` and `OTELCOL_VERSION`/`OTELCOL_SHA256_*` from `otel/lib.sh`. If these change, update `day/prepare.sh` (`prep_otel`, `ensure_services`) and `day/cleanup-host.sh`.
-14. `final_sync` parses `sync-r2.sh count` lines starting `local:` and `remote:` followed by the number. Keep that format.
-15. Anything new that otel/ installs on a PC must be removed by `install-otelcol.sh remove`, or listed in `cleanup-host.sh`.
+- `current-run`: `runner.Context.mark` writes the run id to `~/.local/share/pipedpeer-lab/current-run` on every PC before each run and `idle` after it, in one background Ansible fan-out, waited for before the timed command starts.
+- Logs: `pipedpeer run` output goes to `logs/pipedpeer-run/<run_id>.log` on pc00, Ray's and Dask's driver output to `logs/ray/run-<run_id>.log` and `logs/dask/run-<run_id>.log`, `ray start` to `logs/ray/start-<experiment>-n<N>-<run_id>.log`, the Dask scheduler and workers append to `logs/dask/scheduler.log` and `worker.log`.
+- Ray starts with `--metrics-export-port=8090` and ports 6380-6384, 10002-10999; Dask workers with `--worker-port 9000:9099 --nanny-port 9100:9199` and their dashboards on (pp-poll.py finds them).
+- The process globs of E6 and the kills match whitespace, not any character: `?` matched the `-` of `logs/pipedpeer-run/` in the wrapping shell's command line, which would have signalled the shell.
 
-docs:
-
-16. Part 1 of `docs/benchmarks/lab-campaign.md` still describes the laptop flow. Replace it with the operator steps above when the campaign branches merge. `serve.sh` stays as a laptop fallback for worker setup only.
+Also fixed on the way: `bootstrap-ssh.sh` still fetched the laptop-era `lab-pc.sh` from `serve.sh`; it now runs the published worker line (`LAB_SITE` moves it), so it works from pc00. `calibrate.sh` counts the CPUs it may use (`PL_NPROC`, else affinity), as `nproc` and the runner do. The day's calibration window follows the target (±25 %) instead of the plan's 100-150 s.
