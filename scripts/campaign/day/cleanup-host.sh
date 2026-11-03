@@ -46,7 +46,7 @@ fi
 # E15's netem qdisc: experiments/e15.py names the interface in $L/netem.dev
 # (and removes it itself; this is for a cut-off day). Only that interface.
 if [[ -f $L/netem.dev ]]; then
-  sudo -n tc qdisc del dev "$(cat "$L/netem.dev")" root 2>/dev/null
+  $( ((EUID == 0)) || echo sudo -n ) tc qdisc del dev "$(cat "$L/netem.dev")" root 2>/dev/null
   tc qdisc show dev "$(cat "$L/netem.dev")" 2>/dev/null | grep -q netem && left+=("netem qdisc still on $(cat "$L/netem.dev")")
 fi
 
