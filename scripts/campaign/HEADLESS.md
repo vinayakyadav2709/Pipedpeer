@@ -97,9 +97,44 @@ If the day stops early (pc00 rebooted, power cut, the unit was killed), type the
 
 `profile-minimal.tsv`: 17 PCs, N = 1, 4, 16, 3 repeats after 1 warm-up. It runs e1 (W1, W2, W3, W4 × plain, pipedpeer, ray, dask), e1b, e4, e5 and e6 at 16, the headline experiments e12 (elastic join 4 → 16, about 8 min), e13 (churn at 16, about 10 min) and e15 (netem at N=4, about 12 min), e7, and e8 at ranks 2, 4, 8. It skips e3, e9, e10 and e11. E14 (curl to cluster) adds no row: the step `prep.firstjob` runs the day's first distributed job right after the join (about 3 min, most of it the job's Nix closure, which E1 would otherwise build), and `day/timeline.sh` records each PC's setup, SSH, install and join times in `results/lab/timeline.jsonl`. [FIGURES.md](FIGURES.md) describes the headline figures. Pass another profile with `LAB_PROFILE`.
 
-The headline additions cost about 50 minutes: W4 in e1 15, e12 8, e13 10, e15 12, `prep.firstjob` 3, and W4's calibration 2. With them the step estimates in `lab-day.sh` add up to about 6.8 hours: 5.05 hours of profile rows and 1.75 hours of setup, calibration, the weak references and cleanup.
+### Time
 
-The estimates in the profile add up to about 5.5 hours of experiments plus about 1 hour of setup and cleanup. That is more than the three hours the operator expects. Most of the time is e1 at N=1, where each workload's 125 s strong size runs 16 times (4 systems × 4 runs). To fit three hours, either lower the strong target (`calibrate.sh W1 60` gives a 60 s size), or drop W3 from e1 (`--workloads W1,W2`), or reduce e8.
+The ETA in `lab.sh status` adds the step estimates in `lab-day.sh` (setup and cleanup) and `profile-minimal.tsv` (`est_min`). They come from the full rehearsal (`test/headless-test.sh`, 4 PCs, 2 CPUs each, strong target 10 s), scaled to the lab. The rehearsal's whole day took 57 minutes of steps; its per-step minutes are in `results/lab/rehearsal-day/timings.txt`.
+
+**Per-run overhead.** Most of a rehearsal run is not work: in e1, 80 runs took 18.2 min, of which 10.3 min was inside the timed commands, so 7.9 min over the 64 runs that started is **7.4 s per run** (activation, the run id on every PC, the receipt and record fetch, Ansible). The other experiments measured 3-16 s (e12 and e13: 14-16 s, joins and kills). The lab has 17 PCs, so every fan-out reaches more hosts; the estimate takes **11 s per run** (×1.5).
+
+**Work per run.** A strong size is 60 s on one PC (W4 30 s), weak 60 s per PC. Speed-up is assumed at 70 % efficiency at N=4 and 50 % at N=16, on the slow side, so the estimate errs long: 60/(4×0.7) = 21.4 s, 60/(16×0.5) = 7.5 s.
+
+| Step | Runs | Arithmetic | Minutes |
+|---|---|---|---|
+| e1 | 160 | W1-W3 each: 16 × 60 + 12 × 21.4 + 12 × 7.5 = 1307 s; W4 half, 654 s; 3 × 1307 + 654 = 4575 s = 76.3 min; overhead 160 × 11 s = 29.3 min | 105 |
+| e1b | 40 | 16 × 60 s at N=1, 24 × 75 s at N=4 and 16 (weak, 80 %): 2760 s = 46 min; 40 × 11 s = 7.3 min | 53 |
+| e4 | 16 | caps 8/4/2/1 = 15 of an 8-core PC's cores at 70 %: 60 × 8/(15 × 0.7) = 46 s; 16 × 46 s = 12.3 min; 16 × 11 s = 2.9 min | 15 |
+| e5 | 12 | cold: pip 300 s, Ray 300 s, pipedpeer 120 s; updates 9 × 60 s; 1260 s = 21 min; 12 × 11 s = 2.2 min | 23 |
+| e6 | 18 | 18 × 15 s (W1 at 16, plus recovery) = 4.5 min; 18 × 11 s = 3.3 min; 6 Ray/Dask rebuilds after kills × 30 s = 3 min | 12 |
+| e12 | 3 | 3 × 80 s while PCs join; 3 × 21 s overhead (rehearsal 14 s × 1.5) | 6 |
+| e13 | 3 | 3 × 90 s with churn; 3 × 24 s overhead | 7 |
+| e15 | 18 | 3 delays × 2 repeats × 3 systems × 35 s (21 s at N=4, up to twice that with 80 ms) = 10.5 min; 18 × 11 s = 3.3 min | 14 |
+| e7 | 8 | 8 × (5 + 11) s | 2 |
+| e8 | 78 | lab/runner's 72 min for 72 runs (the rehearsal ran one epoch, no lab-size data); plus the new one-rank reference, 6 × 100 s = 10 min | 82 |
+| **experiments** | | | **319** |
+
+| Setup and cleanup | Rehearsal (3 workers) | Lab estimate, and why | Minutes |
+|---|---|---|---|
+| bootstrap | 1.6 | the same pip installs | 2 |
+| discover | 0 | the operator's walk round; overlaps typing | 5 |
+| prep.network | 0.7 | iperf3 one worker at a time, about 14 s each: 16 × 14 s | 4 |
+| prep.pipedpeer | 0.7 | install in parallel; the Determinate installer downloads on each PC | 3 |
+| prep.firstjob (E14) | 5.5 | the workers import the job's environment first; containers were slow at it | 5 |
+| prep.nixenv | 0.7 (11 cold) | 16 × 719 MB from pc00 at 1 Gbit/s is 92 s on the wire; ×3 for disk and import, plus evaluation | 8 |
+| calibrate | 3.3 at 10 s | at 60 s: about 140 s per workload (doubling points, the 3× point, the verify run), W4 90 s, 510 s; one retry | 12 |
+| weakrefs | 0.3 | N=16's reference is 16 × 60 s on one PC | 17 |
+| other prepare steps | 1.2 | | 6 |
+| clean.workers | 3.5 one by one | about 70 s per PC (the Nix uninstall), now all PCs at once | 2 |
+| analyse, clocks.end, pull.pcap, undo.workers, final.sync, clean.pc00 | 0.5 | final upload of about 1 GB of telemetry and pcap at the lab's uplink | 9 |
+| **setup and cleanup** | | | **73** |
+
+**The day: 319 + 73 = 392 minutes, about 6.5 hours**, plus the time to type the line on 17 PCs before pc00. That is more than a 3-hour visit. The large items are e1 (105), e8 (82), e1b (53) and the N=16 weak reference (17). Ways to fit 3.5 hours, each a profile edit: e8 at ranks 2 and 8 only (-27), e1b at N = 1 and 16 (-18, and weakrefs -4), `--repeats 2` everywhere (-75), or e1 without W3 (-25). The estimate errs long: the efficiency assumptions are pessimistic, and e8's 72 minutes is lab/runner's own figure, not measured.
 
 ### Distributing the Nix env
 

@@ -12,7 +12,7 @@ No laptop goes to the lab. You type one line on every lab PC; the last PC, pc00,
 
 - The campaign passphrase on paper, from `publish.sh` (below).
 - The lab account's user name and password, the same on every PC.
-- Lab time: one visit of about 4 hours, 17 PCs (fewer works; the day uses what it finds).
+- Lab time: one visit of about 7 hours with the minimal profile as it stands (6.5 hours unattended; HEADLESS.md "Time"), 17 PCs (fewer works; the day uses what it finds).
 - Your phone, to photograph any `ERROR`.
 
 ### Before the lab (at home)

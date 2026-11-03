@@ -1,6 +1,6 @@
 # Lab day: the operator's page
 
-You type one line on every lab PC. The last PC, pc00, then runs the whole day on its own, about 4 hours for 17 PCs, and ends with a summary on its screen. You do not need a laptop. If something on screen is not described here, photograph it and go on: nothing you type can lose results.
+You type one line on every lab PC. The last PC, pc00, then runs the whole day on its own, about 6.5 hours for 17 PCs, and ends with a summary on its screen. You do not need a laptop. If something on screen is not described here, photograph it and go on: nothing you type can lose results.
 
 Background, if you want it: [scripts/campaign/HEADLESS.md](../../scripts/campaign/HEADLESS.md).
 
@@ -10,7 +10,7 @@ Background, if you want it: [scripts/campaign/HEADLESS.md](../../scripts/campaig
 - **The lab account**: user name and password of the account you log in with on the lab PCs. Use the same account on every PC.
 - **This page, printed**, or open on your phone.
 - **Your phone**, to photograph any `ERROR`.
-- **Time**: about 30 minutes to type the line on 17 PCs, then about 3.5 hours unattended (the corrected estimate is in [HEADLESS.md](../../scripts/campaign/HEADLESS.md#time)).
+- **Time**: about 30 minutes to type the line on 17 PCs, then about 6.5 hours unattended for the minimal profile as it stands ([HEADLESS.md, "Time"](../../scripts/campaign/HEADLESS.md#time) has the arithmetic and the cuts that would fit 3.5 hours). `status` shows the ETA as the day goes.
 
 ## Before the lab (at home, the day before)
 
