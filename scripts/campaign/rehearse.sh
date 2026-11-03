@@ -120,6 +120,13 @@ else
 	export PL_SYSTEMS="${PL_SYSTEMS:-plain,pipedpeer}"
 fi
 
+# E4's caps need taskset (util-linux), which every lab PC has and the lab
+# image does not.
+for i in 1 2 3; do
+	w "$i" 'command -v taskset >/dev/null || nix-env -iA nixpkgs.util-linux >/dev/null 2>&1' ||
+		log "warning: no taskset in $LAB_CTR-$i; E4 will fail there"
+done
+
 export PL_RESULTS="$out" PL_NPROC="${PL_NPROC:-2}" PL_E11_IDLE_S="${PL_E11_IDLE_S:-30}"
 experiments="${only:-e5 e1 e1b e4 e6 e7 e8 e9 e11 e3 e10}"
 declare -A status
@@ -137,7 +144,8 @@ for e in $experiments; do
 	rc=$?
 	set -e
 	after=$(wc -l <"$out/runs.jsonl")
-	failed=$(tail -n $((after - before)) "$out/runs.jsonl" 2>/dev/null | grep -c '"error": "' || true)
+	failed=$(tail -n $((after - before)) "$out/runs.jsonl" |
+		python3 -c 'import json,sys; print(sum(1 for l in sys.stdin if json.loads(l).get("error")))')
 	status[$e]="rc=$rc runs=$((after - before)) failed=$failed"
 	log "$e: ${status[$e]}"
 done
@@ -155,13 +163,26 @@ log "analyse.py"
 	echo "|---|---|"
 	for e in $experiments; do echo "| $e | ${status[$e]} |"; done
 	echo
+	echo "All runs in runs.jsonl, by experiment:"
+	echo
+	python3 -c 'import json,sys,collections
+c = collections.defaultdict(lambda: [0, 0, 0])
+for l in open(sys.argv[1]):
+    r = json.loads(l)
+    k = c[r["experiment"]]
+    k[0] += 1; k[1] += bool(r.get("error")); k[2] += bool(r.get("warmup"))
+print("| experiment | runs | failed | warm-ups |\n|---|---|---|---|")
+for e, (n, f, w) in sorted(c.items()):
+    print("| %s | %d | %d | %d |" % (e, n, f, w))' "$out/runs.jsonl"
+	echo
 	echo "Failed runs (from runs.jsonl):"
 	echo
-	grep '"error": "' "$out/runs.jsonl" 2>/dev/null |
-		python3 -c 'import json,sys
-for l in sys.stdin:
+	python3 -c 'import json,sys
+for l in open(sys.argv[1]):
     r = json.loads(l)
-    print("- %s %s %s n=%s on %s: %s" % (r["experiment"], r.get("workload"), r.get("system"), r.get("n"), r.get("failing_pc"), r["error"][:200]))' || true
+    if not r.get("error"):
+        continue
+    print("- %s %s %s n=%s on %s: %s" % (r["experiment"], r.get("workload"), r.get("system"), r.get("n"), r.get("failing_pc"), r["error"][:200]))' "$out/runs.jsonl" || true
 } >"$out/REHEARSAL.md"
 log "wrote $out/REHEARSAL.md"
 cat "$out/REHEARSAL.md"
