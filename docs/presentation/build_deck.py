@@ -755,7 +755,7 @@ s = new_slide("Research Publication", notes=(
 text(s, L, T, CW, CH, [
     "**\"PipedPeer: Running Unmodified Python Across a Small Group's Machines Without a Configured Cluster\"**",
     (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant."),
-    (1, "Submitted to the **Journal of Parallel and Distributed Computing** (Elsevier), 3 November 2026; under review."),
+    (1, "Submitted to the **Journal of Parallel and Distributed Computing** (Elsevier), 3 November 2026 (JPDC-D-26-02273); under review."),
     "Shorter IEEE conference-format version (6 pages) with the report; plagiarism report attached.",
     "Every number in the paper and report traces to a recorded measurement in the repository.",
 ], size=19)
