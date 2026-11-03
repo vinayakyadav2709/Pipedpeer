@@ -90,6 +90,34 @@
       "timing_regex": "fit time: ([0-9.]+)s"
     },
     {
+      "id": "W4",
+      "script": "docs/benchmarks/workloads/grid_search.py",
+      "args": [],
+      "ports": {
+        "ray": "docs/benchmarks/workloads/baselines/w4_ray.py",
+        "dask": "docs/benchmarks/workloads/baselines/w4_dask.py"
+      },
+      "size_var": "GS_SAMPLES",
+      "strong_target_s": 30,
+      "strong": {
+        "GS_SAMPLES": "1500"
+      },
+      "weak_per_pc": null,
+      "smoke": {
+        "GS_SAMPLES": "200",
+        "GS_TREES": "10"
+      },
+      "system_env": {
+        "plain": {},
+        "pipedpeer": {},
+        "ray": {},
+        "dask": {}
+      },
+      "result_regex": "best_params=\\{[^\\n]*\\}|best_score=[0-9.]+",
+      "result_compare": "equal",
+      "timing_regex": "fit_seconds=([0-9.]+)"
+    },
+    {
       "id": "T1",
       "script": "docs/benchmarks/workloads/baselines/t1_train.py",
       "args": [],

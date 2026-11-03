@@ -250,7 +250,7 @@ prep_otel() {
 calibrate() {
   local h w js ok=1; h=$(workers | head -n1)
   mkdir -p "$RESULTS/calibration"
-  for w in W1 W2 W3; do
+  for w in W1 W2 W3 W4; do
     [[ -s $RESULTS/calibration/$w.json ]] && continue
     local try
     for try in 1 2; do
@@ -258,11 +258,11 @@ calibrate() {
       out_of "cal.$w" "$h" >"$RESULTS/calibration/$w-$try.log"
       js=$(sed -n 's/^CALIBRATE //p' "$RESULTS/calibration/$w-$try.log" | tail -n1)
       [[ -n $js ]] || continue
-      # The plan's window for one PC alone: 100-150 s.
-      if python3 -c 'import json,sys; v=json.loads(sys.argv[1]).get("verify_s"); sys.exit(0 if v is None or 100<=v<=150 else 1)' "$js" || ((try == 2)); then
+      # One PC alone should take the target (60 s; W4 30 s) give or take a sixth.
+      if python3 -c 'import json,sys; j=json.loads(sys.argv[1]); v=j.get("verify_s"); t=j.get("strong_target_s", 60); sys.exit(0 if v is None or abs(v-t)<=t/6 else 1)' "$js" || ((try == 2)); then
         printf '%s\n' "$js" >"$RESULTS/calibration/$w.json"; break
       fi
-      say "$w: the strong size ran outside 100-150 s on $h; calibrating again"
+      say "$w: the strong size ran outside its target on $h; calibrating again"
     done
     [[ -s $RESULTS/calibration/$w.json ]] || { blocker "calibrating $w on $h failed (results/lab/calibration/$w-*.log)"; ok=0; }
   done

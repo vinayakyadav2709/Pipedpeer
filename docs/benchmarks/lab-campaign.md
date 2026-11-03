@@ -80,6 +80,7 @@ A job whose closure is already on the submitting node must still seed the peers,
 | W1 | `docs/benchmarks/workloads/pool_map.py` | `multiprocessing.Pool` map, CPU bound |
 | W2 | `pipedpeer-demo/cpu.py` | mixed: Pool, joblib, NumPy, pandas |
 | W3 | `pipedpeer-demo/01_sklearn_rf.py` | joblib / scikit-learn |
+| W4 | `docs/benchmarks/workloads/grid_search.py` | scikit-learn `GridSearchCV(n_jobs=-1)`, 256 fits (strong size 30 s on one PC) |
 | T1 | `scripts/bench-train.py`, MLP-C and the transformer | data-parallel training on CPU |
 
 Strong-scaling size: one lab PC alone takes 100-150 s. Weak-scaling size (W1 only): about 60 s of work per PC, items proportional to N. Record sizes in `results/lab/workloads.md`; never change a size between systems.
