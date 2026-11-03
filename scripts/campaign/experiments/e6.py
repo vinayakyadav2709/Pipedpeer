@@ -86,18 +86,22 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
     ctx.remote.start_job(ctx.inv.head.id, JOB_LOG, cmd)
     time.sleep(at_s)
     # On pc00, in one shell so the timing is on one clock: SIGINT, then poll
-    # until `pipedpeer run` is gone and no node reports an active job.
-    count = ("%s/v1/nodes | %s/bin/python3 -c 'import json,sys; "
-             "print(sum((n.get(\"load\") or {}).get(\"active_jobs\", 0) for n in json.load(sys.stdin)))'"
-             % (systems.API, ctx.env_dir))
+    # until `pipedpeer run` is gone and every PC's own /health reports no
+    # active job or lease (each daemon asked directly: the peer table on pc00
+    # is only as fresh as its last poll).
     # ^([^ ]*/)?pipedpeer run matches the CLI and not the shells around it
     # (nor this one), whose command lines start with sh or timeout.
-    script = ("s=$(date +%%s%%N); pkill -INT -f '^([^ ]*/)?pipedpeer run' ; "
-              "while :; do r=$(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); a=$(%s 2>/dev/null || echo 0); "
-              "own=$(%s/v1/jobs 2>/dev/null | grep -c '\"status\": *\"running\"' || true); "
-              "[ \"$r\" -eq 0 ] && [ \"${a:-0}\" -eq 0 ] && [ \"${own:-0}\" -eq 0 ] && break; "
+    tok = systems.API.split("; curl")[0]
+    busy = " ".join(
+        "$(curl -sf --max-time 2 -H \"X-Pipedpeer-Token: $tok\" http://%s:4242/health | "
+        "grep -o '\"active_[a-z]*\":[0-9]*' | head -2 | awk -F: '{s += $2} END {print s + 0}')"
+        % ("127.0.0.1" if h is ctx.inv.head else h.ip) for h in hosts)
+    script = ("%s; s=$(date +%%s%%N); pkill -INT -f '^([^ ]*/)?pipedpeer run' ; "
+              "while :; do r=$(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); a=0; "
+              "for x in %s; do a=$((a + ${x:-0})); done; "
+              "[ \"$r\" -eq 0 ] && [ \"$a\" -eq 0 ] && break; "
               "[ $(( ($(date +%%s%%N) - s) / 1000000000 )) -gt 300 ] && { echo PLTIMEOUT; break; }; "
-              "sleep 0.1; done; e=$(date +%%s%%N); echo \"PLCTRLC $s $e\"") % (count, systems.API)
+              "sleep 0.1; done; e=$(date +%%s%%N); echo \"PLCTRLC $s $e\"") % (tok, busy)
     rc, out = ctx.remote.sh(ctx.inv.head.id, script, timeout=400)
     t = ctx.remote.wait_job(ctx.inv.head.id, JOB_LOG, timeout=120)
     with open(os.path.join(logdir, "output.log"), "w") as f:

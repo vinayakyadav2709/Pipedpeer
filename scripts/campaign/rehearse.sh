@@ -74,7 +74,8 @@ done
 log "inventory: $inv"
 
 bash "$here/lib/ansible.sh" install >>"$out/rehearse.log" 2>&1
-PL_INVENTORY="$inv" bash "$here/lib/ansible.sh" sh all 'hostname' | tee -a "$out/rehearse.log" >&2
+PL_INVENTORY="$inv" bash "$here/lib/ansible.sh" sh all 'cat /etc/hostname' | tee -a "$out/rehearse.log" >&2 ||
+	{ log "ERROR: Ansible cannot reach the containers"; exit 1; }
 
 envlink=/root/.local/share/pipedpeer-lab/env
 src="${PL_ENV_FROM:-ppl-baselines}"
@@ -110,7 +111,8 @@ experiments="${only:-e5 e1 e1b e4 e6 e7 e8 e9 e11 e3 e10}"
 declare -A status
 for e in $experiments; do
 	log "=== $e"
-	before=$(wc -l <"$out/runs.jsonl" 2>/dev/null || echo 0)
+	touch "$out/runs.jsonl"
+	before=$(wc -l <"$out/runs.jsonl")
 	case "$e" in
 	e3) feed=$'\n\n3\n0\nrehearsal\n\n\n4\n5\nrehearsal\n\n\n4\n5\nrehearsal\n' ;;
 	e10) feed=$'1\ny\n\n\n3\n0\nrehearsal\n\nfail\n5\n6\nrehearsal\n' ;;
@@ -120,7 +122,7 @@ for e in $experiments; do
 	printf '%s' "$feed" | "$here/run.sh" "$e" --rehearsal --inventory "$inv" >>"$out/rehearse.log" 2>&1
 	rc=$?
 	set -e
-	after=$(wc -l <"$out/runs.jsonl" 2>/dev/null || echo 0)
+	after=$(wc -l <"$out/runs.jsonl")
 	failed=$(tail -n $((after - before)) "$out/runs.jsonl" 2>/dev/null | grep -c '"error": "' || true)
 	status[$e]="rc=$rc runs=$((after - before)) failed=$failed"
 	log "$e: ${status[$e]}"

@@ -51,7 +51,10 @@ def per_host(out, hosts, tag):
 def main(ctx):
     pp = ctx.backend("pipedpeer")
     have = len(ctx.inv.all)
-    sizes = sorted({min(s, have) for s in ctx.ns([8, 16, 32, 60])})
+    # The largest size is every PC the inventory has (the plan's "all
+    # available", target 60); the rehearsal walks 1, 2 and all 3 containers.
+    asked = ctx.args.n or ([1, 2, have] if ctx.rehearsal else [8, 16, 32, 60])
+    sizes = sorted({min(s, have) for s in asked})
     idle = float(os.environ.get("PL_E11_IDLE_S", "30" if ctx.rehearsal else "600"))
     for size in sizes:
         rec = ctx.recorder
