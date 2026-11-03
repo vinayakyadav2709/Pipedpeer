@@ -59,7 +59,7 @@ def timed(name, fn):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--items", type=int, default=128, help="Pool items")
+    parser.add_argument("--items", type=int, default=int(os.environ.get("CPU_ITEMS", 128)), help="Pool items")
     args = parser.parse_args()
     t0 = time.monotonic()
     print(f"cpu.py on {os.cpu_count()} local cores")

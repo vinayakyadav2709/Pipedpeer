@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "doc": "results/lab/workloads.md",
+  "sizes_status": "provisional, laptop; recalibrate on pc01 in session 1",
+  "workloads": [
+    {
+      "id": "W1",
+      "script": "docs/benchmarks/workloads/pool_map.py",
+      "args": [],
+      "ports": {
+        "ray": "docs/benchmarks/workloads/baselines/w1_ray.py",
+        "dask": "docs/benchmarks/workloads/baselines/w1_dask.py"
+      },
+      "size_var": "BENCH_ITEMS",
+      "strong": {
+        "BENCH_ITEMS": "0"
+      },
+      "weak_per_pc": {
+        "BENCH_ITEMS": "0"
+      },
+      "smoke": {
+        "BENCH_ITEMS": "400"
+      },
+      "calibrate_points": [
+        "1000",
+        "3000"
+      ],
+      "system_env": {
+        "plain": {
+          "BENCH_PROCS": "{nproc_submitter}"
+        },
+        "pipedpeer": {
+          "BENCH_PROCS": "{nproc_submitter}"
+        },
+        "ray": {
+          "BENCH_PROCS": "{nproc_workers}"
+        },
+        "dask": {}
+      },
+      "result_regex": "items=\\d+|checksum=[-0-9.e+]+",
+      "result_compare": "equal",
+      "timing_regex": "seconds=([0-9.]+)"
+    },
+    {
+      "id": "W2",
+      "script": "pipedpeer-demo/cpu.py",
+      "args": [],
+      "ports": {
+        "ray": "docs/benchmarks/workloads/baselines/w2_ray.py",
+        "dask": "docs/benchmarks/workloads/baselines/w2_dask.py"
+      },
+      "size_var": "CPU_ITEMS",
+      "strong": {
+        "CPU_ITEMS": "0"
+      },
+      "weak_per_pc": null,
+      "smoke": {
+        "CPU_ITEMS": "8"
+      },
+      "calibrate_points": [
+        "20",
+        "60"
+      ],
+      "system_env": {
+        "plain": {},
+        "pipedpeer": {},
+        "ray": {},
+        "dask": {}
+      },
+      "result_regex": "(?:Pool|joblib|numpy|pandas): [^\\n]*",
+      "result_compare": "equal",
+      "timing_regex": "TOTAL ([0-9.]+)s"
+    },
+    {
+      "id": "W3",
+      "script": "pipedpeer-demo/01_sklearn_rf.py",
+      "args": [],
+      "ports": {
+        "ray": "docs/benchmarks/workloads/baselines/w3_ray.py",
+        "dask": "docs/benchmarks/workloads/baselines/w3_dask.py"
+      },
+      "size_var": "RF_TREES",
+      "strong": {
+        "RF_TREES": "0"
+      },
+      "weak_per_pc": null,
+      "smoke": {
+        "RF_TREES": "8"
+      },
+      "calibrate_points": [
+        "40",
+        "120"
+      ],
+      "system_env": {
+        "plain": {},
+        "pipedpeer": {},
+        "ray": {},
+        "dask": {}
+      },
+      "result_regex": "data: [^\\n]*|accuracy: [0-9.]+",
+      "result_compare": "equal",
+      "timing_regex": "fit time: ([0-9.]+)s"
+    },
+    {
+      "id": "T1",
+      "script": "docs/benchmarks/workloads/baselines/t1_train.py",
+      "args": [],
+      "ports": {
+        "torchrun": "docs/benchmarks/workloads/baselines/t1_torchrun.py"
+      },
+      "variants": {
+        "mlp-c": {
+          "BENCH_MODEL": "ddp04"
+        },
+        "transformer": {
+          "BENCH_MODEL": "tfm"
+        }
+      },
+      "size_var": "BENCH_EPOCHS",
+      "strong": null,
+      "weak_per_pc": null,
+      "smoke": {
+        "BENCH_EPOCHS": "1"
+      },
+      "calibrate_points": null,
+      "system_env": {
+        "plain": {},
+        "pipedpeer": {},
+        "torchrun": {}
+      },
+      "result_regex": "BENCH_LOSS [0-9.]+",
+      "result_compare": {
+        "rel_tol": 0.01
+      },
+      "timing_regex": "BENCH_ELAPSED ([0-9.]+)"
+    }
+  ]
+}
