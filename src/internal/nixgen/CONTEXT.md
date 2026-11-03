@@ -30,7 +30,7 @@ The daemon that receives a spill from its own job; it splits the chunk exactly o
 **One-hop fan-out**:
 The rule that a forwarded part is terminal (`no_fanout`): peers never re-split, and results return to the origin.
 
-**Share**:
+**Share**: A daemon started with `PIPEDPEER_POOL_SPLIT=headcount` splits evenly instead (`schedule.Even`); that is a benchmark baseline only (lab campaign E4).
 The number of items a device gets, sized by measured throughput so all finish together (makespan); a device that cannot shorten the makespan gets none.
 _Avoid_: split evenly, round-robin
 

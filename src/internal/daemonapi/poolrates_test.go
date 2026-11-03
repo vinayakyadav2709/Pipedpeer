@@ -158,3 +158,33 @@ func TestLostPartsTeachTheSlowPeer(t *testing.T) {
 		t.Errorf("slow peer share %d -> %d of 20; want at most 2 once it lost a part", share(before), share(after))
 	}
 }
+
+// TestHeadcountSplitIgnoresMeasuredSpeed: PIPEDPEER_POOL_SPLIT=headcount
+// restores the even split of commit 8c9284c's parent, the baseline the lab
+// campaign's E4 compares the throughput scheduler against. Every device gets
+// the same number of items (remainder to the first ones), whatever its rate.
+func TestHeadcountSplitIgnoresMeasuredSpeed(t *testing.T) {
+	pm := newPoolManager()
+	pm.rates.observe("fast", 100, time.Second)  // 100 items/s
+	pm.rates.observe("slow", 1, 10*time.Second) // 0.1 items/s
+	ch := &chunk{items: make([]json.RawMessage, 22)}
+
+	t.Setenv("PIPEDPEER_POOL_SPLIT", "headcount")
+	got := map[string]int{}
+	for _, s := range pm.planShares(ch, []string{"fast", "slow"}, true) {
+		got[s.Device.ID] = s.Items
+	}
+	want := map[string]int{localDeviceID: 8, "fast": 7, "slow": 7}
+	for id, n := range want {
+		if got[id] != n {
+			t.Errorf("headcount split: %s got %d items, want %d (all: %v)", id, got[id], n, got)
+		}
+	}
+
+	t.Setenv("PIPEDPEER_POOL_SPLIT", "")
+	for _, s := range pm.planShares(ch, []string{"fast", "slow"}, true) {
+		if s.Device.ID == "slow" && s.Items >= 7 {
+			t.Errorf("default split gave the 0.1 item/s peer %d items; the measured scheduler is not in charge", s.Items)
+		}
+	}
+}

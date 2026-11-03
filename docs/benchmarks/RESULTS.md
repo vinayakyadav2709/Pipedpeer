@@ -121,8 +121,20 @@ the 3× budget. August, before patching was deferred, measured 20.0×
 **Update, 2026-11-03 [commit]: passed.** After every upload began seeding the
 closure to peers (`f182b0f`, `a8c50db`), `lab-fail.sh` passed on the plain lab:
 33 of 80 items ran on peers, a worker was killed with chunks in flight, no chunk
-was lost and the sum matched (commit `a9c715d`). That run's raw output is not
-stored here; the October failure below is kept as the record it replaced.
+was lost and the sum matched (commit `a9c715d`). The October failure below is
+kept as the record it replaced.
+
+**Re-run, 2026-11-03** (`LAB_NAME=runner`, podman, 20-thread Fedora 44 host
+shared with other labs): passed twice, 32 of 80 items on peers, the killed
+worker holding chunks, 0 lost (`raw/O4b_lab_fail_2026-11-03.txt`,
+`raw/O4c_lab_fail_2026-11-03_fixed_wait.txt`). The job's own log reads
+"Closure already on the node; nothing to send", so this is the issue-3
+scenario. One earlier attempt failed because the harness gave the first chunk a
+fixed 180 s, which the fresh containers' environment build overran on the loaded
+host; the wait now lasts as long as the run (`LAB_CHUNK_WAIT`, 900 s). The fix
+that closed the issue is `8484714`, which hands nix the cluster's keys on
+import; `TestImportHandsNixTheClusterKeys` (`internal/narpack`) fails when that
+option is removed.
 
 `scripts/lab-fail.sh` (`raw/O4_lab_fail.txt`) printed:
 
@@ -181,7 +193,6 @@ commits that matter most:
 | Wanted | How to get it |
 |---|---|
 | Repeated multi-machine benchmark | `scripts/bench-pool.sh`, `bench-split.sh` and `bench-ddp.sh` on real machines |
-| Fault injection that distributes, with raw output kept | `scripts/lab-fail.sh` (passed per `a9c715d`; rerun and save its output under `raw/`) |
 | Cross-network acceptance | `scripts/net-verify.sh` on three networks (`pipedpeer-demo/DEMO.md`) |
 | Two GPUs on one node | `scripts/bench-multigpu.sh` (exits 3, "NOT VERIFIED", without the hardware) |
 | Demo workloads end to end | `docker/demo-test.sh` |
