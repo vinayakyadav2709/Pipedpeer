@@ -17,7 +17,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 source "$here/otel/lib.sh"
 
-results="${LAB_RESULTS:-$repo/results/lab}"
+results="${LAB_RESULTS:-${PL_RESULTS:-$repo/results/lab}}"   # PL_RESULTS: the runner's own knob
 otlp_port="${PIPEDPEER_LAB_OTLP_PORT:-4317}"
 pidfile="$LAB_OTEL/driver.pid"
 logfile="$LAB_OTEL/driver.log"

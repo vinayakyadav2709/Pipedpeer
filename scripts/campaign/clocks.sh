@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # clocks.sh [--exec '<prefix>'] [host...]: each lab PC's clock offset from
 # this machine (the driver), flagged over 10 ms, written to
-# results/lab/clocks.txt.
+# results/lab/clocks.txt (LAB_CLOCKS_OUT: another file, e.g. the lab day's
+# second measurement at the end, clocks-end.txt).
 #
 # Hosts: the arguments, else results/lab/inventory.ini (groups head and
 # workers; connects to ansible_host, as ansible_user when set). Each host is
@@ -18,7 +19,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 inventory="$repo/results/lab/inventory.ini"
-out="$repo/results/lab/clocks.txt"
+out="${LAB_CLOCKS_OUT:-$repo/results/lab/clocks.txt}"
 prefix="ssh -o BatchMode=yes -o ConnectTimeout=5"
 limit_ms="${CLOCK_LIMIT_MS:-10}"
 

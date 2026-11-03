@@ -175,4 +175,28 @@ The runner contract of [otel/README.md](otel/README.md) ("Runner integration"):
 - Ray starts with `--metrics-export-port=8090` and ports 6380-6384, 10002-10999; Dask workers with `--worker-port 9000:9099 --nanny-port 9100:9199` and their dashboards on (pp-poll.py finds them).
 - The process globs of E6 and the kills match whitespace, not any character: `?` matched the `-` of `logs/pipedpeer-run/` in the wrapping shell's command line, which would have signalled the shell.
 
+### The lab/sample gaps
+
+[results/lab/sample/REPORT.md](../../results/lab/sample/REPORT.md) section 4 lists what the sample run found. Status here:
+
+| Gap | Status |
+|---|---|
+| 17, rehearsal uploads to the real bucket | Fixed. `runner.Context.sync` uploads only for a campaign run (no `--rehearsal`, results in `results/lab`); `PL_SYNC=1` forces it for a harness with a stand-in, and passes `LAB_RESULTS`. headless-test.sh's uploads go to `test/ingest-standin.py` through the bundle's credentials. |
+| 1, receipt size | Fixed in the runner. runs.jsonl keeps `receipts.summary()`: the receipt's small fields and its steps aggregated per (step, node), a few kB. The whole receipt is `logs/<run_id>/receipt.json.gz` (`receipt_path`). `sample_figures.py` reads lane steps from it (checked: identical lanes for all 26 sample runs). Aggregating per-item steps in the shim itself is still open (shim owner). |
+| 2, node id to pc id | Fixed. `prep.join` writes `results/lab/node-ids.csv` (`pc_id,node_id`, from `~/.local/state/pipedpeer/daemon.node`); `sample_figures.py` prefers it to the daemon-log scrape. |
+| 6, E8 one-rank loss | Fixed. E8 runs the T1 script plain on pc00 once per variant and seed first; `analyse.py`'s E8 table has a "loss vs 1 rank" column. |
+| 7, daemon log time | Fixed for the lines that carry one: the collector parses JSON lines' `time` and Go log lines' date. zerolog's console lines (`13:14:51 INF`) have no date and keep the read time; logging RFC 3339 from the daemon is the product fix. |
+| 9, uncapped awss3 path | Already gzip (`driver.yaml.tmpl`); the day uses the ingest path. |
+| 10, `system.network.connections` | Off. |
+| 11, telemetry.sh and PL_RESULTS | `telemetry.sh` and `sync-r2.sh` use `LAB_RESULTS`, else `PL_RESULTS`, else `results/lab`. |
+| 12, `--size` and weak scaling | An override is per PC in weak mode, multiplied by N (test). |
+| 13, failed runs lose stderr | Timed commands merge stderr into the output (test); with `ansible_connection=local` there is no pty to do it. |
+| 14, clocks measured once | Step `clocks.end` writes `results/lab/clocks-end.txt` before the pcap pull. |
+| 15, E6 warm-up group | The warm-up line has `fault: none`. |
+| 3, container CPU is the host's | Not fixed: the real lab is unaffected. headless-test.sh gives each container `--cpus 2`. |
+| 4, Ray/Dask task timeline | Not fixed: needs changes to the baseline ports. |
+| 5, no container CPU limit | headless-test.sh: `--cpus 2`, `PL_NPROC=2`, `PYTHON_CPU_COUNT=2`. `lab/docker-compose.yml` (rehearse.sh) unchanged. |
+| 8, process, Ray and Dask metrics | Present since lab/traces (`host.process`, `prom.ray`, `prom.dask`); headless-test.sh checks them per PC. |
+| 16, harness restarts | Not applicable to the day (a systemd unit). |
+
 Also fixed on the way: `bootstrap-ssh.sh` still fetched the laptop-era `lab-pc.sh` from `serve.sh`; it now runs the published worker line (`LAB_SITE` moves it), so it works from pc00. `calibrate.sh` counts the CPUs it may use (`PL_NPROC`, else affinity), as `nproc` and the runner do. The day's calibration window follows the target (±25 %) instead of the plan's 100-150 s.

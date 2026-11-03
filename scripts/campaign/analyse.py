@@ -244,15 +244,21 @@ def bars(plt, rows, label_of, title, ylabel, figdir, name, made, value="median_w
 
 
 def e8_table(rows, path):
+    """One row per (variant, ranks, system); "loss vs 1 rank" is the median
+    validation loss over the plain one-rank run's of the same variant."""
+    ref = {r.get("variant"): r.get("median_loss") for r in rows if r["system"] == "plain" and r["n"] == 1}
     with open(path, "w") as f:
-        f.write("| variant | ranks | system | runs | median wall s | IQR s | median val loss | bytes/rank |\n")
-        f.write("|---|---|---|---|---|---|---|---|\n")
+        f.write("| variant | ranks | system | runs | median wall s | IQR s | median val loss | loss vs 1 rank | bytes/rank |\n")
+        f.write("|---|---|---|---|---|---|---|---|---|\n")
         for r in rows:
             def fmt(v, p="%.2f"):
                 return p % v if isinstance(v, (int, float)) else "-"
-            f.write("| %s | %s | %s | %d | %s | %s | %s | %s |\n" % (
+            one = ref.get(r.get("variant"))
+            rel = r.get("median_loss") / one if isinstance(r.get("median_loss"), (int, float)) and one else None
+            f.write("| %s | %s | %s | %d | %s | %s | %s | %s | %s |\n" % (
                 r.get("variant", "-"), r["n"], r["system"], r["runs_used"], fmt(r.get("median_wall_s")),
-                fmt(r.get("iqr_wall_s")), fmt(r.get("median_loss"), "%.4f"), fmt(r.get("median_bytes_per_rank"), "%d")))
+                fmt(r.get("iqr_wall_s")), fmt(r.get("median_loss"), "%.4f"), fmt(rel, "%.3f"),
+                fmt(r.get("median_bytes_per_rank"), "%d")))
 
 
 def main(argv=None):

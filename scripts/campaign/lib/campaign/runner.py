@@ -179,11 +179,23 @@ class Context:
             self._marker = None
 
     def sync(self):
+        """Upload results/lab with sync-r2.sh, only for a real campaign run.
+
+        A rehearsal (--rehearsal, or results anywhere but results/lab) never
+        uploads: with ingest.env on the machine, sync-r2.sh would send it to
+        the campaign's real bucket (the lab/sample rehearsal did, 239 files).
+        PL_SYNC=1 forces the upload, for a harness that points the
+        credentials (PIPEDPEER_LAB_INGEST_ENV) at a local stand-in; PL_SYNC=0
+        leaves it to the caller (the lab day syncs after attempts.jsonl)."""
         script = os.path.join(CAMPAIGN, "sync-r2.sh")
-        if os.environ.get("PL_SYNC") == "0":
+        want = os.environ.get("PL_SYNC", "")
+        campaign = os.path.realpath(self.out_dir) == os.path.realpath(os.path.join(REPO, "results", "lab"))
+        if want == "0":
             self.log("PL_SYNC=0: the caller syncs to R2")
+        elif want != "1" and (self.rehearsal or not campaign):
+            self.log("not uploading: a rehearsal (or results outside results/lab) never syncs to R2; PL_SYNC=1 forces it")
         elif os.path.exists(script):
-            rc = subprocess.call(["bash", script])
+            rc = subprocess.call(["bash", script], env=dict(os.environ, LAB_RESULTS=self.out_dir))
             self.log("sync-r2.sh exited %d" % rc)
         else:
             self.log("scripts/campaign/sync-r2.sh not present; nothing uploaded")

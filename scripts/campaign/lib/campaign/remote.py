@@ -51,7 +51,7 @@ class Remote:
 
     def timed(self, host: str, cmd: str, timeout: float = 1800) -> Timed:
         """Run cmd on one host, timing it there with its own clock."""
-        wrapped = ("s=$(date +%%s%%N); timeout -k 10 %d sh -c %s; rc=$?; "
+        wrapped = ("s=$(date +%%s%%N); timeout -k 10 %d sh -c %s 2>&1; rc=$?; "
                    "e=$(date +%%s%%N); echo; echo \"__PL_TIMES $s $e $rc\"") % (
                        int(timeout), shlex.quote(cmd))
         t0 = time.time_ns()
@@ -75,7 +75,7 @@ class Remote:
         """Run cmd on every host at once (one Ansible fan-out), each timed on
         its own clock. Returns {host id: Timed}; a host with no timing line
         failed before the command ran."""
-        wrapped = ("s=$(date +%%s%%N); timeout -k 10 %d sh -c %s; rc=$?; "
+        wrapped = ("s=$(date +%%s%%N); timeout -k 10 %d sh -c %s 2>&1; rc=$?; "
                    "e=$(date +%%s%%N); echo; echo \"__PL_TIMES $s $e $rc\"") % (
                        int(timeout), shlex.quote(cmd))
         ids = [h.id for h in hosts]
@@ -104,7 +104,7 @@ class Remote:
 
     def start_job(self, host: str, log: str, cmd: str):
         """Start cmd detached on host; its output and a timing line go to log."""
-        wrapped = ("s=$(date +%%s%%N); sh -c %s; rc=$?; e=$(date +%%s%%N); "
+        wrapped = ("s=$(date +%%s%%N); sh -c %s 2>&1; rc=$?; e=$(date +%%s%%N); "
                    "echo; echo \"__PL_TIMES $s $e $rc\"") % shlex.quote(cmd)
         return self.bg(host, log, wrapped)
 

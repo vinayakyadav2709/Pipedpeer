@@ -193,7 +193,24 @@ prep_join() {
   done
   say "pc00 sees $n healthy nodes for $want workers"
   pipedpeer status >"$RESULTS/join-status.txt" 2>&1 || true
+  node_ids
   return 0
+}
+
+# node_ids writes results/lab/node-ids.csv: each PC's pipedpeer node id (the
+# key fingerprint receipts, record.json and the daemon logs name machines
+# by), so they join to pc ids. Rerun at the end of the day by finish.sh.
+node_ids() {
+  local h id
+  ans nodeid all 'cat "${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/daemon.node"' "$INV_ALL" || true
+  {
+    echo "pc_id,node_id"
+    for h in "${OK_HOSTS[@]}"; do
+      id=$(out_of nodeid "$h" | tr -cd '0-9a-f\n' | grep -E '^[0-9a-f]{8,}$' | tail -n1)
+      [[ -n $id ]] && echo "$h,$id"
+    done | sort
+  } >"$RESULTS/node-ids.csv"
+  say "node ids: $(($(wc -l <"$RESULTS/node-ids.csv") - 1)) PCs in results/lab/node-ids.csv"
 }
 
 # prep_nixenv: pc00 builds the campaign env from cache.nixos.org and writes

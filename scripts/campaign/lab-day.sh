@@ -55,6 +55,7 @@ calibrate 12
 weakrefs 17
 $(for r in "${EXPS[@]}"; do read -r id min _ <<<"$r"; echo "exp.$id $min"; done)
 analyse 3
+clocks.end 1
 pull.pcap 2
 clean.workers 10
 undo.workers 3

@@ -14,6 +14,16 @@ had() {
   grep -qx "had-$2" "$HOSTREC/$1" && echo 1 || echo 0
 }
 
+# clocks_end measures every PC's offset again (results/lab/clocks-end.txt):
+# with clocks.txt from prepare, the drift over the day can be interpolated
+# when traces from several PCs are lined up.
+clocks_end() {
+  local prefix="ssh $SSH_COMMON -o BatchMode=yes -o ConnectTimeout=5 -l $USER"
+  LAB_CLOCKS_OUT=$RESULTS/clocks-end.txt bash "$CAMP/clocks.sh" --exec "$prefix" ||
+    say "clocks at the end: some PCs over 10 ms or unreachable (results/lab/clocks-end.txt)"
+  return 0
+}
+
 # pull_pcap stops every capture and copies each PC's pcap files into
 # results/lab/pcap/<pc>/ (gitignored; sync-r2.sh uploads it), before the
 # cleanup deletes them. Over ssh as a tar stream: raw Ansible output is text,
@@ -117,6 +127,7 @@ summary() {
 }
 
 finish() {
+  step clocks.end cleanup clocks_end
   step pull.pcap cleanup pull_pcap
   step clean.workers cleanup clean_workers
   step undo.workers cleanup undo_workers

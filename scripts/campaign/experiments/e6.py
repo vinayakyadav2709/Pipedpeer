@@ -154,7 +154,7 @@ def main(ctx):
     for system in ctx.rng.sample(chosen, len(chosen)):
         b = ctx.backend(system)
         victim = b.hosts_for(n)[-1]
-        ctx.one_run(wl, system, n, 0, warmup=True)
+        ctx.one_run(wl, system, n, 0, warmup=True, extra={"fault": "none"})
         ref = ctx.one_run(wl, system, n, 1, extra={"fault": "none"})
         if ref.get("error") or not ref.get("wall_s"):
             ctx.log("no reference wall for %s; kills skipped" % system)

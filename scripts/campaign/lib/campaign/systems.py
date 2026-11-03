@@ -23,9 +23,13 @@ Ray and Dask clusters are started for a run and stopped before the other one
 starts, so neither idles on the PCs while the other is measured. PipedPeer's
 daemons stay up through an N block, as they would in use.
 """
+import base64
+import gzip
 import json
 import shlex
 import time
+
+from . import receipts
 
 STATE = "$HOME/.local/share/pipedpeer-lab"
 WORK = STATE + "/work"
@@ -293,15 +297,22 @@ class PipedPeer(Backend):
         return res
 
     def collect(self, ws, logdir):
-        """The shim's receipt (PIPEDPEER_RECEIPT) inline, and the run's step
-        record (`pipedpeer jobs last --export json`) as a file in logdir."""
+        """The shim's receipt (PIPEDPEER_RECEIPT), whole as receipt.json.gz in
+        logdir and as a bounded summary inline (receipts.py), and the run's
+        step record (`pipedpeer jobs last --export json`) as record.json."""
         out = {}
-        rc, text = self.remote.sh(self.inv.head.id, "cat %s/receipt.json" % ws, timeout=30)
-        if rc == 0:
+        rc, text = self.remote.sh(self.inv.head.id, "gzip -c %s/receipt.json | base64 -w0" % ws, timeout=300)
+        if rc == 0 and text.strip():
             try:
-                out["receipt"] = json.loads(text)
-            except ValueError:
-                out["receipt_raw"] = text[:2000]
+                raw = gzip.decompress(base64.b64decode(text.strip()))
+                receipt = json.loads(raw)
+                path = logdir + "/receipt.json.gz"
+                with open(path, "wb") as f:
+                    f.write(gzip.compress(raw))
+                out["receipt"] = receipts.summary(receipt)
+                out["receipt_path"] = path
+            except (ValueError, OSError) as e:
+                out["receipt_raw"] = "unreadable receipt (%s): %s" % (e, text[:200])
         rc, text = self.remote.sh(self.inv.head.id, "pipedpeer jobs last --export json", timeout=60)
         if rc == 0 and text.strip():
             path = logdir + "/record.json"

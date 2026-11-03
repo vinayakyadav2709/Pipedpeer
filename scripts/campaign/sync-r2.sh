@@ -17,7 +17,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
-results="${LAB_RESULTS:-$repo/results/lab}"
+results="${LAB_RESULTS:-${PL_RESULTS:-$repo/results/lab}}"   # PL_RESULTS: the runner's own knob
 ingest="$here/ingest/ingest.sh"
 ingest_env="${PIPEDPEER_LAB_INGEST_ENV:-$HOME/.config/pipedpeer-lab/ingest.env}"
 # On pc00 the decrypted bundle's r2.env (PIPEDPEER_LAB_R2_ENV) carries the

@@ -222,7 +222,16 @@ def load_steps(results, run):
             steps, names = list(rec.get("steps") or []), rec.get("names") or {}
         except ValueError:
             pass
-    steps += (run.get("receipt") or {}).get("steps") or []
+    # The receipt's steps: in logs/<run>/receipt.json.gz since runs.jsonl
+    # holds only a summary (lib/campaign/receipts.py); inline in older runs.
+    rp = os.path.join(results, run.get("log_path") or "", "receipt.json.gz")
+    if run.get("log_path") and os.path.exists(rp):
+        try:
+            steps += json.load(gzip.open(rp)).get("steps") or []
+        except (ValueError, OSError):
+            pass
+    else:
+        steps += (run.get("receipt") or {}).get("steps") or []
     return [s for s in steps if s.get("step") in LANE_STEPS], names
 
 
@@ -282,6 +291,10 @@ def build_model(a):
         groups[exp] = rows
     pc_ids = sorted({h for r in runs for h in (r.get("hosts") or [])} | set(metrics.cpu), key=pc_sort)
     pc_of_host, pc_of_node = load_hosts(results), load_node_ids(otel_files(a.otel, "logs"))
+    # The lab day records the join directly (day/prepare.sh node_ids).
+    nid = os.path.join(results, "node-ids.csv")
+    if os.path.exists(nid):
+        pc_of_node.update({r["node_id"][:8]: r["pc_id"] for r in csv.DictReader(open(nid)) if r.get("node_id")})
     timelines = {}
     def per_pc_cpu(r):
         # Where some PCs have per-PC (cgroup) CPU, prefer runs it fully covers.
@@ -497,7 +510,8 @@ def volume(model, runs, results, otel_dirs, profile, pcs_real=17, setup_min=60):
     mfiles, lfiles = otel_files(otel_dirs, "metrics"), otel_files(otel_dirs, "logs")
     logs_dir = glob.glob(os.path.join(results, "logs", "*", "*"))
     receipts = [p for p in logs_dir if p.endswith("record.json")]
-    outputs = [p for p in logs_dir if not p.endswith("record.json")]
+    receipt_files = [p for p in logs_dir if p.endswith("receipt.json.gz")]
+    outputs = [p for p in logs_dir if not p.endswith(("record.json", "receipt.json.gz"))]
     exp_logs = glob.glob(os.path.join(results, "logs", "*.log"))
     plan, minutes = profile_runs(profile)
     day_s = (minutes + setup_min) * 60
@@ -519,8 +533,10 @@ def volume(model, runs, results, otel_dirs, profile, pcs_real=17, setup_min=60):
         n, lo, hi = count_records(files, key)
         add(name, files, n, "pcs", note, (hi - lo) / 1e9 if lo and hi else None)
     runs_path = os.path.join(results, "runs.jsonl")
-    add("runs.jsonl (one line per run; receipts inline)", [runs_path], len(runs), "run")
+    add("runs.jsonl (one line per run; receipt summaries inline)", [runs_path], len(runs), "run")
     add("pipedpeer record.json (steps per machine, chunk)", receipts, len(receipts), "run")
+    if receipt_files:
+        add("pipedpeer receipt.json.gz (every shim step)", receipt_files, len(receipt_files), "run")
     add("run output.log", outputs, len(outputs), "run")
     add("runner logs (logs/<exp>.log)", exp_logs, sum(1 for p in exp_logs for _ in open(p)), "run", "lines")
     host = [p for p in mfiles if "cgroup" not in p]

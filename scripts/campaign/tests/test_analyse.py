@@ -44,6 +44,8 @@ def synth(path):
     for s in ("pipedpeer-exact", "torchrun"):
         lines.append({"experiment": "e8", "workload": "T1", "system": s, "n": 2, "variant": "mlp-c", "repeat": 1,
                       "result_ok": True, "wall_s": 50, "result": "BENCH_LOSS 0.4321", "bytes_per_rank": 10 ** 6})
+    lines.append({"experiment": "e8", "workload": "T1", "system": "plain", "n": 1, "variant": "mlp-c", "repeat": 1,
+                  "result_ok": True, "wall_s": 90, "result": "BENCH_LOSS 0.4000"})
     with open(path, "w") as f:
         for ln in lines:
             f.write(json.dumps(ln) + "\n")
@@ -74,7 +76,8 @@ def test_speedup_median_iqr_and_exclusions(tmp_path):
         for ext in ("png", "pdf"):
             assert (tmp_path / "figures" / ("%s.%s" % (name, ext))).stat().st_size > 1000, name
     table = (tmp_path / "e8_table.md").read_text()
-    assert "| mlp-c | 2 | torchrun | 1 | 50.00 |" in table and "0.4321" in table
+    assert "| mlp-c | 2 | torchrun | 1 | 50.00 |" in table and "| 0.4321 | 1.080 |" in table
+    assert "| mlp-c | 1 | plain | 1 | 90.00 |" in table
     summary = (tmp_path / "summary.txt").read_text()
     assert "e1: 70 runs, 50 used, 10 warm-ups excluded, 10 failed excluded" in summary
     assert "FAILED" in summary and "pc01" in summary

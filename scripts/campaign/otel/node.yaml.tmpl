@@ -31,6 +31,9 @@ receivers:
       load:
       network:
         metrics:
+          # 24 % of all host datapoints and no figure reads it; net/sockets
+          # (pp-poll.py) has every campaign socket (REPORT.md gap 10).
+          system.network.connections: {enabled: false}
           system.network.conntrack.count: {enabled: true}
           system.network.conntrack.max: {enabled: true}
       paging:
@@ -115,6 +118,27 @@ receivers:
     resource:
       service.name: pipedpeer-daemon
       lab.source: daemon-log
+    # The record's time from the line itself where it has one: JSON lines
+    # carry "time" (RFC 3339), Go log lines start "2026/11/03 13:14:51"
+    # (local time). zerolog's console lines ("13:14:51 INF ...") have no
+    # date and keep the time the collector read them.
+    operators:
+      - type: json_parser
+        if: 'body matches "^\\{"'
+        on_error: send_quiet
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: '2006-01-02T15:04:05Z07:00'
+      - type: regex_parser
+        if: 'body matches "^\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2} "'
+        regex: '^(?P<log_time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) '
+        on_error: send_quiet
+        timestamp:
+          parse_from: attributes.log_time
+          layout_type: gotime
+          layout: '2006/01/02 15:04:05'
+          location: Local
 
   # `pipedpeer setup --boot`: systemd's user unit pipedpeer.service, which
   # sends the daemon's stderr to the user journal.

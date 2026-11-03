@@ -81,6 +81,8 @@ At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if
 | `PL_E9_HOST` | `local` (rehearsal: last PC) | Where E9's laptop steps run |
 | `PL_E11_IDLE_S` | 600 (rehearsal: 30) | E11 idle window per cluster size |
 
+`--size W1:BENCH_ITEMS=48` replaces workloads.json's size. In a weak-scaling experiment (E1b) it is the size per PC, multiplied by N like `weak_per_pc`.
+
 ## Rehearsal limits
 
 `rehearse.sh` runs every experiment at N=1 and N=2 on three 2 GB containers that share one host. It uses the workloads' `smoke` sizes and `PL_NPROC=2`. The rehearsal proves that each code path runs; its timings are not measurements. These are the limits of a 3-container lab:

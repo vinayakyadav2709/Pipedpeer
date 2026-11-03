@@ -71,10 +71,12 @@ class Workload:
         return self.script
 
     def size(self, mode: str, n: int, rehearsal: bool = False, override: dict = None) -> dict:
-        """The size env of a run: mode "strong" or "weak", at N PCs."""
+        """The size env of a run: mode "strong" or "weak", at N PCs. In weak
+        mode every base, an override (--size) included, is the size per PC,
+        multiplied by N."""
         if override:
-            return {k: str(v) for k, v in override.items()}
-        if rehearsal and self.smoke:
+            base = override
+        elif rehearsal and self.smoke:
             base = self.smoke
         elif mode == "weak":
             base = self.weak
