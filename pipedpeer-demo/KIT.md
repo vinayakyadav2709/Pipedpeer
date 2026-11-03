@@ -94,24 +94,38 @@ Check: 4 machines healthy.
 
 ### Layout +phone (add to any layout)
 
-Samsung S20 FE 5G, Termux from F-Droid (not the Play Store). Once, from a laptop with the phone on USB debugging:
+Samsung S20 FE 5G (Android 13), Termux from the **Play Store** (the build the real-phone runs used; F-Droid is untested,
+`docs/phone.md`). Two steps, done once, well before the demo.
 
-```bash
-adb shell device_config put activity_manager max_phantom_processes 2147483647
-adb shell settings put global settings_enable_monitor_phantom_procs false
-```
+1. Turn off Android's phantom process killer (it kills pool workers). Android 13 has no toggle, so from the phone
+   itself: Developer options, Wireless debugging on, "Pair device with pairing code", Termux and Settings in split
+   screen, then in Termux:
 
-Then in Termux on the phone:
+   ```bash
+   curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/phone-phantom-off.sh
+   bash phone-phantom-off.sh     # asks for the pairing port, the code, then the connect port
+   ```
 
-```bash
-pkg install -y python python-numpy curl
-termux-wake-lock
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-pipedpeer connect <CODE>
-```
+   It prints `max_phantom_processes = 2147483647` and `phantom process killer off`. Alternative with a laptop and USB
+   debugging:
 
-The phone joins as a pool-only worker: it takes Pool and joblib chunks (`cpu.py`, `both.py`), never whole jobs or
-GPU work. Keep Termux in the foreground or its notification pinned. More detail: `docs/phone.md`.
+   ```bash
+   adb shell device_config put activity_manager max_phantom_processes 2147483647
+   adb shell settings put global settings_enable_monitor_phantom_procs false
+   ```
+
+2. In Termux (nothing to `pkg install` by hand: the installer's `pipedpeer setup` installs proot-distro, a Debian, Nix
+   and the Python packages itself, about 1.5 GB, so do this on Wi-Fi with the phone charging):
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
+   pipedpeer connect <CODE>
+   termux-wake-lock
+   ```
+
+The phone joins as a chunks-only worker: it takes Pool and joblib chunks (`cpu.py`, `both.py`), never whole jobs, DDP
+ranks or GPU work. Keep it plugged in, Termux in the foreground or its notification pinned. More detail:
+`docs/phone.md`.
 
 ## Part C: the flow on stage
 
@@ -137,22 +151,24 @@ its environment); add `-v` to watch it.
    shows every machine busy during the Pool and joblib steps.
 3. **GPU, decided automatically.**
    ```bash
-   pipedpeer run gpu.py
+   pipedpeer run gpu.py                       # one machine: the GPU laptop, no split (gpu.py has no torch.distributed)
    pipedpeer run --ddp 2 gpu.py               # force a split, to compare
    pipedpeer run --ddp 2 --ddp-sync fast gpu.py   # split, syncing less often
    ```
-   Expect: the first run starts split, measures the first steps, then prints `pipedpeer: one machine is faster alone:
+   Needs two machines with an NVIDIA GPU (the ring is GPU-only when any GPU exists; PCs and the phone never join it).
+   With only the RTX 3060 the `--ddp` runs fall back to one machine and nothing splits. Expect: `--ddp 2` starts split, measures the first steps, then prints `pipedpeer: one machine is faster alone:
    <machine> takes about N ms a step by itself against M ms split across 2 machines, so it trains on alone from the
    next epoch. To keep the split: --ddp 2`, then the `epoch 0..2` lines and `validation loss …`. (If no ring can
-   possibly win, it runs on one machine from the start and says nothing; `-v` shows why.) The `--ddp 2` run is clearly slower, which is the point: the
+   possibly win, it runs on one machine from the start; `-v` shows why.) The `--ddp 2` run is clearly slower, which is the point: the
    automatic choice was right. The `--ddp-sync fast` run closes most of that gap; its validation loss should be close
    to the one-GPU run's.
 4. **Both.** `pipedpeer run both.py`
    Expect: `CPU phase: 256,000 rows …` (spread over every machine, phone included), then `GPU phase on: NVIDIA …`.
 5. **Remote.** `pipedpeer run --remote gpu.py`
-   Expect: the job runs on the friend's laptop (summary says where), output streams back as if local.
+   Expect: the job runs on another machine, a GPU one since gpu.py imports torch (the friend's laptop only if it has an NVIDIA GPU; summary says where), output streams back as if local.
    Flags pass through: `pipedpeer run --remote gpu.py --epochs 5`.
-6. **Phone takes CPU work.** `pipedpeer run cpu.py` again with the phone connected.
+6. **Phone takes CPU work.** `pipedpeer run cpu.py --items 400` with the phone connected (more Pool items, so the
+   phone pulls chunks before the work runs out; at 128 it may take none).
    Expect: the phone appears in the `ran on …` line.
 7. **Web page.** `pipedpeer ui` opens `http://127.0.0.1:4242/ui` already signed in (no token to type);
    `pipedpeer ui --print` only prints the address.
