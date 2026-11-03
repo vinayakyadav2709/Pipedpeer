@@ -174,10 +174,13 @@ func (pm *poolManager) runRemoteRacing(i int, peer, runPath, storePath string, c
 		running++
 		go func() {
 			defer rcancel()
-			if release != nil {
-				defer release()
-			}
 			r, c, e := pm.runRemote(to, storePath, &rc, 0)
+			// Free the peer's slot before the result is published: once a
+			// winner is received the part is done, and a deferred release
+			// left the peer booked for a moment after the caller moved on.
+			if release != nil {
+				release()
+			}
 			out <- outcome{r, c, e, "peer:" + to}
 		}()
 	}
