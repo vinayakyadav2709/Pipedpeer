@@ -35,8 +35,12 @@ def main(ctx):
                 first[pc] = s["start_ns"]
             if pc and "items" in s:
                 items[pc] = items.get(pc, 0) + s["items"]
-        if not items and receipt.get("local_items") and not receipt.get("dispatched_items"):
-            items = {ctx.inv.head.id: receipt["local_items"]}  # the map stayed on pc00
+        if receipt.get("local_items") is not None:
+            # pc00's counter, not its compute steps: in the rehearsal of
+            # 2026-11-04 its steps summed to 88778 items against
+            # local_items 66634 (of 73946), while the peers' step items
+            # matched by_where exactly.
+            items[ctx.inv.head.id] = receipt["local_items"]
         res["first_work"] = first
         res["items_per_pc"] = dict(sorted(items.items()))
         res["pcs_with_work"] = len(first)

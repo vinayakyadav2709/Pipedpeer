@@ -16,7 +16,7 @@ What each headline experiment records, and the figure `analyse_headline.py` draw
 
 ## E12 elastic join: `e12_join`
 
-**Data (runs.jsonl, experiment `e12`, one line per system):** `system`, `start_ns`, `wall_s`, `hosts` (the PCs at the start; pc00 included), `n_start`, `n_final`, `join_every_s`, `timeline` (`{bin_s: 1, t0_ns, per_pc: {pc: [items per second, ...]}}`), `timeline_source`, `items_total`, `items_counted`, `chunks_path`, `events`, `hosts_final`, `result_ok`. Each element of `events` is `{kind: "join", t_ns, done_ns, planned_s, pcs: [...], seen_ns}`. `seen_ns` is when the system first listed the new PCs: pipedpeer, pc00's `/v1/nodes` healthy count; Dask, the plugin's worker-add time; Ray, null. CSV: `csv/e12_timeline.csv` (`run_id, system, t_s, pc, cohort, items_per_s`).
+**Data (runs.jsonl, experiment `e12`, one line per system):** `system`, `start_ns`, `wall_s`, `hosts` (the PCs at the start; pc00 included), `n_start`, `n_final`, `join_every_s`, `timeline` (`{bin_s: 1, t0_ns, per_pc: {pc: [items per second, ...]}}`), `timeline_source`, `items_total`, `items_counted`, `chunks_path`, `events`, `hosts_final`, `result_ok`, and the join's outcome from the chunks: `items_per_pc`, `joiner_share` (the joined PCs' part of the items), `joiner_first_work_s` (`{pc: seconds from its join's start to its first chunk}`, null for a joiner that got none) and `joiner_present_frac` (the part of the wall after the first joiner's first work). Each element of `events` is `{kind: "join", t_ns, done_ns, planned_s, pcs: [...], seen_ns}`. `seen_ns` is when the system first listed the new PCs: pipedpeer, pc00's `/v1/nodes` healthy count; Dask, the plugin's worker-add time; Ray, null. CSV: `csv/e12_timeline.csv` (`run_id, system, t_s, pc, cohort, items_per_s`).
 
 **Figure:** one panel per system (pipedpeer, ray, dask), side by side, with a shared y axis.
 
@@ -24,6 +24,8 @@ What each headline experiment records, and the figure `analyse_headline.py` draw
 - Marks: a stacked step area, one layer per join cohort: the PCs the run started on, then each group of 4 that joined. All layers use the system's colour, with opacity falling for later cohorts.
 - Annotations: a dashed vertical line at each join's `t_ns`, labelled `+4`, and a small tick on the x axis at `seen_ns`. The title gives the system and its wall. The legend sits below each panel.
 - Reading: the stack should step up after each join. A cohort that stays flat at zero is a system that does not use PCs that join mid-run. Ray's `Pool` is expected to do this, because its actors were made at the start.
+
+**Size, and why the job outlasts the joins.** 13 × W1's calibrated strong size (`PL_JOIN_SCALE`), in the rehearsal too (a smoke size ends before pc00 lists the joiner). Lab day: 13 × 60 s = 780 s of one PC. pipedpeer starts on 4 PCs (pc00 included); joins of 4 are started at 20, 40 and 60 s, and a joiner computes about 5 s after its start command (detection 3 s, first chunk 2 s; `docs/benchmarks/work-reaches-every-pc.md`). At 80 % per-PC efficiency: 80 PC-s done by 25 s, 208 by 45 s, 400 by 65 s, the remaining 380 on 16 PCs in 30 s, so the job ends near 95 s (82 s at 100 %). The first cohort then works for about 74 % of the run, the last for about 32 %. The rehearsal (2-core containers, 10 s calibration, 130 s of one PC, 2 → 3 PCs with the join at 10 s) puts the joiner in for about 70 % of the run; `test/gonogo.py` fails it below 50 %.
 
 ## E13 churn: `e13_churn`
 
@@ -83,6 +85,14 @@ CSV: `csv/e14_pcs.csv`, one row per PC, with seconds from `head_start` to each o
 ## W4 in E1
 
 W4 (`GridSearchCV`) is one more workload in `e1` (`workload: "W4"`). The existing `e1_speedup` figure gets a W4 panel, and `csv/e1.csv` gets W4 rows; nothing new is needed. The result line compared across systems is `best_params={...} | best_score=...`.
+
+## E5 shipping the environment: cold is cold
+
+**Data (experiment `e5`):** one line per method and phase (`system` pipedpeer, pip or ray; `phase` cold or update; `extra_package`), `wall_s`, `mb_down` (bytes every PC received, summed), `rx_bytes`, `result_ok`. pipedpeer lines add `all_have_s` (until every PC holds the closure), `closure_on_pc00` (built / already built), `closure_paths` (the job closure's store paths, `nix-store -qR` on pc00), `present_before` (`{pc: how many of them that PC held}`, from a `/nix/store` listing each PC takes just before the run), `store_entries_before` and `before_campaign_env`.
+
+**Why the cold ship runs early.** The campaign env (`env/flake.nix`) is on the same nixpkgs revision as pipedpeer's closures, so once `prep.nixenv` has pulled it onto the workers they hold torch, numpy and the rest, and a pipedpeer "cold" ship at the e5 row would send almost nothing while pip and Ray download everything. Three ways out were weighed: evicting the paths on the workers (they are rooted by the env every other experiment needs, so evicting means pulling them again: minutes of day time and a broken env if it fails), a closure on another Python (not the environment pip and Ray install), or measuring before the env arrives. The day does the last: step `prep.e5cold` (between `prep.firstjob` and `prep.nixenv`) runs `run.sh e5 <the e5 row's arguments> --part pipedpeer-cold`. At that point the workers hold only what `pipedpeer setup` and the first job (W1, standard library only) brought: python and its libraries, no numpy or torch. pc00 builds E5's closure from cache.nixos.org there (in the lab it has no campaign env yet either), and `prep.nixenv` later finds those paths present, so the day is no longer. The e5 row then runs pip's and Ray's cold cases, cold by construction (a fresh venv with `--no-cache-dir`; a fresh Ray session), and the updates, and skips pipedpeer's cold run because its line (`before_campaign_env: true`, `result_ok: true`) is in runs.jsonl. If `prep.e5cold` failed, the row runs it, and `present_before` shows how warm it was. The early run has no telemetry traces (the collectors start at `prep.otel`); its receipt, record and `/proc/net/dev` bytes are all the figure uses.
+
+**Figure** (`e5_env`, `e5_env_mb`): median wall and MB per method and phase. The caption quotes `present_before` / `closure_paths` per worker for the cold pipedpeer bar.
 
 # More benchmarks: E16-E20 (lab/more-bench)
 

@@ -235,7 +235,11 @@ prep_join() {
   line=$(pipedpeer invite 2>"$DAY/logs/invite.err") || { say "pipedpeer invite: $(cat "$DAY/logs/invite.err")"; return 1; }
   code=$(sed -n 's/^pipedpeer connect //p' <<<"$line" | tail -n1)
   [[ -n $code ]] || { say "no code in: $line"; return 1; }
-  ans_drop join workers "$(tl_wrap join "pipedpeer connect $code")" "pipedpeer connect failed" || true
+  # --no-warmup: connect would otherwise build the common environment (numpy,
+  # pandas, scipy, torch, ...) on every worker from cache.nixos.org at once:
+  # gigabytes per PC on the lab's uplink, competing with the first job (E14)
+  # and filling the stores E5's cold ship is meant to fill (FIGURES.md, "E5").
+  ans_drop join workers "$(tl_wrap join "pipedpeer connect --no-warmup $code")" "pipedpeer connect failed" || true
   tl_from_out join join   # E14 (day/timeline.sh)
   local want n i; want=$(workers | wc -l)
   for i in $(seq 40); do
