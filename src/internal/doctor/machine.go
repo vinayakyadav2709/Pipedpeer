@@ -20,6 +20,9 @@ type Machine struct {
 	// the phone sandbox line: they replace the user namespace and crun
 	// checks, which a phone without root never passes.
 	Phone, PhoneBox string
+	// PhoneKiller is the phantom-process killer state read Termux-side
+	// (off, on, unknown, not-needed); "" adds no line.
+	PhoneKiller string
 	// PCIRoot is /sys/bus/pci/devices; DriverDir is /proc/driver/nvidia.
 	PCIRoot   string
 	DriverDir string
@@ -70,6 +73,8 @@ func (m Machine) Run(ctx context.Context) []Check {
 			out = append(out, Check{Fail, "crun missing (the job sandbox)", "pipedpeer setup -y"})
 		}
 	}
+	out = append(out, m.phoneKiller()...)
+
 	if m.Nix() {
 		out = append(out, Check{Level: OK, What: "nix usable"})
 	} else {
@@ -78,6 +83,25 @@ func (m Machine) Run(ctx context.Context) []Check {
 
 	out = append(out, m.nvidia()...)
 	return append(out, m.disk())
+}
+
+// phoneKiller reports the phone's phantom-process killer, which kills Termux
+// services in the background. "" (no phone check ran) adds no line.
+func (m Machine) phoneKiller() []Check {
+	switch m.PhoneKiller {
+	case "":
+		return nil
+	case "off":
+		return []Check{{Level: OK, What: "phone: phantom-process killer off"}}
+	case "not-needed":
+		return []Check{{Level: OK, What: "phone: phantom-process killer not needed (Android below 12)"}}
+	case "on":
+		return []Check{{Fail, "phone: phantom-process killer is on (background Termux services get killed)", "pipedpeer setup"}}
+	case "unknown":
+		return []Check{{Warn, "phone: phantom-process killer state unknown",
+			"run `pipedpeer doctor` in a terminal; it asks you to turn on Wireless debugging for a moment"}}
+	}
+	return []Check{{Warn, "phone: phantom-process killer state " + m.PhoneKiller + " is not recognised", "pipedpeer setup"}}
 }
 
 // nvidia flags an NVIDIA display device whose driver is not loaded, the

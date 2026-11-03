@@ -354,6 +354,48 @@ func TestMachinePhone(t *testing.T) {
 	}
 }
 
+// The phone's phantom-process killer, read Termux-side and passed in as
+// PhoneKiller. "" means no line at all (not a phone, or not read).
+func TestPhoneKiller(t *testing.T) {
+	const unknownFix = "run `pipedpeer doctor` in a terminal; it asks you to turn on Wireless debugging for a moment"
+	rows := []struct {
+		name, kill string
+		level      Level
+		what, fix  string // what "" = no line expected
+	}{
+		{"off is OK", "off", OK, "phone: phantom-process killer off", ""},
+		{"not-needed is OK", "not-needed", OK, "phone: phantom-process killer not needed (Android below 12)", ""},
+		{"on fails and points to setup", "on", Fail, "phone: phantom-process killer is on (background Termux services get killed)", "pipedpeer setup"},
+		{"unknown warns with the terminal action", "unknown", Warn, "phone: phantom-process killer state unknown", unknownFix},
+		{"empty adds no line", "", 0, "", ""},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			m := machine(t)
+			m.PhoneKiller = r.kill
+			var got []Check
+			for _, c := range m.Run(context.Background()) {
+				if strings.HasPrefix(c.What, "phone: phantom-process killer") {
+					got = append(got, c)
+				}
+			}
+			if r.what == "" && r.kill == "" {
+				if len(got) != 0 {
+					t.Fatalf("empty PhoneKiller added %d lines, want none", len(got))
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d killer lines, want 1: %+v", len(got), got)
+			}
+			c := got[0]
+			if c.Level != r.level || c.What != r.what || c.Fix != r.fix {
+				t.Errorf("got {%v %q %q}, want {%v %q %q}", c.Level, c.What, c.Fix, r.level, r.what, r.fix)
+			}
+		})
+	}
+}
+
 // E6: two sites reuse 192.168.0.0/24, so the peer's own LAN address is a
 // stranger's here. The node is judged by the path that works; the stranger
 // only warns, and an address where nothing answers is not mentioned.

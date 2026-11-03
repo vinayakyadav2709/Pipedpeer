@@ -79,6 +79,10 @@ func newDoctorCmd() *cobra.Command {
 			if phone.InProot() {
 				m.PhoneBox = phone.ChunksOnlyNote
 			}
+			// Set Termux-side and forwarded into the Debian (PIPEDPEER_*).
+			if kill, ok := phone.PhantomFromEnv(); ok {
+				m.PhoneKiller = string(kill)
+			}
 
 			out := cmd.OutOrStdout()
 			checks := append(c.Run(ctx), m.Run(ctx)...)
