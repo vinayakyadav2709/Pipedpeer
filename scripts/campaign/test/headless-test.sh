@@ -327,8 +327,12 @@ else
 fi
 
 say "Ray work stays off pc00 (Pool and joblib actors ask for a CPU)"
-python3 -I "$here/ray-placement.py" "$raw/otel" pc00 | tee "$work/ray-placement.txt" | tail -n 12
-[[ ${PIPESTATUS[0]} == 0 ]] && pass "no Ray Pool actor or task ran on pc00" || fail "Ray work ran on pc00 ($work/ray-placement.txt)"
+# Not a pipeline under set -e -o pipefail: a NO here must be a FAIL line,
+# not the end of the script before the snapshots below.
+prc=0; python3 -I "$here/ray-placement.py" "$raw/otel" pc00 >"$work/ray-placement.txt" 2>&1 || prc=$?
+grep -E '^pc00 ' "$work/ray-placement.txt" || true
+tail -n 1 "$work/ray-placement.txt"
+((prc == 0)) && pass "no Ray Pool actor or task ran on pc00" || fail "Ray work ran on pc00 (ray-placement.txt)"
 
 say "every PC as it was"
 for p in "${pcs[@]}"; do

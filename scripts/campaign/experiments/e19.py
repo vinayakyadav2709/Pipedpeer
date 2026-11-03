@@ -54,7 +54,7 @@ def work(i):
 if __name__ == "__main__":
     n = int(os.environ.get("E19_ITEMS", "400"))
     t0 = time.perf_counter()
-%(init)s    with Pool(int(os.environ.get("BENCH_PROCS", "8"))) as p:
+%(init)s    with Pool(int(os.environ.get("BENCH_PROCS", "8"))%(pool_args)s) as p:
         out = p.map(work, range(n))
     print("E19 items=%%d total=%%d" %% (n, sum(out)))
     print("seconds=%%.3f" %% (time.perf_counter() - t0))
@@ -73,8 +73,11 @@ def source(phase, offset, rich, ray):
     else:
         imports = "\nimport networkx as nx\n" + ("from rich.text import Text\n" if rich else "")
         lazy = init = ""
+    # One CPU per Ray actor, as the W1-W6 ports: a zero-CPU actor may land
+    # on pc00, the zero-CPU head (test/ray-placement.py).
+    pool_args = ', ray_remote_args={"num_cpus": 1}' if ray else ""
     return TEMPLATE % {"phase": phase, "imports": imports, "offset": offset, "lazy": lazy,
-                       "use": USE_RICH if rich else "", "init": init}
+                       "use": USE_RICH if rich else "", "init": init, "pool_args": pool_args}
 
 
 def write_scripts(ctx):

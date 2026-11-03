@@ -41,7 +41,7 @@ df["y"] = 0.5 * df["k"] * df["t"] + rng.normal(0.0, 1.0, len(df))
 ray.init(address=os.environ.get("RAY_ADDRESS", "auto"))
 register_ray()
 t0 = time.perf_counter()
-with parallel_backend("ray"):
+with parallel_backend("ray", ray_remote_args={"num_cpus": 1}):
     out = Parallel(n_jobs=-1)(delayed(fit)(k, g) for k, g in df.groupby("k"))
 dt = time.perf_counter() - t0
 res = pd.DataFrame(out, columns=["k", "slope", "slope_sd"]).sort_values("k")
