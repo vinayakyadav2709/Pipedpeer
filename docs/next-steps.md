@@ -156,7 +156,13 @@ Dropped: Optuna interception, NPU support.
      run in the lab, not between two real home networks.
    - **Upgrade restart on real machines.** Re-running the installer over a
      running daemon must restart it on the new build; check it on a laptop
-     and a phone (systemd unit and Termux).
+     and a phone (systemd unit and Termux). The process-restart path works
+     in a container; the systemd-unit path and the real installer script
+     have not been run.
+   - **`pipedpeer status` prints the CLI's version** in its `daemon running
+     (… version=…)` line (`src/main.go:159`), not the daemon's, so it hides
+     a daemon left on an old build. Print the version from the daemon's
+     `/health`.
    - **Stale `unreachable` rows** for an old LAN address in `pipedpeer
      status` after a network change.
    - **Docs** for `PIPEDPEER_CONNECT_FROM_INSTALLER` and
