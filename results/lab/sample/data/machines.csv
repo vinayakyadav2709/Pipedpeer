@@ -1,0 +1,4 @@
+pc_id,ip,hostname,cpu_model,cores,threads_per_core,ram_gib,os,kernel,nic,nic_mbps,python,machine_id
+pc00,10.194.154.11,lab-1,,20,,1,NixOS container (nixos/nix:2.31.3),7.2.13-200.fc44.x86_64,eth0,,3.14.7,4c0df64014526416009d84f5b590fec8
+pc01,10.194.154.12,lab-2,,20,,1,NixOS container (nixos/nix:2.31.3),7.2.13-200.fc44.x86_64,eth0,,3.14.7,bf32e24fe1b8d323678ce7e70aecd2a6
+pc02,10.194.154.13,lab-3,,20,,1,NixOS container (nixos/nix:2.31.3),7.2.13-200.fc44.x86_64,eth0,,3.14.7,4ff35279e147c7cf7fe1bb8d92f02743

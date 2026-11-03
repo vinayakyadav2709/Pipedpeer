@@ -1,0 +1,18 @@
+{
+ "run_id": "1793713161858330432",
+ "total_ns": 7115715320,
+ "script_ns": 7069000000,
+ "names": {
+  "95ebf1c72cf54b06": "lab-1"
+ },
+ "steps": [
+  {
+   "machine": "95ebf1c72cf54b06",
+   "node": "95ebf1c72cf54b06",
+   "chunk": -1,
+   "step": "script",
+   "start_ns": 1793713161896529308,
+   "dur_ns": 7069000000
+  }
+ ]
+}

@@ -1,0 +1,7 @@
+# clocks.sh 2026-11-03T17:58:45+0530; offset = PC clock - driver clock; limit 10 ms
+# driver sync: Reference ID : 03062B5A (ec2-3-6-43-90.ap-south-1.compute.amazonaws.com); System time : 0.000199689 seconds slow of NTP time; Last offset : -0.000939523 seconds; Leap status : Normal
+pc                        offset_ms    +-ms  status  sync
+pc00                         0.722   0.845  ok      no chronyc or timedatectl
+pc01                         0.790   0.896  ok      no chronyc or timedatectl
+pc02                         0.704   0.803  ok      no chronyc or timedatectl
+# 3/3 within 10 ms
