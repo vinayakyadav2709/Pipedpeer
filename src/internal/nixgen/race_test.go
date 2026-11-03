@@ -54,8 +54,8 @@ def main():
     payload = pool_func._func_payload(double)
     assert payload is not None, "a module-level function must be shippable"
 
+    pool._cluster_ready = lambda: True
     p = StubPool(processes=2)
-    p._remote = True
     r = p._race(double, items, False, 0.01, payload)
     p.close()
 

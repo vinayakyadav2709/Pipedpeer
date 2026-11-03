@@ -36,17 +36,40 @@ import (
 // the closure's python on its path: no workspace, no user modules, and a
 // __main__ of its own. Whatever it manages to execute, it executed for real.
 const poolFakeDaemon = `
-import base64, json, os, pickle, struct, sys, threading, traceback
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import base64, json, os, pickle, struct, sys, threading, time, traceback
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
-STATE = {"requests": 0, "errors": 0, "items": 0, "last_error": "", "by_src": 0, "by_ref": 0, "both": 0, "func_frame": 0}
+STATE = {"requests": 0, "errors": 0, "items": 0, "last_error": "", "by_src": 0, "by_ref": 0, "both": 0, "func_frame": 0,
+         "early": 0, "pacings": 0}
 LOCK = threading.Lock()
+# FAKE_READY_AFTER=<s>: answer /v1/pool/stats like a daemon whose one peer is
+# importing the closure for that long and holds it after (a peer that was
+# still importing when the job started). Unset: no pacing at all (404), like
+# an older daemon. FAKE_READY_AFTER=never: nobody, ever.
+READY = os.environ.get("FAKE_READY_AFTER")
+T0 = time.monotonic()
+
+def peer_ready():
+    return READY not in (None, "never") and time.monotonic() - T0 >= float(READY)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
     def do_GET(self):
+        if self.path.startswith("/v1/pool/stats") and READY is not None:
+            with LOCK:
+                STATE["pacings"] += 1
+            if peer_ready():
+                pace = {"peers": 1, "pending": 0, "inflight": 2, "part_ms": 250, "cores": 2}
+            else:
+                pace = {"peers": 0, "pending": 0 if READY == "never" else 1, "inflight": 1, "part_ms": 250, "cores": 0}
+            body = json.dumps(pace).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path != "/stats":
             self.send_response(404); self.end_headers(); return
         with LOCK:
@@ -62,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
         data = self.rfile.read(n)
         with LOCK:
             STATE["requests"] += 1
+            if READY is not None and not peer_ready():
+                STATE["early"] += 1
         try:
             body = self.handle_map(data)
         except Exception as e:
@@ -154,7 +179,8 @@ class Handler(BaseHTTPRequestHandler):
             return head.encode() + out
         return json.dumps({"results": [{"pickle": base64.b64encode(pickle.dumps(r)).decode()} for r in results]}).encode()
 
-srv = HTTPServer(("127.0.0.1", 0), Handler)
+# A pacing request must not queue behind a map in flight.
+srv = (ThreadingHTTPServer if READY is not None else HTTPServer)(("127.0.0.1", 0), Handler)
 sys.stdout.write("PORT %d\n" % srv.server_address[1])
 sys.stdout.flush()
 srv.serve_forever()
@@ -169,11 +195,13 @@ type fakeDaemonStats struct {
 	ByRef     int    `json:"by_ref"`
 	Both      int    `json:"both"`
 	FuncFrame int    `json:"func_frame"`
+	Early     int    `json:"early"`
+	Pacings   int    `json:"pacings"`
 }
 
 // startPoolFakeDaemon runs poolFakeDaemon in its own process, from its own
 // directory, so it cannot see the calling test's files or __main__.
-func startPoolFakeDaemon(t *testing.T, python string) (url string, stats func(*testing.T) fakeDaemonStats) {
+func startPoolFakeDaemon(t *testing.T, python string, env ...string) (url string, stats func(*testing.T) fakeDaemonStats) {
 	t.Helper()
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake_daemon.py")
@@ -182,6 +210,7 @@ func startPoolFakeDaemon(t *testing.T, python string) (url string, stats func(*t
 	}
 	cmd := exec.Command(python, script)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +303,14 @@ func runPoolScript(t *testing.T, files map[string]string, main string) poolRunRe
 // cases that need one with cloudpickle in it.
 func runPoolScriptWith(t *testing.T, python string, files map[string]string, main string) poolRunResult {
 	t.Helper()
-	url, stats := startPoolFakeDaemon(t, python)
+	return runPoolScriptEnv(t, python, files, main, nil, nil)
+}
+
+// runPoolScriptEnv is runPoolScriptWith with extra environment for the fake
+// daemon and for the job (the job's entries win over the defaults below).
+func runPoolScriptEnv(t *testing.T, python string, files map[string]string, main string, daemonEnv, jobEnv []string) poolRunResult {
+	t.Helper()
+	url, stats := startPoolFakeDaemon(t, python, daemonEnv...)
 
 	dir := t.TempDir()
 	if err := WriteShimDir(dir); err != nil {
@@ -301,6 +337,7 @@ func runPoolScriptWith(t *testing.T, python string, files map[string]string, mai
 		// for the cluster - correct, and useless to a test of dispatching.
 		"PIPEDPEER_RESPECT_POOL_SIZE=1",
 	)
+	cmd.Env = append(cmd.Env, jobEnv...)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
