@@ -60,6 +60,13 @@ record() {
   printf '%s\n' "$1" >>"$STATE"
 }
 
+# stamp <event>: when this PC reached it (E14, curl to cluster), once; the
+# day reads $STATE_DIR/times through sudo before undo removes it.
+stamp() {
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  grep -q "^$1 " "$STATE_DIR/times" 2>/dev/null || printf '%s %s\n' "$1" "$(date +%s%N)" >>"$STATE_DIR/times"
+}
+
 [[ $EUID -eq 0 ]] || die "run with sudo"
 
 pkg_mgr() {
@@ -296,6 +303,7 @@ home_before() {
 
 setup() {
   need_published
+  stamp setup_start
   resolve_user "${1:-}"
   if [[ -f $STATE ]]; then
     local prev; prev=$(awk '$1=="user-is"{print $2; exit}' "$STATE")
@@ -322,6 +330,7 @@ setup() {
   PC_IP=$ip
   local mid; mid=$(tr -d ' \n' </etc/machine-id 2>/dev/null || true)
   [[ -n $mid ]] || die "/etc/machine-id is empty"
+  stamp labpc
   echo "LAB-PC host=$(uname -n) ip=$ip user=$LAB_USER cores=$(nproc) ram_gib=$(awk '/MemTotal/{printf "%.0f",$2/1048576}' /proc/meminfo) machine_id=$mid"
 }
 
@@ -450,6 +459,7 @@ head_mode() {
   local pcs=${1:-17}
   [[ $pcs =~ ^[0-9]+$ && $pcs -ge 1 ]] || die "usage: head [number of PCs, this one included]"
   need_published
+  stamp head_start
   # The day already finished its cleanup but was stopped before undoing this PC.
   if [[ -f $STATE_DIR/day-finished ]]; then
     cat "$STATE_DIR/summary.txt" 2>/dev/null || true

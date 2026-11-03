@@ -42,6 +42,7 @@ discover() {
     LAB_RESULTS=$RESULTS bash "$CAMP/scan.sh" "$sub" --head "$ip" --user "$USER" >"$DAY/logs/scan.log" 2>&1 ||
       say "scan: $(tail -n1 "$DAY/logs/scan.log")"
     n=$(grep -c '^pc[0-9]* ansible_host=' "$INV" 2>/dev/null || echo 0)
+    tl_seen   # E14: day/timeline.sh
     progress discover "$n of $LAB_PCS PCs answered"
     say "discover: $n of $LAB_PCS PCs answered"
     ((n >= LAB_PCS)) && break
@@ -167,7 +168,10 @@ prep_pipedpeer() {
     [[ -f $HOSTREC/$h ]] || out_of pre "$h" | grep '^had-' >"$HOSTREC/$h" || true
     grep -q had-pipedpeer "$HOSTREC/$h" && blocker "$h already had pipedpeer; the day upgrades it and leaves it installed"
   done
-  ans_drop install all "bash $R/../install-pipedpeer.sh ${v:+--version $v} -y" "pipedpeer install failed" || return 1
+  local irc=0   # E14: timed per PC (day/timeline.sh)
+  ans_drop install all "$(tl_wrap install "bash $R/../install-pipedpeer.sh ${v:+--version $v} -y")" "pipedpeer install failed" || irc=1
+  tl_from_out install install
+  ((irc == 0)) || return 1
   ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
   mkdir -p "$RESULTS/doctor"
   for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
@@ -180,7 +184,8 @@ prep_join() {
   line=$(pipedpeer invite 2>"$DAY/logs/invite.err") || { say "pipedpeer invite: $(cat "$DAY/logs/invite.err")"; return 1; }
   code=$(sed -n 's/^pipedpeer connect //p' <<<"$line" | tail -n1)
   [[ -n $code ]] || { say "no code in: $line"; return 1; }
-  ans_drop join workers "pipedpeer connect $code" "pipedpeer connect failed" || true
+  ans_drop join workers "$(tl_wrap join "pipedpeer connect $code")" "pipedpeer connect failed" || true
+  tl_from_out join join   # E14 (day/timeline.sh)
   local want n i; want=$(workers | wc -l)
   for i in $(seq 40); do
     # Healthy nodes in pc00's view (its own entry may be among them).
@@ -190,6 +195,7 @@ prep_join() {
     sleep 3
   done
   say "pc00 sees $n healthy nodes for $want workers"
+  tl pc00 cluster_ready "$(date +%s%N)" pc00 "" "healthy=$n workers=$want"
   pipedpeer status >"$RESULTS/join-status.txt" 2>&1 || true
   return 0
 }

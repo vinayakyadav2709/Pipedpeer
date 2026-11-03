@@ -201,6 +201,12 @@ cache = json.load(open(raw + "/result-cache.json"))
 assert {k for k in cache if k.startswith("W1|")} == {"W1|BENCH_ITEMS=40", "W1|BENCH_ITEMS=160", "W1|BENCH_ITEMS=640"}, cache
 assert all(v["source"].startswith("plain-precomputed:") for v in cache.values()), cache
 EOF
+python3 - "$raw/timeline.jsonl" <<'EOF' && pass "timeline.jsonl has every E14 event the day writes" || fail "timeline.jsonl (E14)"
+import json, sys
+ev = {json.loads(l)["event"] for l in open(sys.argv[1])}
+need = {"head_start", "setup_start", "labpc", "ssh_ok", "pc_map", "install_start", "install_end", "join_end", "cluster_ready"}
+assert need <= ev, sorted(need - ev)
+EOF
 grep -q 'calibrated on pc01' "$raw/workloads.json" && pass "workloads.json calibrated on pc01" || fail "workloads.json not calibrated"
 grep -q '^| W1 | `BENCH_ITEMS=240`' "$raw/workloads.md" && pass "workloads.md sizes table rewritten" || fail "workloads.md table"
 grep -q 'local:  *\([0-9]*\) ' "$work/head2.log" && pass "final count: $(grep -E '^(local|remote):' "$work/head2.log" | tr '\n' ' ')" || fail "no final count"
