@@ -213,3 +213,87 @@ def test_guided_timer_records_one_line_per_attempt(tmp_path):
         ("p1", "pipedpeer", True), ("p1", "dask", False)]
     assert got[0]["commands_typed"] == 7 and got[1]["script_lines_changed"] == 2
     assert got[1]["error"] == "gave up" and all(x["experiment"] == "e10" for x in got)
+
+
+def test_runs_log_where_the_node_collector_reads(make):
+    """otel/README.md "Runner integration" 3-5: each run's output in
+    logs/<system>/…<run_id>.log on pc00, Ray on fixed ports with the metrics
+    agent on 8090, Dask workers on fixed port ranges and appending logs."""
+    ctx, cluster = make()
+    ctx.scaling(["W1"], ["pipedpeer", "ray", "dask"], [2], 1)
+    got = {ln["system"]: ln["run_id"] for ln in lines(ctx) if ln["repeat"] == 1}
+    cmds = [c for _, c in cluster.calls]
+    assert any("logs/pipedpeer-run/%s.log" % got["pipedpeer"] in c and "pipedpeer run" in c for c in cmds)
+    assert any("logs/ray/run-%s.log" % got["ray"] in c for c in cmds)
+    assert any("logs/dask/run-%s.log" % got["dask"] in c for c in cmds)
+    starts = [c for c in cmds if " start --head" in c or " start --address=" in c]
+    assert starts and all("--metrics-export-port=8090" in c and "--node-manager-port=6380" in c for c in starts)
+    bg = [c for c in cmds if c.startswith("bg: ")]
+    assert any(" worker " in c and "--worker-port 9000:9099" in c and ">> " in c and "dask/worker.log" in c for c in bg)
+    assert all("--no-dashboard" not in c for c in bg)
+
+
+@pytest.mark.parametrize("argv,env,want", [
+    (("e1", "--rehearsal"), {}, False),          # a rehearsal never uploads
+    (("e1",), {}, False),                        # results outside results/lab (tmp_path) never upload
+    (("e1", "--rehearsal"), {"PL_SYNC": "1"}, True),   # a harness with a stand-in may force it
+    (("e1",), {"PL_SYNC": "0"}, False),
+])
+def test_sync_only_for_a_real_campaign(make, monkeypatch, argv, env, want):
+    calls = []
+    monkeypatch.setattr(runner.subprocess, "call", lambda a, **kw: calls.append((a, kw)) or 0)
+    monkeypatch.delenv("PL_SYNC", raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    ctx, _ = make(argv=argv)
+    ctx.sync()
+    assert bool(calls) == want, calls
+    if calls:
+        assert calls[0][1]["env"]["LAB_RESULTS"] == ctx.out_dir
+
+
+def test_receipt_is_bounded_inline_and_whole_in_a_file(make):
+    """REPORT.md gap 1: per-item steps never go into runs.jsonl."""
+    import gzip
+    cluster = FakeCluster()
+    cluster.receipt_steps = 20000
+    ctx, _ = make(cluster)
+    ctx.scaling(["W1"], ["pipedpeer"], [2], 1)
+    ln = [x for x in lines(ctx) if x["repeat"] == 1][0]
+    rc = ln["receipt"]
+    assert "steps" not in rc and rc["steps_total"] == 20001
+    assert rc["remote_items"] == 3 and rc["local_items"] == 5
+    by = {(x["step"], x["node"]): x for x in rc["steps_by"]}
+    assert by[("pickle", "n0")]["count"] == 10000 and by[("pickle", "n0")]["bytes"] == 100000
+    assert len(json.dumps(ln)) < 5000
+    full = json.load(gzip.open(ln["receipt_path"]))
+    assert len(full["steps"]) == 20001
+
+
+def test_size_override_is_per_pc_in_weak_mode():
+    """REPORT.md gap 12: --size must not switch weak scaling off."""
+    wl = Workload(W1)
+    assert wl.size("weak", 4, override={"BENCH_ITEMS": "48"}) == {"BENCH_ITEMS": "192"}
+    assert wl.size("strong", 4, override={"BENCH_ITEMS": "48"}) == {"BENCH_ITEMS": "48"}
+
+
+def test_a_failed_timed_command_keeps_its_stderr(tmp_path, monkeypatch):
+    """REPORT.md gap 13: raw over a local connection has no pty, so stderr
+    would be dropped; the timed command merges it into the output."""
+    from campaign.remote import Remote
+    fake = tmp_path / "ansible-fake"
+    fake.write_text('#!/bin/sh\n[ "$1" = sh ] && exec sh -c "$3" 2>/dev/null\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PL_ANSIBLE_FAKE", str(fake))
+    t = Remote(str(tmp_path / "inv.ini")).timed("pc00", "echo out; echo Traceback-boom >&2; exit 3", timeout=30)
+    assert t.rc == 3 and "out" in t.out and "Traceback-boom" in t.out, t
+
+
+def test_pl_nproc_reaches_python_in_the_job(make, monkeypatch):
+    """A rehearsal's PL_NPROC=2 must make Python in the job see 2 CPUs too:
+    a pipedpeer job in a container otherwise sized its pool to the host's."""
+    monkeypatch.setenv("PL_NPROC", "2")
+    ctx, cluster = make()
+    ctx.scaling(["W1"], ["pipedpeer"], [2], 1)
+    runs = [c for _, c in cluster.calls if "pipedpeer run" in c]
+    assert runs and all("PYTHON_CPU_COUNT=2" in c for c in runs)

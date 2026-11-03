@@ -14,20 +14,65 @@ had() {
   grep -qx "had-$2" "$HOSTREC/$1" && echo 1 || echo 0
 }
 
+# clocks_end measures every PC's offset again (results/lab/clocks-end.txt):
+# with clocks.txt from prepare, the drift over the day can be interpolated
+# when traces from several PCs are lined up.
+clocks_end() {
+  local prefix="ssh $SSH_COMMON -o BatchMode=yes -o ConnectTimeout=5 -l $USER"
+  LAB_CLOCKS_OUT=$RESULTS/clocks-end.txt bash "$CAMP/clocks.sh" --exec "$prefix" ||
+    say "clocks at the end: some PCs over 10 ms or unreachable (results/lab/clocks-end.txt)"
+  return 0
+}
+
+# pull_pcap stops every capture and copies each PC's pcap files into
+# results/lab/pcap/<pc>/ (gitignored; sync-r2.sh uploads it), before the
+# cleanup deletes them. Over ssh as a tar stream: raw Ansible output is text,
+# and the lab PCs have no rsync for ansible.posix.synchronize.
+pull_pcap() {
+  local h ip n
+  ans pcapstop all "bash $R/otel/node.sh pcap-stop" "$INV_ALL" || say "pcap-stop failed on ${BAD_HOSTS[*]}"
+  for h in $(hosts_of head "$INV_ALL") $(workers "$INV_ALL"); do
+    is_done "pcap.$h" && continue
+    mkdir -p "$RESULTS/pcap/$h"
+    if [[ $h == pc00 ]]; then
+      cp -p "$PIPEDPEER_LAB_HOME"/pcap/*.pcap "$RESULTS/pcap/$h/" 2>/dev/null || true
+    else
+      ip=$(host_ip "$h")
+      # shellcheck disable=SC2086  # SSH_COMMON is a list of options
+      timeout 600 ssh $SSH_COMMON -o BatchMode=yes -o ConnectTimeout=10 "$USER@$ip" \
+        'd=$HOME/.local/share/pipedpeer-lab/pcap; [ -d $d ] || exit 0; cd $d && tar -cf - --ignore-failed-read *.pcap 2>/dev/null' |
+        tar -xf - -C "$RESULTS/pcap/$h" 2>/dev/null || { say "pcap from $h: pull failed"; continue; }
+    fi
+    n=$(find "$RESULTS/pcap/$h" -name '*.pcap' | wc -l)
+    say "pcap from $h: $n file(s), $(du -sh "$RESULTS/pcap/$h" | cut -f1)"
+    mark_done "pcap.$h"
+  done
+  return 0
+}
+
 problem() { grep -qxF -- "$1 $2" "$PROBLEMS" 2>/dev/null || printf '%s %s\n' "$1" "$2" >>"$PROBLEMS"; }
 
 clean_workers() {
-  local h script; script=$(base64 -w0 <"$CAMP/day/cleanup-host.sh")
+  local h script todo=() table=""; script=$(base64 -w0 <"$CAMP/day/cleanup-host.sh")
   for h in $(workers "$INV_ALL"); do
     is_done "clean.$h" && continue
-    # raw sends no files, and Ansible templates its argument ({# would start a
-    # Jinja comment): the script goes over as base64 and runs as the lab user.
-    ans "clean.$h" "$h" "mkdir -p \$HOME/pipedpeer-lab; f=\$HOME/pipedpeer-lab/cleanup-host.sh; echo $script | base64 -d >\$f; bash \$f $(had "$h" nix) $(had "$h" pipedpeer)" "$INV_ALL" || true
-    local o; o=$(out_of "clean.$h" "$h" | tail -n1)
+    todo+=("$h")
+    table+="$h) a='$(had "$h" nix) $(had "$h" pipedpeer)';; "
+  done
+  ((${#todo[@]})) || return 0
+  # Every worker at once: the Nix uninstall takes about a minute per PC,
+  # which one at a time is a quarter of an hour on 16 workers. raw sends no
+  # files, and Ansible templates its argument ({# would start a Jinja
+  # comment): the script goes over as base64 and runs as the lab user, with
+  # this PC's had-nix/had-pipedpeer picked by its inventory name.
+  ans clean "$(IFS=:; echo "${todo[*]}")" "case {{ inventory_hostname }} in $table *) a='1 1';; esac
+    mkdir -p \$HOME/pipedpeer-lab; f=\$HOME/pipedpeer-lab/cleanup-host.sh; echo $script | base64 -d >\$f; bash \$f \$a" "$INV_ALL" || true
+  for h in "${todo[@]}"; do
+    local o; o=$(out_of clean "$h" | tail -n1)
     case $o in
       "CLEANUP ok") mark_done "clean.$h" ;;
       "CLEANUP left: "*) problem "$h" "${o#CLEANUP left: }"; mark_done "clean.$h" ;;
-      *) say "cleanup of $h did not finish (rc $(rc_of "clean.$h" "$h")): $(out_of "clean.$h" "$h" | tail -n2 | tr '\n' ' ')" ;;
+      *) say "cleanup of $h did not finish (rc $(rc_of clean "$h")): $(out_of clean "$h" | tail -n2 | tr '\n' ' ')" ;;
     esac
   done
   return 0
@@ -41,7 +86,7 @@ undo_workers() {
     is_done "undo.$h" && continue
     if ! is_done "clean.$h"; then
       ANSIBLE_TIMEOUT=10 ans "reach.$h" "$h" true "$INV_ALL" || { problem "$h" "unreachable at cleanup: not cleaned, lab.sh undo not run"; mark_done "undo.$h"; continue; }
-      problem "$h" "cleanup did not finish: $(out_of "clean.$h" "$h" | tail -n1)"
+      problem "$h" "cleanup did not finish: $(out_of clean "$h" | tail -n1)"
     fi
     ans "undo.$h" "$h" "sudo -n systemd-run --quiet --wait --pipe --collect --unit=pipedpeer-lab-undo bash $LABSH undo" "$INV_ALL" || true
     if out_of "undo.$h" "$h" | grep -q 'undo complete'; then
@@ -91,6 +136,8 @@ summary() {
 }
 
 finish() {
+  step clocks.end cleanup clocks_end
+  step pull.pcap cleanup pull_pcap
   step clean.workers cleanup clean_workers
   step undo.workers cleanup undo_workers
   if ! step final.sync cleanup final_sync; then
@@ -106,6 +153,10 @@ finish() {
   # shellcheck disable=SC2024  # the lab user reads it; root writes the copy
   sudo -n tee /var/lib/pipedpeer-lab/summary.txt <"$DAY/summary.txt" >/dev/null
   sudo -n touch /var/lib/pipedpeer-lab/day-finished
+  # The summary and the log's tail (pc00's cleanup) go up too; the count
+  # above already matched, so this last upload is best effort.
+  cp -f "$DAY/summary.txt" "$RESULTS/summary-day.txt"
+  bash "$CAMP/sync-r2.sh" final >/dev/null 2>&1 || true
   touch "$DAY/.synced"
   say "undoing lab.sh on pc00 (this PC); results, secrets and the code go with it"
   local undo_ok=1

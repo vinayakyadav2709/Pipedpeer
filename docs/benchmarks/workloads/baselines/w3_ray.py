@@ -31,7 +31,7 @@ print(f"data: {X.shape}, classes: {np.bincount(y)}")
 print("training RandomForest(n_estimators=150, n_jobs=-1) ...")
 t0 = time.monotonic()
 clf = RandomForestClassifier(n_estimators=int(os.environ.get("RF_TREES", 150)), max_depth=12, n_jobs=-1, random_state=7)
-with parallel_backend("ray"):
+with parallel_backend("ray", ray_remote_args={"num_cpus": 1}):
     clf.fit(X_train, y_train)
 t_fit = time.monotonic() - t0
 

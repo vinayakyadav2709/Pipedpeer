@@ -17,6 +17,7 @@ HOSTREC=$DAY/hostrec              # per PC: what the day installed there
 VENV=$HOME/.local/share/pipedpeer-lab/ansible
 LABSH=/var/lib/pipedpeer-lab/lab.sh
 DIST_PORT=8137
+SESSION=${LAB_SESSION:-s1}        # lab.session on every telemetry record
 mkdir -p "$DAY" "$HOSTREC" "$DAY/out" "$DAY/logs"
 
 say() { printf '[day %(%H:%M:%S)T] %s\n' -1 "$*"; }
@@ -103,7 +104,7 @@ ans() {
     [[ -n $h ]] || continue
     if [[ $rc == 0 ]]; then OK_HOSTS+=("$h"); else BAD_HOSTS+=("$h"); fi
   done < <(python3 - "$tree" "$dir" "$("$VENV/bin/ansible" -i "$inv" "$pat" --list-hosts 2>/dev/null | sed -n 's/^ \{4,\}//p' | tr '\n' ' ')" <<'PY'
-import json, os, sys
+import json, os, re, sys
 tree, out, hosts = sys.argv[1], sys.argv[2], sys.argv[3].split()
 for h in hosts:
     try:
@@ -113,6 +114,8 @@ for h in hosts:
     rc = 255 if r.get("unreachable") else r.get("rc", 1 if r.get("failed") else 0)
     # raw runs ssh with a pty, so lines end in CRLF.
     text = (r.get("stdout", "") + r.get("stderr", "")).replace("\r\n", "\n")
+    # Terminal escapes: Fedora's sudo tags each session with OSC 3008 sequences.
+    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[A-Za-z]", "", text)
     if r.get("unreachable") or (r.get("failed") and not text):
         text += r.get("msg", "") + "\n"
     open(os.path.join(out, h + ".out"), "w").write(text)

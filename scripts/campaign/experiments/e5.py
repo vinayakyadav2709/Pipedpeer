@@ -112,6 +112,10 @@ def run_pipedpeer(ctx, n, phase, repeat, extra, script):
 def run_pip(ctx, n, phase, repeat, extra, pinlist, names):
     ctx.only(ctx.backend("pipedpeer"))  # no Ray or Dask cluster up meanwhile
     hosts = ctx.inv.all[:n]
+    if len(hosts) < n:
+        return ctx.recorder.write({"workload": "E5-env", "system": "pip", "n": n, "phase": phase, "repeat": repeat,
+                                   "error": "inventory has %d PCs, N=%d asked" % (len(hosts), n),
+                                   "failing_pc": None, "result_ok": False})
     logdir = ctx.recorder.log_dir(ctx.recorder.new_run_id())
     imports = ",".join(x.replace("scikit-learn", "sklearn") for x in names + ([extra] if extra else []))
     pip = "%s/bin/python -m pip install -q --disable-pip-version-check --no-cache-dir" % VENV

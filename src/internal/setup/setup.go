@@ -392,7 +392,9 @@ func helperUninstallScript() string {
 		`    rm -f "$f.pipedpeer-new"`,
 		"  fi",
 		"done",
-		"systemctl try-restart nix-daemon",
+		// Single-user nix has no nix-daemon unit, and try-restart of a unit
+		// that does not exist fails the script (set -e).
+		"if systemctl cat nix-daemon.service >/dev/null 2>&1; then systemctl try-restart nix-daemon; fi",
 	}, "\n") + "\n"
 }
 

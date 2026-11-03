@@ -2,7 +2,8 @@
 exact and fast sync (`pipedpeer run --ddp N --ddp-sync exact|fast`) vs
 torchrun DDP over gloo, ranks 2, 4, 8, one rank per PC on pc00..pc(N-1) for
 both, the same model, batch and steps. Three seeds (repeat = seed), after one
-warm-up per (system, ranks).
+warm-up per (system, ranks). First, per variant and seed, the same script
+plain on pc00 at one rank: the reference for "val loss vs 1 rank".
 
 Recorded per run: wall_s, the validation loss (result; result_ok is the
 loss within T1's rel_tol of the one-rank plain run at that seed), and
@@ -46,6 +47,12 @@ def main(ctx):
             "torchrun": lambda b, w, e, d, n: b.run(w, e, d, n)}
     variants = wl.variants or {"default": {}}
     for vname, venv in variants.items():
+        # The one-rank reference: the same script, model, batch and steps,
+        # plain on pc00, once per seed, so the table has "loss vs 1 rank".
+        if ctx.enabled("plain"):
+            for seed in range(1, ctx.repeats(3) + 1):
+                ctx.size_override[wl.id] = dict(wl.smoke if ctx.rehearsal else {}, **venv, BENCH_SEED=str(seed))
+                ctx.one_run(wl, "plain", 1, seed, extra={"variant": vname})
         for n in [x for x in ctx.ns([2, 4, 8]) if x >= 2] or [2]:
             for seed in range(0, ctx.repeats(3) + 1):
                 size = dict(wl.smoke if ctx.rehearsal else {}, **venv)

@@ -53,6 +53,7 @@ for os in ubuntu fedora; do
 done
 $rt network create "$net" >/dev/null
 gw=$($rt network inspect "$net" --format '{{range .Subnets}}{{.Gateway}}{{end}}')
+export LAB_SITE=http://$gw:8000   # serve.sh's copy of lab.sh stands in for the published one
 subnet=$($rt network inspect "$net" --format '{{range .Subnets}}{{.Subnet}}{{end}}')
 echo "network $net $subnet, driver at $gw"
 
@@ -136,7 +137,7 @@ done
 say "undo"
 for p in "${pcs[@]}"; do
   ip=$(ip_of "$p")
-  in_net ssh $LAB_SSH_OPTS -o BatchMode=yes -i "$LAB_KEY" "lab@$ip" "curl -fsS http://$gw:8000/lab-pc.sh | sudo -n bash -s -- undo" >/dev/null 2>&1 \
+  in_net ssh $LAB_SSH_OPTS -o BatchMode=yes -i "$LAB_KEY" "lab@$ip" "curl -fsSL http://$gw:8000/lab.sh | sudo -n bash -s -- undo" >/dev/null 2>&1 \
     && pass "$p: undo through the key" || fail "$p: undo"
   x "$p" 'sudo -u lab sudo -n true' 2>/dev/null && fail "$p: still passwordless sudo after undo" || pass "$p: sudo asks for the password again"
 done

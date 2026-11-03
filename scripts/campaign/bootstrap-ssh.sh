@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Set up lab PCs that already run sshd with a shared account and password,
-# without visiting them ("zero PC visits"):
-#   scripts/campaign/serve.sh [ip]                 # first: serves lab-pc.sh and the key
+# without visiting them ("zero PC visits"). Run it on pc00 (or any PC on the
+# lab network), then type the head line there:
 #   scripts/campaign/bootstrap-ssh.sh <subnet|host[,host...]|@file> --user <labuser> [--jobs N]
 # It asks for the account's password once (no echo; read from stdin when
 # stdin is not a terminal), then on every host, in parallel, logs in with it
-# and runs exactly the operator's line,
-#   curl -fsS http://DRIVER:PORT/lab-pc.sh | sudo bash -s -- setup
+# and runs exactly the operator's worker line,
+#   curl -fsSL https://vinayakyadav2709.github.io/Pipedpeer/lab.sh | sudo bash
+# (LAB_SITE moves the site, for serve.sh's copy or a test),
 # after one `sudo -S -v` that reads the password from the ssh session's
 # stdin. The result is what typing the line at each PC gives: the campaign
 # key in authorized_keys, passwordless sudo, the ports open, and one LAB-PC
@@ -44,13 +45,9 @@ done
 [[ -n $target && -n $user ]] || usage
 [[ $user =~ ^[a-z_][a-z0-9_.-]*$ ]] || die "bad user name: $user"
 
-served=$results/serve/lab-pc.sh
-[[ -f $served ]] || die "no $served; run scripts/campaign/serve.sh first"
-driver=$(sed -n 's/^DRIVER="\(.*\)"$/\1/p' "$served" | head -n1)
-port=$(sed -n 's/^PORT="\(.*\)"$/\1/p' "$served" | head -n1)
-[[ $driver =~ ^[0-9A-Za-z.:-]+$ && $port =~ ^[0-9]+$ ]] || die "DRIVER/PORT not filled in in $served; rerun serve.sh"
-url="http://$driver:$port/lab-pc.sh"
-curl -fsS -o /dev/null "$url" || die "$url does not answer; is serve.sh running?"
+url="${LAB_SITE:-https://vinayakyadav2709.github.io/Pipedpeer}/lab.sh"
+[[ $url =~ ^https?://[A-Za-z0-9.:/_-]+$ ]] || die "bad LAB_SITE: ${LAB_SITE:-}"
+curl -fsS -o /dev/null "$url" || die "$url does not answer"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -116,7 +113,7 @@ fi
 # credential, then the operator's own line runs under `sudo -n`. With an
 # account that already has passwordless sudo, -v reads nothing.
 # shellcheck disable=SC2016  # expanded on the PC
-remote='IFS= read -r pw; printf "%s\n" "$pw" | sudo -S -p "" -v || { echo "ERROR: sudo refused the password"; exit 1; }; unset pw; curl -fsS '"$url"' | sudo -n bash -s -- setup'
+remote='IFS= read -r pw; printf "%s\n" "$pw" | sudo -S -p "" -v || { echo "ERROR: sudo refused the password"; exit 1; }; unset pw; curl -fsSL '"$url"' | sudo -n bash'
 
 # shellcheck disable=SC2086  # LAB_SSH_OPTS word-splits on purpose
 one() {
@@ -136,7 +133,7 @@ one() {
 }
 
 # 4. All hosts, $jobs at a time.
-echo "bootstrap-ssh: logging in as $user ($mode), running lab-pc.sh setup from $url"
+echo "bootstrap-ssh: logging in as $user ($mode), running the worker line from $url"
 running=0
 while IFS= read -r h; do
 	one "$h" &

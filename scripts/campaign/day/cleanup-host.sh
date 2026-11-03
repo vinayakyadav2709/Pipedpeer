@@ -16,7 +16,9 @@ export PATH=$HOME/.local/bin:/usr/local/bin:/nix/var/nix/profiles/default/bin:$H
 pkill -u "$USER" -f 'dask (scheduler|worker)|distributed\.cli\.dask_|raylet|gcs_server|torchrun|torch\.distributed' 2>/dev/null
 pkill -u "$USER" -x iperf3 2>/dev/null
 
-# Telemetry: the node collector (and the driver collector on pc00).
+# Telemetry: the node collector, its poller and tcpdump (and the driver
+# collector on pc00).
+[[ -f $C/otel/node.sh ]] && bash "$C/otel/node.sh" stop >/dev/null 2>&1
 [[ -f $C/telemetry.sh ]] && bash "$C/telemetry.sh" down >/dev/null 2>&1
 if [[ -f $C/otel/install-otelcol.sh ]]; then
   bash "$C/otel/install-otelcol.sh" remove >/dev/null 2>&1
@@ -38,6 +40,8 @@ fi
 if [[ $had_nix != 1 && -e /nix ]]; then
   if [[ -x /nix/nix-installer ]]; then
     sudo -n /nix/nix-installer uninstall --no-confirm >/dev/null 2>&1 || left+=("nix uninstall failed")
+    # The Determinate uninstaller leaves /etc/nix/sentry-endpoint behind.
+    sudo -n rm -f /etc/nix/sentry-endpoint; sudo -n rmdir /etc/nix 2>/dev/null
   else
     left+=("/nix exists without /nix/nix-installer; remove it by hand")
   fi
@@ -52,7 +56,7 @@ fi
 
 # Temp dirs Ray, Dask and torchrun make, owned by this user only.
 find /tmp -maxdepth 1 -user "$USER" \( -name ray -o -name 'dask-*' -o -name 'dask-scratch-space' \
-  -o -name 'torchelastic_*' -o -name 'pipedpeer-lab*' \) -exec rm -rf {} + 2>/dev/null
+  -o -name 'torchelastic_*' -o -name 'torchinductor_*' -o -name 'pymp-*' -o -name 'pipedpeer-lab*' \) -exec rm -rf {} + 2>/dev/null
 
 rm -rf "$L"
 [[ $keep_day == keep-day ]] || rm -rf "$HOME/pipedpeer-lab"
@@ -61,6 +65,8 @@ rm -rf "$L"
 hash -r
 command -v pipedpeer >/dev/null && [[ $had_pp != 1 ]] && left+=("pipedpeer still on PATH ($(command -v pipedpeer))")
 pgrep -u "$USER" -x otelcol-contrib >/dev/null && left+=("otelcol-contrib still running")
+pgrep -u "$USER" -f 'pp-poll\.py' >/dev/null && left+=("pp-poll.py still running")
+pgrep -x tcpdump >/dev/null && left+=("tcpdump still running")
 pgrep -u "$USER" -f 'raylet|dask (scheduler|worker)' >/dev/null && left+=("ray or dask still running")
 [[ $had_nix != 1 && -e /nix ]] && left+=("/nix still there")
 [[ -e $L ]] && left+=("$L still there")

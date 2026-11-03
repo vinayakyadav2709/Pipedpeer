@@ -2,6 +2,8 @@
 runner sends and keeps the state a real cluster would (which daemons run,
 which Ray and Dask processes are up), so tests assert on behaviour, not on
 command strings."""
+import base64
+import gzip
 import json
 import re
 import time
@@ -34,6 +36,7 @@ class FakeCluster:
         self.result = result
         self.fail = fail or (lambda host, cmd: None)
         self.clock = 1_000_000_000
+        self.receipt_steps = 4
 
     def hosts(self, pattern):
         return [h for h in pattern.split(":") if h in self.ids]
@@ -81,8 +84,12 @@ class FakeCluster:
             return 0, "4\n"
         if "base64 -d" in cmd or "rm -rf" in cmd:
             return 0, ""
-        if "cat " in cmd and "receipt.json" in cmd:
-            return 0, json.dumps({"remote_items": 3, "local_items": 5})
+        if cmd.startswith("gzip -c ") and "receipt.json" in cmd:
+            steps = [{"machine": "m", "node": "n%d" % (i % 2), "chunk": i, "step": "pickle",
+                      "start_ns": i, "dur_ns": 1000, "bytes": 10} for i in range(self.receipt_steps)]
+            steps.append({"machine": "m", "node": "n1", "chunk": 0, "step": "compute", "start_ns": 0, "dur_ns": 5})
+            doc = {"remote_items": 3, "local_items": 5, "steps": steps}
+            return 0, base64.b64encode(gzip.compress(json.dumps(doc).encode())).decode()
         if "jobs last --export json" in cmd:
             return 0, json.dumps({"steps": []})
         if "pipedpeer run" in cmd or "python3" in cmd:

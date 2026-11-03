@@ -41,11 +41,14 @@ PORTS=(22/tcp 4242/tcp 4242/udp 4243/udp 4244/udp 4317/tcp 5201/tcp 8137/tcp)
 # What the campaign may create in the lab user's home. undo removes each one
 # that did not exist before setup (and parents it made, when empty).
 # (motd.legal-displayed: Ubuntu writes it on the first ssh login; snowflake,
-# pip, virtualenv: the day's Ansible venv; rclone: sync-r2.sh.)
+# pip, virtualenv: the day's Ansible venv; rclone: sync-r2.sh; matplotlib:
+# analyse.py on pc00; .local/bin: crun from pipedpeer setup; detsys-ids-client:
+# the Determinate Nix installer. The rehearsal's snapshot diff found the last four.)
 HOME_PATHS=(pipedpeer-lab .ansible .nix-profile .nix-defexpr .nix-channels .ssh/known_hosts
   .cache/nix .cache/pipedpeer .cache/pip .cache/virtualenv .cache/snowflake .cache/motd.legal-displayed
   .local/state/nix .local/state/pipedpeer .local/share/pipedpeer .local/share/pipedpeer-lab
-  .config/pipedpeer .config/pipedpeer-lab .config/nix .config/rclone)
+  .config/pipedpeer .config/pipedpeer-lab .config/nix .config/rclone
+  .cache/matplotlib .config/matplotlib .local/bin .local/state/systems.determinate.detsys-ids-client)
 HOME_PARENTS=(.cache .local/state .local/share .local .config)
 
 log()  { echo "[lab] $*"; }
@@ -426,14 +429,19 @@ launch_day() {
     --setenv=PIPEDPEER_LAB_R2_ENV="$SECRETS/r2.env" --setenv=LAB_SITE="$SITE"
     --setenv=LAB_PIPEDPEER_VERSION="$PIPEDPEER_VERSION")
   local v
-  # Tests and overrides, passed through only when set.
-  for v in LAB_DISCOVER_TIMEOUT LAB_PROFILE LAB_SUBNET PIPEDPEER_LAB_S3_ENDPOINT; do
+  # Tests and overrides, passed through only when set: the day's own, and
+  # run.sh's PL_* knobs (README.md beside lab-day.sh).
+  for v in LAB_DISCOVER_TIMEOUT LAB_PROFILE LAB_SUBNET LAB_SESSION LAB_CAL_STRONG_S LAB_CAL_WEAK_S CAL_MIN_S \
+    PIPEDPEER_LAB_S3_ENDPOINT PIPEDPEER_RELEASE_BASE_URL $(compgen -v PL_ || true); do
     [[ -n ${!v:-} ]] && envs+=(--setenv="$v=${!v}")
   done
   # A system unit owned by the lab user: it survives closing the terminal,
-  # logging out and the screen lock, and needs no linger.
+  # logging out and the screen lock, and needs no linger. TasksMax: the unit
+  # holds the Ray head, the Dask scheduler, Ansible's forks and the
+  # collectors; systemd's default (15 % of pid_max) killed Ray's gRPC threads
+  # where pid_max is small.
   systemd-run --quiet --unit="$UNIT" --uid="$LAB_USER" --gid="$(id -g "$LAB_USER")" \
-    -p WorkingDirectory="$REPO" -p KillMode=control-group -p SyslogIdentifier="$UNIT" "${envs[@]}" \
+    -p WorkingDirectory="$REPO" -p KillMode=control-group -p SyslogIdentifier="$UNIT" -p TasksMax=infinity "${envs[@]}" \
     /bin/bash "$REPO/scripts/campaign/lab-day.sh" || die "systemd-run failed"
   log "started the lab day as the systemd unit $UNIT"
 }

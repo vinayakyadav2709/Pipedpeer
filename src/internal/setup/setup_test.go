@@ -170,7 +170,10 @@ func TestTheHelperInstallScript(t *testing.T) {
 		t.Errorf("running as root needs no sudoers rule:\n%s", root)
 	}
 	un := helperUninstallScript()
-	for _, want := range []string{nixtrust.SudoersFile, nixtrust.HelperPath, nixtrust.KeysFile, "grep -vxF '!include", "systemctl try-restart nix-daemon"} {
+	// The restart is only where a nix-daemon unit exists: single-user nix has
+	// none, and the failed try-restart failed the whole uninstall.
+	for _, want := range []string{nixtrust.SudoersFile, nixtrust.HelperPath, nixtrust.KeysFile, "grep -vxF '!include",
+		"if systemctl cat nix-daemon.service >/dev/null 2>&1; then systemctl try-restart nix-daemon; fi"} {
 		if !strings.Contains(un, want) {
 			t.Errorf("uninstall script lacks %q:\n%s", want, un)
 		}

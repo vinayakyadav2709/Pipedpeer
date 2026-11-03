@@ -36,12 +36,13 @@ def job_command(ctx, b, wl, env):
     envs = " ".join("%s=%s" % (k, shlex.quote(v)) for k, v in sorted(env.items()))
     if b.kind == "pipedpeer":
         es = " ".join("-e %s" % shlex.quote("%s=%s" % kv) for kv in sorted(env.items()))
-        return ws, "cd %s && rm -f receipt.json && pipedpeer run -e PIPEDPEER_RECEIPT=receipt.json %s %s" % (
-            ws, es, wl.script.rsplit("/", 1)[-1])
+        return ws, "cd %s && rm -f receipt.json && %s" % (ws, b.logged("pipedpeer run -e PIPEDPEER_RECEIPT=receipt.json %s %s" % (
+            es, wl.script.rsplit("/", 1)[-1]), "pipedpeer-run"))
     script = wl.script_for(b.kind).rsplit("/", 1)[-1]
     addr = ("RAY_ADDRESS=%s:%d" % (ctx.inv.head.ip, systems.RAY_PORT) if b.kind == "ray"
             else "DASK_SCHEDULER=tcp://%s:%d" % (ctx.inv.head.ip, systems.DASK_PORT))
-    return ws, "cd %s && env %s %s %s/bin/python3 %s" % (ws, addr, envs, ctx.env_dir, script)
+    return ws, "cd %s && %s" % (ws, b.logged("env %s %s %s/bin/python3 %s" % (addr, envs, ctx.env_dir, script),
+                                             b.kind, "run-"))
 
 
 def kill_run(ctx, at_s, victim):
@@ -87,6 +88,17 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
     logdir = rec.log_dir(run_id)
     line = {"run_id": run_id, "workload": wl.id, "system": "pipedpeer-ctrlc", "n": n, "repeat": repeat,
             "log_path": os.path.relpath(logdir, ctx.out_dir)}
+    ctx.run_id = run_id
+    ctx.mark(run_id)
+    try:
+        return _ctrl_c(ctx, b, wl, n, repeat, at_s, line, logdir)
+    finally:
+        ctx.run_id = None
+        ctx.mark("idle")
+
+
+def _ctrl_c(ctx, b, wl, n, repeat, at_s, line, logdir):
+    rec = ctx.recorder
     try:
         hosts = b.activate(n)
         size = ctx.size_for(wl, "strong", n)
@@ -142,7 +154,7 @@ def main(ctx):
     for system in ctx.rng.sample(chosen, len(chosen)):
         b = ctx.backend(system)
         victim = b.hosts_for(n)[-1]
-        ctx.one_run(wl, system, n, 0, warmup=True)
+        ctx.one_run(wl, system, n, 0, warmup=True, extra={"fault": "none"})
         ref = ctx.one_run(wl, system, n, 1, extra={"fault": "none"})
         if ref.get("error") or not ref.get("wall_s"):
             ctx.log("no reference wall for %s; kills skipped" % system)

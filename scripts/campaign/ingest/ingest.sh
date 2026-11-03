@@ -39,7 +39,10 @@ load_env() {
 	fi
 }
 
-# The token goes in a header file, never on a command line other users can read.
+# The token goes in a header file, never on a command line other users can
+# read. It is written once, by main in this shell, and removed on exit: api()
+# runs inside $(...) subshells, and a file made there was never removed (a
+# lab day left 911 copies of the token in /tmp).
 hdr_file=""
 cleanup() { if [[ -n "$hdr_file" ]]; then rm -f "$hdr_file"; fi; }
 trap cleanup EXIT
@@ -208,6 +211,7 @@ main() {
 	local cmd="${1:-}"
 	shift || true
 	load_env
+	auth_header
 	case "$cmd" in
 	put) put_file "$1" "$2" ;;
 	sync) cmd_sync "$@" ;;

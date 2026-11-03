@@ -65,7 +65,7 @@ discover() {
 ensure_services() {
   is_done discover || return 0
   is_done prep.otel && { OTELCOL_TARBALL=$DAY/serve/otelcol.tar.gz bash "$CAMP/telemetry.sh" up >/dev/null 2>&1 || say "driver collector did not start"; }
-  is_done prep.otel && { bash "$CAMP/otel/node.sh" status >/dev/null 2>&1 || bash "$CAMP/otel/node.sh" start pc00 "$(pc00_ip)" >/dev/null 2>&1 || say "pc00 node collector did not start"; }
+  is_done prep.otel && { bash "$CAMP/otel/node.sh" status >/dev/null 2>&1 || bash "$CAMP/otel/node.sh" start pc00 "$(pc00_ip)" --session "$SESSION" --pcap >/dev/null 2>&1 || say "pc00 node collector did not start"; }
   if is_done prep.join && command -v pipedpeer >/dev/null; then
     pipedpeer status >/dev/null 2>&1 || pipedpeer start >/dev/null 2>&1 || say "pc00 daemon did not start"
   fi
@@ -103,8 +103,39 @@ prep_machines() {
   python3 "$CAMP/day/tables.py" machines "$DAY/out/machines" "$INV_ALL" "$RESULTS/machines.csv"
 }
 
+# netem_check: E15 adds delay with tc's netem qdisc, a kernel module
+# (sch_netem; on Ubuntu it is in linux-modules-extra-<kernel>). Each PC is
+# asked whether it is loaded or loadable (modprobe -n: a dry run, nothing
+# changes), results/lab/netem.csv records the answer, and a blocker names
+# the PCs without it now, rather than E15 failing on them hours later.
+netem_check() {
+  local h lacking=()
+  # tc itself: Fedora ships it apart (iproute-tc); through lab.sh pkg, so undo removes it.
+  ans tc all 'export PATH=$PATH:/usr/sbin:/sbin; command -v tc >/dev/null && exit 0
+    if command -v apt-get >/dev/null; then p=iproute2; else p=iproute-tc; fi; sudo -n bash '"$LABSH"' pkg $p' ||
+    blocker "tc did not install on ${BAD_HOSTS[*]}: E15 cannot add delay there"
+  ans netem all 'if [ -d /sys/module/sch_netem ] || sudo -n modprobe -n -q sch_netem 2>/dev/null; then echo PLNETEM yes; else echo "PLNETEM no $(uname -r)"; fi' || true
+  {
+    echo "pc_id,netem,kernel"
+    for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do
+      local line; line=$(out_of netem "$h" | grep '^PLNETEM ' | tail -n1)
+      case $line in
+        "PLNETEM yes") echo "$h,yes," ;;
+        "PLNETEM no "*) echo "$h,no,${line#PLNETEM no }"; lacking+=("$h") ;;
+        *) echo "$h,unknown,"; lacking+=("$h") ;;
+      esac
+    done | sort
+  } >"$RESULTS/netem.csv"
+  if ((${#lacking[@]})); then
+    blocker "no sch_netem kernel module on ${lacking[*]} (results/lab/netem.csv): E15's runs that use them will fail; on Ubuntu it comes with linux-modules-extra-<kernel> (kernels in netem.csv)"
+  else
+    say "netem: available on every PC"
+  fi
+}
+
 prep_network() {
   local ip h; ip=$(pc00_ip)
+  netem_check
   ans_drop iperf all 'command -v iperf3 >/dev/null || sudo -n bash '"$LABSH"' pkg iperf3' "iperf3 install failed" || return 1
   pkill -u "$USER" -x iperf3 2>/dev/null || true
   iperf3 -s -D -p 5201 --pidfile "$DAY/iperf3.pid" || return 1
@@ -159,6 +190,22 @@ for r in json.load(sys.stdin):
   cat "$DAY/pipedpeer-version"
 }
 
+# mirror_release <tag>: the release's binaries and checksums.txt into
+# $DAY/serve/releases/download/<tag>/, verified, for install-pipedpeer.sh.
+mirror_release() {
+  local tag=$1 src=${PIPEDPEER_RELEASE_BASE_URL:-https://github.com/vinayakyadav2709/Pipedpeer/releases}
+  local d=$DAY/serve/releases/download/$tag a
+  dist_up || return 1
+  mkdir -p "$d"
+  [[ -s $d/checksums.txt ]] || curl -fsSL --retry 3 "$src/download/$tag/checksums.txt" -o "$d/checksums.txt" || return 1
+  for a in amd64 arm64; do
+    grep -q " pipedpeer-linux-$a\$" "$d/checksums.txt" || continue
+    [[ -s $d/pipedpeer-linux-$a ]] || curl -fsSL --retry 3 "$src/download/$tag/pipedpeer-linux-$a" -o "$d/pipedpeer-linux-$a" || return 1
+  done
+  (cd "$d" && sha256sum -c --quiet --ignore-missing checksums.txt) || { rm -f "$d"/pipedpeer-linux-*; return 1; }
+  say "pipedpeer $tag on pc00's file server ($(du -sh "$d" | cut -f1))"
+}
+
 prep_pipedpeer() {
   local v h; v=$(pipedpeer_version)
   [[ -n $v ]] || blocker "could not pin a pipedpeer version; installing the latest nightly"
@@ -168,14 +215,18 @@ prep_pipedpeer() {
     [[ -f $HOSTREC/$h ]] || out_of pre "$h" | grep '^had-' >"$HOSTREC/$h" || true
     grep -q had-pipedpeer "$HOSTREC/$h" && blocker "$h already had pipedpeer; the day upgrades it and leaves it installed"
   done
+  # The campaign's own build (publish.sh: release lab-<commit12>) comes down
+  # once to pc00's file server, checksum-checked, and every PC installs it
+  # from there; a nightly comes from GitHub on each PC.
+  local base=${PIPEDPEER_RELEASE_BASE_URL:-}
+  if [[ $v == lab-* ]]; then
+    mirror_release "$v" || { say "could not fetch pipedpeer $v"; return 1; }
+    base=http://$(pc00_ip):$DIST_PORT/releases
+  fi
   local irc=0   # E14: timed per PC (day/timeline.sh)
-  ans_drop install all "$(tl_wrap install "bash $R/../install-pipedpeer.sh ${v:+--version $v} -y")" "pipedpeer install failed" || irc=1
+  ans_drop install all "$(tl_wrap install "${base:+PIPEDPEER_RELEASE_BASE_URL=$base }bash $R/../install-pipedpeer.sh ${v:+--version $v} -y")" "pipedpeer install failed" || irc=1
   tl_from_out install install
   ((irc == 0)) || return 1
-  ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
-  mkdir -p "$RESULTS/doctor"
-  for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
-  ((${#BAD_HOSTS[@]})) && blocker "pipedpeer doctor reported problems on ${BAD_HOSTS[*]} (results/lab/doctor/)"
   return 0
 }
 
@@ -189,7 +240,9 @@ prep_join() {
   local want n i; want=$(workers | wc -l)
   for i in $(seq 40); do
     # Healthy nodes in pc00's view (its own entry may be among them).
-    n=$(curl -fsS http://127.0.0.1:4242/v1/nodes 2>/dev/null |
+    # The API wants the cluster token (the one config file), as systems.py sends it.
+    n=$(curl -fsS -H "X-Pipedpeer-Token: $(sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p' "${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/cluster.json" 2>/dev/null)" \
+      http://127.0.0.1:4242/v1/nodes 2>/dev/null |
       python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin) or [] if x.get("state") == "healthy"))' 2>/dev/null || echo 0)
     ((n >= want)) && break
     sleep 3
@@ -197,7 +250,30 @@ prep_join() {
   say "pc00 sees $n healthy nodes for $want workers"
   tl pc00 cluster_ready "$(date +%s%N)" pc00 "" "healthy=$n workers=$want"
   pipedpeer status >"$RESULTS/join-status.txt" 2>&1 || true
+  node_ids
+  # doctor after the join: before it, each PC's setup has made a cluster of
+  # its own, and doctor reports every other PC on the LAN as a stranger.
+  ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
+  mkdir -p "$RESULTS/doctor"
+  for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
+  ((${#BAD_HOSTS[@]})) && blocker "pipedpeer doctor reported problems on ${BAD_HOSTS[*]} (results/lab/doctor/)"
   return 0
+}
+
+# node_ids writes results/lab/node-ids.csv: each PC's pipedpeer node id (the
+# key fingerprint receipts, record.json and the daemon logs name machines
+# by), so they join to pc ids. Rerun at the end of the day by finish.sh.
+node_ids() {
+  local h id
+  ans nodeid all 'cat "${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/daemon.node"' "$INV_ALL" || true
+  {
+    echo "pc_id,node_id"
+    for h in "${OK_HOSTS[@]}"; do
+      id=$(out_of nodeid "$h" | tr -cd '0-9a-f\n' | grep -E '^[0-9a-f]{8,}$' | tail -n1)
+      [[ -n $id ]] && echo "$h,$id"
+    done | sort
+  } >"$RESULTS/node-ids.csv"
+  say "node ids: $(($(wc -l <"$RESULTS/node-ids.csv") - 1)) PCs in results/lab/node-ids.csv"
 }
 
 # prep_nixenv: pc00 builds the campaign env from cache.nixos.org and writes
@@ -244,23 +320,38 @@ prep_otel() {
   fi
   OTELCOL_TARBALL=$DAY/serve/otelcol.tar.gz bash "$CAMP/telemetry.sh" up ||
     blocker "the driver collector did not start; telemetry is off"
+  # tcpdump for node.sh --pcap: from the distribution, so lab.sh undo removes it.
+  ans tcpdump all 'command -v tcpdump >/dev/null || PATH=$PATH:/usr/sbin command -v tcpdump >/dev/null || sudo -n bash '"$LABSH"' pkg tcpdump' ||
+    blocker "tcpdump did not install on ${BAD_HOSTS[*]}; no pcap from there"
+  # Every trace (otel/README.md, "Runner integration" 1): the session in
+  # $LAB_HOME/session, then the collector, the poller and the pcap.
   ans otel all 'set -e; cd '"$R"'/otel; t=$HOME/pipedpeer-lab/otelcol.tar.gz
     curl -fsS http://'"$(pc00_ip)"':'"$DIST_PORT"'/otelcol.tar.gz -o $t
     OTELCOL_TARBALL=$t bash install-otelcol.sh; rm -f $t
-    bash node.sh status >/dev/null 2>&1 || bash node.sh start {{ inventory_hostname }} '"$(pc00_ip)" ||
+    mkdir -p $HOME/.local/share/pipedpeer-lab; echo '"$SESSION"' >$HOME/.local/share/pipedpeer-lab/session
+    export PATH=$PATH:/usr/sbin
+    bash node.sh status >/dev/null 2>&1 || bash node.sh start {{ inventory_hostname }} '"$(pc00_ip)"' --session '"$SESSION"' --pcap' ||
     blocker "node collector failed on ${BAD_HOSTS[*]}; no host metrics from there"
+  local h
+  for h in "${OK_HOSTS[@]}"; do
+    # No ^: Fedora's sudo prefixes the line with terminal escapes (OSC 3008).
+    out_of otel "$h" | grep -q 'pcap: tcpdump pid' || blocker "$h: no pcap ($(out_of otel "$h" | grep -i pcap | tail -n1 | tr -cd '[:print:]' | cut -c1-200))"
+  done
   return 0
 }
 
 # calibrate: W1-W3 sizes on the first worker (pc01 unless it was dropped).
+# The targets are each workload's own (calibrate.sh: 60 s, W4 30 s) unless
+# LAB_CAL_STRONG_S and LAB_CAL_WEAK_S set one for all (the rehearsal's few seconds).
 calibrate() {
   local h w js ok=1; h=$(workers | head -n1)
+  local targets="${LAB_CAL_STRONG_S:+$LAB_CAL_STRONG_S ${LAB_CAL_WEAK_S:-$LAB_CAL_STRONG_S}}"
   mkdir -p "$RESULTS/calibration"
   for w in W1 W2 W3 W4; do
     [[ -s $RESULTS/calibration/$w.json ]] && continue
     local try
     for try in 1 2; do
-      ans "cal.$w" "$h" "cd $R/../.. && CAL_VERIFY=1 bash scripts/campaign/calibrate.sh $w" || true
+      ans "cal.$w" "$h" "cd $R/../.. && CAL_VERIFY=1 ${CAL_MIN_S:+CAL_MIN_S=$CAL_MIN_S }${PL_NPROC:+PL_NPROC=$PL_NPROC }bash scripts/campaign/calibrate.sh $w $targets" || true
       out_of "cal.$w" "$h" >"$RESULTS/calibration/$w-$try.log"
       js=$(sed -n 's/^CALIBRATE //p' "$RESULTS/calibration/$w-$try.log" | tail -n1)
       [[ -n $js ]] || continue
@@ -291,7 +382,7 @@ weakrefs() {
     python3 "$CAMP/day/sizes.py" have "$REPO" W1 "$size" && continue
     local h=${hosts[$((i % ${#hosts[@]}))]}; i=$((i + 1))
     say "weak reference N=$n ($size) on $h"
-    ( ans "weak.$n" "$h" "cd $R/../.. && $size BENCH_PROCS=\$(nproc) \$HOME/.local/share/pipedpeer-lab/env/bin/python3 docs/benchmarks/workloads/pool_map.py" >/dev/null ) &
+    ( ans "weak.$n" "$h" "cd $R/../.. && $size BENCH_PROCS=${PL_NPROC:-\$(nproc)} \$HOME/.local/share/pipedpeer-lab/env/bin/python3 docs/benchmarks/workloads/pool_map.py" >/dev/null ) &
     pids+=("$!:$n:$h:$size")
   done
   local p ok=1
@@ -343,7 +434,8 @@ run_exp() {
   if [[ ! -f $CAMP/run.sh ]]; then
     rc=127; blocker "$id: scripts/campaign/run.sh is missing"
   else
-    (cd "$REPO" && bash "$CAMP/run.sh" "$id" --inventory "$INV" "$@") 2>&1 | tee "$RESULTS/logs/day/$id.log"
+    # PL_SYNC=0: run.sh leaves the upload to the sync below, after attempts.jsonl has this attempt.
+    (cd "$REPO" && PL_SYNC=0 bash "$CAMP/run.sh" "$id" --inventory "$INV" "$@") 2>&1 | tee "$RESULTS/logs/day/$id.log"
     rc=${PIPESTATUS[0]}
   fi
   to=$(runs_lines)

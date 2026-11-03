@@ -1,0 +1,11 @@
+{"experiment": "e1", "status": "ok", "runs_from_line": 1, "runs_to_line": 81, "rc": 0, "time": "2026-11-03T17:51:49+0000"}
+{"experiment": "e1b", "status": "ok", "runs_from_line": 81, "runs_to_line": 95, "rc": 0, "time": "2026-11-03T17:56:42+0000"}
+{"experiment": "e4", "status": "interrupted", "runs_from_line": 95, "runs_to_line": 97, "rc": null, "time": "2026-11-03T17:57:47+0000"}
+{"experiment": "e4", "status": "ok", "runs_from_line": 97, "runs_to_line": 105, "rc": 0, "time": "2026-11-03T18:00:13+0000"}
+{"experiment": "e5", "status": "ok", "runs_from_line": 105, "runs_to_line": 111, "rc": 0, "time": "2026-11-03T18:01:44+0000"}
+{"experiment": "e6", "status": "ok", "runs_from_line": 111, "runs_to_line": 121, "rc": 0, "time": "2026-11-03T18:04:10+0000"}
+{"experiment": "e12", "status": "ok", "runs_from_line": 121, "runs_to_line": 124, "rc": 0, "time": "2026-11-03T18:07:47+0000"}
+{"experiment": "e13", "status": "ok", "runs_from_line": 124, "runs_to_line": 127, "rc": 0, "time": "2026-11-03T18:16:52+0000"}
+{"experiment": "e15", "status": "ok", "runs_from_line": 127, "runs_to_line": 139, "rc": 0, "time": "2026-11-03T18:19:36+0000"}
+{"experiment": "e7", "status": "ok", "runs_from_line": 139, "runs_to_line": 143, "rc": 0, "time": "2026-11-03T18:19:57+0000"}
+{"experiment": "e8", "status": "ok", "runs_from_line": 143, "runs_to_line": 157, "rc": 0, "time": "2026-11-03T18:23:08+0000"}

@@ -2,7 +2,7 @@
 # The campaign's only way to reach a lab PC: Ansible, from a venv at
 # $HOME/.local/share/pipedpeer-lab/ansible (no root). Sourced or executed:
 #
-#   lib/ansible.sh install                     # venv + ansible-core + community.docker + matplotlib
+#   lib/ansible.sh install                     # venv + ansible-core + community.docker + ansible.posix + matplotlib
 #   lib/ansible.sh sh    <pattern> <command>   # run command (sh -c) on every matching host
 #   lib/ansible.sh bg    <pattern> <log> <cmd> # start command detached; output to <log> on the host
 #   lib/ansible.sh put   <pattern> <src> <dest># copy a driver file to the hosts
@@ -44,8 +44,12 @@ pl_install() {
 	if [[ ! -x $PL_VENV/bin/ansible ]]; then
 		if command -v uv >/dev/null; then
 			uv venv -q "$PL_VENV"
-		else
-			python3 -m venv "$PL_VENV"
+		elif ! python3 -m venv "$PL_VENV" >/dev/null 2>&1; then
+			# Stock Ubuntu has no python3-venv (no ensurepip); virtualenv.pyz needs neither.
+			rm -rf "$PL_VENV"
+			curl -fsSL --retry 3 https://bootstrap.pypa.io/virtualenv.pyz -o "$PL_STATE/virtualenv.pyz" &&
+				python3 "$PL_STATE/virtualenv.pyz" -q "$PL_VENV" || { rm -f "$PL_STATE/virtualenv.pyz"; return 1; }
+			rm -f "$PL_STATE/virtualenv.pyz"
 		fi
 	fi
 	if command -v uv >/dev/null; then
@@ -54,8 +58,12 @@ pl_install() {
 		"$PL_VENV/bin/pip" install -q ansible-core 'docker>=7' matplotlib
 	fi
 	pl_ansible_env
-	[[ -d $PL_VENV/collections/ansible_collections/community/docker ]] ||
-		"$PL_VENV/bin/ansible-galaxy" collection install -p "$PL_VENV/collections" community.docker >/dev/null
+	# The json callback _pl_adhoc reads lives in ansible.posix: ansible-core has none.
+	local c
+	for c in community.docker ansible.posix; do
+		[[ -d $PL_VENV/collections/ansible_collections/${c/.//} ]] ||
+			"$PL_VENV/bin/ansible-galaxy" collection install -p "$PL_VENV/collections" "$c" >/dev/null
+	done
 	"$PL_VENV/bin/ansible" --version | head -1
 }
 
@@ -121,7 +129,9 @@ pl_bg() {
 		"$PL_ANSIBLE_FAKE" bg "$pattern" "$log" "$cmd"
 		return
 	fi
-	pl_sh "$pattern" "mkdir -p \"\$(dirname $log)\"; nohup sh -c $(pl_q "$cmd") >$log 2>&1 </dev/null & echo \$!"
+	# setsid: over ssh the raw module's pty session ends with the command, and
+	# takes a plain nohup'd child with it (the Dask workers never started).
+	pl_sh "$pattern" "mkdir -p \"\$(dirname $log)\"; if command -v setsid >/dev/null; then setsid -f sh -c $(pl_q "$cmd") >$log 2>&1 </dev/null; else nohup sh -c $(pl_q "$cmd") >$log 2>&1 </dev/null & fi; echo started"
 }
 
 pl_put() {

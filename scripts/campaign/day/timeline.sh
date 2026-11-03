@@ -82,7 +82,7 @@ tl_collect() {
 prep_firstjob() {
   tl_collect
   [[ -f $CAMP/run.sh ]] || { blocker "e14: run.sh missing; no first job"; return 0; }
-  (cd "$REPO" && bash "$CAMP/run.sh" e14 --inventory "$INV") 2>&1 | tee "$RESULTS/logs/day/e14.log"
+  (cd "$REPO" && PL_SYNC=0 bash "$CAMP/run.sh" e14 --inventory "$INV") 2>&1 | tee "$RESULTS/logs/day/e14.log"
   ((PIPESTATUS[0] == 0)) || blocker "e14 (first distributed job) failed (results/lab/logs/day/e14.log)"
   return 0
 }

@@ -127,8 +127,20 @@ def summary(results, day, expected, note=""):
         if line.startswith("aborted: "):
             lines.append("  STOPPED EARLY: " + line[len("aborted: "):])
 
-    runs = jsonl(os.path.join(results, "runs.jsonl"))
     attempts = jsonl(os.path.join(results, "attempts.jsonl"))
+    # The lines of cut-off attempts do not count (analyse.py drops them too).
+    cut = set()
+    for a in attempts:
+        if a["status"] == "interrupted":
+            cut.update(range(a["runs_from_line"], a["runs_to_line"]))
+    runs = []
+    rpath = os.path.join(results, "runs.jsonl")
+    for i, line in enumerate(open(rpath) if os.path.exists(rpath) else []):
+        try:
+            if i not in cut:
+                runs.append(json.loads(line))
+        except ValueError:
+            pass
     last = {}
     for a in attempts:
         last[a["experiment"]] = a
@@ -148,9 +160,9 @@ def summary(results, day, expected, note=""):
         n = sum(1 for line in open(blockers) if line.startswith("- "))
         lines.append("    %d problems recorded in results/lab/BLOCKERS.md (in R2 too)" % n)
 
-    lines += ["", "  Results in Cloudflare R2:",
-              "    r2:pipedpeer-lab/raw/    results/lab: runs.jsonl, CSVs, figures, logs",
-              "    r2:pipedpeer-lab/otel/   telemetry (host metrics, daemon logs)"]
+    lines += ["", "  Results in Cloudflare R2 (bucket pipedpeer-lab):",
+              "    raw/        results/lab: runs.jsonl, CSVs, figures, logs, pcap/",
+              "    raw/otel/   telemetry (host metrics, traces, daemon logs)"]
     fc = os.path.join(day, "final-count.txt")
     if os.path.exists(fc):
         lines += ["    " + line.strip() for line in open(fc) if line.strip()]

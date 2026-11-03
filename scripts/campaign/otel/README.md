@@ -67,7 +67,7 @@ Every record carries the resource attributes `lab.pc_id`, `host.name`, `lab.sess
 |---|---|---|---|
 | `host.cpu` | per-core time and utilisation, frequency, logical/physical counts | 1 s | host_metrics |
 | `host.memory`, `host.paging`, `host.load` | memory with utilisation and limit; swap and faults; load | 1 s | host_metrics |
-| `host.network` | per-interface bytes, packets, errors, drops; TCP connection states; conntrack | 1 s | host_metrics |
+| `host.network` | per-interface bytes, packets, errors, drops; conntrack (TCP connection states are off: net/sockets has the campaign's) | 1 s | host_metrics |
 | `host.disk`, `host.processes` | per-device io, ops, time; process counts and forks | 1 s | host_metrics |
 | `host.filesystem` | usage and utilisation of real filesystems | 10 s | host_metrics |
 | `host.process` | per process: cpu time and utilisation, memory, threads, disk io, context switches, fds, page faults, uptime. Only pipedpeer, python, `ray::*`, raylet, gcs_server, dask, crun, nix, torchrun, otelcol, tcpdump (by comm) | 1 s | host_metrics process scraper |

@@ -6,54 +6,52 @@ The lab: 60+ Linux PCs, CPU only, root on all, anything may be installed. The ca
 
 ## Part 1: for the operator
 
-> **Superseded by the headless lab day** ([scripts/campaign/HEADLESS.md](../../scripts/campaign/HEADLESS.md)): no laptop; one `curl … | sudo bash` line on every PC, `… -s -- head` on pc00, and pc00 runs the whole day. The laptop flow below remains as the fallback (`scripts/campaign/serve.sh` serves `lab.sh` for worker setup).
-
-Your agent does the code, the scripts, the runs and the analysis. You get lab time, sit at each PC once, and do the hand-timed tasks (E3, E10).
+No laptop goes to the lab. You type one line on every lab PC; the last PC, pc00, then runs the whole day by itself and ends with a summary on its screen. Your step-by-step page is [results/lab/OPERATOR.md](../../results/lab/OPERATOR.md). Print it.
 
 ### What you need
 
-- Your laptop (the driver): Linux, the Pipedpeer repo cloned and on `dev`, your coding agent, an SSH key (`ssh-keygen -t ed25519` if you have none). On the lab network (cable preferred) during every session.
-- From the project lead: Cloudflare R2 account id, access key, secret.
-- Lab time: three sessions if possible (about 1.5 h, 4 h, 3 h), 33+ PCs.
-- Your phone (hotspot, for E9). Optional: 4-6 classmates for 1 h (E10).
+- The campaign passphrase on paper, from `publish.sh` (below).
+- The lab account's user name and password, the same on every PC.
+- Lab time: one visit of about 7 hours with the minimal profile as it stands (6.5 hours unattended; HEADLESS.md "Time"), 17 PCs (fewer works; the day uses what it finds).
+- Your phone, to photograph any `ERROR`.
 
-### Before the lab (at home, 2-4 days)
+### Before the lab (at home)
 
-1. Save this file as `docs/benchmarks/lab-campaign.md` in your clone.
-2. Give your agent the prompt the project lead sent you.
-3. Hand it the R2 keys when it asks.
-4. Done when it says the rehearsal passed and gives you `results/lab/OPERATOR.md`. Read it; it is your exact script for the lab.
+1. Merge the campaign branches to `dev` and push.
+2. Run `scripts/campaign/publish.sh`. Write the passphrase it shows on paper.
+3. Commit `landing/public/lab.sh` and `landing/public/lab-secrets.enc` to `dev` and push. Wait for the Pages deploy.
+4. Run `scripts/campaign/publish.sh selftest` and `scripts/campaign/ingest/ingest.sh selftest`. Both must pass.
 
-### Session 1 (about 1.5 h): setup
+### In the lab
 
-1. Your agent starts a small web server on your laptop and tells you one line.
-2. On each of the 33 PCs, open a terminal and type that line. It looks like:
+1. On every PC but one, as the lab account:
 
    ```sh
-   curl -fsS http://<your-laptop-ip>:8000/lab-pc.sh | sudo bash -s -- setup
+   curl -fsSL https://vinayakyadav2709.github.io/Pipedpeer/lab.sh | sudo bash
    ```
 
-   It ends with a line starting `LAB-PC`. If it prints `ERROR`, photograph it for your agent.
-3. Tell your agent "all PCs done". From here it drives every PC over SSH.
-4. It checks network, clocks and telemetry and runs each experiment once.
+   It ends with `DONE: this PC is ready, you can leave it.`
+2. On the last PC (pc00):
 
-### Sessions 2 and 3: measurements
+   ```sh
+   curl -fsSL https://vinayakyadav2709.github.io/Pipedpeer/lab.sh | sudo bash -s -- head
+   ```
 
-Tell your agent "session 2" (then "session 3"); it follows OPERATOR.md.
+   Type the passphrase. The day starts: discover, prepare, calibrate, the experiments, analysis, upload, cleanup of every PC. You may close the terminal.
+3. To look in: the same line with `-s -- status`. If the day stops (reboot, power cut), type the head line again; it continues where it stopped.
+4. Leave when the summary says `ALL DONE, the lab PCs are back as they were. You can leave.`
 
-Your hand jobs:
+If the lab PCs already run SSH with one shared password, `scripts/campaign/bootstrap-ssh.sh`, run on pc00, replaces the walk round (OPERATOR.md, "No visits").
 
-- **E3:** on two PCs, under a fresh account, set up PipedPeer, Ray and Dask yourself from their official quick starts, until the test script runs on both. The agent times you and counts commands.
-- **E9:** put your laptop on your phone's hotspot when asked.
-- **E10 (if time):** each classmate does the E3 task for PipedPeer and Dask. Ask their consent; record no names.
-
-Do not leave until the agent says cleanup is done (it runs `undo` on every PC, which removes exactly what setup added).
+The hand-timed tasks (E3, E10) and the second network (E9) are not in this day; see "As built" in Part 2.
 
 ### After the lab
 
-Your agent writes the analysis and opens a PR to `dev`. Send the link to the project lead. Done.
+Rotate the ingest token, delete the campaign key, and remove the bundle from `dev` (OPERATOR.md, "After the lab"). Ask your agent to fetch the results from R2 and write the analysis.
 
 ## Part 2: for the agent
+
+> **As built (2026-11):** Part 2 below is the plan as written, kept as the record. The campaign as built has no driver laptop: pc00 is the Ansible controller, the OTel driver, the Ray head, the Dask scheduler and the submitter, and runs the day as a systemd unit ([scripts/campaign/HEADLESS.md](../../scripts/campaign/HEADLESS.md)). Appendix A became `scripts/campaign/lab.sh`. The day runs the minimal profile ([scripts/campaign/profile-minimal.tsv](../../scripts/campaign/profile-minimal.tsv)): 17 PCs, N = 1, 4, 16, 3 repeats after a warm-up, strong sizes of 60 s on one PC (not 100-150 s), E1, E1b, E4, E5, E6, E7 and E8; E3, E9, E10 and E11 are not run. Uploads go through the ingest Worker (`scripts/campaign/ingest/`), which holds the bucket to the free tier. Every trace is on, pcap included.
 
 You run on the driver laptop. The operator is your hands in the lab. Your job: produce every number, table and figure the PipedPeer paper and report lack, store it in the repo and in Cloudflare R2, and leave the lab PCs as you found them. The decisions below are made; follow them. Product code changes are allowed where a step needs them (with tests, per AGENTS.md). If the same error happens three times in a row, or a step is impossible as written, write it in `results/lab/BLOCKERS.md` and tell the operator.
 
