@@ -165,7 +165,13 @@ def test_relayed_steps_keep_the_machine_that_ran_them(monkeypatch):
             {"step": "queue", "start_ns": 1, "dur_ns": 2}]},
     ]}
     pool_pacing._relay_steps(receipt)
-    assert [s["machine"] for s in pool_pacing._RELAYED_STEPS] == ["peer-id", "10.0.0.3:4242"]
+    assert [s["machine"] for s in pool_pacing._RELAYED_STEPS] == ["peer-id", "10.0.0.3:4242", "10.0.0.3:4242"]
+    # A compute step carries its part's items (per-chunk throughput). The
+    # second part has no compute step: it gets a fallback one from its ms.
+    got = [(s["step"], s.get("items"), s.get("fallback")) for s in pool_pacing._RELAYED_STEPS]
+    assert got == [("compute", 3, None), ("compute", 1, True), ("queue", None, None)]
+    fb = pool_pacing._RELAYED_STEPS[1]
+    assert fb["machine"] == "10.0.0.3:4242" and fb["dur_ns"] == 5_000_000 and "bytes" not in fb
 
 
 def test_pool_width_fits_the_job_memory_cap(monkeypatch):

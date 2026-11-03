@@ -21,6 +21,13 @@ def test_steps_match_c24(monkeypatch):
     assert {s["step"] for s in (a, b)} <= record.NAMES
 
 
+def test_compute_steps_carry_their_items():
+    record.step("compute", 0.2, items=7)
+    record.step("queue", 0.1)
+    a, b = record.steps()
+    assert a["items"] == 7 and "items" not in b
+
+
 def test_into_appends_to_receipt():
     record.step("send", 0.1, 10)
     r = record.into({"remote_items": 1, "steps": [{"step": "queue"}]})
