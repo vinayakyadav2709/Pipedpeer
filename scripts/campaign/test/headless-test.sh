@@ -193,7 +193,7 @@ for a in att:
 print(dict(st))
 assert st["e4"] == ["interrupted", "ok"], st["e4"]
 assert all(v[-1] == "ok" for v in st.values()), st
-assert sorted(st) == sorted(["e1", "e1b", "e4", "e5", "e6", "e7", "e8"]), sorted(st)
+assert sorted(st) == sorted(["e1", "e1b", "e4", "e5", "e6", "e7", "e8", "e12", "e13", "e15"]), sorted(st)
 runs = [json.loads(l) for l in open(raw + "/runs.jsonl")]
 e1 = [r for r in runs if r["experiment"] == "e1"]
 assert len(e1) == 3 * 3 * 4, len(e1)   # N 1,4,16 x 3 systems x (1 warm-up + 3): once, not twice

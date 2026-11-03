@@ -81,8 +81,8 @@ At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if
 | `PL_RAY_START_ARGS`, `PL_DASK_WORKER_ARGS` | rehearsal: small object store, `--memory-limit 0` | Extra arguments for `ray start` and `dask worker` |
 | `PL_E9_HOST` | `local` (rehearsal: last PC) | Where E9's laptop steps run |
 | `PL_E11_IDLE_S` | 600 (rehearsal: 30) | E11 idle window per cluster size |
-| `PL_JOIN_EVERY_S`, `PL_JOIN_SCALE`, `PL_JOIN_TIMEOUT` | 20 (rehearsal: 10), 13, 600 | E12: seconds between joins, the size as a multiple of W1's strong size (unless `--size`), and the time limit |
-| `PL_CHURN_EVERY_S`, `PL_CHURN_DOWN_S`, `PL_CHURN_TIMEOUT` | 20 / 10 / 600 (rehearsal: 10 / 5) | E13: seconds between kills, how long a killed worker stays down, and the time limit |
+| `PL_JOIN_EVERY_S`, `PL_JOIN_SCALE`, `PL_JOIN_TIMEOUT` | 20 (rehearsal: 10), 13, 300 | E12: seconds between joins, the size as a multiple of W1's strong size (unless `--size`), and the time limit |
+| `PL_CHURN_EVERY_S`, `PL_CHURN_DOWN_S`, `PL_CHURN_TIMEOUT` | 20 / 10 / 360 (rehearsal: 10 / 5) | E13: seconds between kills, how long a killed worker stays down, and the time limit |
 | `PL_NETEM_RTTS`, `PL_NETEM_REPEATS` | `0,20,80`, 2 (rehearsal: 1) | E15: the RTTs added, and runs per RTT |
 
 ## Rehearsal limits

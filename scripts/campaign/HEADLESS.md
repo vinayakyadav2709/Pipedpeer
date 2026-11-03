@@ -95,7 +95,9 @@ If the day stops early (pc00 rebooted, power cut, the unit was killed), type the
 
 ### The minimal profile
 
-`profile-minimal.tsv`: 17 PCs, N = 1, 4, 16, 3 repeats after 1 warm-up. It runs e1 (W1, W2, W3 × plain, pipedpeer, ray, dask), e1b, e4, e5 and e6 at 16, e7, and e8 at ranks 2, 4, 8. It skips e3, e9, e10 and e11. Pass another profile with `LAB_PROFILE`.
+`profile-minimal.tsv`: 17 PCs, N = 1, 4, 16, 3 repeats after 1 warm-up. It runs e1 (W1, W2, W3, W4 × plain, pipedpeer, ray, dask), e1b, e4, e5 and e6 at 16, the headline experiments e12 (elastic join 4 → 16, about 8 min), e13 (churn at 16, about 10 min) and e15 (netem at N=4, about 12 min), e7, and e8 at ranks 2, 4, 8. It skips e3, e9, e10 and e11. E14 (curl to cluster) adds no row: the step `prep.firstjob` runs the day's first distributed job right after the join (about 3 min, most of it the job's Nix closure, which E1 would otherwise build), and `day/timeline.sh` records each PC's setup, SSH, install and join times in `results/lab/timeline.jsonl`. [FIGURES.md](FIGURES.md) describes the headline figures. Pass another profile with `LAB_PROFILE`.
+
+The headline additions cost about 50 minutes: W4 in e1 15, e12 8, e13 10, e15 12, `prep.firstjob` 3, and W4's calibration 2. With them the step estimates in `lab-day.sh` add up to about 6.8 hours: 5.05 hours of profile rows and 1.75 hours of setup, calibration, the weak references and cleanup.
 
 The estimates in the profile add up to about 5.5 hours of experiments plus about 1 hour of setup and cleanup. That is more than the three hours the operator expects. Most of the time is e1 at N=1, where each workload's 125 s strong size runs 16 times (4 systems × 4 runs). To fit three hours, either lower the strong target (`calibrate.sh W1 60` gives a 60 s size), or drop W3 from e1 (`--workloads W1,W2`), or reduce e8.
 

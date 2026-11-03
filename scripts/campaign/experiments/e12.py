@@ -123,7 +123,7 @@ def main(ctx):
     ns = ctx.ns([4, 16])
     n0, n1 = ns[0], ns[-1]
     every = float(os.environ.get("PL_JOIN_EVERY_S", "10" if ctx.rehearsal else "20"))
-    timeout = float(os.environ.get("PL_JOIN_TIMEOUT", "600"))
+    timeout = float(os.environ.get("PL_JOIN_TIMEOUT", "300"))
     wl = ctx.workloads[ctx.wl_ids(["W1"])[0]]
     timeline.put_probe(ctx)
     chosen = [s for s in SYSTEMS if ctx.enabled(s)]

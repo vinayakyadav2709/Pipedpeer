@@ -15,7 +15,9 @@ them), and the reference result is E1b's precomputed plain one (the day's
 weakrefs step). One run per system. Each line has fault "churn", events
 (kill and restart: t_ns, pc, restarted_by), kills, items_rerun and
 rerun_source, and the throughput timeline of lib/campaign/timeline.py.
-A run that never ends is stopped after PL_CHURN_TIMEOUT (600 s) and fails.
+A run that never ends is stopped after PL_CHURN_TIMEOUT (360 s, 6x the
+no-churn wall) and fails: Dask under churn can recompute without end, since
+a killed worker takes the finished results it held with it.
 """
 import os
 
@@ -120,7 +122,7 @@ def main(ctx):
     n = ctx.ns([16])[-1]
     every = float(os.environ.get("PL_CHURN_EVERY_S", "10" if ctx.rehearsal else "20"))
     down = float(os.environ.get("PL_CHURN_DOWN_S", "5" if ctx.rehearsal else "10"))
-    timeout = float(os.environ.get("PL_CHURN_TIMEOUT", "600"))
+    timeout = float(os.environ.get("PL_CHURN_TIMEOUT", "360"))
     wl = ctx.workloads[ctx.wl_ids(["W1"])[0]]
     timeline.put_probe(ctx)
     chosen = [s for s in SYSTEMS if ctx.enabled(s)]
