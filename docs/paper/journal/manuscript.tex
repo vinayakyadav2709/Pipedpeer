@@ -55,11 +55,10 @@ Without a Configured Cluster}
   country={India}}
 
 \begin{abstract}
-Cluster frameworks such as Spark, Ray and Dask assume a configured cluster, a
+Cluster frameworks (Spark, Ray, Dask) assume a configured cluster, a
 program written against their interface, and machines that can reach one
-another. These assumptions put the idle laptops, desktops and phones of a small
-group out of reach, particularly when the machines sit behind different home or
-campus routers. PipedPeer runs an unmodified Python script on other machines.
+another. This leaves a small group's idle laptops, desktops and phones out of reach,
+especially behind different home or campus routers. PipedPeer runs an unmodified Python script on other machines.
 Every machine runs the same daemon and there is no head node. The script's
 environment is built as a Nix closure pinned to one package-set revision, and a
 peer receives only the store paths it lacks. Parallel maps, joblib, pandas
@@ -69,14 +68,13 @@ measured peer rates, and numerical work moves only when a cost model predicts a
 gain. Machines on different networks meet through an introducer that every
 daemon serves and then connect over direct, authenticated QUIC links; no job
 data is relayed. We evaluate PipedPeer in container labs, on two laptops in
-different homes with a phone, and on a second pair of machines. Interception
-raises the startup of a trivial job by $1.24\times$, and a repeated submission
-whose closure the worker holds takes 0.83\,s against 23.4\,s for the first. A
+different homes with a phone, and on a second pair of machines. A repeated
+submission whose closure the worker holds takes 0.83\,s against 23.4\,s for the first. A
 mixed CPU script took 13.3--14.6\,s on two laptops against 17.4--18.1\,s on
 one. Periodic weight averaging every 32 steps kept validation loss within 1\%
 of one device on three test models. Small training jobs were not faster on
 two machines than on one GPU. The evaluation covers two or three physical
-machines and is not a controlled scaling study.
+machines, not a controlled scaling study.
 \end{abstract}
 
 \begin{keyword}
@@ -1186,7 +1184,7 @@ in this paper.
 This research did not receive any specific grant from funding agencies in the
 public, commercial, or not-for-profit sectors.
 
-\section*{Declaration of generative AI use}
+\section*{Declaration of generative AI and AI-assisted technologies in the manuscript preparation process}
 During the preparation of this work the authors used Claude (Anthropic) in
 order to assist with drafting and editing the manuscript text and with
 developing parts of the software. After using this tool, the authors reviewed
