@@ -22,38 +22,54 @@ detached daemon, Termux's proot nested in the Debian) were checked in
 `termux/termux-docker:x86_64`; the whole route needs a real phone. Timings
 from containers are not performance numbers.
 
-## One-time phone setup
+## Install
 
-1. Install Termux. The real-phone runs (Samsung S20 FE, Android 13) used the
-   **Play Store** build, which pipedpeer handles (it starts programs through
-   Android's linker). The F-Droid build is untested.
-2. Turn off Android's phantom process killer. On Android 12 and later it kills
-   anything past 32 child processes, which kills pool workers. Any one of:
-   - **Android 14+:** Developer options, "Disable child process restrictions".
-   - **From the phone itself** (Android 11+, no laptop): turn on Developer
-     options, Wireless debugging, tap "Pair device with pairing code", put
-     Termux and Settings in split screen, and in Termux run
-     ```sh
-     curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/phone-phantom-off.sh
-     bash phone-phantom-off.sh     # asks for the pairing port, code, then the connect port
-     ```
-   - **From a laptop** with USB debugging on:
-     ```sh
-     adb shell device_config put activity_manager max_phantom_processes 2147483647
-     adb shell settings put global settings_enable_monitor_phantom_procs false
-     ```
-3. Nothing else to install by hand: `pipedpeer setup` (the installer runs it)
-   does the rest.
-
-## Install and connect
-
-In Termux:
+The only prerequisite is Termux (the Play Store build is the one tested; the
+F-Droid build is untested). In Termux, on a phone, run one command, with the
+invite line `pipedpeer invite` printed on another machine:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash
-pipedpeer connect <code>      # the line `pipedpeer invite` printed on another machine
-termux-wake-lock              # keeps Android from sleeping the worker
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <version> --connect <code>
 ```
+
+The installer runs `pipedpeer setup --connect <code>`: setup, then the same
+join as `pipedpeer connect <code>`. `--connect` is optional; without it, run
+`pipedpeer connect <code>` later (it also moves a phone to another network).
+Because stdin is the script under `curl | bash`, the questions below are read
+from `/dev/tty`; with no terminal setup skips them and says which step is
+left.
+
+## What setup does
+
+Setup checks each step's state, skips what is already done, guides the rest,
+and can be run again at any point (`pipedpeer setup`). On a phone, besides
+the install below, it:
+
+1. Holds a wake lock (`termux-wake-lock`).
+2. Turns off Android's phantom process killer. On Android 12 and later it
+   kills anything past 32 child processes, which kills pool workers. The
+   route depends on the Android version (`internal/phone/prep.go`,
+   `phantom.go`):
+   - **Android 14 and later:** you turn on Developer options, "Disable child
+     process restrictions", and press Enter. Setup reads the property back;
+     if this phone does not expose it, setup takes your word and doctor
+     reports "unknown".
+   - **Android 12 and 13 (SDK 31-33):** setup sets the three phantom
+     settings itself, through Termux's own `adb` connected to the phone over
+     Wireless debugging on 127.0.0.1. It finds the pairing and connect ports
+     over mDNS (`internal/adbmdns`; Termux's adb has no mdns command), so you
+     only turn on Wireless debugging, tap "Pair device with pairing code",
+     and type the 6-digit code. If mDNS finds nothing, it asks for the
+     ports. When the phone is already paired, no code is asked. If Wireless
+     debugging was off when setup started, setup switches it off again at the
+     end and confirms it.
+   - Below Android 12 there is no killer.
+3. Writes `~/.termux/boot/pipedpeer`, which starts the daemon at boot. The
+   Play Store Termux runs it by itself; the F-Droid and GitHub builds also
+   need the Termux:Boot app, opened once (`internal/phone/boot.go`). Uninstall
+   removes the script.
+4. Starts the common-environment warm-up once the daemon is up, as on every
+   machine.
 
 Setup installs `proot-distro`, a Debian (~100 MB), Nix inside it, and a
 pinned Python with numpy, pandas, scipy, scikit-learn, torch, joblib and
@@ -61,7 +77,11 @@ cloudpickle from the public Nix cache (about 1.5 GB) for other machines' pool
 work (short of storage? `PIPEDPEER_PHONE_PYTHON_PKGS="numpy pandas joblib cloudpickle" pipedpeer setup`
 leaves torch out). From then on every `pipedpeer` command typed in Termux runs inside the
 Debian; the files under Termux's home keep their paths there. `pipedpeer
-doctor` names the route.
+doctor` names the route. The phone is a node like any other for the peer
+Nix cache ([ADR-0021](adr/0021-peers-as-nix-binary-cache.md)): it serves and
+asks same-architecture peers (aarch64 only), so an x86_64 laptop never asks it.
+Setup's first Debian and Nix build runs before any daemon exists and uses
+cache.nixos.org only.
 
 If any of that fails, setup says why and makes the phone a pool-only worker
 instead (`"pool_only": true` in `cluster.json`): it installs Termux's `python`
@@ -108,7 +128,9 @@ not start on Play-Store Termux, which is why phones are chunks-only today.
 
 | Symptom | Fix |
 |---|---|
-| Workers die after a few minutes | Phantom process killer is still on: step 2 again |
+| Workers die after a few minutes | The phantom process killer is on. `pipedpeer doctor` reports it as off, on or unknown and names the fix; run `pipedpeer setup` again. On Android 12-13 doctor asks you to switch Wireless debugging on for a moment to read it (no new code), then switches it off again |
+| Setup cannot find the pairing port | Open "Pair device with pairing code" and keep that screen up while setup listens; if mDNS stays silent it asks for the port shown there |
+| Setup says the pairing was refused | Wrong or expired code: run `pipedpeer setup` again and enter the new one |
 | Phone shows but never gets chunks | `grep refusing ~/.local/state/pipedpeer/daemon.log` (full node: `proot-distro login debian -- grep refusing /root/.local/state/pipedpeer/daemon.log`) names the missing module or Python version |
 | Phone drops off when the screen locks | `termux-wake-lock`, keep it charging |
 | LAN discovery doesn't find the phone | Use `pipedpeer connect <code>`; Android filters multicast |

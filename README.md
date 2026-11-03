@@ -86,12 +86,19 @@ curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scri
 
 # an exact build (every machine in a cluster should run the same one)
 curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <version>
+
+# install and join a cluster in one go (the code is the line `pipedpeer invite` printed)
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <version> --connect <code>
 ```
 
 The installer verifies the checksum, puts the binary in `/usr/local/bin` (or
 `~/.local/bin` without sudo, with an ACTION NEEDED line for your PATH) and runs
 `pipedpeer setup`. `pipedpeer --version` prints the build to pass to
-`--version` on the other machines.
+`--version` on the other machines. `--connect <code>` makes setup join
+afterwards, the same as `pipedpeer connect <code>`, which stays for joining
+later or after a network change. Setup also starts building the common Python
+environment in the background, and peers serve each other Nix store paths that
+cache.nixos.org lacks ([ADR-0021](docs/adr/0021-peers-as-nix-binary-cache.md)).
 
 Requires Linux to *run* jobs (`crun` sandbox, Linux namespaces, GPU device
 nodes). macOS builds work as a submitting client. Android phones can join as

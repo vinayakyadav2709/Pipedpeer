@@ -6,7 +6,8 @@
 - [Nodes and placement](./src/internal/coordinator/CONTEXT.md): discovery, address book (`internal/nodestore`: every path per node id), signed address gossip, roles, scoring, leases, admission
 - [Execution on a node](./src/internal/daemonapi/CONTEXT.md): upload, sandbox, memory ceilings, results, job dirs; `internal/clusterstats` builds the snapshot served with the /ui page by `/v1/stats`, and `/v1/history` serves run summaries and run records (`src/internal/daemonapi/ui.go`); `internal/runrec` is the run record (simple and detailed views, CSV/JSON export)
 - [Interception](./src/internal/nixgen/CONTEXT.md): the Python shim (`src/internal/nixgen/shim/*.py`, embedded), pool spill, shares, DDP sync and the one-GPU-or-split decision
-- [Environments and closures](./src/internal/nixstore/CONTEXT.md): import scan, flakes, stores, closure transfer, signing trust
+- [Environments and closures](./src/internal/nixstore/CONTEXT.md): import scan, flakes, stores, closure transfer, signing trust; `internal/peercache` verifies a peer's narinfo (`Accept`) and builds the per-command nix options (`NixArgs`) that make the local daemon's `/nix-cache` a fallback substituter ([ADR-0021](./docs/adr/0021-peers-as-nix-binary-cache.md))
+- Phone setup (`src/internal/phone`, [docs/phone.md](./docs/phone.md)): `internal/adbmdns` finds Android's Wireless-debugging pairing and connect ports over multicast DNS, because Termux cannot list interfaces and its adb has no mdns command
 - [Membership and trust](./src/internal/authtoken/CONTEXT.md): `cluster.json` (token, introducers, roles), invite codes, proof, one identity (node id = key fingerprint), TLS pinned by node id
 
 ## Relationships
