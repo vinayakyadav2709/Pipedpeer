@@ -53,17 +53,26 @@ pull_pcap() {
 problem() { grep -qxF -- "$1 $2" "$PROBLEMS" 2>/dev/null || printf '%s %s\n' "$1" "$2" >>"$PROBLEMS"; }
 
 clean_workers() {
-  local h script; script=$(base64 -w0 <"$CAMP/day/cleanup-host.sh")
+  local h script todo=() table=""; script=$(base64 -w0 <"$CAMP/day/cleanup-host.sh")
   for h in $(workers "$INV_ALL"); do
     is_done "clean.$h" && continue
-    # raw sends no files, and Ansible templates its argument ({# would start a
-    # Jinja comment): the script goes over as base64 and runs as the lab user.
-    ans "clean.$h" "$h" "mkdir -p \$HOME/pipedpeer-lab; f=\$HOME/pipedpeer-lab/cleanup-host.sh; echo $script | base64 -d >\$f; bash \$f $(had "$h" nix) $(had "$h" pipedpeer)" "$INV_ALL" || true
-    local o; o=$(out_of "clean.$h" "$h" | tail -n1)
+    todo+=("$h")
+    table+="$h) a='$(had "$h" nix) $(had "$h" pipedpeer)';; "
+  done
+  ((${#todo[@]})) || return 0
+  # Every worker at once: the Nix uninstall takes about a minute per PC,
+  # which one at a time is a quarter of an hour on 16 workers. raw sends no
+  # files, and Ansible templates its argument ({# would start a Jinja
+  # comment): the script goes over as base64 and runs as the lab user, with
+  # this PC's had-nix/had-pipedpeer picked by its inventory name.
+  ans clean "$(IFS=:; echo "${todo[*]}")" "case {{ inventory_hostname }} in $table *) a='1 1';; esac
+    mkdir -p \$HOME/pipedpeer-lab; f=\$HOME/pipedpeer-lab/cleanup-host.sh; echo $script | base64 -d >\$f; bash \$f \$a" "$INV_ALL" || true
+  for h in "${todo[@]}"; do
+    local o; o=$(out_of clean "$h" | tail -n1)
     case $o in
       "CLEANUP ok") mark_done "clean.$h" ;;
       "CLEANUP left: "*) problem "$h" "${o#CLEANUP left: }"; mark_done "clean.$h" ;;
-      *) say "cleanup of $h did not finish (rc $(rc_of "clean.$h" "$h")): $(out_of "clean.$h" "$h" | tail -n2 | tr '\n' ' ')" ;;
+      *) say "cleanup of $h did not finish (rc $(rc_of clean "$h")): $(out_of clean "$h" | tail -n2 | tr '\n' ' ')" ;;
     esac
   done
   return 0
@@ -77,7 +86,7 @@ undo_workers() {
     is_done "undo.$h" && continue
     if ! is_done "clean.$h"; then
       ANSIBLE_TIMEOUT=10 ans "reach.$h" "$h" true "$INV_ALL" || { problem "$h" "unreachable at cleanup: not cleaned, lab.sh undo not run"; mark_done "undo.$h"; continue; }
-      problem "$h" "cleanup did not finish: $(out_of "clean.$h" "$h" | tail -n1)"
+      problem "$h" "cleanup did not finish: $(out_of clean "$h" | tail -n1)"
     fi
     ans "undo.$h" "$h" "sudo -n systemd-run --quiet --wait --pipe --collect --unit=pipedpeer-lab-undo bash $LABSH undo" "$INV_ALL" || true
     if out_of "undo.$h" "$h" | grep -q 'undo complete'; then
