@@ -1,0 +1,35 @@
+{
+ "run_id": "1793711610217502776",
+ "total_ns": 10618891801,
+ "script_ns": 10192000000,
+ "names": {
+  "95ebf1c72cf54b06": "lab-1"
+ },
+ "steps": [
+  {
+   "machine": "95ebf1c72cf54b06",
+   "node": "95ebf1c72cf54b06",
+   "chunk": -1,
+   "step": "env_build",
+   "start_ns": 1793711610201247100,
+   "dur_ns": 16237707
+  },
+  {
+   "machine": "95ebf1c72cf54b06",
+   "node": "95ebf1c72cf54b06",
+   "chunk": -1,
+   "step": "env_send",
+   "start_ns": 1793711610221117734,
+   "dur_ns": 330392115,
+   "bytes": 151
+  },
+  {
+   "machine": "95ebf1c72cf54b06",
+   "node": "95ebf1c72cf54b06",
+   "chunk": -1,
+   "step": "script",
+   "start_ns": 1793711610575396756,
+   "dur_ns": 10192000000
+  }
+ ]
+}
