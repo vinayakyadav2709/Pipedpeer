@@ -1,0 +1,10 @@
+// Deployed to the operator's personal Cloudflare account:
+//   npx wrangler deploy --profile personal
+{
+  "name": "pipedpeer-lab-ingest",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "pipedpeer-lab" }],
+  "vars": { "CAP_BYTES": "8000000000", "CAP_PUTS": "200000", "CAP_DAY": "50000" }
+}
