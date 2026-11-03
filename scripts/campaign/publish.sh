@@ -49,26 +49,34 @@ strong_enough() {
   local p=$1
   (( ${#p} >= 24 )) && return 0
   # Six or more words separated by spaces or dashes.
-  (( $(tr ' -' '\n\n' <<<"$p" | grep -c '[a-z]') >= 6 )) && return 0
+  local words; read -ra words <<<"${p//-/ }"
+  (( ${#words[@]} >= 6 )) && return 0
   return 1
 }
 
 encrypt() {  # encrypt <out>: tar of the key and r2.env, AES-256-CBC, PBKDF2 600k
-  local work; work=$(mktemp -d); trap 'rm -rf "$work"' RETURN
+  local work rc=0; work=$(mktemp -d)
   install -m 600 "$key" "$work/campaign_ed25519"
   install -m 600 "$r2" "$work/r2.env"
   tar -C "$work" -czf - campaign_ed25519 r2.env |
-    openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt -out "$1.new" -pass fd:3 3< <(printf '%s\n' "$PASS")
+    openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt -out "$1.new" -pass fd:3 3< <(printf '%s\n' "$PASS") || rc=1
+  rm -rf "$work"
+  ((rc == 0)) || die "encryption failed"
   mv -f "$1.new" "$1"
 }
 
 decrypt_check() {  # decrypt_check <bundle> <pubkey file>
-  local work; work=$(mktemp -d); trap 'rm -rf "$work"' RETURN
-  openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -in "$1" -pass fd:3 3< <(printf '%s\n' "$PASS") |
-    tar -xzf - -C "$work" || die "cannot decrypt $1 with that passphrase"
-  [[ $(ssh-keygen -y -f "$work/campaign_ed25519" | awk '{print $2}') == "$(awk '{print $2}' "$2")" ]] ||
-    die "the key in the bundle is not the published key"
-  grep -q '^R2_SECRET_ACCESS_KEY=.' "$work/r2.env" || die "r2.env in the bundle lacks R2_SECRET_ACCESS_KEY"
+  local work why=""; work=$(mktemp -d)
+  if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -in "$1" -pass fd:3 3< <(printf '%s\n' "$PASS") 2>/dev/null |
+       tar -xzf - -C "$work" 2>/dev/null; then
+    why="cannot decrypt $1 with that passphrase"
+  elif [[ $(ssh-keygen -y -f "$work/campaign_ed25519" | awk '{print $2}') != "$(awk '{print $2}' "$2")" ]]; then
+    why="the key in the bundle is not the published key"
+  elif ! grep -q '^R2_SECRET_ACCESS_KEY=.' "$work/r2.env"; then
+    why="r2.env in the bundle lacks R2_SECRET_ACCESS_KEY"
+  fi
+  rm -rf "$work"
+  [[ -z $why ]] || die "$why"
   echo "bundle OK: the key matches the published public key, r2.env is complete"
 }
 
@@ -141,17 +149,20 @@ EOF
 }
 
 selftest() {
-  local work; work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
+  local work; work=$(mktemp -d)
+  # shellcheck disable=SC2064  # work is fixed now
+  trap "rm -rf '$work'" EXIT
   curl -fsSL "$site/lab.sh" -o "$work/lab.sh" || die "cannot download $site/lab.sh"
   curl -fsSL "$site/lab-secrets.enc" -o "$work/lab-secrets.enc" || die "cannot download $site/lab-secrets.enc"
-  cmp -s "$work/lab.sh" "$pub_dir/lab.sh" && echo "lab.sh online is landing/public/lab.sh" ||
-    die "lab.sh online differs from landing/public/lab.sh (Pages not deployed yet?)"
-  cmp -s "$work/lab-secrets.enc" "$pub_dir/lab-secrets.enc" && echo "lab-secrets.enc online is the local one" ||
-    die "lab-secrets.enc online differs from the local one"
+  cmp -s "$work/lab.sh" "$pub_dir/lab.sh" || die "lab.sh online differs from landing/public/lab.sh (Pages not deployed yet?)"
+  echo "lab.sh online is landing/public/lab.sh"
+  cmp -s "$work/lab-secrets.enc" "$pub_dir/lab-secrets.enc" || die "lab-secrets.enc online differs from the local one"
+  echo "lab-secrets.enc online is the local one"
   grep -q '^CAMPAIGN_KEY="__' "$work/lab.sh" && die "the online lab.sh is not filled in"
   local commit; commit=$(sed -n 's/^CAMPAIGN_COMMIT="\(.*\)"$/\1/p' "$work/lab.sh")
-  curl -fsSIL "https://codeload.github.com/vinayakyadav2709/Pipedpeer/tar.gz/$commit" >/dev/null &&
-    echo "code tarball for $commit is downloadable" || die "codeload cannot serve $commit: push it"
+  curl -fsSIL "https://codeload.github.com/vinayakyadav2709/Pipedpeer/tar.gz/$commit" >/dev/null ||
+    die "codeload cannot serve $commit: push it"
+  echo "code tarball for $commit is downloadable"
   sed -n 's/^CAMPAIGN_KEY="\(.*\)"$/\1/p' "$work/lab.sh" >"$work/pub"
   read_pass "campaign passphrase: "
   decrypt_check "$work/lab-secrets.enc" "$work/pub"
