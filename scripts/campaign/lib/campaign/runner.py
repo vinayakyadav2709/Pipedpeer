@@ -170,6 +170,8 @@ class Context:
         """result_ok: the result equals the plain run's at the same size."""
         if result is None:
             return False, None
+        if wl.result_compare == "present":
+            return True, "present"
         ref = self.recorder.cache.get(wl.id, size)
         if ref is None:
             if system == "plain":

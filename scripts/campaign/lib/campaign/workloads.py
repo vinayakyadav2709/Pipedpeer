@@ -11,7 +11,8 @@ workload the runner reads:
                          {nproc_submitter} (pc00's cores) and {nproc_workers}
                          (the cores of the N PCs that do the work)
   result_regex           every match (group 1 if it has one) joined by " | "
-  result_compare         "equal", or {"rel_tol": x} for numbers within x
+  result_compare         "equal"; {"rel_tol": x} for numbers within x; "present"
+                         (any match is right: training loss differs by design)
   timing_regex           group 1 is the script's own timing (script_s)
   files                  optional extra repo files shipped beside the script
 
@@ -97,6 +98,8 @@ class Workload:
         if a is None or b is None:
             return False
         spec = self.result_compare
+        if spec == "present":
+            return True
         if isinstance(spec, dict) and "rel_tol" in spec:
             fa, fb = FLOAT.findall(a), FLOAT.findall(b)
             if len(fa) != len(fb) or not fa:
