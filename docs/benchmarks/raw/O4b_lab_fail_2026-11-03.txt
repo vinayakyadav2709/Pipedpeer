@@ -1,0 +1,92 @@
+# scripts/lab-fail.sh, LAB_NAME=runner LAB_MEM=2g, podman 5.8.9, Fedora 44 Linux 7.2.13, 20 threads, 31 GB, Go 1.26.10
+# commit a89955a4 (lab/runner) + the LAB_CHUNK_WAIT change to lab-fail.sh in the same commit as this file. PASS: remote_items 32 of 80, 0 lost.
+# A shared host: other agents' labs were running at the same time.
+2026-11-03T15:07:07+05:30
+a89955a4
+building binary from /home/falcon/.t3/worktrees/Pipedpeer/t3-ab4bdccd/src...
+Using container runtime: podman; lab runner (pipedpeer-lab-runner-<i>, 10.240.149.0/24)
+lab: warning: running container brilliance-pg16 has no memory limit; not counted
+STEP 1/4: FROM docker.io/nixos/nix:2.31.3
+STEP 1/4: FROM docker.io/nixos/nix:2.31.3
+STEP 2/4: RUN nix-env -iA nixpkgs.crun nixpkgs.curl
+STEP 1/4: FROM docker.io/nixos/nix:2.31.3
+STEP 2/4: RUN nix-env -iA nixpkgs.crun nixpkgs.curl
+STEP 2/4: RUN nix-env -iA nixpkgs.crun nixpkgs.curl
+--> Using cache c83aefdff8cb4126786af9f73e80cc65443a72aefb27357a011b43ea56ac2226
+--> c83aefdff8cb
+--> Using cache c83aefdff8cb4126786af9f73e80cc65443a72aefb27357a011b43ea56ac2226
+--> c83aefdff8cb
+STEP 3/4: ENV PATH=/usr/local/bin:$PATH
+--> Using cache 44fad7d0c9a70879170919ba18aa6fdf5479a720d10a8277b4ea08d4a03797fe
+--> 44fad7d0c9a7
+STEP 3/4: ENV PATH=/usr/local/bin:$PATH
+--> Using cache 44fad7d0c9a70879170919ba18aa6fdf5479a720d10a8277b4ea08d4a03797fe
+--> 44fad7d0c9a7
+STEP 4/4: CMD ["sh", "-c", "printf %s \"$LAB_NODE\" | md5sum | cut -c1-32 > /etc/machine-id; if [ -n \"$LAB_TOKEN\" ]; then mkdir -p \"$XDG_DATA_HOME/pipedpeer\" && umask 077 && printf '{\"token\":\"%s\"}\\n' \"$LAB_TOKEN\" > \"$XDG_DATA_HOME/pipedpeer/cluster.json\"; fi; /usr/local/bin/pipedpeer setup -y && echo \"Worker $(cat /etc/hostname) online :4242\" && exec sleep infinity"]
+--> Using cache 3819de5ed7565f1278c84e61cf8a1bdade3af90678635a4ed28ffaf48e5b6df9
+COMMIT pplab-runner_worker2
+STEP 4/4: CMD ["sh", "-c", "printf %s \"$LAB_NODE\" | md5sum | cut -c1-32 > /etc/machine-id; if [ -n \"$LAB_TOKEN\" ]; then mkdir -p \"$XDG_DATA_HOME/pipedpeer\" && umask 077 && printf '{\"token\":\"%s\"}\\n' \"$LAB_TOKEN\" > \"$XDG_DATA_HOME/pipedpeer/cluster.json\"; fi; /usr/local/bin/pipedpeer setup -y && echo \"Worker $(cat /etc/hostname) online :4242\" && exec sleep infinity"]
+--> Using cache c83aefdff8cb4126786af9f73e80cc65443a72aefb27357a011b43ea56ac2226
+--> c83aefdff8cb
+--> Using cache 3819de5ed7565f1278c84e61cf8a1bdade3af90678635a4ed28ffaf48e5b6df9
+COMMIT pplab-runner_worker1
+STEP 3/4: ENV PATH=/usr/local/bin:$PATH
+--> Using cache 44fad7d0c9a70879170919ba18aa6fdf5479a720d10a8277b4ea08d4a03797fe
+--> 44fad7d0c9a7
+STEP 4/4: CMD ["sh", "-c", "printf %s \"$LAB_NODE\" | md5sum | cut -c1-32 > /etc/machine-id; if [ -n \"$LAB_TOKEN\" ]; then mkdir -p \"$XDG_DATA_HOME/pipedpeer\" && umask 077 && printf '{\"token\":\"%s\"}\\n' \"$LAB_TOKEN\" > \"$XDG_DATA_HOME/pipedpeer/cluster.json\"; fi; /usr/local/bin/pipedpeer setup -y && echo \"Worker $(cat /etc/hostname) online :4242\" && exec sleep infinity"]
+--> Using cache 3819de5ed7565f1278c84e61cf8a1bdade3af90678635a4ed28ffaf48e5b6df9
+COMMIT pplab-runner_worker3
+--> 3819de5ed756
+Successfully tagged localhost/pplab-runner_worker1:latest
+Successfully tagged localhost/pplab-runner_worker3:latest
+Successfully tagged localhost/pplab-runner_worker2:latest
+Successfully tagged localhost/pplab-otel_worker1:latest
+Successfully tagged localhost/pplab-otel_worker2:latest
+Successfully tagged localhost/pplab-otel_worker3:latest
+--> 3819de5ed756
+Successfully tagged localhost/pplab-runner_worker2:latest
+Successfully tagged localhost/pplab-runner_worker1:latest
+Successfully tagged localhost/pplab-runner_worker3:latest
+Successfully tagged localhost/pplab-otel_worker1:latest
+Successfully tagged localhost/pplab-otel_worker2:latest
+Successfully tagged localhost/pplab-otel_worker3:latest
+3819de5ed7565f1278c84e61cf8a1bdade3af90678635a4ed28ffaf48e5b6df9
+3819de5ed7565f1278c84e61cf8a1bdade3af90678635a4ed28ffaf48e5b6df9
+--> 3819de5ed756
+Successfully tagged localhost/pplab-runner_worker3:latest
+Successfully tagged localhost/pplab-runner_worker2:latest
+Successfully tagged localhost/pplab-runner_worker1:latest
+Successfully tagged localhost/pplab-otel_worker1:latest
+Successfully tagged localhost/pplab-otel_worker2:latest
+Successfully tagged localhost/pplab-otel_worker3:latest
+3819de5ed7565f1278c84e61cf8a1bdade3af90678635a4ed28ffaf48e5b6df9
+7e4f7a776440b9444b485d2d63d706ff9d0670f064753b1b0318d8b96637000e
+7e2e3071d779a0f411b32faf1b0ba3fde063fed455e97bf38d5a74bf1c388074
+4fcb846ae514deb5c181802ed62a7f6f0e634f036e53e93e0e64b4fb0315b269
+09558ee6044e336ba1f6eddc2fe300806d8b492c96f6784fdb785579e5cfd87e
+pipedpeer-lab-runner-1
+pipedpeer-lab-runner-2
+pipedpeer-lab-runner-3
+waiting for lab workers...
+lab is up
+worker 1 sees both lab workers
+launching intercept run on worker 1...
+killing worker 2 while it holds chunks
+
+POOL-OK sum=167480
+receipt: 32 items ran on the cluster, 48 locally, 0 chunk(s) lost
+  worker 2: 2 chunk request(s) at kill time (killed mid-flight)
+  worker 3: 2 chunk request(s) at kill time
+PASS: pool.map distributed real work and completed correctly despite losing a worker mid-flight
+Using container runtime: podman; lab runner
+pipedpeer-lab-runner-2
+time="2026-11-03T15:11:50+05:30" level=warning msg="StopSignal SIGTERM failed to stop container pipedpeer-lab-runner-3 in 10 seconds, resorting to SIGKILL"
+pipedpeer-lab-runner-3
+time="2026-11-03T15:12:00+05:30" level=warning msg="StopSignal SIGTERM failed to stop container pipedpeer-lab-runner-1 in 10 seconds, resorting to SIGKILL"
+pipedpeer-lab-runner-1
+pipedpeer-lab-runner-3
+pipedpeer-lab-runner-2
+pipedpeer-lab-runner-1
+7e4f7a776440b9444b485d2d63d706ff9d0670f064753b1b0318d8b96637000e
+pplab-runner_lab
+exit=0 end=2026-11-03T15:12:09+05:30
