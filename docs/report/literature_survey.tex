@@ -11,26 +11,23 @@ Python ecosystem, scheduling, and collaborative task offloading. Each review
 states its bearing on the design of Chapters~\ref{chap:arch}
 and~\ref{chap:design}.
 
-``Spark: Cluster Computing with Working Sets'' \cite{zaharia2010spark} by
-M.~Zaharia \textit{et~al.} keeps a working set in memory across parallel
+M.~Zaharia \textit{et~al.} \cite{zaharia2010spark} keep a working set in memory across parallel
 operations as resilient distributed datasets, which a lost partition rebuilds
-from its lineage, and runs iterative jobs up to ten times faster than
+from its lineage, and run iterative jobs up to ten times faster than
 MapReduce \cite{dean2004mapreduce}. A program is written against the dataset
 API and runs on a cluster with a master, which is exactly the setup PipedPeer
 removes; its hash partitioning by key is the technique PipedPeer's dataframe
 shuffle uses (Section~\ref{sec:intercept}).
 
-``Ray: A Distributed Framework for Emerging AI Applications''
-\cite{moritz2018ray} by P.~Moritz \textit{et~al.} unifies tasks and actors over
-a distributed scheduler and a sharded control store, and reaches millions of
+P.~Moritz \textit{et~al.} \cite{moritz2018ray} unify tasks and actors over
+a distributed scheduler and a sharded control store, and reach millions of
 tasks per second. Ray offers a drop-in \texttt{multiprocessing.Pool} and a
 \texttt{joblib} backend, the closest existing answer to PipedPeer's code
 problem, but each needs a changed import and a running cluster with a head
 node on one network. PipedPeer substitutes the same primitives without the
 import and decides per call whether distributing them pays.
 
-``Dask: Parallel Computation with Blocked Algorithms and Task Scheduling''
-\cite{rocklin2015dask} by M.~Rocklin expresses NumPy- and pandas-like
+M.~Rocklin \cite{rocklin2015dask} expresses NumPy- and pandas-like
 operations as graphs of blocked tasks run by a dynamic scheduler, so that
 arrays and dataframes larger than memory can be processed in parallel. Its
 interfaces mirror the libraries they replace, yet the program must still be
@@ -38,9 +35,8 @@ written against Dask's collections. The out-of-core \texttt{read\_csv} and
 row-block matrix products of Section~\ref{sec:intercept} follow Dask's blocking
 idea while leaving the original pandas and NumPy calls in place.
 
-``Towards Scalable Dataframe Systems'' \cite{petersohn2020modin} by
-D.~Petersohn \textit{et~al.} formalises the dataframe and its algebra, and
-presents Modin, which keeps the pandas API while partitioning the frame and
+D.~Petersohn \textit{et~al.} \cite{petersohn2020modin} formalise the dataframe and its algebra, and
+present Modin, which keeps the pandas API while partitioning the frame and
 running its operations in parallel on Ray or Dask. Modin is the nearest
 precedent for distributing pandas without rewriting it, yet it still needs a
 changed import and a running engine. BOINC \cite{anderson2004boinc} showed that
@@ -59,8 +55,7 @@ HTCondor, however, relies on a central manager that matches jobs to machines,
 and a job is submitted through a description file rather than run as an
 unmodified script.
 
-``Nix: A Safe and Policy-Free System for Software Deployment''
-\cite{dolstra2004nix} by E.~Dolstra \textit{et~al.} stores every package under
+E.~Dolstra \textit{et~al.} \cite{dolstra2004nix} store every package under
 a path named by a cryptographic hash of all its build inputs, so that versions
 coexist, dependencies are complete by construction, and a package's closure can
 be copied between machines exactly. With the package set pinned, that path
@@ -91,8 +86,7 @@ as a Nix closure and run under an OCI runtime instead, at 15 to 21\,ms more per
 job than the unprivileged Bubblewrap sandbox (\texttt{bwrap}) \cite{bubblewrap}
 (Section~\ref{sec:res-sandbox}).
 
-``PyTorch Distributed: Experiences on Accelerating Data Parallel Training''
-\cite{li2020pytorchddp} by S.~Li \textit{et~al.} describes DDP, which
+S.~Li \textit{et~al.} \cite{li2020pytorchddp} describe DDP, which
 replicates the model, buckets gradients and overlaps their all-reduce with the
 backward pass, scaling near-linearly to 256 GPUs. It assumes ranks that open
 connections to one another on their own ports, usually inside one data centre.
@@ -106,34 +100,28 @@ neighbours in the ring. PipedPeer's butterfly reduction through the daemons
 gives each machine the same per-link volume over connections that the daemons
 have already established.
 
-``8-Bit Approximations for Parallelism in Deep Learning''
-\cite{dettmers2016eightbit} by T.~Dettmers compresses gradients to 8 bits for
-transfer while keeping model accuracy, and ``1-Bit Stochastic Gradient
-Descent'' \cite{seide2014onebit} by F.~Seide \textit{et~al.} quantises them to a
+T.~Dettmers \cite{dettmers2016eightbit} compresses gradients to 8 bits for
+transfer while keeping model accuracy, and F.~Seide \textit{et~al.} \cite{seide2014onebit} quantise them to a
 single bit, carrying each step's quantisation error into the next (error
 feedback) so that convergence stays close to full precision. The two combine in
 PipedPeer's wire format: 8-bit values with one scale per block of 4096 and error
 feedback in both directions, about a quarter of the float32 volume.
 
-``Don't Use Large Mini-Batches, Use Local SGD'' \cite{lin2020localsgd} by
-T.~Lin \textit{et~al.} shows that workers taking several local steps between
+T.~Lin \textit{et~al.} \cite{lin2020localsgd} show that workers taking several local steps between
 averages communicate less and, in post-local SGD, generalise better than
 large-batch training. The observation explains why a periodically averaged ring
 can finish slightly below one device's loss (Section~\ref{sec:res-train}).
 
-``DiLoCo: Distributed Low-Communication Training of Language Models''
-\cite{douillard2023diloco} by A.~Douillard \textit{et~al.}, the work closest to
-PipedPeer's training path, trains replicas independently for hundreds of steps
-and merges their parameter changes with an outer Nesterov step, matching
+A.~Douillard \textit{et~al.} \cite{douillard2023diloco}, the work closest to
+PipedPeer's training path, train replicas independently for hundreds of steps
+and merge their parameter changes with an outer Nesterov step, matching
 synchronous training on a language model while communicating about 500 times
 less. PipedPeer's fast synchronisation applies the same structure to links
 between homes. At its intervals of 2 to 64 steps, however, DiLoCo's outer
 momentum amplifies each averaged update about sevenfold, which failed the
 accuracy bar, so the merge is a plain average (Section~\ref{sec:ddp}).
 
-``PowerSGD: Practical Low-Rank Gradient Compression for Distributed
-Optimization'' \cite{vogels2019powersgd} by T.~Vogels \textit{et~al.}
-approximates each gradient matrix by a low-rank product found with one step of
+T.~Vogels \textit{et~al.} \cite{vogels2019powersgd} approximate each gradient matrix by a low-rank product found with one step of
 power iteration, with error feedback, and matches full-precision accuracy at
 high compression. Of ten methods tried at 4, 8 and 11 ranks, rank-16
 PowerSGD on exact synchronisation alone kept every test model within 1\%, yet
@@ -150,8 +138,7 @@ workspaces and results are bulk transfers that need streaming and
 back-pressure, so dispatch uses plain HTTP with a WebSocket for output rather
 than a message broker.
 
-``Programming Models for Failure-Transparent Distributed Systems''
-\cite{kth2025thesis} by J.~Spenger defines failure transparency --- masking
+J.~Spenger \cite{kth2025thesis} defines failure transparency --- masking
 failures fully from the programmer --- independently of a particular semantics,
 proves it for a model of stateful dataflow streaming, and builds two programming
 models on that base. Failure transparency is PipedPeer's central invariant: the
@@ -159,16 +146,14 @@ user's script contains no failure handling, so every remote path must degrade to
 a working local one, enforced here by layered fallback and tests rather than by
 proof (Sections~\ref{sec:ft} and~\ref{sec:res-ft}).
 
-``Python Array API Standard'' \cite{arrayapi2023} by A.~Meurer \textit{et~al.}
-standardises an array interface so that the same code runs on NumPy, CuPy or JAX
+A.~Meurer \textit{et~al.} \cite{arrayapi2023} standardise an array interface so that the same code runs on NumPy, CuPy or JAX
 without modification. Its goal, portability without code change, is
 PipedPeer's, but the mechanism is the mirror image: the standard asks libraries
 to converge on one interface that users then adopt, while interception changes
 nothing the user writes and substitutes the implementations behind the
 interfaces the script already uses.
 
-``iDDS: Intelligent Distributed Dispatch and Scheduling'' \cite{idds2025} by
-W.~Guan \textit{et~al.} assigns workflow tasks to heterogeneous resources from
+W.~Guan \textit{et~al.} \cite{idds2025} assign workflow tasks to heterogeneous resources from
 real-time CPU, memory, data-locality and dependency constraints, driven by a
 task graph. Its scoring-based assignment is comparable to PipedPeer's placement
 function (Section~\ref{sec:placement}), with two differences: PipedPeer schedules
@@ -176,8 +161,7 @@ whole scripts rather than task graphs, and its scoring runs in the submitting
 client, with no scheduler process. Data locality, which iDDS treats as
 first-class, is left to future work.
 
-``Task Offloading in Multi-Hop Relay-Aided Multi-Access Edge Computing''
-\cite{deng2023} by Y.~Deng \textit{et~al.} formulates joint task assignment and
+Y.~Deng \textit{et~al.} \cite{deng2023} formulate joint task assignment and
 relay selection to minimise completion time under transmission and energy
 constraints. Its comparison of transmission time against local computation time
 has the same shape as PipedPeer's cost model (Section~\ref{sec:cost}), which
@@ -185,38 +169,34 @@ measures link bandwidth at run time rather than assuming a channel model, and
 for parallel maps fits each peer's setup time and throughput from the work it
 has returned.
 
-``Multi-Agent Deep Reinforcement Learning Based Dynamic Task Offloading''
-\cite{he2024} by H.~He \textit{et~al.} lets each device learn an offloading policy
+H.~He \textit{et~al.} \cite{he2024} let each device learn an offloading policy
 from local observations without a central coordinator, outperforming centralised
 heuristics on the energy-delay trade-off. A learned policy needs training data
 and a training phase, which is at odds with a tool that a new machine joins by
 running a single binary; a deterministic rule-based model is used instead, and a
 learned policy is a natural direction once a deployment has history.
 
-``Joint Optimization of Multi-User Partial Offloading and Resource Allocation''
-\cite{yong2023} by D.~Yong \textit{et~al.} optimises the split between locally
-executed and offloaded portions of a task and finds partial offloading
+D.~Yong \textit{et~al.} \cite{yong2023} optimise the split between locally
+executed and offloaded portions of a task and find partial offloading
 consistently better than all-or-nothing. Interception offloads partially in this
 sense: it splits a script's work at the granularity of pool chunks, shuffle
 buckets and matrix row blocks while the rest runs locally, choosing the split
 by minimising completion time over measured rates (Section~\ref{sec:intercept}).
 
-``Energy-Efficient Collaborative Task Offloading in MEC'' \cite{adhoc2025} by
-S.~Wang \textit{et~al.} has devices cooperate by relaying tasks towards edge
+S.~Wang \textit{et~al.} \cite{adhoc2025} have devices cooperate by relaying tasks towards edge
 servers, with a learned policy that cuts total energy. Its symmetric model, in
 which every device is both client and server, matches a single binary in which
 any node may submit or accept work, but PipedPeer assumes no edge servers and
 forwards a map once, by a fixed rule rather than a learned policy.
 
-``Blockchain Enabled Task Offloading'' \cite{li2023blockchain} by C.~Li
-\textit{et~al.} enforces service agreements between task submitters and edge
+C.~Li
+\textit{et~al.} \cite{li2023blockchain} enforce service agreements between task submitters and edge
 workers with smart contracts, preventing free-riding among parties that do not
 trust one another. PipedPeer instead trusts every holder of the cluster
 secret (Section~\ref{sec:trust}), so it needs no contract layer but cannot
 police an admitted participant.
 
-``Congestion-Aware Distributed Task Offloading Using Graph Neural Networks''
-\cite{zhao2023} by Z.~Zhao \textit{et~al.} trains a graph neural network to produce
+Z.~Zhao \textit{et~al.} \cite{zhao2023} train a graph neural network to produce
 distributed offloading policies from local neighbourhood observations. PipedPeer
 scores each node on scalar metrics and is blind to topology when it places a
 whole job; link cost is measured only where work is divided. Feeding a
