@@ -17,7 +17,7 @@ if __name__ == "__main__":
     ray.init(address=os.environ.get("RAY_ADDRESS", "auto"))
     n = int(os.environ.get("BENCH_ITEMS", "48"))
     t0 = time.perf_counter()
-    with Pool(int(os.environ.get("BENCH_PROCS", "8"))) as p:
+    with Pool(int(os.environ.get("BENCH_PROCS", "8")), ray_remote_args={"num_cpus": 1}) as p:
         out = p.map(work, range(n))
     dt = time.perf_counter() - t0
     assert len(out) == n

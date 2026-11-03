@@ -70,12 +70,12 @@ def main():
     print(f"cpu.py on {os.cpu_count()} local cores")
 
     def pool():
-        with Pool() as p:
+        with Pool(ray_remote_args={"num_cpus": 1}) as p:
             results = p.map(score, range(args.items))
         print(f"Pool: {args.items} items, checksum {sum(results)}")
 
     def joblib_tiles():
-        with parallel_backend("ray"):
+        with parallel_backend("ray", ray_remote_args={"num_cpus": 1}):
             counts = Parallel(n_jobs=-1)(delayed(mandel_tile)(t) for t in range(TILES))
         print(f"joblib: {TILES} Mandelbrot tiles, {sum(counts)} points inside")
 

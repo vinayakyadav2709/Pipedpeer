@@ -32,7 +32,7 @@ search = GridSearchCV(GradientBoostingClassifier(n_estimators=trees, random_stat
 ray.init(address=os.environ.get("RAY_ADDRESS", "auto"))
 register_ray()
 t0 = time.perf_counter()
-with parallel_backend("ray"):
+with parallel_backend("ray", ray_remote_args={"num_cpus": 1}):
     search.fit(X, y)
 dt = time.perf_counter() - t0
 best = ", ".join("%s=%s" % kv for kv in sorted(search.best_params_.items()))
