@@ -285,9 +285,9 @@ short = [r for r in e1 if r["n"] == 4 and r["system"] in ("ray", "dask")]
 assert short and all("inventory has 3 workers" in (r.get("error") or "") for r in short), short[:1]
 other = [(r["workload"], r["system"], r["n"], (r.get("error") or "")[:90]) for r in e1 if r.get("error") and r not in short]
 print("e1 failures besides N=4 > workers:", other)
-# Known, not the day's: W4 under pipedpeer gives another best_score (HEADLESS.md, "Rehearsal");
-# Ray's memory monitor kills W3 tasks in 1.25 GB containers.
-assert all((w, sy) in (("W4", "pipedpeer"), ("W3", "ray")) for w, sy, _, _ in other), other
+# Known, the containers' and not the day's: Ray's memory monitor kills W3's
+# tasks in 1.25 GB workers (HEADLESS.md, "Rehearsal").
+assert all((w, sy) == ("W3", "ray") for w, sy, _, _ in other), other
 cache = json.load(open(d + "/result-cache.json"))
 weak = {k: v for k, v in cache.items() if v["source"].startswith("plain-precomputed:")}
 print("weak references:", sorted(weak))

@@ -151,7 +151,7 @@ The alternatives were worse:
 
 Checked with real Nix (nixos/nix 2.31.3, two containers): the first built a small flake on the campaign's nixpkgs pin, then ran `nix copy --to file://…?compression=zstd` and `nix flake archive --json --to …`. The second had **no network**. It ran `nix copy --no-check-sigs --from file://…` with the output path and the two archived source paths, then `nix build --option substituters "" path:<flake>`. Both the evaluation of nixpkgs and the build found everything locally, and the program ran. The top path was built locally and carries no signature.
 
-The binary-cache pull above runs as root through the passwordless sudo that `lab.sh` already grants, so the worker's Nix accepts the unsigned paths with no configuration change. If the pull fails, `install.sh` falls back to cache.nixos.org on its own. The file server also hands out the code tarball and the otelcol release, so the code comes from GitHub once and otelcol once.
+The full rehearsal exercises this path for real: pc00 writes the cache (719 MB, zstd) and three workers with fresh Determinate stores pull it (11 min in the first full run, 45 s in the last; all four containers share one host disk, so the lab’s numbers will differ). The binary-cache pull above runs as root through the passwordless sudo that `lab.sh` already grants, so the worker's Nix accepts the unsigned paths with no configuration change. If the pull fails, `install.sh` falls back to cache.nixos.org on its own. The file server also hands out the code tarball and the otelcol release, so the code comes from GitHub once and otelcol once.
 
 ## How the secrets are protected
 
@@ -159,7 +159,7 @@ The binary-cache pull above runs as root through the passwordless sudo that `lab
 - On pc00, `lab.sh head` reads the passphrase from `/dev/tty`, never from argv or the environment. openssl gets it on a file descriptor. The decrypted key must match the public key embedded in `lab.sh`, which catches a wrong passphrase that happens to decrypt.
 - The decrypted files live in `/run/pipedpeer-lab`, on tmpfs, so a reboot wipes them. The directory belongs to root with mode 0711: nobody can list it. The two files in it belong to the lab user with mode 0600, because the day runs as that user and ssh refuses group-readable keys. The brief asked for a root-owned 0700 directory readable by the lab user; 0711 with lab-owned 0600 files is the nearest arrangement that ssh accepts. `lab.sh undo` on pc00 deletes the directory, and that undo runs only after the final R2 count matches.
 - The keys reach the collector and rclone as environment variables only (`otel/README.md`).
-- The SSH key opens only lab PCs that ran `lab.sh`, and `undo` removes it from each one. **After the lab**, revoke the R2 token, delete `~/.config/pipedpeer-lab/campaign_ed25519{,.pub}`, and remove `lab-secrets.enc` from `dev`. Git history keeps the old bundle, which then holds only a dead key and a revoked token.
+- The SSH key opens only lab PCs that ran `lab.sh`, and `undo` removes it from each one. **After the lab**, rotate the ingest token (`wrangler secret put INGEST_TOKEN`), delete `~/.config/pipedpeer-lab/campaign_ed25519{,.pub}`, delete the `lab-<commit12>` release, and remove `lab-secrets.enc` from `dev` (OPERATOR.md, "After the lab"). Git history keeps the old bundle, which then holds only a deleted key and a dead token.
 
 ## Resume and robustness
 
@@ -173,16 +173,28 @@ The binary-cache pull above runs as root through the passwordless sudo that `lab
 
 ## Rehearsal
 
-`scripts/campaign/test/headless-test.sh` runs the whole day on four systemd containers (pc00 and w1, w3 on Ubuntu with ufw, w2 on Fedora with firewalld; 1 GB and 3 × 768 MB). A local http server stands in for Pages and codeload, `rclone serve s3` for R2. The test types the worker line on w1-w3 and the head line on pc00 through a pty. It kills the unit during e4, types the head line again, and then checks the resume, the R2 contents, the summary, and that every container's snapshot after the day equals the one before. `lab-pc-test.sh` covers lab.sh's worker mode, `pkg`, `enable` and `undo` in more detail.
+`scripts/campaign/test/headless-test.sh` runs the whole day, as the lab will, on four systemd containers: pc00 and w1, w3 on Ubuntu 24.04 with ufw, w2 on Fedora 43 with firewalld; pc00 2 GB, workers 1.25 GB, 2 CPUs each. It types the worker line on w1-w3 and the head line on pc00 through a pty, kills the day's unit during e4, types the head line again, and checks:
 
-The rehearsal uses stand-ins (in `test/headless-stubs/`) for:
+- the resume (finished steps skipped, e4 marked interrupted and run again, the summary's ALL DONE);
+- every experiment of `test/profile-rehearsal.tsv` finished, with e1's failures limited to the expected ones;
+- the uploads: runs.jsonl, attempts, CSVs, figures, every PC's pcap, the driver collector's files, and the final count;
+- the traces: 12 sources from all four PCs, plus `pipedpeer-run` from pc00, with `lab.run_id`;
+- that pipedpeer W1 runs at N ≥ 2 sent items to peers, that runs.jsonl lines stay small, and that no Ray Pool actor or task ran on pc00 (`test/ray-placement.py`);
+- that every PC's snapshot after the day equals the one before: packages, users, units, the lab user's home (every file hashed), sudoers, `/etc/ssh`, `/etc/nix`, `/etc/profile.d`, `/usr/local/bin`, the lab user's files in `/tmp`, `/nix`, the lab user's processes and the firewall.
 
-- **pipedpeer and Nix:** a real install needs crun and Nix inside the container, plus the 2.5 GiB closure on four containers. The fake `pipedpeer` keeps state where the real one does, and the fake `nix` writes, serves and fetches a binary cache, so the distribution path through pc00's file server runs. Real `nix copy` between two stores is not exercised.
-- **`env/install.sh`:** links the system python3 as the env.
-- **`calibrate.sh`:** prints small sizes in the real `CALIBRATE` format, so `workloads.json` and `workloads.md` are rewritten for real.
-- **`run.sh` and `analyse.py`:** lab/runner's real ones need pipedpeer, Ray and Dask. The stand-in reaches every PC through the day's inventory with Ansible, and writes one runs.jsonl line per (N, system, repeat).
+**Real:** lab.sh, the passphrase on `/dev/tty`, the decryption, the systemd unit, scan.sh, Ansible over SSH, pipedpeer built from the checkout and installed by `install-pipedpeer.sh` from a release served by pc00 (checksum checked), `pipedpeer setup -y` with the Determinate Nix installer and crun on each worker, the join, the campaign env built on pc00 and pulled by each worker from pc00's binary cache, calibrate.sh, run.sh with real Ray, Dask and torchrun, analyse.py, otelcol, pp-poll.py and tcpdump on every PC, the driver collector, ingest.sh and sync-r2.sh with the count, cleanup with the Nix uninstall, and lab.sh undo.
 
-Everything else is real: lab.sh, the passphrase on `/dev/tty`, the decryption, the systemd unit, scan.sh, Ansible over SSH, iperf3 installed and removed through `lab.sh pkg`, clocks.sh, the weak references, otelcol on every container with the driver uploading to the S3 stand-in, sync-r2.sh and its count, cleanup, and undo.
+**Stand-ins, and why:**
+
+- **The internet:** a local http server serves Pages (lab.sh and the bundle), codeload (the working tree as the tarball) and the GitHub release (`lab-rehearsal`). `test/ingest-standin.py` has the ingest Worker's routes, token check and caps, with a directory for the bucket. No rehearsal data reaches the real bucket.
+- **pc00's Nix:** a copy of the `pipedpeer-lab-nix` volume, where the 2.5 GiB campaign env is already built. pc00 is a PC that "had Nix", so the day keeps it, and pc00 does not download the env from cache.nixos.org. The workers start without Nix.
+- **CPUs:** the containers see all 20 host CPUs. `--cpus 2`, `PL_NPROC=2` and `PYTHON_CPU_COUNT=2` make them 2-core PCs.
+- **Sizes:** `test/profile-rehearsal.tsv`: N up to what four PCs hold, one repeat, a 10 s calibration target, and the smoke sizes of rehearse.sh for e4, e5, e8, e12, e13 and e15.
+- **netem:** the containers share the host's kernel, which has `sch_netem` loaded, so `netem.csv` says yes everywhere; the "no" path is not exercised.
+
+**Result** (2026-11-03, the run committed in `results/lab/rehearsal-day/`): all checks passed, 65 minutes of steps. e1: 80 runs, 18 failed: the 16 runs at N=4 for Ray and Dask (3 workers; recorded, e1 went on) and Ray W3 at N=2 twice (Ray's memory monitor in 1.25 GB containers). e6 and e13: Ray failed when a worker was killed, which is the fault's measured outcome, and Dask under churn hit the runner's 360 s stop. E14 (the first job, right after the join) ran wholly on pc00: the workers were still importing its environment after a minute.
+
+Earlier runs of the rehearsal found the product and harness bugs listed below; the test now guards against each one.
 
 ## Integration (lab/integrate)
 

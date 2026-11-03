@@ -1,0 +1,41 @@
+step             phase       minutes
+bootstrap        setup           0.6
+discover         discover        0.0
+prep.machines    prepare         0.0
+prep.network     prepare         0.7
+prep.clocks      prepare         0.0
+prep.code        prepare         0.0
+prep.pipedpeer   prepare         0.8
+prep.join        prepare         0.5
+prep.firstjob    prepare         5.3
+prep.nixenv      prepare         0.7
+prep.otel        prepare         0.5
+calibrate        calibrate       3.3
+weakrefs         calibrate       0.3
+exp.e1           run            19.9
+exp.e1b          run             4.7
+exp.e4           run             0.0  (cut off)
+exp.e4           run             2.5
+exp.e5           run             1.5
+exp.e6           run             2.4
+exp.e12          run             3.6
+exp.e13          run             9.1
+exp.e15          run             2.7
+exp.e7           run             0.3
+exp.e8           run             3.3
+analyse          analyse         0.1
+clocks.end       cleanup         0.0
+pull.pcap        cleanup         0.0
+clean.workers    cleanup         1.6
+undo.workers     cleanup         0.3
+final.sync       cleanup         0.2
+clean.pc00       cleanup         0.0
+
+phase setup                      0.6
+phase discover                   0.0
+phase prepare                    8.6
+phase calibrate                  3.6
+phase run                       50.0
+phase analyse                    0.1
+phase cleanup                    2.1
+all (without cut-off steps)     65.0

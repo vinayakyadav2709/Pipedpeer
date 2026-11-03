@@ -1,0 +1,32 @@
+e1: 80 runs, 31 used, 40 warm-ups excluded, 9 failed excluded
+  FAILED e1-20261103T173612-37097b W1 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T173612-37097b)
+  FAILED e1-20261103T173613-5da351 W1 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T173613-5da351)
+  FAILED e1-20261103T173614-493c00 W1 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T173614-493c00)
+  FAILED e1-20261103T173615-313e8b W1 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T173615-313e8b)
+  FAILED e1-20261103T174029-3d6628 W2 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174029-3d6628)
+  FAILED e1-20261103T174031-fad04b W2 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174031-fad04b)
+  FAILED e1-20261103T174050-0dc8ac W2 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174050-0dc8ac)
+  FAILED e1-20261103T174051-390af6 W2 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174051-390af6)
+  FAILED e1-20261103T174610-8f1df4 W4 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174610-8f1df4)
+  FAILED e1-20261103T174611-452cb4 W4 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174611-452cb4)
+  FAILED e1-20261103T174612-d95d1a W4 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174612-d95d1a)
+  FAILED e1-20261103T174624-b44b5d W4 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T174624-b44b5d)
+  FAILED e1-20261103T174954-85ec4f W3 ray n=2 on pc00: exit 1: Refer to the documentation on how to address the out of memory issue: https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/debug-memory.html. Consider provisioning more memory on this node or reducing task parallelism by requesting more CPUs per task. Set max_restarts and max_task_ (logs/e1-20261103T174954-85ec4f)
+  FAILED e1-20261103T175048-c57b91 W3 ray n=2 on pc00: exit 1: Refer to the documentation on how to address the out of memory issue: https://docs.ray.io/en/latest/ray-observability/user-guides/debug-apps/debug-memory.html. Consider provisioning more memory on this node or reducing task parallelism by requesting more CPUs per task. Set max_restarts and max_task_ (logs/e1-20261103T175048-c57b91)
+  FAILED e1-20261103T175108-c922fd W3 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T175108-c922fd)
+  FAILED e1-20261103T175128-7cd84b W3 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T175128-7cd84b)
+  FAILED e1-20261103T175142-44c5df W3 dask n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T175142-44c5df)
+  FAILED e1-20261103T175144-35eb85 W3 ray n=4 on pc00: inventory has 3 workers, N=4 asked (logs/e1-20261103T175144-35eb85)
+e12: 3 runs, 3 used, 0 warm-ups excluded, 0 failed excluded
+e13: 3 runs, 1 used, 0 warm-ups excluded, 2 failed excluded
+  FAILED e13-20261103T180754-69309d W1 ray n=2 on pc00: exit 1:     [2026-11-03 18:08:26,032 I 27626 27626] (raylet) accessor.cc:453: Received address and liveness notification for node, IsAlive = 1 node_id=be70e602d856c5f242aa633b9c399310b8dcf9c03b9b7a3515dd2d47 (logs/e13-20261103T180754-69309d)
+  FAILED e13-20261103T181029-99f789 W1 dask n=2 on pc00: exit 143: [runner] stopped after 360 s (logs/e13-20261103T181029-99f789)
+e14: 1 runs, 1 used, 0 warm-ups excluded, 0 failed excluded
+e15: 12 runs, 9 used, 3 warm-ups excluded, 0 failed excluded
+e1b: 14 runs, 7 used, 7 warm-ups excluded, 0 failed excluded
+e4: 8 runs, 4 used, 4 warm-ups excluded, 0 failed excluded
+e5: 6 runs, 6 used, 0 warm-ups excluded, 0 failed excluded
+e6: 10 runs, 6 used, 3 warm-ups excluded, 1 failed excluded
+  FAILED e6-20261103T180259-34f894 W1 ray n=3 on pc00: exit 1:     [2026-11-03 18:03:01,386 I 16622 16622] (raylet) worker_pool.cc:531: Started worker process with pid 17035 worker_id=b8916c51cc5fbdfcf82d4823d406bc2062b8328d073d2fb3f37c5e55 (logs/e6-20261103T180259-34f894)
+e7: 4 runs, 2 used, 2 warm-ups excluded, 0 failed excluded
+e8: 14 runs, 8 used, 6 warm-ups excluded, 0 failed excluded
