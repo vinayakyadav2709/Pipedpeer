@@ -210,7 +210,13 @@ class Context:
         workers = hosts if kind in ("pipedpeer", "plain") else [h for h in hosts if h is not self.inv.head]
         cores = [caps[i] if caps and i < len(caps) else self.nproc(h) for i, h in enumerate(workers)]
         sub = caps[0] if caps and kind == "pipedpeer" else self.nproc(self.inv.head)
-        return wl.system_env(system, sub, sum(cores) or 1)
+        env = wl.system_env(system, sub, sum(cores) or 1)
+        if self.nproc_override:
+            # PL_NPROC makes every PC an N-core PC; Python sees all the
+            # host's CPUs otherwise (os.cpu_count: multiprocessing, loky, the
+            # shim), also inside pipedpeer's sandbox, where this goes as -e.
+            env["PYTHON_CPU_COUNT"] = str(self.nproc_override)
+        return env
 
     def size_for(self, wl, mode, n):
         size = wl.size(mode, n, rehearsal=self.rehearsal, override=self.size_override.get(wl.id))

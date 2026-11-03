@@ -287,3 +287,13 @@ def test_a_failed_timed_command_keeps_its_stderr(tmp_path, monkeypatch):
     monkeypatch.setenv("PL_ANSIBLE_FAKE", str(fake))
     t = Remote(str(tmp_path / "inv.ini")).timed("pc00", "echo out; echo Traceback-boom >&2; exit 3", timeout=30)
     assert t.rc == 3 and "out" in t.out and "Traceback-boom" in t.out, t
+
+
+def test_pl_nproc_reaches_python_in_the_job(make, monkeypatch):
+    """A rehearsal's PL_NPROC=2 must make Python in the job see 2 CPUs too:
+    a pipedpeer job in a container otherwise sized its pool to the host's."""
+    monkeypatch.setenv("PL_NPROC", "2")
+    ctx, cluster = make()
+    ctx.scaling(["W1"], ["pipedpeer"], [2], 1)
+    runs = [c for _, c in cluster.calls if "pipedpeer run" in c]
+    assert runs and all("PYTHON_CPU_COUNT=2" in c for c in runs)
