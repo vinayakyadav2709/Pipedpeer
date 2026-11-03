@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Find the lab PCs that ran lab-pc.sh setup and build the Ansible inventory.
+# Find the lab PCs that ran lab.sh (worker setup) and build the Ansible inventory.
 #   scripts/campaign/scan.sh <subnet> [--head <ip>] [--user <labuser>] [--no-nmap]
 # Finds hosts with port 22 open (nmap -p22 --open, or a parallel TCP sweep in
 # python3 when nmap is missing), logs in to each with the campaign key, reads

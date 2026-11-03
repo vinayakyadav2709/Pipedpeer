@@ -1,9 +1,9 @@
-# Lab PC stand-in for lab-pc-test.sh: Ubuntu 24.04 with systemd, ufw and a
-# sudo-capable user "lab", without openssh (setup must install it).
+# Lab PC stand-in for lab-pc-test.sh and headless-test.sh: Ubuntu 24.04 with systemd, ufw and a
+# sudo-capable user "lab", without openssh-server (setup must install it).
 FROM docker.io/library/ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq \
- && apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus sudo curl ca-certificates iproute2 ufw \
+ && apt-get install -y -qq --no-install-recommends systemd systemd-sysv dbus sudo curl ca-certificates iproute2 ufw python3 openssl openssh-client \
  && ! dpkg -s openssh-server >/dev/null 2>&1 \
  && useradd -m -s /bin/bash lab \
  && echo 'lab ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/00-lab-test && chmod 440 /etc/sudoers.d/00-lab-test

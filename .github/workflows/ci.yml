@@ -53,6 +53,12 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./scripts/shim-check.sh
 
+      # landing/public/lab.sh is what the lab PCs run; it must be
+      # scripts/campaign/lab.sh apart from the lines publish.sh fills in.
+      - name: Published lab.sh matches the source
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/campaign/lab-fill.sh check
+
       # The shim is supposed to cost nothing when a job never touches an
       # interceptable library. Nothing enforced that, and it regressed to 21x
       # by importing torch at startup. Gate it here.

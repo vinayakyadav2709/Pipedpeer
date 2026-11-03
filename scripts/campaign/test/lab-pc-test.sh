@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end test of lab-pc.sh, serve.sh and scan.sh on systemd containers.
+# End-to-end test of lab.sh (worker mode, pkg, enable, undo), serve.sh and
+# scan.sh on systemd containers. headless-test.sh covers lab.sh head.
 #   scripts/campaign/test/lab-pc-test.sh
 # Seven lab PC stand-ins (512 MB each) on their own podman network:
 #   ub-fresh   Ubuntu 24.04, ufw active, no openssh, no ~/.ssh; setup twice
@@ -14,9 +15,10 @@
 #              set up after the scans, undone with the rest
 # Each PC is snapshotted (packages, users, ssh units, ~/.ssh tree with modes and
 # hashes, /etc/sudoers.d, /etc/ssh, firewall rules, state dir), set up the real
-# way (curl from serve.sh | sudo bash -s -- setup, as user lab), checked (LAB-PC
-# line, key login and sudo -n from the driver side), scanned with scan.sh, then
-# undone; the snapshot after undo must equal the one before.
+# way (curl from serve.sh | sudo bash, as user lab), checked (LAB-PC line, the
+# DONE banner, key login and sudo -n from the driver side), scanned with
+# scan.sh, given packages, a service and home leftovers the way lab-day.sh adds
+# them, then undone; the snapshot after undo must equal the one before.
 # Needs rootless podman (the driver side runs in its network namespace) or
 # rootful docker. Removes everything it made on exit.
 # shellcheck disable=SC2015,SC2016,SC2086  # pass||fail lines; remote snippets; LAB_SSH_OPTS splits
@@ -98,11 +100,12 @@ say "serve.sh"
 out=$(in_net bash "$camp/serve.sh" "$gw")
 echo "$out"
 line=$(grep -E '^  curl ' <<<"$out" | sed 's/^  //')
-[[ $line == "curl -fsS http://$gw:8000/lab-pc.sh | sudo bash -s -- setup" ]] \
+[[ $line == "curl -fsSL http://$gw:8000/lab.sh | sudo bash" ]] \
   && pass "operator line: $line" || fail "operator line: '$line'"
-grep -q "^DRIVER=\"$gw\"$" "$LAB_RESULTS/serve/lab-pc.sh" && pass "DRIVER filled in" || fail "DRIVER not filled in"
-cmp -s "$LAB_RESULTS/serve/driver.pub" "$LAB_KEY.pub" && pass "driver.pub is the campaign key" || fail "driver.pub"
 pub=$(cat "$LAB_KEY.pub")
+grep -qxF "CAMPAIGN_KEY=\"$(awk '{print $1" "$2}' <<<"$pub")\"" "$LAB_RESULTS/serve/lab.sh" && pass "campaign key filled in" || fail "campaign key not filled in"
+grep -qxF "SITE=\"http://$gw:8000\"" "$LAB_RESULTS/serve/lab.sh" && pass "site filled in" || fail "site not filled in"
+bash "$camp/lab-fill.sh" check "$LAB_RESULTS/serve/lab.sh" >/dev/null && pass "served copy is lab.sh apart from the filled lines" || fail "served copy differs"
 
 say "prepare pre-existing state"
 x ub-fresh 'ufw --force enable >/dev/null'
@@ -110,6 +113,8 @@ x ub-pre 'ufw --force enable >/dev/null && ufw allow 22/tcp >/dev/null'
 x ub-refuse 'ufw --force enable >/dev/null'
 x_lab ub-pre 'mkdir -p .ssh && chmod 775 .ssh && printf "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOtherKeyOtherKeyOtherKeyOtherKeyOtherKey0 other@pc" >.ssh/authorized_keys && chmod 664 .ssh/authorized_keys'
 x_lab fd-haskey "mkdir -m 700 .ssh && printf '%s\n' '$pub' >.ssh/authorized_keys && chmod 600 .ssh/authorized_keys"
+x ub-pre 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends systemd-timesyncd >/dev/null 2>&1'
+x_lab ub-fresh 'mkdir -p .config/keep && echo mine >.config/keep/file'
 x ub-rc 'ufw --force enable >/dev/null && apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-server >/dev/null 2>&1 && apt-get remove -y -qq openssh-server >/dev/null 2>&1 && dpkg -l openssh-server | grep -q "^rc"'
 # Both images start without an SSH server, so setup must install it.
 for p in fd-haskey fd-off; do x "$p" 'dnf install -y -q openssh-server >/dev/null 2>&1'; done
@@ -131,16 +136,19 @@ snapshot() {
     if command -v ufw >/dev/null; then ufw status verbose; sha256sum /etc/ufw/user.rules /etc/ufw/user6.rules; fi
     if command -v firewall-cmd >/dev/null; then firewall-cmd --list-all; find /etc/firewalld -type f -exec sha256sum {} + | sort; fi
     echo "== state"; ls -la /var/lib/pipedpeer-lab 2>&1
+    echo "== units"; systemctl list-unit-files --no-legend 2>/dev/null | sort
+    echo "== trusted"; command -v firewall-cmd >/dev/null && firewall-cmd --zone=trusted --list-all
     true
   '
 }
 for p in "${pcs[@]}"; do snapshot "$p" >"$work/before-$p"; done
 
-setup_line="curl -fsS http://$gw:8000/lab-pc.sh | sudo bash -s -- setup"
+setup_line="curl -fsSL http://$gw:8000/lab.sh | sudo bash"
 check_setup() {
   local p=$1 out=$2 ip mid last
   ip=$(ip_of "$p"); mid=$(x "$p" 'cat /etc/machine-id')
-  last=$(tail -n1 <<<"$out")
+  last=$(grep '^LAB-PC ' <<<"$out" | tail -n1)
+  grep -q "DONE: this PC is ready, you can leave it.   (ip $ip)" <<<"$out" && pass "$p: DONE banner with its ip" || fail "$p: no DONE banner"
   if [[ $last =~ ^LAB-PC\ host=$p\ ip=$ip\ user=lab\ cores=[0-9]+\ ram_gib=[0-9]+\ machine_id=$mid$ ]]; then
     pass "$p: $last"
   else
@@ -156,10 +164,12 @@ check_setup() {
 say "refusals"
 out=$(x ub-refuse "$setup_line" 2>&1 || true)
 grep -q 'ERROR: the lab user is root' <<<"$out" && pass "root shell through sudo refused" || { fail "root via sudo not refused"; echo "$out"; }
-out=$(x ub-refuse "curl -fsS http://$gw:8000/lab-pc.sh | bash -s -- setup" 2>&1 || true)
+out=$(x ub-refuse "curl -fsSL http://$gw:8000/lab.sh | bash" 2>&1 || true)
 grep -q 'ERROR: ' <<<"$out" && pass "root shell without sudo refused: $(tail -n1 <<<"$out")" || { fail "root shell not refused"; echo "$out"; }
-out=$(x_lab_in ub-refuse "sudo bash -s -- setup" <"$camp/lab-pc.sh" 2>&1 || true)
-grep -q 'ERROR: DRIVER is not filled in' <<<"$out" && pass "unfilled DRIVER refused" || { fail "unfilled DRIVER"; echo "$out"; }
+out=$(x_lab_in ub-refuse "sudo bash" <"$camp/lab.sh" 2>&1 || true)
+grep -q 'ERROR: this copy of lab.sh is not published yet' <<<"$out" && pass "unpublished lab.sh refused" || { fail "unpublished lab.sh ran"; echo "$out"; }
+out=$(x_lab_in ub-refuse "sudo bash -s -- head" <"$camp/lab.sh" 2>&1 || true)
+grep -q 'ERROR: this copy of lab.sh is not published yet' <<<"$out" && pass "unpublished head refused" || { fail "unpublished head ran"; echo "$out"; }
 snapshot ub-refuse >"$work/after-ub-refuse"
 diff -u "$work/before-ub-refuse" "$work/after-ub-refuse" && pass "ub-refuse unchanged" || fail "ub-refuse changed by a refused setup"
 
@@ -179,6 +189,8 @@ for p in ub-fresh fd-fresh; do
 done
 grep -q '^ufw 22/tcp$' "$work/state1-ub-pre" && fail "ub-pre: pre-existing ufw 22/tcp recorded" || pass "ub-pre: pre-existing ufw 22/tcp not recorded"
 grep -q '^ufw 4242/tcp$' "$work/state1-ub-pre" && pass "ub-pre: ufw rules it added are recorded" || fail "ub-pre: ufw 4242/tcp not recorded"
+grep -qxF "ufw-from $subnet" "$work/state1-ub-pre" && pass "ub-pre: the PC's subnet is allowed in ufw" || fail "ub-pre: no ufw-from $subnet"
+grep -qxF "fwd-src $subnet" "$work/state1-fd-fresh" && pass "fd-fresh: the PC's subnet is trusted in firewalld" || fail "fd-fresh: no fwd-src $subnet"
 grep -q '^fwd 4242/tcp$' "$work/state1-fd-fresh" && pass "fd-fresh: firewalld ports recorded" || fail "fd-fresh: no firewalld ports recorded"
 grep -q '^ak' "$work/state1-fd-haskey" && fail "fd-haskey: unmarked key touched" || pass "fd-haskey: unmarked existing key left alone"
 [[ $(x_lab ub-pre 'wc -l <.ssh/authorized_keys') == 2 ]] && pass "ub-pre: other key and campaign key on separate lines" || fail "ub-pre: key lines merged"
@@ -239,21 +251,38 @@ for p in ub-rc fd-off; do
 done
 grep -q '^pkg-rc apt openssh-server$' <(x ub-rc 'cat /var/lib/pipedpeer-lab/state') && pass "ub-rc: reinstall from rc recorded as pkg-rc" || fail "ub-rc: no pkg-rc line"
 
+say "pkg, enable and home leftovers (as lab-day.sh adds them)"
+lab=/var/lib/pipedpeer-lab/lab.sh
+x_lab ub-pre "sudo bash $lab pkg chrony iperf3" >/dev/null && pass "ub-pre: pkg chrony iperf3" || fail "ub-pre: pkg chrony iperf3"
+st=$(x ub-pre 'cat /var/lib/pipedpeer-lab/state')
+grep -q '^pkg apt chrony$' <<<"$st" && grep -q '^pkg apt iperf3$' <<<"$st" && pass "ub-pre: packages recorded" || fail "ub-pre: packages not recorded"
+grep -q '^pkg-gone apt systemd-timesyncd$' <<<"$st" && pass "ub-pre: chrony replacing systemd-timesyncd recorded" || fail "ub-pre: no pkg-gone line"
+x_lab fd-fresh "sudo bash $lab pkg chrony iperf3 && sudo bash $lab enable chronyd" >/dev/null && pass "fd-fresh: pkg chrony iperf3, enable chronyd" || fail "fd-fresh: pkg/enable"
+grep -q '^svc chronyd' <(x fd-fresh 'cat /var/lib/pipedpeer-lab/state') && pass "fd-fresh: chronyd state recorded" || fail "fd-fresh: chronyd not recorded"
+x_lab ub-fresh 'mkdir -p .ansible/tmp .cache/nix .local/share/pipedpeer-lab/env .config/pipedpeer pipedpeer-lab/repo && touch .ssh/known_hosts .config/keep/new'
+x_lab ub-fresh 'ln -s /nix/var/nix/profiles/per-user/lab/profile .nix-profile'
+
 say "undo"
 # Two through the copy setup saved on the PC, two through the driver.
 for p in ub-fresh ub-pre fd-fresh fd-haskey ub-rc fd-off; do
   case $p in
-    ub-fresh|fd-fresh) undo_cmd='sudo bash /var/lib/pipedpeer-lab/lab-pc.sh undo' ;;
-    *) undo_cmd="curl -fsS http://$gw:8000/lab-pc.sh | sudo bash -s -- undo" ;;
+    ub-fresh|fd-fresh) undo_cmd='sudo bash /var/lib/pipedpeer-lab/lab.sh undo' ;;
+    *) undo_cmd="curl -fsSL http://$gw:8000/lab.sh | sudo bash -s -- undo" ;;
   esac
   out=$(x_lab "$p" "$undo_cmd" 2>&1) || { fail "$p: undo exited non-zero"; echo "$out"; }
   grep -q WARNING <<<"$out" && { fail "$p: undo warned"; echo "$out"; }
   snapshot "$p" >"$work/after-$p"
+  if [[ $p == ub-fresh ]]; then
+    # .config/keep/new is the user's own, made after setup: it must survive.
+    x_lab ub-fresh 'test -f .config/keep/new && rm .config/keep/new' && pass "ub-fresh: the user's own new file kept" || fail "ub-fresh: user file removed"
+    x_lab ub-fresh 'test ! -e .cache/nix' && pass "ub-fresh: .cache/nix removed" || fail "ub-fresh: .cache/nix left"
+    snapshot "$p" >"$work/after-$p"
+  fi
   if diff -u "$work/before-$p" "$work/after-$p"; then pass "$p: byte-identical after undo"; else fail "$p: differs after undo"; fi
 done
 
 bash "$camp/serve.sh" stop >/dev/null
-if [[ ! -f $LAB_RESULTS/serve.pid ]] && ! in_net python3 -c 'import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=2)' "http://$gw:8000/driver.pub" 2>/dev/null; then
+if [[ ! -f $LAB_RESULTS/serve.pid ]] && ! in_net python3 -c 'import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=2)' "http://$gw:8000/lab.sh" 2>/dev/null; then
   pass "serve.sh stop: server gone"
 else
   fail "serve.sh stop: still serving"
