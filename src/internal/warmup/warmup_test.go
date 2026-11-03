@@ -179,6 +179,19 @@ func fakeExe(t *testing.T) string {
 	if err := os.WriteFile(exe, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The detached child appends its result to the log after Start returns;
+	// wait for it (the alive lock drops when it exits) so the temp dirs are
+	// not removed while it is still writing. Cleanups run last-in first-out,
+	// so this runs before the test's earlier TempDir and Setenv cleanups.
+	t.Cleanup(func() {
+		deadline := time.Now().Add(20 * time.Second)
+		for Running() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if Running() {
+			t.Logf("warm-up child still running after 20s; temp dir cleanup may race")
+		}
+	})
 	return exe
 }
 
