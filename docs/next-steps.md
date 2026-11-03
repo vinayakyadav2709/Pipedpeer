@@ -132,6 +132,35 @@ Dropped: Optuna interception, NPU support.
 
 1. Whatever the verification pass and the real-hardware runs (section 2)
    found.
+   - **Workspace selection.** Today `pipedpeer run` tars the whole folder up
+     to the nearest `.git` or `.pipedpeerignore`, which can be far bigger
+     than the script needs.
+     - The upper bound becomes the cwd, never above `$HOME`; for a script
+       outside the cwd, its own folder. For an import from above the cwd,
+       decide between an error and including it automatically, depending
+       on how sure the trace is.
+     - Send only traced files: local imports (`pythondeps/deps.go` already
+       finds them) plus literal `open`/`read_csv` paths. First measure how
+       complete the trace is: dynamic paths, `importlib`, package data,
+       paths relative to the cwd.
+     - Fetch on demand: a job that opens a missing file fetches it from the
+       submitter and caches it for peers, so only nodes that use a dataset
+       receive it. Possibly with a confirm prompt.
+     - Keep the 2 GiB cap and `.pipedpeerignore`.
+   - **Cross-arch placement.** The closure is built for the submitter's
+     architecture, so `coordinator/find.go` turns away nodes of another one
+     (`arch mismatch`); a phone's whole job never goes to a laptop. Fix: the
+     target builds its own closure.
+   - **NAT hole-punch test with a public introducer.** Punching needs an
+     introducer that sees both peers' public addresses; it has only been
+     run in the lab, not between two real home networks.
+   - **Upgrade restart on real machines.** Re-running the installer over a
+     running daemon must restart it on the new build; check it on a laptop
+     and a phone (systemd unit and Termux).
+   - **Stale `unreachable` rows** for an old LAN address in `pipedpeer
+     status` after a network change.
+   - **Docs** for `PIPEDPEER_CONNECT_FROM_INSTALLER` and
+     `PIPEDPEER_WARMUP_RETRY`.
 2. **DiLoCo in automatic mode**, only if its benchmark passes (validation loss
    within 1% of one GPU on every test model, mean of 3 seeds, spread
    reported), then **Streaming DiLoCo** if it is cheap on top of the overlap
