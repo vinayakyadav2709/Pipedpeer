@@ -3,18 +3,22 @@
 ## Steps to run
 
 ```bash
-# Laptop A (inviter). <VERSION> = the build under test (pipedpeer --version prints "pipedpeer version <VERSION>")
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-pipedpeer invite                      # prints: pipedpeer connect <CODE>
+# Set these first on every machine; pasting <VERSION> or <CODE> as-is is a bash syntax error.
+VERSION='0.0.1-nightly.YYYYMMDD-abcdef0'   # the build under test (pipedpeer --version prints it)
+CODE='pp1-...'                             # laptop B and the phone: the code laptop A's `pipedpeer invite` printed
+
+# Laptop A (inviter)
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
+pipedpeer invite                      # prints: pipedpeer connect pp1-...
 
 # Laptop B, the college PC (installer runs `pipedpeer setup` itself)
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-pipedpeer connect <CODE>
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
+pipedpeer connect "$CODE"
 
 # Phone, in Termux (F-Droid or Play Store), one line; no laptop or USB cable needed.
 # Setup installs its own packages, takes the wake lock, turns the phantom-process killer
 # off over Wireless debugging (it asks for the pairing code and ports), and joins the cluster.
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION> --connect <CODE>
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION" --connect "$CODE"
 
 # Demo runs, from pipedpeer-demo/ on laptop A
 python3 cpu.py
@@ -128,7 +132,7 @@ new · worker: phone worker (Termux)
 2. [ ] Phone, Termux: the phone line from Steps to run, with that code. Open Settings > Developer options > Wireless debugging in split screen when it asks, and give it the pairing code and the two ports. It takes a long while (Debian, Nix and ~1.5 GB of Python packages) → expect `✓ wake lock held`, `✓ phantom-process killer off`, `✓ start on boot: … written`, `✓ Debian with Nix ready; …`, `✓ pool python ready at …`, `✓ connected: …`, and no `✗` lines.
 3. [ ] Phone: run the same line again → done within about a minute, every step `already …`, nothing rebuilt.
 4. [ ] Laptop A: `pipedpeer status` → the phone is listed as healthy.
-5. [ ] Laptop A: `pipedpeer run cpu.py` → the checksum matches `python3 cpu.py`, and the phone shows in the `ran on …` line. If it doesn't, on the phone run `grep refusing ~/.local/state/pipedpeer/daemon.log` and note the output.
+5. [ ] Laptop A: `pipedpeer run cpu.py` → the checksum matches `python3 cpu.py`, and the phone shows in the `ran on …` line. If it doesn't, on the phone run `grep refusing $PREFIX/var/lib/proot-distro/containers/pipedpeer/rootfs/root/.local/state/pipedpeer/daemon.log` (a pool-only phone: `~/.local/state/pipedpeer/daemon.log`) and note the output.
 6. [ ] Laptop A: `pipedpeer run --remote gpu.py` → never placed on the phone.
 7. [ ] Laptop A, a small training chunk per seed:
    ```bash
@@ -153,8 +157,8 @@ new · worker: phone worker (Termux)
 ### Phone as a full node — phone
 new · numbers go to the paper · worker: phone full node (proot + Nix)
 1. [ ] Phone, in Termux: `pipedpeer doctor` → a `✓ phone: full node (Debian in proot with Nix)` line and the chunks-only reason line (see Pass 3, "A phone takes chunks, never whole jobs").
-2. [ ] Phone, in Termux: `cd ~ && curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cpu.py`, then plain Termux Python: `time python cpu.py` three times → write down the three `real` times.
-3. [ ] Phone, same file inside proot with Nix's Python: `time proot-distro login debian -- /root/.local/share/pipedpeer/phone-python/bin/python3 $PWD/cpu.py` three times → write down the three `real` times.
+2. [ ] Phone, in Termux: `cd ~ && curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cpu.py`, then plain Termux Python, which has none of cpu.py's libraries until you install them once (Termux has no `python-pandas` package, so pandas is built with pip, 10–20 min): `pkg install -y python python-numpy build-essential ninja && pip install cython meson-python "versioneer[toml]" wheel joblib && pip install --no-build-isolation pandas`, then `time python cpu.py` three times → write down the three `real` times.
+3. [ ] Phone, same file inside proot with Nix's Python: `time proot-distro login pipedpeer -- /root/.local/share/pipedpeer/phone-python/bin/python3 $PWD/cpu.py` three times → write down the three `real` times.
 4. [ ] Phone, in Termux: `pipedpeer stop && pipedpeer start && pipedpeer status` → the daemon is running again and the command prompt came back after each. (The `view.py` whole-job sandbox view no longer applies: phones take chunks only.)
 
 ### Tailscale worst case + `pipedpeer jobs --export-all` — laptop A, laptop B on different networks
@@ -216,13 +220,16 @@ Both laptops: `tailscale up`, same build `<VERSION>`.
 
 Laptop A (yours), paste:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
+VERSION='0.0.1-nightly.YYYYMMDD-abcdef0'   # the build under test
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
 pipedpeer invite        # send the printed `pipedpeer connect pp1-…` line to your friend
 ```
 Laptop B (your friend's), paste after receiving the line:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-pipedpeer connect <CODE>
+VERSION='0.0.1-nightly.YYYYMMDD-abcdef0'   # the build under test
+CODE='pp1-...'                             # the code from the line laptop A sent
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
+pipedpeer connect "$CODE"
 pipedpeer status
 ```
 Laptop A, in `pipedpeer-demo/` once `pipedpeer status` lists both:

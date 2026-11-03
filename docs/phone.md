@@ -133,6 +133,6 @@ not start on Play-Store Termux, which is why phones are chunks-only today.
 | Workers die after a few minutes | The phantom process killer is on. `pipedpeer doctor` reports it as off, on or unknown and names the fix; run `pipedpeer setup` again. On Android 12-13 doctor asks you to switch Wireless debugging on for a moment to read it (no new code), then switches it off again |
 | Setup cannot find the pairing port | Open "Pair device with pairing code" and keep that screen up while setup listens (it searches for 60 s); if mDNS stays silent it asks for the port shown there |
 | Setup says the pairing was refused | Wrong or expired code, three times in a row (setup asks again after each failure): run `pipedpeer setup` again and enter the new one |
-| Phone shows but never gets chunks | `grep refusing ~/.local/state/pipedpeer/daemon.log` (full node: `proot-distro login debian -- grep refusing /root/.local/state/pipedpeer/daemon.log`) names the missing module or Python version |
+| Phone shows but never gets chunks | `grep refusing ~/.local/state/pipedpeer/daemon.log` (full node, where the daemon runs inside the `pipedpeer` container: `grep refusing $PREFIX/var/lib/proot-distro/containers/pipedpeer/rootfs/root/.local/state/pipedpeer/daemon.log`) names the missing module or Python version |
 | Phone drops off when the screen locks | `termux-wake-lock`, keep it charging |
 | LAN discovery doesn't find the phone | Use `pipedpeer connect <code>`; Android filters multicast |

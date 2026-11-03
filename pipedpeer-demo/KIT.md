@@ -22,7 +22,8 @@ Scripts in this folder (each also runs under plain `python3`, prints its own `TO
    cluster it first says `pipedpeer: created a new cluster`). That one line is all another machine needs.
 3. Check live state before answering "what do I run": `ip -4 route get 1.1.1.1` (this machine's address, network),
    `pipedpeer status` (members, health), `pipedpeer doctor` (what is broken and the fix).
-4. Fill `<VERSION>` and `<CODE>` in the blocks below and send one complete message: the user's own steps first, then
+4. Fill the `VERSION='…'` and `CODE='…'` lines at the top of each block below (a bare `<CODE>` pasted into bash is a
+   syntax error) and send one complete message: the user's own steps first, then
    one block per other machine.
 
 Ports (all opened by `setup` when a firewall is active): 4242/tcp daemon API, 4242/udp LAN discovery, 4243/udp direct
@@ -35,9 +36,10 @@ Every layout uses the same two blocks; a layout is just which machines get which
 ### Block FIRST: the user's laptop (RTX 3060, Fedora)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
+VERSION='0.0.1-nightly.YYYYMMDD-abcdef0'   # the build under test
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
 # The installer checks the download against checksums.txt, then runs `pipedpeer setup`;
-# answer yes to "start at boot" (add -y after <VERSION> to answer yes to everything).
+# answer yes to "start at boot" (add -y after "$VERSION" to answer yes to everything).
 # Expect: "✓ cluster created. On each other machine, run:" and the line  pipedpeer connect pp1-...
 pipedpeer invite          # prints that line again whenever you need it
 ```
@@ -45,9 +47,11 @@ pipedpeer invite          # prints that line again whenever you need it
 ### Block JOIN: every other Linux machine (friend's laptop, college PCs)
 
 ```bash
-# Skip the curl line if `pipedpeer --version` already prints <VERSION>.
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-pipedpeer connect <CODE>
+VERSION='0.0.1-nightly.YYYYMMDD-abcdef0'   # the build under test
+CODE='pp1-...'                             # the code `pipedpeer invite` printed
+# Skip the curl line if `pipedpeer --version` already prints $VERSION.
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
+pipedpeer connect "$CODE"
 ```
 
 `connect` ends with one of three results:
@@ -118,8 +122,10 @@ Samsung S20 FE 5G (Android 13), Termux from the **Play Store** (the build the re
    and the Python packages itself, about 1.5 GB, so do this on Wi-Fi with the phone charging):
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-   pipedpeer connect <CODE>
+   VERSION='0.0.1-nightly.YYYYMMDD-abcdef0'   # the build under test
+   CODE='pp1-...'                             # the code `pipedpeer invite` printed
+   curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version "$VERSION"
+   pipedpeer connect "$CODE"
    termux-wake-lock
    ```
 
