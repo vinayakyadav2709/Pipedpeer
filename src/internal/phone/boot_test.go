@@ -32,6 +32,32 @@ func TestBootAbsolutePath(t *testing.T) { // phone test: Termux:Boot's PATH lack
 	}
 }
 
+func TestBinaryPathLinker(t *testing.T) { // phone test: os.Executable names linker64 in Termux
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "pipedpeer")
+	os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755)
+	oldE, oldA := executable, argv0
+	t.Cleanup(func() { executable, argv0 = oldE, oldA })
+	executable = func() (string, error) { return "/apex/com.android.runtime/bin/linker64", nil }
+	t.Setenv("PATH", dir)
+	for _, a := range []string{"pipedpeer", bin} {
+		argv0 = func() string { return a }
+		if got := binaryPath(); got != bin {
+			t.Errorf("argv0 %q: binaryPath = %q, want %q", a, got, bin)
+		}
+	}
+	argv0 = func() string { return "not-here" }
+	if got := binaryPath(); got != "pipedpeer" {
+		t.Errorf("unresolvable argv0: binaryPath = %q, want the PATH fallback", got)
+	}
+	// Opposite: a normal executable path is used as is, argv[0] ignored.
+	executable = func() (string, error) { return bin, nil }
+	argv0 = func() string { return "/elsewhere/pipedpeer" }
+	if got := binaryPath(); got != bin {
+		t.Errorf("normal exe: binaryPath = %q, want %q", got, bin)
+	}
+}
+
 func TestBootRewritesOldPathScript(t *testing.T) { // opposite: ours is rewritten, a user's is not
 	const old = "#!/data/data/com.termux/files/usr/bin/sh\ntermux-wake-lock\nexec pipedpeer start\n"
 	bootFixture(t)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -27,13 +28,21 @@ func bootScript() string {
 		"exec " + shQuote(binaryPath()) + " start\n"
 }
 
-// executable is os.Executable; a variable for tests.
-var executable = os.Executable
+// executable and argv0 are os.Executable and os.Args[0]; variables for tests.
+var (
+	executable = os.Executable
+	argv0      = func() string { return os.Args[0] }
+)
 
 // binaryPath is this binary's resolved absolute path, else "pipedpeer" (found
-// through PATH, with a warning).
+// through PATH, with a warning). Termux starts binaries through the Android
+// linker, so os.Executable can name /apex/.../linker64; then argv[0] (looked
+// up in PATH when bare) names the binary.
 func binaryPath() string {
 	exe, err := executable()
+	if err == nil && strings.HasPrefix(filepath.Base(exe), "linker") {
+		exe, err = argv0Path()
+	}
 	if err == nil {
 		if r, rerr := filepath.EvalSymlinks(exe); rerr == nil {
 			exe = r
@@ -42,6 +51,18 @@ func binaryPath() string {
 	}
 	log.Warn().Err(err).Msg("phone: cannot resolve the pipedpeer binary; the boot script relies on PATH")
 	return "pipedpeer"
+}
+
+func argv0Path() (string, error) {
+	a := argv0()
+	if !strings.Contains(a, "/") {
+		p, err := exec.LookPath(a)
+		if err != nil {
+			return "", fmt.Errorf("os.Executable is the linker and argv[0] %q is not in PATH: %w", a, err)
+		}
+		a = p
+	}
+	return filepath.Abs(a)
 }
 
 func shQuote(s string) string {
