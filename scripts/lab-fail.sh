@@ -134,8 +134,13 @@ runpid=$!
 
 # Wait until a remote worker is demonstrably holding chunks, then kill that
 # one: a kill that lands on an idle worker proves nothing about failover.
+# The wait lasts as long as the run does (up to LAB_CHUNK_WAIT seconds): the
+# run first builds its environment, which on a fresh container downloads
+# Python and on a loaded host took longer than the fixed 180 s this used to
+# allow, failing a run that had not yet started its script.
 kill_idx=""
-for _ in $(seq 1 90); do
+chunk_deadline=$((SECONDS + ${LAB_CHUNK_WAIT:-900}))
+while kill -0 "$runpid" 2>/dev/null && ((SECONDS < chunk_deadline)); do
 	for idx in 2 3; do
 		if [[ "$(chunks_received "$idx")" -gt 0 ]]; then
 			kill_idx="$idx"

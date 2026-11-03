@@ -1,0 +1,5 @@
+workload,system,n,runs_used,warmups_excluded,failed_excluded,median_wall_s,q1_wall_s,q3_wall_s,iqr_wall_s,median_join_s,median_bytes_per_node_per_min,mode,median_script_s
+E11-idle,pipedpeer,1,1,0,0,0.7389,0.7389,0.7389,0.0,0.739,3270.0,,
+E11-idle,pipedpeer,2,1,0,0,6.6418,6.6418,6.6418,0.0,6.642,29702.0,,
+E11-idle,pipedpeer,3,1,0,0,5.8524,5.8524,5.8524,0.0,5.852,57196.0,,
+W1,pipedpeer,3,1,0,0,1.6014,1.6014,1.6014,0.0,,,strong,0.7312

@@ -1,0 +1,11 @@
+workload,system,n,mode,runs_used,warmups_excluded,failed_excluded,median_wall_s,q1_wall_s,q3_wall_s,iqr_wall_s,fault,median_script_s,median_ctrlc_latency_s
+W1,pipedpeer,2,strong,0,1,0,,,,,,,
+W1,pipedpeer,2,strong,1,0,0,3.7773,3.7773,3.7773,0.0,none,3.4797,
+W1,pipedpeer,2,strong,1,0,0,6.9349,6.9349,6.9349,0.0,kill -9,6.3871,
+W1,ray,2,strong,0,1,0,,,,,,,
+W1,ray,2,strong,1,0,0,15.4742,15.4742,15.4742,0.0,none,13.9217,
+W1,ray,2,strong,1,0,0,15.0958,15.0958,15.0958,0.0,kill -9,13.3959,
+W1,dask,2,strong,0,1,0,,,,,,,
+W1,dask,2,strong,1,0,0,16.6476,16.6476,16.6476,0.0,none,15.6626,
+W1,dask,2,strong,1,0,0,31.5645,31.5645,31.5645,0.0,kill -9,30.5793,
+W1,pipedpeer-ctrlc,2,,1,0,0,4.8128,4.8128,4.8128,0.0,,,4.813

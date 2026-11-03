@@ -1,0 +1,9 @@
+workload,system,n,mode,runs_used,warmups_excluded,failed_excluded,median_wall_s,q1_wall_s,q3_wall_s,iqr_wall_s,median_script_s
+W1,pipedpeer,1,strong,1,1,0,2.9621,2.9621,2.9621,0.0,2.7016
+W1,pipedpeer,2,strong,1,1,0,3.5709,3.5709,3.5709,0.0,3.3026
+W1,pipedpeer-headcount,1,strong,1,1,0,2.803,2.803,2.803,0.0,2.6022
+W1,pipedpeer-headcount,2,strong,1,1,0,3.8594,3.8594,3.8594,0.0,3.509
+W1,ray,1,strong,1,1,0,4.5313,4.5313,4.5313,0.0,2.9344
+W1,ray,2,strong,1,1,0,5.6964,5.6964,5.6964,0.0,4.0682
+W1,dask,1,strong,1,1,0,3.1509,3.1509,3.1509,0.0,2.6495
+W1,dask,2,strong,1,1,0,3.4131,3.4131,3.4131,0.0,2.9099

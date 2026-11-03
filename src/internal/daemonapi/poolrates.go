@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -192,6 +193,13 @@ const localDeviceID = "local"
 
 func (pm *poolManager) planShares(ch *chunk, peers []string, includeLocal bool) []schedule.Share {
 	devices := pm.devicesFor(peers, ch.fnFP, includeLocal)
+	if os.Getenv("PIPEDPEER_POOL_SPLIT") == "headcount" {
+		// Benchmark baseline only (lab campaign E4): the even split this
+		// scheduler replaced, read from the daemon's environment.
+		shares := schedule.Even(len(ch.items), devices)
+		log.Printf("[pool] plan (headcount split, PIPEDPEER_POOL_SPLIT): %s", describeShares(shares))
+		return shares
+	}
 	plan := schedule.Compute(schedule.Options{Items: len(ch.items)}, devices)
 
 	for _, r := range plan.Rejected {
