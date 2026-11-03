@@ -105,7 +105,8 @@
       "weak_per_pc": null,
       "smoke": {
         "GS_SAMPLES": "200",
-        "GS_TREES": "10"
+        "GS_TREES": "10",
+        "LOKY_MAX_CPU_COUNT": "2"
       },
       "system_env": {
         "plain": {},
