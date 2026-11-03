@@ -150,7 +150,8 @@ for e in $experiments; do
 	# before Ansible can deliver the kill, so E6 gets ten times the work.
 	case "$e" in
 	e6) extra=(--size W1:BENCH_ITEMS=4000) ;;
-	e12 | e13) extra=(--size W1:BENCH_ITEMS=20000) ;;
+	e12) extra=(--size W1:BENCH_ITEMS=20000) ;;
+	e13) extra=(--size W1:BENCH_ITEMS=10000) ;;   # per PC: weak size x N
 	e14) extra=(--n 3 --size W1:BENCH_ITEMS=20000) ;;
 	e15) extra=(--size W1:BENCH_ITEMS=2000) ;;
 	*) extra=() ;;

@@ -1,16 +1,23 @@
 # The minimal profile (../profile-minimal.tsv) cut to the rehearsal's four
 # containers (pc00 + 3 workers, 2 CPUs each): the same experiments in the
 # same order, N to what fits, one repeat after the warm-up. headless-test.sh
-# passes it as LAB_PROFILE. Sizes are the day's own calibration at a 10 s
-# target (LAB_CAL_STRONG_S), except where --rehearsal picks the smoke sizes:
-# e4 (caps 2/1/1 instead of 8/4/2/1), e5 (numpy and joblib, not torch) and e8
-# (one epoch). e1's N=4 is one more than Ray and Dask have workers for: those
-# runs must be recorded as failed while the experiment goes on.
+# passes it as LAB_PROFILE. E14 is not a row: the day runs it at
+# prep.firstjob, as in the lab. Sizes are the day's own calibration at a 10 s
+# target (LAB_CAL_STRONG_S), except where --rehearsal picks smoke sizes and
+# rehearse.sh's settings: e4 (caps 2/1/1), e5 (numpy and joblib, not torch),
+# e8 (one epoch), e12 (1 -> 2 PCs, 2 -> 3 for pipedpeer), e13 (N=2, a kill
+# every 10 s) and e15 (N=2); e12, e13 and e15 get jobs long enough to outlast
+# a join, a kill or a delay change. e1's N=4 is one more than Ray and Dask
+# have workers for: those runs must be recorded as failed while e1 goes on.
+# --size is per PC in weak mode (e13), so 10000 there is 20000 at N=2.
 # step	est_min	arguments
 e1	20	--n 1,2,4 --repeats 1
 e1b	6	--n 1,3 --repeats 1
 e4	5	--rehearsal --n 3 --repeats 1
 e5	8	--rehearsal --n 3 --repeats 1
 e6	6	--n 3 --repeats 1
+e12	8	--rehearsal --size W1:BENCH_ITEMS=20000
+e13	8	--rehearsal --size W1:BENCH_ITEMS=10000
+e15	8	--rehearsal --size W1:BENCH_ITEMS=2000
 e7	2	--repeats 1
 e8	10	--rehearsal --n 2 --repeats 1
