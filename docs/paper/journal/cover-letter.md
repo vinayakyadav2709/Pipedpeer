@@ -19,6 +19,6 @@ The manuscript is original. It has not been published and is not under considera
 
 Sincerely,
 
-[CORRESPONDING AUTHOR NAME], on behalf of all authors
+Yateen Vaviya (corresponding author), on behalf of all authors
 Department of Computer Engineering, Sardar Patel Institute of Technology, Mumbai, India
-[CORRESPONDING AUTHOR E-MAIL]
+yateen.vaviya23@spit.ac.in
