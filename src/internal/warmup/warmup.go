@@ -1,12 +1,15 @@
 // Package warmup builds the common Python environment in the background
 // after `connect`, so the first real script starts fast without any prep
-// script (D9). Progress goes to userdir.State()/warmup.log (C19): the last
-// line is the current step, "done" when finished.
+// script (D9). Progress goes to userdir.State()/warmup.log (C19): the first
+// line is the header (it carries the build and torch kind), the last line is
+// the current step, "done" when finished.
 package warmup
 
 import (
 	_ "embed"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,13 +37,22 @@ func Args(script string, nvidia bool) []string {
 	return a
 }
 
+// kind is the torch build named in the log header.
+func kind(nvidia bool) string {
+	if nvidia {
+		return "CUDA"
+	}
+	return "CPU"
+}
+
 // shell runs "$0" "$@" (the pipedpeer run), appending its output to the log,
 // then the final line.
 const shell = `"$0" "$@" >>"$PIPEDPEER_WARMUP_LOG" 2>&1 && echo done >>"$PIPEDPEER_WARMUP_LOG" ||
 echo "failed (exit $?); details above" >>"$PIPEDPEER_WARMUP_LOG"`
 
 // Running reports whether a warm-up started within the last hour has not
-// written its final line.
+// written its final line. An empty log has no progress line, so it is not
+// running.
 // ponytail: a killed warm-up blocks a new one for up to an hour; a pid file
 // if that bites.
 func Running() bool {
@@ -55,13 +67,38 @@ func Running() bool {
 	}
 	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
 	last := lines[len(lines)-1]
+	if last == "" {
+		return false
+	}
 	return last != "done" && !strings.HasPrefix(last, "failed")
 }
 
+// Done reports whether the log is a finished warm-up for this build and torch
+// kind: the last line is "done" and the header ends with the marker
+// "build=<version> torch=<CPU|CUDA>". A log from a build without the marker
+// is not Done, so the first run after an upgrade rebuilds once.
+func Done(version string, nvidia bool) bool {
+	body, err := os.ReadFile(LogPath())
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "pipedpeer: reading %s: %v\n", LogPath(), err)
+		}
+		return false
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) < 2 || lines[len(lines)-1] != "done" {
+		return false
+	}
+	f := strings.Fields(lines[0])
+	n := len(f)
+	return n >= 2 && f[n-2] == "build="+version && f[n-1] == "torch="+kind(nvidia)
+}
+
 // Start launches the warm-up detached from this process (it outlives the
-// CLI) and returns at once.
-func Start(exe string, nvidia bool) error {
-	if Running() {
+// CLI) and returns at once. It does nothing when a warm-up is Running or
+// Done for this version and torch kind.
+func Start(exe, version string, nvidia bool) error {
+	if Running() || Done(version, nvidia) {
 		return nil
 	}
 	// Its own directory: run ships the working directory as the workspace.
@@ -76,12 +113,9 @@ func Start(exe string, nvidia bool) error {
 	if err := os.MkdirAll(userdir.State(), 0o755); err != nil {
 		return fmt.Errorf("state dir: %w", err)
 	}
-	torch := "torch CPU"
-	if nvidia {
-		torch = "torch CUDA"
-	}
 	head := fmt.Sprintf("%s building the common environment (numpy, pandas, scikit-learn, scipy, "+
-		"matplotlib, seaborn, tqdm, %s)\n", time.Now().Format(time.RFC3339), torch)
+		"matplotlib, seaborn, tqdm, torch %s) build=%s torch=%s\n",
+		time.Now().Format(time.RFC3339), kind(nvidia), version, kind(nvidia))
 	if err := os.WriteFile(LogPath(), []byte(head), 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", LogPath(), err)
 	}
