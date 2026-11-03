@@ -155,7 +155,10 @@ func classify(s connSnapshot) connResult {
 		}
 		return h
 	}
-	healthyIDs := map[string]bool{}
+	// One line per machine: a peer can be both an unhealthy node and an
+	// unreachable entry, or unreachable more than once (once per path), and
+	// was counted and printed each time ("4 not" for two machines).
+	healthyIDs, reported := map[string]bool{}, map[string]bool{}
 	rejected := false
 	for _, n := range s.nodes {
 		if n.Source == "self" || n.Path == "self" {
@@ -171,12 +174,15 @@ func classify(s connSnapshot) connResult {
 			why = n.State
 		}
 		rejected = rejected || secretRejected(why)
+		reported[short8(n.NodeID)] = true
 		res.problems = append(res.problems, name(n)+": "+why+" — fix: "+fixFor(why))
 	}
 	for _, u := range s.unreachable {
-		if healthyIDs[short8(u.Peer)] {
+		id := short8(u.Peer)
+		if healthyIDs[id] || reported[id] {
 			continue
 		}
+		reported[id] = true
 		rejected = rejected || secretRejected(u.Reason)
 		res.problems = append(res.problems, short8(u.Peer)+": "+u.Reason+" — fix: "+fixFor(u.Reason))
 	}

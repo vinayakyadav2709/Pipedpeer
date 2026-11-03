@@ -103,6 +103,26 @@ func TestDuplicateHostnamesGetIDs(t *testing.T) {
 	}
 }
 
+// The phone's connect said "4 not" for two machines, each listed twice: one
+// was an unhealthy node and also unreachable, the other unreachable twice.
+func TestUnreachableMachineCountedOnce(t *testing.T) {
+	noRoute := "dial tcp 192.168.0.200:4242: connect: no route to host"
+	r := classify(connSnapshot{
+		nodes: []connNode{
+			{NodeID: "a611cf3e940eb8a4", State: "healthy", Capabilities: map[string]string{"hostname": "fedora"}},
+			{NodeID: "9078b729c31d42b5", State: "unreachable", Reason: noRoute},
+		},
+		unreachable: []connUnreach{
+			{Peer: "9078b729c31d42b5", Reason: noRoute},
+			{Peer: "49c0a5c4aaaaaaaa", Reason: "no address known"},
+			{Peer: "49c0a5c4aaaaaaaa", Reason: "no address known"},
+		},
+	})
+	if r.outcome != connPartly || len(r.problems) != 2 {
+		t.Fatalf("outcome %v, problems %d, want partly with 2:\n%s", r.outcome, len(r.problems), strings.Join(r.problems, "\n"))
+	}
+}
+
 func TestInvitePrintsOneLine(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv(authtoken.EnvVar, "")
