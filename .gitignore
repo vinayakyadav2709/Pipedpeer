@@ -39,6 +39,9 @@ pipedpeer-demo/join-command.txt
 
 # lab campaign: collector output (it goes to R2 itself) and anything secret
 /results/lab/otel/
+# packet headers from node.sh --pcap; they go to R2 through sync-r2.sh
+/results/lab/pcap/
+*.pcap
 r2.env
 *.r2.env
 # lab campaign: what serve.sh serves to the lab PCs, its pid and log

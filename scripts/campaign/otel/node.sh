@@ -14,7 +14,9 @@
 # else "none": the lab.session attribute on every record.
 # --pcap: needs root (sudo -n); tcpdump from the system, else built from the
 # campaign's nixpkgs pin. Files rotate every 10 min:
-# pcap/<pc_id>-<UTC time>.pcap, 96-byte snaplen, ports 4242-4244 only.
+# pcap/<pc_id>-<UTC time>.pcap, 96-byte snaplen, ports 4242-4244 only, not
+# loopback (pp-poll.py asks the local daemon every second; the pcap is for
+# bytes on the wire).
 #
 # Daemon log: journald when pipedpeer runs as the systemd user unit
 # (`pipedpeer setup --boot`), else the file the daemon appends to,
@@ -97,7 +99,7 @@ start_pcap() {
 	# -U writes each packet out at once, so a killed capture keeps its tail.
 	local root=()
 	((EUID == 0)) || root=(sudo -n)
-	detach "${root[@]}" sh -c 'echo $$ >"$1"; exec "$2" -i any -n -U -s 96 -Z "$3" -G 600 -w "$4/$5-%Y%m%dT%H%M%SZ.pcap" "portrange 4242-4244"' \
+	detach "${root[@]}" sh -c 'echo $$ >"$1"; exec "$2" -i any -n -U -s 96 -Z "$3" -G 600 -w "$4/$5-%Y%m%dT%H%M%SZ.pcap" "portrange 4242-4244 and not net 127.0.0.0/8 and not ip6 host ::1"' \
 		sh "$pcap_pid" "$td" "$user" "$pcap_dir" "$pc_id" >>"$LAB_OTEL/pcap.log" 2>&1 </dev/null &
 	sleep 1
 	if [[ -f "$pcap_pid" ]] && as_root kill -0 "$(cat "$pcap_pid")" 2>/dev/null; then

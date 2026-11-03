@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # sync-r2.sh [count]: mirror results/lab to r2:pipedpeer-lab/raw with the
 # pinned rclone (otel/lib.sh), after every experiment. results/lab/otel/ (the
-# collector uploads that itself) and results/lab/serve/ are left out.
+# collector uploads that itself) and results/lab/serve/ are left out;
+# results/lab/pcap/<pc_id>/ (node.sh --pcap, gitignored) goes up with the rest.
 # rclone is configured from ~/.config/pipedpeer-lab/r2.env through
 # RCLONE_CONFIG_R2_* variables only; no rclone.conf holds the keys.
 # Without r2.env it warns and exits 0, so the runner carries on.
@@ -12,7 +13,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 source "$here/otel/lib.sh"
 
-results="$repo/results/lab"
+results="${LAB_RESULTS:-$repo/results/lab}"
 remote="r2:$R2_BUCKET/raw"
 filters=(--exclude "/otel/**" --exclude "/serve/**")
 
