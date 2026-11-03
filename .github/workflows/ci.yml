@@ -67,6 +67,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./scripts/check-skips.sh
 
+      # `pipedpeer run` builds the job's environment as a Nix closure, so the
+      # benchmark below needs Nix; without it the run stops at "nix not found".
+      # Same Nix release as the lab image (lab/Dockerfile).
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.31.3/install
+
       # Interception must not cost more than it saves. With no peers this
       # only checks the never-slower budget; with a cluster it becomes the
       # manual-versus-automatic comparison.
