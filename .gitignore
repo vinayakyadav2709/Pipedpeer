@@ -36,3 +36,8 @@ pipedpeer-demo/join-command.txt
 # Local exam references (other people's work) and generated demo data; never commit.
 /major/
 /data.csv
+
+# lab campaign: what serve.sh serves to the lab PCs, its pid and log
+results/lab/serve/
+results/lab/serve.pid
+results/lab/serve.log
