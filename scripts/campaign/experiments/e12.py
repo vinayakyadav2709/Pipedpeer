@@ -16,11 +16,18 @@ with no peer stays on pc00, so 1 -> 2 would show nothing).
              nodes may get nothing: that is the result, not a fault.
 
 One run per system (no repeats; the timeline is the result). Size: W1's
-strong size x PL_JOIN_SCALE (13: about 80 s while PCs join), or --size.
-Each line has n_start, n (the final N), join_every_s, events (one per join:
-t_ns, done_ns, pcs, seen_ns when the system first saw them), and the
-throughput timeline of lib/campaign/timeline.py.
+calibrated strong size x PL_JOIN_SCALE (13: about 80 s while PCs join), or
+--size. A rehearsal uses the calibrated size too, not the smoke size: a
+job of a few seconds ends before pc00 even lists the joiner. Each line has
+n_start, n (the final N), join_every_s, events (one per join: t_ns,
+done_ns, pcs, seen_ns when the system first saw them), the throughput
+timeline of lib/campaign/timeline.py, and the join's outcome from the
+chunks: items_per_pc, joiner_share (the joined PCs' part of the items),
+joiner_first_work_s {pc: s from its join's start to its first chunk; null
+if it got none} and joiner_present_frac (the part of the wall after the
+first joiner's first work).
 """
+import json
 import os
 import time
 
@@ -32,7 +39,9 @@ SYSTEMS = ["pipedpeer", "dask", "ray"]
 def size(ctx, wl):
     if wl.id in ctx.size_override:
         return ctx.size_for(wl, "strong", 1)
-    base = ctx.size_for(wl, "strong", 1)  # the smoke size in a rehearsal
+    base = wl.size("strong", 1)  # calibrated, also in a rehearsal
+    if not base or any(v in ("0", "") for v in base.values()):
+        base = ctx.size_for(wl, "strong", 1)
     scale = float(os.environ.get("PL_JOIN_SCALE", "13"))
     return {k: str(int(int(v) * scale)) for k, v in base.items()}
 
@@ -74,6 +83,29 @@ def joiner(ctx, b, group):
     return fn
 
 
+def join_outcome(chunks_file, events, start_ns, wall_s):
+    """items_per_pc, joiner_share, joiner_first_work_s, joiner_present_frac."""
+    with open(chunks_file) as f:
+        chunks = [c for c in json.load(f).get("chunks") or [] if c["t1"] > 0]
+    per, first = {}, {}
+    for c in chunks:
+        per[c["pc"]] = per.get(c["pc"], 0) + c["items"]
+        first[c["pc"]] = min(first.get(c["pc"], c["t0"]), c["t0"])
+    total = sum(per.values())
+    joined, delay = set(), {}
+    for e in events:
+        t = (e["t_ns"] - start_ns) / 1e9
+        for pc in e.get("pcs") or []:
+            joined.add(pc)
+            delay[pc] = round(first[pc] - t, 3) if pc in first else None
+    starts = [first[pc] for pc in joined if pc in first]
+    share = sum(v for pc, v in per.items() if pc in joined)
+    return {"items_per_pc": {pc: round(v, 1) for pc, v in sorted(per.items())},
+            "joiner_share": round(share / total, 4) if total else None,
+            "joiner_first_work_s": delay,
+            "joiner_present_frac": round(max(0.0, 1 - min(starts) / wall_s), 4) if starts and wall_s else 0.0}
+
+
 def one(ctx, wl, system, n0, n1, every, timeout):
     b = ctx.backend(system)
     if system == "pipedpeer" and n0 == 1 and len(ctx.inv.all) > n1:
@@ -106,6 +138,10 @@ def one(ctx, wl, system, n0, n1, every, timeout):
         actors = int(env.get("BENCH_PROCS", "0") or 0)
         res.update(timeline.collect(ctx, b, res, nodes, items, actors, logdir, dask_dump=dump))
         res["events"] = events
+        res.update(join_outcome(os.path.join(ctx.out_dir, res["chunks_path"]), events, res.get("start_ns") or 0,
+                                ((res.get("end_ns") or 0) - (res.get("start_ns") or 0)) / 1e9))
+        ctx.log("E12 %s: joiner share %s, first work after the join %s, joiners present %s of the run" % (
+            system, res["joiner_share"], res["joiner_first_work_s"], res["joiner_present_frac"]))
         res["hosts_final"] = [h.id for h in pool]
         state["joined"] = True
         return res

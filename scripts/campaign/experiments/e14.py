@@ -4,8 +4,8 @@ right after the join (lab-day.sh's prep.firstjob step runs it before the
 Nix env, calibration or any experiment). The size is workloads.json's
 provisional one, since calibration comes later; --size overrides it.
 
-The run line has phase "first-job" and first_work {pc: ns}: the start of the
-first compute step each PC ran, from the shim's receipt (pc00's clock: the
+The run line has phase "first-job", items_per_pc {pc: items computed there}
+and first_work {pc: ns}: the start of the first compute step each PC ran, from the shim's receipt (pc00's clock: the
 origin daemon times its parts). The same go into results/lab/timeline.jsonl
 as event first_work, beside the setup, install and join events of
 day/timeline.sh. analyse_headline.py turns them into the staircase.
@@ -25,14 +25,20 @@ def main(ctx):
     def run(b_, wl_, env, logdir, n_):
         res = b.run(wl, env, logdir, n)
         nodes = timeline.node_map(ctx, b.hosts_for(n))
-        first = {}
-        for s in receipts.full(res).get("steps") or []:
+        first, items = {}, {}
+        receipt = receipts.full(res)
+        for s in receipt.get("steps") or []:
             if s.get("step") != "compute":
                 continue
             pc = nodes.get(s.get("machine")) or nodes.get(s.get("node"))
             if pc and (pc not in first or s["start_ns"] < first[pc]):
                 first[pc] = s["start_ns"]
+            if pc and "items" in s:
+                items[pc] = items.get(pc, 0) + s["items"]
+        if not items and receipt.get("local_items") and not receipt.get("dispatched_items"):
+            items = {ctx.inv.head.id: receipt["local_items"]}  # the map stayed on pc00
         res["first_work"] = first
+        res["items_per_pc"] = dict(sorted(items.items()))
         res["pcs_with_work"] = len(first)
         with open(path, "a") as f:
             for pc, t in sorted(first.items()):

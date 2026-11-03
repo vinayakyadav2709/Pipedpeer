@@ -17,10 +17,22 @@ Update: one extra small package each time: tqdm, then tabulate, then toolz
 a warm cache from the second time on). pipedpeer adds it with --pkg; pip into
 the existing venv; ray with a new runtime_env.
 
-Cold is cold only on PCs that have never run this environment: run E5 before
-the other experiments in a session (OPERATOR.md). The pipedpeer line records
-whether pc00 had to build the env ("closure_on_pc00": built / already built).
+Cold is cold only on PCs that hold none of the closure. The campaign env
+(env/flake.nix) is on the same nixpkgs revision as pipedpeer's closures, so
+once the day has pulled it onto the workers (prep.nixenv) they already hold
+torch, numpy and the rest. The day therefore runs pipedpeer's cold ship
+early, as its own step (prep.e5cold, `--part pipedpeer-cold`): after the
+join and the first job (which brought only python), before the env. The
+E5 row later skips pipedpeer's cold run when that line is in runs.jsonl,
+and runs pip's and Ray's cold cases, which are cold by construction (a
+fresh venv with --no-cache-dir; a fresh Ray session). Every pipedpeer line
+records the proof: closure_paths (the job closure's store paths, from
+pc00) and present_before {pc: how many of them that PC held before the
+run}, from a /nix/store listing taken just before it (probes.py), and
+whether pc00 had to build the env ("closure_on_pc00": built / already
+built). before_campaign_env is true on the early line.
 """
+import json
 import os
 import re
 import shlex
@@ -66,7 +78,18 @@ def record(ctx, method, phase, repeat, n, hosts, start_ns, end_ns, nets, ok, ext
     return ctx.recorder.write(line)
 
 
-def run_pipedpeer(ctx, n, phase, repeat, extra, script):
+def cold_done(ctx):
+    """True when runs.jsonl already has pipedpeer's early cold ship, done right."""
+    try:
+        with open(ctx.recorder.path) as f:
+            lines = [json.loads(ln) for ln in f if '"before_campaign_env"' in ln]
+    except (OSError, ValueError):
+        return False
+    return any(x.get("experiment") == "e5" and x.get("before_campaign_env") and x.get("result_ok")
+               for x in lines)
+
+
+def run_pipedpeer(ctx, n, phase, repeat, extra, script, early=False):
     b = ctx.backend("pipedpeer")
     logdir = ctx.recorder.log_dir(ctx.recorder.new_run_id())
     try:
@@ -76,6 +99,7 @@ def run_pipedpeer(ctx, n, phase, repeat, extra, script):
                                    "repeat": repeat, "error": str(e), "failing_pc": e.host, "result_ok": False})
     wl = Workload({"id": "E5-env", "script": script, "result_regex": r"E5-ENV-OK.*"})
     flags = ["-v"] + (["--pkg", extra] if extra else [])
+    stores = probes.store_snapshot(ctx, hosts)
     before = probes.netdev(ctx, hosts)
     res = b.run(wl, {"E5_EXTRA": extra or ""}, logdir, n, extra_flags=flags)
     with open(os.path.join(logdir, "output.log"), "w") as f:
@@ -96,13 +120,19 @@ def run_pipedpeer(ctx, n, phase, repeat, extra, script):
                 break
             time.sleep(2)
     after = probes.netdev(ctx, hosts)
+    names = probes.closure(ctx, ctx.inv.head.id, store) if store else []
+    present = probes.present_before(ctx, hosts, names)
+    ctx.log("E5 pipedpeer %s: closure %d paths; held before the run: %s" % (
+        phase, len(names), ", ".join("%s %s" % kv for kv in sorted(present.items())) or "unknown"))
     # The job runs on pc00, which builds the env (cold) or finds it built.
     on_pc00 = "built" if "Built successfully" in res["out"] else "already built"
     ok = res["rc"] == 0 and not missing and "E5-ENV-OK" in res["out"]
     more = {"store_path": store, "closure_on_pc00": on_pc00, "receipt": res.get("receipt"),
             "record_path": res.get("record_path"), "rc": res["rc"],
             "all_have_s": round((all_have_ns - res["start_ns"]) / 1e9, 3) if all_have_ns else None,
-            "missing_pcs": missing or None}
+            "missing_pcs": missing or None, "closure_paths": len(names) or None,
+            "present_before": present or None, "store_entries_before": stores or None,
+            "before_campaign_env": early}
     if missing:
         more["failing_pc"] = missing[0]
     return record(ctx, "pipedpeer", phase, repeat, n, hosts, res["start_ns"], res["end_ns"],
@@ -165,6 +195,11 @@ def main(ctx):
     n = ctx.ns([32])[-1]
     names = SMALL if ctx.rehearsal else FULL
     script = HERE + ("e5_env_small.py" if ctx.rehearsal else "e5_env.py")
+    if ctx.args.part == "pipedpeer-cold":
+        # The day's prep.e5cold: no campaign env on the PCs yet (no pins).
+        ctx.log("E5 at N=%d: pipedpeer's cold ship only, before the campaign env" % n)
+        run_pipedpeer(ctx, n, "cold", 0, None, script, early=True)
+        return
     try:
         pinlist = pins(ctx, names)
     except systems.StepError as e:
@@ -188,7 +223,11 @@ def main(ctx):
         else:
             run_ray(ctx, n, phase, repeat, extra, pinlist)
 
+    early = cold_done(ctx)
     for m in methods:  # cold in a fixed order: pipedpeer's cold must come first on fresh PCs
+        if m == "pipedpeer" and early:
+            ctx.log("E5 pipedpeer cold: done before the campaign env (prep.e5cold), not repeated")
+            continue
         one(m, "cold", 0, None)
     for r in range(1, min(ctx.repeats(3), len(EXTRAS)) + 1):
         for m in ctx.rng.sample(methods, len(methods)):

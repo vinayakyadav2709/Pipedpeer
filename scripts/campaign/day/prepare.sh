@@ -276,6 +276,21 @@ node_ids() {
   say "node ids: $(($(wc -l <"$RESULTS/node-ids.csv") - 1)) PCs in results/lab/node-ids.csv"
 }
 
+# prep_e5cold: E5's cold pipedpeer ship (experiments/e5.py), before
+# prep_nixenv. The campaign env shares nixpkgs with pipedpeer's closures, so
+# after it the workers would hold most of E5's closure and "cold" would not
+# be. The profile's e5 row runs the rest of E5 (pip, Ray, the updates) and
+# skips this run. A failure is recorded, never fatal; the row then runs it.
+prep_e5cold() {
+  local row; row=$(printf '%s\n' "${EXPS[@]}" | awk '$1=="e5"')
+  [[ -n $row ]] || return 0
+  local -a args; read -r -a args <<<"$row"
+  (cd "$REPO" && PL_SYNC=0 bash "$CAMP/run.sh" e5 --inventory "$INV" "${args[@]:2}" --part pipedpeer-cold) 2>&1 |
+    tee "$RESULTS/logs/day/e5-cold.log"
+  ((PIPESTATUS[0] == 0)) || blocker "e5 cold ship before the env failed (results/lab/logs/day/e5-cold.log); the e5 row runs it later"
+  return 0
+}
+
 # prep_nixenv: pc00 builds the campaign env from cache.nixos.org and writes
 # its closure, and the flake's inputs, into a binary cache it serves; each
 # worker pulls from there as root (no signatures needed, no nix.conf change),

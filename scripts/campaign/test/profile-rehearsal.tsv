@@ -5,19 +5,27 @@
 # prep.firstjob, as in the lab. Sizes are the day's own calibration at a 10 s
 # target (LAB_CAL_STRONG_S), except where --rehearsal picks smoke sizes and
 # rehearse.sh's settings: e4 (caps 2/1/1), e5 (numpy and joblib, not torch),
-# e8 (one epoch), e12 (1 -> 2 PCs, 2 -> 3 for pipedpeer), e13 (N=2, a kill
-# every 10 s) and e15 (N=2); e12, e13 and e15 get jobs long enough to outlast
-# a join, a kill or a delay change. e1's N=4 is one more than Ray and Dask
+# e8 (one epoch), e12 (1 -> 2 PCs, 2 -> 3 for pipedpeer, a join every 10 s),
+# e13 (N=2, a kill every 10 s), e15 (N=2), e17 (20 s idle), e20 (the smoke
+# sizes); e13 and e15 get jobs long enough to outlast a kill or a delay
+# change. e12 is 13 x the calibrated strong size (e12.py), about 130 s of
+# one PC: the joiner works for most of the run. E5's cold pipedpeer ship
+# runs at prep.e5cold, before the env, from this row's arguments. e1's N=4 is one more than Ray and Dask
 # have workers for: those runs must be recorded as failed while e1 goes on.
 # --size is per PC in weak mode (e13), so 10000 there is 20000 at N=2.
 # step	est_min	arguments
 e1	20	--n 1,2,4 --repeats 1
 e1b	6	--n 1,3 --repeats 1
+e16	4	--n 3 --repeats 1
 e4	5	--rehearsal --n 3 --repeats 1
 e5	8	--rehearsal --n 3 --repeats 1
 e6	6	--n 3 --repeats 1
-e12	8	--rehearsal --size W1:BENCH_ITEMS=20000
+e12	8	--rehearsal
 e13	8	--rehearsal --size W1:BENCH_ITEMS=10000
 e15	8	--rehearsal --size W1:BENCH_ITEMS=2000
+e17	4	--rehearsal --n 3
+e18	4	--n 2
+e19	5	--rehearsal --n 3
+e20	6	--rehearsal --n 3 --repeats 1
 e7	2	--repeats 1
 e8	10	--rehearsal --n 2 --repeats 1
