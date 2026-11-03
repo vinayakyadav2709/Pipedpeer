@@ -3,7 +3,7 @@ Journal of Parallel and Distributed Computing
 
 Dear Editor,
 
-We submit the manuscript "PipedPeer: Running Unmodified Python Across a Small Group's Machines Without a Configured Cluster" for consideration as a research paper in the Journal of Parallel and Distributed Computing.
+We submit the manuscript “PipedPeer: Running Unmodified Python Across a Small Group's Machines Without a Configured Cluster” for consideration as a research paper in the Journal of Parallel and Distributed Computing.
 
 Cluster frameworks such as Spark, Ray and Dask assume a configured cluster, a program written against their interface, and machines that can reach one another. The manuscript presents PipedPeer, a system that removes all three assumptions for Python. It makes the following contributions:
 
