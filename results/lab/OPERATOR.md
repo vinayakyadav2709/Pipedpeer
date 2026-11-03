@@ -20,7 +20,7 @@ Background, if you want it: [scripts/campaign/HEADLESS.md](../../scripts/campaig
    scripts/campaign/publish.sh
    ```
 
-   Press Enter for a generated passphrase and write it on paper. Your Cloudflare upload credentials (`~/.config/pipedpeer-lab/ingest.env`) go into the encrypted bundle.
+   It needs `go` and a logged-in `gh`: it builds pipedpeer at this commit and uploads it as the GitHub prerelease `lab-<commit>` (the lab installs exactly that build). Press Enter for a generated passphrase and write it on paper, with the commit it prints. Your Cloudflare upload credentials (`~/.config/pipedpeer-lab/ingest.env`) go into the encrypted bundle.
 2. Commit the two files it lists, `landing/public/lab.sh` and `landing/public/lab-secrets.enc`, to `dev` and push. Wait for the Pages deploy to finish (GitHub, Actions tab).
 3. Check the live site:
 
@@ -29,7 +29,7 @@ Background, if you want it: [scripts/campaign/HEADLESS.md](../../scripts/campaig
    scripts/campaign/ingest/ingest.sh selftest
    ```
 
-   The first command asks for the passphrase and must end with no error. The second must print `selftest ok`. It leaves one 4 kB object under `selftest/` in the bucket.
+   The first command checks the published files, the code tarball and the pipedpeer release, asks for the passphrase, and must end with `selftest passed`. The second must print `selftest ok`. It leaves one 4 kB object under `selftest/` in the bucket.
 
 ## In the lab
 
@@ -177,5 +177,6 @@ bash Pipedpeer-<commit>/scripts/campaign/bootstrap-ssh.sh <lab subnet, e.g. 10.2
    ```
 
 2. Delete the campaign SSH key: `rm ~/.config/pipedpeer-lab/campaign_ed25519 ~/.config/pipedpeer-lab/campaign_ed25519.pub`.
-3. Remove the bundle from `dev`: `git rm landing/public/lab-secrets.enc`, restore the placeholders with `git checkout <commit before publish> -- landing/public/lab.sh`, commit and push. Git history keeps the old bundle, but it now holds a deleted key and a dead token.
-4. Read the data back with `npx wrangler r2 object get pipedpeer-lab/<key> --remote --profile personal`, or ask your agent to fetch `raw/` and start the analysis.
+3. Delete the lab's pipedpeer release: `gh release delete lab-<commit> --cleanup-tag -R vinayakyadav2709/Pipedpeer`.
+4. Remove the bundle from `dev`: `git rm landing/public/lab-secrets.enc`, restore the placeholders with `git checkout <commit before publish> -- landing/public/lab.sh`, commit and push. Git history keeps the old bundle, but it now holds a deleted key and a dead token.
+5. Read the data back with `npx wrangler r2 object get pipedpeer-lab/<key> --remote --profile personal`, or ask your agent to fetch `raw/` and start the analysis.
