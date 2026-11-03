@@ -3,6 +3,7 @@ package setup
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -261,11 +262,23 @@ func TrustAfterJoin() error {
 		return err
 	}
 	if step == trustNotNeeded || (step != trustApply && helperReady()) {
-		return nil
+		return joinSubstituter()
 	}
 	fmt.Println("this machine's nix accepts only the signing keys listed in nix.conf; " +
 		"installing pipedpeer's key helper so the daemon can add the cluster's (sudo):")
-	return applyTrust(missing)
+	if err := applyTrust(missing); err != nil {
+		return err
+	}
+	return joinSubstituter()
+}
+
+// joinSubstituter lets the peer cache be set up after a join, without
+// prompting; a machine that needs `pipedpeer setup` for it is not an error.
+func joinSubstituter() error {
+	if err := ensureSubstituter(io.Discard, false, false); err != nil && !errors.Is(err, ErrNeedsSetup) {
+		return err
+	}
+	return nil
 }
 
 // applyTrust has the key helper add keys, installing it first (the one sudo
@@ -660,8 +673,16 @@ func startDaemon(nodeID string, port int, mustRestart bool) (created bool, err e
 	return created, nil
 }
 
+// Options are setup's inputs.
+type Options struct {
+	AutoYes, NoInstall bool
+	Port               int  // daemonctl.DefaultPort from the command
+	Joining            bool // --connect given: no invite line from startAndReport
+}
+
 // Run executes the setup flow. Returns the daemon port if started.
-func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
+func Run(o Options) (int, error) {
+	autoYes, noInstall, daemonPort := o.AutoYes, o.NoInstall, o.Port
 	fmt.Println()
 	fmt.Println("  Pipedpeer setup")
 	fmt.Println()
@@ -670,17 +691,20 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	// no crun, systemd or firewall to set up (Android allows none of them).
 	if phone.InProot() {
 		phone.ProotSetup(os.Stdout, nixgen.NixpkgsRef)
-		return startAndReport(daemonPort, false)
+		return startAndReport(daemonPort, false, o.Joining)
 	}
 
 	// A phone in Termux becomes a full node in a proot Debian with Nix, and
 	// this same command reruns there (phone.Launch, which exits). When that
 	// cannot be set up it becomes a pool-only worker on Termux's python.
 	if phone.IsTermux() {
+		if err := termuxPrep(os.Stdout, autoYes, noInstall); err != nil {
+			term.Warn(os.Stdout, "phone preparation incomplete (continuing): %v", err)
+		}
 		if err := phone.SetupTermux(os.Stdout, os.Args[1:], daemonctl.Stop); err != nil {
 			return 0, fmt.Errorf("phone setup: %w", err)
 		}
-		return startAndReport(daemonPort, false)
+		return startAndReport(daemonPort, false, o.Joining)
 	}
 
 	results := checkAll()
@@ -733,12 +757,16 @@ func Run(autoYes, noInstall bool, daemonPort int) (int, error) {
 	// Ports before the daemon: peers that find it should be able to reach it.
 	networkReport(autoYes)
 
-	return startAndReport(daemonPort, profileLoaded || serviceNew)
+	if err := ensureSubstituter(os.Stdout, true, autoYes); err != nil {
+		term.Warn(os.Stdout, "peer cache for nix not set up: %v", err)
+	}
+
+	return startAndReport(daemonPort, profileLoaded || serviceNew, o.Joining)
 }
 
 // startAndReport starts the daemon under this machine's identity and prints
 // the invite line when it created the cluster.
-func startAndReport(daemonPort int, mustRestart bool) (int, error) {
+func startAndReport(daemonPort int, mustRestart, joining bool) (int, error) {
 	nodeID, err := identity.GetOrCreate()
 	if err != nil {
 		return 0, fmt.Errorf("identity: %w", err)
@@ -751,7 +779,7 @@ func startAndReport(daemonPort int, mustRestart bool) (int, error) {
 	}
 
 	fmt.Println()
-	if created {
+	if created && !joining {
 		code, err := InviteCode()
 		if err != nil {
 			return daemonPort, err

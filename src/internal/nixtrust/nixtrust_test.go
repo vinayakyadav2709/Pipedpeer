@@ -3,8 +3,10 @@ package nixtrust
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,5 +150,97 @@ func TestCallsGoThroughSudoWithoutAPrompt(t *testing.T) {
 		if i >= len(ran) || strings.Join(ran[i], " ") != w {
 			t.Errorf("call %d = %v, want %s", i, ran, w)
 		}
+	}
+}
+
+func TestFileContentCarriesTheSubstituterAndParseKeepsIt(t *testing.T) {
+	k := newKey(t)
+	body := FileContent([]string{k})
+	if !strings.Contains(body, keysSetting+" = "+k) || !strings.Contains(body, "extra-trusted-substituters = http://127.0.0.1:4242/nix-cache") {
+		t.Fatalf("content:\n%s", body)
+	}
+	if got := parseKeys(body); !slices.Equal(got, []string{k}) {
+		t.Errorf("parseKeys = %v", got)
+	}
+	old := "# x\n" + keysSetting + " = " + k + "\n"
+	if got := parseKeys(old); !slices.Equal(got, []string{k}) {
+		t.Errorf("old file: parseKeys = %v", got)
+	}
+}
+
+func TestSyncRewritesOnlyWhenContentDiffers(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "keys.conf")
+	k1, k2 := newKey(t), newKey(t)
+	restarts := 0
+	restart := func() error { restarts++; return nil }
+	if err := os.WriteFile(file, []byte(keysSetting+" = "+k1+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"sync"}, file, restart); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := os.ReadFile(file)
+	if string(body) != FileContent([]string{k1}) || restarts != 1 {
+		t.Fatalf("after sync of old file: restarts=%d\n%s", restarts, body)
+	}
+	if err := run([]string{"sync"}, file, restart); err != nil || restarts != 1 {
+		t.Errorf("sync of a current file: err=%v restarts=%d", err, restarts)
+	}
+	if err := run([]string{"add", k2}, file, restart); err != nil || restarts != 2 {
+		t.Fatalf("add: err=%v restarts=%d", err, restarts)
+	}
+	body, _ = os.ReadFile(file)
+	if string(body) != FileContent([]string{k1, k2}) {
+		t.Errorf("after add:\n%s", body)
+	}
+}
+
+func TestNoVerbIsAUsageErrorThatMentionsSync(t *testing.T) {
+	err := run(nil, filepath.Join(t.TempDir(), "k"), func() error { return nil })
+	if !errors.Is(err, errUsage) || !strings.Contains(err.Error(), "| sync") {
+		t.Fatalf("err = %v", err)
+	}
+	if err := run([]string{"sync", "x"}, filepath.Join(t.TempDir(), "k"), func() error { return nil }); err == nil {
+		t.Error("sync with arguments was accepted")
+	}
+}
+
+func TestSyncMapsAnOldHelperToErrOldHelper(t *testing.T) {
+	ge, ex := geteuid, execute
+	t.Cleanup(func() { geteuid, execute = ge, ex })
+	geteuid = func() int { return 0 }
+	execute = func(a []string) ([]byte, error) {
+		return []byte("pipedpeer-nix-trust: usage: pipedpeer-nix-trust add|remove <key> [key ...]\n"), errors.New("exit status 2")
+	}
+	if err := Sync(); !errors.Is(err, ErrOldHelper) {
+		t.Errorf("old helper: %v", err)
+	}
+	execute = func(a []string) ([]byte, error) {
+		return []byte("usage: pipedpeer-nix-trust add|remove <key> [key ...] | sync"), errors.New("exit status 2")
+	}
+	if err := Sync(); err == nil || errors.Is(err, ErrOldHelper) {
+		t.Errorf("new helper failing: %v", err)
+	}
+	var ran []string
+	execute = func(a []string) ([]byte, error) { ran = a; return nil, nil }
+	if err := Sync(); err != nil || strings.Join(ran, " ") != HelperPath+" sync" {
+		t.Errorf("ok sync: %v %v", err, ran)
+	}
+}
+
+func TestSubstituterListedReadsTheKeysFile(t *testing.T) {
+	kf := keysFile
+	t.Cleanup(func() { keysFile = kf })
+	keysFile = filepath.Join(t.TempDir(), "keys.conf")
+	if SubstituterListed() {
+		t.Error("missing file reported listed")
+	}
+	os.WriteFile(keysFile, []byte(keysSetting+" = "+newKey(t)+"\n"), 0o644)
+	if SubstituterListed() {
+		t.Error("old file reported listed")
+	}
+	os.WriteFile(keysFile, []byte(FileContent(nil)), 0o644)
+	if !SubstituterListed() {
+		t.Error("current file not listed")
 	}
 }

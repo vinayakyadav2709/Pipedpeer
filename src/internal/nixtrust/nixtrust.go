@@ -41,8 +41,23 @@ const (
 	IncludeLine = "!include " + KeysFile
 
 	keysSetting = "extra-trusted-public-keys"
+	subsSetting = "extra-trusted-substituters"
 	maxKeys     = 256
+
+	// SubstituterURL is the local daemon's peer cache. A multi-user nix-daemon
+	// lets an untrusted client name only substituters listed as trusted, so the
+	// helper writes this one into KeysFile.
+	SubstituterURL = "http://127.0.0.1:4242/nix-cache"
+
+	substituterLine = subsSetting + " = " + SubstituterURL
+	usageText       = "usage: pipedpeer-nix-trust add|remove <key> [key ...] | sync"
 )
+
+// ErrOldHelper means the installed helper predates the peer cache.
+var ErrOldHelper = errors.New("nix trust helper predates the peer cache")
+
+// errUsage marks a bad command line; Main exits 2 for it.
+var errUsage = errors.New(usageText)
 
 // keyRE is the exact shape nixsign.PublicKeyFor produces: a pipedpeer name
 // over a 16-hex fingerprint, and 32 bytes of base64 (43 chars and one pad).
@@ -71,7 +86,7 @@ func FileContent(keys []string) string {
 	if len(keys) > 0 {
 		s += keysSetting + " = " + strings.Join(keys, " ") + "\n"
 	}
-	return s
+	return s + substituterLine + "\n"
 }
 
 // parseKeys reads the keys back from a KeysFile. The file is the helper's
@@ -82,6 +97,9 @@ func parseKeys(body string) []string {
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if line == substituterLine {
 			continue
 		}
 		name, val, ok := strings.Cut(line, "=")
@@ -117,7 +135,7 @@ func apply(have []string, verb string, keys []string) []string {
 	return next
 }
 
-// Main is the helper: `add|remove <key>...`. Nothing else is accepted.
+// Main is the helper: `add|remove <key>...` or `sync`. Nothing else is accepted.
 func Main(args []string) int {
 	// sudo resets the environment, but a root daemon calls this directly.
 	os.Setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
@@ -128,14 +146,18 @@ func Main(args []string) int {
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pipedpeer-nix-trust:", err)
+		if errors.Is(err, errUsage) {
+			return 2
+		}
 		return 1
 	}
 	return 0
 }
 
 func run(args []string, file string, restart func() error) error {
-	if len(args) < 2 || (args[0] != "add" && args[0] != "remove") {
-		return errors.New("usage: pipedpeer-nix-trust add|remove <key> [key ...]")
+	sync := len(args) == 1 && args[0] == "sync"
+	if !sync && (len(args) < 2 || (args[0] != "add" && args[0] != "remove")) {
+		return errUsage
 	}
 	if len(args)-1 > maxKeys {
 		return fmt.Errorf("at most %d keys at once", maxKeys)
@@ -150,20 +172,33 @@ func run(args []string, file string, restart func() error) error {
 		return err
 	}
 	have := parseKeys(string(body))
-	next := apply(have, args[0], args[1:])
+	next := have
+	if !sync {
+		next = apply(have, args[0], args[1:])
+	}
 	if slices.Equal(have, next) && FileContent(next) == string(body) {
 		return nil
 	}
+	hadSubstituter := hasSubstituterLine(string(body))
 	if err := writeAtomic(file, FileContent(next)); err != nil {
 		return err
 	}
-	if slices.Equal(have, next) {
-		return nil // only the file's form changed; nix sees the same keys
+	if slices.Equal(have, next) && hadSubstituter {
+		return nil // only the file's form changed; nix sees the same settings
 	}
 	if err := restart(); err != nil {
 		return fmt.Errorf("keys written, but restarting nix-daemon failed: %w", err)
 	}
 	return nil
+}
+
+func hasSubstituterLine(body string) bool {
+	for _, l := range strings.Split(body, "\n") {
+		if strings.TrimSpace(l) == substituterLine {
+			return true
+		}
+	}
+	return false
 }
 
 func writeAtomic(file, content string) error {
@@ -264,8 +299,9 @@ func Installed() bool {
 
 // Seams for tests.
 var (
-	geteuid = os.Geteuid
-	execute = func(argv []string) ([]byte, error) {
+	geteuid  = os.Geteuid
+	keysFile = KeysFile
+	execute  = func(argv []string) ([]byte, error) {
 		return termuxexec.Command(argv[0], argv[1:]...).CombinedOutput()
 	}
 )
@@ -297,6 +333,33 @@ func Add(keys []string) error { return call("add", keys) }
 
 // Remove has the helper stop trusting keys.
 func Remove(keys []string) error { return call("remove", keys) }
+
+// SubstituterListed reports whether KeysFile carries the substituter line, so
+// a multi-user nix-daemon accepts the local peer cache from an untrusted client.
+func SubstituterListed() bool {
+	body, err := os.ReadFile(keysFile)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "pipedpeer: reading %s: %v\n", keysFile, err)
+		}
+		return false
+	}
+	return hasSubstituterLine(string(body))
+}
+
+// Sync has the helper rewrite KeysFile with the current keys and the
+// substituter line. An old helper answers with its usage: ErrOldHelper.
+func Sync() error {
+	out, err := execute(argv("sync"))
+	if err == nil {
+		return nil
+	}
+	text := strings.TrimSpace(string(out))
+	if strings.Contains(text, "add|remove <key> [key ...]") && !strings.Contains(text, "| sync") {
+		return ErrOldHelper
+	}
+	return fmt.Errorf("%s sync: %w: %s", HelperPath, err, text)
+}
 
 func call(verb string, keys []string) error {
 	if len(keys) == 0 {
