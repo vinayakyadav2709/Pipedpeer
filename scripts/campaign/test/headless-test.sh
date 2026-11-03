@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
-# Rehearsal of the headless lab day on systemd containers (HEADLESS.md):
+# Rehearsal of the whole headless lab day on systemd containers (HEADLESS.md):
 #   scripts/campaign/test/headless-test.sh [--keep]
-# Four lab PC stand-ins on their own podman network (LAB_PCS=4):
+# Four lab PC stand-ins on their own podman network (LAB_PCS=4), 2 CPUs each:
 #   pc00  Ubuntu 24.04, ufw active, no python3-venv: runs lab.sh head
 #   w1    Ubuntu, ufw active          w2  Fedora, firewalld      w3  Ubuntu
-# The host side stands in for the internet: a local http server for GitHub
-# Pages (lab.sh filled in the way publish.sh does, lab-secrets.enc encrypted
-# with a test passphrase) and for codeload (the working tree as a tarball,
-# with rehearsal stand-ins from headless-stubs/ for what needs crun, Nix or
-# the runner), and `rclone serve s3` for R2.
+#
+# Everything on the PCs is the real thing: lab.sh, the passphrase on
+# /dev/tty, the systemd unit, scan.sh, Ansible over SSH, pipedpeer (built
+# from this checkout, installed by install-pipedpeer.sh with its checksum,
+# `pipedpeer setup -y` putting in Nix with the Determinate installer and
+# crun), the Nix env distributed from pc00's binary cache, calibrate.sh,
+# run.sh with real Ray, Dask and torchrun, analyse.py, every trace
+# (collectors, pp-poll.py, tcpdump), sync-r2.sh through ingest.sh, cleanup
+# and undo. What stands in, and why (HEADLESS.md, "Rehearsal"):
+#   - The host side plays the internet: a local http server for GitHub Pages,
+#     codeload and the pipedpeer release, and test/ingest-standin.py (the
+#     ingest Worker's routes and caps, a directory for the bucket) so no
+#     rehearsal data reaches the real R2 bucket.
+#   - pc00's /nix is a copy of the pipedpeer-lab-nix volume (PL_NIX_VOLUME),
+#     where the 2.5 GiB campaign env is already built, so pc00 "had Nix"
+#     and does not download the env from cache.nixos.org. The workers start
+#     without Nix and get everything else for real.
+#   - Containers see all the host's CPUs: --cpus 2, PL_NPROC=2 and
+#     PYTHON_CPU_COUNT=2 make them 2-core PCs.
+#   - test/profile-rehearsal.tsv: N to what four PCs fit, one repeat, a 10 s
+#     strong target for calibration.
 #
 # It snapshots every PC, runs the worker line on w1-w3, then the head line on
-# pc00 through a pty (the passphrase is read from /dev/tty), kills the
-# pipedpeer-lab-day unit midway through the experiments, runs the head line
-# again, and checks: the day resumed (finished steps skipped, the cut-off
-# experiment marked interrupted and run again), R2 has the results with the
-# local count, the summary says ALL DONE, and every PC's snapshot after the
-# day equals the one before. Containers are removed at the end; images stay.
-# Needs rootless podman (the host side runs in its network namespace).
+# pc00 through a pty, kills the pipedpeer-lab-day unit during e4, runs the
+# head line again, and checks: the resume, the uploads, the traces, the
+# summary, and that every PC's snapshot after the day equals the one before.
+# Needs rootless podman; about 5.5 GB of RAM and 25 GB of disk.
 # shellcheck disable=SC2015,SC2016  # pass||fail lines; remote snippets
 set -euo pipefail
 
@@ -28,13 +41,18 @@ keep=0; [[ ${1:-} == --keep ]] && keep=1
 rt=podman
 tag=pphl-$$
 net=$tag
-work=$(mktemp -d)
-port=8100 s3port=9000
+# On disk, not /tmp: the bucket stand-in and the pc00 store copy are gigabytes.
+work=$(mktemp -d -p "${XDG_CACHE_HOME:-$HOME/.cache}" pipedpeer-headless.XXXXXX)
+port=8100 ingest_port=8101
 pcs=(pc00 w1 w2 w3)
 pass_phrase="rehearsal horse battery staple lab day"
+token=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+nixvol_src=${PL_NIX_VOLUME:-pipedpeer-lab-nix}
+nixvol=$tag-nix
 fails=0
+t_start=$(date +%s)
 
-say()  { printf '\n=== %s\n' "$*"; }
+say()  { printf '\n=== [%s] %s\n' "$(date +%T)" "$*"; }
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; fails=$((fails + 1)); }
 
@@ -43,35 +61,55 @@ in_net() { podman unshare --rootless-netns "$@"; }
 cleanup() {
   set +e
   [[ -f $work/http.pid ]] && in_net kill "$(cat "$work/http.pid")" 2>/dev/null
-  [[ -f $work/s3.pid ]] && in_net kill "$(cat "$work/s3.pid")" 2>/dev/null
+  [[ -f $work/ingest.pid ]] && in_net kill "$(cat "$work/ingest.pid")" 2>/dev/null
   if ((keep == 0)); then
     for p in "${pcs[@]}"; do $rt rm -f -t 0 "$tag-$p" >/dev/null 2>&1; done
     $rt network rm "$net" >/dev/null 2>&1
-    rm -rf "$work"
+    $rt volume rm -f "$nixvol" >/dev/null 2>&1
+    # The bucket stand-in and the store copy belong to container uids.
+    $rt unshare rm -rf "$work"
   else
-    echo "kept: containers $tag-*, network $net, $work"
+    echo "kept: containers $tag-*, network $net, volume $nixvol, $work"
   fi
 }
 trap cleanup EXIT
 
-say "build images"
+# Memory: every container is capped (no swap); the set waits for room.
+source "$repo/scripts/lib/lab.sh"
+pp_lab_mem_check "$(( (1536 + 3 * 1280) * 1048576 ))" headless-test
+
+say "build images and pipedpeer"
 for os in ubuntu fedora; do
   $rt build -q -t "pipedpeer-labpc-$os" -f "$here/Dockerfile.$os" "$here" >"$work/build-$os.log" 2>&1 \
     || { cat "$work/build-$os.log"; echo "image build failed"; exit 1; }
 done
+rel=$work/site/releases/download/nightly-rehearsal
+mkdir -p "$rel"
+(cd "$repo/src" && CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -o "$rel/pipedpeer-linux-amd64" .)
+(cd "$rel" && sha256sum pipedpeer-linux-amd64 >checksums.txt)
+echo "pipedpeer $("$rel/pipedpeer-linux-amd64" --version 2>&1 | tail -n1)"
+
+say "pc00's /nix: a copy of the $nixvol_src volume"
+src_mp=$($rt volume inspect "$nixvol_src" --format '{{.Mountpoint}}') || { echo "no volume $nixvol_src"; exit 1; }
+$rt volume create "$nixvol" >/dev/null
+dst_mp=$($rt volume inspect "$nixvol" --format '{{.Mountpoint}}')
+$rt unshare cp -a "$src_mp/." "$dst_mp/"
+echo "copied $(du -sh "$dst_mp" | cut -f1)"
+
 $rt network create "$net" >/dev/null
 gw=$($rt network inspect "$net" --format '{{range .Subnets}}{{.Gateway}}{{end}}')
 site=http://$gw:$port
-echo "network $net, site $site, S3 http://$gw:$s3port"
+echo "network $net, site $site, ingest http://$gw:$ingest_port"
 
-run_pc() {  # run_pc <name> <image> <memory>
-  podman run -d --name "$tag-$1" --hostname "$1" --network "$net" --memory "$3" \
-    --cap-add NET_ADMIN,NET_RAW --systemd=always "$2" >/dev/null
+run_pc() {  # run_pc <name> <image> <memory> [podman args]
+  local n=$1 img=$2 mem=$3; shift 3
+  podman run -d --name "$tag-$n" --hostname "$n" --network "$net" --memory "$mem" --memory-swap "$mem" \
+    --cpus 2 --shm-size 256m --pids-limit 32768 --privileged --systemd=always "$@" "$img" >/dev/null
 }
-run_pc pc00 pipedpeer-labpc-ubuntu 1g
-run_pc w1 pipedpeer-labpc-ubuntu 768m
-run_pc w2 pipedpeer-labpc-fedora 768m
-run_pc w3 pipedpeer-labpc-ubuntu 768m
+run_pc pc00 pipedpeer-labpc-ubuntu 1536m -v "$nixvol:/nix"
+run_pc w1 pipedpeer-labpc-ubuntu 1280m
+run_pc w2 pipedpeer-labpc-fedora 1280m
+run_pc w3 pipedpeer-labpc-ubuntu 1280m
 x()     { $rt exec "$tag-$1" bash -c "$2"; }
 x_lab() { $rt exec -u lab -w /home/lab "$tag-$1" bash -c "$2"; }
 for p in "${pcs[@]}"; do
@@ -80,36 +118,37 @@ for p in "${pcs[@]}"; do
     [[ $st == running || $st == degraded ]] && break
     sleep 0.5
   done
+  # Each PC its own machine id, as on real PCs (the image ships one, and the
+  # daemon's machine key hashes it).
+  x "$p" 'tr -d - </proc/sys/kernel/random/uuid >/etc/machine-id'
+  # 2-core PCs for Python (multiprocessing, joblib) in every session and unit.
+  x "$p" 'echo PYTHON_CPU_COUNT=2 >>/etc/environment; mkdir -p /etc/systemd/system.conf.d
+    printf "[Manager]\nDefaultEnvironment=PYTHON_CPU_COUNT=2\n" >/etc/systemd/system.conf.d/cpus.conf; systemctl daemon-reexec'
 done
 for p in pc00 w1 w3; do x "$p" 'ufw --force enable >/dev/null'; done
+# A lab PC that already had single-user Nix, with the env built.
+x pc00 'chown -R lab:lab /nix'
 
-say "stand-ins for Pages, codeload and R2"
-mkdir -p "$work/site" "$work/cfg" "$work/s3/pipedpeer-lab" "$work/tree"
+say "stand-ins for Pages, codeload, the release and the ingest Worker"
+mkdir -p "$work/cfg" "$work/bucket" "$work/tree"
 ssh-keygen -q -t ed25519 -N '' -C test -f "$work/cfg/campaign_ed25519"
-printf 'R2_ACCOUNT_ID=rehearsal\nR2_ACCESS_KEY_ID=TESTKEY\nR2_SECRET_ACCESS_KEY=TESTSECRET\n' >"$work/cfg/r2.env"
+printf 'INGEST_URL=http://%s:%s\nINGEST_TOKEN=%s\n' "$gw" "$ingest_port" "$token" >"$work/cfg/r2.env"
 chmod 600 "$work/cfg/r2.env"
-# The code tarball: the working tree (committed or not), with the stand-ins.
+# The code tarball: the working tree (committed or not), as codeload serves it.
 commit=$(git -C "$repo" rev-parse HEAD)
 (cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -cf - 2>/dev/null) | tar -xf - -C "$work/tree"
-s=$camp/test/headless-stubs
-cp "$s/install-pipedpeer.sh" "$work/tree/scripts/install-pipedpeer.sh"
-cp "$s/env-install.sh" "$work/tree/scripts/campaign/env/install.sh"
-cp "$s/calibrate.sh" "$work/tree/scripts/campaign/calibrate.sh"
-# lab/runner's run.sh and analyse.py need real pipedpeer, Ray and Dask: stand-ins.
-cp "$s/run.sh" "$work/tree/scripts/campaign/run.sh"
-cp "$s/analyse.py" "$work/tree/scripts/campaign/analyse.py"
-tar -C "$work/tree/.." -czf "$work/site/code.tar.gz" --transform "s|^tree|Pipedpeer-$commit|" tree
-# lab.sh and the bundle, as publish.sh makes them.
+rm -rf "$work/tree/results/lab/rehearsal" "$work/tree/results/lab/runs.jsonl"
+tar -C "$work" -czf "$work/site/code.tar.gz" --transform "s|^tree|Pipedpeer-$commit|" tree
 bash "$camp/lab-fill.sh" fill "$camp/lab.sh" "$work/site/lab.sh" "$(cat "$work/cfg/campaign_ed25519.pub")" "$commit" "$site" rehearsal
 bash "$camp/lab-fill.sh" check "$work/site/lab.sh" >/dev/null && pass "site lab.sh is lab.sh with the published lines filled" || fail "site lab.sh"
 tar -C "$work/cfg" -czf - campaign_ed25519 r2.env |
   openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt -out "$work/site/lab-secrets.enc" -pass fd:3 3< <(printf '%s\n' "$pass_phrase")
 in_net sh -c "cd '$work/site' && exec python3 -m http.server $port --bind $gw >'$work/http.log' 2>&1 & echo \$! >'$work/http.pid'"
-# shellcheck source=../otel/lib.sh
-( export PIPEDPEER_LAB_HOME=$work/rclone; source "$camp/otel/lib.sh"; lab_install_rclone >/dev/null )
-in_net sh -c "exec '$work/rclone/bin/rclone' serve s3 --auth-key TESTKEY,TESTSECRET --addr $gw:$s3port '$work/s3' >'$work/s3.log' 2>&1 & echo \$! >'$work/s3.pid'"
+in_net sh -c "INGEST_TOKEN='$token' exec python3 '$here/ingest-standin.py' $gw $ingest_port '$work/bucket' >'$work/ingest.log' 2>&1 & echo \$! >'$work/ingest.pid'"
 sleep 2
 in_net curl -fsS -o /dev/null "$site/lab.sh" && pass "site serves lab.sh" || fail "site down"
+in_net env INGEST_URL="http://$gw:$ingest_port" INGEST_TOKEN="$token" bash "$camp/ingest/ingest.sh" usage >/dev/null &&
+  pass "ingest stand-in answers" || fail "ingest stand-in down"
 
 snapshot() {
   x "$1" '
@@ -123,10 +162,12 @@ snapshot() {
     find /home/lab -type f -exec sha256sum {} + 2>/dev/null | sort
     echo "== sudoers"; find /etc/sudoers.d -printf "%p %M %u %g\n" | sort; sha256sum /etc/sudoers.d/* | sort
     echo "== etc-ssh"; find /etc/ssh -printf "%p %M\n" 2>/dev/null | sort
+    echo "== etc-nix"; ls -A /etc/nix 2>&1; echo "== profile.d"; ls -A /etc/profile.d
     echo "== bin"; ls -A /usr/local/bin
     echo "== tmp"; find /tmp /var/tmp -maxdepth 1 -user lab 2>/dev/null | sort
     echo "== nix"; ls -d /nix 2>&1
     echo "== run"; ls -d /run/pipedpeer-lab /var/lib/pipedpeer-lab 2>&1
+    echo "== lab processes"; ps -u lab -o comm= 2>/dev/null | sort
     echo "== firewall"
     if command -v ufw >/dev/null; then ufw status verbose; sha256sum /etc/ufw/user.rules /etc/ufw/user6.rules; fi
     if command -v firewall-cmd >/dev/null; then firewall-cmd --list-all; firewall-cmd --zone=trusted --list-all; fi
@@ -141,18 +182,29 @@ for p in w1 w2 w3; do
   grep -q "DONE: this PC is ready, you can leave it." <<<"$out" && pass "$p: $(grep '^LAB-PC' <<<"$out")" || { fail "$p: no DONE"; echo "$out"; }
 done
 
-head_line="curl -fsSL $site/lab.sh | sudo LAB_CODE_URL=$site/code.tar.gz PIPEDPEER_LAB_S3_ENDPOINT=http://$gw:$s3port LAB_DISCOVER_TIMEOUT=600 bash -s -- head 4"
+profile=/home/lab/pipedpeer-lab/repo/scripts/campaign/test/profile-rehearsal.tsv
+knobs="LAB_CODE_URL=$site/code.tar.gz PIPEDPEER_RELEASE_BASE_URL=$site/releases LAB_DISCOVER_TIMEOUT=600"
+knobs+=" LAB_PROFILE=$profile LAB_CAL_STRONG_S=10 LAB_CAL_WEAK_S=5 CAL_MIN_S=1 PL_NPROC=2"
+knobs+=" PL_RAY_START_ARGS=--object-store-memory=100000000 PL_DASK_WORKER_ARGS='--memory-limit 0'"
+knobs+=" PL_WAIT_TIMEOUT=240 PL_RUN_TIMEOUT=900"
+head_line="curl -fsSL $site/lab.sh | sudo $knobs bash -s -- head 4"
 # The passphrase goes in through a pty: lab.sh reads it from /dev/tty.
 head_run() { printf '%s\n' "$pass_phrase" | $rt exec -i -u lab -w /home/lab "$tag-pc00" script -qec "$head_line" /dev/null; }
 
-say "head line on pc00 (first run, killed midway)"
+say "head line on pc00 (first run, killed during e4)"
 head_run >"$work/head1.log" 2>&1 &
 hp=$!
 killed=0
-for _ in $(seq 900); do
+for _ in $(seq 5400); do
   if x pc00 'grep -q "^e4 " /home/lab/pipedpeer-lab/exp-started 2>/dev/null'; then
-    sleep 4   # e4's runs have started
+    # Mid-experiment: once e4 has written two runs.
+    for _ in $(seq 300); do
+      n=$(x pc00 'f=/home/lab/pipedpeer-lab/repo/results/lab/runs.jsonl; s=$(awk "\$1==\"e4\"{print \$2}" /home/lab/pipedpeer-lab/exp-started | tail -n1); echo $(( $(wc -l <$f) - s ))' 2>/dev/null || echo 0)
+      ((n >= 2)) && break
+      sleep 2
+    done
     x pc00 'systemctl kill -s KILL pipedpeer-lab-day' && killed=1
+    echo "killed after $n e4 run(s)"
     break
   fi
   kill -0 "$hp" 2>/dev/null || break
@@ -167,6 +219,7 @@ x pc00 'cat /home/lab/pipedpeer-lab/done' >"$work/ledger1"
 echo "ledger after the kill: $(tr '\n' ' ' <"$work/ledger1")"
 out=$(x_lab pc00 "curl -fsSL $site/lab.sh | sudo bash -s -- status" 2>&1)
 grep -q '^phase:' <<<"$out" && pass "status shows the phase: $(grep '^now:' <<<"$out")" || { fail "status"; echo "$out"; }
+echo "$out" >"$work/status-after-kill.txt"
 
 say "head line again (resume)"
 head_run >"$work/head2.log" 2>&1 || true
@@ -177,39 +230,84 @@ done
 grep -q 'e4 was cut off before; running it again' "$work/head2.log" && pass "e4 run again after the kill" || fail "e4 not marked as cut off"
 grep -q 'ALL DONE, the lab PCs are back as they were. You can leave.' "$work/head2.log" && pass "summary: ALL DONE" || fail "no ALL DONE"
 
-say "R2 stand-in"
-raw=$work/s3/pipedpeer-lab/raw
-for f in runs.jsonl attempts.jsonl machines.csv network.csv clocks.txt workloads.md workloads.json result-cache.json inventory.ini logs/day/lab-day.log e1.csv; do
-  [[ -s $raw/$f ]] && pass "R2 has raw/$f" || fail "R2 lacks raw/$f"
+say "uploads (the ingest stand-in's bucket)"
+raw=$work/bucket/raw
+got=$work/got
+mkdir -p "$got"
+for f in runs.jsonl attempts.jsonl machines.csv network.csv clocks.txt workloads.md workloads.json result-cache.json \
+  inventory.ini logs/day/lab-day.log csv/e1.csv summary.txt summary-day.txt; do
+  if [[ -s $raw/$f.gz ]]; then pass "uploaded raw/$f.gz"; mkdir -p "$got/$(dirname "$f")"; gzip -dc "$raw/$f.gz" >"$got/$f"
+  else fail "not uploaded: raw/$f.gz"; fi
 done
-ls "$work/s3/pipedpeer-lab/otel" >/dev/null 2>&1 && pass "R2 has otel/ ($(find "$work/s3/pipedpeer-lab/otel" -type f | wc -l) objects)" || fail "no otel/ objects in R2"
-python3 - "$raw" <<'EOF' && pass "attempts: e4 interrupted then ok; one ok run of every experiment" || fail "attempts.jsonl"
-import json, sys, collections
-raw = sys.argv[1]
-att = [json.loads(l) for l in open(raw + "/attempts.jsonl")]
+for f in e1_speedup e1b_efficiency e4_uneven e5_env; do
+  [[ -s $raw/figures/$f.png ]] && pass "figure $f.png uploaded" || fail "no figure $f.png"
+done
+n_otel=$(find "$raw/otel" -name '*.zjsonl*' 2>/dev/null | wc -l)
+((n_otel > 0)) && pass "driver collector files uploaded by ingest.sh: $n_otel under raw/otel/" || fail "no otel files uploaded"
+for p in pc00 pc01 pc02 pc03; do
+  n=$(find "$raw/pcap/$p" -name '*.pcap' 2>/dev/null | wc -l)
+  ((n > 0)) && pass "pcap from $p: $n file(s), $(du -ch "$raw/pcap/$p"/*.pcap | tail -n1 | cut -f1)" || fail "no pcap from $p"
+done
+grep -q '^local:' "$work/head2.log" && pass "final count: $(grep -E '^(local|remote):' "$work/head2.log" | tail -n2 | tr '\n' ' ')" || fail "no final count"
+
+say "attempts, runs and the weak references"
+python3 - "$got" <<'EOF' && pass "attempts and runs as expected" || fail "attempts/runs"
+import collections, json, sys
+d = sys.argv[1]
+att = [json.loads(l) for l in open(d + "/attempts.jsonl")]
 st = collections.defaultdict(list)
 for a in att:
     st[a["experiment"]].append(a["status"])
-print(dict(st))
+print("attempts:", dict(st))
 assert st["e4"] == ["interrupted", "ok"], st["e4"]
 assert all(v[-1] == "ok" for v in st.values()), st
 assert sorted(st) == sorted(["e1", "e1b", "e4", "e5", "e6", "e7", "e8"]), sorted(st)
-runs = [json.loads(l) for l in open(raw + "/runs.jsonl")]
+runs = [json.loads(l) for l in open(d + "/runs.jsonl")]
+by = collections.Counter(r["experiment"] for r in runs)
+bad = collections.Counter(r["experiment"] for r in runs if r.get("error"))
+print("runs:", dict(by), "failed:", dict(bad))
 e1 = [r for r in runs if r["experiment"] == "e1"]
-assert len(e1) == 3 * 3 * 4, len(e1)   # N 1,4,16 x 3 systems x (1 warm-up + 3): once, not twice
-cache = json.load(open(raw + "/result-cache.json"))
-assert {k for k in cache if k.startswith("W1|")} == {"W1|BENCH_ITEMS=40", "W1|BENCH_ITEMS=160", "W1|BENCH_ITEMS=640"}, cache
-assert all(v["source"].startswith("plain-precomputed:") for v in cache.values()), cache
+# W1-W3 x (N=1: 4 systems, N=2 and 4: 3 systems) x (warm-up + 1): once, not twice.
+assert len(e1) == 3 * (4 + 3 + 3) * 2, len(e1)
+short = [r for r in e1 if r["n"] == 4 and r["system"] in ("ray", "dask")]
+assert short and all("inventory has 3 workers" in (r.get("error") or "") for r in short), short[:1]
+ok = [r for r in e1 if not r.get("error")]
+assert len(ok) == len(e1) - len(short), [(r["system"], r["n"], r.get("error")) for r in e1 if r.get("error") and r not in short]
+cache = json.load(open(d + "/result-cache.json"))
+weak = {k: v for k, v in cache.items() if v["source"].startswith("plain-precomputed:")}
+print("weak references:", sorted(weak))
+assert len(weak) == 2, weak   # N = 1 and 3
+e1b = [r for r in runs if r["experiment"] == "e1b" and not r.get("warmup")]
+assert e1b and all((r.get("result_ref") or "").startswith("plain-precomputed:") or r["system"] == "plain" for r in e1b), \
+    [(r["system"], r["n"], r.get("result_ref")) for r in e1b]
 EOF
-grep -q 'calibrated on pc01' "$raw/workloads.json" && pass "workloads.json calibrated on pc01" || fail "workloads.json not calibrated"
-grep -q '^| W1 | `BENCH_ITEMS=240`' "$raw/workloads.md" && pass "workloads.md sizes table rewritten" || fail "workloads.md table"
-grep -q 'local:  *\([0-9]*\) ' "$work/head2.log" && pass "final count: $(grep -E '^(local|remote):' "$work/head2.log" | tr '\n' ' ')" || fail "no final count"
+grep -q 'e4: ' "$got/summary.txt" && pass "analyse.py summary: $(grep '^e4: ' "$got/summary.txt")" || fail "no e4 in summary.txt"
+grep -q 'calibrated on pc01' "$got/workloads.json" && pass "workloads.json calibrated on pc01" || fail "workloads.json not calibrated"
+
+say "traces"
+if python3 -I "$camp/otel/otelread.py" check "$raw/otel" 1000000 >"$work/otel-check.txt" 2>&1; then
+  for src in host.cpu host.process pp-poll/api net/sockets net/snmp node-state/procs daemon-log ray-log dask-log pipedpeer-run prom.ray prom.dask; do
+    n=$(awk -v s="$src" '$3==s{c++} END{print c+0}' "$work/otel-check.txt")
+    ((n == 4)) && pass "trace $src from all 4 PCs" ||
+      { ((n > 0)) && echo "NOTE: trace $src from $n of 4 PCs: $(awk -v s="$src" '$3==s{printf "%s ", $1}' "$work/otel-check.txt")" || fail "no trace $src"; }
+  done
+  grep -q 'run ids seen: e' "$work/otel-check.txt" && pass "records carry lab.run_id" || fail "no lab.run_id on any record"
+else
+  fail "otelread.py check failed"; tail -5 "$work/otel-check.txt"
+fi
 
 say "every PC as it was"
 for p in "${pcs[@]}"; do
   snapshot "$p" >"$work/after-$p"
   if diff -u "$work/before-$p" "$work/after-$p"; then pass "$p: identical after the day"; else fail "$p: differs after the day"; fi
 done
+
+say "phase timings (lab-day.log)"
+python3 "$here/day-timings.py" "$got/logs/day/lab-day.log" | tee "$work/timings.txt"
+echo "rehearsal wall: $(( ($(date +%s) - t_start) / 60 )) min"
+mkdir -p "$repo/results/lab/rehearsal-day"
+cp "$work/timings.txt" "$work/otel-check.txt" "$got/summary.txt" "$got/attempts.jsonl" "$repo/results/lab/rehearsal-day/" 2>/dev/null || true
+gzip -dc "$raw/logs/day/lab-day.log.gz" >"$repo/results/lab/rehearsal-day/lab-day.log" 2>/dev/null || true
 
 echo
 if ((fails)); then echo "headless-test: $fails FAILED"; exit 1; fi
