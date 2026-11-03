@@ -8,10 +8,27 @@ So the runner keeps the whole receipt as logs/<run_id>/receipt.json.gz and
 puts summary(receipt) inline: every small field as it is, and the steps
 aggregated per (step, node).
 """
+import gzip
 import json
 from collections import defaultdict
 
 INLINE_FIELD_BYTES = 4096   # a field larger than this stays in the file only
+
+
+def full(res):
+    """The whole receipt of a run result: receipt.json.gz (receipt_path) when
+    the backend kept one, else the inline receipt. The inline one is a
+    summary without "steps", so anything that reads steps (the E12/E13
+    timelines, E14's first work, E13's rerun count) must come here: reading
+    the summary gave every timeline zero items ("receipt-steps-missing")."""
+    path = res.get("receipt_path")
+    if path:
+        try:
+            with gzip.open(path, "rt") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+    return res.get("receipt") or {}
 
 
 def summary(receipt):
