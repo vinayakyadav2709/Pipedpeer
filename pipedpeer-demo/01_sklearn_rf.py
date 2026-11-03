@@ -4,6 +4,7 @@
 Plain scikit-learn. No pipedpeer imports, no SDK, no Pool wrappers —
 n_jobs=-1 is routed transparently through the cluster pool.
 """
+import os
 import time
 
 import numpy as np
@@ -15,7 +16,7 @@ _T0 = time.monotonic()
 
 rng = np.random.RandomState(7)
 
-n_samples, n_features = 200_000, 20
+n_samples, n_features = int(os.environ.get("RF_SAMPLES", 200_000)), 20
 X = rng.rand(n_samples, n_features)
 y = ((X[:, 0] * 2.0 + X[:, 1] - X[:, 2] * X[:, 3] + rng.normal(0, 0.05, n_samples)) > 0.5).astype(int)
 
@@ -24,7 +25,7 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_
 print(f"data: {X.shape}, classes: {np.bincount(y)}")
 print("training RandomForest(n_estimators=150, n_jobs=-1) ...")
 t0 = time.monotonic()
-clf = RandomForestClassifier(n_estimators=150, max_depth=12, n_jobs=-1, random_state=7)
+clf = RandomForestClassifier(n_estimators=int(os.environ.get("RF_TREES", 150)), max_depth=12, n_jobs=-1, random_state=7)
 clf.fit(X_train, y_train)
 t_fit = time.monotonic() - t0
 

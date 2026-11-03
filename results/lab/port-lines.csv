@@ -1,0 +1,16 @@
+workload,system,changed_lines
+W1,plain,0
+W1,pipedpeer,0
+W1,ray,4
+W1,dask,6
+W2,plain,0
+W2,pipedpeer,0
+W2,ray,12
+W2,dask,10
+W3,plain,0
+W3,pipedpeer,0
+W3,ray,8
+W3,dask,6
+T1,plain,0
+T1,pipedpeer,0
+T1,torchrun,18
