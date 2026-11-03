@@ -85,3 +85,17 @@ func probe(port int) error {
 	}
 	return nil
 }
+
+// RunWithFallback runs a nix build with the peer cache options (argv) and, if
+// that fails while the cache was on, once more without them (plain). A
+// multi-user nix-daemon ignores a client's `fallback`, so a peer that vanishes
+// between narinfo and NAR would otherwise fail a build that a local build can
+// do. The first error is logged; the second is returned.
+func RunWithFallback(argv, plain []string, run func(argv []string) error) error {
+	err := run(argv)
+	if err == nil || len(argv) == len(plain) {
+		return err
+	}
+	log.Warn().Err(err).Msg("nix build with the peer cache failed; retrying without it")
+	return run(plain)
+}

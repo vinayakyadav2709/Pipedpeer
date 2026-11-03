@@ -44,15 +44,17 @@ var (
 	// buildFlake builds dir's flake for system into dir/result. A variable so
 	// tests use a fake nix.
 	buildFlake = func(dir, system string) error {
-		cmd, cleanup, err := nixstore.CmdContext(context.Background(), dir, flakeBuildArgv(dir, system, CachePort)...)
-		if err != nil {
-			return err
-		}
-		defer cleanup()
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("nix build: %v: %s", err, tail(out))
-		}
-		return nil
+		return peercache.RunWithFallback(flakeBuildArgv(dir, system, CachePort), flakeBuildArgv(dir, system, 0), func(argv []string) error {
+			cmd, cleanup, err := nixstore.CmdContext(context.Background(), dir, argv...)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("nix build: %v: %s", err, tail(out))
+			}
+			return nil
+		})
 	}
 	system = identity.System
 )

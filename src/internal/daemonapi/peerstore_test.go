@@ -247,3 +247,37 @@ func TestPeerNar(t *testing.T) {
 		}
 	})
 }
+
+// Spec: a full semaphore answers 503 at once (not a wait), and the two
+// routes have separate slots.
+func TestPeerStoreSemaphoreFull(t *testing.T) {
+	s := &Server{}
+	e := &peerEnv{globOut: []string{peerBashPath}, infoOut: [][]byte{peerFixture(t)}, dumpData: []byte("x")}
+	e.install(t)
+	fill := func(sem chan struct{}) func() {
+		for i := 0; i < maxPeerStoreJobs; i++ {
+			sem <- struct{}{}
+		}
+		return func() {
+			for i := 0; i < maxPeerStoreJobs; i++ {
+				<-sem
+			}
+		}
+	}
+	done := fill(peerNarSem)
+	if rec := narReq(s, peerBashHash); rec.Code != 503 {
+		t.Errorf("NAR with all NAR slots taken: %d", rec.Code)
+	}
+	if rec := narinfoReq(s, peerBashHash); rec.Code == 503 {
+		t.Error("a full NAR pool starved the narinfo route")
+	}
+	done()
+	done = fill(peerInfoSem)
+	if rec := narinfoReq(s, peerBashHash); rec.Code != 503 {
+		t.Errorf("narinfo with all slots taken: %d", rec.Code)
+	}
+	if rec := narReq(s, peerBashHash); rec.Code != 200 {
+		t.Errorf("NAR with free NAR slots: %d", rec.Code)
+	}
+	done()
+}

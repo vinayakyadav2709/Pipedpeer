@@ -183,20 +183,23 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 	if reused {
 		detail("      Reusing an environment that already has these packages\n")
 	} else {
-		nixSystem := nixgen.NixArch()
-		cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, nixBuildArgv(flakeRef(nixSystem), opts.CachePort)...)
-		if err != nil {
-			env.Close()
-			return nil, err
-		}
-		defer cleanup()
+		flake := flakeRef(nixgen.NixArch())
 		var nixOut bytes.Buffer
-		if opts.Verbose {
-			cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		} else {
-			cmd.Stdout, cmd.Stderr = &nixOut, &nixOut
-		}
-		if err := cmd.Run(); err != nil {
+		err := peercache.RunWithFallback(nixBuildArgv(flake, opts.CachePort), nixBuildArgv(flake, 0), func(argv []string) error {
+			cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, argv...)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			nixOut.Reset()
+			if opts.Verbose {
+				cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+			} else {
+				cmd.Stdout, cmd.Stderr = &nixOut, &nixOut
+			}
+			return cmd.Run()
+		})
+		if err != nil {
 			env.Close()
 			os.Stderr.Write(nixOut.Bytes())
 			if ctx.Err() != nil {

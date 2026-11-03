@@ -85,6 +85,15 @@ func TestAccept(t *testing.T) {
 	zeroSize := parseNI(t, strings.Replace(real21, "NarSize: 1856848", "NarSize: 0", 1))
 	ca := parseNI(t, "StorePath: "+patchPath+"\nURL: nar/x.nar.zst\nCompression: zstd\nNarHash: sha256:10w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2\nNarSize: 1656\nReferences: \nCA: fixed:r:sha256:10w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2\n")
 	otherHash := strings.Repeat("a", 32)
+	// Same CA claim under a path it does not produce (a peer forging a swap).
+	caForged := parseNI(t, strings.Replace(real21, "References:", "CA: fixed:r:sha256:10w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2\nReferences:", 1))
+	caForged.Signatures = nil
+	if caForged.CA == "" {
+		t.Fatal("test setup: CA not parsed")
+	}
+	caForgedSigned := parseNI(t, strings.Replace(real21, "References:", "CA: fixed:r:sha256:10w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2\nReferences:", 1))
+	caForgedSigned.Signatures = parseNI(t, real21).Signatures
+	badDir := parseNI(t, strings.Replace(real21, "StorePath: /nix/store/", "StorePath: /evil/", 1))
 
 	cases := []struct {
 		name    string
@@ -100,6 +109,9 @@ func TestAccept(t *testing.T) {
 		{"5 other hash", parseNI(t, real21), otherHash, nixos, "store path mismatch"},
 		{"6 own key trusted", signed, bashHash, []signature.PublicKey{pk}, ""},
 		{"7 own key untrusted", signed, bashHash, nixos, "test-1"},
+		{"9 CA that does not match the path, no sig", caForged, bashHash, nixos, "no trusted signature"},
+		{"10 CA mismatch but trusted sig", caForgedSigned, bashHash, nixos, ""},
+		{"11 store path outside /nix/store", badDir, bashHash, nixos, "not a valid"},
 		{"8 NarSize 0", zeroSize, bashHash, nixos, "NarSize"},
 	}
 	for _, c := range cases {

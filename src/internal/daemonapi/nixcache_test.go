@@ -148,20 +148,30 @@ func TestNixCacheInfoAndAuth(t *testing.T) {
 	var served atomic.Int32
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { served.Add(1) })
 	h := exceptLocalNixCache(authtoken.Middleware)(next)
-	try := func(method, path, remote string) int {
+	tryHost := func(method, path, remote, host string) int {
 		r := httptest.NewRequest(method, path, nil)
 		r.RemoteAddr = remote
+		r.Host = host
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
 		return w.Code
 	}
+	try := func(method, path, remote string) int { return tryHost(method, path, remote, "127.0.0.1:4242") }
 	// 2: not loopback.
 	if c := try("GET", "/nix-cache/"+ncHash+".narinfo", "192.168.1.5:1"); c != 401 {
 		t.Errorf("remote: %d", c)
 	}
-	// 3: POST from loopback.
-	if c := try("POST", "/nix-cache/"+ncHash+".narinfo", "127.0.0.1:1"); c != 401 {
-		t.Errorf("post: %d", c)
+	// 3: a write from loopback is refused as read-only (spec 3.6); from
+	// elsewhere it meets the token check.
+	if c := try("PUT", "/nix-cache/"+ncHash+".narinfo", "127.0.0.1:1"); c != 405 {
+		t.Errorf("put: %d", c)
+	}
+	if c := try("PUT", "/nix-cache/"+ncHash+".narinfo", "192.168.1.5:1"); c != 401 {
+		t.Errorf("remote put: %d", c)
+	}
+	// 3b: DNS rebinding presents a foreign Host from loopback.
+	if c := tryHost("GET", "/nix-cache/nix-cache-info", "127.0.0.1:1", "evil.example:4242"); c != 401 {
+		t.Errorf("rebound host: %d", c)
 	}
 	// 4: other routes keep their auth; so does a traversal out of the prefix.
 	if c := try("GET", "/v1/nodes", "127.0.0.1:1"); c != 401 {
@@ -179,6 +189,9 @@ func TestNixCacheInfoAndAuth(t *testing.T) {
 	}
 	if c := try("HEAD", "/nix-cache/"+ncHash+".narinfo", "[::1]:1"); c != 200 {
 		t.Errorf("exempt HEAD: %d", c)
+	}
+	if c := tryHost("GET", "/nix-cache/nix-cache-info", "127.0.0.1:1", "localhost:4242"); c != 200 {
+		t.Errorf("localhost host: %d", c)
 	}
 }
 

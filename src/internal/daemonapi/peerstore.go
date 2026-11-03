@@ -22,11 +22,15 @@ import (
 // authenticated peers. It never asks other peers, so a request cannot loop
 // through the cluster. The local /nix-cache layer fans out to these routes.
 
-// maxPeerStoreJobs caps the nix processes the peer layer runs at once.
+// maxPeerStoreJobs caps the nix processes each peer route runs at once.
 const maxPeerStoreJobs = 8
 
-// peerStoreSem is the counting semaphore for those processes.
-var peerStoreSem = make(chan struct{}, maxPeerStoreJobs)
+// The narinfo and NAR routes have a semaphore each, so a few long NAR streams
+// cannot starve the quick narinfo lookups.
+var (
+	peerInfoSem = make(chan struct{}, maxPeerStoreJobs)
+	peerNarSem  = make(chan struct{}, maxPeerStoreJobs)
+)
 
 // Seams for tests.
 var (
@@ -73,13 +77,14 @@ var (
 	ensureSigned = nixsign.EnsureSigned
 )
 
-// acquirePeerStore takes a semaphore slot or gives up with the request.
-func acquirePeerStore(ctx context.Context) (release func(), err error) {
+// acquirePeerStore takes a slot of sem, or reports false at once when all are
+// taken: the asker then moves on to another peer instead of queueing here.
+func acquirePeerStore(sem chan struct{}) (release func(), ok bool) {
 	select {
-	case peerStoreSem <- struct{}{}:
-		return func() { <-peerStoreSem }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	default:
+		return nil, false
 	}
 }
 
@@ -134,9 +139,9 @@ func (s *Server) handlePeerNarinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	release, err := acquirePeerStore(ctx)
-	if err != nil {
-		log.Warn().Err(err).Str("hash", hash).Str("path", path).Msg("peer store: gave up waiting for a slot")
+	release, ok := acquirePeerStore(peerInfoSem)
+	if !ok {
+		log.Debug().Str("hash", hash).Str("path", path).Msg("peer store: all slots taken")
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
 	}
@@ -182,9 +187,9 @@ func (s *Server) handlePeerNar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	release, err := acquirePeerStore(ctx)
-	if err != nil {
-		log.Warn().Err(err).Str("hash", hash).Str("path", path).Msg("peer store: gave up waiting for a slot")
+	release, ok := acquirePeerStore(peerNarSem)
+	if !ok {
+		log.Debug().Str("hash", hash).Str("path", path).Msg("peer store: all slots taken")
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/nix-community/go-nix/pkg/narinfo/signature"
+	"github.com/nix-community/go-nix/pkg/storepath"
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
@@ -61,6 +62,9 @@ func Accept(ni *narinfo.NarInfo, hash string, trusted []signature.PublicKey) err
 	if got := HashOf(ni.StorePath); got != hash {
 		return fmt.Errorf("store path mismatch: asked %s, got %q", hash, ni.StorePath)
 	}
+	if sp, err := storepath.FromAbsolutePath(ni.StorePath); err != nil || path.Dir(ni.StorePath) != storeDir || sp.Name == "" {
+		return fmt.Errorf("not a valid %s path: %q", storeDir, ni.StorePath)
+	}
 	if err := ni.Check(); err != nil {
 		return err
 	}
@@ -73,7 +77,18 @@ func Accept(ni *narinfo.NarInfo, hash string, trusted []signature.PublicKey) err
 		return fmt.Errorf("no URL")
 	}
 	if ni.CA != "" {
-		return nil
+		// A CA field proves nothing by itself: the path must be the one that
+		// the hash, name and references produce. Otherwise the narinfo needs
+		// a trusted signature like any other.
+		want, err := CAStorePath(ni.CA, ni.StorePath, ni.References)
+		switch {
+		case err == nil && want == ni.StorePath:
+			return nil
+		case err != nil:
+			log.Debug().Err(err).Str("ca", ni.CA).Msg("peer cache: CA not verifiable, requiring a signature")
+		default:
+			log.Warn().Str("path", ni.StorePath).Str("computed", want).Msg("peer cache: CA does not match the store path, requiring a signature")
+		}
 	}
 	if len(ni.Signatures) == 0 {
 		return fmt.Errorf("no trusted signature: path is unsigned and not content-addressed")

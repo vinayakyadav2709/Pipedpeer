@@ -2,6 +2,7 @@ package daemonapi
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"path"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/pipedpeer/pipedpeer/internal/direct"
 	"github.com/pipedpeer/pipedpeer/internal/peercache"
 )
 
@@ -19,6 +21,12 @@ import (
 // to use as an extra substituter. It owns no store paths: each answer is
 // fetched from a peer's token-gated /v1/store routes (peerstore.go), and those
 // never fan out, so a lookup cannot loop through the cluster.
+
+// maxFanOuts caps the lookups asking peers at once; the rest answer 404 for
+// now (nix builds the path itself) without being remembered.
+const maxFanOuts = 16
+
+var fanOutSem = make(chan struct{}, maxFanOuts)
 
 const (
 	narinfoBudget   = 3 * time.Second  // all peers, one narinfo
@@ -32,22 +40,43 @@ var cacheNow = time.Now
 
 // exceptLocalNixCache applies auth to everything but GET/HEAD on /nix-cache/
 // from this machine. Nix cannot send the token. A loopback caller is this
-// machine's nix, another local user, or an internet peer spliced in through
-// QUIC, which the cluster secret has already authenticated.
+// machine's nix or another local user. A connection the QUIC splice opened for
+// a peer (direct.Spliced) also arrives from loopback, but nothing says which
+// process on the far machine opened it, so it is not exempt and needs the
+// token like any other remote request.
 func exceptLocalNixCache(auth func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		guarded := auth(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p := r.URL.Path
-			if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
-				strings.HasPrefix(p, peercache.Route+"/") && path.Clean(p) == p &&
-				isLoopback(r.RemoteAddr) {
+			// The Host check keeps a web page that rebinds its name to
+			// 127.0.0.1 from reading the cache through the browser.
+			if strings.HasPrefix(p, peercache.Route+"/") && path.Clean(p) == p &&
+				isLoopback(r.RemoteAddr) && !direct.Spliced(r.RemoteAddr) && loopbackHost(r.Host) {
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					w.Header().Set("Allow", "GET, HEAD")
+					http.Error(w, "the cache is read-only", http.StatusMethodNotAllowed)
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
 			guarded.ServeHTTP(w, r)
 		})
 	}
+}
+
+// loopbackHost reports whether a Host header names this machine's loopback.
+func loopbackHost(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = strings.Trim(hostport, "[]")
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type cacheHit struct {
@@ -84,7 +113,12 @@ func (c *nixCache) handleInfo(w http.ResponseWriter, r *http.Request) {
 
 func (c *nixCache) handleNarinfo(w http.ResponseWriter, r *http.Request) {
 	hash, ok := strings.CutSuffix(chi.URLParam(r, "name"), ".narinfo")
-	if !ok || !peercache.ValidHash(hash) {
+	if !ok {
+		// .ls files and anything else this cache does not serve.
+		http.NotFound(w, r)
+		return
+	}
+	if !peercache.ValidHash(hash) {
 		http.Error(w, "bad store hash", http.StatusBadRequest)
 		return
 	}
@@ -117,11 +151,11 @@ func (c *nixCache) handleNar(w http.ResponseWriter, r *http.Request) {
 	for _, p := range hit.peers {
 		resp, err := peerGet(r.Context(), p, "/v1/store/nar/"+hash)
 		if err != nil {
-			log.Warn().Err(err).Str("hash", hash).Str("peer", p.NodeID).Msg("nix cache: NAR fetch failed")
+			warnPeer(p, err, "nix cache: NAR fetch failed", map[string]any{"hash": hash})
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			log.Warn().Int("status", resp.StatusCode).Str("hash", hash).Str("peer", p.NodeID).Msg("nix cache: peer refused the NAR")
+			warnPeer(p, nil, "nix cache: peer refused the NAR", map[string]any{"hash": hash, "status": resp.StatusCode})
 			resp.Body.Close()
 			continue
 		}
@@ -133,7 +167,15 @@ func (c *nixCache) handleNar(w http.ResponseWriter, r *http.Request) {
 		resp.Body.Close()
 		return
 	}
+	// Every source failed: forget the answer so the next ask looks again.
+	c.forget(hash)
 	http.NotFound(w, r)
+}
+
+func (c *nixCache) forget(hash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.hits, hash)
 }
 
 // lookup returns the narinfo for hash from the remembered answers or by
@@ -149,6 +191,13 @@ func (c *nixCache) lookup(r *http.Request, hash string) (cacheHit, bool) {
 		peers := c.s.cachePeers()
 		if len(peers) == 0 {
 			log.Debug().Str("hash", hash).Msg("nix cache: no peers to ask")
+			return cacheHit{}, nil
+		}
+		select {
+		case fanOutSem <- struct{}{}:
+			defer func() { <-fanOutSem }()
+		default:
+			log.Warn().Str("hash", hash).Msg("nix cache: too many lookups in flight, answering a miss")
 			return cacheHit{}, nil
 		}
 		h, clean := fanOutNarinfo(peers, hash)

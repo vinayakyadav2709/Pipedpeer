@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/nix-community/go-nix/pkg/narinfo"
@@ -37,13 +38,16 @@ func (s *Server) cachePeers() []PeerHealth {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
 	var out []PeerHealth
+	seen := map[string]bool{}
 	for _, ph := range s.peerHealths {
 		switch {
 		case ph.Status != "healthy" || ph.Host == "" || ph.Port == 0:
 		case ph.NodeID == s.nodeID:
 		case machine != "" && ph.Machine == machine:
 		case ph.Arch == "" || ph.Arch != system:
+		case ph.NodeID != "" && seen[ph.NodeID]: // one node under several addresses
 		default:
+			seen[ph.NodeID] = true
 			out = append(out, *ph)
 		}
 	}
@@ -84,8 +88,9 @@ func (b *cancelBody) Close() error {
 }
 
 type peerAnswer struct {
-	peer PeerHealth
-	body []byte // nil unless acceptable
+	peer    PeerHealth
+	body    []byte // nil unless acceptable
+	narHash string // the accepted narinfo's NarHash
 	// clean is true when the peer answered definitively (404, or a narinfo we
 	// rejected), false for a timeout or transport error.
 	clean bool
@@ -103,29 +108,65 @@ func fanOutNarinfo(peers []PeerHealth, hash string) (cacheHit, bool) {
 		go func() { ch <- askPeer(ctx, p, hash, trusted) }()
 	}
 	clean := true
-	failed := map[string]bool{}
-	for range peers {
+	for i := range peers {
 		a := <-ch
-		if a.body != nil {
-			hit := cacheHit{body: a.body, peers: []PeerHealth{a.peer}}
-			// Peers still pending may hold it too; the NAR fetch tries them
-			// after the winner and treats a 404 as a miss.
-			for _, p := range peers {
-				if p.NodeID != a.peer.NodeID || p.Host != a.peer.Host || p.Port != a.peer.Port {
-					if !failed[peerKey(p)] {
-						hit.peers = append(hit.peers, p)
-					}
-				}
-			}
-			return hit, true
+		if a.body == nil {
+			clean = clean && a.clean
+			continue
 		}
-		failed[peerKey(a.peer)] = true
-		clean = clean && a.clean
+		hit := cacheHit{body: a.body, peers: []PeerHealth{a.peer}}
+		// Other peers that already answered with the same NarHash can serve
+		// the NAR if the winner cannot. A different NarHash means a different
+		// build of the path; nix would reject that NAR.
+		grace := time.NewTimer(fallbackGrace)
+		for left := len(peers) - i - 1; left > 0; left-- {
+			select {
+			case o := <-ch:
+				if o.body != nil && o.narHash == a.narHash {
+					hit.peers = append(hit.peers, o.peer)
+				}
+				continue
+			case <-grace.C:
+			}
+			break
+		}
+		grace.Stop()
+		return hit, true
 	}
 	if !clean {
 		log.Warn().Str("hash", hash).Int("peers", len(peers)).Msg("nix cache: no peer answered in time")
 	}
 	return cacheHit{}, clean
+}
+
+// fallbackGrace is how long a hit waits for the slower peers' answers, to
+// have more than one NAR source. A variable so tests can shorten it.
+var fallbackGrace = 100 * time.Millisecond
+
+// peerWarnEvery is how often one peer may be warned about.
+const peerWarnEvery = 30 * time.Second
+
+var (
+	peerWarnMu   sync.Mutex
+	peerWarnLast = map[string]time.Time{}
+)
+
+// warnPeer logs a warning about peer at most once per peerWarnEvery, so a
+// dead peer does not warn on every lookup.
+func warnPeer(p PeerHealth, err error, msg string, fields map[string]any) {
+	peerWarnMu.Lock()
+	now := cacheNow()
+	if last, ok := peerWarnLast[p.NodeID]; ok && now.Sub(last) < peerWarnEvery {
+		peerWarnMu.Unlock()
+		return
+	}
+	peerWarnLast[p.NodeID] = now
+	peerWarnMu.Unlock()
+	ev := log.Warn().Err(err).Str("peer", p.NodeID)
+	for k, v := range fields {
+		ev = ev.Interface(k, v)
+	}
+	ev.Msg(msg)
 }
 
 func peerKey(p PeerHealth) string {
@@ -138,7 +179,7 @@ func askPeer(ctx context.Context, p PeerHealth, hash string, trusted []signature
 	resp, err := peerGet(ctx, p, "/v1/store/narinfo/"+hash)
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Warn().Err(err).Str("hash", hash).Str("peer", p.NodeID).Msg("nix cache: narinfo request failed")
+			warnPeer(p, err, "nix cache: narinfo request failed", map[string]any{"hash": hash})
 		}
 		return a
 	}
@@ -148,13 +189,13 @@ func askPeer(ctx context.Context, p PeerHealth, hash string, trusted []signature
 		return a
 	}
 	if resp.StatusCode != http.StatusOK {
-		log.Warn().Int("status", resp.StatusCode).Str("hash", hash).Str("peer", p.NodeID).Msg("nix cache: peer refused the narinfo")
+		warnPeer(p, nil, "nix cache: peer refused the narinfo", map[string]any{"hash": hash, "status": resp.StatusCode})
 		return a
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		if ctx.Err() == nil {
-			log.Warn().Err(err).Str("hash", hash).Str("peer", p.NodeID).Msg("nix cache: narinfo read failed")
+			warnPeer(p, err, "nix cache: narinfo read failed", map[string]any{"hash": hash})
 		}
 		return a
 	}
@@ -164,10 +205,9 @@ func askPeer(ctx context.Context, p PeerHealth, hash string, trusted []signature
 		err = peercache.Accept(ni, hash, trusted)
 	}
 	if err != nil {
-		log.Warn().Err(err).Str("hash", hash).Str("peer", p.NodeID).
-			Str("addr", fmt.Sprintf("%s:%d", p.Host, p.Port)).Msg("nix cache: narinfo rejected")
+		warnPeer(p, err, "nix cache: narinfo rejected", map[string]any{"hash": hash, "addr": fmt.Sprintf("%s:%d", p.Host, p.Port)})
 		return a
 	}
-	a.body = raw
+	a.body, a.narHash = raw, ni.NarHash.String()
 	return a
 }

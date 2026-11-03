@@ -286,12 +286,49 @@ func (e *Endpoint) NextOther(ctx context.Context) ([]byte, netip.AddrPort, error
 }
 
 // LocalDialer connects to a local service, for splicing a peer's streams to
-// this daemon.
+// this daemon. Each connection's local address is remembered while it is
+// open, so the service, in the same process, can tell a spliced request from
+// a process on this machine (see Spliced).
 func LocalDialer(addr string) func(context.Context) (net.Conn, error) {
 	return func(ctx context.Context) (net.Conn, error) {
 		var d net.Dialer
-		return d.DialContext(ctx, "tcp", addr)
+		c, err := d.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		key := c.LocalAddr().String()
+		spliced.Store(key, struct{}{})
+		return &splicedConn{Conn: c, key: key}, nil
 	}
+}
+
+var spliced sync.Map // local addresses of open spliced connections
+
+// Spliced reports whether remoteAddr, as the local service sees it, is a
+// connection LocalDialer opened for a peer's stream rather than one from a
+// process on this machine.
+func Spliced(remoteAddr string) bool {
+	_, ok := spliced.Load(remoteAddr)
+	return ok
+}
+
+type splicedConn struct {
+	net.Conn
+	key  string
+	once sync.Once
+}
+
+// CloseWrite half-closes, which splice relies on to end a request body.
+func (c *splicedConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+func (c *splicedConn) Close() error {
+	c.once.Do(func() { spliced.Delete(c.key) })
+	return c.Conn.Close()
 }
 
 // adoptWindow is how long an adopted socket takes new connections. The peer

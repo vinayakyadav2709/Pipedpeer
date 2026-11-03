@@ -2,6 +2,7 @@ package peercache
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -85,6 +86,36 @@ func TestNixArgs(t *testing.T) {
 		}
 		if c.logWant != "" && strings.Count(logs.String(), "\n") != 1 {
 			t.Errorf("%s: want one log line, got %q", c.name, logs.String())
+		}
+	}
+}
+
+func TestRunWithFallback(t *testing.T) {
+	cached, plain := []string{"nix", "build", "--option", "fallback", "true"}, []string{"nix", "build"}
+	boom := fmt.Errorf("boom")
+	cases := []struct {
+		name      string
+		argv      []string
+		failOn    int // attempt number (1-based) that fails and all before; 0 = none
+		wantCalls int
+		wantErr   bool
+	}{
+		{"cache build fails, plain succeeds", cached, 1, 2, false},
+		{"both fail", cached, 2, 2, true},
+		{"cache build succeeds", cached, 0, 1, false},
+		{"cache off, failure not retried", plain, 1, 1, true},
+	}
+	for _, c := range cases {
+		calls := 0
+		err := RunWithFallback(c.argv, plain, func(a []string) error {
+			calls++
+			if calls <= c.failOn {
+				return boom
+			}
+			return nil
+		})
+		if calls != c.wantCalls || (err != nil) != c.wantErr {
+			t.Errorf("%s: calls %d err %v; want %d, err=%v", c.name, calls, err, c.wantCalls, c.wantErr)
 		}
 	}
 }
