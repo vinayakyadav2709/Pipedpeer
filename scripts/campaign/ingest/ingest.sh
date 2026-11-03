@@ -176,7 +176,8 @@ cmd_sync() {
 cmd_count() {
 	local dir="$1" local_n synced
 	local_n="$(find "$dir" -type f ! -name .ingest-manifest ! -path "$dir/serve/*" | wc -l)"
-	synced="$(wc -l <"$dir/.ingest-manifest" 2>/dev/null || echo 0)"
+	synced=0
+	[[ -f "$dir/.ingest-manifest" ]] && synced="$(wc -l <"$dir/.ingest-manifest")"
 	echo "local files: $local_n, synced per manifest: $synced"
 	usage_json | python3 -c 'import json,sys; d=json.load(sys.stdin); u=d["usage"]; print("worker: %d objects, %.3f GB of %.1f GB cap, %d of %d uploads" % (u["objects"], u["bytes"]/1e9, d["caps"]["bytes"]/1e9, u["puts"], d["caps"]["puts"]))'
 	[[ "$local_n" == "$synced" ]]
