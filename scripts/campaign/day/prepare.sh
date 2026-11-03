@@ -223,10 +223,6 @@ prep_pipedpeer() {
   ans_drop install all "$(tl_wrap install "${base:+PIPEDPEER_RELEASE_BASE_URL=$base }bash $R/../install-pipedpeer.sh ${v:+--version $v} -y")" "pipedpeer install failed" || irc=1
   tl_from_out install install
   ((irc == 0)) || return 1
-  ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
-  mkdir -p "$RESULTS/doctor"
-  for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
-  ((${#BAD_HOSTS[@]})) && blocker "pipedpeer doctor reported problems on ${BAD_HOSTS[*]} (results/lab/doctor/)"
   return 0
 }
 
@@ -251,6 +247,12 @@ prep_join() {
   tl pc00 cluster_ready "$(date +%s%N)" pc00 "" "healthy=$n workers=$want"
   pipedpeer status >"$RESULTS/join-status.txt" 2>&1 || true
   node_ids
+  # doctor after the join: before it, each PC's setup has made a cluster of
+  # its own, and doctor reports every other PC on the LAN as a stranger.
+  ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
+  mkdir -p "$RESULTS/doctor"
+  for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
+  ((${#BAD_HOSTS[@]})) && blocker "pipedpeer doctor reported problems on ${BAD_HOSTS[*]} (results/lab/doctor/)"
   return 0
 }
 
