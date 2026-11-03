@@ -18,7 +18,15 @@ import (
 	"log"
 	"net"
 	"sort"
+	"sync"
 )
+
+// dialUDP is net.Dial; tests replace it.
+var dialUDP = net.Dial
+
+// noLocalAddrOnce keeps the getsockname warning to one line per process:
+// SourceFor runs for every peer on every poll.
+var noLocalAddrOnce sync.Once
 
 // SourceFor returns the local address the kernel would use to reach peer
 // ("host:port" or bare host), or "" if it has no route.
@@ -32,12 +40,22 @@ func SourceFor(peer string) string {
 	}
 	// Port is irrelevant to route selection; UDP dial is connectionless, so
 	// nothing is sent and no peer is contacted.
-	conn, err := net.Dial("udp", net.JoinHostPort(host, "9"))
+	conn, err := dialUDP("udp", net.JoinHostPort(host, "9"))
 	if err != nil {
 		return ""
 	}
 	defer conn.Close()
-	local, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	// Under proot on Android getsockname can fail, and Go then leaves the
+	// local address nil; calling String on it crashed the daemon.
+	la := conn.LocalAddr()
+	if la == nil {
+		noLocalAddrOnce.Do(func() {
+			log.Printf("netaddr: no local address for the route to %s (getsockname failed); "+
+				"advertising the fallback address (logged once)", host)
+		})
+		return ""
+	}
+	local, _, err := net.SplitHostPort(la.String())
 	if err != nil {
 		return ""
 	}
