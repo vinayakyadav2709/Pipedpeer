@@ -152,9 +152,7 @@ func Start(nodeID string, port int, maxConcurrent int) error {
 	argv := append([]string{exe}, args...)
 	argv = append(cgroups.ScopePrefix("pipedpeer-daemon-"+strconv.Itoa(port)), argv...)
 
-	cmd := termuxexec.Command(argv[0], argv[1:]...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd := detachedCommand(argv, logFile)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
