@@ -31,6 +31,13 @@ var (
 	}
 )
 
+// MultiUser reports whether this machine's builds go through a root
+// nix-daemon: a system nix whose daemon is active, and no private store.
+func MultiUser() bool { return !privateStore() && multiUserNix() }
+
+// NixConfig returns `nix config show <name>` from the machine's own nix.
+func NixConfig(name string) (string, error) { return nixConfig(name) }
+
 // SystemUntrusted reports which of keys this machine's nix accepts only from
 // nix.conf and does not list there.
 //
