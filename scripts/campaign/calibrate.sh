@@ -11,8 +11,8 @@
 # smoke size until one run takes at least CAL_MIN_S (8) seconds, then once
 # more at 3x that size, and fits wall = c0 + c1 * size through the two points
 # (c0 is start-up and the fixed sections, c1 the per-unit cost). Each point is
-# the fastest of CAL_REPS (2) runs. W1's BENCH_PROCS is this machine's nproc,
-# as for every plain run. CAL_VERIFY=1 then runs the strong size once and
+# the fastest of CAL_REPS (2) runs. W1's BENCH_PROCS is this machine's nproc
+# (or PL_NPROC), as for every plain run. CAL_VERIFY=1 then runs the strong size once and
 # records its wall as verify_s. The last line is `CALIBRATE {json}` for the runner.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
@@ -28,7 +28,9 @@ strong_s = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
 weak_s = float(sys.argv[3]) if len(sys.argv) > 3 else 60.0
 min_s = float(os.environ.get("CAL_MIN_S", "8"))
 reps = int(os.environ.get("CAL_REPS", "2"))
-nproc = os.cpu_count()
+# The cores the runner's plain run gets: PL_NPROC, else this process's CPUs
+# (what `nproc` prints, which run.sh uses).
+nproc = int(os.environ.get("PL_NPROC") or len(os.sched_getaffinity(0)))
 
 spec = json.load(open("scripts/campaign/workloads.json"))
 w = next((w for w in spec["workloads"] if w["id"] == wid), None)

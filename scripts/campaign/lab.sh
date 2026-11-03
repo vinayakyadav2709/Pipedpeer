@@ -417,14 +417,19 @@ launch_day() {
     --setenv=PIPEDPEER_LAB_R2_ENV="$SECRETS/r2.env" --setenv=LAB_SITE="$SITE"
     --setenv=LAB_PIPEDPEER_VERSION="$PIPEDPEER_VERSION")
   local v
-  # Tests and overrides, passed through only when set.
-  for v in LAB_DISCOVER_TIMEOUT LAB_PROFILE LAB_SUBNET PIPEDPEER_LAB_S3_ENDPOINT; do
+  # Tests and overrides, passed through only when set: the day's own, and
+  # run.sh's PL_* knobs (README.md beside lab-day.sh).
+  for v in LAB_DISCOVER_TIMEOUT LAB_PROFILE LAB_SUBNET LAB_SESSION LAB_CAL_STRONG_S LAB_CAL_WEAK_S CAL_MIN_S \
+    PIPEDPEER_LAB_S3_ENDPOINT PIPEDPEER_RELEASE_BASE_URL $(compgen -v PL_ || true); do
     [[ -n ${!v:-} ]] && envs+=(--setenv="$v=${!v}")
   done
   # A system unit owned by the lab user: it survives closing the terminal,
-  # logging out and the screen lock, and needs no linger.
+  # logging out and the screen lock, and needs no linger. TasksMax: the unit
+  # holds the Ray head, the Dask scheduler, Ansible's forks and the
+  # collectors; systemd's default (15 % of pid_max) killed Ray's gRPC threads
+  # where pid_max is small.
   systemd-run --quiet --unit="$UNIT" --uid="$LAB_USER" --gid="$(id -g "$LAB_USER")" \
-    -p WorkingDirectory="$REPO" -p KillMode=control-group -p SyslogIdentifier="$UNIT" "${envs[@]}" \
+    -p WorkingDirectory="$REPO" -p KillMode=control-group -p SyslogIdentifier="$UNIT" -p TasksMax=infinity "${envs[@]}" \
     /bin/bash "$REPO/scripts/campaign/lab-day.sh" || die "systemd-run failed"
   log "started the lab day as the systemd unit $UNIT"
 }

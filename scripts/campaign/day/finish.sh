@@ -14,6 +14,32 @@ had() {
   grep -qx "had-$2" "$HOSTREC/$1" && echo 1 || echo 0
 }
 
+# pull_pcap stops every capture and copies each PC's pcap files into
+# results/lab/pcap/<pc>/ (gitignored; sync-r2.sh uploads it), before the
+# cleanup deletes them. Over ssh as a tar stream: raw Ansible output is text,
+# and the lab PCs have no rsync for ansible.posix.synchronize.
+pull_pcap() {
+  local h ip n
+  ans pcapstop all "bash $R/otel/node.sh pcap-stop" "$INV_ALL" || say "pcap-stop failed on ${BAD_HOSTS[*]}"
+  for h in $(hosts_of head "$INV_ALL") $(workers "$INV_ALL"); do
+    is_done "pcap.$h" && continue
+    mkdir -p "$RESULTS/pcap/$h"
+    if [[ $h == pc00 ]]; then
+      cp -p "$PIPEDPEER_LAB_HOME"/pcap/*.pcap "$RESULTS/pcap/$h/" 2>/dev/null || true
+    else
+      ip=$(host_ip "$h")
+      # shellcheck disable=SC2086  # SSH_COMMON is a list of options
+      timeout 600 ssh $SSH_COMMON -o BatchMode=yes -o ConnectTimeout=10 "$USER@$ip" \
+        'd=$HOME/.local/share/pipedpeer-lab/pcap; [ -d $d ] || exit 0; cd $d && tar -cf - --ignore-failed-read *.pcap 2>/dev/null' |
+        tar -xf - -C "$RESULTS/pcap/$h" 2>/dev/null || { say "pcap from $h: pull failed"; continue; }
+    fi
+    n=$(find "$RESULTS/pcap/$h" -name '*.pcap' | wc -l)
+    say "pcap from $h: $n file(s), $(du -sh "$RESULTS/pcap/$h" | cut -f1)"
+    mark_done "pcap.$h"
+  done
+  return 0
+}
+
 problem() { grep -qxF -- "$1 $2" "$PROBLEMS" 2>/dev/null || printf '%s %s\n' "$1" "$2" >>"$PROBLEMS"; }
 
 clean_workers() {
@@ -91,6 +117,7 @@ summary() {
 }
 
 finish() {
+  step pull.pcap cleanup pull_pcap
   step clean.workers cleanup clean_workers
   step undo.workers cleanup undo_workers
   if ! step final.sync cleanup final_sync; then
@@ -106,6 +133,10 @@ finish() {
   # shellcheck disable=SC2024  # the lab user reads it; root writes the copy
   sudo -n tee /var/lib/pipedpeer-lab/summary.txt <"$DAY/summary.txt" >/dev/null
   sudo -n touch /var/lib/pipedpeer-lab/day-finished
+  # The summary and the log's tail (pc00's cleanup) go up too; the count
+  # above already matched, so this last upload is best effort.
+  cp -f "$DAY/summary.txt" "$RESULTS/summary-day.txt"
+  bash "$CAMP/sync-r2.sh" final >/dev/null 2>&1 || true
   touch "$DAY/.synced"
   say "undoing lab.sh on pc00 (this PC); results, secrets and the code go with it"
   local undo_ok=1

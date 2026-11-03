@@ -10,7 +10,8 @@ source "$here/lib.sh"
 case "${1:-install}" in
 install) lab_install_otelcol ;;
 remove)
-	lab_stop_pid "$LAB_OTEL/node.pid"
+	# The collector, pp-poll.py and tcpdump: node.sh stop knows all three.
+	bash "$here/node.sh" stop >/dev/null 2>&1 || lab_stop_pid "$LAB_OTEL/node.pid"
 	rm -rf "$LAB_OTEL" "$LAB_BIN/otelcol-contrib" "$LAB_HOME/dl"
 	rmdir "$LAB_BIN" "$LAB_HOME" 2>/dev/null || true
 	echo "removed otelcol-contrib and $LAB_OTEL"

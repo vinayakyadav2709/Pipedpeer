@@ -64,7 +64,7 @@ discover() {
 ensure_services() {
   is_done discover || return 0
   is_done prep.otel && { OTELCOL_TARBALL=$DAY/serve/otelcol.tar.gz bash "$CAMP/telemetry.sh" up >/dev/null 2>&1 || say "driver collector did not start"; }
-  is_done prep.otel && { bash "$CAMP/otel/node.sh" status >/dev/null 2>&1 || bash "$CAMP/otel/node.sh" start pc00 "$(pc00_ip)" >/dev/null 2>&1 || say "pc00 node collector did not start"; }
+  is_done prep.otel && { bash "$CAMP/otel/node.sh" status >/dev/null 2>&1 || bash "$CAMP/otel/node.sh" start pc00 "$(pc00_ip)" --session "$SESSION" --pcap >/dev/null 2>&1 || say "pc00 node collector did not start"; }
   if is_done prep.join && command -v pipedpeer >/dev/null; then
     pipedpeer status >/dev/null 2>&1 || pipedpeer start >/dev/null 2>&1 || say "pc00 daemon did not start"
   fi
@@ -167,7 +167,7 @@ prep_pipedpeer() {
     [[ -f $HOSTREC/$h ]] || out_of pre "$h" | grep '^had-' >"$HOSTREC/$h" || true
     grep -q had-pipedpeer "$HOSTREC/$h" && blocker "$h already had pipedpeer; the day upgrades it and leaves it installed"
   done
-  ans_drop install all "bash $R/../install-pipedpeer.sh ${v:+--version $v} -y" "pipedpeer install failed" || return 1
+  ans_drop install all "${PIPEDPEER_RELEASE_BASE_URL:+PIPEDPEER_RELEASE_BASE_URL=$PIPEDPEER_RELEASE_BASE_URL }bash $R/../install-pipedpeer.sh ${v:+--version $v} -y" "pipedpeer install failed" || return 1
   ans doctor all 'pipedpeer --version; pipedpeer doctor' || true
   mkdir -p "$RESULTS/doctor"
   for h in "${OK_HOSTS[@]}" "${BAD_HOSTS[@]}"; do out_of doctor "$h" >"$RESULTS/doctor/$h.txt"; done
@@ -184,7 +184,9 @@ prep_join() {
   local want n i; want=$(workers | wc -l)
   for i in $(seq 40); do
     # Healthy nodes in pc00's view (its own entry may be among them).
-    n=$(curl -fsS http://127.0.0.1:4242/v1/nodes 2>/dev/null |
+    # The API wants the cluster token (the one config file), as systems.py sends it.
+    n=$(curl -fsS -H "X-Pipedpeer-Token: $(sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p' "${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/cluster.json" 2>/dev/null)" \
+      http://127.0.0.1:4242/v1/nodes 2>/dev/null |
       python3 -c 'import json,sys; print(sum(1 for x in json.load(sys.stdin) or [] if x.get("state") == "healthy"))' 2>/dev/null || echo 0)
     ((n >= want)) && break
     sleep 3
@@ -238,31 +240,46 @@ prep_otel() {
   fi
   OTELCOL_TARBALL=$DAY/serve/otelcol.tar.gz bash "$CAMP/telemetry.sh" up ||
     blocker "the driver collector did not start; telemetry is off"
+  # tcpdump for node.sh --pcap: from the distribution, so lab.sh undo removes it.
+  ans tcpdump all 'command -v tcpdump >/dev/null || PATH=$PATH:/usr/sbin command -v tcpdump >/dev/null || sudo -n bash '"$LABSH"' pkg tcpdump' ||
+    blocker "tcpdump did not install on ${BAD_HOSTS[*]}; no pcap from there"
+  # Every trace (otel/README.md, "Runner integration" 1): the session in
+  # $LAB_HOME/session, then the collector, the poller and the pcap.
   ans otel all 'set -e; cd '"$R"'/otel; t=$HOME/pipedpeer-lab/otelcol.tar.gz
     curl -fsS http://'"$(pc00_ip)"':'"$DIST_PORT"'/otelcol.tar.gz -o $t
     OTELCOL_TARBALL=$t bash install-otelcol.sh; rm -f $t
-    bash node.sh status >/dev/null 2>&1 || bash node.sh start {{ inventory_hostname }} '"$(pc00_ip)" ||
+    mkdir -p $HOME/.local/share/pipedpeer-lab; echo '"$SESSION"' >$HOME/.local/share/pipedpeer-lab/session
+    export PATH=$PATH:/usr/sbin
+    bash node.sh status >/dev/null 2>&1 || bash node.sh start {{ inventory_hostname }} '"$(pc00_ip)"' --session '"$SESSION"' --pcap' ||
     blocker "node collector failed on ${BAD_HOSTS[*]}; no host metrics from there"
+  local h
+  for h in "${OK_HOSTS[@]}"; do
+    # No ^: Fedora's sudo prefixes the line with terminal escapes (OSC 3008).
+    out_of otel "$h" | grep -q 'pcap: tcpdump pid' || blocker "$h: no pcap ($(out_of otel "$h" | grep -i pcap | tail -n1 | tr -cd '[:print:]' | cut -c1-200))"
+  done
   return 0
 }
 
 # calibrate: W1-W3 sizes on the first worker (pc01 unless it was dropped).
+# The strong and weak targets are calibrate.sh's 60 s unless LAB_CAL_STRONG_S
+# and LAB_CAL_WEAK_S say otherwise (the rehearsal uses a few seconds).
 calibrate() {
   local h w js ok=1; h=$(workers | head -n1)
+  local targets="${LAB_CAL_STRONG_S:-60} ${LAB_CAL_WEAK_S:-60}"
   mkdir -p "$RESULTS/calibration"
   for w in W1 W2 W3; do
     [[ -s $RESULTS/calibration/$w.json ]] && continue
     local try
     for try in 1 2; do
-      ans "cal.$w" "$h" "cd $R/../.. && CAL_VERIFY=1 bash scripts/campaign/calibrate.sh $w" || true
+      ans "cal.$w" "$h" "cd $R/../.. && CAL_VERIFY=1 ${CAL_MIN_S:+CAL_MIN_S=$CAL_MIN_S }${PL_NPROC:+PL_NPROC=$PL_NPROC }bash scripts/campaign/calibrate.sh $w $targets" || true
       out_of "cal.$w" "$h" >"$RESULTS/calibration/$w-$try.log"
       js=$(sed -n 's/^CALIBRATE //p' "$RESULTS/calibration/$w-$try.log" | tail -n1)
       [[ -n $js ]] || continue
-      # The plan's window for one PC alone: 100-150 s.
-      if python3 -c 'import json,sys; v=json.loads(sys.argv[1]).get("verify_s"); sys.exit(0 if v is None or 100<=v<=150 else 1)' "$js" || ((try == 2)); then
+      # The verify run must land within 25 % of the strong target (60 s: 45-75 s).
+      if python3 -c 'import json,sys; c=json.loads(sys.argv[1]); v=c.get("verify_s"); t=c["strong_target_s"]; sys.exit(0 if v is None or 0.75*t<=v<=1.25*t else 1)' "$js" || ((try == 2)); then
         printf '%s\n' "$js" >"$RESULTS/calibration/$w.json"; break
       fi
-      say "$w: the strong size ran outside 100-150 s on $h; calibrating again"
+      say "$w: the strong size ran outside 25 % of the target on $h; calibrating again"
     done
     [[ -s $RESULTS/calibration/$w.json ]] || { blocker "calibrating $w on $h failed (results/lab/calibration/$w-*.log)"; ok=0; }
   done
@@ -285,7 +302,7 @@ weakrefs() {
     python3 "$CAMP/day/sizes.py" have "$REPO" W1 "$size" && continue
     local h=${hosts[$((i % ${#hosts[@]}))]}; i=$((i + 1))
     say "weak reference N=$n ($size) on $h"
-    ( ans "weak.$n" "$h" "cd $R/../.. && $size BENCH_PROCS=\$(nproc) \$HOME/.local/share/pipedpeer-lab/env/bin/python3 docs/benchmarks/workloads/pool_map.py" >/dev/null ) &
+    ( ans "weak.$n" "$h" "cd $R/../.. && $size BENCH_PROCS=${PL_NPROC:-\$(nproc)} \$HOME/.local/share/pipedpeer-lab/env/bin/python3 docs/benchmarks/workloads/pool_map.py" >/dev/null ) &
     pids+=("$!:$n:$h:$size")
   done
   local p ok=1
@@ -337,7 +354,8 @@ run_exp() {
   if [[ ! -f $CAMP/run.sh ]]; then
     rc=127; blocker "$id: scripts/campaign/run.sh is missing"
   else
-    (cd "$REPO" && bash "$CAMP/run.sh" "$id" --inventory "$INV" "$@") 2>&1 | tee "$RESULTS/logs/day/$id.log"
+    # PL_SYNC=0: run.sh leaves the upload to the sync below, after attempts.jsonl has this attempt.
+    (cd "$REPO" && PL_SYNC=0 bash "$CAMP/run.sh" "$id" --inventory "$INV" "$@") 2>&1 | tee "$RESULTS/logs/day/$id.log"
     rc=${PIPESTATUS[0]}
   fi
   to=$(runs_lines)

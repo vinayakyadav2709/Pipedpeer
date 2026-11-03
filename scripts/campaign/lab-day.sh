@@ -9,7 +9,7 @@
 #   calibrate  W1-W3 sizes on pc01; then the weak-scaling plain references
 #   run        the profile's experiments through run.sh, syncing R2 after each
 #   analyse    analyse.py, then sync
-#   finish     clean every worker and undo lab.sh there, final sync and count,
+#   finish     pull every PC's pcap, clean every worker and undo lab.sh there, final sync and count,
 #              clean and undo pc00, print the summary
 #
 # Resumable: $DAY/done is a ledger of finished steps (day/lib.sh); rerunning
@@ -55,6 +55,7 @@ calibrate 12
 weakrefs 17
 $(for r in "${EXPS[@]}"; do read -r id min _ <<<"$r"; echo "exp.$id $min"; done)
 analyse 3
+pull.pcap 2
 clean.workers 10
 undo.workers 3
 final.sync 3
