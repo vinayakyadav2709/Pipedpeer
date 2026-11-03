@@ -38,7 +38,7 @@ T1's loss differs between 1 and R ranks by design: the sharding and shuffling di
 
 Strong scaling: one PC alone takes about 60 s (target 60 s). The plan asks for 100–150 s; the operator chose 60 s on 2026-11-03 so the minimal day fits one lab session (about 4 h instead of 6.5 h). At N=16 a run then holds about 4 s of work per PC, so fixed costs weigh more than they would at 125 s; the write-up must say so. Weak scaling (W1 only): about 60 s of work per PC, so items = per-PC size × N.
 
-| Workload | Strong size | Weak size per PC | Fit on the laptop | Strong size measured on the laptop |
+| Workload | Strong size | Weak size per PC | Fit on the laptop | Measured on the laptop at the earlier 125 s size |
 |---|---|---|---|---|
 | W1 | `BENCH_ITEMS=73946` | `BENCH_ITEMS=73759` × N | 0.29 s + 0.00081 s × items | 133.5 s |
 | W2 | `CPU_ITEMS=580` | none | 5.80 s + 0.0986 s × items | 113.5 s |
