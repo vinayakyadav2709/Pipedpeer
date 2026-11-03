@@ -1,0 +1,11 @@
+# Lab PC stand-in for lab-pc-test.sh: Fedora with systemd, firewalld and a
+# sudo-capable user "lab", without openssh-server (setup must install it).
+FROM registry.fedoraproject.org/fedora:43
+RUN dnf install -y -q systemd sudo curl iproute firewalld procps-ng >/dev/null \
+ && ! rpm -q openssh-server >/dev/null 2>&1 \
+ && systemctl enable firewalld \
+ && useradd -m -s /bin/bash lab \
+ && echo 'lab ALL=(ALL) NOPASSWD: ALL' >/etc/sudoers.d/00-lab-test && chmod 440 /etc/sudoers.d/00-lab-test \
+ && dnf makecache -q
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
