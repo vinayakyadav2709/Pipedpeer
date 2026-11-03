@@ -1,0 +1,8 @@
+workload,system,n,mode,runs_used,warmups_excluded,failed_excluded,median_wall_s,q1_wall_s,q3_wall_s,iqr_wall_s,median_script_s,weak_efficiency
+W1,plain,1,weak,1,1,0,1.0458,1.0458,1.0458,0.0,1.0143,1.0
+W1,pipedpeer,1,weak,1,1,0,0.48,0.48,0.48,0.0,0.3244,1.0
+W1,pipedpeer,2,weak,1,1,0,0.8728,0.8728,0.8728,0.0,0.6648,0.55
+W1,ray,1,weak,1,1,0,2.6101,2.6101,2.6101,0.0,1.438,1.0
+W1,ray,2,weak,1,1,0,3.4395,3.4395,3.4395,0.0,2.2332,0.7589
+W1,dask,1,weak,1,1,0,1.5887,1.5887,1.5887,0.0,1.2174,1.0
+W1,dask,2,weak,1,1,0,1.8173,1.8173,1.8173,0.0,1.459,0.8742

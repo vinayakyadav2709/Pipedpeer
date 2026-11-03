@@ -1,0 +1,7 @@
+workload,system,n,phase,runs_used,warmups_excluded,failed_excluded,median_wall_s,q1_wall_s,q3_wall_s,iqr_wall_s,median_mb_down,median_all_have_s,extra_package
+E5-env,pipedpeer,2,cold,1,0,0,0.7763,0.7763,0.7763,0.0,0.01,2.363,
+E5-env,pipedpeer,2,update,1,0,0,0.7851,0.7851,0.7851,0.0,0.01,4.222,tqdm
+E5-env,ray,2,cold,1,0,0,6.6149,6.6149,6.6149,0.0,0.11,,
+E5-env,ray,2,update,1,0,0,6.8689,6.8689,6.8689,0.0,0.52,,tqdm
+E5-env,pip,2,cold,1,0,0,4.2637,4.2637,4.2637,0.0,0.76,,
+E5-env,pip,2,update,1,0,0,0.8644,0.8644,0.8644,0.0,0.42,,tqdm

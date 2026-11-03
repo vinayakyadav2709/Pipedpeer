@@ -1,0 +1,12 @@
+e1: 42 runs, 21 used, 21 warm-ups excluded, 0 failed excluded
+e10: 2 runs, 1 used, 0 warm-ups excluded, 1 failed excluded
+  FAILED e10-20261103T180411-cbdfde W1 dask n=2 on None: gave up (None)
+e11: 4 runs, 4 used, 0 warm-ups excluded, 0 failed excluded
+e1b: 14 runs, 7 used, 7 warm-ups excluded, 0 failed excluded
+e3: 3 runs, 3 used, 0 warm-ups excluded, 0 failed excluded
+e4: 16 runs, 8 used, 8 warm-ups excluded, 0 failed excluded
+e5: 6 runs, 6 used, 0 warm-ups excluded, 0 failed excluded
+e6: 10 runs, 7 used, 3 warm-ups excluded, 0 failed excluded
+e7: 4 runs, 2 used, 2 warm-ups excluded, 0 failed excluded
+e8: 12 runs, 6 used, 6 warm-ups excluded, 0 failed excluded
+e9: 1 runs, 1 used, 0 warm-ups excluded, 0 failed excluded

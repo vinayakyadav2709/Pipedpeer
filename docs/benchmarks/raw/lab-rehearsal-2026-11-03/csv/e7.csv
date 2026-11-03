@@ -1,0 +1,3 @@
+workload,system,n,mode,runs_used,warmups_excluded,failed_excluded,median_wall_s,q1_wall_s,q3_wall_s,iqr_wall_s
+E7-trivial,pipedpeer-shim,2,strong,1,1,0,0.2814,0.2814,0.2814,0.0
+E7-trivial,pipedpeer-noshim,2,strong,1,1,0,0.1806,0.1806,0.1806,0.0
