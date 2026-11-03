@@ -139,3 +139,7 @@ CSV `csv/e19_ship.csv` (`run_id, system, n, phase, ttfr_s, wall_s, script_s, env
 `e20_summary.json`: one entry per (workload, system, n): `runs, ok_runs, median_wall_s, speedup_vs_plain, result_ok_all, script_lines_changed, result`.
 
 **Figure:** one panel per workload, bars per system of `speedup_vs_plain` at N=16, a ✓ or ✗ above each bar from `result_ok_all`, and `script_lines_changed` under the system name (`0 lines`, `6 lines`). Title `Unmodified pandas and scikit-learn, 16 PCs`.
+
+# Paper figures
+
+`paper_figures.py` draws the IEEE paper's evaluation figures (E1 to E20, telemetry and receipts) from the same inputs, in one style (`paperfig/style.py`, `paperfig/paper.mplstyle`), at IEEEtran's column widths. `docs/paper/FIGURES.md` lists every figure with its file, width, paper section and draft caption; `docs/paper/build-preview.sh` compiles the preview document. `--sample` reads the container sample, including `results/lab/sample/data/more/` for E16-E20.
