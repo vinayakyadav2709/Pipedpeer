@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/pipedpeer/pipedpeer/internal/userdir"
+	"github.com/pipedpeer/pipedpeer/internal/warmup"
 )
 
 // printStatus is the body of `pipedpeer status`: the machines, peers with
@@ -58,7 +57,7 @@ func printStatus(w io.Writer, port int) {
 // warmupLine is the last line of the environment warm-up log when it was
 // written within the hour, else "".
 func warmupLine() string {
-	path := filepath.Join(userdir.State(), "warmup.log")
+	path := warmup.LogPath()
 	info, err := os.Stat(path)
 	if err != nil || time.Since(info.ModTime()) > time.Hour {
 		return ""

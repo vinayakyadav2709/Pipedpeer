@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -10,6 +12,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/service"
 	"github.com/pipedpeer/pipedpeer/internal/setup"
+	"github.com/pipedpeer/pipedpeer/internal/term"
 )
 
 func newStartCmd() *cobra.Command {
@@ -136,14 +139,49 @@ Use -y to answer yes to every question.`,
 					return err
 				}
 			}
-			_, err := setup.Run(autoYes, noInstall, daemonctl.DefaultPort)
-			return err
+			code, _ := cmd.Flags().GetString("connect")
+			o := setup.Options{AutoYes: autoYes, NoInstall: noInstall,
+				Port: daemonctl.DefaultPort, Joining: code != ""}
+			outcome, err := runSetup(cmd.OutOrStdout(), o, code)
+			if err != nil {
+				return err
+			}
+			if outcome != connConnected {
+				os.Exit(int(outcome))
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolP("yes", "y", false, "Answer yes to every question")
 	cmd.Flags().Bool("no-install", false, "Check only, don't install anything")
+	cmd.Flags().String("connect", "",
+		"after setup, join the cluster this invite code names (same as `pipedpeer connect <code>`)")
 	cmd.Flags().String("public-address", "",
 		"this machine's address as seen from other networks (host or host:port, e.g. a cloud VM's public IP); "+
 			"invites list it first. Empty clears it")
 	return cmd
+}
+
+// Seam: tests replace setup.Run so no system is touched.
+var setupRun = setup.Run
+
+// runSetup runs setup, then joins with code when one was given, or else
+// starts the warm-up itself. The returned outcome is the exit code: only a
+// join that was not fully connected makes it non-zero.
+func runSetup(out io.Writer, o setup.Options, code string) (connOutcome, error) {
+	port, err := setupRun(o)
+	if err != nil {
+		return connFailed, err
+	}
+	if port <= 0 {
+		if code != "" {
+			term.Action(out, "once setup has completed, run `pipedpeer connect %s`", code)
+		}
+		return connConnected, nil
+	}
+	if code != "" {
+		return runConnectFn(out, code)
+	}
+	startWarmupFn(out)
+	return connConnected, nil
 }
