@@ -1,8 +1,15 @@
-# Node collector, one per lab PC. node.sh renders it: @PC_ID@, @DRIVER@,
-# @STORAGE@, @DAEMON_LOG_RECEIVER@ (file_log or journald, chosen by how the
-# daemon was installed) and @DAEMON_LOG_FILE@.
+# Node collector, one per lab PC. node.sh renders it:
+#   @PC_ID@ @HOST_NAME@ @SESSION@   resource attributes on every record
+#   @DRIVER@                        driver collector, host:port (OTLP/gRPC)
+#   @STORAGE@                       file_storage directory (read offsets)
+#   @DAEMON_LOG_RECEIVER@           file_log or journald, chosen by how the daemon was installed
+#   @DAEMON_LOG_FILE@               the daemon's log file (file_log only)
+#   @LOGS@                          $LAB_HOME/logs: ray/, dask/, pipedpeer-run/ and pp-poll.py's JSON lines
+#   @RAY_TMP@                       Ray's temp dir (default /tmp/ray)
+#   @SELF_METRICS_PORT@             this collector's own metrics, on 127.0.0.1
+# Every source sets lab.source, which telemetry.sh check counts by.
 extensions:
-  # Remembers how far the daemon log was read, so a restart neither drops nor
+  # Remembers how far each log file was read, so a restart neither drops nor
   # repeats lines.
   file_storage:
     directory: @STORAGE@
@@ -12,9 +19,91 @@ receivers:
     collection_interval: 1s
     scrapers:
       cpu:
+        metrics:
+          system.cpu.utilization: {enabled: true}
+          system.cpu.frequency: {enabled: true}
+          system.cpu.logical.count: {enabled: true}
+          system.cpu.physical.count: {enabled: true}
       memory:
-      network:
+        metrics:
+          system.memory.utilization: {enabled: true}
+          system.memory.limit: {enabled: true}
       load:
+      network:
+        metrics:
+          system.network.conntrack.count: {enabled: true}
+          system.network.conntrack.max: {enabled: true}
+      paging:
+        metrics:
+          system.paging.utilization: {enabled: true}
+      processes:
+      disk:
+      # Only the processes the campaign runs. The name is the kernel's comm
+      # (15 characters): Ray renames its workers ray::<task>; nix wraps
+      # entry points, so the Dask CLI is .dask-wrapped and its worker
+      # processes python3.14.
+      process:
+        include:
+          names: ['^(\.?(pipedpeer|python|ray|dask|torchrun|nix|otelcol).*|raylet|gcs_server|crun|tcpdump)$']
+          match_type: regexp
+        mute_process_name_error: true
+        mute_process_exe_error: true
+        mute_process_io_error: true
+        mute_process_user_error: true
+        mute_process_cgroup_error: true
+        metrics:
+          process.cpu.utilization: {enabled: true}
+          process.memory.utilization: {enabled: true}
+          process.threads: {enabled: true}
+          process.context_switches: {enabled: true}
+          process.open_file_descriptors: {enabled: true}
+          process.paging.faults: {enabled: true}
+          process.uptime: {enabled: true}
+        # A Ray worker's command line is kilobytes and would repeat every
+        # second; pp-poll.py's "procs" records carry it once per change, keyed
+        # by pid.
+        resource_attributes:
+          process.command_line: {enabled: false}
+
+  # Filesystems change slowly; 10 s is plenty.
+  host_metrics/fs:
+    collection_interval: 10s
+    scrapers:
+      filesystem:
+        metrics:
+          system.filesystem.utilization: {enabled: true}
+        exclude_fs_types:
+          fs_types: [autofs, binfmt_misc, bpf, cgroup, cgroup2, configfs, debugfs, devpts, devtmpfs, fusectl, hugetlbfs, mqueue, nsfs, proc, procfs, pstore, rpc_pipefs, securityfs, selinuxfs, squashfs, sysfs, tracefs]
+          match_type: strict
+        exclude_mount_points:
+          mount_points: ['/proc/.*', '/sys/.*', '/run/user/.*', '/snap/.*', '/var/lib/(docker|containers)/.*']
+          match_type: regexp
+
+  # Ray's per-node metrics agent (ray start --metrics-export-port), Dask's
+  # scheduler and worker /metrics (targets written by pp-poll.py, which asks
+  # the scheduler where the workers on this PC listen), and this collector's
+  # own counters (sent, refused, dropped). pp-poll.py lists a target only
+  # while it listens, so a stopped Ray or Dask is no target rather than a
+  # failed scrape every interval.
+  prometheus/apps:
+    config:
+      scrape_configs:
+        - job_name: ray
+          scrape_interval: 5s
+          scrape_timeout: 4s
+          file_sd_configs:
+            - files: ['@LOGS@/sd/ray.json']
+              refresh_interval: 5s
+        - job_name: dask
+          scrape_interval: 2s
+          scrape_timeout: 2s
+          file_sd_configs:
+            - files: ['@LOGS@/sd/dask.json']
+              refresh_interval: 5s
+        - job_name: otelcol
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['127.0.0.1:@SELF_METRICS_PORT@']
 
   # `pipedpeer setup` without --boot: the daemon appends to
   # $XDG_STATE_HOME/pipedpeer/daemon.log (internal/daemonctl).
@@ -22,8 +111,10 @@ receivers:
     include: [@DAEMON_LOG_FILE@]
     start_at: beginning
     storage: file_storage
+    include_file_path: true
     resource:
       service.name: pipedpeer-daemon
+      lab.source: daemon-log
 
   # `pipedpeer setup --boot`: systemd's user unit pipedpeer.service, which
   # sends the daemon's stderr to the user journal.
@@ -36,37 +127,163 @@ receivers:
       - type: add
         field: resource["service.name"]
         value: pipedpeer-daemon
+      - type: add
+        field: resource["lab.source"]
+        value: daemon-log
+
+  # Ray's own logs (raylet, gcs_server, workers, dashboard, events) for every
+  # session, plus whatever the runner writes to logs/ray (ray start output).
+  # session_latest is a link to one of the session_2* directories; reading
+  # both would read every file twice.
+  file_log/ray:
+    include:
+      - '@RAY_TMP@/session_2*/logs/**/*.log'
+      - '@RAY_TMP@/session_2*/logs/**/*.out'
+      - '@RAY_TMP@/session_2*/logs/**/*.err'
+      - '@LOGS@/ray/*.log'
+    start_at: beginning
+    storage: file_storage
+    include_file_path: true
+    resource:
+      service.name: ray
+      lab.source: ray-log
+
+  file_log/dask:
+    include: ['@LOGS@/dask/*.log']
+    start_at: beginning
+    storage: file_storage
+    include_file_path: true
+    resource:
+      service.name: dask
+      lab.source: dask-log
+
+  # One file per run, logs/pipedpeer-run/<run_id>.log: the run id comes from
+  # the file name.
+  file_log/pprun:
+    include: ['@LOGS@/pipedpeer-run/*.log']
+    start_at: beginning
+    storage: file_storage
+    include_file_path: true
+    resource:
+      service.name: pipedpeer-cli
+      lab.source: pipedpeer-run
+    operators:
+      - type: regex_parser
+        parse_from: attributes["log.file.name"]
+        parse_to: attributes
+        regex: '^(?P<run_id>.+)\.log$'
+        on_error: send_quiet
+      - type: move
+        if: 'attributes.run_id != nil'
+        from: attributes.run_id
+        to: attributes["lab.run_id"]
+
+  # pp-poll.py's JSON lines: daemon API answers (pp-poll), sockets and kernel
+  # network counters (net), and processes, clock, facts, Dask targets
+  # (node-state). The body stays the line as written; only the timestamp
+  # and lab.run_id are lifted out, so nothing is stored twice.
+  file_log/poll:
+    include: ['@LOGS@/pp-poll.jsonl*']
+    start_at: beginning
+    storage: file_storage
+    resource: {service.name: pp-poll, lab.source: pp-poll}
+    operators: &json_line
+      - type: json_parser
+        parse_to: attributes["_p"]
+        on_error: send_quiet
+      - type: time_parser
+        if: 'attributes["_p"] != nil and attributes["_p"]["ts_ns"] != nil'
+        parse_from: attributes["_p"]["ts_ns"]
+        layout_type: epoch
+        layout: ns
+        on_error: send_quiet
+      - type: copy
+        if: 'attributes["_p"] != nil and attributes["_p"]["run_id"] != nil'
+        from: attributes["_p"]["run_id"]
+        to: attributes["lab.run_id"]
+      - type: copy
+        if: 'attributes["_p"] != nil and attributes["_p"]["kind"] != nil'
+        from: attributes["_p"]["kind"]
+        to: attributes["lab.kind"]
+      - type: remove
+        if: 'attributes["_p"] != nil'
+        field: attributes["_p"]
+  file_log/net:
+    include: ['@LOGS@/net.jsonl*']
+    start_at: beginning
+    storage: file_storage
+    resource: {service.name: pp-poll, lab.source: net}
+    operators: *json_line
+  file_log/state:
+    include: ['@LOGS@/node-state.jsonl*']
+    start_at: beginning
+    storage: file_storage
+    resource: {service.name: pp-poll, lab.source: node-state}
+    operators: *json_line
 
 processors:
   resource/lab:
     attributes:
-      - key: lab.pc_id
-        value: @PC_ID@
-        action: upsert
-  # Bounded, so a first read of a long daemon log or journal never makes an
-  # OTLP message over the driver's receive limit (the driver drops those).
+      - {key: lab.pc_id, value: '@PC_ID@', action: upsert}
+      - {key: host.name, value: '@HOST_NAME@', action: upsert}
+      - {key: lab.session, value: '@SESSION@', action: upsert}
+  # Sources without their own lab.source get one from the receiver kind.
+  resource/host:
+    attributes:
+      - {key: lab.source, value: host-metrics, action: insert}
+  resource/prom:
+    attributes:
+      - {key: lab.source, value: prometheus, action: insert}
+  # Bounded, so a first read of a long log never makes an OTLP message over
+  # the driver's receive limit (the driver drops those).
   batch:
     timeout: 1s
-    send_batch_size: 1000
-    send_batch_max_size: 2000
+    send_batch_size: 2000
+    send_batch_max_size: 4000
 
 exporters:
   otlp_grpc:
-    endpoint: @DRIVER@:4317
+    endpoint: @DRIVER@
     tls:
       insecure: true
+    compression: zstd
+    # The driver laptop may be away (hotspot test, a sleep): queue up to
+    # about 10 min of this PC's data in memory and retry rather than drop.
+    sending_queue:
+      queue_size: 5000
+    retry_on_failure:
+      max_elapsed_time: 30m
 
 service:
   extensions: [file_storage]
   telemetry:
+    logs:
+      level: warn
+      # The same message at most twice per 10 min, then every 1000th: a
+      # target that keeps failing must not fill node.log.
+      sampling:
+        enabled: true
+        tick: 10m
+        initial: 2
+        thereafter: 1000
     metrics:
-      level: none
+      level: basic
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: @SELF_METRICS_PORT@
   pipelines:
-    metrics:
-      receivers: [host_metrics]
-      processors: [resource/lab, batch]
+    metrics/host:
+      receivers: [host_metrics, host_metrics/fs]
+      processors: [resource/lab, resource/host, batch]
+      exporters: [otlp_grpc]
+    metrics/prom:
+      receivers: [prometheus/apps]
+      processors: [resource/lab, resource/prom, batch]
       exporters: [otlp_grpc]
     logs:
-      receivers: [@DAEMON_LOG_RECEIVER@/daemon]
+      receivers: [@DAEMON_LOG_RECEIVER@/daemon, file_log/ray, file_log/dask, file_log/pprun, file_log/poll, file_log/net, file_log/state]
       processors: [resource/lab, batch]
       exporters: [otlp_grpc]
