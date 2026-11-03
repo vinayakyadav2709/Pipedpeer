@@ -166,7 +166,13 @@ func TestAPeerBackFromANewAddressLinksWithinOneRound(t *testing.T) {
 	go func() { b1.Run(ctx1); close(stopped) }()
 	defer func() { stop1(); <-stopped }()
 
-	waitFor(t, 15*time.Second, "A and B link", func() bool { return linked(a, b1) })
+	// Linked is not enough (as in TestBothSidesRelinkAtOnceAfterAnOutage):
+	// both ends punch at once, and the losing connection can still be on its
+	// way into linkUp. Landing after B is cut off below, it replaces the link
+	// with a connection already dead, and the stale-but-alive case is gone.
+	waitFor(t, 15*time.Second, "A and B link and stop dialling each other", func() bool {
+		return linked(a, b1) && idle(a, b1) && idle(b1, a)
+	})
 	nodeB := b1.node()
 	forwarder := a.Peers()[nodeB]
 
