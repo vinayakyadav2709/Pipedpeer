@@ -17,6 +17,7 @@ scripts/campaign/rehearse.sh [--keep] [--only "e1 e4"]
 | `experiments/<id>.py` | One file per experiment. The plan's section 3 table lists them. |
 | `analyse.py` | Writes the CSVs, figures and the E8 table. |
 | `lib/campaign/timeline.py`, `analyse_headline.py`, `FIGURES.md` | The headline experiments E12-E15 (lab/headline): per-chunk throughput from each system's own records, actions while a job runs, and their figures. `FIGURES.md` describes every field and figure. |
+| `lib/campaign/energy.py`, `otel/energy.sh`, `analyse_more.py` | E16-E20 (lab/more-bench): RAPL package energy per run, idle footprint, noisy neighbour, cold vs warm ship, pandas and scikit-learn one-liners. `analyse_more.py` writes their CSVs and JSON summaries; `FIGURES.md` ("More benchmarks") describes every field. |
 | `rehearse.sh` | Runs every experiment on the container lab. |
 | `tests/` | pytest suite: the runner against a fake cluster, and `analyse.py` against synthetic data. |
 
@@ -45,7 +46,7 @@ The runner appends one line per run to `results/lab/runs.jsonl` and flushes it a
 | `size`, `mode`, `caps`, `seed`, `script_s`, `rc` | The size env, strong or weak, core caps (E4), the order seed, the script's own timing (`timing_regex`) and the exit code |
 | `error`, `failing_pc`, `log_path` | Set when the run failed. A failed run never stops the experiment. |
 
-Some experiments add fields: E5 has `phase`, `mb_down`, `all_have_s` and `per_pc_s`. E6 has `fault`, `killed_pc`, `kill_at_s`, `kill_landed`, `ctrlc_latency_s` and `interrupt_landed`. E8 has `variant` and `bytes_per_rank`. E9 has `paths` and `introducer_bytes`. E11 has `join_s`, `bytes_per_node_per_min` and `bytes_source`. E3 and E10 have `minutes`, `commands_typed`, `script_lines_changed`, `participant` and `notes`. E12 has `n_start`, `n_final`, `join_every_s`, `events` (joins) and the throughput fields `timeline`, `timeline_source`, `items_total`, `items_counted` and `chunks_path`. E13 has `fault: "churn"`, `events` (kills and restarts), `kills`, `items_rerun`, `rerun_source` and the same throughput fields. E14 has `phase: "first-job"`, `first_work` and `pcs_with_work`, and appends to `results/lab/timeline.jsonl`. E15 has `rtt_added_ms` and `netem_hosts`. [FIGURES.md](FIGURES.md) gives the exact shapes. A rehearsal line carries `rehearsal: true`.
+Some experiments add fields: E5 has `phase`, `mb_down`, `all_have_s` and `per_pc_s`. E6 has `fault`, `killed_pc`, `kill_at_s`, `kill_landed`, `ctrlc_latency_s` and `interrupt_landed`. E8 has `variant` and `bytes_per_rank`. E9 has `paths` and `introducer_bytes`. E11 has `join_s`, `bytes_per_node_per_min` and `bytes_source`. E3 and E10 have `minutes`, `commands_typed`, `script_lines_changed`, `participant` and `notes`. E12 has `n_start`, `n_final`, `join_every_s`, `events` (joins) and the throughput fields `timeline`, `timeline_source`, `items_total`, `items_counted` and `chunks_path`. E13 has `fault: "churn"`, `events` (kills and restarts), `kills`, `items_rerun`, `rerun_source` and the same throughput fields. E14 has `phase: "first-job"`, `first_work` and `pcs_with_work`, and appends to `results/lab/timeline.jsonl`. E15 has `rtt_added_ms` and `netem_hosts`. E16 has `energy_j`, `energy_all_pcs_j`, `energy_per_pc_j` and an `idle-power` line. E17 has `ready_s`, `commands` and `footprint`. E18 has `fault: "none"|"hog"`, `hog_pcs`, `hog_share` and `fair_share`. E19 has `phase` (cold, warm, edit, newdep) and `ttfr_s`. E20 has `script_lines_changed`. [FIGURES.md](FIGURES.md) gives the exact shapes. A rehearsal line carries `rehearsal: true`.
 
 ## Order and warm-ups
 
@@ -86,6 +87,9 @@ PipedPeer runs keep the shim's receipt whole in `logs/<run_id>/receipt.json.gz`;
 | `PL_JOIN_EVERY_S`, `PL_JOIN_SCALE`, `PL_JOIN_TIMEOUT` | 20 (rehearsal: 10), 13, 300 | E12: seconds between joins, the size as a multiple of W1's strong size (unless `--size`), and the time limit |
 | `PL_CHURN_EVERY_S`, `PL_CHURN_DOWN_S`, `PL_CHURN_TIMEOUT` | 20 / 10 / 360 (rehearsal: 10 / 5) | E13: seconds between kills, how long a killed worker stays down, and the time limit |
 | `PL_NETEM_RTTS`, `PL_NETEM_REPEATS` | `0,20,80`, 2 (rehearsal: 1) | E15: the RTTs added, and runs per RTT |
+| `PL_ENERGY_IDLE_S`, `PL_ENERGY_IN_CONTAINER` | 10, unset | E16: the idle-power window; read RAPL inside a container anyway (the counters are the host's) |
+| `PL_IDLE_S`, `PL_READY_TIMEOUT` | 60 (rehearsal: 20), 300 | E17: the idle window, and the limit for a cluster to come up |
+| `PL_HOG_PCS`, `PL_HOG_AT_S`, `PL_HOG_SCALE`, `PL_HOG_REPEATS`, `PL_HOG_TIMEOUT` | 1, 5 (rehearsal: 3), 2, 1, 300 | E18: hogged PCs, when the hog starts, the size as a multiple of W1's strong size (unless `--size`), pairs per system, and the run's limit (each hog ends itself after it too) |
 
 `--size W1:BENCH_ITEMS=48` replaces workloads.json's size. In a weak-scaling experiment (E1b) it is the size per PC, multiplied by N like `weak_per_pc`.
 
@@ -100,4 +104,6 @@ PipedPeer runs keep the shim's receipt whole in `logs/<run_id>/receipt.json.gz`;
 - **E4:** caps are 2/1 instead of 8/4/2/1, at N=2.
 - **E3 and E10:** these are guided timers with no PC involved. The rehearsal feeds their answers through stdin.
 - **E12, E13, E14:** these run W1 with `BENCH_ITEMS=20000`, so that a job outlasts a join or a kill. E12 joins 1 → 2 for Ray and Dask, and 2 → 3 for pipedpeer: its N counts pc00, and a map that starts with no peer stays on pc00. E13 kills one of the N=2 workers every 10 s and restarts it 5 s later. E14 runs on all three containers.
+- **E16:** a container cannot read RAPL (rootless podman maps root to the user, and the counters would be the host's package, shared by the three containers), so every line says `energy_available: false` with the reason. The joule path is tested on a fake powercap tree (`tests/test_more.py`) instead.
+- **E17, E18, E19, E20:** N=2. E18 runs W1 at `BENCH_ITEMS=3000` so the job outlasts the hog's start at 3 s; with `PL_NPROC=2` the hog is one busy loop on core 0 of pc01, and the containers share the host's cores, so the hog's effect is small. E19's cold run downloads networkx (pipedpeer from cache.nixos.org, Ray from PyPI).
 - **E15:** the containers are privileged, so `tc netem` works on their `eth0`. rehearse.sh installs iproute2 (for `tc`) and procps (for E13's `pkill`), which the lab image lacks.

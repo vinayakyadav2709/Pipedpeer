@@ -136,6 +136,8 @@ The ETA in `lab.sh status` adds the step estimates in `lab-day.sh` (setup and cl
 
 **The day: 319 + 73 = 392 minutes, about 6.5 hours**, plus the time to type the line on 17 PCs before pc00. That is more than a 3-hour visit. The large items are e1 (105), e8 (82), e1b (53) and the N=16 weak reference (17). Ways to fit 3.5 hours, each a profile edit: e8 at ranks 2 and 8 only (-27), e1b at N = 1 and 16 (-18, and weakrefs -4), `--repeats 2` everywhere (-75), or e1 without W3 (-25). The estimate errs long: the efficiency assumptions are pessimistic, and e8's 72 minutes is lab/runner's own figure, not measured.
 
+The more-benchmarks rows (lab/more-bench, [FIGURES.md](FIGURES.md) "More benchmarks") add about 32 minutes: e16 energy to solution 6 (right after e1b, so its archive of the RAPL samples also covers E1's runs), e17 idle footprint and cluster start 6, e18 noisy neighbour 6, e19 cold vs warm ship 6, e20 pandas and scikit-learn one-liners 8. With them the experiments come to 319 + 32 = 351 minutes and the day to 351 + 73 = 424 minutes, about 7.1 hours. RAPL needs root: `otel/energy.sh` reads the counters through `sudo -n`, which `lab.sh` grants; `node.sh start` starts it and `node.sh stop` (which cleanup runs) stops it. E18's CPU hogs end themselves after 300 s and carry `PL_CAMPAIGN_HOG=1`, so a cut-off E18 leaves none behind.
+
 ### Distributing the Nix env
 
 The campaign env is a 2.5 GiB closure. If 17 PCs each fetched it from cache.nixos.org, the lab's internet link would carry about 42 GiB. Instead:

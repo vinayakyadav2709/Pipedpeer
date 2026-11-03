@@ -85,6 +85,7 @@ Every record carries the resource attributes `lab.pc_id`, `host.name`, `lab.sess
 | `node-state/clock` | `chronyc -c tracking` (offset, frequency, stratum, root delay) and `timedatectl show` | 30 s | pp-poll.py |
 | `node-state/facts` | `uname -a`, `lscpu`, cpu models, meminfo, NIC speed/duplex/MTU (and `ethtool` when present), os-release, kernel cmdline, clock, pipedpeer version | each `node.sh start` | pp-poll.py |
 | `node-state/dask-sd`, `ray-sd` | the scrape targets, when they change | on change | pp-poll.py |
+| `energy` | RAPL package energy: every top-level powercap zone's `energy_uj` (or hwmon `amd_energy`), as read; one `energy-start` line with the zones, or `available: false` and why (E16) | 1 s | `energy.sh` (root through `sudo -n`) → `logs/energy.jsonl` |
 | pcap (not OTel) | packet headers (96 B) on 4242-4244, not loopback | continuous, 10 min files | `node.sh --pcap` |
 
 Not available: the daemon exposes no gossip or membership byte counters (`src/internal/daemonapi` has none). For E11 take membership bytes from the pcaps (exact, per port and peer) or from `net/sockets` (TCP bytes per connection on 4242; UDP sockets have no byte counters in Linux). pp-poll.py never polls `/v1/stats`: that route asks every node, so 60 pollers would add 3,600 requests a second to the traffic E11 measures.

@@ -133,7 +133,7 @@ for i in 1 2 3; do
 done
 
 export PL_RESULTS="$out" PL_NPROC="${PL_NPROC:-2}" PL_E11_IDLE_S="${PL_E11_IDLE_S:-30}"
-experiments="${only:-e5 e14 e1 e1b e4 e6 e12 e13 e15 e7 e8 e9 e11 e3 e10}"
+experiments="${only:-e5 e14 e1 e1b e16 e4 e6 e12 e13 e15 e17 e18 e19 e20 e7 e8 e9 e11 e3 e10}"
 declare -A status
 for e in $experiments; do
 	log "=== $e"
@@ -154,6 +154,7 @@ for e in $experiments; do
 	e13) extra=(--size W1:BENCH_ITEMS=10000) ;;   # per PC: weak size x N
 	e14) extra=(--n 3 --size W1:BENCH_ITEMS=20000) ;;
 	e15) extra=(--size W1:BENCH_ITEMS=2000) ;;
+	e18) extra=(--size W1:BENCH_ITEMS=3000) ;;   # outlasts the hog's 3 s start
 	*) extra=() ;;
 	esac
 	set +e

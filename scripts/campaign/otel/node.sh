@@ -2,8 +2,9 @@
 # node.sh start <pc_id> <driver[:port]> [--pcap] [--session S] | stop | status | pcap-stop
 #
 # The node collector on a lab PC, plus pp-poll.py (daemon API, sockets,
-# processes, clock; README "Sources") and, with --pcap, a tcpdump of the
-# pipedpeer ports. Collector and poller run without root and detached
+# processes, clock; README "Sources"), energy.sh (RAPL package energy each
+# second, as root through sudo -n where it can) and, with --pcap, a tcpdump
+# of the pipedpeer ports. Collector and poller run without root and detached
 # (setsid), so stop is kill + rm and leaves nothing behind. Everything is
 # under ~/.local/share/pipedpeer-lab: otel/ (config, pids, logs, read
 # offsets), logs/ (the runner's ray/, dask/, pipedpeer-run/ and the poller's
@@ -178,6 +179,8 @@ start() {
 	echo "node collector up: pid $(cat "$pidfile"), lab.pc_id=$pc_id lab.session=$session -> $driver, daemon log from $src"
 	echo "pp-poll.py up: pid $(cat "$poll_pid") ($py), JSON lines in $LAB_LOGS"
 	if ((pcap)); then start_pcap "$pc_id" || true; fi
+	# Package energy every second (E16); says why where RAPL cannot be read.
+	sh "$here/energy.sh" start || true
 }
 
 cmd="${1:-}"
@@ -202,6 +205,7 @@ stop)
 	lab_stop_pid "$pidfile"
 	lab_stop_pid "$poll_pid"
 	stop_pcap
+	sh "$here/energy.sh" stop >/dev/null 2>&1 || true
 	echo "node collector and poller stopped"
 	;;
 pcap-stop) stop_pcap ;;
@@ -209,6 +213,7 @@ status)
 	rc=0
 	if lab_running "$pidfile"; then echo "collector running: pid $(cat "$pidfile"), config $config, log $logfile"; else echo "collector not running"; rc=1; fi
 	if lab_running "$poll_pid"; then echo "pp-poll.py running: pid $(cat "$poll_pid"), log $poll_log"; else echo "pp-poll.py not running"; rc=1; fi
+	sh "$here/energy.sh" status || true
 	if [[ -f "$pcap_pid" ]]; then echo "pcap: pid $(cat "$pcap_pid"), $(find "$pcap_dir" -name '*.pcap' 2>/dev/null | wc -l) file(s) in $pcap_dir"; fi
 	exit "$rc"
 	;;

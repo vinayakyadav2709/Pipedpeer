@@ -331,6 +331,11 @@ def main(argv=None):
     m, sk = analyse_headline.run(runs, out, csvdir, figdir, None if a.no_figures else plt, save)
     made += m
     skipped += sk
+    # E16-E20: CSVs and JSON summaries only (analyse_more.py, FIGURES.md).
+    import analyse_more
+    more = analyse_more.run(runs, out, csvdir)
+    if more:
+        summary.append("e16-e20 data: %s" % ", ".join(more))
     with open(os.path.join(out, "summary.txt"), "w") as f:
         f.write("\n".join(summary) + "\n")
     print("\n".join(summary))
