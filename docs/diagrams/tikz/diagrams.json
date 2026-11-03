@@ -1,0 +1,98 @@
+[
+  {
+    "name": "arch",
+    "file": "docs/diagrams/tikz/pdf/arch.pdf",
+    "width": "double",
+    "shows": "Every machine runs the same binary: a short-lived client that builds, places and ships the job, and a daemon that admits it, caches its closure and runs it, with peers on the LAN or over direct links.",
+    "caption": "System design. Both roles are one binary. The client builds the closure, takes a lease (1) and sends only the store paths the worker lacks (2); output and changed files stream back (3). The worker pushes the signed closure to peers (4) and the shim spreads parts and gradients over them (5). Introducers carry addresses, never job data.",
+    "section": "System Design"
+  },
+  {
+    "name": "placement",
+    "file": "docs/diagrams/tikz/pdf/placement.pdf",
+    "width": "single",
+    "shows": "How the client picks a node: candidates, ordered hard filters, the score of Eq. 1, the three-phase lease, and the two retry paths.",
+    "caption": "Placement in the submitting client. Hard filters run in order; survivors are ranked by the score S of Equation 1. A refused lease moves to the next node (a); a failed run is placed again, at most three times (b).",
+    "section": "System Design > Placement"
+  },
+  {
+    "name": "lease",
+    "file": "docs/diagrams/tikz/pdf/lease.pdf",
+    "width": "single",
+    "shows": "The worker's lease state machine: accept reserves, commit runs, and expiry, completion or a silent submitter releases.",
+    "caption": "Lease states on the worker. A reservation expires 30 s after its last renewal plus a 5 s grace; a running lease is kept while its job lives and reaped only after 5 minutes without renewal.",
+    "section": "System Design > Placement"
+  },
+  {
+    "name": "closure",
+    "file": "docs/diagrams/tikz/pdf/closure.pdf",
+    "width": "single",
+    "shows": "The store path as cache key: what the client asks the worker and what crosses the wire when warm, partly cached or cold.",
+    "caption": "Environment transfer. The client asks whether the worker can run the closure (1) and which store paths it lacks (2), and sends only those (3). Adding one package sent 7 of 43 paths, 28.6 MB of 206.0 MB.",
+    "section": "System Design > Environment Reproduction"
+  },
+  {
+    "name": "nat",
+    "file": "docs/diagrams/tikz/pdf/nat.pdf",
+    "width": "single",
+    "shows": "Message sequence of a join across networks, from the invite code to a direct QUIC link, with the introducer carrying only addresses.",
+    "caption": "Joining across networks. Both nodes register their candidates with an introducer (2), which forwards one punch request (3); both sides then probe every candidate pair (4) until a direct QUIC link forms (5). No job data passes through the introducer.",
+    "section": "System Design > Joining Across Networks"
+  },
+  {
+    "name": "trust",
+    "file": "docs/diagrams/tikz/pdf/trust.pdf",
+    "width": "single",
+    "shows": "The two roots of trust, the cluster secret and the node key, and the four places each one is checked.",
+    "caption": "Trust. The cluster secret guards every daemon route and the QUIC hello; the node key makes the TLS certificate, signs the hello and signs closures.",
+    "section": "System Design > Joining Across Networks"
+  },
+  {
+    "name": "shim",
+    "file": "docs/diagrams/tikz/pdf/shim.pdf",
+    "width": "double",
+    "shows": "The shim loaded before the script patches parallel entry points, and each call either leaves the machine or runs as written.",
+    "caption": "Transparent interception. The shim is imported before the script's first line (1) and patches the listed calls (2). Each call is gated (3); offloaded work is split by measured speed while local cores re-run late parts (4), and the script receives the result a local run would give (5).",
+    "section": "System Design > Transparent Interception"
+  },
+  {
+    "name": "shuffle",
+    "file": "docs/diagrams/tikz/pdf/shuffle.pdf",
+    "width": "single",
+    "shows": "The hash shuffle behind pandas grouping and joining: every key lands whole on one node, so partial results only need concatenation.",
+    "caption": "Hash shuffle for pandas grouping and joining. Rows are bucketed by a hash of their key, so each key is complete on one node and any aggregation is exact without a combiner; the row order of joins is not preserved.",
+    "section": "System Design > Transparent Interception"
+  },
+  {
+    "name": "ddp",
+    "file": "docs/diagrams/tikz/pdf/ddp.pdf",
+    "width": "single",
+    "shows": "PipedPeer's training sync through the lead daemon, its exact, fast and auto modes, against torchrun's rank-to-rank all-reduce.",
+    "caption": "Data-parallel training. (a) Each PipedPeer rank posts to the lead daemon and receives one sample-weighted average; exact mode sends int8 gradients every step, fast mode weights every H steps. (b) The torchrun baseline meets at a c10d rendezvous and all-reduces between ranks over gloo.",
+    "section": "System Design > Transparent Interception"
+  },
+  {
+    "name": "cost",
+    "file": "docs/diagrams/tikz/pdf/cost.pdf",
+    "width": "single",
+    "shows": "The order of the numerical gate: size and node rules, the memory rule, an optimistic bound, a bandwidth probe, then Equation 2.",
+    "caption": "The cost model as a cascade. Cheap tests run first; bandwidth is measured only when offloading could win at 10 Gbit/s. Work moves when Equation 2 holds or when it does not fit in local memory.",
+    "section": "System Design > The Cost Model"
+  },
+  {
+    "name": "sandbox",
+    "file": "docs/diagrams/tikz/pdf/sandbox.pdf",
+    "width": "single",
+    "shows": "The layers around a job: crun container mounts and namespaces, the per-job and daemon memory ceilings, and the host.",
+    "caption": "The job sandbox. The closure is mounted read-only and the workspace read-write inside a crun container; a per-job cgroup and the daemon's own scope bound memory. The job shares the host network.",
+    "section": "System Design > Implementation"
+  },
+  {
+    "name": "lab",
+    "file": "docs/diagrams/tikz/pdf/lab.pdf",
+    "width": "double",
+    "shows": "The lab campaign topology: pc00 drives, submits and collects telemetry from 16 worker PCs on one LAN, then uploads to R2 through a capped ingest Worker.",
+    "caption": "Lab campaign. pc00 runs the experiments over Ansible, hosts the Ray head, Dask scheduler and PipedPeer submitter, and collects OpenTelemetry from a collector on every PC into files; after each experiment the results go to R2 through an ingest Worker that refuses uploads past the free tier.",
+    "section": "Evaluation > Setup"
+  }
+]

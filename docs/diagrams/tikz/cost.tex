@@ -1,0 +1,42 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[tb/.style={box, minimum width=4.8cm, minimum height=0.5cm},
+  nl/.style={elab, above, pos=0.5}]
+  \def\x{3.05} \def\xr{7.45} \def\xl{0.18}
+  \node[tb] (T1) at (\x,0)     {At least 2 nodes and 32\,MiB?};
+  \node[tb] (T2) at (\x,-0.8) {Does it fit in local memory?};
+  \node[tb, fill=ppfill] (T3) at (\x,-1.6) {A GPU peer sets $R' = 6R$};
+  \node[tb] (T4) at (\x,-2.4) {Would it win at an assumed 10\,Gbit/s?};
+  \node[tb, fill=ppfill] (T5) at (\x,-3.2) {Measure $B$: 64\,MB probe, kept 300\,s};
+  \node[tb, minimum height=0.62cm] (T6) at (\x,-4.06)
+    {Is $\frac{\phi}{R} > \frac{\rho}{B} + 1.3\,\frac{\phi}{R'K}$\,?};
+  \node[pbox, minimum width=2.6cm, minimum height=0.55cm] (Dist) at (\x,-5.0) {Distribute};
+  \node[box, minimum width=2.4cm, minimum height=0.55cm] (Loc) at (\xr,-5.0) {Run locally};
+
+  \foreach \a/\b in {T1/T2, T2/T3, T3/T4, T4/T5, T5/T6}
+    \draw[data] (\a) -- (\b);
+  \foreach \a/\b in {T2/T3, T4/T5}
+    \path (\a.south) -- node[elab, right, pos=0.45, xshift=1pt] {yes} (\b.north);
+  \path (T1.south) -- node[elab, right, pos=0.45, xshift=1pt] {yes} (T2.north);
+  \draw[pdata] (T6) -- node[elab, right, xshift=1pt] {yes} (Dist);
+
+  % no -> local rail
+  \foreach \t/\l in {T1/no, T4/{no; no probe}, T6/no}
+    \draw[data, -] (\t.east) -- node[nl] {\l} (\xr, 0 |- \t.east);
+  \draw[data] (\xr,0 |- T1.east) -- (Loc.north);
+  
+  % does not fit -> distribute
+  \draw[pdata] (T2.west) -- (\xl,-0.8) node[elab, above right, pos=0] {} |- (Dist.west);
+  \node[elab, above] at ($(T2.west)!0.5!(\xl,-0.8)$) {no};
+  \node[plain, font=\ppnote, text=ppsec, rotate=90, anchor=north] at (\xl+0.03,-2.95)
+    {or raise if it fits nowhere};
+
+  \node[plain, font=\ppnote, text=ppsec, anchor=north west, align=left, text width=8.6cm, align=flush left]
+    at (0.05,-5.38)
+    {$\phi$ operations and $\rho$ link crossings per byte; $B$ bandwidth; $R$, $R'$ local and
+     per-node remote throughput; $K$ nodes holding the environment. Indivisible work (SVD)
+     moves when its transfer costs under half the local time.};
+  \ppwidth{\ppsingle}
+\end{tikzpicture}
+\end{document}

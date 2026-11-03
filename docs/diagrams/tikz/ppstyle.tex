@@ -1,0 +1,99 @@
+% Shared look of the PipedPeer diagrams. Every diagram \input{ppstyle}.
+% Drawn at final size: IEEEtran \columnwidth 252pt, \textwidth 516pt.
+\usepackage{fontspec}
+\setmainfont{texgyretermes}[Extension=.otf, UprightFont=*-regular,
+  BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+\setmonofont{texgyrecursor}[Extension=.otf, UprightFont=*-regular,
+  BoldFont=*-bold, ItalicFont=*-italic, BoldItalicFont=*-bolditalic]
+\usepackage{unicode-math}
+\setmathfont{texgyretermes-math.otf}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, fit, calc, backgrounds,
+  shapes.geometric, shapes.misc}
+
+% Okabe-Ito; PipedPeer blue is the one accent.
+\definecolor{ppblue}{HTML}{0072B2}
+\definecolor{ppray}{HTML}{D55E00}
+\definecolor{ppdask}{HTML}{009E73}
+\definecolor{ppplain}{HTML}{595959}
+\definecolor{pptorch}{HTML}{CC79A7}
+\definecolor{pporange}{HTML}{E69F00}
+\definecolor{ppink}{HTML}{1A1A1A}
+\definecolor{ppsec}{HTML}{555555}
+\definecolor{pprule}{HTML}{333333}
+\definecolor{ppgrey}{HTML}{8C8C8C}
+\definecolor{ppframe}{HTML}{B4B4B4}
+\definecolor{ppfill}{HTML}{F2F2F2}
+\colorlet{pplight}{ppblue!10}
+
+\newcommand\pplab{\fontsize{8}{9.5}\selectfont}
+\newcommand\ppnote{\fontsize{7}{8.4}\selectfont}
+\newcommand\ppsmall{\fontsize{6.5}{7.8}\selectfont}
+% Cursor is lighter than Termes; a slight embolden matches the stroke weight.
+\newfontfamily\pptt{texgyrecursor}[Extension=.otf, UprightFont=*-regular,
+  UprightFeatures={FakeBold=0.9}]
+\newcommand\ppcode[1]{{\pptt #1}}
+\newcommand\ppsec[1]{{\color{ppsec}#1}}
+
+\newlength\ppsingle \setlength\ppsingle{252pt}
+\newlength\ppdouble \setlength\ppdouble{516pt}
+
+\tikzset{
+  every picture/.style={line width=0.6pt, >={Stealth[length=3pt,width=2.4pt]},
+    font=\pplab, color=ppink, line cap=butt, line join=miter},
+  % boxes
+  box/.style={draw=pprule, fill=white, line width=0.5pt, rounded corners=1pt,
+    align=center, inner xsep=3pt, inner ysep=2.5pt, minimum height=0.5cm},
+  pbox/.style={box, draw=ppblue, fill=pplight},
+  nbox/.style={box, fill=ppfill},
+  ghost/.style={box, draw=ppgrey, dashed, dash pattern=on 2pt off 1.2pt},
+  plain/.style={align=center, inner sep=1pt},
+  % frames grouping boxes
+  group/.style={draw=ppframe, line width=0.5pt, rounded corners=1pt,
+    inner sep=5pt},
+  pgroup/.style={group, draw=ppblue!55},
+  glabel/.style={font=\ppnote\scshape, text=ppsec, inner sep=1.5pt,
+    anchor=north west},
+  % edges: solid = data, dashed = control, dotted = optional
+  data/.style={->, draw=pprule, line width=0.7pt},
+  pdata/.style={data, draw=ppblue},
+  ctrl/.style={->, draw=pprule, line width=0.6pt, dash pattern=on 2.4pt off 1.6pt},
+  opt/.style={->, draw=ppgrey, line width=0.6pt, dash pattern=on 0.6pt off 1.2pt},
+  elab/.style={font=\ppnote, text=ppsec, inner sep=1.2pt, align=center,
+    fill=white, fill opacity=0, text opacity=1},
+  elabw/.style={elab, fill opacity=1},
+  % numbered step markers
+  ppmark/.style={circle, draw=ppblue, fill=ppblue, text=white, inner sep=0pt,
+    minimum size=8.4pt, font=\fontsize{6.5}{6.5}\selectfont\bfseries},
+  % decision diamond
+  decide/.style={draw=pprule, fill=white, line width=0.6pt, diamond,
+    aspect=2.2, inner sep=0.6pt, align=center},
+  % state of a state machine
+  state/.style={box, rounded corners=4pt, minimum height=0.62cm},
+}
+
+% A frame drawn behind the nodes it fits, with a small-caps label in its
+% top-left corner: \ppgroup[style]{name}{label}{fit list}
+\newcommand\ppgroup[4][group]{%
+  \begin{scope}[on background layer]
+    \node[#1, fit=#4] (#2) {};
+  \end{scope}
+  \node[glabel] at (#2.north west) {#3};}
+
+% Fix the picture's width to exactly #1 and fail the build when anything was
+% drawn outside x in [0,#1], so nothing is clipped or scaled. The figure is
+% drawn with its left edge at x = 0.
+\newcommand\ppwidth[1]{%
+  \pgfpointanchor{current bounding box}{south west}\pgfgetlastxy\ppxa\ppya
+  \pgfpointanchor{current bounding box}{north east}\pgfgetlastxy\ppxb\ppyb
+  \ifdim\ppxa<-0.6pt \errmessage{PP: drawn \ppxa\space left of x=0}\fi
+  \ifdim\ppxb>\dimexpr#1+0.6pt\relax
+    \errmessage{PP: drawn to \ppxb, past the width}\fi
+  \typeout{PP-BBOX: x from \ppxa\space to \ppxb}%
+  \pgfresetboundingbox
+  \path (0,\ppya) rectangle (#1,\ppyb);
+}
+
+% An inline step marker for use inside node text.
+\newcommand\ppstep[1]{\tikz[baseline=(s.base)]\node[ppmark](s){#1};}

@@ -1,0 +1,46 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[eb/.style={box, minimum width=5.3cm, minimum height=0.56cm, inner ysep=1.5pt},
+  gate/.style={font=\ppnote, text=ppsec}]
+  \node[box, minimum width=2.0cm, minimum height=0.9cm] (S) at (1.12,0) {Unmodified\\script};
+  \node[pbox, minimum width=3.1cm, minimum height=0.9cm] (H) at (4.45,0)
+    {Shim, imported first\\[-1pt]\ppnote\ppsec{embedded in the binary,}\\[-2pt]\ppnote\ppsec{appended to the workspace}};
+
+  \def\xe{9.25}
+  \foreach \y/\e/\g [count=\i] in {
+      1.36/{\ppcode{Pool}, process executors}/{${\ge}\,0.5$\,s of work},
+      0.68/{\ppcode{joblib}, scikit-learn}/{${\ge}\,0.5$\,s of work},
+      0/{pandas grouping, joining}/{cost model},
+      -0.68/{NumPy products, SVD}/{cost model},
+      -1.36/{data-parallel training}/{opt-in, \ppcode{--ddp}}} {
+    \node[eb] (E\i) at (\xe,\y) {};
+    \node[anchor=west, inner sep=0pt] at ($(E\i.west)+(0.12,0)$) {\e};
+    \node[gate, anchor=east, inner sep=0pt] at ($(E\i.east)+(-0.12,0)$) {\g};
+  }
+  \coordinate (Et) at ($(E1.north)+(0,0.3)$);
+  \ppgroup{ent}{patched calls, and when they may leave}{(Et)(E1)(E5)}
+
+  \node[decide] (D) at (13.5,0) {cluster\\faster?};
+
+  \node[pbox, minimum width=3.0cm, align=left] (R) at (16.4,0.9)
+    {Remote: split by\\measured speed; late\\parts re-run locally};
+  \node[box, minimum width=3.0cm, align=left] (L) at (16.4,-0.85)
+    {Local: the original\\function, as written};
+  \path (R.west) ++(0,0) coordinate (Rw);
+  \node[align=left, text width=2.75cm, inner sep=0pt] at (R) {};
+
+  \draw[data] (S) -- node[elab, above] {\ppstep{1}} (H);
+  \draw[data] (H) -- node[elab, above] {\ppstep{2}} (H -| ent.west);
+  \draw[data] (ent.east |- D) -- node[elab, above] {\ppstep{3}} (D);
+  \draw[pdata] (D.north) |- node[elab, above, pos=0.78] {yes \ppstep{4}} (R.west);
+  \draw[data] (D.south) |- node[elab, below, pos=0.78] {no} (L.west);
+  % results back
+  \def\yr{-2.28}
+  \draw[data] (L.south) |- (S.south |- 0,\yr) node[elab, below, pos=0.5, inner sep=2pt] {} -- (S.south);
+  \draw[pdata] (R.east) -- (18.05,0.9) |- (L.south |- 0,\yr);
+  \node[elab, below, inner sep=2pt] at (9.25,\yr)
+    {\ppstep{5} the same result as a local run; on any exception the original runs instead};
+  \ppwidth{\ppdouble}
+\end{tikzpicture}
+\end{document}

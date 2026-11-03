@@ -1,0 +1,50 @@
+\documentclass[tikz,border=0pt]{standalone}
+\input{ppstyle}
+\begin{document}
+\begin{tikzpicture}[lb/.style={box, minimum width=5.3cm, minimum height=0.74cm},
+  wb/.style={box, minimum width=5.0cm, minimum height=0.74cm},
+  cb/.style={box, minimum width=3.5cm, minimum height=0.74cm},
+  pc/.style={box, minimum width=0.56cm, minimum height=0.3cm, inner sep=0.5pt, font=\ppsmall}]
+  \def\xl{2.85} \def\xw{11.0} \def\xc{16.18}
+  \def\ya{0} \def\yb{-0.95} \def\yc{-1.9} \def\yd{-2.85} \def\ye{-3.8}
+
+  % pc00
+  \node[lb] (a) at (\xl,\ya) {Systems under test: PipedPeer submitter\\(one of the $N$), Ray head, Dask scheduler};
+  \node[pbox, lb] (b) at (\xl,\yb) {OTel driver collector, OTLP on :4317;\\file exporter, compressed JSON lines};
+  \node[lb] (c) at (\xl,\yc) {Runner: the lab day and \ppcode{run.sh},\\Ansible over ssh};
+  \node[lb] (d) at (\xl,\yd) {File server: code, Nix binary cache,\\the collector binary};
+  \node[nbox, lb] (e) at (\xl,\ye) {Results: one record per run, logs,\\clock offsets, packet captures};
+  \coordinate (at) at ($(a.north)+(0,0.3)$);
+  \ppgroup{pc0}{pc00: driver, and a node like the others}{(at)(a)(e)}
+
+  % workers
+  \node[wb] (w1) at (\xw,\ya) {PipedPeer daemon, Ray worker, Dask\\workers, or a torchrun rank};
+  \node[pbox, wb] (w2) at (\xw,\yb) {OTel node collector: host and process\\metrics, Ray and Dask metrics, logs};
+  \node[wb] (w3) at (\xw,\yc) {\ppcode{pp-poll.py}: daemon API, sockets,\\kernel counters, clock};
+  \node[wb] (w4) at (\xw,\yd) {RAPL energy counters; \ppcode{tcpdump}\\of packet headers on 4242--4244};
+  \foreach \i in {1,...,16} {
+    \pgfmathsetmacro\col{mod(\i-1,8)} \pgfmathsetmacro\row{int((\i-1)/8)}
+    \node[pc] at ({\xw-2.5+0.29+\col*0.631}, {\ye+0.17-\row*0.38}) {pc\ifnum\i<10 0\fi\i};
+  }
+  \coordinate (wt) at ($(w1.north)+(0,0.3)$);
+  \coordinate (wbot) at (\xw,\ye-0.42);
+  \ppgroup{wrk}{each worker, pc01 to pc16}{(wt)(w1)(w4)(wbot)}
+
+  % links, on the lab LAN
+  \draw[data, <->] (a.east) -- node[elab, above] {jobs, tasks, ranks} (a.east -| wrk.west);
+  \draw[pdata] (w2.west -| wrk.west) -- node[elab, above] {OTLP/gRPC, zstd} (b.east);
+  \draw[ctrl] (c.east) -- node[elab, above] {commands, run id} (c.east -| wrk.west);
+  \draw[data] (d.east) -- node[elab, above] {code, Nix paths} (d.east -| wrk.west);
+  \draw[opt] (wrk.west |- e) -- node[elab, above] {pcap, at the end} (e.east);
+  \node[plain, font=\ppnote\itshape, text=ppsec] at ($(pc0.north east)!0.5!(wrk.north west)+(0,-0.05)$) {lab LAN};
+
+  % cloud
+  \node[cb] (i) at (\xc,\yc) {ingest Worker: refuses\\uploads past the free tier};
+  \node[pbox, cb] (r) at (\xc,\ye) {R2 bucket: raw results\\and telemetry};
+  \draw[data] (i) -- (r);
+  \coordinate (ct) at ($(i.north)+(0,0.3)$);
+  \ppgroup{cld}{cloudflare}{(ct)(i)(r)}
+  \draw[data] (e.south) -- ++(0,-0.62) -| node[elab, above, pos=0.22] {\ppcode{sync-r2.sh} after each experiment} ([xshift=-0.9cm]cld.south);
+  \ppwidth{\ppdouble}
+\end{tikzpicture}
+\end{document}
