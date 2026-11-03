@@ -217,11 +217,11 @@ func TestPeerNar(t *testing.T) {
 			t.Fatalf("code %d", rec.Code)
 		}
 	})
-	t.Run("11 at most 8 dumps", func(t *testing.T) {
+	t.Run("11 at most maxPeerStoreJobs dumps", func(t *testing.T) {
 		e := &peerEnv{globOut: []string{peerBashPath}, dumpData: []byte("x"), dumpGate: make(chan struct{})}
 		e.install(t)
 		var wg sync.WaitGroup
-		for i := 0; i < 9; i++ {
+		for i := 0; i < maxPeerStoreJobs+1; i++ {
 			wg.Add(1)
 			go func() { defer wg.Done(); narReq(s, peerBashHash) }()
 		}
@@ -229,7 +229,7 @@ func TestPeerNar(t *testing.T) {
 		for atomic.LoadInt32(&e.dumpRunning) < maxPeerStoreJobs && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
-		time.Sleep(50 * time.Millisecond) // give the 9th a chance to wrongly start
+		time.Sleep(50 * time.Millisecond) // give the extra one a chance to wrongly start
 		if got := atomic.LoadInt32(&e.dumpRunning); got != maxPeerStoreJobs {
 			t.Fatalf("running %d, want %d", got, maxPeerStoreJobs)
 		}
@@ -248,9 +248,12 @@ func TestPeerNar(t *testing.T) {
 	})
 }
 
-// Spec: a full semaphore answers 503 at once (not a wait), and the two
+// Spec: a full semaphore answers 503 once the wait for a slot ran out, and the two
 // routes have separate slots.
 func TestPeerStoreSemaphoreFull(t *testing.T) {
+	old := peerSlotWait
+	peerSlotWait = 50 * time.Millisecond
+	t.Cleanup(func() { peerSlotWait = old })
 	s := &Server{}
 	e := &peerEnv{globOut: []string{peerBashPath}, infoOut: [][]byte{peerFixture(t)}, dumpData: []byte("x")}
 	e.install(t)

@@ -185,7 +185,7 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 	} else {
 		flake := flakeRef(nixgen.NixArch())
 		var nixOut bytes.Buffer
-		err := peercache.RunWithFallback(nixBuildArgv(flake, opts.CachePort), nixBuildArgv(flake, 0), func(argv []string) error {
+		err := peercache.RunWithFallback(ctx, nixBuildArgv(flake, opts.CachePort), nixBuildArgv(flake, 0), func(argv []string) error {
 			cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, argv...)
 			if err != nil {
 				return err
@@ -197,7 +197,16 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 			} else {
 				cmd.Stdout, cmd.Stderr = &nixOut, &nixOut
 			}
-			return cmd.Run()
+			if err := cmd.Run(); err != nil {
+				if out := nixOut.Bytes(); len(out) > 0 {
+					if len(out) > 2048 {
+						out = out[len(out)-2048:]
+					}
+					return fmt.Errorf("%w: ...%s", err, out)
+				}
+				return err
+			}
+			return nil
 		})
 		if err != nil {
 			env.Close()

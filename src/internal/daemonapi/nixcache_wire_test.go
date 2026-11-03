@@ -103,3 +103,45 @@ func TestRouterWiringSpliced(t *testing.T) {
 		t.Errorf("after the spliced connection closed: got %d, want 200", got)
 	}
 }
+
+// /health and the other API routes are not touched by the cache gate: a
+// request over a spliced connection (the forwarder's) is answered normally,
+// with the token when one is set, not reset or refused for being spliced.
+func TestSplicedConnectionServesHealth(t *testing.T) {
+	srv := httptest.NewServer(New("health-node").Handler())
+	defer srv.Close()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return direct.LocalDialer(srv.Listener.Addr().String())(ctx)
+		},
+	}}
+	defer client.CloseIdleConnections()
+	get := func(path, token string) int {
+		req, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1"+path, nil)
+		if token != "" {
+			req.Header.Set(authtoken.Header, token)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s over a spliced connection: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := get("/health", ""); got != http.StatusOK {
+		t.Errorf("/health, no token set: %d", got)
+	}
+	if err := authtoken.Set("secret"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = authtoken.Set("") })
+	if got := get("/health", "secret"); got != http.StatusOK {
+		t.Errorf("/health with the token: %d", got)
+	}
+	if got := get("/health", ""); got != http.StatusUnauthorized {
+		t.Errorf("/health without the token (as before this change): %d", got)
+	}
+	if got := get("/nix-cache/nix-cache-info", ""); got != http.StatusUnauthorized {
+		t.Errorf("cache over a splice without token: %d", got)
+	}
+}

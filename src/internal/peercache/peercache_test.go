@@ -93,6 +93,7 @@ func TestAccept(t *testing.T) {
 	}
 	caForgedSigned := parseNI(t, strings.Replace(real21, "References:", "CA: fixed:r:sha256:10w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2\nReferences:", 1))
 	caForgedSigned.Signatures = parseNI(t, real21).Signatures
+	caOtherNar := parseNI(t, strings.Replace(ca.String(), "NarHash: sha256:10w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2", "NarHash: sha256:00w02iccr1pnkrfnhxb0ghfizq42pq6nxgplrdgl9f0bfazxdli2", 1))
 	badDir := parseNI(t, strings.Replace(real21, "StorePath: /nix/store/", "StorePath: /evil/", 1))
 
 	cases := []struct {
@@ -112,6 +113,8 @@ func TestAccept(t *testing.T) {
 		{"9 CA that does not match the path, no sig", caForged, bashHash, nixos, "no trusted signature"},
 		{"10 CA mismatch but trusted sig", caForgedSigned, bashHash, nixos, ""},
 		{"11 store path outside /nix/store", badDir, bashHash, nixos, "not a valid"},
+		{"12 CA whose NarHash differs from the CA hash", caOtherNar, "001gp43bjqzx60cg345n2slzg7131za8", nil, "differs from NarHash"},
+		{"13 CA with matching NarHash (opposite of 12)", ca, "001gp43bjqzx60cg345n2slzg7131za8", nil, ""},
 		{"8 NarSize 0", zeroSize, bashHash, nixos, "NarSize"},
 	}
 	for _, c := range cases {

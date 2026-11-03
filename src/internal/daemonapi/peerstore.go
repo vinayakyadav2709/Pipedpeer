@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/klauspost/compress/zstd"
@@ -22,8 +23,14 @@ import (
 // authenticated peers. It never asks other peers, so a request cannot loop
 // through the cluster. The local /nix-cache layer fans out to these routes.
 
-// maxPeerStoreJobs caps the nix processes each peer route runs at once.
-const maxPeerStoreJobs = 8
+// maxPeerStoreJobs caps the nix processes each peer route runs at once. It
+// matches nix's default max-substitution-jobs (16), the NARs one machine asks
+// for together.
+const maxPeerStoreJobs = 16
+
+// peerSlotWait is how long a request waits for a free slot before it answers
+// 503. It stays under peerHeaderWait, the asker's patience for a response.
+var peerSlotWait = 8 * time.Second
 
 // The narinfo and NAR routes have a semaphore each, so a few long NAR streams
 // cannot starve the quick narinfo lookups.
@@ -77,15 +84,24 @@ var (
 	ensureSigned = nixsign.EnsureSigned
 )
 
-// acquirePeerStore takes a slot of sem, or reports false at once when all are
-// taken: the asker then moves on to another peer instead of queueing here.
-func acquirePeerStore(sem chan struct{}) (release func(), ok bool) {
+// acquirePeerStore takes a slot of sem, waiting up to peerSlotWait (or until
+// ctx ends) when all are taken: nix asks for many paths at once and a refusal
+// would turn into a missing NAR.
+func acquirePeerStore(ctx context.Context, sem chan struct{}) (release func(), ok bool) {
 	select {
 	case sem <- struct{}{}:
 		return func() { <-sem }, true
 	default:
-		return nil, false
 	}
+	t := time.NewTimer(peerSlotWait)
+	defer t.Stop()
+	select {
+	case sem <- struct{}{}:
+		return func() { <-sem }, true
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	return nil, false
 }
 
 // localStorePath resolves a store hash to the full store path held here, or
@@ -139,7 +155,7 @@ func (s *Server) handlePeerNarinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	release, ok := acquirePeerStore(peerInfoSem)
+	release, ok := acquirePeerStore(ctx, peerInfoSem)
 	if !ok {
 		log.Debug().Str("hash", hash).Str("path", path).Msg("peer store: all slots taken")
 		http.Error(w, "busy", http.StatusServiceUnavailable)
@@ -187,7 +203,7 @@ func (s *Server) handlePeerNar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	release, ok := acquirePeerStore(peerNarSem)
+	release, ok := acquirePeerStore(ctx, peerNarSem)
 	if !ok {
 		log.Debug().Str("hash", hash).Str("path", path).Msg("peer store: all slots taken")
 		http.Error(w, "busy", http.StatusServiceUnavailable)

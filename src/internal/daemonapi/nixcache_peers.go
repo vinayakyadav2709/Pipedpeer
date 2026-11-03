@@ -38,20 +38,42 @@ func (s *Server) cachePeers() []PeerHealth {
 	s.peersMu.RLock()
 	defer s.peersMu.RUnlock()
 	var out []PeerHealth
-	seen := map[string]bool{}
+	byNode := map[string]int{} // NodeID -> index in out
 	for _, ph := range s.peerHealths {
 		switch {
 		case ph.Status != "healthy" || ph.Host == "" || ph.Port == 0:
 		case ph.NodeID == s.nodeID:
 		case machine != "" && ph.Machine == machine:
 		case ph.Arch == "" || ph.Arch != system:
-		case ph.NodeID != "" && seen[ph.NodeID]: // one node under several addresses
 		default:
-			seen[ph.NodeID] = true
+			if i, ok := byNode[ph.NodeID]; ok && ph.NodeID != "" {
+				// One node under several addresses: keep the nearest.
+				if addrRank(*ph) < addrRank(out[i]) || (addrRank(*ph) == addrRank(out[i]) && peerKey(*ph) < peerKey(out[i])) {
+					out[i] = *ph
+				}
+				continue
+			}
+			byNode[ph.NodeID] = len(out)
 			out = append(out, *ph)
 		}
 	}
 	return out
+}
+
+// addrRank orders a node's addresses: LAN (private) first, other routable
+// ones next, and loopback last (that is the internet forwarder, a QUIC path
+// unfit for multi-GB NARs when a LAN address exists).
+func addrRank(p PeerHealth) int {
+	ip := net.ParseIP(p.Host)
+	switch {
+	case ip == nil:
+		return 1
+	case ip.IsLoopback():
+		return 3
+	case ip.IsPrivate() || ip.IsLinkLocalUnicast():
+		return 0
+	}
+	return 2
 }
 
 // peerGet issues GET path against a peer's daemon. The response header must
@@ -91,57 +113,59 @@ type peerAnswer struct {
 	peer    PeerHealth
 	body    []byte // nil unless acceptable
 	narHash string // the accepted narinfo's NarHash
+	busy    bool   // the peer answered 503
 	// clean is true when the peer answered definitively (404, or a narinfo we
 	// rejected), false for a timeout or transport error.
 	clean bool
 }
 
 // fanOutNarinfo asks every peer at once and returns the first acceptable
-// answer (the others are cancelled). clean reports whether every peer that
-// was heard from answered definitively, so a miss may be remembered.
-func fanOutNarinfo(peers []PeerHealth, hash string) (cacheHit, bool) {
+// answer. clean reports whether every peer that was heard from answered
+// definitively, so a miss may be remembered. With no hit and a peer that
+// answered 503, the hit is busy: not a miss. rest collects the slower peers
+// that answer with the winner's NarHash (they can serve the NAR if the winner
+// cannot) and calls add for each until the budget ends; the caller runs it
+// after remembering the hit. Callers must run rest even for a miss.
+func fanOutNarinfo(peers []PeerHealth, hash string) (hit cacheHit, clean bool, rest func(add func(PeerHealth))) {
 	ctx, cancel := context.WithTimeout(context.Background(), narinfoBudget)
-	defer cancel()
 	trusted := trustedKeys()
 	ch := make(chan peerAnswer, len(peers))
 	for _, p := range peers {
 		go func() { ch <- askPeer(ctx, p, hash, trusted) }()
 	}
-	clean := true
+	clean = true
+	busy := false
 	for i := range peers {
 		a := <-ch
 		if a.body == nil {
 			clean = clean && a.clean
+			busy = busy || a.busy
 			continue
 		}
-		hit := cacheHit{body: a.body, peers: []PeerHealth{a.peer}}
-		// Other peers that already answered with the same NarHash can serve
-		// the NAR if the winner cannot. A different NarHash means a different
-		// build of the path; nix would reject that NAR.
-		grace := time.NewTimer(fallbackGrace)
-		for left := len(peers) - i - 1; left > 0; left-- {
-			select {
-			case o := <-ch:
-				if o.body != nil && o.narHash == a.narHash {
-					hit.peers = append(hit.peers, o.peer)
+		hit = cacheHit{body: a.body, peers: []PeerHealth{a.peer}}
+		left := len(peers) - i - 1
+		return hit, true, func(add func(PeerHealth)) {
+			defer cancel()
+			for ; left > 0; left-- {
+				select {
+				case o := <-ch:
+					// A different NarHash is a different build of the path;
+					// nix would reject that NAR.
+					if o.body != nil && o.narHash == a.narHash {
+						add(o.peer)
+					}
+				case <-ctx.Done():
+					return
 				}
-				continue
-			case <-grace.C:
 			}
-			break
 		}
-		grace.Stop()
-		return hit, true
 	}
+	cancel()
 	if !clean {
 		log.Warn().Str("hash", hash).Int("peers", len(peers)).Msg("nix cache: no peer answered in time")
 	}
-	return cacheHit{}, clean
+	return cacheHit{busy: busy}, clean && !busy, func(func(PeerHealth)) {}
 }
-
-// fallbackGrace is how long a hit waits for the slower peers' answers, to
-// have more than one NAR source. A variable so tests can shorten it.
-var fallbackGrace = 100 * time.Millisecond
 
 // peerWarnEvery is how often one peer may be warned about.
 const peerWarnEvery = 30 * time.Second
@@ -156,11 +180,18 @@ var (
 func warnPeer(p PeerHealth, err error, msg string, fields map[string]any) {
 	peerWarnMu.Lock()
 	now := cacheNow()
-	if last, ok := peerWarnLast[p.NodeID]; ok && now.Sub(last) < peerWarnEvery {
+	// Per peer and message: a NAR failure must not hide a later "narinfo
+	// rejected" from the same peer. A peer with no NodeID is told by address.
+	key := p.NodeID
+	if key == "" {
+		key = net.JoinHostPort(p.Host, strconv.Itoa(p.Port))
+	}
+	key += "|" + msg
+	if last, ok := peerWarnLast[key]; ok && now.Sub(last) < peerWarnEvery {
 		peerWarnMu.Unlock()
 		return
 	}
-	peerWarnLast[p.NodeID] = now
+	peerWarnLast[key] = now
 	peerWarnMu.Unlock()
 	ev := log.Warn().Err(err).Str("peer", p.NodeID)
 	for k, v := range fields {
@@ -189,6 +220,7 @@ func askPeer(ctx context.Context, p PeerHealth, hash string, trusted []signature
 		return a
 	}
 	if resp.StatusCode != http.StatusOK {
+		a.busy = resp.StatusCode == http.StatusServiceUnavailable
 		warnPeer(p, nil, "nix cache: peer refused the narinfo", map[string]any{"hash": hash, "status": resp.StatusCode})
 		return a
 	}

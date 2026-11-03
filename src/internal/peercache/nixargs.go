@@ -1,10 +1,12 @@
 package peercache
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +56,10 @@ func NixArgs(port int) []string {
 	if err := probe(port); err != nil {
 		return nil
 	}
-	args := []string{"--option", "extra-substituters", url}
+	// connect-timeout: with cache.nixos.org unreachable, nix otherwise waits
+	// out the OS connect timeout per attempt before it reaches the peer
+	// (lab: 79.8 s without, 29.2 s with 5 s).
+	args := []string{"--option", "connect-timeout", "5", "--option", "extra-substituters", url}
 	if !multi {
 		if keys := clusterKeys(); keys != "" {
 			args = append(args, "--option", "extra-trusted-public-keys", keys)
@@ -90,10 +95,11 @@ func probe(port int) error {
 // that fails while the cache was on, once more without them (plain). A
 // multi-user nix-daemon ignores a client's `fallback`, so a peer that vanishes
 // between narinfo and NAR would otherwise fail a build that a local build can
-// do. The first error is logged; the second is returned.
-func RunWithFallback(argv, plain []string, run func(argv []string) error) error {
+// do. The first error is logged in full (run should put nix's output tail in
+// it); the second is returned. A cancelled ctx is not retried.
+func RunWithFallback(ctx context.Context, argv, plain []string, run func(argv []string) error) error {
 	err := run(argv)
-	if err == nil || len(argv) == len(plain) {
+	if err == nil || slices.Equal(argv, plain) || ctx.Err() != nil {
 		return err
 	}
 	log.Warn().Err(err).Msg("nix build with the peer cache failed; retrying without it")

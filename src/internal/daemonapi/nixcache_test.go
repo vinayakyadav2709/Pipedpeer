@@ -381,6 +381,7 @@ func TestNixCacheNar(t *testing.T) {
 		c := newNCPeer(t, 200, good, 0, 200, "FROMC")
 		e := newNCEnv(t, true, ncPeers(t, b, c))
 		e.do("GET", "/"+ncHash+".narinfo")
+		time.Sleep(200 * time.Millisecond) // the second peer's answer joins as a source
 		w := e.do("GET", "/nar/"+ncHash+".nar.zst")
 		if w.Code != 200 || w.Body.String() != "FROMC" {
 			t.Fatalf("%d %q", w.Code, w.Body.String())

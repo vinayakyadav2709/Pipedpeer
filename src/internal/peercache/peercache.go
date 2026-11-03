@@ -6,6 +6,7 @@ package peercache
 
 import (
 	"fmt"
+	"github.com/nix-community/go-nix/pkg/nixbase32"
 	"os"
 	"path"
 	"strings"
@@ -83,6 +84,12 @@ func Accept(ni *narinfo.NarInfo, hash string, trusted []signature.PublicKey) err
 		want, err := CAStorePath(ni.CA, ni.StorePath, ni.References)
 		switch {
 		case err == nil && want == ni.StorePath:
+			// A recursive sha256 CA is the hash of the NAR, so a different
+			// NarHash is a narinfo nix would reject at import; do not let it
+			// win over honest peers.
+			if h, ok := strings.CutPrefix(ni.CA, "fixed:r:sha256:"); ok && h != nixbase32.EncodeToString(ni.NarHash.Digest()) {
+				return fmt.Errorf("CA hash %s differs from NarHash %s", h, ni.NarHash)
+			}
 			return nil
 		case err != nil:
 			log.Debug().Err(err).Str("ca", ni.CA).Msg("peer cache: CA not verifiable, requiring a signature")

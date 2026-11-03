@@ -2,6 +2,7 @@ package peercache
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -33,13 +34,13 @@ func TestNixArgs(t *testing.T) {
 	cases := []routeCase{
 		{name: "1 port 0", port: 0, status: 200, body: info, noProbe: true},
 		{name: "2 private, keys", port: 4242, keys: "k1 k2", status: 200, body: info,
-			want: []string{"--option", "extra-substituters", url4242, "--option", "extra-trusted-public-keys", "k1 k2",
+			want: []string{"--option", "connect-timeout", "5", "--option", "extra-substituters", url4242, "--option", "extra-trusted-public-keys", "k1 k2",
 				"--option", "narinfo-cache-negative-ttl", "0", "--option", "fallback", "true"}},
 		{name: "3 single-user, no keys file", port: 4250, status: 200, body: info,
-			want: []string{"--option", "extra-substituters", url4250, "--option", "narinfo-cache-negative-ttl", "0",
+			want: []string{"--option", "connect-timeout", "5", "--option", "extra-substituters", url4250, "--option", "narinfo-cache-negative-ttl", "0",
 				"--option", "fallback", "true"}},
 		{name: "4 multi-user, listed", port: 4242, multi: true, listed: true, status: 200, body: info,
-			want: []string{"--option", "extra-substituters", url4242, "--option", "fallback", "true"}},
+			want: []string{"--option", "connect-timeout", "5", "--option", "extra-substituters", url4242, "--option", "fallback", "true"}},
 		{name: "5 multi-user, not listed", port: 4242, multi: true, status: 200, body: info, logWant: "pipedpeer setup", noProbe: true},
 		{name: "6 multi-user, listed, port 4250", port: 4250, multi: true, listed: true, status: 200, body: info, logWant: "default daemon port", noProbe: true},
 		{name: "7a probe 404", port: 4242, status: 404, body: "no", logWant: "peer cache off"},
@@ -90,6 +91,22 @@ func TestNixArgs(t *testing.T) {
 	}
 }
 
+func TestRunWithFallbackCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls := 0
+	err := RunWithFallback(ctx, []string{"nix", "--option", "fallback", "true"}, []string{"nix"}, func([]string) error { calls++; return fmt.Errorf("killed") })
+	if calls != 1 || err == nil {
+		t.Errorf("cancelled ctx: %d calls, err %v; want 1 call and the error", calls, err)
+	}
+	// Opposite: a live ctx retries, and equal-length but different argv counts as cache-on.
+	calls = 0
+	_ = RunWithFallback(context.Background(), []string{"nix", "a"}, []string{"nix", "b"}, func([]string) error { calls++; return fmt.Errorf("x") })
+	if calls != 2 {
+		t.Errorf("same-length differing argv: %d calls, want 2", calls)
+	}
+}
+
 func TestRunWithFallback(t *testing.T) {
 	cached, plain := []string{"nix", "build", "--option", "fallback", "true"}, []string{"nix", "build"}
 	boom := fmt.Errorf("boom")
@@ -107,7 +124,7 @@ func TestRunWithFallback(t *testing.T) {
 	}
 	for _, c := range cases {
 		calls := 0
-		err := RunWithFallback(c.argv, plain, func(a []string) error {
+		err := RunWithFallback(context.Background(), c.argv, plain, func(a []string) error {
 			calls++
 			if calls <= c.failOn {
 				return boom

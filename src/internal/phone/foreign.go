@@ -44,7 +44,7 @@ var (
 	// buildFlake builds dir's flake for system into dir/result. A variable so
 	// tests use a fake nix.
 	buildFlake = func(dir, system string) error {
-		return peercache.RunWithFallback(flakeBuildArgv(dir, system, CachePort), flakeBuildArgv(dir, system, 0), func(argv []string) error {
+		return peercache.RunWithFallback(context.Background(), flakeBuildArgv(dir, system, CachePort), flakeBuildArgv(dir, system, 0), func(argv []string) error {
 			cmd, cleanup, err := nixstore.CmdContext(context.Background(), dir, argv...)
 			if err != nil {
 				return err

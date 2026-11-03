@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,9 +23,15 @@ import (
 // fetched from a peer's token-gated /v1/store routes (peerstore.go), and those
 // never fan out, so a lookup cannot loop through the cluster.
 
-// maxFanOuts caps the lookups asking peers at once; the rest answer 404 for
-// now (nix builds the path itself) without being remembered.
+// maxFanOuts caps the lookups asking peers at once. Nix asks up to
+// http-connections (25) narinfos together, so a lookup over the cap waits
+// fanOutWait for a slot and then answers 503. Never 404: nix remembers a 404
+// (narinfo-cache-negative-ttl, an hour by default), while it retries a 5xx
+// and does not cache it.
 const maxFanOuts = 16
+
+// fanOutWait is a variable so tests can shorten it.
+var fanOutWait = narinfoBudget
 
 var fanOutSem = make(chan struct{}, maxFanOuts)
 
@@ -51,8 +58,11 @@ func exceptLocalNixCache(auth func(http.Handler) http.Handler) func(http.Handler
 			p := r.URL.Path
 			// The Host check keeps a web page that rebinds its name to
 			// 127.0.0.1 from reading the cache through the browser.
+			// A browser request carries Origin or Sec-Fetch-Site; nix sends
+			// neither. A page could otherwise make this machine fan out.
 			if strings.HasPrefix(p, peercache.Route+"/") && path.Clean(p) == p &&
-				isLoopback(r.RemoteAddr) && !direct.Spliced(r.RemoteAddr) && loopbackHost(r.Host) {
+				isLoopback(r.RemoteAddr) && !direct.Spliced(r.RemoteAddr) && loopbackHost(r.Host) &&
+				r.Header.Get("Origin") == "" && r.Header.Get("Sec-Fetch-Site") == "" {
 				if r.Method != http.MethodGet && r.Method != http.MethodHead {
 					w.Header().Set("Allow", "GET, HEAD")
 					http.Error(w, "the cache is read-only", http.StatusMethodNotAllowed)
@@ -83,6 +93,15 @@ type cacheHit struct {
 	body    []byte       // the winning peer's narinfo, unchanged
 	peers   []PeerHealth // winner first, then peers that may also have it
 	expires time.Time
+	// busy marks an answer that is no answer: a slot was not free here or at
+	// a peer. It is never remembered and goes to nix as 503.
+	busy bool
+}
+
+// busyReply tells nix to try again later (5xx is retried, a 404 is cached).
+func busyReply(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "busy, retry", http.StatusServiceUnavailable)
 }
 
 // nixCache is the per-server lookup state behind the /nix-cache router.
@@ -123,6 +142,10 @@ func (c *nixCache) handleNarinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hit, ok := c.lookup(r, hash)
+	if hit.busy {
+		busyReply(w)
+		return
+	}
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -140,6 +163,10 @@ func (c *nixCache) handleNar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hit, ok := c.lookup(r, hash)
+	if hit.busy {
+		busyReply(w)
+		return
+	}
 	if !ok {
 		http.NotFound(w, r)
 		return
@@ -148,6 +175,7 @@ func (c *nixCache) handleNar(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/zstd")
 		return
 	}
+	busy := false
 	for _, p := range hit.peers {
 		resp, err := peerGet(r.Context(), p, "/v1/store/nar/"+hash)
 		if err != nil {
@@ -156,6 +184,7 @@ func (c *nixCache) handleNar(w http.ResponseWriter, r *http.Request) {
 		}
 		if resp.StatusCode != http.StatusOK {
 			warnPeer(p, nil, "nix cache: peer refused the NAR", map[string]any{"hash": hash, "status": resp.StatusCode})
+			busy = busy || resp.StatusCode == http.StatusServiceUnavailable
 			resp.Body.Close()
 			continue
 		}
@@ -163,13 +192,62 @@ func (c *nixCache) handleNar(w http.ResponseWriter, r *http.Request) {
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			// Headers are gone; nix sees a short body, rejects it and falls back.
 			log.Warn().Err(err).Str("hash", hash).Str("peer", p.NodeID).Msg("nix cache: NAR stream broke")
+			if r.Context().Err() == nil { // not nix hanging up
+				c.dropSource(hash, p)
+			}
 		}
 		resp.Body.Close()
 		return
 	}
 	// Every source failed: forget the answer so the next ask looks again.
+	// A source that was only busy is a 503, which nix retries; a 404 on a
+	// NAR whose narinfo it has fails the build.
 	c.forget(hash)
+	if busy {
+		busyReply(w)
+		return
+	}
 	http.NotFound(w, r)
+}
+
+// dropSource removes a peer whose NAR stream broke from the remembered hit,
+// and the hit with it when no source is left.
+func (c *nixCache) dropSource(hash string, p PeerHealth) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h, ok := c.hits[hash]
+	if !ok {
+		return
+	}
+	var left []PeerHealth
+	for _, q := range h.peers {
+		if peerKey(q) != peerKey(p) {
+			left = append(left, q)
+		}
+	}
+	if len(left) == 0 {
+		delete(c.hits, hash)
+		return
+	}
+	h.peers = left
+	c.hits[hash] = h
+}
+
+// addSource adds a peer that answered after the winner with the same NarHash.
+func (c *nixCache) addSource(hash string, p PeerHealth) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	h, ok := c.hits[hash]
+	if !ok {
+		return
+	}
+	for _, q := range h.peers {
+		if peerKey(q) == peerKey(p) {
+			return
+		}
+	}
+	h.peers = append(slices.Clone(h.peers), p)
+	c.hits[hash] = h
 }
 
 func (c *nixCache) forget(hash string) {
@@ -193,15 +271,19 @@ func (c *nixCache) lookup(r *http.Request, hash string) (cacheHit, bool) {
 			log.Debug().Str("hash", hash).Msg("nix cache: no peers to ask")
 			return cacheHit{}, nil
 		}
+		wait := time.NewTimer(fanOutWait)
+		defer wait.Stop()
 		select {
 		case fanOutSem <- struct{}{}:
 			defer func() { <-fanOutSem }()
-		default:
-			log.Warn().Str("hash", hash).Msg("nix cache: too many lookups in flight, answering a miss")
-			return cacheHit{}, nil
+		case <-wait.C:
+			warnPeer(PeerHealth{NodeID: "local"}, nil, "nix cache: too many lookups in flight, answering 503", map[string]any{"hash": hash})
+			return cacheHit{busy: true}, nil
 		}
-		h, clean := fanOutNarinfo(peers, hash)
+		h, clean, rest := fanOutNarinfo(peers, hash)
 		c.remember(hash, h, clean)
+		// The slower peers' answers are collected after the slot is free.
+		go rest(func(p PeerHealth) { c.addSource(hash, p) })
 		return h, nil
 	})
 	h := v.(cacheHit)

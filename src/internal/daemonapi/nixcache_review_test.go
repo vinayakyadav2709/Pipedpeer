@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"github.com/nix-community/go-nix/pkg/narinfo"
 	"github.com/nix-community/go-nix/pkg/narinfo/signature"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -32,8 +31,6 @@ func TestNixCacheReview(t *testing.T) {
 	})
 
 	t.Run("a peer with a different NarHash is not a NAR fallback", func(t *testing.T) {
-		fallbackGrace = 500 * time.Millisecond
-		t.Cleanup(func() { fallbackGrace = 100 * time.Millisecond })
 		sk, pk, err := signature.GenerateKeypair("test-1", rand.Reader)
 		if err != nil {
 			t.Fatal(err)
@@ -62,6 +59,7 @@ func TestNixCacheReview(t *testing.T) {
 			if w := e.do("GET", "/"+ncHash+".narinfo"); w.Code != 200 {
 				t.Fatalf("narinfo: %d", w.Code)
 			}
+			time.Sleep(300 * time.Millisecond) // the slower peer's answer joins the sources
 			w := e.do("GET", "/nar/"+ncHash+".nar.zst")
 			return w.Code, w.Body.String()
 		}
@@ -113,7 +111,10 @@ func TestNixCacheReview(t *testing.T) {
 		}
 	})
 
-	t.Run("lookups over the fan-out cap answer a miss without remembering it", func(t *testing.T) {
+	t.Run("lookups over the fan-out cap answer 503 (not a 404 nix would cache) without remembering it", func(t *testing.T) {
+		old := fanOutWait
+		fanOutWait = 50 * time.Millisecond
+		t.Cleanup(func() { fanOutWait = old })
 		a := newNCPeer(t, 200, good, 0, 200, "")
 		e := newNCEnv(t, true, ncPeers(t, a))
 		for i := 0; i < maxFanOuts; i++ {
@@ -123,7 +124,7 @@ func TestNixCacheReview(t *testing.T) {
 		for i := 0; i < maxFanOuts; i++ {
 			<-fanOutSem
 		}
-		if w.Code != 404 || a.calls.Load() != 0 {
+		if w.Code != 503 || a.calls.Load() != 0 {
 			t.Fatalf("over the cap: %d, %d peer calls", w.Code, a.calls.Load())
 		}
 		if w := e.do("GET", "/"+ncHash+".narinfo"); w.Code != 200 {
@@ -140,15 +141,15 @@ func TestWarnPeerRateLimit(t *testing.T) {
 	p := PeerHealth{NodeID: "dead"}
 	count := func() int { peerWarnMu.Lock(); defer peerWarnMu.Unlock(); return len(peerWarnLast) }
 	warnPeer(p, nil, "x", nil)
-	first := peerWarnLast["dead"]
+	first := peerWarnLast["dead|x"]
 	e.advance(10 * time.Second)
 	warnPeer(p, nil, "x", nil)
-	if !peerWarnLast["dead"].Equal(first) {
+	if !peerWarnLast["dead|x"].Equal(first) {
 		t.Error("warned again inside 30 s")
 	}
 	e.advance(25 * time.Second)
 	warnPeer(p, nil, "x", nil)
-	if peerWarnLast["dead"].Equal(first) {
+	if peerWarnLast["dead|x"].Equal(first) {
 		t.Error("did not warn after 30 s")
 	}
 	warnPeer(PeerHealth{NodeID: "other"}, nil, "x", nil)
@@ -156,5 +157,3 @@ func TestWarnPeerRateLimit(t *testing.T) {
 		t.Error("another peer shares the limit")
 	}
 }
-
-var _ = http.StatusOK
