@@ -4,11 +4,13 @@ set -euo pipefail
 # Downloads the pipedpeer binary for this machine, verifies it against the
 # release's checksums.txt, installs it and runs `pipedpeer setup`.
 #
-# Usage: install-pipedpeer.sh [--version <v>] [--channel nightly|stable] [-y]
+# Usage: install-pipedpeer.sh [--version <v>] [--channel nightly|stable] [-y] [--connect <CODE>]
 #   default             latest nightly (the rolling "nightly" release)
 #   --version <v>       a build: releases/download/nightly-<v>/ (e.g. 0.1.4-nightly.20261015-239e713)
 #   --channel stable    latest tagged v* release (old; nightly is the supported stream)
 #   -y                  passed through to `pipedpeer setup`
+#   --connect <CODE>    passed through to `pipedpeer setup`, which joins the network after setup
+#                       (PCs and phones); `pipedpeer connect` still works for later
 # Environment: PIPEDPEER_RELEASE_BASE_URL overrides the release host,
 #              PIPEDPEER_INSTALL_DIR forces the target dir (no sudo).
 
@@ -22,8 +24,9 @@ fi
 CHANNEL="${PIPEDPEER_CHANNEL:-nightly}"
 VERSION="${PIPEDPEER_VERSION:-}"
 SETUP_ARGS=()
+CONNECT_CODE=""
 
-usage() { sed -n '4,13p' "$script_path" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,14p' "$script_path" 2>/dev/null | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,6 +35,8 @@ while [[ $# -gt 0 ]]; do
     --channel) CHANNEL="${2:-}"; [[ -n "$CHANNEL" ]] || { echo "--channel requires a value" >&2; exit 1; }; shift 2 ;;
     --channel=*) CHANNEL="${1#*=}"; shift ;;
     -y|--yes) SETUP_ARGS+=("-y"); shift ;;
+    --connect) CONNECT_CODE="${2:-}"; [[ -n "$CONNECT_CODE" && "$CONNECT_CODE" != -* ]] || { echo "--connect requires a code" >&2; exit 1; }; shift 2 ;;
+    --connect=*) CONNECT_CODE="${1#*=}"; [[ -n "$CONNECT_CODE" ]] || { echo "--connect requires a code" >&2; exit 1; }; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -41,6 +46,10 @@ case "$CHANNEL" in
   stable|nightly) ;;
   *) echo "Unknown channel: $CHANNEL (expected 'nightly' or 'stable')" >&2; exit 1 ;;
 esac
+
+if [[ -n "$CONNECT_CODE" ]]; then
+  SETUP_ARGS+=("--connect" "$CONNECT_CODE")
+fi
 
 BINARY_NAME="pipedpeer"
 PLATFORM="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -142,7 +151,18 @@ if [[ -n "$NEED_PATH_NOTE" ]]; then
   esac
 fi
 
-"$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+# Under `curl | bash` stdin is the script pipe, so setup reads the terminal from
+# /dev/tty when there is one. Without a terminal (CI, ssh without -t) setup keeps
+# the inherited stdin and its prompts take their non-interactive answers.
+if [ -r /dev/tty ] && { : </dev/tty; } 2>/dev/null; then
+  "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"} </dev/tty
+else
+  "$INSTALL_DIR/$BINARY_NAME" setup ${SETUP_ARGS[@]+"${SETUP_ARGS[@]}"}
+fi
 
 echo
-echo "Next: run 'pipedpeer invite' on the first machine; on every other machine run 'pipedpeer connect <invite>'."
+if [[ -n "$CONNECT_CODE" ]]; then
+  echo "joined; \`pipedpeer status\`"
+else
+  echo "Next: run 'pipedpeer invite' on the first machine; on every other machine run 'pipedpeer connect <invite>'."
+fi
