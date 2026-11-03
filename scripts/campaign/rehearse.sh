@@ -126,9 +126,14 @@ for i in 1 2 3; do
 	w "$i" 'command -v taskset >/dev/null || nix-env -iA nixpkgs.util-linux >/dev/null 2>&1' ||
 		log "warning: no taskset in $LAB_CTR-$i; E4 will fail there"
 done
+# E15 needs tc (iproute2) and E13 pkill (procps); every lab PC has both.
+for i in 1 2 3; do
+	w "$i" 'command -v tc >/dev/null || nix-env -iA nixpkgs.iproute2 >/dev/null 2>&1; command -v pkill >/dev/null || nix-env -iA nixpkgs.procps >/dev/null 2>&1' ||
+		log "warning: no tc or pkill in $LAB_CTR-$i; E13 or E15 will fail there"
+done
 
 export PL_RESULTS="$out" PL_NPROC="${PL_NPROC:-2}" PL_E11_IDLE_S="${PL_E11_IDLE_S:-30}"
-experiments="${only:-e5 e1 e1b e4 e6 e7 e8 e9 e11 e3 e10}"
+experiments="${only:-e5 e14 e1 e1b e4 e6 e12 e13 e15 e7 e8 e9 e11 e3 e10}"
 declare -A status
 for e in $experiments; do
 	log "=== $e"
@@ -139,8 +144,16 @@ for e in $experiments; do
 	e10) feed=$'1\ny\n\n\n3\n0\nrehearsal\n\nfail\n5\n6\nrehearsal\n' ;;
 	*) feed=$'\n' ;;
 	esac
+	# The headline experiments need jobs that outlast a join or a kill
+	# (README.md, "Rehearsal limits"); E14 runs on all three containers.
+	case "$e" in
+	e12 | e13) extra=(--size W1:BENCH_ITEMS=20000) ;;
+	e14) extra=(--n 3 --size W1:BENCH_ITEMS=20000) ;;
+	e15) extra=(--size W1:BENCH_ITEMS=2000) ;;
+	*) extra=() ;;
+	esac
 	set +e
-	printf '%s' "$feed" | "$here/run.sh" "$e" --rehearsal --inventory "$inv" >>"$out/rehearse.log" 2>&1
+	printf '%s' "$feed" | "$here/run.sh" "$e" --rehearsal --inventory "$inv" "${extra[@]}" >>"$out/rehearse.log" 2>&1
 	rc=$?
 	set -e
 	after=$(wc -l <"$out/runs.jsonl")

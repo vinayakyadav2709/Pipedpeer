@@ -16,6 +16,7 @@ scripts/campaign/rehearse.sh [--keep] [--only "e1 e4"]
 | `lib/campaign/` | The runner, as stdlib Python. `runner.py` holds the context, the per-run record and the scaling loop. `systems.py` holds the four systems and how each one is held to N. `workloads.py` reads `workloads.json`. `record.py` writes `runs.jsonl`. `remote.py` holds timed remote commands. `guided.py` is the E3/E10 timer. |
 | `experiments/<id>.py` | One file per experiment. The plan's section 3 table lists them. |
 | `analyse.py` | Writes the CSVs, figures and the E8 table. |
+| `lib/campaign/timeline.py`, `analyse_headline.py`, `FIGURES.md` | The headline experiments E12-E15 (lab/headline): per-chunk throughput from each system's own records, actions while a job runs, and their figures. `FIGURES.md` describes every field and figure. |
 | `rehearse.sh` | Runs every experiment on the container lab. |
 | `tests/` | pytest suite: the runner against a fake cluster, and `analyse.py` against synthetic data. |
 
@@ -44,7 +45,7 @@ The runner appends one line per run to `results/lab/runs.jsonl` and flushes it a
 | `size`, `mode`, `caps`, `seed`, `script_s`, `rc` | The size env, strong or weak, core caps (E4), the order seed, the script's own timing (`timing_regex`) and the exit code |
 | `error`, `failing_pc`, `log_path` | Set when the run failed. A failed run never stops the experiment. |
 
-Some experiments add fields: E5 has `phase`, `mb_down`, `all_have_s` and `per_pc_s`. E6 has `fault`, `killed_pc`, `kill_at_s` and `ctrlc_latency_s`. E8 has `variant` and `bytes_per_rank`. E9 has `paths` and `introducer_bytes`. E11 has `join_s`, `bytes_per_node_per_min` and `bytes_source`. E3 and E10 have `minutes`, `commands_typed`, `script_lines_changed`, `participant` and `notes`. A rehearsal line carries `rehearsal: true`.
+Some experiments add fields: E5 has `phase`, `mb_down`, `all_have_s` and `per_pc_s`. E6 has `fault`, `killed_pc`, `kill_at_s` and `ctrlc_latency_s`. E8 has `variant` and `bytes_per_rank`. E9 has `paths` and `introducer_bytes`. E11 has `join_s`, `bytes_per_node_per_min` and `bytes_source`. E3 and E10 have `minutes`, `commands_typed`, `script_lines_changed`, `participant` and `notes`. E12 has `n_start`, `n_final`, `join_every_s`, `events` (joins) and the throughput fields `timeline`, `timeline_source`, `items_total`, `items_counted` and `chunks_path`. E13 has `fault: "churn"`, `events` (kills and restarts), `kills`, `items_rerun`, `rerun_source` and the same throughput fields. E14 has `phase: "first-job"`, `first_work` and `pcs_with_work`, and appends to `results/lab/timeline.jsonl`. E15 has `rtt_added_ms` and `netem_hosts`. [FIGURES.md](FIGURES.md) gives the exact shapes. A rehearsal line carries `rehearsal: true`.
 
 ## Order and warm-ups
 
@@ -80,6 +81,9 @@ At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if
 | `PL_RAY_START_ARGS`, `PL_DASK_WORKER_ARGS` | rehearsal: small object store, `--memory-limit 0` | Extra arguments for `ray start` and `dask worker` |
 | `PL_E9_HOST` | `local` (rehearsal: last PC) | Where E9's laptop steps run |
 | `PL_E11_IDLE_S` | 600 (rehearsal: 30) | E11 idle window per cluster size |
+| `PL_JOIN_EVERY_S`, `PL_JOIN_SCALE`, `PL_JOIN_TIMEOUT` | 20 (rehearsal: 10), 13, 600 | E12: seconds between joins, the size as a multiple of W1's strong size (unless `--size`), and the time limit |
+| `PL_CHURN_EVERY_S`, `PL_CHURN_DOWN_S`, `PL_CHURN_TIMEOUT` | 20 / 10 / 600 (rehearsal: 10 / 5) | E13: seconds between kills, how long a killed worker stays down, and the time limit |
+| `PL_NETEM_RTTS`, `PL_NETEM_REPEATS` | `0,20,80`, 2 (rehearsal: 1) | E15: the RTTs added, and runs per RTT |
 
 ## Rehearsal limits
 
@@ -91,3 +95,5 @@ At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if
 - **E6:** this runs at N=2, so the run kills the one worker other than pc00. The kill lands at about 30% of a short smoke-size run.
 - **E4:** caps are 2/1 instead of 8/4/2/1, at N=2.
 - **E3 and E10:** these are guided timers with no PC involved. The rehearsal feeds their answers through stdin.
+- **E12, E13, E14:** these run W1 with `BENCH_ITEMS=20000`, so that a job outlasts a join or a kill. E12 joins 1 → 2 for Ray and Dask, and 2 → 3 for pipedpeer: its N counts pc00, and a map that starts with no peer stays on pc00. E13 kills one of the N=2 workers every 10 s and restarts it 5 s later. E14 runs on all three containers.
+- **E15:** the containers are privileged, so `tc netem` works on their `eth0`. rehearse.sh installs iproute2 (for `tc`) and procps (for E13's `pkill`), which the lab image lacks.

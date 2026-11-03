@@ -196,7 +196,7 @@ def test_rehearsal_defaults(make):
 
 def test_every_experiment_module_loads():
     names = sorted(f[:-3] for f in os.listdir(os.path.join(HERE, "..", "experiments")) if f.endswith(".py"))
-    assert names == ["e1", "e10", "e11", "e1b", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]
+    assert names == ["e1", "e10", "e11", "e12", "e13", "e14", "e15", "e1b", "e3", "e4", "e5", "e6", "e7", "e8", "e9"]
     for n in names:
         mod = runner.load_experiment(n)
         assert callable(mod.main), n
