@@ -1,0 +1,77 @@
+# Driver collector, on the operator's laptop. telemetry.sh renders it:
+# @RESULTS@ (absolute results/lab), @STORAGE@, @R2_ACCOUNT_ID@. The awss3
+# exporter is wired into pipelines only by the driver-r2.yaml overlay, which
+# telemetry.sh adds when ~/.config/pipedpeer-lab/r2.env exists; its keys reach
+# the collector as AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY in the
+# environment, never in a file.
+extensions:
+  file_storage:
+    directory: @STORAGE@
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 32
+
+  # One JSON line per run, appended by scripts/campaign/run.sh.
+  file_log/runs:
+    include: [@RESULTS@/runs.jsonl]
+    start_at: beginning
+    storage: file_storage
+    resource:
+      service.name: lab-runner
+    operators:
+      - type: json_parser
+        parse_to: attributes
+        on_error: send_quiet
+        timestamp:
+          parse_from: attributes.end_ns
+          layout_type: epoch
+          layout: ns
+
+processors:
+  batch:
+    timeout: 1s
+  # Fewer, larger objects in R2: one per signal every 30 s.
+  batch/r2:
+    timeout: 30s
+    send_batch_size: 50000
+
+exporters:
+  file/metrics:
+    path: @RESULTS@/otel/metrics.jsonl
+    flush_interval: 1s
+    rotation:
+      max_megabytes: 256
+      max_backups: 1000
+  file/logs:
+    path: @RESULTS@/otel/logs.jsonl
+    flush_interval: 1s
+    rotation:
+      max_megabytes: 256
+      max_backups: 1000
+  awss3:
+    s3uploader:
+      endpoint: https://@R2_ACCOUNT_ID@.r2.cloudflarestorage.com
+      region: auto
+      s3_force_path_style: true
+      s3_bucket: pipedpeer-lab
+      s3_prefix: otel
+    marshaler: otlp_json
+
+service:
+  extensions: [file_storage]
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [file/metrics]
+    logs:
+      receivers: [otlp, file_log/runs]
+      processors: [batch]
+      exporters: [file/logs]

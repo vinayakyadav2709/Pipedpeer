@@ -1,0 +1,11 @@
+# Overlay for driver.yaml: the same receivers also feed R2 through awss3.
+service:
+  pipelines:
+    metrics/r2:
+      receivers: [otlp]
+      processors: [batch/r2]
+      exporters: [awss3]
+    logs/r2:
+      receivers: [otlp, file_log/runs]
+      processors: [batch/r2]
+      exporters: [awss3]
