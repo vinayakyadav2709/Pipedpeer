@@ -139,8 +139,12 @@ for e in $experiments; do
 	e10) feed=$'1\ny\n\n\n3\n0\nrehearsal\n\nfail\n5\n6\nrehearsal\n' ;;
 	*) feed=$'\n' ;;
 	esac
+	# E6 kills at 30% of the run: the smoke size (about a second) ends
+	# before Ansible can deliver the kill, so E6 gets ten times the work.
+	extra=()
+	[[ $e == e6 ]] && extra=(--size W1:BENCH_ITEMS=4000)
 	set +e
-	printf '%s' "$feed" | "$here/run.sh" "$e" --rehearsal --inventory "$inv" >>"$out/rehearse.log" 2>&1
+	printf '%s' "$feed" | "$here/run.sh" "$e" --rehearsal --inventory "$inv" "${extra[@]}" >>"$out/rehearse.log" 2>&1
 	rc=$?
 	set -e
 	after=$(wc -l <"$out/runs.jsonl")

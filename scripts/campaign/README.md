@@ -44,7 +44,7 @@ The runner appends one line per run to `results/lab/runs.jsonl` and flushes it a
 | `size`, `mode`, `caps`, `seed`, `script_s`, `rc` | The size env, strong or weak, core caps (E4), the order seed, the script's own timing (`timing_regex`) and the exit code |
 | `error`, `failing_pc`, `log_path` | Set when the run failed. A failed run never stops the experiment. |
 
-Some experiments add fields: E5 has `phase`, `mb_down`, `all_have_s` and `per_pc_s`. E6 has `fault`, `killed_pc`, `kill_at_s` and `ctrlc_latency_s`. E8 has `variant` and `bytes_per_rank`. E9 has `paths` and `introducer_bytes`. E11 has `join_s`, `bytes_per_node_per_min` and `bytes_source`. E3 and E10 have `minutes`, `commands_typed`, `script_lines_changed`, `participant` and `notes`. A rehearsal line carries `rehearsal: true`.
+Some experiments add fields: E5 has `phase`, `mb_down`, `all_have_s` and `per_pc_s`. E6 has `fault`, `killed_pc`, `kill_at_s`, `kill_landed`, `ctrlc_latency_s` and `interrupt_landed`. E8 has `variant` and `bytes_per_rank`. E9 has `paths` and `introducer_bytes`. E11 has `join_s`, `bytes_per_node_per_min` and `bytes_source`. E3 and E10 have `minutes`, `commands_typed`, `script_lines_changed`, `participant` and `notes`. A rehearsal line carries `rehearsal: true`.
 
 ## Order and warm-ups
 
@@ -88,6 +88,6 @@ At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if
 - **E11:** sizes 8, 16, 32 and 60 are capped at the 3 containers. The rehearsal runs the join-and-idle path at sizes 1 to 3 with a 30 s idle window. Containers have no `nft`, so bytes come from the NIC counters (`bytes_source: nic`).
 - **E9:** there is no second network. The "laptop" is pc02 on the lab bridge, so the path type is `lan`, and `net-verify.sh` is skipped because its introducer kill needs a real introducer.
 - **E5:** this runs at N=2 with a small package set (`e5_env_small.py`: numpy and joblib). Shipping torch three times would not fit in 2 GB containers. pip installs joblib only: the lab image is Nix-only, so a manylinux wheel with C code, such as numpy, installs but cannot load `libstdc++`. The lab PCs have that library.
-- **E6:** this runs at N=2, so the run kills the one worker other than pc00. The kill lands at about 30% of a short smoke-size run.
+- **E6:** this runs at N=2, so the run kills the one worker other than pc00. It runs W1 at `BENCH_ITEMS=4000`, ten times the smoke size. At the smoke size a run ends in about a second, before Ansible can deliver the kill. Each line's `kill_landed` (and `interrupt_landed` for Ctrl-C) says whether the job was still running when the signal arrived.
 - **E4:** caps are 2/1 instead of 8/4/2/1, at N=2.
 - **E3 and E10:** these are guided timers with no PC involved. The rehearsal feeds their answers through stdin.

@@ -8,7 +8,9 @@ killed with SIGKILL at about 30% of the reference wall:
   ray        the raylet on the last worker (its worker processes go with it)
   dask       every Dask process on the last worker (nanny and workers)
 
-result_ok says whether the answer was still right; wall_s is compared with
+result_ok says whether the answer was still right; kill_landed (and
+interrupt_landed for Ctrl-C) whether the job was still running when the
+signal went in, since a kill after the end is no fault; wall_s is compared with
 the no-kill wall in analyse.py. Then PipedPeer's Ctrl-C, three times: SIGINT
 to `pipedpeer run` on pc00 at ~30%, and the time until the run has exited and
 no node in the cluster reports an active job (ctrlc_latency_s).
@@ -47,15 +49,20 @@ def kill_run(ctx, at_s, victim):
     victim at at_s, wait for the job."""
     def run(b, wl, env, logdir, n):
         ws, cmd = job_command(ctx, b, wl, env)
+        t0 = time.time()  # before the start: Ansible's own second counts toward at_s
         ctx.remote.start_job(ctx.inv.head.id, JOB_LOG, cmd)
-        t0 = time.time()
         time.sleep(max(0.0, at_s - (time.time() - t0)))
         k0 = time.time_ns()
-        rc, out = ctx.remote.sh(victim.id, KILL[b.kind] + "; true", timeout=60)
-        ctx.log("killed %s on %s at %.1f s" % (b.kind, victim.id, at_s))
+        # landed: the job had not finished when the kill went in. A kill
+        # after the end is no fault at all, and the line must say so.
+        rc, out = ctx.remote.sh(ctx.inv.head.id, "grep -c __PL_TIMES %s || true" % JOB_LOG, timeout=60)
+        landed = out.strip().splitlines()[-1:] == ["0"]
+        ctx.remote.sh(victim.id, KILL[b.kind] + "; true", timeout=60)
+        ctx.log("killed %s on %s at %.1f s%s" % (b.kind, victim.id, time.time() - t0,
+                                                "" if landed else " (job had already finished)"))
         t = ctx.remote.wait_job(ctx.inv.head.id, JOB_LOG, timeout=ctx.run_timeout)
         res = {"rc": t.rc, "out": t.out, "start_ns": t.start_ns, "end_ns": t.end_ns,
-               "killed_pc": victim.id, "kill_ns": k0, "kill_at_s": round(at_s, 2)}
+               "killed_pc": victim.id, "kill_ns": k0, "kill_at_s": round(at_s, 2), "kill_landed": landed}
         if b.kind == "pipedpeer":
             res.update(b.collect(ws, logdir))
             rc2, unit = ctx.remote.sh(victim.id, "test -f ${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/"
@@ -83,8 +90,9 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
         line.update({"error": str(e), "failing_pc": e.host, "result_ok": False})
         return rec.write(line)
     line["hosts"] = [h.id for h in hosts]
+    t0 = time.time()
     ctx.remote.start_job(ctx.inv.head.id, JOB_LOG, cmd)
-    time.sleep(at_s)
+    time.sleep(max(0.0, at_s - (time.time() - t0)))
     # On pc00, in one shell so the timing is on one clock: SIGINT, then poll
     # until `pipedpeer run` is gone and every PC's own /health reports no
     # active job or lease (each daemon asked directly: the peer table on pc00
@@ -96,7 +104,8 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
         "$(curl -sf --max-time 2 -H \"X-Pipedpeer-Token: $tok\" http://%s:4242/health | "
         "grep -o '\"active_[a-z]*\":[0-9]*' | head -2 | cut -d: -f2)"
         % ("127.0.0.1" if h is ctx.inv.head else h.ip) for h in hosts)
-    script = ("%s; s=$(date +%%s%%N); pkill -INT -f '^([^ ]*/)?pipedpeer run' ; "
+    script = ("%s; echo PLRUNNING $(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); "
+              "s=$(date +%%s%%N); pkill -INT -f '^([^ ]*/)?pipedpeer run' ; "
               "while :; do r=$(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); a=0; "
               "for x in %s; do a=$((a + ${x:-0})); done; "
               "[ \"$r\" -eq 0 ] && [ \"$a\" -eq 0 ] && break; "
@@ -112,6 +121,8 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
                      "failing_pc": ctx.inv.head.id, "result_ok": False})
     else:
         s, e = int(m[0][1]), int(m[0][2])
+        running = [ln.split()[1] for ln in out.splitlines() if ln.startswith("PLRUNNING ")]
+        line["interrupt_landed"] = bool(running) and running[0] != "0"
         line.update({"start_ns": s, "end_ns": e, "ctrlc_latency_s": round((e - s) / 1e9, 3),
                      "interrupt_at_s": round(at_s, 2), "result_ok": True, "rc": t.rc})
     ctx.log("Ctrl-C %d: %s" % (repeat, line.get("ctrlc_latency_s", line.get("error"))))
