@@ -94,7 +94,7 @@ def ctrl_c(ctx, b, wl, n, repeat, at_s):
     tok = systems.API.split("; curl")[0]
     busy = " ".join(
         "$(curl -sf --max-time 2 -H \"X-Pipedpeer-Token: $tok\" http://%s:4242/health | "
-        "grep -o '\"active_[a-z]*\":[0-9]*' | head -2 | awk -F: '{s += $2} END {print s + 0}')"
+        "grep -o '\"active_[a-z]*\":[0-9]*' | head -2 | cut -d: -f2)"
         % ("127.0.0.1" if h is ctx.inv.head else h.ip) for h in hosts)
     script = ("%s; s=$(date +%%s%%N); pkill -INT -f '^([^ ]*/)?pipedpeer run' ; "
               "while :; do r=$(pgrep -f '^([^ ]*/)?pipedpeer run' | wc -l); a=0; "

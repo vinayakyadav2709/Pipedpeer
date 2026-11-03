@@ -19,7 +19,7 @@ the existing venv; ray with a new runtime_env.
 
 Cold is cold only on PCs that have never run this environment: run E5 before
 the other experiments in a session (OPERATOR.md). The pipedpeer line records
-what the upload said about pc00 ("closure_on_pc00").
+whether pc00 had to build the env ("closure_on_pc00": built / already built).
 """
 import os
 import re
@@ -96,8 +96,8 @@ def run_pipedpeer(ctx, n, phase, repeat, extra, script):
                 break
             time.sleep(2)
     after = probes.netdev(ctx, hosts)
-    on_pc00 = ("already on the node" if "already on the node" in res["out"]
-               else "sent" if re.search(r"Sent \d+ of \d+", res["out"]) else "built here")
+    # The job runs on pc00, which builds the env (cold) or finds it built.
+    on_pc00 = "built" if "Built successfully" in res["out"] else "already built"
     ok = res["rc"] == 0 and not missing and "E5-ENV-OK" in res["out"]
     more = {"store_path": store, "closure_on_pc00": on_pc00, "receipt": res.get("receipt"),
             "record_path": res.get("record_path"), "rc": res["rc"],
@@ -114,7 +114,7 @@ def run_pip(ctx, n, phase, repeat, extra, pinlist, names):
     hosts = ctx.inv.all[:n]
     logdir = ctx.recorder.log_dir(ctx.recorder.new_run_id())
     imports = ",".join(x.replace("scikit-learn", "sklearn") for x in names + ([extra] if extra else []))
-    pip = "%s/bin/pip install -q --disable-pip-version-check --no-cache-dir" % VENV
+    pip = "%s/bin/python -m pip install -q --disable-pip-version-check --no-cache-dir" % VENV
     if extra:
         cmd = "%s %s" % (pip, extra)
     else:
@@ -174,7 +174,13 @@ def main(ctx):
         if method == "pipedpeer":
             run_pipedpeer(ctx, n, phase, repeat, extra, script)
         elif method == "pip":
-            run_pip(ctx, n, phase, repeat, extra, pinlist, names)
+            if ctx.rehearsal:
+                # The lab image is Nix-only: a manylinux wheel with C code
+                # (numpy) installs but cannot load libstdc++. Lab PCs have it.
+                pure = [p for p in pinlist if p.startswith("joblib==")]
+                run_pip(ctx, n, phase, repeat, extra, pure, ["joblib"])
+            else:
+                run_pip(ctx, n, phase, repeat, extra, pinlist, names)
         else:
             run_ray(ctx, n, phase, repeat, extra, pinlist)
 

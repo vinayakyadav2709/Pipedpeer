@@ -1,8 +1,10 @@
 """Small measurements taken on the PCs through the same Ansible fan-out."""
 
-# Bytes received / sent on every interface but lo, from /proc/net/dev.
-NETDEV = ("awk 'NR>2 { sub(/:/, \" \"); if ($1 != \"lo\") { r += $2; t += $10 } } "
-          "END { printf \"PLNET %d %d\\n\", r, t }' /proc/net/dev")
+# Bytes received / sent on every interface but lo, from /proc/net/dev, in
+# plain sh: the lab image has no awk.
+NETDEV = ('r=0; t=0; while read -r l; do case "$l" in *:*) n=$(echo ${l%%:*}); '
+          '[ "$n" = lo ] && continue; set -- ${l#*:}; r=$((r + $1)); t=$((t + $9));; esac; '
+          'done < /proc/net/dev; echo "PLNET $r $t"')
 
 
 def netdev(ctx, hosts):

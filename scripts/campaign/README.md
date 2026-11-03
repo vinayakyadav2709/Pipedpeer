@@ -87,7 +87,7 @@ At the end of every experiment the runner calls `scripts/campaign/sync-r2.sh` if
 
 - **E11:** sizes 8, 16, 32 and 60 are capped at the 3 containers. The rehearsal runs the join-and-idle path at sizes 1 to 3 with a 30 s idle window. Containers have no `nft`, so bytes come from the NIC counters (`bytes_source: nic`).
 - **E9:** there is no second network. The "laptop" is pc02 on the lab bridge, so the path type is `lan`, and `net-verify.sh` is skipped because its introducer kill needs a real introducer.
-- **E5:** this runs at N=2 with a small package set (`e5_env_small.py`: numpy and joblib). Shipping torch three times would not fit in 2 GB containers.
+- **E5:** this runs at N=2 with a small package set (`e5_env_small.py`: numpy and joblib). Shipping torch three times would not fit in 2 GB containers. pip installs joblib only: the lab image is Nix-only, so a manylinux wheel with C code, such as numpy, installs but cannot load `libstdc++`. The lab PCs have that library.
 - **E6:** this runs at N=2, so the run kills the one worker other than pc00. The kill lands at about 30% of a short smoke-size run.
 - **E4:** caps are 2/1 instead of 8/4/2/1, at N=2.
 - **E3 and E10:** these are guided timers with no PC involved. The rehearsal feeds their answers through stdin.
