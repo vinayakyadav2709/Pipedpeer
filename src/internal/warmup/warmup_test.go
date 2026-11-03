@@ -92,20 +92,25 @@ func TestWarmupStateTable(t *testing.T) {
 		done    bool // Done("v1", false)
 		doneNv  bool // Done("v1", true); only checked for 7.4
 		check   string
+		holder  bool // a live process holds the alive lock
 	}{
-		{"7.1 no file", nil, 0, false, false, false, ""},
-		{"7.2 header v1 CPU, done", strp(header("v1", "CPU") + "done\n"), 0, false, true, false, ""},
-		{"7.3 same, asked with another build", strp(header("v1", "CPU") + "done\n"), 0, false, false, false, "other"},
-		{"7.4 same, asked with nvidia", strp(header("v1", "CPU") + "done\n"), 0, false, false, false, "nvidia"},
-		{"7.5 last failed", strp(header("v1", "CPU") + "failed (exit 1); details above\n"), 0, false, false, false, ""},
-		{"7.6 progress, modified now", strp(header("v1", "CPU") + "built numpy\n"), 0, true, false, false, ""},
-		{"7.7 progress, modified 2 h ago", strp(header("v1", "CPU") + "built numpy\n"), 2 * time.Hour, false, false, false, ""},
-		{"7.8 empty file", strp(""), 0, false, false, false, ""},
-		{"7.9 old header without build=, done", strp(oldHeader + "done\n"), 0, false, false, false, ""},
+		{"7.1 no file", nil, 0, false, false, false, "", false},
+		{"7.2 header v1 CPU, done", strp(header("v1", "CPU") + "done\n"), 0, false, true, false, "", false},
+		{"7.3 same, asked with another build", strp(header("v1", "CPU") + "done\n"), 0, false, false, false, "other", false},
+		{"7.4 same, asked with nvidia", strp(header("v1", "CPU") + "done\n"), 0, false, false, false, "nvidia", false},
+		{"7.5 last failed", strp(header("v1", "CPU") + "failed (exit 1); details above\n"), 0, false, false, false, "", false},
+		{"7.6 progress, modified now", strp(header("v1", "CPU") + "built numpy\n"), 0, true, false, false, "", true},
+		{"7.6b progress, holder killed", strp(header("v1", "CPU") + "built numpy\n"), 0, false, false, false, "", false},
+		{"7.7 progress, modified 2 h ago", strp(header("v1", "CPU") + "built numpy\n"), 2 * time.Hour, false, false, false, "", false},
+		{"7.8 empty file", strp(""), 0, false, false, false, "", false},
+		{"7.9 old header without build=, done", strp(oldHeader + "done\n"), 0, false, false, false, "", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			setLog(t, c.body, c.age)
+			if c.holder {
+				holdAlive(t)
+			}
 			if got := Running(); got != c.running {
 				t.Errorf("Running() = %v, want %v", got, c.running)
 			}
@@ -273,5 +278,61 @@ func TestStartWritesIgnoreFile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(data, "pipedpeer", "warmup", ".pipedpeerignore")); err != nil {
 		t.Fatalf("no ignore file in the warm-up dir: %v", err)
+	}
+}
+
+// holdAlive takes the alive lock as a live warm-up child would.
+func holdAlive(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(userdir.State(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(AlivePath(), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+}
+
+// A killed warm-up (unfinished log, no holder) does not block a new one; a
+// live holder does.
+func TestKilledWarmupDoesNotBlockStart(t *testing.T) {
+	body := header("v1", "CPU") + "built numpy\n"
+	setLog(t, &body, time.Minute)
+	if r, err := Start(fakeExe(t), "v1", false); err != nil || r != Started {
+		t.Fatalf("killed holder: %v %v", r, err)
+	}
+	live := header("v1", "CPU") + "built numpy\n"
+	setLog(t, &live, time.Minute)
+	holdAlive(t)
+	if r, err := Start(fakeExe(t), "v1", false); err != nil || r != AlreadyRunning {
+		t.Fatalf("live holder: %v %v", r, err)
+	}
+}
+
+// The started child holds the alive lock while it runs and drops it on exit.
+func TestStartedChildHoldsAliveLock(t *testing.T) {
+	setLog(t, nil, 0)
+	exe := filepath.Join(t.TempDir(), "slow")
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := Start(exe, "v1", false); err != nil || r != Started {
+		t.Fatal(r, err)
+	}
+	if !Running() {
+		t.Fatal("child alive but not Running")
+	}
+	// two Starts at once: the second does not launch
+	if r, err := Start(exe, "v1", false); err != nil || r != AlreadyRunning {
+		t.Fatalf("second start: %v %v", r, err)
+	}
+	for deadline := time.Now().Add(20 * time.Second); Running() && time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+	}
+	if Running() {
+		t.Fatal("finished child still Running")
 	}
 }

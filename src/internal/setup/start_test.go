@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -19,6 +20,9 @@ type fakeDaemon struct {
 
 func (f *fakeDaemon) install(t *testing.T) {
 	t.Helper()
+	oldMC := runningMaxConcurrent
+	runningMaxConcurrent = func(int) int { return 0 }
+	t.Cleanup(func() { runningMaxConcurrent = oldMC })
 	oldS, oldStart, oldRe := daemonStatus, daemonStart, daemonRestart
 	daemonStatus = func() daemonctl.State { return daemonctl.State{Running: f.running} }
 	daemonStart = func(string, int, int) error {
@@ -149,5 +153,75 @@ func TestJoiningPrintsNoInviteLine(t *testing.T) {
 		if !joining && err == nil && !has {
 			t.Errorf("not joining: no invite line in %q", out)
 		}
+	}
+}
+
+// TestRunningDaemonRestartedWhenVersionDiffers is the upgrade rows: the
+// installer replaces the binary, and setup must replace the daemon too. The
+// fake daemon and the stubbed /health keep any real service manager out.
+func TestRunningDaemonRestartedWhenVersionDiffers(t *testing.T) {
+	cases := []struct {
+		name     string
+		running  bool
+		daemonV  string
+		queryErr error
+		restart  bool
+		start    bool
+	}{
+		{"same version: no restart", true, "1.2.0", nil, false, false},
+		{"different version: restart", true, "1.1.0", nil, true, false},
+		{"not running: start as today", false, "", nil, false, true},
+		{"version unknown (old daemon): restart", true, "", nil, true, false},
+		{"health unreachable: restart", true, "", errors.New("refused"), true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			isolate(t)
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("DBUS_SESSION_BUS_ADDRESS", "")
+			if _, err := EnsureToken(); err != nil { // an existing cluster: not "created"
+				t.Fatal(err)
+			}
+			f := &fakeDaemon{running: c.running}
+			f.install(t)
+			oldV, oldQ := Version, daemonVersion
+			Version = "1.2.0"
+			daemonVersion = func(int) (string, error) { return c.daemonV, c.queryErr }
+			t.Cleanup(func() { Version, daemonVersion = oldV, oldQ })
+			if _, err := startDaemon("n1", daemonctl.DefaultPort, false); err != nil {
+				t.Fatal(err)
+			}
+			var restarts, starts int
+			for _, s := range f.starts {
+				if strings.HasPrefix(s, "restart:") {
+					restarts++
+				} else {
+					starts++
+				}
+			}
+			if (restarts == 1) != c.restart || (starts == 1) != c.start || restarts > 1 || starts > 1 {
+				t.Fatalf("calls = %v; want restart=%v start=%v", f.starts, c.restart, c.start)
+			}
+		})
+	}
+}
+
+// A failed restart is an error that says why, not a silent success.
+func TestFailedUpgradeRestartIsReported(t *testing.T) {
+	isolate(t)
+	if _, err := EnsureToken(); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeDaemon{running: true}
+	f.install(t)
+	daemonRestart = func(string, int, int) error { return errors.New("unit failed") }
+	oldV, oldQ := Version, daemonVersion
+	Version = "1.2.0"
+	daemonVersion = func(int) (string, error) { return "1.1.0", nil }
+	t.Cleanup(func() { Version, daemonVersion = oldV, oldQ })
+	_, err := startDaemon("n1", daemonctl.DefaultPort, false)
+	if err == nil || !strings.Contains(err.Error(), "unit failed") {
+		t.Fatalf("err = %v", err)
 	}
 }

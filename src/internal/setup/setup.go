@@ -1,18 +1,22 @@
 package setup
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 
 	"github.com/pipedpeer/pipedpeer/internal/daemonctl"
+	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/nixsign"
@@ -629,7 +633,48 @@ var (
 	serviceSupported = service.Supported
 	serviceInstalled = service.Installed
 	serviceInstall   = service.Install
+
+	runningMaxConcurrent = daemonctl.RunningMaxConcurrent
 )
+
+// Version is this binary's build (main.version); the command sets it. A
+// running daemon whose version differs is restarted by setup.
+var Version string
+
+// daemonVersion reads the running daemon's version from its /health.
+// "" with a nil error means the daemon predates the field.
+var daemonVersion = func(port int) (string, error) {
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Get(fmt.Sprintf("http://127.0.0.1:%d/health", port))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Capabilities map[string]string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
+		return "", fmt.Errorf("bad /health: %w", err)
+	}
+	return h.Capabilities[heartbeat.VersionCapability], nil
+}
+
+// staleDaemon reports whether the running daemon is not this build, and what
+// to log about it. An unknown version (old daemon, or no answer) counts as
+// stale. Without a Version of its own (tests) nothing is stale.
+func staleDaemon(port int) (stale bool, from string) {
+	if Version == "" {
+		return false, ""
+	}
+	v, err := daemonVersion(port)
+	if err != nil {
+		term.Warn(os.Stdout, "could not read the running daemon's version (%v); restarting it", err)
+		return true, "unknown"
+	}
+	if v == "" {
+		return true, "unknown"
+	}
+	return v != Version, v
+}
 
 // ask prints a [Y/n] question; empty, y and yes are yes.
 func ask(q string) bool {
@@ -688,7 +733,23 @@ func startDaemon(nodeID string, port int, mustRestart bool) (created bool, err e
 		}
 		term.OK(os.Stdout, "daemon restarted on :%d", port)
 	default:
-		term.OK(os.Stdout, "daemon already running on :%d", port)
+		p := port
+		if st.Port != 0 {
+			p = st.Port
+		}
+		stale, from := staleDaemon(p)
+		if !stale {
+			term.OK(os.Stdout, "daemon already running on :%d", port)
+			break
+		}
+		term.OK(os.Stdout, "restarting the daemon: %s -> %s", from, Version)
+		// The same manager that started it: Restart stops and starts through
+		// the systemd user unit when installed, else the process it recorded.
+		if err := daemonRestart(nodeID, p, runningMaxConcurrent(p)); err != nil {
+			term.Warn(os.Stdout, "could not restart the old daemon (%s): %v; restart it by hand: pipedpeer stop && pipedpeer start", from, err)
+			return created, fmt.Errorf("daemon restart: %w", err)
+		}
+		term.OK(os.Stdout, "daemon restarted on :%d", p)
 	}
 	return created, nil
 }
