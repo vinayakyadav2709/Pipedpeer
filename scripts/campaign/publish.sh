@@ -4,6 +4,12 @@
 # PCs download the code at exactly that commit). Never run in the lab.
 #
 #   scripts/campaign/publish.sh [--version <pipedpeer nightly version>]
+#       0. builds pipedpeer at HEAD (linux amd64 and arm64, version
+#          lab-<commit12>) and uploads it with checksums.txt as the GitHub
+#          prerelease lab-<commit12>: the lab runs the campaign's own build,
+#          which has what no nightly has yet (E4's headcount split, the
+#          shim's per-step items). --version <nightly> skips this and pins
+#          that nightly instead;
 #       1. creates the campaign SSH key ~/.config/pipedpeer-lab/campaign_ed25519
 #          if missing (never in the repo);
 #       2. asks for the campaign passphrase, or generates and prints one;
@@ -92,8 +98,8 @@ publish() {
     esac
   done
   for t in git openssl ssh-keygen python3 tar; do command -v "$t" >/dev/null || die "$t not found"; done
-  [[ -f $r2 ]] || die "no $r2 (lines R2_ACCOUNT_ID=, R2_ACCESS_KEY_ID=, R2_SECRET_ACCESS_KEY=; a token scoped to the one bucket)"
-  grep -q '^R2_SECRET_ACCESS_KEY=.' "$r2" || die "$r2 lacks R2_SECRET_ACCESS_KEY"
+  [[ -f $r2 ]] || die "no $cfg/ingest.env (INGEST_URL=, INGEST_TOKEN=; ingest/README.md) and no r2.env"
+  grep -qE '^(INGEST_TOKEN|R2_SECRET_ACCESS_KEY)=.' "$r2" || die "$r2 has neither INGEST_TOKEN nor R2_SECRET_ACCESS_KEY"
   local commit; commit=$(git -C "$repo" rev-parse HEAD)
   if [[ -n $(git -C "$repo" status --porcelain -- scripts docs/benchmarks pipedpeer-demo) ]]; then
     die "uncommitted changes under scripts/, docs/benchmarks/ or pipedpeer-demo/: the lab would not get them; commit first"
@@ -101,6 +107,8 @@ publish() {
   if ! git -C "$repo" branch -r --contains "$commit" 2>/dev/null | grep -q .; then
     echo "WARNING: $commit is on no remote branch you have fetched; push it before the lab, or codeload cannot serve it" >&2
   fi
+
+  [[ -n $version ]] || version=$(release_build "$commit") || die "building or uploading the lab build failed"
 
   mkdir -p "$cfg"; chmod 700 "$cfg"
   if [[ ! -f $key ]]; then
@@ -146,9 +154,40 @@ Once the Pages run finishes (a few minutes), check what is online:
 The operator types on every lab PC:   curl -fsSL $site/lab.sh | sudo bash
 and on the head PC:                   curl -fsSL $site/lab.sh | sudo bash -s -- head
 
-After the lab: revoke the R2 token in the Cloudflare dashboard, delete
-$key and $key.pub, and remove landing/public/lab-secrets.enc from dev.
+After the lab: rotate the ingest token, delete $key and $key.pub,
+remove landing/public/lab-secrets.enc from dev, and delete the release
+($version; results/lab/OPERATOR.md, "After the lab").
 EOF
+}
+
+# release_build <commit>: build pipedpeer at <commit> for the lab and upload
+# it as the GitHub prerelease lab-<commit12>; prints the version. A release
+# is used rather than Pages: no binary goes into git history, and
+# install-pipedpeer.sh verifies it against checksums.txt as it does a nightly.
+# Rerunning replaces the assets (--clobber), so it is idempotent.
+release_build() {
+  local commit=$1 tag work gh_repo=vinayakyadav2709/Pipedpeer arch
+  tag="lab-${commit:0:12}"
+  command -v go >/dev/null || { echo "publish.sh: go not found; it builds the lab's pipedpeer" >&2; return 1; }
+  command -v gh >/dev/null || { echo "publish.sh: gh not found; it uploads the lab's pipedpeer" >&2; return 1; }
+  work=$(mktemp -d)
+  # Build from the commit itself, not the working tree.
+  git -C "$repo" archive "$commit" src | tar -x -C "$work" || { rm -rf "$work"; return 1; }
+  for arch in amd64 arm64; do
+    (cd "$work/src" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch GOFLAGS=-buildvcs=false \
+      go build -trimpath -ldflags "-s -w -X main.version=$tag" -o "$work/pipedpeer-linux-$arch" .) >&2 || { rm -rf "$work"; return 1; }
+  done
+  (cd "$work" && sha256sum pipedpeer-linux-amd64 pipedpeer-linux-arm64 >checksums.txt)
+  if gh release view "$tag" -R "$gh_repo" >/dev/null 2>&1; then
+    gh release upload "$tag" -R "$gh_repo" --clobber "$work"/pipedpeer-linux-* "$work/checksums.txt" >&2 || { rm -rf "$work"; return 1; }
+  else
+    gh release create "$tag" -R "$gh_repo" --prerelease --target "$commit" --title "Lab campaign build $tag" \
+      --notes "pipedpeer built at $commit for the headless lab day (scripts/campaign/HEADLESS.md). Not a release." \
+      "$work"/pipedpeer-linux-* "$work/checksums.txt" >&2 || { rm -rf "$work"; return 1; }
+  fi
+  echo "uploaded pipedpeer $tag (GitHub release $tag)" >&2
+  rm -rf "$work"
+  echo "$tag"
 }
 
 selftest() {
@@ -166,6 +205,16 @@ selftest() {
   curl -fsSIL "https://codeload.github.com/vinayakyadav2709/Pipedpeer/tar.gz/$commit" >/dev/null ||
     die "codeload cannot serve $commit: push it"
   echo "code tarball for $commit is downloadable"
+  local v; v=$(sed -n 's/^PIPEDPEER_VERSION="\(.*\)"$/\1/p' "$work/lab.sh")
+  if [[ $v == lab-* ]]; then
+    local rel=https://github.com/vinayakyadav2709/Pipedpeer/releases/download/$v
+    curl -fsSL "$rel/checksums.txt" -o "$work/sums" && curl -fsSL "$rel/pipedpeer-linux-amd64" -o "$work/pipedpeer-linux-amd64" ||
+      die "release $v is not downloadable"
+    (cd "$work" && grep ' pipedpeer-linux-amd64$' sums | sha256sum -c --quiet) || die "release $v: checksum mismatch"
+    chmod +x "$work/pipedpeer-linux-amd64"
+    [[ $("$work/pipedpeer-linux-amd64" --version 2>&1) == *"$v"* ]] || die "release $v: the binary does not report $v"
+    echo "pipedpeer $v is downloadable and checks out"
+  fi
   sed -n 's/^CAMPAIGN_KEY="\(.*\)"$/\1/p' "$work/lab.sh" >"$work/pub"
   read_pass "campaign passphrase: "
   decrypt_check "$work/lab-secrets.enc" "$work/pub"

@@ -6,7 +6,8 @@ set -euo pipefail
 #
 # Usage: install-pipedpeer.sh [--version <v>] [--channel nightly|stable] [-y]
 #   default             latest nightly (the rolling "nightly" release)
-#   --version <v>       a build: releases/download/nightly-<v>/ (e.g. 0.1.4-nightly.20261015-239e713)
+#   --version <v>       a build: releases/download/nightly-<v>/ (e.g. 0.1.4-nightly.20261015-239e713);
+#                       lab-<commit12> is the lab campaign's own build, releases/download/lab-<commit12>/
 #   --channel stable    latest tagged v* release (old; nightly is the supported stream)
 #   -y                  passed through to `pipedpeer setup`
 # Environment: PIPEDPEER_RELEASE_BASE_URL overrides the release host,
@@ -78,7 +79,9 @@ if [[ -n "${TERMUX_VERSION:-}" && "$ARCH" == "arm64" ]]; then
   fallback_name="$artifact_name"
   artifact_name="${BINARY_NAME}-android-${ARCH}"
 fi
-if [[ -n "$VERSION" ]]; then
+if [[ "$VERSION" == lab-* ]]; then
+  base_url="${RELEASE_BASE_URL}/download/${VERSION}"
+elif [[ -n "$VERSION" ]]; then
   base_url="${RELEASE_BASE_URL}/download/nightly-${VERSION#nightly-}"
 elif [[ "$CHANNEL" == "nightly" ]]; then
   base_url="${RELEASE_BASE_URL}/download/nightly"
