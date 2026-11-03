@@ -11,14 +11,10 @@ pipedpeer invite                      # prints: pipedpeer connect <CODE>
 curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
 pipedpeer connect <CODE>
 
-# Phone, once from a laptop with USB debugging on
-adb shell device_config put activity_manager max_phantom_processes 2147483647
-adb shell settings put global settings_enable_monitor_phantom_procs false
-# then in Termux (from F-Droid)
-pkg install -y python python-numpy curl
-termux-wake-lock
-curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION>
-pipedpeer connect <CODE>
+# Phone, in Termux (F-Droid or Play Store), one line; no laptop or USB cable needed.
+# Setup installs its own packages, takes the wake lock, turns the phantom-process killer
+# off over Wireless debugging (it asks for the pairing code and ports), and joins the cluster.
+curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <VERSION> --connect <CODE>
 
 # Demo runs, from pipedpeer-demo/ on laptop A
 python3 cpu.py
@@ -128,12 +124,13 @@ new · worker: U22 demo kit
 
 ### Phone worker (Termux) — phone, laptop A
 new · worker: phone worker (Termux)
-1. [ ] Run the two `adb shell` lines → no output, no error.
-2. [ ] In Termux: `pkg install -y python python-numpy curl && termux-wake-lock`, then the install line (takes a long while: Debian, Nix and ~1.5 GB of Python packages; prints `✓ Debian with Nix ready` and `✓ pool python ready`), then `pipedpeer connect <CODE>` → `✓ connected: …`.
-3. [ ] Laptop A: `pipedpeer status` → the phone is listed as healthy.
-4. [ ] Laptop A: `pipedpeer run cpu.py` → the checksum matches `python3 cpu.py`, and the phone shows in the `ran on …` line. If it doesn't, on the phone run `grep refusing ~/.local/state/pipedpeer/daemon.log` and note the output.
-5. [ ] Laptop A: `pipedpeer run --remote gpu.py` → never placed on the phone.
-6. [ ] Laptop A, a small training chunk per seed:
+1. [ ] Laptop A: `pipedpeer invite` → copy the `pipedpeer connect pp1-…` code.
+2. [ ] Phone, Termux: the phone line from Steps to run, with that code. Open Settings > Developer options > Wireless debugging in split screen when it asks, and give it the pairing code and the two ports. It takes a long while (Debian, Nix and ~1.5 GB of Python packages) → expect `✓ wake lock held`, `✓ phantom-process killer off`, `✓ start on boot: … written`, `✓ Debian with Nix ready; …`, `✓ pool python ready at …`, `✓ connected: …`, and no `✗` lines.
+3. [ ] Phone: run the same line again → done within about a minute, every step `already …`, nothing rebuilt.
+4. [ ] Laptop A: `pipedpeer status` → the phone is listed as healthy.
+5. [ ] Laptop A: `pipedpeer run cpu.py` → the checksum matches `python3 cpu.py`, and the phone shows in the `ran on …` line. If it doesn't, on the phone run `grep refusing ~/.local/state/pipedpeer/daemon.log` and note the output.
+6. [ ] Laptop A: `pipedpeer run --remote gpu.py` → never placed on the phone.
+7. [ ] Laptop A, a small training chunk per seed:
    ```bash
    cat > phone_train.py <<'EOF'
    import multiprocessing, torch
@@ -156,10 +153,9 @@ new · worker: phone worker (Termux)
 ### Phone as a full node — phone
 new · numbers go to the paper · worker: phone full node (proot + Nix)
 1. [ ] Phone, in Termux: `pipedpeer doctor` → a `✓ phone: full node (Debian in proot with Nix)` line and the chunks-only reason line (see Pass 3, "A phone takes chunks, never whole jobs").
-2. [ ] Phone, in Termux: `cd ~ && cp ~/pipedpeer-demo/cpu.py . 2>/dev/null || curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cpu.py`, then `pipedpeer run cpu.py` → superseded: whole jobs from the phone are not run on it; see Pass 3 (it goes to a laptop, or fails with `arch mismatch`).
-3. [ ] Phone, same file, plain Termux Python: `pkg install -y python-numpy` if needed, then `time python cpu.py` three times → write down the three `real` times.
-4. [ ] Phone, same file inside proot with Nix's Python: `time proot-distro login debian -- /root/.local/share/pipedpeer/phone-python/bin/python3 $PWD/cpu.py` three times → write down the three `real` times.
-5. [ ] Phone, in Termux: `pipedpeer stop && pipedpeer start && pipedpeer status` → the daemon is running again and the command prompt came back after each. (The `view.py` whole-job sandbox view no longer applies: phones take chunks only.)
+2. [ ] Phone, in Termux: `cd ~ && curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/pipedpeer-demo/cpu.py`, then plain Termux Python: `time python cpu.py` three times → write down the three `real` times.
+3. [ ] Phone, same file inside proot with Nix's Python: `time proot-distro login debian -- /root/.local/share/pipedpeer/phone-python/bin/python3 $PWD/cpu.py` three times → write down the three `real` times.
+4. [ ] Phone, in Termux: `pipedpeer stop && pipedpeer start && pipedpeer status` → the daemon is running again and the command prompt came back after each. (The `view.py` whole-job sandbox view no longer applies: phones take chunks only.)
 
 ### Tailscale worst case + `pipedpeer jobs --export-all` — laptop A, laptop B on different networks
 new · numbers go to the paper · worker: U22 demo kit
@@ -179,8 +175,8 @@ changed: requeue is bounded; Ctrl+C during a build · worker: U22 demo kit
 
 ### Phone as a full node: setup on a new kernel — phone
 changed: builds its own proot on kernels 6.6+; scripts for the phantom-process killer · worker: phone full node (proot + Nix)
-1. [ ] Phone, Termux (manual fallback; `pipedpeer setup` does this step itself): `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/phone-phantom-off.sh && bash phone-phantom-off.sh` (Termux and Settings in split screen; Wireless debugging: pairing port, code, then connect port) → ends with `max_phantom_processes = 2147483647` and `phantom process killer off; Wireless debugging can be turned off again`. Or the two `adb shell` lines from Steps to run.
-2. [ ] Phone: install line, then `pipedpeer connect <CODE>` → on a 6.6+ kernel (`uname -r`) the output says it builds a newer proot, then `✓ Debian with Nix ready`; no `cp: ... Function not implemented`.
+1. [ ] Phone: the phone line from Steps to run → on a 6.6+ kernel (`uname -r`) the output says it builds a newer proot, then `✓ Debian with Nix ready`; no `cp: ... Function not implemented`.
+2. [ ] Only if setup's phantom-process step failed: `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/phone-phantom-off.sh && bash phone-phantom-off.sh` (Termux and Settings in split screen; Wireless debugging: pairing port, code, then connect port) → ends with `max_phantom_processes = 2147483647` and `phantom process killer off; Wireless debugging can be turned off again`.
 3. [ ] Phone: `pipedpeer doctor` → `✓ phone: full node (Debian in proot with Nix)` and `! phone: takes pool and torch chunks only; whole jobs and DDP ranks need a nested proot sandbox, which this Termux's proot can't start`.
 4. [ ] Laptop A: `pipedpeer status` → the phone is `healthy`.
 
@@ -247,8 +243,8 @@ pipedpeer jobs --export-all ~/pp-real-run
 
 ### Play-Store Termux installs and runs — phone (Termux from the Play Store)
 changed: an Android build of the binary runs through linker64 · worker: Play-Store Termux
-1. [ ] Phone, Termux from the Play Store: run the install line from Steps to run (`--version <VERSION>`) → it picks the Android asset and ends without `unexpected e_type`.
-2. [ ] `pipedpeer connect <CODE>` → `✓ connected: …`; `pipedpeer status` on laptop A lists the phone `healthy`.
+1. [ ] Phone, Termux from the Play Store: the phone line from Steps to run → it picks the Android asset, ends with `✓ connected: …` and no `unexpected e_type`.
+2. [ ] Laptop A: `pipedpeer status` lists the phone `healthy`.
 3. [ ] Smoke: F-Droid Termux (if you have it) still installs the same way.
 
 ### A phone takes chunks, never whole jobs — phone, laptop A
@@ -298,9 +294,10 @@ changed: the drift reference is kept when auto switches after warm-up · worker:
 
 ### Uninstall on a phone — phone
 changed: removes everything setup added, keeps your own packages · worker: phone uninstall
+After the demo only: this takes the phone out of the cluster.
 1. [ ] Termux: `pipedpeer uninstall --dry-run` → lists the `pipedpeer` container, the proot build, recorded pip and Termux packages, data/state/cache and the binary, and `would print how to turn Android's phantom-process killer back on (if you turned it off for pipedpeer), from a computer with adb:` with the adb lines; removes nothing.
 2. [ ] `pipedpeer uninstall -y` → ends with `adb shell device_config delete activity_manager max_phantom_processes` and `adb shell settings put global settings_enable_monitor_phantom_procs true` (each shown as `  adb …`); then `proot-distro list` shows no `pipedpeer` container and `ls ~/.local/share/pipedpeer` is missing; your own packages and a `debian` container of yours, if any, remain.
-3. [ ] Install again, run `pipedpeer setup` twice, then `pipedpeer uninstall -y` → still removes everything (container, proot, packages setup added).
+3. [ ] Run the phone line again, then once more, then `pipedpeer uninstall -y` → still removes everything (container, proot, packages setup added).
 4. [ ] Laptop A: `pipedpeer status` → the phone stops showing within a few minutes.
 
 ## Passed
