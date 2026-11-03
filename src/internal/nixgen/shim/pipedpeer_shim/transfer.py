@@ -31,7 +31,10 @@ except ImportError:  # record.py sits beside sitecustomize.py until U03 moves it
 # complete on one node and the per-node agg/merge is exact — no combiners, any
 # agg spec works.
 _IN_MERGE = False
-_BW_CACHE = {"t": 0.0, "bw": None}
+# "t" is None until the first measurement. A 0.0 start read as fresh on any
+# machine whose monotonic clock (time since boot) was under _BW_TTL, so a
+# freshly booted node never measured the link and kept all work local.
+_BW_CACHE = {"t": None, "bw": None}
 # Floor of an svd/eig offload's wall-clock limit (tests lower it).
 _LINALG_MIN_DEADLINE = 30.0
 _BW_TTL = 300.0
@@ -113,7 +116,7 @@ def _measure_bandwidth():
     8 MB probe through the frames path, cached _BW_TTL. None on failure means
     stay local."""
     now = time.monotonic()
-    if now - _BW_CACHE["t"] < _BW_TTL:
+    if _BW_CACHE["t"] is not None and now - _BW_CACHE["t"] < _BW_TTL:
         return _BW_CACHE["bw"]
     bw = _daemon_link_speed()
     if bw:

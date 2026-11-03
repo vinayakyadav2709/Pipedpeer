@@ -17,6 +17,7 @@
 \usepackage{algpseudocode}
 \usepackage{xcolor}
 \usepackage[hidelinks]{hyperref}
+\usepackage{xurl}
 
 \newcommand{\figpath}[1]{../../diagrams/#1}
 % Marks a field only the authors can fill. The manuscript must contain none
@@ -39,30 +40,30 @@
 \title{PipedPeer: Running Unmodified Python Across a Small Group's Machines
 Without a Configured Cluster}
 
-\author[spit]{Yateen Vaviya}
+\author[spit]{Yateen Vaviya\corref{cor1}\fnref{eq}}
 \ead{yateen.vaviya23@spit.ac.in}
-\author[spit]{Vinayak Yadav}
+\author[spit]{Vinayak Yadav\fnref{eq}}
 \ead{vinayak.yadav23@spit.ac.in}
-\author[spit]{Sahil Gupta}
+\author[spit]{Sahil Gupta\fnref{eq}}
 \ead{sahil.gupta23@spit.ac.in}
 \author[spit]{Rupali Sawant}
 \ead{rupali_sawant@spit.ac.in}
-\author[spit]{Dayanand Ambawade}
-\ead{dd_ambawade@spit.ac.in}
-% \cortext / \corref: the authors choose the corresponding author.
+\cortext[cor1]{Corresponding author.}
+\fntext[eq]{These authors contributed equally to this work.}
 
-\affiliation[spit]{organization={Department of Computer Engineering, Sardar Patel Institute of Technology},
+\affiliation[spit]{organization={Department of Computer Engineering, Bharatiya Vidya Bhavan's Sardar Patel Institute of Technology},
+  addressline={Bhavan's Campus, Old D N Nagar, Munshi Nagar, Andheri West},
   city={Mumbai},
+  postcode={400058},
   state={Maharashtra},
   country={India}}
 
 \begin{abstract}
-Cluster frameworks such as Spark, Ray and Dask assume a configured cluster, a
+Cluster frameworks (Spark, Ray, Dask) assume a configured cluster, a
 program written against their interface, and machines that can reach one
-another. These assumptions put the idle laptops, desktops and phones of a small
-group out of reach, particularly when the machines sit behind different home or
-campus routers. PipedPeer runs an unmodified Python script on other machines.
-Every machine runs the same daemon and there is no head node. The script's
+another. This leaves a small group's idle laptops, desktops and phones out of reach,
+especially behind different routers. PipedPeer runs an unmodified Python script on other machines.
+Every machine runs the same daemon; there is no head node. The script's
 environment is built as a Nix closure pinned to one package-set revision, and a
 peer receives only the store paths it lacks. Parallel maps, joblib, pandas
 grouping and joins, NumPy products and PyTorch data-parallel training are
@@ -71,14 +72,13 @@ measured peer rates, and numerical work moves only when a cost model predicts a
 gain. Machines on different networks meet through an introducer that every
 daemon serves and then connect over direct, authenticated QUIC links; no job
 data is relayed. We evaluate PipedPeer in container labs, on two laptops in
-different homes with a phone, and on a second pair of machines. Interception
-raises the startup of a trivial job by $1.24\times$, and a repeated submission
-whose closure the worker holds takes 0.83\,s against 23.4\,s for the first. A
+different homes with a phone, and on a second pair of machines. A repeated
+submission whose closure the worker holds takes 0.83\,s against 23.4\,s for the first. A
 mixed CPU script took 13.3--14.6\,s on two laptops against 17.4--18.1\,s on
 one. Periodic weight averaging every 32 steps kept validation loss within 1\%
 of one device on three test models. Small training jobs were not faster on
 two machines than on one GPU. The evaluation covers two or three physical
-machines and is not a controlled scaling study.
+machines, not a controlled scaling study.
 \end{abstract}
 
 \begin{keyword}
@@ -1175,35 +1175,39 @@ repeated evaluation on more physical machines against Ray, Dask and Lithops.
 
 % ============================================================
 \section*{CRediT authorship contribution statement}
-\authorfill{state each author's roles using the CRediT taxonomy
-(Conceptualization, Software, Investigation, Writing -- original draft,
-Supervision, \ldots). Only the authors know this.}
+\textbf{Yateen Vaviya:} Conceptualization, Methodology, Software, Validation,
+Investigation, Formal analysis, Visualization, Writing -- original draft,
+Writing -- review \& editing.
+\textbf{Vinayak Yadav:} Conceptualization, Methodology, Software, Validation,
+Investigation, Formal analysis, Visualization, Writing -- original draft,
+Writing -- review \& editing.
+\textbf{Sahil Gupta:} Conceptualization, Methodology, Software, Validation,
+Investigation, Formal analysis, Visualization, Writing -- original draft,
+Writing -- review \& editing.
+\textbf{Rupali Sawant:} Supervision, Writing -- review \& editing.
 
 \section*{Declaration of competing interest}
-\authorfill{confirm: ``The authors declare that they have no known competing
-financial interests or personal relationships that could have appeared to
-influence the work reported in this paper.''}
+The authors declare that they have no known competing financial interests or
+personal relationships that could have appeared to influence the work reported
+in this paper.
 
 \section*{Funding}
-\authorfill{state funding, or ``This research did not receive any specific
-grant from funding agencies in the public, commercial, or not-for-profit
-sectors.''}
-
-\section*{Declaration of generative AI use}
-\authorfill{Elsevier requires this statement. The manuscript and parts of the
-software were prepared with the help of an AI assistant (Claude, Anthropic);
-state how, and confirm that the authors reviewed and edited the content and
-take full responsibility for it.}
+This research did not receive any specific grant from funding agencies in the
+public, commercial, or not-for-profit sectors.
 
 \section*{Data availability}
 The source code, benchmark scripts and every measurement record cited in this
 paper are available in the project repository~\cite{pipedpeerrepo}, under
 \texttt{docs/benchmarks}.
 
-\section*{Acknowledgements}
-\authorfill{optional.}
-
 % ============================================================
+\section*{Declaration of generative AI and AI-assisted technologies in the manuscript preparation process}
+During the preparation of this work the authors used Claude (Anthropic), an AI assistant,
+to assist with drafting and editing the manuscript text and with
+developing parts of the software. After using this tool, the authors reviewed
+and edited the content as needed and take full responsibility for the content
+of the published article.
+
 \begin{thebibliography}{99}
 
 \bibitem{zaharia2010spark} M.~Zaharia, M.~Chowdhury, M.~J.~Franklin, S.~Shenker, I.~Stoica, Spark: Cluster computing with working sets, in: Proc. 2nd USENIX Workshop on Hot Topics in Cloud Computing (HotCloud), 2010.
@@ -1266,7 +1270,7 @@ paper are available in the project repository~\cite{pipedpeerrepo}, under
 
 \bibitem{ford2005p2p} B.~Ford, P.~Srisuresh, D.~Kegel, Peer-to-peer communication across network address translators, in: Proc. USENIX Annual Technical Conf., 2005, pp. 179--192.
 
-\bibitem{anderson2020nat} D.~Anderson, How NAT traversal works, Tailscale blog, 2020. URL \url{https://tailscale.com/blog/how-nat-traversal-works} (accessed 16 October 2026).
+\bibitem{anderson2020nat} D.~Anderson, How NAT traversal works, Tailscale blog, 2020. URL \url{https://tailscale.com/blog/how-nat-traversal-works} (accessed 3 November 2026).
 
 \bibitem{rfc9000} J.~Iyengar, M.~Thomson, QUIC: A UDP-based multiplexed and secure transport, RFC 9000, IETF, 2021.
 
@@ -1324,17 +1328,17 @@ paper are available in the project repository~\cite{pipedpeerrepo}, under
 
 \bibitem{rfc8446} E.~Rescorla, The Transport Layer Security (TLS) protocol version 1.3, RFC 8446, IETF, 2018.
 
-\bibitem{cloudpickle} cloudpickle: Extended pickling support for Python objects, 2015. URL \url{https://github.com/cloudpipe/cloudpickle} (accessed 16 October 2026).
+\bibitem{cloudpickle} cloudpickle: Extended pickling support for Python objects, 2015. URL \url{https://github.com/cloudpipe/cloudpickle} (accessed 3 November 2026).
 
-\bibitem{crun} crun: A fast and lightweight fully featured OCI runtime and C library for running containers, 2017. URL \url{https://github.com/containers/crun} (accessed 16 October 2026).
+\bibitem{crun} crun: A fast and lightweight fully featured OCI runtime and C library for running containers, 2017. URL \url{https://github.com/containers/crun} (accessed 3 November 2026).
 
-\bibitem{termux} Termux: Android terminal emulator and Linux environment, 2015. URL \url{https://termux.dev} (accessed 16 October 2026).
+\bibitem{termux} Termux: Android terminal emulator and Linux environment, 2015. URL \url{https://termux.dev} (accessed 3 November 2026).
 
-\bibitem{proot} PRoot: chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux, 2010. URL \url{https://proot-me.github.io} (accessed 16 October 2026).
+\bibitem{proot} PRoot: chroot, mount --bind, and binfmt\_misc without privilege/setup for Linux, 2010. URL \url{https://proot-me.github.io} (accessed 3 November 2026).
 
 \bibitem{jia2011mutation} Y.~Jia, M.~Harman, An analysis and survey of the development of mutation testing, IEEE Trans. Softw. Eng. 37~(5) (2011) 649--678.
 
-\bibitem{pipedpeerrepo} Y.~Vaviya, V.~Yadav, S.~Gupta, PipedPeer: source code and measurement records. URL \url{https://github.com/vinayakyadav2709/Pipedpeer} (accessed 16 October 2026).
+\bibitem{pipedpeerrepo} Y.~Vaviya, V.~Yadav, S.~Gupta, PipedPeer: source code and measurement records. URL \url{https://github.com/vinayakyadav2709/Pipedpeer} (accessed 3 November 2026).
 
 \end{thebibliography}
 

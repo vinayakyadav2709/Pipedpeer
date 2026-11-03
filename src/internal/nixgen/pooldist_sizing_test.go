@@ -34,7 +34,10 @@ if __name__ == "__main__":
         got = pool.map(work, list(range(32)))
         width = pool._procs
     assert got == list(range(32)), "wrong results"
-    print("WIDTH %d CORES %d" % (width, os.cpu_count()))
+    # Not os.cpu_count(): that is the host's total, and a pinned or throttled
+    # job (taskset, a container cpuset or cpu.max) correctly gets fewer.
+    from pipedpeer_shim import core
+    print("WIDTH %d CORES %d" % (width, core._usable_cores()))
 `
 	res := runPoolScript(t, map[string]string{"job.py": script}, "job.py")
 	var width, cores int
@@ -42,7 +45,7 @@ if __name__ == "__main__":
 		t.Fatalf("unexpected output %q (stderr: %s)", res.stdout, res.stderr)
 	}
 	if cores > 2 && width <= 2 {
-		t.Errorf("pool honoured the requested 2 workers on a %d-core box; the point is not having to pick", cores)
+		t.Errorf("pool honoured the requested 2 workers with %d usable cores; the point is not having to pick", cores)
 	}
 	if width < 1 {
 		t.Errorf("nonsensical width %d", width)

@@ -194,8 +194,8 @@ HALF = Inches(6.0)
 
 # 1 Title
 s = new_slide(None, notes=(
-    "Good morning. We are Yateen, Vinayak and Sahil. Our guide is Dr. Rupali Sawant and our mentor "
-    "Prof. Dayanand Ambawade. Our project is PipedPeer: it runs an ordinary Python script on the other "
+    "Good morning. We are Yateen, Vinayak and Sahil. Our guide is Dr. Rupali Sawant. "
+    "Our project is PipedPeer: it runs an ordinary Python script on the other "
     "machines around you, without setting up a cluster, without changing the script, and across "
     "different home or college networks."))
 s.shapes.add_picture(str(LOGO), int((W - Inches(1.4)) / 2), Inches(0.45), height=Inches(1.4))
@@ -207,7 +207,7 @@ text(s, Inches(1), Inches(3.5), Inches(11.33), Inches(1.4), [
     "!Vinayak Yadav (UCID 2023300264)",
     "!Sahil Gupta (UCID 2023300072)"], size=20, align=PP_ALIGN.CENTER, spacing=2)
 text(s, Inches(1), Inches(5.0), Inches(11.33), Inches(0.9), [
-    "!Guide: Dr. Rupali Sawant      Mentor: Prof. Dayanand Ambawade"], size=18,
+    "!Guide: Dr. Rupali Sawant"], size=18,
     align=PP_ALIGN.CENTER)
 text(s, Inches(1), Inches(5.8), Inches(11.33), Inches(1.0), [
     "!" + FOOTER + ", Mumbai",
@@ -732,34 +732,31 @@ text(s, Inches(7.0), T, Inches(5.8), CH, [
     "Controlled, repeated evaluation on more machines against Ray, Dask and Lithops.",
 ], size=17)
 
-# 28 Execution plan, budget, distribution of work
-s = new_slide("Execution Plan, Budget and Distribution of Work", notes=(
-    "FILL BEFORE THE EXAM: each member's responsibilities in the table. The project ran from April to "
-    "November 2026 in phases, each merged after review. The budget was nil: all software is open source and "
-    "we used our own laptops and a phone."))
-table(s, L, T, Inches(7.4), [
-    ["Member", "Responsibilities"],
-    ["Yateen Vaviya", "[fill in before the exam]"],
-    ["Vinayak Yadav", "[fill in before the exam]"],
-    ["Sahil Gupta", "[fill in before the exam]"],
-], col_w=[2.2, 5.2], size=15, row_h=0.7)
-text(s, Inches(8.3), T, Inches(4.5), CH, [
+# 28 Execution plan and budget
+s = new_slide("Execution Plan and Budget", notes=(
+    "The project ran from April to November 2026 in phases, each on its own branch and merged into dev after "
+    "review. All three of us worked on every part together. No hardware was bought: the software is open "
+    "source, and we used our own laptops and a phone, plus one rented cloud server as an introducer during "
+    "the cross-network tests, since shut down."))
+text(s, L, T, CW, CH, [
     "**Timeline:** 12 April – November 2026 (first to latest commit); each phase on its own branch, "
     "merged into dev after review.",
-    "**Budget:** no hardware bought — open-source software, our own laptops and phone. "
-    "[confirm: any cost of the cloud host used as introducer]",
-], size=16)
+    "**Team:** all three members worked jointly on design, implementation, evaluation and writing.",
+    "**Budget:** no hardware bought — open-source software, our own laptops and phone, and one rented "
+    "cloud server as introducer during the cross-network tests (since shut down).",
+], size=18)
 
 # 29 Publication
 s = new_slide("Research Publication", notes=(
-    "Our paper is written in IEEE conference format, with the plagiarism report attached as the "
-    "evaluation requires. We also prepared a longer journal version for the Journal of Parallel and "
-    "Distributed Computing. Every number in both comes from a recorded measurement."))
+    "Our journal paper was submitted to the Journal of Parallel and Distributed Computing, an "
+    "Elsevier journal, on 3 November 2026, and is under review. A shorter IEEE conference-format "
+    "version accompanies the report, with the plagiarism report attached as the evaluation "
+    "requires. Every number in both comes from a recorded measurement."))
 text(s, L, T, CW, CH, [
-    "**\"PipedPeer: Zero-Configuration Distributed Computing via Recursive, Decentralised Coordination\"**",
-    (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant, D. Ambawade — IEEE conference format, 6 pages."),
-    (1, "Status: [fill in — e.g. submitted to <conference>, <date>]; plagiarism report attached."),
-    "Journal version prepared for the **Journal of Parallel and Distributed Computing** (Elsevier).",
+    "**\"PipedPeer: Running Unmodified Python Across a Small Group's Machines Without a Configured Cluster\"**",
+    (1, "Y. Vaviya, V. Yadav, S. Gupta, R. Sawant."),
+    (1, "Submitted to the **Journal of Parallel and Distributed Computing** (Elsevier), 3 November 2026 (JPDC-D-26-02273); under review."),
+    "Shorter IEEE conference-format version (6 pages) with the report; plagiarism report attached.",
     "Every number in the paper and report traces to a recorded measurement in the repository.",
 ], size=19)
 
@@ -787,7 +784,7 @@ text(s, Inches(1), Inches(2.9), Inches(11.33), Inches(1.0), "!Thank You", size=4
 text(s, Inches(1), Inches(4.0), Inches(11.33), Inches(2.0), [
     "!Questions?",
     "!Yateen Vaviya, Vinayak Yadav, Sahil Gupta",
-    "!Guide: Dr. Rupali Sawant   ·   Mentor: Prof. Dayanand Ambawade",
+    "!Guide: Dr. Rupali Sawant",
 ], size=20, align=PP_ALIGN.CENTER)
 
 prs.save(OUT)
