@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Serve lab-pc.sh and the campaign public key to the lab PCs.
+# Serve lab.sh to the lab PCs from a laptop on the lab network: the fallback
+# to the published copy (HEADLESS.md), for worker setup only.
 #   scripts/campaign/serve.sh [ip]   start (ip: the driver's lab-facing address;
 #                                    default: the source address of the default route)
 #   scripts/campaign/serve.sh stop   stop it
-# Creates the campaign key ~/.ssh/pipedpeer-lab_ed25519 when missing, fills
-# DRIVER into results/lab/serve/lab-pc.sh beside driver.pub, runs
-# python3 -m http.server from there in the background, and prints the one line
-# the operator types on each PC.
+# Creates the campaign key ~/.ssh/pipedpeer-lab_ed25519 when missing, fills its
+# public half, this checkout's commit and the server's URL into
+# results/lab/serve/lab.sh, runs python3 -m http.server from there in the
+# background, and prints the one line the operator types on each PC.
 # Env: LAB_KEY (key path), LAB_RESULTS (default <repo>/results/lab), LAB_PORT (default 8000).
 set -euo pipefail
 
@@ -48,25 +49,19 @@ fi
 
 stop >/dev/null
 mkdir -p "$dir"
-# Only the two assignments: the same tokens elsewhere detect an unfilled copy.
-sed -e "s/^DRIVER=\"__DRIVER_IP__\"\$/DRIVER=\"$ip\"/" -e "s/^PORT=\"__DRIVER_PORT__\"\$/PORT=\"$port\"/" \
-  "$here/lab-pc.sh" >"$dir/lab-pc.sh.new"
-if ! grep -qx "DRIVER=\"$ip\"" "$dir/lab-pc.sh.new" || ! grep -qx "PORT=\"$port\"" "$dir/lab-pc.sh.new"; then
-  die "could not fill DRIVER and PORT into lab-pc.sh"
-fi
-mv -f "$dir/lab-pc.sh.new" "$dir/lab-pc.sh"
-cp -f "$key.pub" "$dir/driver.pub"
+commit=$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || echo 0000000000000000000000000000000000000000)
+bash "$here/lab-fill.sh" fill "$here/lab.sh" "$dir/lab.sh" "$(cat "$key.pub")" "$commit" "http://$ip:$port"
 
 (cd "$dir" && exec nohup python3 -m http.server "$port" --bind "$ip" >"$logf" 2>&1 </dev/null) &
 echo $! >"$pidf"
 
 # Wait until it answers, so the line printed below works when the operator types it.
 for _ in $(seq 50); do
-  if python3 -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=1)" "http://$ip:$port/driver.pub" 2>/dev/null; then
+  if python3 -c "import urllib.request,sys; urllib.request.urlopen(sys.argv[1], timeout=1)" "http://$ip:$port/lab.sh" 2>/dev/null; then
     echo "serving $dir on http://$ip:$port (pid $(cat "$pidf"); stop: scripts/campaign/serve.sh stop)"
     echo "On each lab PC, as the lab user, type:"
     echo
-    echo "  curl -fsS http://$ip:$port/lab-pc.sh | sudo bash -s -- setup"
+    echo "  curl -fsSL http://$ip:$port/lab.sh | sudo bash"
     echo
     exit 0
   fi

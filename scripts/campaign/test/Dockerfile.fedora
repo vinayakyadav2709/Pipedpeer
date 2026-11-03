@@ -1,7 +1,7 @@
-# Lab PC stand-in for lab-pc-test.sh: Fedora with systemd, firewalld and a
+# Lab PC stand-in for lab-pc-test.sh and headless-test.sh: Fedora with systemd, firewalld and a
 # sudo-capable user "lab", without openssh-server (setup must install it).
 FROM registry.fedoraproject.org/fedora:43
-RUN dnf install -y -q systemd sudo curl iproute firewalld procps-ng >/dev/null \
+RUN dnf install -y -q systemd sudo curl iproute firewalld procps-ng python3 openssl openssh-clients tar gzip findutils >/dev/null \
  && ! rpm -q openssh-server >/dev/null 2>&1 \
  && systemctl enable firewalld \
  && useradd -m -s /bin/bash lab \
