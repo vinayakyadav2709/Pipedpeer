@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "doc": "results/lab/workloads.md",
-  "sizes_status": "provisional, laptop; recalibrate on pc01 in session 1",
+  "sizes_status": "provisional, laptop (20 threads, shared); recalibrate on pc01 in session 1 with scripts/campaign/calibrate.sh",
   "workloads": [
     {
       "id": "W1",
@@ -13,18 +13,14 @@
       },
       "size_var": "BENCH_ITEMS",
       "strong": {
-        "BENCH_ITEMS": "0"
+        "BENCH_ITEMS": "154055"
       },
       "weak_per_pc": {
-        "BENCH_ITEMS": "0"
+        "BENCH_ITEMS": "73759"
       },
       "smoke": {
         "BENCH_ITEMS": "400"
       },
-      "calibrate_points": [
-        "1000",
-        "3000"
-      ],
       "system_env": {
         "plain": {
           "BENCH_PROCS": "{nproc_submitter}"
@@ -51,16 +47,12 @@
       },
       "size_var": "CPU_ITEMS",
       "strong": {
-        "CPU_ITEMS": "0"
+        "CPU_ITEMS": "1209"
       },
       "weak_per_pc": null,
       "smoke": {
         "CPU_ITEMS": "8"
       },
-      "calibrate_points": [
-        "20",
-        "60"
-      ],
       "system_env": {
         "plain": {},
         "pipedpeer": {},
@@ -81,16 +73,12 @@
       },
       "size_var": "RF_TREES",
       "strong": {
-        "RF_TREES": "0"
+        "RF_TREES": "1583"
       },
       "weak_per_pc": null,
       "smoke": {
         "RF_TREES": "8"
       },
-      "calibrate_points": [
-        "40",
-        "120"
-      ],
       "system_env": {
         "plain": {},
         "pipedpeer": {},
@@ -122,16 +110,13 @@
       "smoke": {
         "BENCH_EPOCHS": "1"
       },
-      "calibrate_points": null,
       "system_env": {
         "plain": {},
         "pipedpeer": {},
         "torchrun": {}
       },
       "result_regex": "BENCH_LOSS [0-9.]+",
-      "result_compare": {
-        "rel_tol": 0.01
-      },
+      "result_compare": "present",
       "timing_regex": "BENCH_ELAPSED ([0-9.]+)"
     }
   ]

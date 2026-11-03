@@ -65,6 +65,7 @@ remove_env() {
 		log "store paths still alive (kept by other roots): $alive"
 		rm -f "$closure"
 	fi
+	rm -f "$state/smoke-dask.log"   # written by smoke.py
 	rmdir "$state" 2>/dev/null || true
 	log "removed"
 }
