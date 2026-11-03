@@ -13,6 +13,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/identity"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/peercache"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"github.com/rs/zerolog/log"
 )
@@ -43,9 +44,7 @@ var (
 	// buildFlake builds dir's flake for system into dir/result. A variable so
 	// tests use a fake nix.
 	buildFlake = func(dir, system string) error {
-		cmd, cleanup, err := nixstore.CmdContext(context.Background(), dir, "nix", "build",
-			"path:.#packages."+system+".default", "--out-link", filepath.Join(dir, "result"),
-			"--option", "build-users-group", "")
+		cmd, cleanup, err := nixstore.CmdContext(context.Background(), dir, flakeBuildArgv(dir, system, CachePort)...)
 		if err != nil {
 			return err
 		}
@@ -57,6 +56,19 @@ var (
 	}
 	system = identity.System
 )
+
+// CachePort is the local daemon's API port; buildFlake offers its /nix-cache to
+// nix as a substituter. 0 leaves the peer cache out. runDaemon sets it.
+var CachePort int
+
+// flakeBuildArgv is the argv of a foreign environment's nix build. The peer
+// cache options come last and are empty when cachePort is 0 or the peer
+// cache is off.
+func flakeBuildArgv(dir, system string, cachePort int) []string {
+	argv := []string{"nix", "build", "path:.#packages." + system + ".default",
+		"--out-link", filepath.Join(dir, "result"), "--option", "build-users-group", ""}
+	return append(argv, peercache.NixArgs(cachePort)...)
+}
 
 // storeKey is the by-store link name for a submitter's store path, or "" when
 // the path is not a plain /nix/store entry.

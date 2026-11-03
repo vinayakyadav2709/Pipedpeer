@@ -3,12 +3,23 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestBuildUsesAPathFlakeRef(t *testing.T) {
 	if got, want := flakeRef("x86_64-linux"), "path:.#packages.x86_64-linux.default"; got != want {
 		t.Fatalf("flakeRef = %q, want %q", got, want)
+	}
+}
+
+// With no cache port the build argv is the plain build, unchanged; the peer
+// cache options are appended only when a port is given.
+func TestNixBuildArgvUnchangedWithoutCachePort(t *testing.T) {
+	want := []string{"nix", "build", "path:.#packages.x86_64-linux.default", "--option", "build-users-group", ""}
+	got := nixBuildArgv(flakeRef("x86_64-linux"), 0)
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("nixBuildArgv(port 0) = %q, want %q", got, want)
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/jobhistory"
 	"github.com/pipedpeer/pipedpeer/internal/nixgen"
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
+	"github.com/pipedpeer/pipedpeer/internal/peercache"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/runrec"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -69,6 +70,9 @@ type EnvOptions struct {
 	// Verbose prints the "Found…/Using…/Built…" detail lines and nix's own
 	// build output. Off, only warnings print (nix output only on failure).
 	Verbose bool
+	// CachePort is the local daemon's API port, whose /nix-cache nix may
+	// fetch from. 0 leaves the peer cache out of the build.
+	CachePort int
 }
 
 // StageFn reports build progress. Callers own the numbering so a single run
@@ -180,8 +184,7 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 		detail("      Reusing an environment that already has these packages\n")
 	} else {
 		nixSystem := nixgen.NixArch()
-		cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, "nix", "build", flakeRef(nixSystem),
-			"--option", "build-users-group", "")
+		cmd, cleanup, err := nixstore.CmdContext(ctx, tmpDir, nixBuildArgv(flakeRef(nixSystem), opts.CachePort)...)
 		if err != nil {
 			env.Close()
 			return nil, err
@@ -348,6 +351,14 @@ func findProjectRoot(scriptDir string) string {
 // flakeRef uses the path: type so Nix does not treat the scratch dir as part
 // of an enclosing git tree (e.g. a git-tracked $HOME).
 func flakeRef(system string) string { return "path:.#packages." + system + ".default" }
+
+// nixBuildArgv is the argv of the environment's nix build. The peer cache
+// options come last and are empty when cachePort is 0 or the peer cache is
+// off, so the argv is then the plain build.
+func nixBuildArgv(flake string, cachePort int) []string {
+	argv := []string{"nix", "build", flake, "--option", "build-users-group", ""}
+	return append(argv, peercache.NixArgs(cachePort)...)
+}
 
 // ProbePythonPackages asks the pinned nixpkgs, in one nix eval, which of names
 // exist as python3Packages attributes. Names are import names already vetted

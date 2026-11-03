@@ -98,3 +98,12 @@ func TestForeignEnv(t *testing.T) {
 		}
 	}
 }
+
+// With CachePort 0 the foreign build argv is the plain build, unchanged.
+func TestFlakeBuildArgvUnchangedWithoutCachePort(t *testing.T) {
+	got := strings.Join(flakeBuildArgv("/d", "aarch64-linux", 0), " ")
+	want := "nix build path:.#packages.aarch64-linux.default --out-link /d/result --option build-users-group "
+	if got != want {
+		t.Fatalf("flakeBuildArgv(port 0) = %q, want %q", got, want)
+	}
+}
