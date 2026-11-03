@@ -35,9 +35,9 @@ curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scri
 The installer runs `pipedpeer setup --connect <code>`: setup, then the same
 join as `pipedpeer connect <code>`. `--connect` is optional; without it, run
 `pipedpeer connect <code>` later (it also moves a phone to another network).
-Because stdin is the script under `curl | bash`, the questions below are read
-from `/dev/tty`; with no terminal setup skips them and says which step is
-left.
+Because stdin is the script under `curl | bash`, setup's prompts (the pairing
+code, the Enter that confirms the developer toggle) are read from
+`/dev/tty`; with no terminal setup skips them and says which step is left.
 
 ## What setup does
 
@@ -75,7 +75,9 @@ Setup installs `proot-distro`, a Debian (~100 MB), Nix inside it, and a
 pinned Python with numpy, pandas, scipy, scikit-learn, torch, joblib and
 cloudpickle from the public Nix cache (about 1.5 GB) for other machines' pool
 work (short of storage? `PIPEDPEER_PHONE_PYTHON_PKGS="numpy pandas joblib cloudpickle" pipedpeer setup`
-leaves torch out). From then on every `pipedpeer` command typed in Termux runs inside the
+leaves torch out of that pinned Python). The warm-up in step 4 is separate: it
+builds the common environment (torch, scipy, matplotlib; several GB) and the
+variable does not change it. From then on every `pipedpeer` command typed in Termux runs inside the
 Debian; the files under Termux's home keep their paths there. `pipedpeer
 doctor` names the route. The phone is a node like any other for the peer
 Nix cache ([ADR-0021](adr/0021-peers-as-nix-binary-cache.md)): it serves and
@@ -129,8 +131,8 @@ not start on Play-Store Termux, which is why phones are chunks-only today.
 | Symptom | Fix |
 |---|---|
 | Workers die after a few minutes | The phantom process killer is on. `pipedpeer doctor` reports it as off, on or unknown and names the fix; run `pipedpeer setup` again. On Android 12-13 doctor asks you to switch Wireless debugging on for a moment to read it (no new code), then switches it off again |
-| Setup cannot find the pairing port | Open "Pair device with pairing code" and keep that screen up while setup listens; if mDNS stays silent it asks for the port shown there |
-| Setup says the pairing was refused | Wrong or expired code: run `pipedpeer setup` again and enter the new one |
+| Setup cannot find the pairing port | Open "Pair device with pairing code" and keep that screen up while setup listens (it searches for 60 s); if mDNS stays silent it asks for the port shown there |
+| Setup says the pairing was refused | Wrong or expired code, three times in a row (setup asks again after each failure): run `pipedpeer setup` again and enter the new one |
 | Phone shows but never gets chunks | `grep refusing ~/.local/state/pipedpeer/daemon.log` (full node: `proot-distro login debian -- grep refusing /root/.local/state/pipedpeer/daemon.log`) names the missing module or Python version |
 | Phone drops off when the screen locks | `termux-wake-lock`, keep it charging |
 | LAN discovery doesn't find the phone | Use `pipedpeer connect <code>`; Android filters multicast |

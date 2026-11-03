@@ -106,7 +106,7 @@ Samsung S20 FE 5G (Android 13), Termux from the **Play Store** (the build the re
    bash phone-phantom-off.sh     # asks for the pairing port, the code, then the connect port
    ```
 
-   It prints `max_phantom_processes = 2147483647` and `phantom process killer off`. Alternative with a laptop and USB
+   `pipedpeer setup` does this step itself; the script is the manual fallback. It prints `max_phantom_processes = 2147483647` and `phantom process killer off`. Alternative with a laptop and USB
    debugging:
 
    ```bash

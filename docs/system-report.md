@@ -1479,7 +1479,7 @@ handful.
 
 **Ports.** One block, one hard cut ([ADR-0020](adr/0020-ports-block-hard-cut.md)):
 4242/tcp daemon API, 4242/udp discovery, 4243/udp direct links, 4244/udp
-introducer. The gloo training ports are gone with the gloo backend.
+introducer. The same 4242/tcp port also serves the loopback-only `/nix-cache` route for the peer Nix cache. The gloo training ports are gone with the gloo backend.
 
 **Install and setup.** Every nightly build is published under its own version
 (`nightly-<version>`), and `install-pipedpeer.sh --version <v>` gives every
@@ -1528,7 +1528,7 @@ crun is needed ([phone.md](phone.md)).
   link speed is measured passively from real transfers and feeds the cost
   models (estimates were 7-37x too high).
 - *Environments.* Only workspace files the node lacks are sent (a content
-  cache on each node); nodes fetch paths cache.nixos.org serves themselves;
+  cache on each node); nodes fetch paths cache.nixos.org serves themselves, and ask same-architecture peers after it for the rest through the local `/nix-cache` route (priority 60) and the token-gated `/v1/store/narinfo` and `/v1/store/nar` routes ([ADR-0021](adr/0021-peers-as-nix-binary-cache.md));
   the per-script environment wrapper is skipped when an existing environment
   covers the imports; a closure seed to a node that already holds every path
   takes milliseconds.

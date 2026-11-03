@@ -179,7 +179,7 @@ changed: requeue is bounded; Ctrl+C during a build · worker: U22 demo kit
 
 ### Phone as a full node: setup on a new kernel — phone
 changed: builds its own proot on kernels 6.6+; scripts for the phantom-process killer · worker: phone full node (proot + Nix)
-1. [ ] Phone, Termux: `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/phone-phantom-off.sh && bash phone-phantom-off.sh` (Termux and Settings in split screen; Wireless debugging: pairing port, code, then connect port) → ends with `max_phantom_processes = 2147483647` and `phantom process killer off; Wireless debugging can be turned off again`. Or the two `adb shell` lines from Steps to run.
+1. [ ] Phone, Termux (manual fallback; `pipedpeer setup` does this step itself): `curl -fsSLO https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/phone-phantom-off.sh && bash phone-phantom-off.sh` (Termux and Settings in split screen; Wireless debugging: pairing port, code, then connect port) → ends with `max_phantom_processes = 2147483647` and `phantom process killer off; Wireless debugging can be turned off again`. Or the two `adb shell` lines from Steps to run.
 2. [ ] Phone: install line, then `pipedpeer connect <CODE>` → on a 6.6+ kernel (`uname -r`) the output says it builds a newer proot, then `✓ Debian with Nix ready`; no `cp: ... Function not implemented`.
 3. [ ] Phone: `pipedpeer doctor` → `✓ phone: full node (Debian in proot with Nix)` and `! phone: takes pool and torch chunks only; whole jobs and DDP ranks need a nested proot sandbox, which this Termux's proot can't start`.
 4. [ ] Laptop A: `pipedpeer status` → the phone is `healthy`.

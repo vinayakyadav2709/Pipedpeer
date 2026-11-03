@@ -87,7 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scri
 # an exact build (every machine in a cluster should run the same one)
 curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <version>
 
-# install and join a cluster in one go (the code is the line `pipedpeer invite` printed)
+# install and join a cluster in one go (add `-y` after `bash -s --` to skip prompts) (the code is the line `pipedpeer invite` printed)
 curl -fsSL https://raw.githubusercontent.com/vinayakyadav2709/Pipedpeer/dev/scripts/install-pipedpeer.sh | bash -s -- --version <version> --connect <code>
 ```
 
@@ -96,8 +96,10 @@ The installer verifies the checksum, puts the binary in `/usr/local/bin` (or
 `pipedpeer setup`. `pipedpeer --version` prints the build to pass to
 `--version` on the other machines. `--connect <code>` makes setup join
 afterwards, the same as `pipedpeer connect <code>`, which stays for joining
-later or after a network change. Setup also starts building the common Python
-environment in the background, and peers serve each other Nix store paths that
+later or after a network change. Setup asks for sudo once on a multi-user nix. It also starts building the
+common Python environment in the background (several GB, torch included; not
+on introducer-only or pool-only machines; follow it with `pipedpeer status` or
+`warmup.log` in the state directory), and peers serve each other Nix store paths that
 cache.nixos.org lacks ([ADR-0021](docs/adr/0021-peers-as-nix-binary-cache.md)).
 
 Requires Linux to *run* jobs (`crun` sandbox, Linux namespaces, GPU device
@@ -124,7 +126,7 @@ pipedpeer run main.py       # run your script, using the whole cluster
 is available; without root it falls back to a private store in your data
 directory. It creates the cluster secret before the daemon first starts, opens
 the firewall ports, and asks whether to start pipedpeer at boot (default yes).
-After `connect`, the common environments are built in the background so the
+After `setup` (or a successful `connect`), the common environments are built in the background so the
 first run starts fast.
 
 Commands:

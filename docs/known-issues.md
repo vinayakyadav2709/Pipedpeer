@@ -75,6 +75,7 @@ None open.
 
 ## Limitations by design
 
+- **A path a peer gains later can wait an hour on a multi-user nix.** The nix-daemon ignores an untrusted client's `narinfo-cache-negative-ttl`, so a miss from the peer cache is remembered for nix's default hour ([ADR-0021](adr/0021-peers-as-nix-binary-cache.md)).
 - **Joining across networks needs one reachable introducer.** Every daemon is
   one and a node knows up to 8, but a new machine whose invite names only
   unreachable members cannot join (`connect` says so and exits 1). Links that

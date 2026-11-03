@@ -21,9 +21,10 @@ The command is run without `--json-format`. The private store pins nix 2.31.3, w
 
 | # | Source | Text | Handling |
 |---|---|---|---|
-| 2.1 | Real: cache.nixos.org, bash | `StorePath`, `URL: nar/0i3p…p634.nar.zst`, `Compression: zstd`, `FileHash`, `FileSize`, `NarHash: sha256:0i3p…p634`, `NarSize: 1856848`, `References: 0d8g…-glibc-2.42-67 byi2…-bash-5.3p15` (basenames), `Deriver: yxs8…drv` (basename), `Sig: cache.nixos.org-1:L1O9…` | This is the shape the daemon renders. It sets `URL: nar/<storehash>.nar.zst` and `Compression: zstd`, and omits `FileHash`/`FileSize` because the NAR is compressed while streaming. |
+| 2.1 | Real: cache.nixos.org, bash (the sample, not the daemon's output) | `StorePath`, `URL: nar/0i3p…p634.nar.zst`, `Compression: zstd`, `FileHash`, `FileSize`, `NarHash: sha256:0i3p…p634`, `NarSize: 1856848`, `References: 0d8g…-glibc-2.42-67 byi2…-bash-5.3p15` (basenames), `Deriver: yxs8…drv` (basename), `Sig: cache.nixos.org-1:L1O9…` | The sample above, kept for its field set. |
+| 2.1a | Rendered by the daemon from a peer's narinfo | as 2.1 | It sets `URL: nar/<storehash>.nar.zst` and `Compression: zstd`, and omits `FileHash`/`FileSize` because the NAR is compressed while streaming. |
 | 2.2 | Rendered by a peer, CA path | as 2.1 with `CA: fixed:r:sha256:…` and no `Sig` | Accepted when the CA field is present: nix checks CA paths by content. |
-| 2.3 | Rendered by a peer, signed by a cluster key | `Sig: <node>-1:<b64>` | Accepted when the signature verifies against a key in `nixsign.TrustedKeysFile()` or nix's `trusted-public-keys`. The fingerprint is `1;<StorePath>;<NarHash>;<NarSize>;<full refs comma-joined>`. |
+| 2.3 | Rendered by a peer, signed by a cluster key or by a key in nix's `trusted-public-keys` (cache.nixos.org's included) | `Sig: <node>-1:<b64>` | Accepted when the signature verifies against a key in `nixsign.TrustedKeysFile()` or nix's `trusted-public-keys`. The fingerprint is `1;<StorePath>;<NarHash>;<NarSize>;<full refs comma-joined>`. |
 | 2.4 | Synthetic: signed by a key nobody trusts | | Reject it, warn with the peer and key name, and try the next peer. |
 | 2.5 | Synthetic: the `StorePath` hash differs from the hash asked for | | Reject and warn. This guards against a confused or hostile peer. |
 | 2.6 | Synthetic: a peer from an older build | 404 on `/v1/store/narinfo/…` | Count it as a miss, with no warning: the route is additive (ADR-0006). |
@@ -35,15 +36,17 @@ The command is run without `--json-format`. The private store pins nix 2.31.3, w
 |---|---|---|
 | 3.1 | `GET /nix-cache/nix-cache-info` | 200 `StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 60\n`. cache.nixos.org answers Priority 40 (real), so nix asks it first. |
 | 3.2 | `GET /nix-cache/<32 nix32 chars>.narinfo` | 200 with the first acceptable peer answer, or 404. |
-| 3.3 | `GET /nix-cache/nar/<hash>.nar.zst` | The peer's zstd stream, passed through. Retried on the next peer that answered the narinfo, else 404. |
+| 3.3 | `GET /nix-cache/nar/<hash>.nar.zst` | The peer's zstd stream, passed through. Retried on the other eligible peers not yet recorded as failed (including ones that had not answered the narinfo), else 404. |
 | 3.4 | `GET /nix-cache/<bad>.narinfo` (wrong length, or a char outside `0123456789abcdfghijklmnpqrsvwxyz`) | 400. No fan-out. |
 | 3.5 | `HEAD` of any of these (nix probes with HEAD for some stores) | As GET without the body. |
 | 3.6 | `PUT` or any write | 405. The cache is read-only. |
 | 3.7 | From a non-loopback address without the cluster token | 401 (the normal token middleware). |
 | 3.8 | `/nix-cache/log/…`, `/nix-cache/*.ls`, `realisations/…` | 404 |
-| 3.9 | Peers of another nix system (an `aarch64-linux` phone asked by an `x86_64-linux` PC) | Not asked. Store paths differ by system. Arch-independent sources are then not shared across arches, which costs little because cache.nixos.org has them. |
+| 3.9 | Peers of another nix system (an `aarch64-linux` phone asked by an `x86_64-linux` PC) | Not asked. Store paths differ by system. Arch-independent sources are then not shared across arches, which should cost little because cache.nixos.org has them (not measured). |
 | 3.10 | A peer with no arch reported (a build older than the cache) | Not asked. It has no `/v1/store` and would only miss. |
-| 3.11 | A same-arch peer that is a phone (Termux) | Asked and served like any node. There is no phone special case. |
+| 3.11 | A same-arch peer that is a phone (Termux) | Asked and served like any node. There is no phone special case. A pool-only node has no nix, so it serves nothing and never asks; an introducer-only node asks nothing. |
+| 3.12 | A peer whose status is not healthy, or that has no host or port | Not asked. |
+| 3.13 | A peer on the same machine (same boot id), such as a second daemon on one host | Not asked, so two daemons on one host do not share paths. |
 
 ## 4. Finding the Wireless debugging ports (mDNS, done in Go inside Termux)
 
@@ -81,15 +84,15 @@ Real, SM-G781B, Android 13, Play Store Termux:
 | 5.8 | Synthetic: after a reboot without `set_sync_disabled_for_tests persistent` | via adb, `max_phantom_processes` → `null` | `on`. Doctor points to `pipedpeer setup`. |
 | 5.9 | Synthetic: Wireless debugging is off when the step starts (no connect SRV dials) | the user turns it on at pipedpeer's request | When the step ends, pipedpeer runs `adb shell settings put global adb_wifi_enabled 0` as its last command, leaving the phone as it found it. The command may end with the transport closing. "Off" is confirmed when the connect port stops dialing within 3 s; otherwise pipedpeer warns "turn off Wireless debugging in Developer options". |
 | 5.10 | Synthetic: Wireless debugging is already on when the step starts (a connect SRV dials) | | It is left on: the user turned it on for their own reasons. The step only runs `adb disconnect`. |
-| 5.11 | Real (P5 measures it): the exit status and output of `adb shell settings put global adb_wifi_enabled 0` over a Wi-Fi transport | to be recorded | Decides whether 5.9's dial check is needed, or the exit status alone is enough. |
+| 5.11 | Synthetic: `adb shell settings put global adb_wifi_enabled 0` over a Wi-Fi transport | the transport may close before an exit status arrives | The exit status is not relied on; 5.9's dial check decides. |
 
 ## 6. Installer arguments (`scripts/install-pipedpeer.sh`)
 
 | # | Args | Result |
 |---|---|---|
 | 6.1 | `--version v0.9.1` | as today |
-| 6.2 | `--version v0.9.1 --connect PP1-abc` | setup runs with `--connect PP1-abc` |
-| 6.3 | `--connect=PP1-abc -y` | setup gets `-y --connect PP1-abc` (any order) |
+| 6.2 | `--version v0.9.1 --connect pp1-abc` | setup runs with `--connect pp1-abc` |
+| 6.3 | `--connect=pp1-abc -y` | setup gets `--connect pp1-abc` appended after the other arguments (`-y` first) |
 | 6.4 | `--connect` with no value, or followed by another flag | exits 1 with "--connect requires a code" |
 | 6.5 | `--bogus` | exits 1 as today |
 | 6.6 | Piped through `curl … \| bash` with a terminal | setup reads from `/dev/tty` |
@@ -107,4 +110,4 @@ Real, SM-G781B, Android 13, Play Store Termux:
 | 7.6 | a progress line, modified < 1 h ago | true | false |
 | 7.7 | a progress line, modified > 1 h ago | false | false |
 | 7.8 | empty file | false | false |
-| 7.9 | old header without `build=` (written by today's build), last `done` | false | false: one rebuild after the upgrade, which is cheap because nix has everything |
+| 7.9 | old header without `build=` (written before the `build=` header existed), last `done` | false | false: one rebuild after the upgrade, which is cheap because nix has everything |

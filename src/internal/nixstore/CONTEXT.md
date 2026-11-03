@@ -72,6 +72,7 @@ The nix public keys of cluster nodes, each proved against the fingerprint it is 
 - A signed archive holds only the paths one peer lacked, so it is never cached or forwarded as a closure.
 - Setup never writes `require-sigs = false`; a machine that already has it is left alone (`cf2e3ae`).
 - A signed import never passes `--no-check-sigs`; it adds the cluster keys to what nix already trusts, for that one command.
+- The peer cache (`/nix-cache`, [ADR-0021](../../../docs/adr/0021-peers-as-nix-binary-cache.md)) serves only on loopback without a token, and the peer layer (`/v1/store/narinfo`, `/v1/store/nar`) never asks further peers, so a lookup cannot loop.
 - Builds name the flake as `path:` (`app/env.go` `flakeRef`), so a `$HOME` that is a git checkout cannot make nix refuse the untracked `flake.nix` (`35a0050`).
 
 ## Entry points
@@ -82,4 +83,5 @@ The nix public keys of cluster nodes, each proved against the fingerprint it is 
 - Submitter upload and diff: `daemonctl/execution.go` `UploadJob`, `daemonctl/closurediff.go` `seedClosure`.
 - Daemon store routes: `daemonapi/narcache.go` `handleStoreMissing`, `handleStoreCheck`, `handleStoreImport`, `importSignedClosure`; seeding `daemonapi/server.go` `broadcastClosure`, `importStoreOnPeer`; signed path `daemonapi/signedclosure.go` `signedClosureFor`.
 - Archives: `narpack/narpack.go` `Publish`, `Pack`, `Import`; pruning `narpack/prune.go` `Prune`; compression sniffing `tarcodec/`.
+- Peer cache: `peercache/peercache.go` `Accept`, `TrustedKeys`, `NixArgs` (called from `app/env.go` and `phone/foreign.go`); local route `daemonapi/nixcache.go` `exceptLocalNixCache`, `nixCacheRouter`; fan-out `daemonapi/nixcache_peers.go`; peer layer `daemonapi/peerstore.go`; root helper line `nixtrust/nixtrust.go`.
 - Signing and trust: `nixsign/nixsign.go` `SignPaths`, `WriteTrustedKeys`; `nixsign/collect.go` `Collect`; `daemonapi/server.go` `refreshTrustedKeys`; setup `setup/setup.go` `trustClusterKeys`, `installHelper`; the mode check `nixsign/system.go` `SystemUntrusted`; the root helper `nixtrust/nixtrust.go` `Main`, `ValidKey`; the daemon's use `daemonapi/server.go` `warnUntrustedKeys`, called from the poll and before each signed import (`daemonapi/narcache.go` `importSignedClosure`).

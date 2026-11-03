@@ -62,6 +62,7 @@ What the daemon can still promise to a new job: its budget minus what it and its
 - Sandbox decision and fallback: `handleJobExec` (`sandboxRequired`); quirks `daemonapi/sandboxquirks.go` `probeQuirks`; user namespace probe `userns/userns.go`.
 - GPU: devices from `gpu.Detect()` (`internal/gpu`); driver libraries mounted via `execution.go` `gpuDriverLibDir`, `gpuDriverLibs`.
 - Memory: `execution.go` `grantableMemory`, `applyMemLimit`, `oomKills`; `cgroups/cgroups.go` `Prepare`; `cgroups/budget.go` `SelfBudget`.
+- Nix cache: `/nix-cache` (`nixcache.go`, exempt from the token for GET/HEAD from loopback only) and `/v1/store/narinfo`, `/v1/store/nar` (`peerstore.go`); see [nixstore](../nixstore/CONTEXT.md) and ADR-0021.
 - Persistence: `daemonapi/server.go` `EnablePersistence`, `daemonapi/state.go`.
 - Submitter side: `app/run.go` `Run`, `RunTask`; `daemonctl/execution.go` `UploadJob`, `StreamExecute`, `DownloadResults`; daemon lifecycle `daemonctl/manager.go` `Start`.
 - History: `jobhistory/history.go` `BaseDir`.
