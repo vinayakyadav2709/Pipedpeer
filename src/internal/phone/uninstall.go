@@ -5,6 +5,7 @@ package phone
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -376,8 +377,9 @@ var adb = func(w io.Writer, args ...string) error {
 	return cmd.Run()
 }
 
-// phantomOverWifi pairs with this phone's own adb, runs phantomRevert and
-// disconnects. android-tools comes in for it when missing and goes again.
+// phantomOverWifi connects this phone's own adb (wifiADB: ports from mDNS,
+// pairing when refused), runs phantomRevert and leaves Wireless debugging as
+// it was found. android-tools comes in for it when missing and goes again.
 func phantomOverWifi(w io.Writer, in *bufio.Reader) error {
 	if _, err := lookAdb(); err != nil {
 		fmt.Fprintln(w, "installing adb (pkg install android-tools), removed again after...")
@@ -396,21 +398,11 @@ func phantomOverWifi(w io.Writer, in *bufio.Reader) error {
 			return fmt.Errorf("pkg install android-tools: %w: %s", err, tail(out))
 		}
 	}
-	fmt.Fprintln(w, "Settings > Developer options > Wireless debugging: on, then \"Pair device with pairing code\" (Termux and Settings in split screen)")
-	pairPort := ask(w, in, "pairing port: ")
-	code := ask(w, in, "pairing code: ")
-	if err := adb(w, "pair", "127.0.0.1:"+pairPort, code); err != nil {
-		return fmt.Errorf("adb pair: %w", err)
+	dev, done, err := wifiADB(context.Background(), w, in, true, true)
+	defer done()
+	if err != nil {
+		return err
 	}
-	dev := "127.0.0.1:" + ask(w, in, "port under 'IP address & Port' on the Wireless debugging screen: ")
-	if err := adb(w, "connect", dev); err != nil {
-		return fmt.Errorf("adb connect: %w", err)
-	}
-	defer func() {
-		if err := adb(io.Discard, "disconnect", dev); err != nil {
-			log.Warn().Err(err).Str("device", dev).Msg("phone: adb disconnect failed")
-		}
-	}()
 	var errs []error
 	for _, a := range phantomRevert {
 		if err := adb(w, append([]string{"-s", dev}, a...)...); err != nil {

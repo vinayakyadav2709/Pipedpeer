@@ -207,34 +207,29 @@ func TestRemovePkgsKeepsAllWhenUsersWouldGo(t *testing.T) {
 	}
 }
 
-func TestPhantomNoteOverWifi(t *testing.T) {
-	fakePhone(t)
-	oldAdb, oldLook := adb, lookAdb
-	t.Cleanup(func() { adb, lookAdb = oldAdb, oldLook })
-	lookAdb = func() (string, error) { return "/bin/adb", nil }
-	var calls []string
-	adb = func(_ io.Writer, args ...string) error { calls = append(calls, strings.Join(args, " ")); return nil }
-
+func TestPhantomNoteOverWifi(t *testing.T) { // 17: ports from mDNS, only the code is asked
+	r := newRig(t, 33)
 	var out bytes.Buffer
-	PhantomNote(&out, bufio.NewReader(strings.NewReader("y\n37001\n123456\n41002\n")), false, true)
+	PhantomNote(&out, bufio.NewReader(strings.NewReader("y\n\n123456\n")), false, true)
+	d := "127.0.0.1:42965"
 	want := []string{
-		"pair 127.0.0.1:37001 123456",
-		"connect 127.0.0.1:41002",
-		"-s 127.0.0.1:41002 shell device_config delete activity_manager max_phantom_processes",
-		"-s 127.0.0.1:41002 shell settings put global settings_enable_monitor_phantom_procs true",
-		"-s 127.0.0.1:41002 shell device_config set_sync_disabled_for_tests none",
-		"disconnect 127.0.0.1:41002",
+		"connect " + d, "pair 127.0.0.1:41913 123456", "connect " + d,
+		"-s " + d + " shell device_config delete activity_manager max_phantom_processes",
+		"-s " + d + " shell settings put global settings_enable_monitor_phantom_procs true",
+		"-s " + d + " shell device_config set_sync_disabled_for_tests none",
+		"-s " + d + " shell settings put global adb_wifi_enabled 0",
+		"disconnect " + d,
 	}
-	if !slices.Equal(calls, want) {
-		t.Errorf("adb calls %q\nwant %q", calls, want)
+	if got := r.adbCalls(); !slices.Equal(got, want) {
+		t.Errorf("adb calls %q\nwant %q", got, want)
 	}
-	if !strings.Contains(out.String(), "adb shell settings put global settings_enable_monitor_phantom_procs true") {
-		t.Errorf("output %q: want the revert lines printed", out.String())
+	if s := out.String(); !strings.Contains(s, "adb shell settings put global settings_enable_monitor_phantom_procs true") || strings.Contains(s, "port") && strings.Contains(s, "pairing port:") {
+		t.Errorf("output %q: want the revert lines printed and no port question", s)
 	}
 
-	calls = nil
+	r.calls = nil
 	PhantomNote(io.Discard, bufio.NewReader(strings.NewReader("")), false, false)
-	if len(calls) != 0 {
-		t.Errorf("-y: ran adb %q, want only the lines printed", calls)
+	if len(r.calls) != 0 {
+		t.Errorf("-y: ran adb %q, want only the lines printed", r.calls)
 	}
 }

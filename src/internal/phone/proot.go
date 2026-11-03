@@ -12,6 +12,7 @@ package phone
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,8 +84,43 @@ func Launch(args []string) {
 	if !ProotReady() || len(args) > 0 && args[0] == "uninstall" {
 		return
 	}
-	os.Exit(forward(args))
+	if len(args) > 0 {
+		switch args[0] {
+		case "setup":
+			// A re-run: the Termux-side steps happen here, the rest in the Debian.
+			o := PrepOpts{}
+			for _, a := range args[1:] {
+				switch a {
+				case "-y", "--yes", "-yes":
+					o.AutoYes = true
+				case "--no-install":
+					o.NoInstall = true
+				}
+			}
+			if err := prepFn(os.Stdout, o); err != nil {
+				log.Warn().Err(err).Msg("phone: Termux-side setup steps failed; going on")
+			}
+		case "doctor":
+			// Termux cannot be asked from inside the Debian: answer here.
+			var in io.Reader
+			ask := false
+			if f, err := openTTY(); err == nil {
+				defer f.Close()
+				in, ask = f, true
+			}
+			os.Setenv(phantomEnv, string(phantomStateFn(context.Background(), os.Stderr, in, ask)))
+		}
+	}
+	exitFn(forwardFn(args))
 }
+
+// Seams for Launch's tests.
+var (
+	prepFn         = TermuxPrep
+	phantomStateFn = PhantomState
+	forwardFn      = forward
+	exitFn         = os.Exit
+)
 
 // loginArgs starts `proot-distro login` for the full node. --minimal, because
 // the default mode binds the host's /proc/self/fd onto /dev/fd, which proot
