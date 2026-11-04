@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"net"
 	"net/http"
 	"os"
@@ -13,7 +14,6 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/heartbeat"
@@ -83,10 +83,7 @@ func killProcessGroup(p *os.Process) error {
 	if p == nil {
 		return nil
 	}
-	if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
-		return p.Kill()
-	}
-	return nil
+	return nixstore.KillGroup(p)
 }
 
 // chunkDirFor returns the on-disk chunk cache dir for a store path. Chunks
@@ -179,6 +176,8 @@ type poolWorker struct {
 	id     int64
 	// dir is the worker's scratch dir; kill removes it.
 	dir string
+	// cleanup removes the crun bundle of a private-store worker (never nil).
+	cleanup func()
 	// killed is set once the worker was stopped (its request was cancelled,
 	// or the server shut down); a killed worker is never reused.
 	killed atomic.Bool

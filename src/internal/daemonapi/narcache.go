@@ -198,7 +198,7 @@ func (c *narCache) ensureLocal(storePath string) (string, bool) {
 	if storePath == "" {
 		return "", false
 	}
-	if _, err := os.Stat(filepath.Join(storePath, "bin", "run")); err != nil {
+	if _, err := os.Stat(nixstore.HostPath(filepath.Join(storePath, "bin", "run"))); err != nil {
 		return "", false // not materialised here; nothing to export
 	}
 	qcmd, qcleanup, err := nixstore.Cmd("", "nix-store", "-qR", storePath)
