@@ -33,6 +33,11 @@
 # Needs rootless podman; about 6 GB of RAM (pc00 2 GB: it is the head of everything) and 25 GB of disk.
 # shellcheck disable=SC2015,SC2016  # pass||fail lines; remote snippets
 set -euo pipefail
+# Nothing here may reach the real ingest Worker: the host's own credentials
+# are never read (the one host-side ingest call names the stand-in), and the
+# PCs get only the bundle's r2.env, which names the stand-in.
+export PIPEDPEER_LAB_INGEST_ENV=/dev/null
+unset INGEST_URL INGEST_TOKEN
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 camp=$(cd "$here/.." && pwd)
@@ -227,7 +232,7 @@ echo "$out" >"$work/status-after-kill.txt"
 say "head line again (resume)"
 head_run >"$work/head2.log" 2>&1 || true
 sed 's/^/    | /' "$work/head2.log" | tail -n 45
-for s in discover prep.nixenv calibrate exp.e1 exp.e1b; do
+for s in discover prep.e5cold prep.nixenv calibrate exp.e1 exp.e1b; do
   grep -q "$s: done before, skipped" "$work/head2.log" && pass "resume skipped $s" || fail "resume did not skip $s"
 done
 grep -q 'e4 was cut off before; running it again' "$work/head2.log" && pass "e4 run again after the kill" || fail "e4 not marked as cut off"
@@ -296,6 +301,8 @@ e1b = [r for r in runs if r["experiment"] == "e1b" and not r.get("warmup")]
 assert e1b and all((r.get("result_ref") or "").startswith("plain-precomputed:") or r["system"] == "plain" for r in e1b), \
     [(r["system"], r["n"], r.get("result_ref")) for r in e1b]
 EOF
+say "go/no-go: E5 cold, E14 first job, E12 join, E6/E13 correctness, E16-E20"
+python3 "$here/gonogo.py" "$got" "$work/gonogo.json" pc00 pc01 pc02 pc03 && pass "go/no-go: every check held" || fail "go/no-go: see the NO-GO lines above"
 gzip -dc "$raw/timeline.jsonl.gz" >"$got/timeline.jsonl" 2>/dev/null || true
 python3 - "$got/timeline.jsonl" <<'EOF' && pass "timeline.jsonl has every E14 event the day writes" || fail "timeline.jsonl (E14)"
 import json, sys
@@ -320,8 +327,12 @@ else
 fi
 
 say "Ray work stays off pc00 (Pool and joblib actors ask for a CPU)"
-python3 -I "$here/ray-placement.py" "$raw/otel" pc00 | tee "$work/ray-placement.txt" | tail -n 12
-[[ ${PIPESTATUS[0]} == 0 ]] && pass "no Ray Pool actor or task ran on pc00" || fail "Ray work ran on pc00 ($work/ray-placement.txt)"
+# Not a pipeline under set -e -o pipefail: a NO here must be a FAIL line,
+# not the end of the script before the snapshots below.
+prc=0; python3 -I "$here/ray-placement.py" "$raw/otel" pc00 >"$work/ray-placement.txt" 2>&1 || prc=$?
+grep -E '^pc00 ' "$work/ray-placement.txt" || true
+tail -n 1 "$work/ray-placement.txt"
+((prc == 0)) && pass "no Ray Pool actor or task ran on pc00" || fail "Ray work ran on pc00 (ray-placement.txt)"
 
 say "every PC as it was"
 for p in "${pcs[@]}"; do
@@ -333,7 +344,7 @@ say "phase timings (lab-day.log)"
 python3 "$here/day-timings.py" "$got/logs/day/lab-day.log" | tee "$work/timings.txt"
 echo "rehearsal wall: $(( ($(date +%s) - t_start) / 60 )) min"
 mkdir -p "$repo/results/lab/rehearsal-day"
-cp "$work/timings.txt" "$work/otel-check.txt" "$work/ray-placement.txt" "$got/summary.txt" "$got/attempts.jsonl" "$repo/results/lab/rehearsal-day/" 2>/dev/null || true
+cp "$work/timings.txt" "$work/gonogo.json" "$work/gonogo.txt" "$work/otel-check.txt" "$work/ray-placement.txt" "$got/summary.txt" "$got/attempts.jsonl" "$repo/results/lab/rehearsal-day/" 2>/dev/null || true
 gzip -dc "$raw/logs/day/lab-day.log.gz" >"$repo/results/lab/rehearsal-day/lab-day.log" 2>/dev/null || true
 
 echo

@@ -25,7 +25,7 @@ clf = RandomForestClassifier(n_estimators=int(os.environ.get("CV_TREES", "100"))
 ray.init(address=os.environ.get("RAY_ADDRESS", "auto"))
 register_ray()
 t0 = time.perf_counter()
-with parallel_backend("ray"):
+with parallel_backend("ray", ray_remote_args={"num_cpus": 1}):
     scores = cross_val_score(clf, X, y, cv=cv, n_jobs=-1)
 dt = time.perf_counter() - t0
 print("fits=%d samples=%d" % (len(scores), n))

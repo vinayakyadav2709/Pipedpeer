@@ -128,3 +128,21 @@ def test_timeline_reads_the_steps_from_the_receipt_file(tmp_path):
     assert "steps" not in res["receipt"]
     assert receipts.full(res)["steps"] == whole["steps"]
     assert timeline.rerun_items(B(), res, 10) == (3, "receipt-steps")
+
+
+def test_e12_join_outcome_names_the_joiners_share_and_first_work(tmp_path):
+    from campaign import runner
+    e12 = runner.load_experiment("e12")
+    f = tmp_path / "chunks.json"
+    f.write_text(json.dumps({"chunks": [
+        {"pc": "pc00", "t0": 0.0, "t1": 30.0, "items": 600},
+        {"pc": "pc01", "t0": 0.5, "t1": 30.0, "items": 300},
+        {"pc": "pc02", "t0": 13.0, "t1": 30.0, "items": 100},
+        {"pc": "pc01", "t0": -3.0, "t1": -1.0, "items": 50}]}))   # a run before: left out
+    events = [{"kind": "join", "t_ns": S + 10 * 10**9, "pcs": ["pc02"]},
+              {"kind": "join", "t_ns": S + 20 * 10**9, "pcs": ["pc03"]}]
+    got = e12.join_outcome(str(f), events, S, 40.0)
+    assert got["items_per_pc"] == {"pc00": 600, "pc01": 300, "pc02": 100}
+    assert got["joiner_share"] == 0.1
+    assert got["joiner_first_work_s"] == {"pc02": 3.0, "pc03": None}
+    assert got["joiner_present_frac"] == round(1 - 13 / 40, 4)

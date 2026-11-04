@@ -235,7 +235,11 @@ prep_join() {
   line=$(pipedpeer invite 2>"$DAY/logs/invite.err") || { say "pipedpeer invite: $(cat "$DAY/logs/invite.err")"; return 1; }
   code=$(sed -n 's/^pipedpeer connect //p' <<<"$line" | tail -n1)
   [[ -n $code ]] || { say "no code in: $line"; return 1; }
-  ans_drop join workers "$(tl_wrap join "pipedpeer connect $code")" "pipedpeer connect failed" || true
+  # --no-warmup: connect would otherwise build the common environment (numpy,
+  # pandas, scipy, torch, ...) on every worker from cache.nixos.org at once:
+  # gigabytes per PC on the lab's uplink, competing with the first job (E14)
+  # and filling the stores E5's cold ship is meant to fill (FIGURES.md, "E5").
+  ans_drop join workers "$(tl_wrap join "pipedpeer connect --no-warmup $code")" "pipedpeer connect failed" || true
   tl_from_out join join   # E14 (day/timeline.sh)
   local want n i; want=$(workers | wc -l)
   for i in $(seq 40); do
@@ -274,6 +278,21 @@ node_ids() {
     done | sort
   } >"$RESULTS/node-ids.csv"
   say "node ids: $(($(wc -l <"$RESULTS/node-ids.csv") - 1)) PCs in results/lab/node-ids.csv"
+}
+
+# prep_e5cold: E5's cold pipedpeer ship (experiments/e5.py), before
+# prep_nixenv. The campaign env shares nixpkgs with pipedpeer's closures, so
+# after it the workers would hold most of E5's closure and "cold" would not
+# be. The profile's e5 row runs the rest of E5 (pip, Ray, the updates) and
+# skips this run. A failure is recorded, never fatal; the row then runs it.
+prep_e5cold() {
+  local row; row=$(printf '%s\n' "${EXPS[@]}" | awk '$1=="e5"')
+  [[ -n $row ]] || return 0
+  local -a args; read -r -a args <<<"$row"
+  (cd "$REPO" && PL_SYNC=0 bash "$CAMP/run.sh" e5 --inventory "$INV" "${args[@]:2}" --part pipedpeer-cold) 2>&1 |
+    tee "$RESULTS/logs/day/e5-cold.log"
+  ((PIPESTATUS[0] == 0)) || blocker "e5 cold ship before the env failed (results/lab/logs/day/e5-cold.log); the e5 row runs it later"
+  return 0
 }
 
 # prep_nixenv: pc00 builds the campaign env from cache.nixos.org and writes

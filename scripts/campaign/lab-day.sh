@@ -5,7 +5,7 @@
 #   discover   scan pc00's subnet until LAB_PCS PCs (pc00 included) log in
 #              with the campaign key, or LAB_DISCOVER_TIMEOUT (1800 s) passes
 #   prepare    machines.csv, network.csv, clocks, pipedpeer + join, the first
-#              distributed job (E14), the Nix env (pc00 builds it, the rest
+#              distributed job (E14), E5's cold pipedpeer ship, the Nix env (pc00 builds it, the rest
 #              pull it from pc00), telemetry
 #   calibrate  W1-W3 sizes on pc01; then the weak-scaling plain references
 #   run        the profile's experiments through run.sh, syncing R2 after each
@@ -53,7 +53,8 @@ prep.code 1
 prep.pipedpeer 3
 prep.join 1
 prep.firstjob 5
-prep.nixenv 8
+prep.e5cold 8
+prep.nixenv 5
 prep.otel 2
 calibrate 12
 weakrefs 17
@@ -95,7 +96,7 @@ main() {
   fi
   if ! aborted; then
     local s
-    for s in machines network clocks code pipedpeer join firstjob nixenv otel; do
+    for s in machines network clocks code pipedpeer join firstjob e5cold nixenv otel; do
       ensure_services
       step "prep.$s" prepare "prep_$s" || { abort "prepare $s failed on pc00"; break; }
     done

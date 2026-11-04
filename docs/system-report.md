@@ -1487,7 +1487,9 @@ pipedpeer at boot (a systemd user unit plus `loginctl enable-linger`; default
 yes; `start --boot` / `stop --boot` later), and prints colour-coded results
 with explicit ACTION NEEDED lines. After `connect`, the common environments
 build in the background so the first run starts warm; `status` shows the
-warm-up's progress. `pipedpeer doctor` checks the daemon, the token, each
+warm-up's progress. `connect --no-warmup` skips it: a benchmark of the first
+ship or the first job, or a site whose uplink cannot carry one download of
+torch per machine (the lab campaign does both). `pipedpeer doctor` checks the daemon, the token, each
 introducer, each peer (with TCP and UDP reachability told apart, since a router
 that passes UDP but not TCP was the demo's unexplained `unknown` row), the
 firewall, user namespaces and AppArmor, crun, Nix, the NVIDIA driver, disk and

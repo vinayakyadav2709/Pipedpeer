@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
@@ -34,9 +35,11 @@ const connectWait = 60 * time.Second
 // newConnectCmd joins the cluster an invite code names: it saves the secret
 // and introducers, restarts the daemon once, waits for the other machines and
 // ends with connected (exit 0), partly (exit 2) or failed (exit 1), each with
-// what to do. Then it builds the common environment in the background.
+// what to do. Then it builds the common environment in the background,
+// unless --no-warmup.
 func newConnectCmd() *cobra.Command {
-	return &cobra.Command{
+	var noWarmup bool
+	cmd := &cobra.Command{
 		Use:   "connect <code>",
 		Short: "Join the cluster of the machine that printed this code (pipedpeer invite)",
 		Args:  cobra.ExactArgs(1),
@@ -92,15 +95,13 @@ func newConnectCmd() *cobra.Command {
 			printConnResult(out, res)
 			pruneIntroducers(base, inv.Addrs)
 			if res.outcome != connFailed {
-				exe, err := termuxexec.Executable()
-				if err == nil {
-					err = warmup.Start(exe, gpu.Detect().Vendor == gpu.VendorNVIDIA)
-				}
-				if err != nil {
-					term.Warn(out, "could not start building the common environment: %v", err)
-				} else {
-					term.OK(out, "building the common environment in the background (`pipedpeer status` shows progress)")
-				}
+				warmupAfterConnect(out, noWarmup, func() error {
+					exe, err := termuxexec.Executable()
+					if err != nil {
+						return err
+					}
+					return warmup.Start(exe, gpu.Detect().Vendor == gpu.VendorNVIDIA)
+				})
 			}
 			if res.outcome != connConnected {
 				os.Exit(int(res.outcome))
@@ -108,6 +109,27 @@ func newConnectCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&noWarmup, "no-warmup", false,
+		"do not build the common environment (numpy, pandas, torch, ...) in the background; "+
+			"the first script that needs it builds it")
+	return cmd
+}
+
+// warmupAfterConnect starts the background build of the common environment,
+// or says it was skipped. A benchmark that measures the first ship of an
+// environment, or the first job, turns it off: the warm-up downloads
+// gigabytes on every machine right after the join, which fills the stores
+// the first ship is meant to fill and competes with the first job.
+func warmupAfterConnect(out io.Writer, skip bool, start func() error) {
+	if skip {
+		term.OK(out, "not building the common environment (--no-warmup)")
+		return
+	}
+	if err := start(); err != nil {
+		term.Warn(out, "could not start building the common environment: %v", err)
+		return
+	}
+	term.OK(out, "building the common environment in the background (`pipedpeer status` shows progress)")
 }
 
 // pruneIntroducers keeps as introducers only the invite's addresses that

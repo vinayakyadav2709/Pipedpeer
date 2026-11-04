@@ -17,9 +17,9 @@ e1	105	--n 1,4,16 --repeats 3
 e1b	53	--n 1,4,16 --repeats 3
 e16	6	--n 16
 e4	15	--n 4 --repeats 3
-e5	23	--n 16 --repeats 3
+e5	21	--n 16 --repeats 3
 e6	12	--n 16 --repeats 3
-e12	6	--n 4,16
+e12	9	--n 4,16
 e13	7	--n 16
 e15	14	--n 4
 e17	6	--n 16

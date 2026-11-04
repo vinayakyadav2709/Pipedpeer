@@ -392,6 +392,7 @@ def parse_args(argv):
     p.add_argument("--seed", type=int)
     p.add_argument("--size", action="append", help="W1:ENV=VALUE, overrides workloads.json")
     p.add_argument("--workloads", type=lambda s: [x for x in s.split(",") if x])
+    p.add_argument("--part", help="E5: pipedpeer-cold runs only pipedpeer's cold ship (the day's prep.e5cold)")
     return p.parse_args(argv)
 
 
