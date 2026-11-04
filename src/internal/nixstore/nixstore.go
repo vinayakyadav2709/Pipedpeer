@@ -252,6 +252,55 @@ func dieWith(cmd *exec.Cmd) {
 	cmd.WaitDelay = cancelGrace
 }
 
+// RunCmd builds a command that runs argv as a program from a store closure
+// (not a nix tool). On a system store, or none, it is the plain host exec. On a
+// private store the closure's /nix/store paths exist only inside the namespace,
+// so the command goes through crun with the store bound at /nix; env is not
+// forwarded into the container beyond the bundle's own, and stdin/stdout/stderr
+// pass through. The caller sets Stdin/Stdout/Stderr as for any exec.Cmd.
+// Cancelling ctx (or killing the process group with SIGTERM, see KillGroup)
+// stops the container. cleanup removes the bundle and must run after Wait.
+func RunCmd(ctx context.Context, dir string, argv ...string) (*exec.Cmd, func(), error) {
+	if len(argv) == 0 {
+		return nil, nil, fmt.Errorf("no command given")
+	}
+	if !Private() {
+		cmd := termuxexec.CommandContext(ctx, argv[0], argv[1:]...)
+		cmd.Dir = dir
+		return cmd, func() {}, nil
+	}
+	cmd, cleanup, err := privateCmd(ctx, dir, argv)
+	if err != nil {
+		return nil, nil, err
+	}
+	if ctx.Done() != nil {
+		dieWith(cmd)
+	}
+	return cmd, cleanup, nil
+}
+
+// KillGroup stops the process group led by p. Plain SIGKILL on a system store;
+// on a private store the leader is crun and the container is in its own
+// session, so SIGTERM goes first (crun forwards it) and SIGKILL follows after
+// cancelGrace.
+func KillGroup(p *os.Process) error {
+	if p == nil {
+		return nil
+	}
+	if !Private() {
+		if err := syscall.Kill(-p.Pid, syscall.SIGKILL); err != nil {
+			return p.Kill()
+		}
+		return nil
+	}
+	pid := p.Pid
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
+		return p.Kill()
+	}
+	time.AfterFunc(cancelGrace, func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	return nil
+}
+
 func cmdFor(ctx context.Context, dir string, argv []string) (*exec.Cmd, func(), error) {
 	if len(argv) == 0 {
 		return nil, nil, fmt.Errorf("no command given")
@@ -272,6 +321,19 @@ func cmdFor(ctx context.Context, dir string, argv []string) (*exec.Cmd, func(), 
 	if err != nil {
 		return nil, nil, err
 	}
+	// argv[0] is nix's multi-call name, and OCI takes args[0] as both the
+	// path and argv[0] - so running <store>/bin/nix with argv[0] "nix-store"
+	// is not expressible. The nix package ships bin/nix-store and the rest as
+	// links beside bin/nix, so naming the right link gets the right
+	// behaviour. Without this, `nix-store -qR` reaches nix as `nix -qR` and
+	// fails with "unrecognised flag '-q'".
+	inside := append([]string{filepath.Join(binDir, argv[0])}, argv[1:]...)
+	return privateCmd(ctx, dir, inside)
+}
+
+// privateCmd runs inside (a full argv, argv[0] a path valid under /nix) through
+// crun with the private store bound at /nix.
+func privateCmd(ctx context.Context, dir string, inside []string) (*exec.Cmd, func(), error) {
 	// Repair rather than assume. A store seeded by an older build has no
 	// nix.conf, and the only symptom is every build failing with
 	// "experimental Nix feature 'nix-command' is disabled" - which reads as a
@@ -291,13 +353,6 @@ func cmdFor(ctx context.Context, dir string, argv []string) (*exec.Cmd, func(), 
 	}
 	cleanup := func() { os.RemoveAll(bundle) }
 
-	// argv[0] is nix's multi-call name, and OCI takes args[0] as both the
-	// path and argv[0] - so running <store>/bin/nix with argv[0] "nix-store"
-	// is not expressible. The nix package ships bin/nix-store and the rest as
-	// links beside bin/nix, so naming the right link gets the right
-	// behaviour. Without this, `nix-store -qR` reaches nix as `nix -qR` and
-	// fails with "unrecognised flag '-q'".
-	inside := append([]string{filepath.Join(binDir, argv[0])}, argv[1:]...)
 	if err := writeBundle(bundle, inside, dir); err != nil {
 		cleanup()
 		return nil, nil, err

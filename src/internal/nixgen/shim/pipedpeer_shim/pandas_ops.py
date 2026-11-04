@@ -1,5 +1,7 @@
 """Distributed pandas: groupby/merge shuffles and the install hooks."""
 
+import threading
+
 from pipedpeer_shim import core
 from pipedpeer_shim import transfer
 from pipedpeer_shim.core import (
@@ -71,7 +73,21 @@ def _add_unobserved(df, keys, as_index, dropna, spec, args, kw, res):
     return res
 
 
+_IN_SHUFFLE = threading.local()
+
+
 def _groupby_shuffle(gb, spec, args, kw):
+    """Run the shuffle with the groupby patches off for this thread: its own
+    local bucket and unobserved-category helper aggregate through pandas'
+    patched agg, which would otherwise shuffle again (forced: for ever)."""
+    _IN_SHUFFLE.on = True
+    try:
+        return _groupby_shuffle_inner(gb, spec, args, kw)
+    finally:
+        _IN_SHUFFLE.on = False
+
+
+def _groupby_shuffle_inner(gb, spec, args, kw):
     _log('groupby: hash-shuffling %d rows across %d nodes' % (len(gb.obj), int(core._NUM_SHARDS)))
     """Hash-shuffle a DataFrameGroupBy.agg: rows bucketed by hash(key)%K,
     bucket 0 aggregated locally, buckets 1..K-1 shipped as no_split items
@@ -133,6 +149,8 @@ def _groupby_gate(gb):
     the transfer, keys are plain or categorical columns (no index/array
     keys)."""
     from pandas.core.groupby import generic as _gbg
+    if getattr(_IN_SHUFFLE, "on", False):
+        return False
     if not isinstance(gb, _gbg.DataFrameGroupBy):
         return False
     if gb.level is not None or getattr(gb, "axis", 0) != 0:

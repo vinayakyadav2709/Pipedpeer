@@ -206,6 +206,9 @@ func (s *Server) broadcastClosure(storePath string) []string {
 			log.Warn().Err(err).Str("peer", ph.addr()).Str("store", storePath).Msg("closure broadcast failed")
 			return
 		}
+		if !s.peerHasStore(&ph, storePath, nil) {
+			log.Warn().Str("peer", ph.addr()).Str("store", storePath).Msg("peer took the closure but reports it not runnable")
+		}
 		log.Info().Str("peer", ph.addr()).Str("store", storePath).
 			Float64("secs", time.Since(start).Round(10*time.Millisecond).Seconds()).Msg("peer took the closure")
 	}

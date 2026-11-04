@@ -29,6 +29,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/pipedpeer/pipedpeer/internal/clustercfg"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/term"
 )
 
@@ -103,7 +104,7 @@ func hostPython() (string, string, error) {
 // is).
 func PoolRunPath(store string) (string, error) {
 	if store != "" {
-		if run := filepath.Join(store, "bin", "run"); exists(run) {
+		if run := filepath.Join(store, "bin", "run"); hasRun(run) {
 			return run, nil
 		}
 	}
@@ -128,7 +129,7 @@ func PoolRunPath(store string) (string, error) {
 // is a phone with a host python that is either any version (the
 // chunk ships func_src) or the submitter's minor version (by-value bytecode).
 func CanRun(store string, h http.Header) bool {
-	if store != "" && exists(filepath.Join(store, "bin", "run")) {
+	if store != "" && hasRun(filepath.Join(store, "bin", "run")) {
 		return true
 	}
 	// A job whose recipe was offered runs only in its own env built here
@@ -250,6 +251,11 @@ func minor(v string) string {
 	}
 	return p[0] + "." + p[1]
 }
+
+// hasRun is exists for a closure's entrypoint: with a private nix store the
+// closure lives under the store dir on the host, not at its /nix path (which
+// exists only inside the namespace). The returned run path stays the /nix one.
+func hasRun(p string) bool { return exists(nixstore.HostPath(p)) }
 
 func exists(p string) bool {
 	_, err := os.Stat(p)

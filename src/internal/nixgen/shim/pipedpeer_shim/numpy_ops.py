@@ -15,6 +15,12 @@ from pipedpeer_shim.transfer import (
 )
 
 
+# numpy's own matmul, captured before the patch. The local fallback in
+# _np_dispatch must use it: the patched one re-enters the gate, which under
+# force/offload always says yes, and would re-dispatch every block.
+_NATIVE = {"matmul": None}
+
+
 def _np_dispatch(blocks, other):
     """Run [np.matmul(block, other) for block in blocks] over the cluster via
     the warm-worker /v1/pool/map path. Blocks and the fixed operand ship as
@@ -47,7 +53,8 @@ def _np_dispatch(blocks, other):
     except Exception as e:
         _log("numpy remote failed (%s); local fallback" % e)
         import numpy as _np
-        return [_np.matmul(b, other) for b in blocks]
+        mm = _NATIVE["matmul"] or _np.matmul
+        return [mm(b, other) for b in blocks]
 
 
 def _install_numpy():
@@ -62,6 +69,7 @@ def _install_numpy():
         return
 
     _orig_matmul = _np.matmul
+    _NATIVE["matmul"] = _orig_matmul
     _orig_dot = _np.dot
     _orig_tensordot = _np.tensordot
     # Capture the pre-patch callables directly: getattr(_np.linalg, name)

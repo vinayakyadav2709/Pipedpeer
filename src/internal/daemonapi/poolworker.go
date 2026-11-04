@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
+	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 
 	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
@@ -31,30 +31,39 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 		return nil, err
 	}
 
-	cmd := termuxexec.Command(runPath, workerScript)
+	// Private store: the closure exists only under /nix inside crun's namespace.
+	cmd, cleanup, err := nixstore.RunCmd(context.Background(), "", runPath, workerScript)
+	if err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
 	// Own process group, so a cancel kills whatever the user's function forked.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		cleanup()
 		os.RemoveAll(dir)
 		return nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cleanup()
 		os.RemoveAll(dir)
 		return nil, err
 	}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
+		cleanup()
 		os.RemoveAll(dir)
 		return nil, err
 	}
 
 	w := &poolWorker{
-		cmd:    cmd,
-		dir:    dir,
-		stdin:  bufio.NewWriter(stdin),
-		stdout: bufio.NewScanner(stdout),
+		cmd:     cmd,
+		cleanup: cleanup,
+		dir:     dir,
+		stdin:   bufio.NewWriter(stdin),
+		stdout:  bufio.NewScanner(stdout),
 	}
 	w.stdout.Buffer(make([]byte, 0, 64<<10), 16<<20)
 	return w, nil
@@ -75,6 +84,9 @@ func (w *poolWorker) killOnce() bool {
 	}
 	if err := killProcessGroup(w.cmd.Process); err != nil {
 		log.Printf("[pool] stopping warm worker pid %d: %v", w.cmd.Process.Pid, err)
+	}
+	if w.cleanup != nil {
+		w.cleanup()
 	}
 	if w.dir != "" {
 		if err := os.RemoveAll(w.dir); err != nil {
@@ -281,7 +293,11 @@ func runPoolChunk(runPath string, ch *chunk) ([]any, error) {
 	}
 
 	ctx := ch.context()
-	cmd := termuxexec.CommandContext(ctx, runPath, runnerPath, inPath, outPath)
+	cmd, cleanup, err := nixstore.RunCmd(ctx, "", runPath, runnerPath, inPath, outPath)
+	if err != nil {
+		return nil, fmt.Errorf("pool run: %v", err)
+	}
+	defer cleanup()
 	// Own process group, killed whole on cancel (see killProcessGroup).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return killProcessGroup(cmd.Process) }

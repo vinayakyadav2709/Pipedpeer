@@ -167,6 +167,29 @@ Dropped: Optuna interception, NPU support.
      status` after a network change.
    - **Docs** for `PIPEDPEER_CONNECT_FROM_INSTALLER` and
      `PIPEDPEER_WARMUP_RETRY`.
+   - **Force-mode tests for every shim interceptor.** `--distribute force`
+     and `--offload` make every gate say yes, so any distributed or fallback
+     path that calls a patched function distributes again without end (the
+     groupby shuffle ran out of memory; the numpy matmul fallback sent 33
+     blocks for one). Only `tests/test_groupby_force.py` and
+     `tests/test_numpy_force.py` run with `_FORCE` on; merge/join,
+     dot/tensordot/svd/eig, the partitioned frame, out-of-core reads,
+     joblib, `Pool` and torch were checked by reading only. Add one
+     parametrised test that runs each under force and offload and asserts
+     one distribution and a result equal to the plain library.
+   - **Pool chunks on a private nix store** run through crun. The daemon's
+     environment is not forwarded into the container, so
+     `PIPEDPEER_WORKER_PROCS` and `PIPEDPEER_CACHE_BUDGET` set on the daemon
+     do not reach chunks there. A chunk executing inside crun is covered by
+     argv/bundle tests only; run it end to end on a machine without `/nix`.
+   - **Daemon crashes on Termux are not restarted.** The boot script starts
+     it once; a crash leaves the phone off the cluster until `pipedpeer
+     start` is run by hand. Add a supervisor loop or restart on the next
+     `pipedpeer` command.
+   - **`scripts/install-pipedpeer.sh` needs sudo for an upgrade** when the
+     binary is in `/usr/local/bin`, so an unattended upgrade fails with
+     "a terminal is required". Install to `~/.local/bin` when it is on PATH,
+     or say so before downloading.
 2. **DiLoCo in automatic mode**, only if its benchmark passes (validation loss
    within 1% of one GPU on every test model, mean of 3 seeds, spread
    reported), then **Streaming DiLoCo** if it is cheap on top of the overlap

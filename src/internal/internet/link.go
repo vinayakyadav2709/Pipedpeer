@@ -73,7 +73,7 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 	// Port zero: the kernel picks. Fixed ports would collide as soon as a
 	// second peer appeared, and the number is never typed by anybody - it
 	// goes straight to the node store.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, lnAddr, err := listenLoopback()
 	if err != nil {
 		if conn != nil {
 			conn.CloseWithError(1, "")
@@ -95,7 +95,7 @@ func (m *Manager) linkUp(ctx context.Context, node string, conn *quic.Conn, path
 	// Shutdown still closes it: closeAll calls stop and closes the listener.
 	linkCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	link := &peerLink{
-		listener: ln, addr: ln.Addr().String(), conn: conn,
+		listener: ln, addr: lnAddr, conn: conn,
 		stop: cancel, lastSeen: now, since: now, dialled: dialled, path: path,
 	}
 	link.announced.Add(1)

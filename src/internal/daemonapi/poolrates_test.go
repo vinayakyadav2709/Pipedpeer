@@ -158,3 +158,44 @@ func TestLostPartsTeachTheSlowPeer(t *testing.T) {
 		t.Errorf("slow peer share %d -> %d of 20; want at most 2 once it lost a part", share(before), share(after))
 	}
 }
+
+// TestRatesAreKeptPerFunction: what one function measured on a peer must not
+// decide another function's split. The daemon's rate ring outlives a job, so
+// one ring per peer let a script of tiny items (or a slow first start) make
+// the fastest node look slow to the next script: fedora got 2 of 18 items and
+// the phone 16 (demo 2026-11-04).
+func TestRatesAreKeptPerFunction(t *testing.T) {
+	share := func(sh []schedule.Share, id string) int {
+		for _, s := range sh {
+			if s.Device.ID == id {
+				return s.Items
+			}
+		}
+		return 0
+	}
+	cases := []struct {
+		name     string
+		observed string // function the measurements were for
+		planned  string // function being planned
+		wantFast bool   // "fast" must take the larger share
+	}{
+		{"other function's measurements are ignored", "tiny", "darts", true},
+		{"same function's measurements are used", "darts", "darts", false},
+		{"unnamed function still uses unnamed measurements", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pm := newPoolManager()
+			// "fast" measured as very slow for c.observed, "slow" as quick.
+			pm.observeRate("fast", c.observed, 1, 10*time.Second)
+			pm.observeRate("fast", c.observed, 2, 20*time.Second)
+			pm.observeRate("slow", c.observed, 10, time.Second)
+			pm.observeRate("slow", c.observed, 20, 2*time.Second)
+			sh := pm.planShares(&chunk{items: make([]json.RawMessage, 20), fnFP: c.planned}, []string{"fast", "slow"}, false)
+			gotFast := share(sh, "fast") >= share(sh, "slow")
+			if gotFast != c.wantFast {
+				t.Errorf("fast %d, slow %d of 20; want fast larger: %v", share(sh, "fast"), share(sh, "slow"), c.wantFast)
+			}
+		})
+	}
+}
