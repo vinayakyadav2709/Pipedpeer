@@ -154,11 +154,10 @@ Dropped: Optuna interception, NPU support.
    - **NAT hole-punch test with a public introducer.** Punching needs an
      introducer that sees both peers' public addresses; it has only been
      run in the lab, not between two real home networks.
-   - **Upgrade restart on real machines.** Re-running the installer over a
-     running daemon must restart it on the new build; check it on a laptop
-     and a phone (systemd unit and Termux). The process-restart path works
-     in a container; the systemd-unit path and the real installer script
-     have not been run.
+   - ~~**Upgrade restart on real machines.**~~ Verified 2026-11-04 on two
+     Fedora laptops (systemd unit) and two Termux phones (SM-G781B,
+     CPH2569): installer or `pipedpeer setup -y` printed `restarting the
+     daemon: <old> -> <new>` and `status` showed the new version on each.
    - **`pipedpeer status` prints the CLI's version** in its `daemon running
      (… version=…)` line (`src/main.go:159`), not the daemon's, so it hides
      a daemon left on an old build. Print the version from the daemon's
@@ -176,7 +175,11 @@ Dropped: Optuna interception, NPU support.
      dot/tensordot/svd/eig, the partitioned frame, out-of-core reads,
      joblib, `Pool` and torch were checked by reading only. Add one
      parametrised test that runs each under force and offload and asserts
-     one distribution and a result equal to the plain library.
+     one distribution and a result equal to the plain library. Urgent since
+     4ffffa8: before it, `--offload` never turned force on (the shim compared
+     the machine key with the raw boot id and never matched), so this path
+     was dead for `--offload`; now it is live. `cpu.py` uses only the fixed
+     interceptors; anything else under `--offload` is untested.
    - **Pool chunks on a private nix store** run through crun. The daemon's
      environment is not forwarded into the container, so
      `PIPEDPEER_WORKER_PROCS` and `PIPEDPEER_CACHE_BUDGET` set on the daemon
@@ -190,6 +193,54 @@ Dropped: Optuna interception, NPU support.
      binary is in `/usr/local/bin`, so an unattended upgrade fails with
      "a terminal is required". Install to `~/.local/bin` when it is on PATH,
      or say so before downloading.
+
+   Found on 2026-11-04 (fedora + yeet + two phones, test sheet
+   `pipedpeer-demo/TESTING.md`); all four affect the demo:
+
+   - **A phone's pool worker is killed before it ever warms up.** Run
+     88202885 (`phone_train.py`, third run, environment already built):
+     the phone got 4-5 items, logged `spawning warm worker`, and 27.6 s
+     later `warm worker pid … stopped for a cancelled request: signal:
+     killed`; the origin had expected 5.9 s, run its local backup copy,
+     won, and cancelled. Every run starts the worker cold again, so the
+     phone never lands in `ran on` for torch work, and the races cost
+     50-55 s of wasted peer time per run (1m7s against 34 s). Cause: the
+     worker imports only the stdlib (`daemonapi/poolscripts.go:272`), so
+     `import torch` under proot happens inside the first task, and a
+     cancel kills the process group (`daemonapi/poolworker.go:142`,
+     added in 14028de for a killed script). Fix: (1) start the worker
+     and import the job's modules (`phone.Need` has the list) when
+     "job environment built" fires; (2) on cancel, let a worker that is
+     still on its first task finish, drop the result and keep it; kill
+     only a warm worker mid-chunk; (3) optionally a soft cancel (SIGINT,
+     KeyboardInterrupt, ack, SIGKILL after a grace period). Cost: at most
+     one unwanted chunk of phone CPU; idle workers are still reaped.
+   - **~7.5 s fixed cost on every run.** `jobs last --timeline` on a warm
+     run: `nix build 0ms · export closure 5.2s · upload 2.1s`, with
+     `Closure already on the node; nothing to send` and 0 of 47 workspace
+     files sent. `cpu.py` plain 19.4 s, `pipedpeer run` 25.1 s although
+     the script part was faster (17.4 s): on demo-sized scripts pipedpeer
+     looks slower than Python. Cache the export by store path and skip
+     the upload round trip when the node already has the closure.
+   - **No progress while a run builds its environment.** `pipedpeer run
+     cpu.py` on a phone printed only the GPU warning for 1.5+ min while
+     it built for aarch64; nothing reached either daemon. Without `-v`
+     print one line per slow stage (building, exporting, uploading).
+   - **A copied node key is not detected.** The node id is the key's
+     fingerprint (`identity/key.go:39`), so two machines sharing
+     `~/.local/share/pipedpeer/node.key` (cloned lab disk, VM template,
+     restored home) are one node to the cluster: both prove the id, the
+     address book merges their paths, and "this machine" checks match
+     both. Hostnames (F17) and machine keys (`heartbeat/machine.go`)
+     already handle clones; the node key does not. Fix: each daemon
+     announces a per-start random nonce; one node id seen with two nonces
+     at two addresses at once is a clone, and `status`/`doctor` say
+     "delete node.key on one of them and run setup".
+   - **An unidentified flaky test in `internal/coordinator`.** It failed
+     once in a full `go test ./...` after merging 74be7b8 and passed on
+     every rerun (three alone, one full suite); the `--- FAIL` line was not
+     captured. Run `go test -count=20 ./internal/coordinator/` under load
+     to find it.
 2. **DiLoCo in automatic mode**, only if its benchmark passes (validation loss
    within 1% of one GPU on every test model, mean of 3 seeds, spread
    reported), then **Streaming DiLoCo** if it is cheap on top of the overlap
