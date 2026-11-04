@@ -201,7 +201,21 @@ Dropped: Optuna interception, NPU support.
      Battery → Termux → allow background activity); acquire the wake lock
      now, not only at boot; and optionally start `sshd` from the boot script
      so the phone can be reached remotely. `pipedpeer doctor` should report
-     each of these.
+     each of these. It happened again on the CPH2569 (2026-11-04): the
+     network was up, port 4242 closed, and the wake lock was gone with
+     Termux. Also needed:
+     - Restart the daemon when Android kills it, not only at boot: a
+       Termux job or watchdog that brings back the wake lock, `sshd` and
+       `pipedpeer start`.
+     - Setup on Oppo/OnePlus (ColorOS) also says to lock Termux in recent
+       apps (long-press the card → lock).
+   - **A dead phone vanishes from `pipedpeer status`** instead of showing as
+     `unreachable`, as a dead laptop does, so a node missing from the table
+     is easy to overlook. Keep it listed as unreachable with its last-seen
+     time.
+   - **`pipedpeer start` on a phone prints "gpu cannot list: permission
+     denied"** before "daemon running". A phone has no usable GPU, so skip the
+     GPU probe on Termux or log it at debug level.
    - **`scripts/install-pipedpeer.sh` needs sudo for an upgrade** when the
      binary is in `/usr/local/bin`, so an unattended upgrade fails with
      "a terminal is required". Install to `~/.local/bin` when it is on PATH,
