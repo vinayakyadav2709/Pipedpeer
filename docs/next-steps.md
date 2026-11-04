@@ -207,6 +207,15 @@ Dropped: Optuna interception, NPU support.
    --explain` is already the EXPLAIN ANALYZE half (after a run, why each
    machine won); chunk sizes are decided at run time from measured item
    cost, so before a first run they can only be estimates.
+8. **Prepare a script on every machine before its first run.** A machine of
+   another architecture (an ARM phone next to x86 laptops) cannot use the
+   submitter's closure; it is sent the recipe and joins the pool once its own
+   build is done. The job does not wait for it, so on a script's first run a
+   new phone usually finishes building after the job ends and takes no
+   share; from the second run on it joins. A `pipedpeer prepare <script>`
+   (or the same step in `pipedpeer explain`) would send the recipe to every
+   node and wait until each reports the closure runnable, showing per-node
+   progress, so the first run in front of people already uses every machine.
 
 ## 5. Decisions already made (do not reopen)
 
