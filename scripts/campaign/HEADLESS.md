@@ -99,7 +99,7 @@ If the day stops early (pc00 rebooted, power cut, the unit was killed), type the
 
 ### Time
 
-The ETA in `lab.sh status` adds the step estimates in `lab-day.sh` (setup and cleanup) and `profile-minimal.tsv` (`est_min`). They come from the full rehearsal (`test/headless-test.sh`, 4 PCs, 2 CPUs each, strong target 10 s), scaled to the lab. The rehearsal's whole day took 57 minutes of steps; its per-step minutes are in `results/lab/rehearsal-day/timings.txt`.
+The ETA in `lab.sh status` adds the step estimates in `lab-day.sh` (setup and cleanup) and `profile-minimal.tsv` (`est_min`). They come from the full rehearsal (`test/headless-test.sh`, 4 PCs, 2 CPUs each, strong target 10 s), scaled to the lab. The rehearsal's whole day took 72.6 minutes of steps (2026-11-04, E16-E20 included); its per-step minutes are in `results/lab/rehearsal-day/timings.txt`.
 
 **Per-run overhead.** Most of a rehearsal run is not work: in e1, 80 runs took 18.2 min, of which 10.3 min was inside the timed commands, so 7.9 min over the 64 runs that started is **7.4 s per run** (activation, the run id on every PC, the receipt and record fetch, Ansible). The other experiments measured 3-16 s (e12 and e13: 14-16 s, joins and kills). The lab has 17 PCs, so every fan-out reaches more hosts; the estimate takes **11 s per run** (×1.5).
 
@@ -112,12 +112,12 @@ The ETA in `lab.sh status` adds the step estimates in `lab-day.sh` (setup and cl
 | e4 | 16 | caps 8/4/2/1 = 15 of an 8-core PC's cores at 70 %: 60 × 8/(15 × 0.7) = 46 s; 16 × 46 s = 12.3 min; 16 × 11 s = 2.9 min | 15 |
 | e5 | 11 | cold: pip 300 s, Ray 300 s (pipedpeer's cold ship is `prep.e5cold`, 4 min, before the env); updates 9 × 60 s; 1140 s = 19 min; 11 × 11 s = 2 min | 21 |
 | e6 | 18 | 18 × 15 s (W1 at 16, plus recovery) = 4.5 min; 18 × 11 s = 3.3 min; 6 Ray/Dask rebuilds after kills × 30 s = 3 min | 12 |
-| e12 | 3 | 3 × 80 s while PCs join; 3 × 21 s overhead (rehearsal 14 s × 1.5) | 6 |
+| e12 | 3 | 13 × 60 s = 780 s of one PC: pipedpeer and Dask about 95 s while PCs join ([FIGURES.md](FIGURES.md), "E12"); Ray's Pool keeps the 4 workers it started with, 780/(4 × 0.8) = 244 s; 434 s; 3 × 21 s overhead (rehearsal 14 s × 1.5) | 9 |
 | e13 | 3 | 3 × 90 s with churn; 3 × 24 s overhead | 7 |
 | e15 | 18 | 3 delays × 2 repeats × 3 systems × 35 s (21 s at N=4, up to twice that with 80 ms) = 10.5 min; 18 × 11 s = 3.3 min | 14 |
 | e7 | 8 | 8 × (5 + 11) s | 2 |
 | e8 | 78 | lab/runner's 72 min for 72 runs (the rehearsal ran one epoch, no lab-size data); plus the new one-rank reference, 6 × 100 s = 10 min | 82 |
-| **experiments** | | | **319** |
+| **experiments** | | | **320** |
 
 | Setup and cleanup | Rehearsal (3 workers) | Lab estimate, and why | Minutes |
 |---|---|---|---|
@@ -125,18 +125,19 @@ The ETA in `lab.sh status` adds the step estimates in `lab-day.sh` (setup and cl
 | discover | 0 | the operator's walk round; overlaps typing | 5 |
 | prep.network | 0.7 | iperf3 one worker at a time, about 14 s each: 16 × 14 s | 4 |
 | prep.pipedpeer | 0.7 | install in parallel; the Determinate installer downloads on each PC | 3 |
-| prep.firstjob (E14) | 5.5 | the workers import the job's environment first; containers were slow at it | 5 |
-| prep.nixenv | 0.7 (11 cold) | 16 × 719 MB from pc00 at 1 Gbit/s is 92 s on the wire; ×3 for disk and import, plus evaluation | 8 |
+| prep.firstjob (E14) | 1.9 (5.5 with connect's warm-up) | the workers import the job's environment first; W1 needs only python | 5 |
+| prep.e5cold | 0.2 | E5's cold pipedpeer ship: pc00 builds the torch closure from cache.nixos.org (about 1.5 GB at the lab's uplink, 2-3 min) and sends it to 15 peers over pc00's 1 Gbit/s link (about 22 GB, 3 min, plus import) | 8 |
+| prep.nixenv | 0.8 (11 cold) | 16 × 719 MB from pc00 at 1 Gbit/s is 92 s on the wire; ×3 for disk and import, plus evaluation; the torch paths are already there from prep.e5cold | 5 |
 | calibrate | 3.3 at 10 s | at 60 s: about 140 s per workload (doubling points, the 3× point, the verify run), W4 90 s, 510 s; one retry | 12 |
 | weakrefs | 0.3 | N=16's reference is 16 × 60 s on one PC | 17 |
 | other prepare steps | 1.2 | | 6 |
 | clean.workers | 3.5 one by one | about 70 s per PC (the Nix uninstall), now all PCs at once | 2 |
 | analyse, clocks.end, pull.pcap, undo.workers, final.sync, clean.pc00 | 0.5 | final upload of about 1 GB of telemetry and pcap at the lab's uplink | 9 |
-| **setup and cleanup** | | | **73** |
+| **setup and cleanup** | | | **78** |
 
-**The day: 319 + 73 = 392 minutes, about 6.5 hours**, plus the time to type the line on 17 PCs before pc00. That is more than a 3-hour visit. The large items are e1 (105), e8 (82), e1b (53) and the N=16 weak reference (17). Ways to fit 3.5 hours, each a profile edit: e8 at ranks 2 and 8 only (-27), e1b at N = 1 and 16 (-18, and weakrefs -4), `--repeats 2` everywhere (-75), or e1 without W3 (-25). The estimate errs long: the efficiency assumptions are pessimistic, and e8's 72 minutes is lab/runner's own figure, not measured.
+**The day: 320 + 78 = 398 minutes, about 6.6 hours**, plus the time to type the line on 17 PCs before pc00. That is more than a 3-hour visit. The large items are e1 (105), e8 (82), e1b (53) and the N=16 weak reference (17). Ways to fit 3.5 hours, each a profile edit: e8 at ranks 2 and 8 only (-27), e1b at N = 1 and 16 (-18, and weakrefs -4), `--repeats 2` everywhere (-75), or e1 without W3 (-25). The estimate errs long: the efficiency assumptions are pessimistic, and e8's 72 minutes is lab/runner's own figure, not measured.
 
-The more-benchmarks rows (lab/more-bench, [FIGURES.md](FIGURES.md) "More benchmarks") add about 32 minutes: e16 energy to solution 6 (right after e1b, so its archive of the RAPL samples also covers E1's runs), e17 idle footprint and cluster start 6, e18 noisy neighbour 6, e19 cold vs warm ship 6, e20 pandas and scikit-learn one-liners 8. With them the experiments come to 319 + 32 = 351 minutes and the day to 351 + 73 = 424 minutes, about 7.1 hours. RAPL needs root: `otel/energy.sh` reads the counters through `sudo -n`, which `lab.sh` grants; `node.sh start` starts it and `node.sh stop` (which cleanup runs) stops it. E18's CPU hogs end themselves after 300 s and carry `PL_CAMPAIGN_HOG=1`, so a cut-off E18 leaves none behind.
+The more-benchmarks rows (lab/more-bench, [FIGURES.md](FIGURES.md) "More benchmarks") add about 32 minutes: e16 energy to solution 6 (right after e1b, so its archive of the RAPL samples also covers E1's runs), e17 idle footprint and cluster start 6, e18 noisy neighbour 6, e19 cold vs warm ship 6, e20 pandas and scikit-learn one-liners 8. With them the experiments come to 320 + 32 = 352 minutes and the day to 352 + 78 = 430 minutes, about 7.2 hours: the ETA `lab.sh status` shows for `profile-minimal.tsv`. RAPL needs root: `otel/energy.sh` reads the counters through `sudo -n`, which `lab.sh` grants; `node.sh start` starts it and `node.sh stop` (which cleanup runs) stops it. E18's CPU hogs end themselves after 300 s and carry `PL_CAMPAIGN_HOG=1`, so a cut-off E18 leaves none behind.
 
 ### Distributing the Nix env
 
@@ -194,7 +195,13 @@ The full rehearsal exercises this path for real: pc00 writes the cache (719 MB, 
 - **Sizes:** `test/profile-rehearsal.tsv`: N up to what four PCs hold, one repeat, a 10 s calibration target, and the smoke sizes of rehearse.sh for e4, e5, e8, e12, e13 and e15.
 - **netem:** the containers share the host's kernel, which has `sch_netem` loaded, so `netem.csv` says yes everywhere; the "no" path is not exercised.
 
-**Result** (2026-11-03, the run committed in `results/lab/rehearsal-day/`): all checks passed, 65 minutes of steps. e1: 80 runs, 18 failed: the 16 runs at N=4 for Ray and Dask (3 workers; recorded, e1 went on) and Ray W3 at N=2 twice (Ray's memory monitor in 1.25 GB containers). e6 and e13: Ray failed when a worker was killed, which is the fault's measured outcome, and Dask under churn hit the runner's 360 s stop. E14 (the first job, right after the join) ran wholly on pc00: the workers were still importing its environment after a minute.
+**Result** (2026-11-04, the run committed in `results/lab/rehearsal-day/`, with `gonogo.json` and `gonogo.txt`): all 64 checks passed, 72.6 minutes of steps, 75 minutes wall. Every row of `test/profile-rehearsal.tsv` finished (e4 once cut off, then ok). e1: 80 runs, 18 failed: the 16 at N=4 for Ray and Dask (3 workers) and Ray W3 at N=2 twice (Ray's memory monitor in 1.25 GB containers). Ray failed in e6 when a worker was killed and in e13 under churn, and Dask under churn hit the runner's 360 s stop (it passed in the run before): measured outcomes, recorded. Every pipedpeer run gave the right result. `test/gonogo.py`:
+
+- E14, the first job: every PC worked, items 27.3 / 24.4 / 23.0 / 25.3 % (pc00-pc03), first work at 31.5-31.6 s, wall 99.9 s.
+- E5 cold: each worker held 24 of the 42 closure paths (220 of 471 MB: the interpreter, glibc, the shim's cloudpickle) and none of numpy, joblib or OpenBLAS; 121 MB came over the wire.
+- E12: pipedpeer's joiner did 29.0 % of the items, from 2.3 s after its join, and joiners were in for 82 % of the run; Dask 48.4 %, 0.5 s, 91 %; Ray 0 % (its Pool keeps its first actors).
+
+Found by this round and fixed: connect's background warm-up (the workers built torch and the rest during the first job, which then took 387 s with 2.4-3.6 % of the items per worker; the day now joins with `--no-warmup`), the campaign env on scikit-learn 1.8.0 against pipedpeer's 1.9.0 (every pipedpeer W4 result differed), and E19's and E20's Ray ports running zero-CPU actors on pc00.
 
 Earlier runs of the rehearsal found the product and harness bugs listed below; the test now guards against each one.
 

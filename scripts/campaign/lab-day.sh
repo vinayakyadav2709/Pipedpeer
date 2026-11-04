@@ -53,8 +53,8 @@ prep.code 1
 prep.pipedpeer 3
 prep.join 1
 prep.firstjob 5
-prep.e5cold 4
-prep.nixenv 8
+prep.e5cold 8
+prep.nixenv 5
 prep.otel 2
 calibrate 12
 weakrefs 17

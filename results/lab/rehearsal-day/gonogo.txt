@@ -1,0 +1,12 @@
+E5 cold: closure 42 paths, 470.9 MB; workers held before: {'pc01': {'mb': 219.8, 'paths': 24, 'python_packages': ['python3.14-cloudpickle-3.1.2']}, 'pc02': {'mb': 219.8, 'paths': 24, 'python_packages': ['python3.14-cloudpickle-3.1.2']}}; wall 4.8091 s, all PCs had it at 6.012 s, 121.01 MB received
+E14 first job: share {'pc00': 0.2732, 'pc01': 0.2441, 'pc02': 0.23, 'pc03': 0.2526}; first work {'pc00': 31.5, 'pc01': 31.61, 'pc02': 31.61, 'pc03': 31.61} s; wall 99.8741 s
+E12 pipedpeer: wall 75.9419 s, join at [11.11] s, seen at [15.2] s, joiner share 0.2903, first work {'pc02': 2.34} s after its join, joiners present for 0.8229 of the run
+E12 dask: wall 118.1505 s, join at [10.26] s, seen at [11.48] s, joiner share 0.4838, first work {'pc02': 0.524} s after its join, joiners present for 0.9087 of the run
+E12 ray: wall 156.4272 s, join at [10.42] s, seen at [None] s, joiner share 0.0, first work {'pc02': None} s after its join, joiners present for 0.0 of the run
+E6: {'dask kill -9 ok=True': 1, 'dask none ok=True': 1, 'pipedpeer kill -9 ok=True': 1, 'pipedpeer none ok=True': 1, 'pipedpeer-ctrlc - ok=True': 1, 'ray kill -9 ok=False': 1, 'ray none ok=True': 1}
+E13: {'dask churn ok=False': 1, 'pipedpeer churn ok=True': 1, 'ray churn ok=False': 1}
+E16: 8 runs, 0 failed []
+E17: 3 runs, 0 failed []
+E18: 6 runs, 0 failed []
+E19: 8 runs, 0 failed []
+E20: 14 runs, 0 failed []

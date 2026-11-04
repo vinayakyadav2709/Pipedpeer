@@ -1,0 +1,173 @@
+{
+ "e12_dask": {
+  "error": null,
+  "items_per_pc": {
+   "pc01": 29560,
+   "pc02": 27705
+  },
+  "join_at_s": [
+   10.26
+  ],
+  "joiner_first_work_s": {
+   "pc02": 0.524
+  },
+  "joiner_present_frac": 0.9087,
+  "joiner_share": 0.4838,
+  "result_ok": true,
+  "seen_s": [
+   11.48
+  ],
+  "wall_s": 118.1505
+ },
+ "e12_pipedpeer": {
+  "error": null,
+  "items_per_pc": {
+   "pc00": 18247,
+   "pc01": 22395,
+   "pc02": 16621
+  },
+  "join_at_s": [
+   11.11
+  ],
+  "joiner_first_work_s": {
+   "pc02": 2.34
+  },
+  "joiner_present_frac": 0.8229,
+  "joiner_share": 0.2903,
+  "result_ok": true,
+  "seen_s": [
+   15.2
+  ],
+  "wall_s": 75.9419
+ },
+ "e12_ray": {
+  "error": null,
+  "items_per_pc": {
+   "pc01": 57272
+  },
+  "join_at_s": [
+   10.42
+  ],
+  "joiner_first_work_s": {
+   "pc02": null
+  },
+  "joiner_present_frac": 0.0,
+  "joiner_share": 0.0,
+  "result_ok": true,
+  "seen_s": [
+   null
+  ],
+  "wall_s": 156.4272
+ },
+ "e13": {
+  "dask churn ok=False": 1,
+  "pipedpeer churn ok=True": 1,
+  "ray churn ok=False": 1
+ },
+ "e14_first_work_s": {
+  "pc00": 31.5,
+  "pc01": 31.61,
+  "pc02": 31.61,
+  "pc03": 31.61
+ },
+ "e14_share": {
+  "pc00": 0.2732,
+  "pc01": 0.2441,
+  "pc02": 0.23,
+  "pc03": 0.2526
+ },
+ "e14_wall_s": 99.8741,
+ "e16": {
+  "errors": [],
+  "failed": 0,
+  "runs": 8
+ },
+ "e17": {
+  "errors": [],
+  "failed": 0,
+  "runs": 3
+ },
+ "e18": {
+  "errors": [],
+  "failed": 0,
+  "runs": 6
+ },
+ "e19": {
+  "errors": [],
+  "failed": 0,
+  "runs": 8
+ },
+ "e20": {
+  "errors": [],
+  "failed": 0,
+  "runs": 14
+ },
+ "e5_cold": [
+  {
+   "all_have_s": 6.012,
+   "before_campaign_env": true,
+   "closure_on_pc00": "built",
+   "closure_paths": 42,
+   "mb_down": 121.01,
+   "present_before": {
+    "pc00": {
+     "mb": 470.6,
+     "paths": 40,
+     "python_packages": [
+      "python3.14-cloudpickle-3.1.2",
+      "python3.14-joblib-1.5.3",
+      "python3.14-lz4-4.4.5",
+      "python3.14-numpy-2.5.1",
+      "python3.14-psutil-7.2.2"
+     ]
+    },
+    "pc01": {
+     "mb": 219.8,
+     "paths": 24,
+     "python_packages": [
+      "python3.14-cloudpickle-3.1.2"
+     ]
+    },
+    "pc02": {
+     "mb": 219.8,
+     "paths": 24,
+     "python_packages": [
+      "python3.14-cloudpickle-3.1.2"
+     ]
+    }
+   },
+   "result_ok": true,
+   "wall_s": 4.8091
+  },
+  {
+   "all_have_s": null,
+   "before_campaign_env": null,
+   "closure_on_pc00": null,
+   "closure_paths": null,
+   "mb_down": 1.29,
+   "present_before": null,
+   "result_ok": true,
+   "wall_s": 3.7524
+  },
+  {
+   "all_have_s": null,
+   "before_campaign_env": null,
+   "closure_on_pc00": null,
+   "closure_paths": null,
+   "mb_down": 0.45,
+   "present_before": null,
+   "result_ok": true,
+   "wall_s": 6.1523
+  }
+ ],
+ "e6": {
+  "dask kill -9 ok=True": 1,
+  "dask none ok=True": 1,
+  "pipedpeer kill -9 ok=True": 1,
+  "pipedpeer none ok=True": 1,
+  "pipedpeer-ctrlc - ok=True": 1,
+  "ray kill -9 ok=False": 1,
+  "ray none ok=True": 1
+ },
+ "no_go": []
+}
