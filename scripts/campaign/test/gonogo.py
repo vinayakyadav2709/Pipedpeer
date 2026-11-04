@@ -4,8 +4,9 @@ attempts.jsonl (headless-test.sh):
   python3 gonogo.py <dir with runs.jsonl, attempts.jsonl> <out.json> [pc ...]
 
   E5   pipedpeer's cold ship ran before the campaign env (prep.e5cold),
-       once, right, and no worker held any Python package of its closure
-       (only the interpreter and system libraries the first job brought)
+       once, right, and no worker held any package E5 ships (numpy, joblib,
+       pandas, scikit-learn, torch); the interpreter, system libraries and
+       the shim's own cloudpickle come with the first job and may be there
   E14  every PC computed part of the first job; share and first work per PC
   E12  pipedpeer's joiner did more than 5 % of the items and worked for at
        least half the run; share, first work and wall for every system
@@ -18,6 +19,9 @@ exits 1 on any NO-GO. Lines of interrupted attempts are left out.
 import collections
 import json
 import sys
+
+# What E5's job imports (experiments/e5.py FULL; the rehearsal ships SMALL).
+SHIPPED = {"numpy", "joblib", "pandas", "scikit-learn", "torch"}
 
 
 def load(d):
@@ -47,9 +51,11 @@ def e5(runs, out, notes, bad):
     notes.append("E5 cold: closure %s paths, %s MB; workers held before: %s; wall %s s, all PCs had it at %s s, "
                  "%s MB received" % (c["closure_paths"], c.get("closure_mb"), pres, c.get("wall_s"),
                                      c.get("all_have_s"), c.get("mb_down")))
-    warm = {pc: v["python_packages"] for pc, v in pres.items() if isinstance(v, dict) and v["python_packages"]}
+    warm = {pc: [p for p in v["python_packages"] if p.split("-", 1)[-1].rsplit("-", 1)[0] in SHIPPED]
+            for pc, v in pres.items() if isinstance(v, dict)}
+    warm = {pc: p for pc, p in warm.items() if p}
     if warm:
-        bad.append("e5: workers held Python packages of the closure before the cold ship: %s" % warm)
+        bad.append("e5: workers held packages E5 ships before the cold ship: %s" % warm)
     if not all(isinstance(v, dict) for v in pres.values()):
         notes.append("E5 cold: present_before has counts only (an older build); check the bytes by hand")
 
