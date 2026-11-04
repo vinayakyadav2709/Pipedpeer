@@ -155,15 +155,7 @@ func (m *rateModel) devices(peers []string, cores func(string) int, localRate fl
 			// share is dropped, nothing is ever sent there, and so nothing is
 			// ever measured. A peer that is in fact slower is corrected after
 			// its first part comes back.
-			c := cores(p)
-			if c <= 0 {
-				c = localCores()
-			}
-			rate = localRate * float64(c) / float64(max(1, localCores()))
-			if rate <= 0 {
-				rate = float64(c)
-			}
-			setup = 0.05
+			rate, setup = coresPrior(cores(p), localRate)
 		}
 		out = append(out, schedule.Device{
 			ID: p, Node: p, Kind: schedule.CPU,
@@ -171,6 +163,18 @@ func (m *rateModel) devices(peers []string, cores func(string) int, localRate fl
 		})
 	}
 	return out
+}
+
+// coresPrior is the core-count guess for a peer with no measurement.
+func coresPrior(c int, localRate float64) (rate, setup float64) {
+	if c <= 0 {
+		c = localCores()
+	}
+	rate = localRate * float64(c) / float64(max(1, localCores()))
+	if rate <= 0 {
+		rate = float64(c)
+	}
+	return rate, 0.05
 }
 
 // localCores is this node's core count, the denominator for the core-count
@@ -222,8 +226,8 @@ func describeShares(shares []schedule.Share) string {
 // core-count-shaped guess until something has actually run here. The absolute
 // value matters less than its ratio to the peers', since only relative speed
 // decides the split.
-func (pm *poolManager) localRate() float64 {
-	if rate, _, ok := pm.rates.fit(localDeviceID); ok {
+func (pm *poolManager) localRate(fn string) float64 {
+	if rate, _, ok := pm.rates.fit(rateKey(localDeviceID, fn)); ok {
 		return rate
 	}
 	return float64(localCores())
@@ -237,7 +241,7 @@ func (pm *poolManager) localRate() float64 {
 // so the split equalises real finish times across chunks in flight instead of
 // treating every node as idle.
 func (pm *poolManager) devicesFor(peers []string, fn string, includeLocal bool) []schedule.Device {
-	devs := pm.rates.devices(nil, pm.peerCores, pm.localRate(), includeLocal)
+	devs := pm.rates.devices(nil, pm.peerCores, pm.localRate(fn), includeLocal)
 	now := time.Now()
 	for _, p := range peers {
 		rate, setup := pm.peerRate(p, fn)
@@ -254,7 +258,7 @@ func (pm *poolManager) devicesFor(peers []string, fn string, includeLocal bool) 
 // prior rateModel.devices uses.
 func (pm *poolManager) peerRate(peer, fn string) (rate, setup float64) {
 	key := pm.key(peer)
-	if r, o, ok := pm.rates.fit(key); ok {
+	if r, o, ok := pm.rates.fit(rateKey(key, fn)); ok {
 		return r, o
 	}
 	if pm.priorFn != nil && fn != "" {
@@ -262,15 +266,14 @@ func (pm *poolManager) peerRate(peer, fn string) (rate, setup float64) {
 			return r, o
 		}
 	}
-	d := pm.rates.devices([]string{peer}, pm.peerCores, pm.localRate(), false)
-	return d[0].Rate, d[0].SetupSec
+	return coresPrior(pm.peerCores(peer), pm.localRate(fn))
 }
 
 // expectedSec predicts how long n items of fn take on peer ("" = this node),
 // fixed cost included; 0 when nothing is known.
 func (pm *poolManager) expectedSec(peer, fn string, n int) float64 {
 	if peer == "" {
-		if r, o, ok := pm.rates.fit(localDeviceID); ok && r > 0 {
+		if r, o, ok := pm.rates.fit(rateKey(localDeviceID, fn)); ok && r > 0 {
 			return o + float64(n)/r
 		}
 		if pm.priorFn != nil && fn != "" && pm.selfID != "" {
@@ -322,7 +325,7 @@ func (pm *poolManager) observeLost(peer, fn string, items int, d time.Duration, 
 	}
 	key := pm.key(peer)
 	log.Printf("[pool] %s did not finish %d items in %.1fs (expected %.1fs); counting that as its time", key, items, d.Seconds(), expected)
-	pm.rates.observe(key, items, d)
+	pm.observeRate(key, fn, items, d)
 	pm.observeStats(key, fn, items, d.Seconds(), d.Seconds())
 }
 
@@ -428,4 +431,28 @@ func (b *flightBook) held(key string) int {
 func (b *flightBook) acquire(ctx context.Context, key string, depth int, pred float64) (release func(), err error) {
 	_, release, err = b.acquireFirst(ctx, []slot{{key: key, depth: depth, pred: pred}})
 	return release, err
+}
+
+// rateKey is the rate ring for node key running function fn.
+//
+// One ring per node used to serve every function, and the daemon's rings
+// outlive a job: a script of tiny items, or one slow first start, made the
+// fastest node look slow to the next script (fedora 2 of 18 items, the phone
+// 16). Speed is a property of node and function together, the same pairing
+// poolstats keeps across runs.
+func rateKey(key, fn string) string {
+	if fn == "" {
+		return key
+	}
+	return key + "\x00" + fn
+}
+
+// observeRate records that node key took d for items of function fn: in fn's
+// own ring, which decides fn's splits, and in the node-wide ring, which only
+// paces (a node's round trip does not depend on the function).
+func (pm *poolManager) observeRate(key, fn string, items int, d time.Duration) {
+	pm.rates.observe(rateKey(key, fn), items, d)
+	if fn != "" {
+		pm.rates.observe(key, items, d)
+	}
 }

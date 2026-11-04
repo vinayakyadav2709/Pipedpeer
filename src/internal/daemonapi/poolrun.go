@@ -236,7 +236,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 					d := time.Since(started)
 					ch.prov.record("local", len(p.c.items), d.Milliseconds(),
 						pm.step(pm.selfID, "compute", started, d, i))
-					pm.rates.observe(localDeviceID, len(p.c.items), d)
+					pm.observeRate(localDeviceID, ch.fnFP, len(p.c.items), d)
 					pm.observeStats(pm.selfID, ch.fnFP, len(p.c.items), d.Seconds(), d.Seconds())
 				}
 			} else {
@@ -336,7 +336,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 							// A backup's win is not measured: it started late, so
 							// d is not its time. The queue wait is not the peer's
 							// time, so it is left out.
-							pm.rates.observe(key, len(p.c.items), d)
+							pm.observeRate(key, ch.fnFP, len(p.c.items), d)
 							if compute <= 0 {
 								compute = d.Seconds()
 							}
