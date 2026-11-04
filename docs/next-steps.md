@@ -186,6 +186,19 @@ Dropped: Optuna interception, NPU support.
      it once; a crash leaves the phone off the cluster until `pipedpeer
      start` is run by hand. Add a supervisor loop or restart on the next
      `pipedpeer` command.
+   - **Phone setup does not keep Termux alive.** The boot script and
+     `termux-wake-lock` stop neither Android's battery killer nor a closed
+     Termux; on an Oppo phone (CPH2569) Termux was closed mid-session and
+     the node went unreachable with its SSH server gone. `pipedpeer setup` on
+     Termux should: check the Termux:Boot app is installed and was opened
+     once, and say so if not; open the battery-optimisation exemption prompt
+     for Termux (`am start -a
+     android.settings.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS -d
+     package:com.termux`) and print the vendor path (Oppo/OnePlus: Settings →
+     Battery → Termux → allow background activity); acquire the wake lock
+     now, not only at boot; and optionally start `sshd` from the boot script
+     so the phone can be reached remotely. `pipedpeer doctor` should report
+     each of these.
    - **`scripts/install-pipedpeer.sh` needs sudo for an upgrade** when the
      binary is in `/usr/local/bin`, so an unattended upgrade fails with
      "a terminal is required". Install to `~/.local/bin` when it is on PATH,
