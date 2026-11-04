@@ -228,6 +228,10 @@ Dropped: Optuna interception, NPU support.
      only a warm worker mid-chunk; (3) optionally a soft cancel (SIGINT,
      KeyboardInterrupt, ack, SIGKILL after a grace period). Cost: at most
      one unwanted chunk of phone CPU; idle workers are still reaped.
+     This is why item 8's "from the second run on it joins" did not hold
+     for `phone_train.py` (runs 2 and 3 were `ran on fedora 100%`): a
+     `prepare` step that only builds the closure would not fix it; it
+     must also start the worker and import the job's modules.
    - **~7.5 s fixed cost on every run.** `jobs last --timeline` on a warm
      run: `nix build 0ms · export closure 5.2s · upload 2.1s`, with
      `Closure already on the node; nothing to send` and 0 of 47 workspace
