@@ -196,6 +196,13 @@ const localDeviceID = "local"
 
 func (pm *poolManager) planShares(ch *chunk, peers []string, includeLocal bool) []schedule.Share {
 	devices := pm.devicesFor(peers, ch.fnFP, includeLocal)
+	if splitPolicy() == "headcount" {
+		shares := headcountShares(len(ch.items), devices)
+		if len(shares) > 0 {
+			log.Printf("[pool] plan (headcount): %s", describeShares(shares))
+		}
+		return shares
+	}
 	plan := schedule.Compute(schedule.Options{Items: len(ch.items)}, devices)
 
 	for _, r := range plan.Rejected {
