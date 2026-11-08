@@ -216,6 +216,17 @@ _cluster_parse_args() {
 
 # --- caps ------------------------------------------------------------------
 
+# _cluster_restart_daemon <pc>: the pipedpeer daemon reads the CPU count once
+# at start, so a cap (or its reset) only counts after a restart.
+_cluster_restart_daemon() {
+	local pc="$1"
+	if ! lab_ssh "$pc" "pipedpeer stop; pipedpeer start"; then
+		lab_log "cap $pc: daemon restart FAILED; the daemon may still advertise the old core count"
+		return 1
+	fi
+	lab_log "cap $pc: daemon restarted to read the new core count"
+}
+
 # cluster_cap_apply <pc> <cpus> (logged with its undo)
 cluster_cap_apply() {
 	local pc="$1" cpus="$2"
@@ -225,6 +236,9 @@ cluster_cap_apply() {
 	fi
 	lab_log "cap $pc: allowed 0-$((cpus - 1)) (undo: sudo systemctl set-property --runtime user-\$(id -u).slice AllowedCPUs=)"
 	printf '%s %s\n' "$pc" "$cpus" >>"$(_caps_file)"
+	if _cluster_has pipedpeer; then
+		_cluster_restart_daemon "$pc" || return 1
+	fi
 }
 
 cluster_reset_caps() {
@@ -239,6 +253,7 @@ cluster_reset_caps() {
 		if ! lab_ssh "$pc" "sudo systemctl set-property --runtime user-\$(id -u).slice AllowedCPUs=''"; then
 			lab_log "cap ${pc}: resetting AllowedCPUs= FAILED; check sudo on $pc"
 		fi
+		_cluster_restart_daemon "$pc" || true
 	done <"$cf"
 	rm -f "$cf"
 	return 0

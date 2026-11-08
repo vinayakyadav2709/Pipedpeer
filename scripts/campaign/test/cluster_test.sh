@@ -92,6 +92,8 @@ _verif_install() { # _verif_install <dir>: pipedpeer + systemctl stubs
 # test stub pipedpeer: log calls; `status` prints the saved text.
 if [[ -z "${FAKELAB_DIR:-}" ]]; then echo "pipedpeer stub: no FAKELAB_DIR" >&2; exit 97; fi
 printf 'pipedpeer %s\n' "$*" >>"$FAKELAB_DIR/pipedpeer.log"
+# host, verb and how many sudo lines existed by then (a restart after a cap has >= 1)
+printf '%s %s sudo=%s\n' "$(basename "$HOME")" "${1:-}" "$(wc -l <"$FAKELAB_DIR/sudo.log" 2>/dev/null || echo 0)" >>"$FAKELAB_DIR/pipedpeer.order"
 case "${1:-}" in
 	status) exec cat -- "${PIPEDPEER_STATUS_FILE:?no PIPEDPEER_STATUS_FILE}" ;;
 	start | stop | setup | invite | jobs | doctor) exit 0 ;;
@@ -298,7 +300,14 @@ EOF
 	grep -q 'set-property --runtime user-' "$d/sudo.log" || pnote "no set-property --runtime user- slice call"
 	grep -q 'CLUSTER-DOWN' "$d/log" || pnote "down did not print CLUSTER-DOWN"
 	[[ ! -f "$d/caps.txt" ]] || pnote "caps.txt survived down"
-	verdict "--cap pc01=2 -> set-property logged, kept on clean exit, reset by down"
+	# the daemon on the capped PC restarts after the cap (reads the capped cores)
+	# and again after the reset; the uncapped PC is never restarted by the cap
+	local order="$d/pipedpeer.order" first_stop
+	first_stop="$(grep '^pc01 stop' "$order" 2>/dev/null | head -1 || true)"
+	[[ "$first_stop" =~ sudo=([0-9]+) && ${BASH_REMATCH[1]} -ge 1 ]] || pnote "pc01 daemon not restarted after the cap: [$first_stop]"
+	[[ "$(grep -c '^pc01 stop' "$order" 2>/dev/null || true)" -ge 2 ]] || pnote "pc01 daemon not restarted after the reset"
+	grep -q '^pc03 start' "$order" 2>/dev/null && pnote "uncapped pc03 restarted"
+	verdict "--cap pc01=2 -> set-property logged, daemon restarted after the cap and the reset, kept on clean exit, reset by down"
 }
 
 # --cap on a failed up -> the EXIT trap resets it

@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
-# e6.sh (brief S14): faults — SIGKILL a PC's agent mid-run; Ctrl-C stops
-# the run and its cleanup within a measured latency.
+# e6.sh (brief S14): faults. Kill arm: a PC's agent gets SIGKILL 30% of the way
+# into a W1 run; Ctrl-C arm: SIGINT stops a pipedpeer run and the time until
+# every PC reports 0 JOBS is the stop latency. Writes analysis-input/e6.csv:
+#   system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s
+#
+#   e6.sh [--n N] [--systems a,b] [--kills K] [--ctrlc K] [--ctrlc-after S]
+#         [--only kill|ctrlc] [--dry-run] [-h]
+#
+# Runs go through campaign_run_one (ids E6-W1-<system>-n<N>-r<i> and
+# E6c-W1-pipedpeer-n<N>-r<i>), so wall_s and result_ok come from the run's
+# runs.jsonl record. A crashed or cut run has result_ok 0; a run with no
+# record has an empty wall_s (logged). kill_at_s is the time from the run's
+# own t0 to the moment the kill was issued, after the run was seen running.
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -8,84 +19,195 @@ D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$D/run.sh"
 
-usage() { echo "usage: e6.sh [--n <N>] [--dry-run] [-h]"; }
-DRY=0
-N=16
-while (($#)); do
-  case "$1" in
-    --dry-run) DRY=1; shift ;;
-    --n) N="$2"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) usage >&2; echo "e6.sh: unknown arg $1" >&2; exit 2 ;;
-  esac
-done
+e6_usage() { echo "usage: e6.sh [--n N] [--systems a,b] [--kills K] [--ctrlc K] [--ctrlc-after S] [--only kill|ctrlc] [--dry-run] [-h]"; }
 
-mkdir -p "$LAB/analysis-input" 2>/dev/null || true
-
-if ((DRY)); then
-  echo "E6-DRY-RUN n=$N systems=pipedpeer,ray,dask kills=3 ctrlc=3"
-  exit 0
-fi
-
-out="$LAB/analysis-input/e6.csv"
-printf 'system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s\n' >"$out"
-
-# median wall of W1 at N from runs.jsonl, else a fixed 60s fallback.
-med_wall() {
-  local sys="$1"
-  python3 - "$LAB/runs.jsonl" "$sys" "$N" <<'PY'
+# e6_median_wall <system>: median wall of the E1 W1 runs at N, else 60.
+e6_median_wall() {
+  python3 - "$LAB/runs.jsonl" "$1" "$N" <<'PY'
 import json, sys
-runs, sys_, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+runs, system, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
 vals = []
 try:
     for ln in open(runs):
         d = json.loads(ln)
-        if d["experiment"] == "E1" and d["workload"] == "W1" and d["system"] == sys_ and d["n"] == n and not d["warmup"] and d["result_ok"]:
+        if (d.get("experiment") == "E1" and d.get("workload") == "W1" and d.get("system") == system
+                and d.get("n") == n and not d.get("warmup") and d.get("result_ok")):
             vals.append(d["wall_s"])
 except FileNotFoundError:
-    pass
+    sys.stderr.write("e6: no runs.jsonl; median wall taken as 60 s\n")
 vals.sort()
-print(vals[len(vals)//2] if vals else 60)
+if not vals:
+    sys.stderr.write("e6: no E1 W1 runs for %s at n=%d; median wall taken as 60 s\n" % (system, n))
+print(vals[len(vals) // 2] if vals else 60)
 PY
 }
 
-declare -A unit=( [pipedpeer]=pipedpeer.service [ray]=lab-ray [dask]=lab-dask-worker )
-kill_pc="pc05"
-[[ $N -lt 6 ]] && kill_pc="pc01"
-
-for sys in pipedpeer ray dask; do
-  med="$(med_wall "$sys")"
-  kill_at="$(python3 -c "print(0.3 * $med)")"
-  for i in 1 2 3; do
-    run_id="E6-W1-$sys-n$N-k$i"
-    if _run_id_in_runs "$run_id"; then
-      echo "skipped $run_id"
-      continue
+# e6_wait_running <run_id>: until the run on pc00 has a t0 and no exit file.
+# Sets RUN_ELAPSED_NS (pc00's clock now minus t0, both read on pc00) and
+# POLL_NS (the driver's clock at that moment).
+e6_wait_running() {
+  local id="$1" out deadline=$((SECONDS + ${E6_START_WAIT_S:-120}))
+  # shellcheck disable=SC2016  # remote script
+  while ((SECONDS < deadline)); do
+    out="$(lab_ssh pc00 'R=~/pipedpeer-lab/runs/'"$id"'; t=$(cat $R/t0 2>/dev/null); if [ -n "$t" ] && [ ! -e $R/exit ]; then echo "$t $(date +%s%N)"; fi' 2>/dev/null)" || out=""
+    if [[ "$out" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+      RUN_ELAPSED_NS=$((BASH_REMATCH[2] - BASH_REMATCH[1]))
+      POLL_NS="$(date +%s%N)"
+      return 0
     fi
-    lab_detach pc00 "$run_id" "$(sys_cmd "$sys" W1 "$N" "$run_id")" || continue
-    sleep "$kill_at"
-    lab_ssh "$kill_pc" "systemctl --user kill -s SIGKILL ${unit[$sys]}" || true
-    kill_elapsed="$(python3 -c "print($kill_at)")"
-    lab_wait pc00 "$run_id" 600 || true
-    wall="$(grep "\"run_id\":\"$run_id\"" "$LAB/runs.jsonl" | tail -1 | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["wall_s"])' 2>/dev/null || echo 0)"
-    ok="$(grep "\"run_id\":\"$run_id\"" "$LAB/runs.jsonl" | tail -1 | python3 -c 'import json,sys; print(1 if json.loads(sys.stdin.read())["result_ok"] else 0)' 2>/dev/null || echo 0)"
-    printf '%s,kill,%s,%s,%s,%s,\n' "$sys" "$i" "$kill_elapsed" "$wall" "$ok" >>"$out"
-    "$D/cluster.sh" up "$N" || true
+    sleep 0.2
   done
-done
+  lab_log "e6 $id: never seen running within ${E6_START_WAIT_S:-120}s"
+  return 1
+}
 
-# Ctrl-C arm: SIGINT pipedpeer run on pc00, watch JOBS go to 0.
-for i in 1 2 3; do
-  run_id="E6-W1-pipedpeer-n$N-c$i"
-  lab_detach pc00 "$run_id" 'cd ~/pipedpeer-lab/work && pipedpeer run pool_map.py' || continue
-  sleep 10
-  t0="$(date +%s%N)"
-  lab_ssh pc00 'pkill -INT -f "pipedpeer run pool_map.py"' || true
-  lab_wait pc00 "$run_id" 120 || true
-  t1="$(date +%s%N)"
-  stop="$(python3 -c "print(($t1-$t0)/1e9)")"
-  printf 'pipedpeer,ctrlc,%s,,%s,1,%s\n' "$i" 0 "$stop" >>"$out"
-done
+# e6_record <run_id>: "<wall_s>,<result_ok>" from the run's runs.jsonl line;
+# result_ok is 1 only for a true; wall_s is empty when unknown. Returns 1
+# (and logs) when the run has no record.
+e6_record() {
+  local id="$1" rec
+  rec="$(grep -F -- "\"run_id\":\"$id\"" "$LAB/runs.jsonl" 2>/dev/null | tail -1 || true)"
+  if [[ -z "$rec" ]]; then
+    lab_log "e6 $id: no record in runs.jsonl; wall_s left empty, result_ok 0"
+    return 1
+  fi
+  E6_REC="$rec" python3 -c '
+import json, os
+d = json.loads(os.environ["E6_REC"])
+w = d.get("wall_s")
+print("%s,%d" % ("" if not w else w, 1 if d.get("result_ok") is True else 0))
+'
+}
 
-"$D/upload.sh" || true
-echo "E6-DONE csv=$out"
+# e6_jobs_total <pc>: JOBS summed over the rows of that PC's `pipedpeer
+# status` table; the JOBS column is found by the header's position (the table
+# is tab-aligned). Prints nothing and returns 1 when the table is unreadable.
+e6_jobs_total() {
+  local f="$LAB/logs/e6-status-$1.txt"
+  mkdir -p "$LAB/logs"
+  lab_ssh "$1" pipedpeer status >"$f" 2>/dev/null || { lab_log "e6: pipedpeer status failed on $1"; return 1; }
+  awk '
+    /^NAME[ ]+STATE/ { col = index($0, "JOBS"); intable = 1; next }
+    intable && NF == 0 { exit }
+    intable && col { s = substr($0, col); split(s, a, " "); t += a[1] + 0; seen = 1 }
+    END { if (!seen) exit 1; print t }
+  ' "$f" || { lab_log "e6: no JOBS column in the status table of $1"; return 1; }
+}
+
+e6_main() {
+  local DRY=0 N=16 KILLS=3 CTRLC=3 AFTER=10 ONLY=both
+  local -a systems=(pipedpeer ray dask)
+  while (($#)); do
+    case "$1" in
+      --dry-run) DRY=1; shift ;;
+      --n) N="${2:?--n needs a number}"; shift 2 ;;
+      --systems) IFS=',' read -r -a systems <<<"${2:?--systems needs a list}"; shift 2 ;;
+      --kills) KILLS="${2:?}"; shift 2 ;;
+      --ctrlc) CTRLC="${2:?}"; shift 2 ;;
+      --ctrlc-after) AFTER="${2:?}"; shift 2 ;;
+      --only) ONLY="${2:?}"; shift 2 ;;
+      -h | --help) e6_usage; return 0 ;;
+      *) e6_usage >&2; echo "e6.sh: unknown arg $1" >&2; return 2 ;;
+    esac
+  done
+
+  mkdir -p "$LAB/analysis-input"
+  if ((DRY)); then
+    echo "E6-DRY-RUN n=$N systems=$(IFS=,; echo "${systems[*]}") kills=$KILLS ctrlc=$CTRLC"
+    return 0
+  fi
+
+  _load_sizes || return 1
+  local out="$LAB/analysis-input/e6.csv"
+  [[ -f "$out" ]] || printf 'system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s\n' >"$out"
+
+  local -A unit=([pipedpeer]=pipedpeer.service [ray]=lab-ray [dask]=lab-dask-worker)
+  local kill_pc=pc05 p sys i id med remain kill_at pid rec now_ns
+  ((N < 6)) && kill_pc=pc01
+
+  "$CLUSTER_SH" up "$N" || { lab_log "e6: cluster up failed"; return 1; }
+
+  if [[ "$ONLY" != ctrlc ]]; then
+    for sys in "${systems[@]}"; do
+      med="$(e6_median_wall "$sys")"
+      for ((i = 1; i <= KILLS; i++)); do
+        id="E6-W1-$sys-n$N-r$i"
+        if _run_id_in_runs "$id"; then
+          echo "skipped $id"
+          continue
+        fi
+        campaign_run_one E6 W1 "$sys" "$N" "$i" 0 600 &
+        pid=$!
+        kill_at=""
+        if e6_wait_running "$id"; then
+          remain="$(python3 -c "print(max(0.0, 0.3 * $med - $RUN_ELAPSED_NS / 1e9))")"
+          sleep "$remain"
+          now_ns="$(date +%s%N)"
+          kill_at="$(python3 -c "print(round(($RUN_ELAPSED_NS + $now_ns - $POLL_NS) / 1e9, 3))")"
+          lab_ssh "$kill_pc" "systemctl --user kill -s SIGKILL ${unit[$sys]}" ||
+            lab_log "e6 $id: SIGKILL of ${unit[$sys]} on $kill_pc failed; the run was not disturbed"
+        else
+          lab_log "e6 $id: no kill (run not seen running); kill_at_s left empty"
+        fi
+        wait "$pid" || lab_log "e6 $id: campaign_run_one returned $?"
+        rec="$(e6_record "$id" || echo ",0")"
+        printf '%s,kill,%s,%s,%s,\n' "$sys" "$i" "$kill_at" "$rec" >>"$out"
+        "$CLUSTER_SH" up "$N" || lab_log "e6: cluster up after the kill failed; later runs may be short of PCs"
+      done
+    done
+  fi
+
+  if [[ "$ONLY" != kill ]]; then
+    local -a hosts
+    mapfile -t hosts <"$(lab_hosts "$N")"
+    local stop_s all_zero tot limit="${E6_STOP_LIMIT_S:-120}" t_int
+    for ((i = 1; i <= CTRLC; i++)); do
+      id="E6c-W1-pipedpeer-n$N-r$i"
+      if _run_id_in_runs "$id"; then
+        echo "skipped $id"
+        continue
+      fi
+      campaign_run_one E6c W1 pipedpeer "$N" "$i" 0 600 &
+      pid=$!
+      stop_s=""
+      if e6_wait_running "$id"; then
+        sleep "$AFTER"
+        t_int="$(date +%s%N)"
+        lab_ssh pc00 "pkill -INT -f '[p]ipedpeer run'" ||
+          lab_log "e6 $id: no pipedpeer run to interrupt on pc00"
+        while :; do
+          all_zero=1
+          for p in "${hosts[@]}"; do
+            if tot="$(e6_jobs_total "$p")" && [[ "$tot" == 0 ]]; then
+              :
+            else
+              all_zero=0
+            fi
+          done
+          now_ns="$(date +%s%N)"
+          if ((all_zero)); then
+            stop_s="$(python3 -c "print(round(($now_ns - $t_int) / 1e9, 3))")"
+            break
+          fi
+          if ((now_ns - t_int > limit * 1000000000)); then
+            lab_log "e6 $id: JOBS still not 0 on every PC ${limit}s after Ctrl-C; stop latency left empty"
+            break
+          fi
+          sleep "${E6_POLL_S:-1}"
+        done
+      else
+        lab_log "e6 $id: no Ctrl-C (run not seen running); stop latency left empty"
+      fi
+      wait "$pid" || lab_log "e6 $id: campaign_run_one returned $?"
+      rec="$(e6_record "$id" || echo ",0")"
+      printf 'pipedpeer,ctrlc,%s,,%s,%s\n' "$i" "$rec" "$stop_s" >>"$out"
+    done
+  fi
+
+  "$UPLOAD_SH" || lab_log "e6: upload failed; results stay in $LAB"
+  echo "E6-DONE csv=$out"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  e6_main "$@"
+fi
