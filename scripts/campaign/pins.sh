@@ -129,7 +129,10 @@ main() {
 	# versions.py inside the closure: rsync it into the PC's work dir first.
 	local rc
 	rc=0
-	lab_rsync "$REPO/docs/benchmarks/workloads/versions.py" pc00:pipedpeer-lab/work/versions.py || rc=$?
+	lab_ssh pc00 'mkdir -p ~/pipedpeer-lab/work' || rc=$?
+	if ((rc == 0)); then
+		lab_rsync "$REPO/docs/benchmarks/workloads/versions.py" pc00:pipedpeer-lab/work/versions.py || rc=$?
+	fi
 	if ((rc != 0)); then
 		lab_log "pins: could not rsync versions.py to pc00"
 		echo "cannot rsync versions.py to pc00" >&2
@@ -194,8 +197,12 @@ main() {
 	# wheel availability; a missing pin falls back to the nearest lower one
 	if [[ "${PINS_WHEEL_CHECK:-1}" != 0 ]]; then
 		local chosen pkg wanted
-		for pkg in numpy pandas scikit-learn joblib; do
-			wanted="$(_pin_of "$line" "$pkg")"
+		local key
+		for key in numpy pandas sklearn joblib; do
+			# the VERSIONS key is the import name; the requirement is the PyPI name
+			pkg="$key"
+			[[ "$key" != sklearn ]] || pkg=scikit-learn
+			wanted="$(_pin_of "$line" "$key")" || wanted=""
 			[[ -n "$wanted" ]] || continue
 			chosen="$(_pin_nearest "$pkg" "$wanted")"
 			if [[ -n "$chosen" && "$chosen" != "$wanted" ]]; then

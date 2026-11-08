@@ -75,6 +75,7 @@ else
 fi
 
 check_tool shellcheck
+check_tool uv   # venv.sh ships this binary to every PC
 
 if [[ -f $HOME/.ssh/pipedpeer-lab ]]; then
   ok "$HOME/.ssh/pipedpeer-lab"

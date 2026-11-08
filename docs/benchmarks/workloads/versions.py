@@ -11,6 +11,19 @@ import importlib
 import platform
 import sys
 
+
+
+def _closure_hint():
+    """Never called. pipedpeer builds its closure from the imports it can see
+    in the source, and `importlib.import_module` below hides them, so the
+    modules pins.sh reads would be missing from the closure."""
+    import joblib  # noqa: F401
+    import numpy  # noqa: F401
+    import pandas  # noqa: F401
+    import sklearn  # noqa: F401
+    import torch  # noqa: F401
+
+
 MODULES = ("numpy", "pandas", "sklearn", "joblib", "torch", "ray", "dask")
 
 

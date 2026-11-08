@@ -104,7 +104,7 @@ linger() {
 }
 
 setup() {
-  pkg openssh-server sysstat curl iperf3 parallel   # sysstat: `sar`; curl: the product installer
+  pkg openssh-server sysstat curl iperf3 parallel rsync   # sysstat: `sar`; curl: the product installer; rsync: every fetch and stage
 
   # Ubuntu 24.04 starts sshd by socket activation, 22.04 as a service.
   if ! { systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket; }; then
@@ -184,7 +184,18 @@ undo_gset() {
 # then read `journalctl -u lab-undo` (or the PC's screen) for "undo complete".
 undo() {
   [[ -f $STATE ]] || { log "nothing recorded"; return 0; }
-  local l f pkgs=()
+  local l f pkgs=() u
+  # Started by "sudo systemd-run" there is no SUDO_USER, so LAB_USER above is
+  # root; the user setup acted for is on the line it saved.
+  if [[ -f $LINE_FILE ]]; then
+    u=$(sed -n 's/.* user=\([^ ]*\).*/\1/p' "$LINE_FILE" | head -n1)
+    if [[ -n $u ]] && getent passwd "$u" >/dev/null; then
+      LAB_USER=$u
+      HOME_DIR=$(getent passwd "$LAB_USER" | cut -d: -f6)
+    else
+      log "WARNING: cannot read the lab user from $LINE_FILE; acting for $LAB_USER"
+    fi
+  fi
   # Read STATE on fd 3, newest first, so a rule that depends on another is
   # removed after it; apt/ufw cannot swallow the list from stdin.
   while IFS= read -r l <&3; do
@@ -214,6 +225,14 @@ undo() {
   # One purge for everything apt added, after ssh is stopped. No autoremove: it
   # would take the lab's own orphans with it.
   if [[ ${#pkgs[@]} -gt 0 ]]; then
+    # Where policy-rc.d forbids service control (containers) the purge leaves a
+    # running sshd behind; stopping it first is the same on a real PC.
+    for f in "${pkgs[@]}"; do
+      if [[ $f == openssh-server ]]; then
+        systemctl disable --now ssh.socket ssh.service >/dev/null 2>&1 \
+          || log "WARNING: ssh not stopped before the purge"
+      fi
+    done
     DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "${pkgs[@]}" </dev/null \
       || log "WARNING: not all packages purged: ${pkgs[*]}"
   fi

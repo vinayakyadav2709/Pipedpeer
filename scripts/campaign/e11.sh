@@ -151,7 +151,8 @@ print(int(v) if v == int(v) else round(v, 2))
 }
 
 e11_stop_all() {
-  lab_fanout e11-stop "$1" 'pipedpeer stop || echo "pipedpeer stop: not running"; systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler' >/dev/null ||
+  # shellcheck disable=SC2016  # expanded on the PC, not here
+  lab_fanout e11-stop "$1" 'pipedpeer stop || echo "pipedpeer stop: not running"; systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler; do if [ "$(systemctl --user show -p ActiveState --value $u 2>/dev/null)" = active ]; then echo "$u is still active" >&2; exit 1; fi; done; exit 0' >/dev/null ||
     lab_log "e11: stopping the daemons failed on every PC"
 }
 

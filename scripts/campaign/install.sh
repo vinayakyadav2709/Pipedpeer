@@ -116,6 +116,11 @@ main() {
 			want_version="${want_version#*version=}"
 			want_version="${want_version%%[[:space:]]*}"
 		fi
+		# `pipedpeer --version` prints "pipedpeer version <v>"
+		if [[ "$want_version" == *" version "* ]]; then
+			want_version="${want_version##* version }"
+			want_version="${want_version%%[[:space:]]*}"
+		fi
 		[[ -n "$want_version" ]] || {
 			lab_log "install: no version from '$PP_BINARY --version'"
 			echo "cannot read a version from $PP_BINARY --version" >&2
@@ -139,7 +144,9 @@ main() {
 	done
 	local instcmd="bash ~/pipedpeer-lab/install-pipedpeer.sh --version $version -y"
 	if [[ -n "${PP_BINARY:-}" ]]; then
-		instcmd="pipedpeer setup -y"
+		# /usr/local/bin like the released installer: ~/.local/bin is not on
+		# the PATH of a non-interactive ssh command on Ubuntu.
+		instcmd="sudo install -m 0755 ~/.local/bin/pipedpeer /usr/local/bin/pipedpeer && pipedpeer setup -y"
 	elif [[ -n "${INSTALL_CMD:-}" ]]; then
 		instcmd="${INSTALL_CMD//\{version\}/$version}"
 	fi

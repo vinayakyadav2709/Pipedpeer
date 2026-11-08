@@ -276,7 +276,8 @@ _cluster_wait_count() {
 	deadline=$(( $(date +%s) + CLUSTER_READY_S ))
 	while :; do
 		have=""
-		if lab_ssh "${CLUSTER_IDS[0]}" "$count_cmd" >"$f" 2>/dev/null; then
+		# a probe that hangs (Ray with no head waits for one) must not outlast the deadline
+		if lab_ssh "${CLUSTER_IDS[0]}" "timeout 30 $count_cmd" >"$f" 2>/dev/null; then
 			out="$(tr -d '[:space:]' <"$f" || true)"
 			if [[ "$out" =~ ^[0-9]+$ ]]; then
 				have="$out"
@@ -435,10 +436,15 @@ cluster_up() {
 	# systems this cluster does not use are stopped on the remaining PCs
 	for ((i = CLUSTER_N; i < ${#others[@]}; i++)); do
 		pc="${others[$i]}"
-		if ! lab_ssh "$pc" "pipedpeer stop; systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler"; then
+		if ! lab_ssh "$pc" "pipedpeer stop; $_CLUSTER_STOP_UNITS"; then
 			lab_log "up: could not stop the other systems on $pc; they may idle next to the cluster"
 		fi
 	done
+
+	# units left by an earlier run (or a crashed one) would make the starts below fail
+	if ! lab_fanout cluster-reset "$hostfile" "$_CLUSTER_STOP_UNITS" >/dev/null; then
+		_cluster_fail "up: could not clear earlier Ray/Dask units; see logs/cluster-reset" || return 1
+	fi
 
 	# caps go on before anything starts
 	for ((k = 0; k < ${#CLUSTER_CAP_PC[@]}; k++)); do
@@ -516,7 +522,7 @@ cluster_down() {
 	for id in "${all[@]}"; do
 		printf '%s\n' "$id" >>"$file"
 	done
-	if ! lab_fanout cluster-down "$file" 'systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler' >/dev/null; then
+	if ! lab_fanout cluster-down "$file" "$_CLUSTER_STOP_UNITS" >/dev/null; then
 		lab_log "down: systemctl stop failed on every PC"
 		rc=1
 	fi
@@ -530,6 +536,9 @@ cluster_down() {
 
 # --- the systems' readiness and cores commands ------------------------------
 
+# stops the Ray/Dask units that exist; a unit that is not loaded is not an error
+# shellcheck disable=SC2016  # expanded on the PC, not here
+_CLUSTER_STOP_UNITS='systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler; do if [ "$(systemctl --user show -p ActiveState --value $u 2>/dev/null)" = active ]; then echo "$u is still active" >&2; exit 1; fi; systemctl --user reset-failed $u 2>/dev/null; done; exit 0'
 _RAY_COUNT_CMD="~/pipedpeer-lab/venv/bin/python -c \"import ray; ray.init(address='auto'); print(len([x for x in ray.nodes() if x['Alive']]))\""
 
 # _dask_count_cmd <scheduler ip>: the Dask worker count on that scheduler.

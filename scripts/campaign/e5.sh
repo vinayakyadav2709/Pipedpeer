@@ -16,9 +16,12 @@
 # pipedpeer: ready = first `compute` step per node in the job's timeline.
 # pip: ready = the PC's own clock after its venv install finished.
 # ray: ready = the task start each node reports (docs/benchmarks/workloads/e5_ray.py).
-# TODO(S17 step 7): confirm the pipedpeer step names (env_send, env_build,
-# compute) and how to start the pipedpeer arm with a cold environment cache
-# on a real 2-node run; only needed when a 2-node run is required.
+# TODO(real lab): on the Docker lab (2 PCs, both healthy in `pipedpeer status`)
+# every timeline holds only env_build, env_send and script, all on pc00, so no
+# `compute` step exists, no pipedpeer ready time is written and ready_s stays
+# empty. The step names above are therefore unconfirmed; check on real PCs
+# whether e5_env.py's Pool map reaches the second PC (then `compute` should
+# appear) and cold-cache start (it does start cold: env_build runs each time).
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
