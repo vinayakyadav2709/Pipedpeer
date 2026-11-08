@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Port of docs/benchmarks/workloads/pool_idle.py (idle) to Ray.
 # Distributed: the Pool items, as Ray tasks; each item is ~0.1 ms of arithmetic,
 # which is the point (this port trains the idle case of the same map, where the
@@ -28,4 +29,4 @@ if __name__ == "__main__":
         out = p.map(work, range(n))
     dt = time.perf_counter() - t0
     assert out == [work(i) for i in range(n)], "results differ from serial"
-    print("POOLIDLE-OK items=%d seconds=%.4f checksum=%.6f" % (n, dt, sum(out)))
+    print(f"POOLIDLE-OK items={n} seconds={dt:.4f} checksum={sum(out):.6f}")

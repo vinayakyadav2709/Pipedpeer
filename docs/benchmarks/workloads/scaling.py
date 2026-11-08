@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """CPU-bound Pool.map used for the scaling measurement.
 
 Each item is a few hundred milliseconds of pure arithmetic with a tiny payload
@@ -23,4 +24,4 @@ if __name__ == "__main__":
         out = p.map(work, range(n))
     dt = time.perf_counter() - t0
     assert len(out) == n
-    print("SCALING-OK items=%d seconds=%.3f checksum=%.4f" % (n, dt, sum(out)))
+    print(f"SCALING-OK items={n} seconds={dt:.3f} checksum={sum(out):.4f}")

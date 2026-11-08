@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
 """CPU-bound Pool.map. The unit of work is deliberately large enough that
 per-item dispatch cost is not what is being measured."""
-import os, sys, time
+import os
+import time
 from multiprocessing import Pool
 
 
@@ -22,4 +24,4 @@ if __name__ == "__main__":
     # Correctness: the same computation, serially.
     if os.environ.get("BENCH_VERIFY") == "1":
         assert out == [work(i) for i in range(n)], "results differ from serial"
-    print("POOLMAP-OK items=%d seconds=%.4f checksum=%.6f" % (n, dt, sum(out)))
+    print(f"POOLMAP-OK items={n} seconds={dt:.4f} checksum={sum(out):.6f}")

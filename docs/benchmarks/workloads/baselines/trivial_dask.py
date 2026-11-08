@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Port of docs/benchmarks/workloads/trivial.py (fixed cost) to Dask Distributed.
 # Distributed: one no-op task on the cluster (the fixed cost is the submission hop).
 # Local: the result line.

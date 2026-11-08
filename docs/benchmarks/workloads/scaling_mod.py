@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Same workload as scaling.py, but the kernel lives in an importable module."""
 import os
 import time
@@ -12,4 +13,4 @@ if __name__ == "__main__":
         out = p.map(work, range(n))
     dt = time.perf_counter() - t0
     assert len(out) == n
-    print("SCALING-OK items=%d seconds=%.3f checksum=%.4f" % (n, dt, sum(out)))
+    print(f"SCALING-OK items={n} seconds={dt:.3f} checksum={sum(out):.4f}")

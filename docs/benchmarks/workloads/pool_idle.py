@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """A Pool.map the shim's cost model must decline (N7: idle interception).
 
 The gate (nixgen/shim.go, _ClusterPool._run) runs a head of
@@ -8,7 +9,8 @@ takes under 62 ms. Each item is ~0.1 ms of arithmetic, so it declines with a
 wide margin while still going through the measurement path. bench.py checks the
 receipt: any dispatched item fails the run.
 """
-import os, time
+import os
+import time
 from multiprocessing import Pool
 
 
@@ -26,4 +28,4 @@ if __name__ == "__main__":
         out = p.map(work, range(n))
     dt = time.perf_counter() - t0
     assert out == [work(i) for i in range(n)], "results differ from serial"
-    print("POOLIDLE-OK items=%d seconds=%.4f checksum=%.6f" % (n, dt, sum(out)))
+    print(f"POOLIDLE-OK items={n} seconds={dt:.4f} checksum={sum(out):.6f}")

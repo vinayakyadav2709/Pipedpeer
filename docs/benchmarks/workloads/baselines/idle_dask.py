@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Port of docs/benchmarks/workloads/pool_idle.py (idle) to Dask Distributed.
 # Distributed: the Pool items, as dask tasks; each item is ~0.1 ms of arithmetic.
 # Local: the checksum reduction and the result line.
@@ -24,4 +25,4 @@ if __name__ == "__main__":
     out = client.gather(client.map(work, range(n)))
     dt = time.perf_counter() - t0
     assert out == [work(i) for i in range(n)], "results differ from serial"
-    print("POOLIDLE-OK items=%d seconds=%.4f checksum=%.6f" % (n, dt, sum(out)))
+    print(f"POOLIDLE-OK items={n} seconds={dt:.4f} checksum={sum(out):.6f}")

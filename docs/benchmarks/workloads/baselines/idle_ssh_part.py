@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Port of docs/benchmarks/workloads/pool_idle.py (idle) for the plain-ssh baseline.
 # One part of the item list, run on one lab PC by idle_ssh.sh (GNU parallel
 # --sshlogin); the Pool itself stays on the PC it runs on.

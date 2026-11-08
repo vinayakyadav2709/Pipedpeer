@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """The compute kernel, in its own module so it is importable by name on a
 worker. A function defined in the submitting script's __main__ is pickled as
 __main__.work, which does not resolve on the worker."""

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Port of docs/benchmarks/workloads/trivial.py (fixed cost) to Ray.
 # Distributed: one no-op task on the cluster (this is the point: the fixed cost
 # is the submission hop, not compute).

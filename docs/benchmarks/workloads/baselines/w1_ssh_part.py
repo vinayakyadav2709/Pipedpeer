@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # Port of docs/benchmarks/workloads/pool_map.py (W1) for the plain-ssh baseline.
 # One part of the item list, run on one lab PC by w1_ssh.sh (GNU parallel
 # --sshlogin); the Pool itself stays on the PC it runs on.
