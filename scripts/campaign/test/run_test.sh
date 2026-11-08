@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2004,SC2030,SC2031,SC2317,SC2034  # rows run in subshells
+# shellcheck disable=SC2004,SC2030,SC2031,SC2317,SC2034,SC2015,SC2016,SC2002,SC2143  # rows run in subshells
 # The S9 case table: one row per behaviour scripts/campaign/run.sh promises
 # (brief S9), driven through the fake lab (test/fakelab.sh) with stub
 # pipedpeer/python that print the real result line formats. Nothing here
