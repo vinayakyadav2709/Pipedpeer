@@ -82,6 +82,14 @@ func TestPlanSharesSplitPolicy(t *testing.T) {
 			wantMap:      map[string]int{},
 		},
 		{
+			name:         "headcount single peer",
+			env:          "headcount",
+			items:        20,
+			peers:        []string{"fast"},
+			includeLocal: false,
+			wantMap:      map[string]int{"fast": 20},
+		},
+		{
 			name:         "headcount no peers with local",
 			env:          "headcount",
 			items:        20,
