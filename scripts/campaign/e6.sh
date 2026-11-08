@@ -10,7 +10,7 @@
 # Runs go through campaign_run_one (ids E6-W1-<system>-n<N>-r<i> and
 # E6c-W1-pipedpeer-n<N>-r<i>), so wall_s and result_ok come from the run's
 # runs.jsonl record. A crashed or cut run has result_ok 0; a run with no
-# record has an empty wall_s (logged). kill_at_s is the time from the run's
+# record has an empty wall_s and result_ok (logged). kill_at_s is the time from the run's
 # own t0 to the moment the kill was issued, after the run was seen running.
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,14 +62,16 @@ e6_wait_running() {
 }
 
 # e6_record <run_id>: "<wall_s>,<result_ok>" from the run's runs.jsonl line;
-# result_ok is 1 only for a true; wall_s is empty when unknown. Returns 1
-# (and logs) when the run has no record.
+# result_ok is 1 only for a true, 0 for a recorded failure; wall_s is empty
+# when unknown. A run with no record prints "," (both empty: a measurement
+# that failed is never 0) and logs the reason.
 e6_record() {
   local id="$1" rec
   rec="$(grep -F -- "\"run_id\":\"$id\"" "$LAB/runs.jsonl" 2>/dev/null | tail -1 || true)"
   if [[ -z "$rec" ]]; then
-    lab_log "e6 $id: no record in runs.jsonl; wall_s left empty, result_ok 0"
-    return 1
+    lab_log "e6 $id: no record in runs.jsonl; wall_s and result_ok left empty"
+    echo ","
+    return 0
   fi
   E6_REC="$rec" python3 -c '
 import json, os
@@ -150,7 +152,7 @@ e6_main() {
           lab_log "e6 $id: no kill (run not seen running); kill_at_s left empty"
         fi
         wait "$pid" || lab_log "e6 $id: campaign_run_one returned $?"
-        rec="$(e6_record "$id" || echo ",0")"
+        rec="$(e6_record "$id")"
         printf '%s,kill,%s,%s,%s,\n' "$sys" "$i" "$kill_at" "$rec" >>"$out"
         "$CLUSTER_SH" up "$N" || lab_log "e6: cluster up after the kill failed; later runs may be short of PCs"
       done
@@ -199,7 +201,7 @@ e6_main() {
         lab_log "e6 $id: no Ctrl-C (run not seen running); stop latency left empty"
       fi
       wait "$pid" || lab_log "e6 $id: campaign_run_one returned $?"
-      rec="$(e6_record "$id" || echo ",0")"
+      rec="$(e6_record "$id")"
       printf 'pipedpeer,ctrlc,%s,,%s,%s\n' "$i" "$rec" "$stop_s" >>"$out"
     done
   fi

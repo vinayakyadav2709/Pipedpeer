@@ -451,6 +451,44 @@ awk -v a="${stop:-x}" 'BEGIN{exit !(a>=2 && a<9)}' || pnote "stop_latency_s [$st
 awk -v a="${wall:-x}" 'BEGIN{exit !(a>0)}' || pnote "wall_s [$wall] not from the record"
 verdict "e6 Ctrl-C, JOBS 0 after 3 polls -> stop_latency to that poll, wall/result from the record"
 
+# F1: a run with no record -> wall_s and result_ok empty (never 0), reason logged
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  : >"$d/runs.jsonl"
+  export LAB_RESULTS="$d"
+  cd "$REPO"
+  # shellcheck source=/dev/null
+  source "$CAMP/e6.sh"
+  rec="$(e6_record E6-W1-pipedpeer-n2-r9 2>"$d/err")" && echo "rc0 [$rec]"
+  grep -q 'no record' "$d/err" "$d/campaign.log" && echo logged
+  printf '{"run_id":"E6-W1-x-n2-r1","wall_s":5,"result_ok":false}\n' >"$d/runs.jsonl"
+  e6_record E6-W1-x-n2-r1
+) >"$d/out" 2>&1
+grep -qx 'rc0 \[,\]' "$d/out" || pnote "no-record output not empty: $(tr '\n' ' ' <"$d/out")"
+grep -q '^logged$' "$d/out" || pnote "no-record reason not logged: $(tr '\n' ' ' <"$d/out")"
+grep -qx '5,0' "$d/out" || pnote "recorded failure not 5,0: $(tr '\n' ' ' <"$d/out")"
+verdict "e6 no record -> empty wall_s/result_ok + logged; recorded failure -> 0"
+
+# F1: e5_env.py really imports the S13 packages (AST, not a grep of the docstring)
+for f in e5_env.py e5_env_tqdm.py; do
+  want="numpy pandas sklearn joblib scipy"; [[ $f == e5_env_tqdm.py ]] && want="$want tqdm"
+  got="$(python3 -I - "$REPO/docs/benchmarks/workloads/$f" <<'PY'
+import ast, sys
+t = ast.parse(open(sys.argv[1]).read())
+names = set()
+for n in ast.walk(t):
+    if isinstance(n, ast.Import):
+        names |= {a.name.split(".")[0] for a in n.names}
+    elif isinstance(n, ast.ImportFrom) and n.module:
+        names.add(n.module.split(".")[0])
+print(" ".join(sorted(names)))
+PY
+)"
+  for m in $want; do [[ " $got " == *" $m "* ]] || pnote "$f does not import $m (has: $got)"; done
+  verdict "$f imports $want"
+done
+
 total=$((pass + failed))
 echo "PASS $pass/$total"
 [[ $failed -eq 0 ]]

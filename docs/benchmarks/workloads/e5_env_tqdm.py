@@ -4,6 +4,11 @@ import sys
 import time
 from multiprocessing import Pool
 
+import joblib  # noqa: F401
+import numpy  # noqa: F401
+import pandas  # noqa: F401
+import scipy  # noqa: F401
+import sklearn  # noqa: F401
 import tqdm  # noqa: F401
 
 
@@ -15,7 +20,6 @@ def work(i):
 
 
 def main():
-
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 128
     t0 = time.perf_counter()
     with Pool() as p:

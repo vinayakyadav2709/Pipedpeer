@@ -51,6 +51,10 @@ verdict() {
 	problems=()
 }
 
+# RUN_TEST_FORCE_FAIL=1: the table is one row that fails on purpose, so the
+# summary below can be seen to say FAIL and exit non-zero.
+FORCE_FAIL="${RUN_TEST_FORCE_FAIL:-0}"
+
 newdir() {
 	local d
 	d="$(mktemp -d "$STATE/campaign-run-test.XXXXXX")"
@@ -278,6 +282,16 @@ if dups:
 print("ok")
 PY
 }
+
+if [[ "$FORCE_FAIL" == 1 ]]; then
+	pnote "failing on purpose"
+	verdict "forced failure"
+	nrows=$(wc -l <"$RESULTS")
+	nfail=$(grep -c '^bad$' "$RESULTS" || true)
+	if ((nfail == 0)); then printf "PASS %d/%d\n" "$((nrows - nfail))" "$nrows"; else printf "FAIL %d/%d passed\n" "$((nrows - nfail))" "$nrows"; fi
+	((nrows > 0 && nfail == 0))
+	exit
+fi
 
 # --- row 1: SMOKE --dry-run lists 27 run_ids, each once, no plain at 2 ------
 (d=$(newdir)
@@ -529,6 +543,14 @@ grep -q 'remote_items=0' "$LAB/BLOCKERS.md" 2>/dev/null || pnote "skipped SMOKE 
 run.sh SMOKE --workloads W2 --systems pipedpeer --sizes 2 --repeats 1 >/dev/null 2>&1
 [[ "$(grep -c 'remote_items=0' "$LAB/BLOCKERS.md")" == 1 ]] || pnote "a second resume duplicated the BLOCKERS line"
 verdict "SMOKE gate fires for a skipped run, once")
+
+# --- F1: the summary fails when a row fails -----------------------------------
+(d=$(newdir)
+rc=0
+RUN_TEST_FORCE_FAIL=1 bash "${BASH_SOURCE[0]}" >"$d/out" 2>&1 || rc=$?
+((rc != 0)) || pnote "exit 0 although a row failed"
+grep -qx 'FAIL 0/1 passed' "$d/out" || pnote "summary not FAIL 0/1: $(tail -2 "$d/out" | tr '\n' ' ')"
+verdict "a failing row prints FAIL p/n and exits non-zero")
 
 nrows=$(wc -l <"$RESULTS")
 nfail=$(grep -c '^bad$' "$RESULTS" || true)

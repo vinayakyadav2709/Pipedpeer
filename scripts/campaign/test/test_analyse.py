@@ -395,3 +395,57 @@ def test_e1b_efficiency_noisy_ci(tmp_path_factory):  # T2
                   ("efficiency", "efficiency_lo", "efficiency_hi"))
     assert lo < pt < hi
     assert 0.9 < lo and hi < 1.1
+
+
+def _e4_lab(tmp_path_factory, e4_csv):
+    lab = tmp_path_factory.mktemp("e4lab")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e4.csv").write_text(e4_csv)
+    return lab
+
+
+def test_e4_empty_cells_excluded_and_noted(tmp_path_factory):  # F1
+    lab = _e4_lab(tmp_path_factory, """\
+system,repeat,wall_s,result_ok,share_pc00
+pipedpeer,1,10,1,0.5
+pipedpeer,2,,,0.6
+pipedpeer,3,12,,0.5
+ray,1,20,1,1.0
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    rows = _read_csv(lab, "E4.csv")
+    pip = _pick(rows, system="pipedpeer")
+    assert pip["repeats"] == "1"
+    assert float(pip["median_wall_s"]) == pytest.approx(10)
+    assert "2" in pip["note"] and "excluded" in pip["note"]
+    assert _pick(rows, system="ray")["note"] == ""   # opposite: nothing excluded
+
+
+def test_e4_all_rows_empty_no_crash(tmp_path_factory):  # F1
+    lab = _e4_lab(tmp_path_factory, """\
+system,repeat,wall_s,result_ok,share_pc00
+pipedpeer,1,,,0.5
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    pip = _pick(_read_csv(lab, "E4.csv"), system="pipedpeer")
+    assert pip["median_wall_s"] == "" and "1" in pip["note"]
+
+
+def test_e6_empty_result_ok_not_zero(tmp_path_factory):  # F1
+    lab = tmp_path_factory.mktemp("e6lab")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e6.csv").write_text("""\
+system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s
+pipedpeer,kill,1,1.0,12,1,
+pipedpeer,kill,2,1.0,,,
+ray,kill,1,1.0,30,0,
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    rows = _read_csv(lab, "E6.csv")
+    assert _pick(rows, system="pipedpeer")["result_ok_all"] == "true"
+    assert _pick(rows, system="ray")["result_ok_all"] == "false"   # recorded failure

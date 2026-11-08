@@ -260,15 +260,26 @@ def table_e4(data):
     shares = [c for c in data[0] if c.startswith("share_")]
     rows = []
     for s in sorted({r["system"] for r in data}):
-        rs = [r for r in data if r["system"] == s]
-        row = {"system": s, "repeats": len(rs),
-               "median_wall_s": float(np.median([float(r["wall_s"]) for r in rs])),
-               "result_ok_all": all(float(r["result_ok"]) != 0 for r in rs)}
+        allrs = [r for r in data if r["system"] == s]
+        # a failed measurement is an empty cell: excluded and counted, not 0
+        rs = [r for r in allrs if r["wall_s"] != "" and r["result_ok"] != ""]
+        skipped = len(allrs) - len(rs)
+        note = ""
+        if skipped:
+            note = (f"{skipped} of {len(allrs)} rows excluded "
+                    "(empty wall_s or result_ok)")
+            print(f"WARN E4 {s}: {note}")
+        row = {"system": s, "repeats": len(rs), "note": note,
+               "median_wall_s": (float(np.median([float(r["wall_s"])
+                                                  for r in rs]))
+                                 if rs else None),
+               "result_ok_all": (all(float(r["result_ok"]) != 0 for r in rs)
+                                 if rs else None)}
         for c in shares:
             vals = [float(r[c]) for r in rs if r[c] != ""]
             row[c] = sum(vals) / len(vals) if vals else None
         rows.append(row)
-    cols = ["system", "repeats", "median_wall_s", "result_ok_all"] + shares
+    cols = ["system", "repeats", "median_wall_s", "result_ok_all"] + shares + ["note"]
     return cols, rows
 
 
@@ -297,6 +308,12 @@ def _med(choice, rs, col):
     return float(np.median(vals)) if vals else None
 
 
+def _all_ok(rs):
+    """False if any recorded result_ok is 0; empty cells (no record) skipped."""
+    vals = [float(r["result_ok"]) for r in rs if r["result_ok"] != ""]
+    return all(v != 0 for v in vals) if vals else None
+
+
 def table_e6(data):
     rows = []
     for sys_ in sorted({r["system"] for r in data}):
@@ -305,8 +322,7 @@ def table_e6(data):
             rows.append({"system": sys_, "kind": kind, "runs": len(rs),
                          "kill_at_s_median": _med(None, rs, "kill_at_s"),
                          "wall_s_median": _med(None, rs, "wall_s"),
-                         "result_ok_all": all(float(r["result_ok"]) != 0
-                                              for r in rs),
+                         "result_ok_all": _all_ok(rs),
                          "stop_latency_s_median": _med(None, rs,
                                                        "stop_latency_s")})
     cols = ["system", "kind", "runs", "kill_at_s_median", "wall_s_median",
@@ -414,6 +430,7 @@ def make_figures(lab, groups, weak):
                       f"{exp} efficiency (weak scaling)", "t(1)/t(N)")
 
     def bars(name, rows, valcol, ylabel):
+        rows = [r for r in rows if r[valcol] != ""]
         if not rows:
             print(f"SKIP FIGURE {name} ({valcol} data missing)")
             return
