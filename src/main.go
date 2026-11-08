@@ -38,6 +38,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
 	"github.com/pipedpeer/pipedpeer/internal/runrec"
 	"github.com/pipedpeer/pipedpeer/internal/say"
+	"github.com/pipedpeer/pipedpeer/internal/setup"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userns"
 )
@@ -156,7 +157,12 @@ func newStatusCmd() *cobra.Command {
 			if !st.Running {
 				return errors.New("daemon stopped (start it with: pipedpeer start)")
 			}
-			fmt.Printf("daemon running (pid=%d node-id=%s port=%d version=%s)\n", st.PID, st.NodeID, localDaemonPort(), version)
+			v, err := setup.DaemonVersion(localDaemonPort())
+			shown, warn := statusVersion(version, v, err)
+			fmt.Printf("daemon running (pid=%d node-id=%s port=%d version=%s)\n", st.PID, st.NodeID, localDaemonPort(), shown)
+			if warn != "" {
+				fmt.Fprintln(os.Stderr, warn)
+			}
 			printStatus(os.Stdout, localDaemonPort())
 			return nil
 		},

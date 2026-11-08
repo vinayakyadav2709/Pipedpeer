@@ -658,6 +658,10 @@ var daemonVersion = func(port int) (string, error) {
 	return h.Capabilities[heartbeat.VersionCapability], nil
 }
 
+// DaemonVersion reads the running daemon's version for `pipedpeer status`.
+// "" with a nil error means the daemon predates the field.
+func DaemonVersion(port int) (string, error) { return daemonVersion(port) }
+
 // staleDaemon reports whether the running daemon is not this build, and what
 // to log about it. An unknown version (old daemon, or no answer) counts as
 // stale. Without a Version of its own (tests) nothing is stale.
