@@ -25,6 +25,14 @@ REPO="${REPO:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-topleve
 LAB="${LAB_RESULTS:-$REPO/results/lab}"
 export REPO LAB
 
+# pssh -x and rsync -e take the ssh_config path inside one option string, so
+# a space in $LAB would split it. Refuse it up front with a clear error.
+if [[ "$LAB" == *[[:space:]]* ]]; then
+	echo "lib.sh: the results dir [$LAB] contains a space; the pssh/rsync options cannot carry it. Set LAB_RESULTS to a path without spaces." >&2
+	# shellcheck disable=SC2317  # return when sourced, exit when run
+	return 1 2>/dev/null || exit 1
+fi
+
 # lab_log <msg...>: one line to stderr and to $LAB/campaign.log.
 lab_log() {
 	local ts msg
@@ -220,7 +228,15 @@ lab_fanout() {
 			if [[ -n "$host" ]]; then
 				failed_ids+=("$host")
 			fi
-		done < <(printf '%s\n' "$answer" | sed -n 's/^\[FAILURE\][[:space:]]*\([^[:space:]]*\).*/\1/p')
+		done < <(printf '%s\n' "$answer" | sed -n 's/^\[[0-9]*\][[:space:]]*[0-9:]*[[:space:]]*\[FAILURE\][[:space:]]*\([^[:space:]]*\).*/\1/p')
+		if ((${#failed_ids[@]} == 0 && rc != 0)); then
+			# pssh failed but printed no report line we know (usage error,
+			# changed format): never read that as success.
+			lab_log "fanout $step: pssh exit $rc with no [FAILURE] line; treating every host as failed"
+			while IFS= read -r host; do
+				[[ -n "$host" && "$host" != \#* ]] && failed_ids+=("$host")
+			done <"$hostsfile"
+		fi
 		if ((${#failed_ids[@]} == 0 || attempt >= 3)); then
 			break
 		fi

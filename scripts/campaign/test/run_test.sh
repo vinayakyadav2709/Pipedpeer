@@ -20,8 +20,9 @@ mkdir -p "$STATE"
 # shellcheck source=/dev/null
 source "$REPO/scripts/campaign/test/fakelab.sh"
 
-pass=0
-failed=0
+# Rows run in ( ... ) subshells, so a counter would be lost: every verdict is
+# one line in $RESULTS, and the final count is read back from it.
+RESULTS="$(mktemp)"
 problems=()
 dirs=()
 
@@ -34,11 +35,12 @@ cleanup() {
 	for d in "${dirs[@]}"; do
 		rm -rf "$d"
 	done
+	rm -f "$RESULTS"
 }
 trap cleanup EXIT
 
-ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
-bad() { failed=$((failed + 1)); printf 'FAIL %s%s\n' "$1" "${2:+ -- $2}"; }
+ok() { echo ok >>"$RESULTS"; printf 'ok   %s\n' "$1"; }
+bad() { echo bad >>"$RESULTS"; printf 'FAIL %s%s\n' "$1" "${2:+ -- $2}"; }
 pnote() { problems+=("$*"); }
 verdict() {
 	if ((${#problems[@]} == 0)); then
@@ -170,11 +172,13 @@ case "$sub" in
 			*pool_map.py*|*w1_*) echo "POOLMAP-OK items=${BENCH_ITEMS:-4800} seconds=1.0000 checksum=${BENCH_STUB_BAD:-42.0}" ;;
 			*pool_idle.py*) echo "POOLIDLE-OK items=4800 seconds=1.5000 checksum=${BENCH_STUB_BAD:-42.0}" ;;
 			*trivial.py*) echo "TRIVIAL-OK" ;;
-			*cpu.py*) echo "Pool: 128 items, checksum 100.0"; echo "joblib: 64 Mandelbrot tiles, 24 points inside"; echo "numpy: largest singular value 1.2346"; echo "pandas: 5 rows -> 2 cities, total rain 100.1" ;;
-			*w3_rf.py*) echo "accuracy: 0.9400" ;;
-			*t1_mlp.py*) echo "final loss: 0.490000"; echo "weight checksum: 1.234567890" ;;
+			*cpu.py*) echo "Pool: 128 items, checksum 100.0"; echo "joblib: 64 Mandelbrot tiles, 24 points inside"; echo "numpy: largest singular value ${STUB_W2_SV:-1.2346}"; echo "pandas: 5 rows -> 2 cities, total rain 100.1" ;;
+			*w3_rf.py*) echo "accuracy: ${STUB_W3_ACC:-0.9400}" ;;
+			*t1_mlp.py*) echo "final loss: ${STUB_T1_LOSS:-0.490000}"; echo "weight checksum: 1.234567890" ;;
 			*) echo "pipedpeer-stub: no result lines for [$script]" >&2; exit 3 ;;
 		esac
+		[[ -n "${CAMP_STUB_EXIT:-}" ]] && exit "$CAMP_STUB_EXIT"
+		exit 0
 		;;
 	connect) exit 0 ;;
 	stop|start) ;;
@@ -195,6 +199,43 @@ PPSTUB
 	# shellcheck source=/dev/null
 	source "$RUN_SH"
 	set +e
+}
+
+# expected_e1_runs: the E1 run count for --sizes 1,2 --repeats 2, computed from
+# the E1 row of experiments.tsv (plain only at n=1), not typed in.
+expected_e1_runs() {
+	python3 - "$CAMP/experiments.tsv" <<'PY'
+import sys
+
+for ln in open(sys.argv[1]):
+    f = ln.rstrip("\n").split("\t")
+    if len(f) >= 8 and f[0] == "E1":
+        wl, systems, warm = f[1].split(","), f[2].split(","), int(f[5])
+        runs = 0
+        for n in (1, 2):
+            at_n = [s for s in systems if not (s == "plain" and n > 1)]
+            runs += len(wl) * len(at_n) * (2 + (1 if warm > 0 else 0))
+        print(runs)
+        break
+else:
+    print(0)
+PY
+}
+
+# rec_field <run_id> <field>: that field of the run's runs.jsonl line, as JSON.
+rec_field() {
+	python3 - "$LAB/runs.jsonl" "$1" "$2" <<'PY'
+import json
+import sys
+
+for ln in open(sys.argv[1]):
+    r = json.loads(ln)
+    if r["run_id"] == sys.argv[2]:
+        print(json.dumps(r[sys.argv[3]]))
+        break
+else:
+    print("MISSING")
+PY
 }
 
 json_count() { # json_count <exp-filter> — rows in runs.jsonl
@@ -258,7 +299,8 @@ verdict "dry-run SMOKE prints 27 run_ids once each")
 row_setup "$d"
 out="$(run.sh E1 --sizes 1,2 --repeats 2 2>"$d/err")"
 n="$(json_count E1)"
-[[ "$n" == 81 ]] || pnote "expected 81 runs (3wl x [5 sys x3 + 4 sys x3]), got $n"
+want81="$(expected_e1_runs)"
+[[ "$n" == "$want81" && "$want81" -gt 0 ]] || pnote "expected $want81 runs derived from the E1 row of experiments.tsv (workloads x systems-at-n x (repeats+warm-up)), got $n"
 warm="$(grep -c '"warmup":true' "$LAB/runs.jsonl")"
 [[ "$warm" == 27 ]] || pnote "expected 27 warm-up rows, got $warm"
 plain_n2="$(grep -c '"system":"plain","n":2' "$LAB/runs.jsonl")"
@@ -268,7 +310,7 @@ grep -q 'cluster up 1' "$d/stubs.log" && grep -q 'cluster up 2' "$d/stubs.log" |
 grep -q 'metrics start E1-n1' "$d/stubs.log" || pnote "metrics.sh start missing for n=1"
 grep -q 'metrics stop E1-n2' "$d/stubs.log" || pnote "metrics.sh stop missing for n=2"
 grep -q '^upload' "$d/stubs.log" || pnote "upload.sh not called"
-verdict "E1 sizes 1,2 repeats 2 runs 81 rows with warm-ups and order"
+verdict "E1 sizes 1,2 repeats 2 runs every row with warm-ups and order"
 )
 
 # --- row 3: same command again: nothing runs, skipped <k> -------------------
@@ -279,18 +321,20 @@ before="$(json_count E1)"
 out2="$(run.sh E1 --sizes 1,2 --repeats 2 2>"$d/err")"
 skips="$(grep -c '^skipped ' <<<"$out2")"
 after="$(json_count E1)"
-[[ "$skips" == 81 ]] || pnote "expected 81 skipped lines, got $skips"
+[[ "$skips" == "$(expected_e1_runs)" ]] || pnote "expected $(expected_e1_runs) skipped lines, got $skips"
 [[ "$before" == "$after" ]] || pnote "runs.jsonl grew on rerun ($before -> $after)"
-[[ "$out2" == *'RUNS done=0 skipped=81'* ]] || pnote "summary should say done=0 skipped=81, got: $(tail -1 <<<"$out2")"
-verdict "rerun of a finished experiment skips all 81")
+[[ "$out2" == *"RUNS done=0 skipped=$(expected_e1_runs)"* ]] || pnote "summary should say done=0 skipped=$(expected_e1_runs), got: $(tail -1 <<<"$out2")"
+verdict "rerun of a finished experiment skips every run")
 
 # --- row 4: kill mid-way, rerun completes the rest, no run_id twice ---------
 (d=$(newdir)
 row_setup "$d"
-CAMP_STUB_SLEEP=0.6 run.sh E1 --workloads W1 --sizes 1,2 --repeats 2 --systems plain,pipedpeer,ray 2>"$d/err1" &
+# setsid + a group kill: killing only the bash would orphan the running
+# campaign_run_one subshell, which would still record its run.
+CAMP_STUB_SLEEP=0.6 setsid run.sh E1 --workloads W1 --sizes 1,2 --repeats 2 --systems plain,pipedpeer,ray 2>"$d/err1" &
 bgpid=$!
 sleep 2.2
-kill "$bgpid" 2>/dev/null || true
+kill -- "-$bgpid" 2>/dev/null || true
 wait "$bgpid" 2>/dev/null || true
 mid="$(json_count E1)"
 out2="$(run.sh E1 --workloads W1 --sizes 1,2 --repeats 2 --systems plain,pipedpeer,ray 2>"$d/err2")"
@@ -383,5 +427,111 @@ okc="$(grep -c '"result_ok":true' "$LAB/runs.jsonl")"
 [[ "$maj" == 4 && "$okc" == 4 ]] || pnote "majority pass: ref=majority x$maj / ok x$okc (want 4/4)"
 verdict "E1b weak: no reference -> rows flipped to ref=majority")
 
-printf 'PASS %d/%d\n' "$pass" "$((pass + failed))"
-((failed == 0))
+
+# --- C1: the real path when systemd-inhibit is present ---------------------
+inhibit_stub() { # inhibit_stub <dir>: systemd-inhibit that drops its options and runs the command
+	cat >"$1/bin/systemd-inhibit" <<'INH'
+#!/usr/bin/env bash
+while [[ "${1:-}" == --* ]]; do shift; done
+exec "$@"
+INH
+	chmod +x "$1/bin/systemd-inhibit"
+}
+
+(d=$(newdir)
+row_setup "$d"
+inhibit_stub "$d"
+env -u LAB_INHIBITED "$RUN_SH" SMOKE --workloads W1 --systems plain --sizes 1 >"$d/out" 2>"$d/err"
+[[ "$(json_count SMOKE)" == 1 ]] || pnote "real run under systemd-inhibit recorded $(json_count SMOKE) runs, want 1: $(head -3 "$d/out")"
+grep -q 'cluster up 1' "$d/stubs.log" 2>/dev/null || pnote "cluster.sh was not called: the dry list ran"
+verdict "run.sh SMOKE without --dry-run under systemd-inhibit takes the real path")
+
+(d=$(newdir)
+row_setup "$d"
+inhibit_stub "$d"
+env -u LAB_INHIBITED "$RUN_SH" SMOKE --workloads W1 --systems plain --sizes 1 --dry-run >"$d/out" 2>"$d/err"
+[[ ! -e "$d/runs.jsonl" && ! -e "$d/stubs.log" ]] || pnote "dry-run under systemd-inhibit ran something"
+grep -q 'SMOKE-W1-plain-n1-r1' "$d/out" || pnote "dry list missing: $(head -2 "$d/out")"
+verdict "run.sh SMOKE --dry-run under systemd-inhibit prints the dry list only")
+
+# --- C2: size spec scaling ---------------------------------------------------
+(d=$(newdir)
+row_setup "$d"
+sizes="$(run.sh E1 --workloads W1 --systems pipedpeer --repeats 1 --dry-run 2>"$d/err" | sed -n 's/.*-n\([0-9]*\)-r.*/\1/p' | sort -un | tr '\n' ' ')"
+[[ "$sizes" == "1 2 4 8 16 24 32 " || "$sizes" == "1 2 4 8 16 24 32" ]] || pnote "dry sizes [$sizes], want 1 2 4 8 16 24 32"
+run.sh E1 --workloads W1 --systems pipedpeer --repeats 1 >"$d/out" 2>"$d/err" || true
+ups="$(sed -n 's/^cluster up //p' "$d/stubs.log" | tr '\n' ' ')"
+[[ "$ups" == "1 2 4 8 16 24 32 " ]] || pnote "real run brought up [$ups], want 1 2 4 8 16 24 32"
+verdict "size spec scaling is exactly 1,2,4,8,16,24,32, dry and real")
+
+(d=$(newdir)
+row_setup "$d"
+sizes="$(run.sh SMOKE --sizes 2,4 --dry-run 2>"$d/err" | sed -n 's/.*-n\([0-9]*\)-r.*/\1/p' | sort -un | tr '\n' ' ')"
+[[ "$sizes" == "2 4 " ]] || pnote "--sizes 2,4 gave [$sizes]"
+verdict "--sizes 2,4 runs sizes 2 and 4")
+
+# --- H3 / M2: the exit code in the record ------------------------------------
+(d=$(newdir)
+row_setup "$d"
+lab_wait() { return 255; }
+CAMP_STUB_SLEEP=2 campaign_run_one T W1 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+id=T-W1-pipedpeer-n1-r1
+[[ "$(rec_field $id exit_code)" == null ]] || pnote "exit_code $(rec_field $id exit_code), want null"
+[[ "$(rec_field $id note)" == '"lost-connection"' ]] || pnote "note $(rec_field $id note), want lost-connection"
+[[ "$(rec_field $id result_ok)" == false ]] || pnote "result_ok $(rec_field $id result_ok), want false"
+verdict "lab_wait 255 with no exit file: exit_code null, lost-connection, result_ok false")
+
+(d=$(newdir)
+row_setup "$d"
+CAMP_STUB_EXIT=3 campaign_run_one T W1 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+id=T-W1-pipedpeer-n1-r1
+[[ "$(rec_field $id exit_code)" == 3 ]] || pnote "exit_code $(rec_field $id exit_code), want 3"
+[[ "$(rec_field $id result_ok)" == false ]] || pnote "result_ok $(rec_field $id result_ok), want false (matching output, failed job)"
+verdict "job exits 3: exit_code 3, result_ok false")
+
+(d=$(newdir)
+row_setup "$d"
+campaign_run_one T W1 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+id=T-W1-pipedpeer-n1-r1
+[[ "$(rec_field $id exit_code)" == 0 ]] || pnote "exit_code $(rec_field $id exit_code), want 0"
+[[ "$(rec_field $id result_ok)" == true ]] || pnote "result_ok $(rec_field $id result_ok), want true"
+verdict "job exits 0: exit_code 0, result_ok true")
+
+(d=$(newdir)
+row_setup "$d"
+lab_wait() { return 0; }
+CAMP_STUB_SLEEP=2 campaign_run_one T W1 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+id=T-W1-pipedpeer-n1-r1
+[[ "$(rec_field $id exit_code)" == null ]] || pnote "exit_code $(rec_field $id exit_code), want null"
+[[ "$(rec_field $id result_ok)" == false ]] || pnote "result_ok $(rec_field $id result_ok), want false"
+verdict "exit file absent with rc 0: exit_code null, never 0, result_ok false")
+
+# --- T1: result_ok judges every workload on wrong and right values -----------
+(d=$(newdir)
+row_setup "$d"
+STUB_W2_SV=9.9999 campaign_run_one T W2 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+STUB_W3_ACC=0.5000 campaign_run_one T W3 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+STUB_T1_LOSS=0.500000 campaign_run_one T T1 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+STUB_T1_LOSS=0.491000 campaign_run_one T2 T1 pipedpeer 1 1 0 30 strong >/dev/null 2>&1 || true
+for w in W2 W3 T1; do
+	[[ "$(rec_field "T-$w-pipedpeer-n1-r1" result_ok)" == false ]] || pnote "$w wrong value judged $(rec_field "T-$w-pipedpeer-n1-r1" result_ok), want false"
+done
+[[ "$(rec_field T2-T1-pipedpeer-n1-r1 result_ok)" == true ]] || pnote "T1 loss within 1% judged $(rec_field T2-T1-pipedpeer-n1-r1 result_ok), want true"
+verdict "wrong W2/W3/T1 values are result_ok false; T1 within 1% is true")
+
+# --- M7: SMOKE gate on a resumed (skipped) run -------------------------------
+(d=$(newdir)
+row_setup "$d"
+STUB_REMOTE_ITEMS=0 campaign_run_one SMOKE W2 pipedpeer 2 1 0 30 strong >/dev/null 2>&1 || true
+run.sh SMOKE --workloads W2 --systems pipedpeer --sizes 2 --repeats 1 >"$d/out" 2>"$d/err"
+grep -q '^skipped ' "$d/out" || pnote "the run was not skipped: $(head -2 "$d/out")"
+grep -q 'remote_items=0' "$LAB/BLOCKERS.md" 2>/dev/null || pnote "skipped SMOKE run did not reach the gate (no BLOCKERS line)"
+run.sh SMOKE --workloads W2 --systems pipedpeer --sizes 2 --repeats 1 >/dev/null 2>&1
+[[ "$(grep -c 'remote_items=0' "$LAB/BLOCKERS.md")" == 1 ]] || pnote "a second resume duplicated the BLOCKERS line"
+verdict "SMOKE gate fires for a skipped run, once")
+
+nrows=$(wc -l <"$RESULTS")
+nfail=$(grep -c '^bad$' "$RESULTS" || true)
+npass=$((nrows - nfail))
+if ((nfail == 0)); then printf "PASS %d/%d\n" "$npass" "$nrows"; else printf "FAIL %d/%d passed\n" "$npass" "$nrows"; fi
+((nrows > 0 && nfail == 0))

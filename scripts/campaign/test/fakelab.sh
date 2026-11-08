@@ -14,7 +14,8 @@
 #   ssh -F x pcNN -- cmd   -> HOME=<dir>/pcNN bash -c "$cmd"
 #   rsync ... pcNN:path    -> the same path under <dir>/pcNN (real rsync runs)
 #   pssh -h file -o/-e ... -> loops the ssh stub, one output file per host,
-#                             printing [SUCCESS]/[FAILURE] <id>
+#                             printing pssh 2.3.1's report lines,
+#                             "[k] HH:MM:SS [SUCCESS] <id>" / "[k] ... [FAILURE] <id> <error>"
 #   systemd-run --unit=U   -> setsid bash -c "$cmd" &
 #   sudo ...               -> appends to <dir>/sudo.log, runs the command
 #   nmap ...               -> runs $SCAN_NMAP_CMD, which a test supplies
@@ -64,7 +65,11 @@ fakelab_init() {
 	for ((i = 0; i < n; i++)); do
 		pc="$(printf 'pc%02d' "$i")"
 		mkdir -p "$dir/$pc/pipedpeer-lab/work" "$dir/$pc/pipedpeer-lab/runs"
-		cp "$stamp" "$dir/$pc/pipedpeer-lab/work/stamp.py"
+		# Tests that exercise staging (stage_test.sh) set FAKELAB_NO_STAMP=1 and
+		# start from an empty work dir.
+		if [[ "${FAKELAB_NO_STAMP:-0}" != 1 ]]; then
+			cp "$stamp" "$dir/$pc/pipedpeer-lab/work/stamp.py"
+		fi
 	done
 
 	_fakelab_write_stubs "$dir"
@@ -157,7 +162,9 @@ FAKELAB-RSYNC
 	cat >"$dir/bin/pssh" <<'FAKELAB-PSSH'
 #!/usr/bin/env bash
 # Fake-lab pssh: one ssh stub per host, -o/-e files per host, and the
-# [SUCCESS]/[FAILURE] lines the campaign's fan-out parses.
+# report lines the campaign's fan-out parses, in pssh 2.3.1's own format
+# (psshlib/task.py): "[1] 12:34:56 [SUCCESS] host" and
+# "[2] 12:34:56 [FAILURE] host Exited with error code 255".
 set -uo pipefail
 if [[ -z "${FAKELAB_DIR:-}" || ! -d "${FAKELAB_DIR:-}" ]]; then
 	echo "fakelab pssh: FAKELAB_DIR is unset; refusing to stand in for a real pssh" >&2
@@ -187,12 +194,16 @@ cmd="${rest[*]}"
 [[ -n "$err" ]] || err=.
 mkdir -p "$out" "$err"
 rc_all=0
+k=0
 while IFS= read -r host; do
 	[[ -z "$host" || "$host" == \#* ]] && continue
-	if "$FAKELAB_DIR/bin/ssh" "$host" -- "$cmd" >"$out/$host" 2>"$err/$host"; then
-		printf '[SUCCESS] %s\n' "$host"
+	k=$((k + 1))
+	rc=0
+	"$FAKELAB_DIR/bin/ssh" "$host" -- "$cmd" >"$out/$host" 2>"$err/$host" || rc=$?
+	if ((rc == 0)); then
+		printf '[%d] %s [SUCCESS] %s\n' "$k" "$(date +%H:%M:%S)" "$host"
 	else
-		printf '[FAILURE] %s\n' "$host"
+		printf '[%d] %s [FAILURE] %s Exited with error code %d\n' "$k" "$(date +%H:%M:%S)" "$host" "$rc"
 		rc_all=1
 	fi
 done <"$hosts"
@@ -224,7 +235,9 @@ if [[ ${#rest[@]} -eq 0 ]]; then
 	exit 2
 fi
 printf 'systemd-run %s: %s\n' "${unit:-?}" "${rest[*]}" >>"$FAKELAB_DIR/units.log"
-setsid bash -c "${rest[*]}" >/dev/null 2>&1 &
+# Wrapper output is kept (units.out), not discarded, so a failure before
+# cmd.sh's own redirections can be read.
+setsid bash -c "${rest[*]}" >>"$FAKELAB_DIR/units.out" 2>&1 &
 exit 0
 FAKELAB-SYSTEMD-RUN
 

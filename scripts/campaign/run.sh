@@ -37,7 +37,8 @@ EXPERIMENTS="$REPO/scripts/campaign/experiments.tsv"
 CLUSTER_SH="${CLUSTER_SH:-$REPO/scripts/campaign/cluster.sh}"
 METRICS_SH="${METRICS_SH:-$REPO/scripts/campaign/metrics.sh}"
 UPLOAD_SH="${UPLOAD_SH:-$REPO/scripts/campaign/upload.sh}"
-SCALING_SIZES=(1 2 4 8 16 24 32)
+# The size spec "scaling" as the comma list the size parsing splits on.
+SCALING_SIZES="1,2,4,8,16,24,32"
 
 RUNS_DONE=0
 RUNS_SKIPPED=0
@@ -158,6 +159,15 @@ def num(path, default=0):
         return default
 
 
+def maybe_int(path):
+    """The integer in the file, or None when the file is missing or garbled."""
+    try:
+        with open(path) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
 def maybe_json(path):
     try:
         with open(path) as fh:
@@ -167,9 +177,11 @@ def maybe_json(path):
 
 
 t0, t1 = num(os.path.join(d, "t0")), num(os.path.join(d, "t1"))
-exit_code = num(os.path.join(d, "exit"))
-if not exit_code:
-    exit_code = int(env["PYRUN_RC"] or 0)
+# The exit file is the truth. Without it the code is unknown (None -> null),
+# except a timeout, where the driver's own 124 is the answer. Never 0.
+exit_code = maybe_int(os.path.join(d, "exit"))
+if exit_code is None and env["PYRUN_RC"].strip() == "124":
+    exit_code = 124
 
 out = os.path.join(d, "out")
 texts = []
@@ -213,6 +225,9 @@ elif reffile:
         mine = tail(fg[0]) if fg else None
         result_ok = base is not None and mine is not None and \
             abs(mine - base) <= 0.01 * abs(base)
+
+if exit_code != 0:
+    result_ok = False  # a job that failed or whose end is unknown is not a result
 
 receipt = maybe_json(os.path.join(d, "receipt.json"))
 remote_items = receipt.get("remote_items") if isinstance(receipt, dict) else None
@@ -260,7 +275,7 @@ campaign_run_one() {
 	local timeout_s="${7:-0}"
 	PYRUN_MODE="${8:-strong}"
 	_load_sizes >/dev/null 2>&1 || true
-	local run_id hfile dir rc=0 code cmd prefix envs rec_rc=0 note=""
+	local run_id hfile dir rc=0 code cmd prefix envs rec_rc="" note=""
 	local -a hosts=()
 
 	run_id="$(_run_id "$exp" "$w" "$sys" "$n" "$rep" "$warm")"
@@ -283,6 +298,9 @@ campaign_run_one() {
 	if ((rc == 124)); then
 		note="timeout"
 		rec_rc=124
+	elif ((rc != 0)); then
+		note="lost-connection"
+		lab_log "run $run_id: lab_wait returned $rc; recording the run with exit_code null"
 	fi
 
 	dir="$LAB/hosts/pc00/runs/$run_id"
@@ -315,6 +333,37 @@ _intersect() {
 	}'
 }
 
+# _run_result_line <run_id>: the `RESULT <id> ok=.. remote_items=..` line,
+# rebuilt from the run's runs.jsonl line (empty when there is none).
+_run_result_line() {
+	python3 - "$LAB/runs.jsonl" "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        for ln in fh:
+            r = json.loads(ln)
+            if r["run_id"] == sys.argv[2]:
+                ok = "null" if r["result_ok"] is None else str(bool(r["result_ok"])).lower()
+                rec = r.get("receipt")
+                ri = rec.get("remote_items") if isinstance(rec, dict) else None
+                print("RESULT %s ok=%s remote_items=%s" % (r["run_id"], ok, "-" if ri is None else ri))
+                break
+except FileNotFoundError:
+    pass
+PY
+}
+
+# _run_blocker <line>: append to BLOCKERS.md unless it is already there, so a
+# resumed campaign does not repeat itself.
+_run_blocker() {
+	if ! grep -qxF -- "$1" "$LAB/BLOCKERS.md" 2>/dev/null; then
+		echo "$1" >>"$LAB/BLOCKERS.md"
+	fi
+	lab_log "$1"
+}
+
 # _run_gates <exp> <w> <sys> <n> <run_id> <RESULT line>: SMOKE gates.
 _run_gates() {
 	local exp="$1" w="$2" sys="$3" n="$4" run_id="$5" result="$6"
@@ -324,12 +373,10 @@ _run_gates() {
 	ritm="$(printf '%s\n' "$result" | sed -n 's/^.*remote_items=\(.*\)$/\1/p')"
 	printf 'SMOKE %s %s n=%s result_ok=%s remote_items=%s\n' "$w" "$sys" "$n" "$ok" "$ritm"
 	if [[ "$ok" == false ]]; then
-		echo "SMOKE gate: result_ok=false $run_id" >>"$LAB/BLOCKERS.md"
-		lab_log "SMOKE gate: result_ok=false $run_id"
+		_run_blocker "SMOKE gate: result_ok=false $run_id"
 	fi
 	if [[ "$sys" == pipedpeer && "$n" -gt 1 && "$ritm" == 0 ]]; then
-		echo "SMOKE gate: remote_items=0 $run_id" >>"$LAB/BLOCKERS.md"
-		lab_log "SMOKE gate: remote_items=0 $run_id"
+		_run_blocker "SMOKE gate: remote_items=0 $run_id"
 	fi
 }
 
@@ -357,6 +404,8 @@ groups = {}
 for i, r in enumerate(rows):
     if r["experiment"] != exp or r.get("ref") != "none" or r["warmup"]:
         continue
+    if r.get("exit_code") != 0:
+        continue  # a failed run stays result_ok false
     groups.setdefault((r["workload"], r["n"]), []).append(i)
 
 
@@ -443,7 +492,7 @@ run_all() {
 		[[ -n "$sizes" ]] && row_sizes="$sizes"
 		[[ -n "$reps" ]] && row_reps="$reps"
 		if [[ "$row_sizes" == "scaling" ]]; then
-			row_sizes="${SCALING_SIZES[*]}"
+			row_sizes="$SCALING_SIZES"
 		fi
 		local -a workloads_list=() sizes_list=() row_systems=() sys_at_n=() order=()
 		IFS=',' read -r -a workloads_list <<<"$row_w"
@@ -488,7 +537,12 @@ run_all() {
 						if [[ "$exp" == SMOKE && -n "$resline" ]]; then
 							PYRUN_MODE="$row_mode" _run_gates "$exp" "$w" "$sys" "$n" "$run_id" "$resline"
 						elif [[ "$exp" == SMOKE && "$result" == skipped\ * ]]; then
-							: # already recorded earlier; the gate printed then
+							# Resumed run: the earlier pass may have died before the
+							# gate ran, so judge it again from runs.jsonl.
+							resline="$(_run_result_line "$run_id")"
+							if [[ -n "$resline" ]]; then
+								PYRUN_MODE="$row_mode" _run_gates "$exp" "$w" "$sys" "$n" "$run_id" "$resline"
+							fi
 						fi
 					done
 				done
@@ -559,7 +613,7 @@ run_dry_run() {
 		[[ -n "$sizes" ]] && row_sizes="$sizes"
 		[[ -n "$reps" ]] && row_reps="$reps"
 		if [[ "$row_sizes" == "scaling" ]]; then
-			row_sizes="${SCALING_SIZES[*]}"
+			row_sizes="$SCALING_SIZES"
 		fi
 		local -a workloads_list=() sizes_list=() row_systems=()
 		IFS=',' read -r -a workloads_list <<<"$row_w"
@@ -595,6 +649,7 @@ run_dry_run() {
 main() {
 	local -a sub_args=()
 	local arg dry=0
+	local -a dry_arg=()
 	if (($# == 0)); then
 		run_usage >&2
 		return 2
@@ -608,7 +663,7 @@ main() {
 	while (($#)); do
 		arg="$1"
 		case "$arg" in
-			--dry-run) dry=1; shift ;;
+			--dry-run) dry=1; dry_arg=(--dry-run); shift ;;
 			*) sub_args+=("$arg"); shift ;;
 		esac
 	done
@@ -616,7 +671,7 @@ main() {
 		# macOS would get caffeinate -dimsu in the same place; the lab is
 		# Linux-driven and there is no mac driver machine (Facts).
 		exec systemd-inhibit --what=sleep:idle:handle-lid-switch --why=pipedpeer-lab \
-			env LAB_INHIBITED=1 bash "$0" "$exp" ${dry:+--dry-run} "${sub_args[@]}"
+			env LAB_INHIBITED=1 bash "$0" "$exp" "${dry_arg[@]}" "${sub_args[@]}"
 	fi
 	if ((dry)); then
 		run_dry_run "$exp" "${sub_args[@]}"

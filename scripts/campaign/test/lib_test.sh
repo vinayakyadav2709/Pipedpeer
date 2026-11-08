@@ -357,6 +357,94 @@ t13() {
 	verdict "ssh drop for 2 polls mid-wait -> exit code returned, no restart"
 }
 
+# pssh 2.3.1's real report lines: a lone SUCCESS line -> failed=0, no FAILED file
+t14() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		cat >"$d/bin/pssh" <<'PSSH'
+#!/usr/bin/env bash
+echo "[1] 12:00:00 [SUCCESS] pc01"
+exit 0
+PSSH
+		printf 'pc01\n' >"$d/h.txt"
+		lab_fanout s14 "$d/h.txt" true
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	line "$d/log" "FANOUT step=s14 ok=1 failed=0" || pnote "no ok=1 failed=0 line: $(tail -3 "$d/log")"
+	[[ ! -e "$d/logs/s14/FAILED" ]] || pnote "FAILED file exists for an all-success run"
+	verdict "pssh '[1] 12:00:00 [SUCCESS] pc01' -> failed=0, no FAILED file"
+}
+
+# the real FAILURE line: retried, then FAILED lists the host
+t15() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		cat >"$d/bin/pssh" <<'PSSH'
+#!/usr/bin/env bash
+echo "x" >>"$FAKELAB_DIR/pssh.calls"
+echo "[2] 12:00:00 [FAILURE] pc02 Exited with error code 255"
+exit 1
+PSSH
+		export LAB_RETRY_SLEEP=0.1
+		printf 'pc02\npc03\n' >"$d/h.txt"
+		lab_fanout s15 "$d/h.txt" true
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	line "$d/logs/s15/FAILED" pc02 || pnote "FAILED does not list pc02"
+	[[ "$(count "$d/pssh.calls" x)" == 3 ]] || pnote "pssh called $(count "$d/pssh.calls" x) times, want 3 attempts"
+	line "$d/log" "FANOUT step=s15 ok=1 failed=1" || pnote "no ok=1 failed=1 line"
+	verdict "pssh '[2] 12:00:00 [FAILURE] pc02 Exited with error code 255' -> retried, FAILED=pc02"
+}
+
+# pssh failing with no parsable report line must not look like success
+t16() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		cat >"$d/bin/pssh" <<'PSSH'
+#!/usr/bin/env bash
+echo "pssh: unrecognized option" >&2
+exit 2
+PSSH
+		export LAB_RETRY_SLEEP=0.1
+		printf 'pc01\n' >"$d/h.txt"
+		lab_fanout s16 "$d/h.txt" true
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	want_val "$d/log" rc 1 "fanout whose pssh printed no report"
+	line "$d/log" "FANOUT step=s16 ok=0 failed=1" || pnote "no ok=0 failed=1 line"
+	verdict "pssh exit 2 and no report line -> every host failed, exit 1"
+}
+
+# a $LAB with a space is refused with a clear error (pssh -x / rsync -e split it)
+t17() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		export LAB_RESULTS="$d/has space"
+		# shellcheck source=/dev/null
+		source "$LIB"
+	) >"$d/log" 2>&1 || rc=$?
+	((rc != 0)) || pnote "sourcing lib.sh with a space in LAB succeeded"
+	grep -q 'space' "$d/log" || pnote "no clear error: $(cat "$d/log")"
+	rc=0
+	(
+		export LAB_RESULTS="$d/nospace"
+		# shellcheck source=/dev/null
+		source "$LIB"
+	) >"$d/log2" 2>&1 || rc=$?
+	((rc == 0)) || pnote "a LAB without a space was refused: $(cat "$d/log2")"
+	verdict "LAB with a space refused with an error; LAB without one accepted"
+}
+
 printf 'scripts/campaign/lib.sh case table\n\n'
 t1
 t2
@@ -371,6 +459,10 @@ t10
 t11
 t12
 t13
+t14
+t15
+t16
+t17
 printf '\n'
 
 total=$((pass + failed))
