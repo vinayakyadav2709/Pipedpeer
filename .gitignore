@@ -36,3 +36,4 @@ pipedpeer-demo/join-command.txt
 # Local exam references (other people's work) and generated demo data; never commit.
 /major/
 /data.csv
+results/
