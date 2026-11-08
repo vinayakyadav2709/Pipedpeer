@@ -1,0 +1,13 @@
+# Driver-side dev venv used only by scripts/campaign/test/ports_test.sh
+# (the port smoke runs on this laptop, not on the lab PCs; the lab venv is
+# built from $LAB/requirements.txt by venv.sh instead). Python 3.11 for the
+# venv: Ray keeps wheels for 3.11 rather than the newest CPython.
+# CPU build: the default Linux wheel from PyPI pulls CUDA-sized nvidia deps;
+# the extra index only serves torch-family wheels.
+--extra-index-url https://download.pytorch.org/whl/cpu
+ray[default]
+dask[distributed]
+scikit-learn
+pandas
+joblib
+torch
