@@ -32,7 +32,7 @@ def main() -> int:
             break
         if not stamped:
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write("%d\n" % time.time_ns())
+                fh.write(f"{time.time_ns()}\n")
             stamped = True
         write(line)
         sys.stdout.flush()
