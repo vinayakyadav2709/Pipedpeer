@@ -45,7 +45,7 @@ inv_parse() {
 		[[ "$line" == *=* ]] || continue
 		k=${line%%=*}
 		v=${line#*=}
-		kv[$k]=$v
+		kv[$k]=${v//,/;} # machines.csv is comma separated
 	done <"$log"
 	speed=${kv[nic_speed_mbps]:-}
 	if [[ "$speed" == "-1" ]]; then

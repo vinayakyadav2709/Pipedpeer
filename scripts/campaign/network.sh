@@ -92,21 +92,29 @@ main() {
 				lab_log "network: iperf3 client failed pc00 -> $pc (exit $?); no row"
 			fi
 			pair=""
+			avg="" # a failed ping must not keep the previous PC's numbers
+			mdev=""
 			if out=$(lab_ssh pc00 "ping -c 10 -q $ip"); then
 				printf '%s\n' "$out" >"$outdir/ping-$pc.txt"
 				pair=$(net_ping_parse "$outdir/ping-$pc.txt")
-				avg=${pair% *}
-				mdev=${pair#* }
+				if [[ -n "$pair" ]]; then
+					avg=${pair% *}
+					mdev=${pair#* }
+				fi
 			else
 				lab_log "network: ping failed pc00 -> $pc (exit $?); no row"
 			fi
 			tcp=0
 			if lab_ssh pc00 "timeout 3 bash -c 'echo > /dev/tcp/$ip/4242'" >/dev/null 2>&1; then
 				tcp=1
+			else
+				lab_log "network: tcp 4242 from pc00 to $pc closed (tcp4242=0)"
 			fi
 			dok=0
 			if lab_ssh "$pc" 'pipedpeer doctor' >/dev/null 2>&1; then
 				dok=1
+			else
+				lab_log "network: pipedpeer doctor failed on $pc (doctor_ok=0)"
 			fi
 			if [[ -n "$mbps" && -n "$avg" ]]; then
 				printf '%s,%s,%s,%s,%s,%s,%s\n' "$pc" "$ip" "$mbps" "$avg" "$mdev" "$tcp" "$dok"

@@ -163,7 +163,7 @@ def check_groups(groups, exp, warns):
                         warns.append(f"result_ok-false {rid}")
             have = sorted(groups[exp][w][s])
             for n in ns_all:
-                if n not in have and n > have[0]:
+                if n not in have:
                     warns.append(f"missing {exp} {w} {s} n={n}")
 
 
@@ -205,10 +205,12 @@ def check_predictions(lab, speedups, warns):
 
 def spread_report(groups):
     max_spread = 0.0
+    used = 0  # most repeats any group ran
     for exp in sorted(groups):
         for w in sorted(groups[exp]):
             for s in sorted(groups[exp][w]):
                 for n, g in sorted(groups[exp][w][s].items()):
+                    used = max(used, len(g.walls))
                     if len(g.walls) < 2:
                         continue
                     med = float(np.median(g.walls))
@@ -220,7 +222,9 @@ def spread_report(groups):
     if max_spread < 0.10:
         print("REPEATS-OK")
     else:
-        k = min(15, math.ceil(5 * (max_spread / 0.10) ** 2))
+        # Variance scales with 1/k, so k grows with the square of the spread
+        # ratio; it must exceed the repeats already run, else it is no advice.
+        k = min(15, max(math.ceil(used * (max_spread / 0.10) ** 2), used + 1))
         print(f"RAISE-REPEATS {k}")
 
 

@@ -14,6 +14,7 @@
 #   TOTAL <s:.1f>s
 import argparse
 import os
+import socket
 import time
 
 import numpy as np
@@ -61,6 +62,9 @@ def main():
     parser.add_argument("--items", type=int, default=128)
     args = parser.parse_args()
     import ray
+    # Fail fast: ray.init retries an unreachable head for minutes.
+    _host, _, _port = os.environ["RAY_ADDRESS"].rpartition(":")
+    socket.create_connection((_host, int(_port)), timeout=5).close()
     ray.init(address=os.environ["RAY_ADDRESS"])
     t0 = time.monotonic()
     print(f"cpu.py on {os.cpu_count()} local cores")

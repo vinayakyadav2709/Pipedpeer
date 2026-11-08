@@ -8,6 +8,7 @@
 # Pool() = all CPUs in the cluster (Ray's default), so BENCH_PROCS is not read.
 # Original result line, byte-for-byte: POOLIDLE-OK items=%d seconds=%.4f checksum=%.6f
 import os
+import socket
 import time
 
 import ray
@@ -22,6 +23,9 @@ def work(i):
 
 
 if __name__ == "__main__":
+    # Fail fast: ray.init retries an unreachable head for minutes.
+    _host, _, _port = os.environ["RAY_ADDRESS"].rpartition(":")
+    socket.create_connection((_host, int(_port)), timeout=5).close()
     ray.init(address=os.environ["RAY_ADDRESS"])
     n = int(os.environ.get("BENCH_ITEMS", "16"))
     t0 = time.perf_counter()

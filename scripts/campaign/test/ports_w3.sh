@@ -6,7 +6,7 @@ DASK_ADDR=${PORTS_DASK_ADDR:?}
 hosts2=${PORTS_HOSTS2:?}
 workdir=${PORTS_WORKDIR:?}
 
-ORIG_W3="BENCH_TREES=20 '$PY' docs/benchmarks/workloads/w3_rf.py"
+ORIG_W3="BENCH_TREES=20 '$PY' w3_rf.py"
 
 port_ray_case w3-ray-accuracy \
 	"$ORIG_W3" \

@@ -4,7 +4,18 @@ torch.distributed + DistributedDataParallel; rank/world come from torchrun's
 RANK/WORLD_SIZE. Only rank 0 prints.
 """
 import os
+import sys
 import time
+
+# torchrun sets RANK and WORLD_SIZE. A launch that lost them would train on one
+# node and print a loss that looks like a normal one, so the launcher states
+# the world it asked for (BENCH_EXPECT_WORLD) and a mismatch stops the run
+# before torch is even imported.
+rank = int(os.environ.get("RANK", "0"))
+world = int(os.environ.get("WORLD_SIZE", "1"))
+expect = os.environ.get("BENCH_EXPECT_WORLD")
+if expect is not None and int(expect) != world:
+    sys.exit(f"t1_torchrun: expected WORLD_SIZE={expect}, torchrun gave {world}")
 
 import torch
 import torch.distributed as dist
@@ -15,9 +26,6 @@ seed = int(os.environ.get("BENCH_SEED", "11"))
 epochs = int(os.environ.get("BENCH_EPOCHS", "30"))
 torch.manual_seed(seed)
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
-rank = int(os.environ.get("RANK", os.environ.get("PIPEDPEER_RANK", "0")))
-world = int(os.environ.get("WORLD_SIZE", os.environ.get("PIPEDPEER_WORLD_SIZE", "1")))
 
 if world > 1:
     dist.init_process_group("gloo")

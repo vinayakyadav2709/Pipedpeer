@@ -51,7 +51,7 @@ diff_lines() {
 
 # sh_lines <file>: non-blank, non-comment lines (the glue that is new code).
 sh_lines() {
-	grep -cv '^[[:space:]]*#' "$1" || true
+	grep -Evc '^[[:space:]]*(#|$)' "$1" || true
 }
 
 row() { # <port_path> <w>
@@ -62,7 +62,10 @@ row() { # <port_path> <w>
 		return 0
 	fi
 	name=${port##*/}
-	lines=$(diff_lines "$orig" "$port")
+	case $name in
+	*_ssh.sh) lines=$(sh_lines "$port") ;; # no part: only the glue is new code
+	*) lines=$(diff_lines "$orig" "$port") ;;
+	esac
 	# An ssh baseline has two files: the part (a real diff of the original)
 	# and the glue (counted whole, it has no common ancestor with any file).
 	glue=""

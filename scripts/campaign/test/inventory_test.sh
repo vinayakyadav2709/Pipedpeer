@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2317  # cleanup runs through the trap
+# shellcheck disable=SC2317,SC2016  # cleanup runs through the trap; row bodies are single-quoted on purpose
 # The S5 case table (brief): one row per behaviour inventory.sh, clocks.sh and
 # network.sh promise on saved text. These are pure parsing rows; the remote
 # paths behind them run only as the scripts themselves (never in tests), so
@@ -246,7 +246,145 @@ EOF
 	verdict "home_fs=nfs4 -> SHARED-HOME pc01, exit 1"
 }
 
-printf 'scripts/campaign inventory/network/clocks case table\n\n'
+
+# row_run <body>: write the row file from stdin-less text, run it, print its dir.
+_row() {
+	local f
+	f="$(mktemp "$STATE/inv-row.XXXXXX")"
+	dirs+=("$(dirname "$f")")
+	printf '%s\n' "$1" >"$f"
+	row_setup "$f"
+}
+
+# network.sh main with ssh stubbed: pc01's ping works, pc02's fails. The failed
+# ping must leave its columns empty, never pc01's numbers (D1).
+NET_STUB='
+printf "pc00\t10.0.0.1\n pc01\t10.0.0.2\npc02\t10.0.0.3\n" | sed "s/^ //" >"$LAB/hosts.tsv"
+lab_ssh() {
+	local pc=$1 cmd=$2
+	case $cmd in
+	"iperf3 -s"*) return 0 ;;
+	"iperf3 -c"*) echo "{\"end\": {\"sum_received\": {\"bits_per_second\": 9.4e8}}}" ;;
+	"ping"*)
+		if [[ ${NET_PING_FAIL:-} == *"$cmd"* ]]; then return 1; fi
+		case $cmd in
+		*10.0.0.2*) echo "rtt min/avg/max/mdev = 0.100/0.200/0.300/0.050 ms" ;;
+		*10.0.0.3*) echo "rtt min/avg/max/mdev = 0.400/0.500/0.600/0.070 ms" ;;
+		esac ;;
+	*4242*) return 0 ;;
+	"pipedpeer doctor") return 0 ;;
+	esac
+}
+'
+t8() {
+	local d
+	d="$(_row "$NET_STUB
+NET_PING_FAIL='ping -c 10 -q 10.0.0.3' main >/dev/null 2>&1
+cp \"\$LAB/network.csv\" \"\$LAB/net.out\"")"
+	grep -q '^pc01,10.0.0.2,940.0,0.200,0.050,1,1$' "$d/lab/net.out" || pnote "pc01 row: $(cat "$d/lab/net.out")"
+	grep -q '^pc02,10.0.0.3,940.0,,,1,1$' "$d/lab/net.out" || pnote "pc02 (ping failed) kept pc01's numbers: $(grep '^pc02' "$d/lab/net.out")"
+	verdict "network.sh: a failed ping leaves rtt empty, not the previous PC's"
+}
+t9() {
+	local d
+	d="$(_row "$NET_STUB
+main >/dev/null 2>&1
+cp \"\$LAB/network.csv\" \"\$LAB/net.out\"")"
+	grep -q '^pc01,10.0.0.2,940.0,0.200,0.050,1,1$' "$d/lab/net.out" || pnote "pc01 row: $(cat "$d/lab/net.out")"
+	grep -q '^pc02,10.0.0.3,940.0,0.500,0.070,1,1$' "$d/lab/net.out" || pnote "pc02 row: $(grep '^pc02' "$d/lab/net.out")"
+	verdict "network.sh: both pings fine -> each PC has its own rtt"
+}
+
+# port-lines.sh: the glue count is non-blank, non-comment lines (its header says so)
+t10() {
+	local d want got
+	d="$(_row 'bash "$REPO/scripts/campaign/port-lines.sh" >/dev/null 2>&1; cp "$LAB/port-lines.csv" "$LAB/pl.out"')"
+	want=$(grep -Evc '^[[:space:]]*(#|$)' "$REPO/docs/benchmarks/workloads/baselines/trivial_ssh.sh")
+	got=$(awk -F, '$1 == "baselines/trivial_ssh.sh" { print $3 }' "$d/lab/pl.out")
+	[[ "$got" == "$want" ]] || pnote "trivial_ssh.sh counted $got, non-blank non-comment lines are $want"
+	verdict "port-lines: ssh glue counts non-blank, non-comment lines"
+}
+t11() {
+	local d want got
+	d="$(_row 'bash "$REPO/scripts/campaign/port-lines.sh" >/dev/null 2>&1; cp "$LAB/port-lines.csv" "$LAB/pl.out"')"
+	want=$(diff -u "$REPO/docs/benchmarks/workloads/pool_map.py" "$REPO/docs/benchmarks/workloads/baselines/w1_ray.py" | grep -c '^[+-][^+-]' || true)
+	got=$(awk -F, '$1 == "baselines/w1_ray.py" { print $3 }' "$d/lab/pl.out")
+	[[ "$got" == "$want" ]] || pnote "w1_ray.py counted $got, diff says $want"
+	verdict "port-lines: a .py port counts its diff lines"
+}
+
+# inventory.sh: a comma in a value (cpu model) must not add a CSV column
+t12() {
+	local d n
+	d="$(_row 'printf "pc00\t10.0.0.1\tx\thost0\n" >"$LAB/hosts.tsv"
+mkdir -p "$LAB/logs/inventory"
+printf "os_id=ubuntu\nos_version=24.04\nkernel=6.8\ncpu_model=Fancy CPU, 8-Core\nsockets=1\ncores_per_socket=4\nthreads_per_core=2\nnproc=8\nram_gib=15.50\nnic=eth0\nnic_speed_mbps=1000\npython3=Python 3.12.3\nhome_fs=ext2/ext3\n" >"$LAB/logs/inventory/pc00"
+inv_parse_all >/dev/null 2>&1
+awk -F, "NR == 2 { print NF }" "$LAB/machines.csv" >"$LAB/nf.out"')"
+	n=$(cat "$d/lab/nf.out")
+	[[ "$n" == 16 ]] || pnote "machines.csv row has $n fields, want 16"
+	verdict "inventory: a comma in cpu_model keeps 16 CSV fields"
+}
+t13() {
+	local d n
+	d="$(_row 'printf "pc00\t10.0.0.1\tx\thost0\n" >"$LAB/hosts.tsv"
+mkdir -p "$LAB/logs/inventory"
+printf "os_id=ubuntu\ncpu_model=Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz\nhome_fs=ext2/ext3\n" >"$LAB/logs/inventory/pc00"
+inv_parse_all >/dev/null 2>&1
+awk -F, "NR == 2 { print NF \" \" \$7 }" "$LAB/machines.csv" >"$LAB/nf.out"')"
+	n=$(cat "$d/lab/nf.out")
+	[[ "$n" == "16 Intel(R) Core(TM) i5-8500 CPU @ 3.00GHz" ]] || pnote "got [$n]"
+	verdict "inventory: a plain cpu_model is written unchanged"
+}
+
+# pins.sh: the PyTorch CPU index lists "2.5.1+cpu"; the exact pin 2.5.1 exists
+# there and must not fall back to a lower version.
+PINS_FAKE='
+source "$REPO/scripts/campaign/pins.sh"
+mkdir -p "$LAB/fakebin"
+cat >"$LAB/fakebin/python3" <<FAKE
+#!/usr/bin/env bash
+if [ "\$1 \$2 \$3" = "-m pip index" ]; then echo "torch (2.5.1+cpu)"; echo "Available versions: $AVAIL"; exit 0; fi
+exec /usr/bin/python3 "\$@"
+FAKE
+chmod +x "$LAB/fakebin/python3"
+PATH="$LAB/fakebin:$PATH"
+'
+t14() {
+	local d
+	d="$(_row "AVAIL='2.5.1+cpu, 2.5.0+cpu, 2.4.1+cpu'
+$PINS_FAKE
+_pin_nearest torch 2.5.1 >\"\$LAB/pin.out\" 2>/dev/null")"
+	[[ "$(cat "$d/lab/pin.out")" == "2.5.1" ]] || pnote "torch 2.5.1 (index has 2.5.1+cpu) -> [$(cat "$d/lab/pin.out")]"
+	verdict "pins: torch 2.5.1 found as 2.5.1+cpu keeps the exact pin"
+}
+t15() {
+	local d
+	d="$(_row "AVAIL='2.5.0+cpu, 2.4.1+cpu'
+$PINS_FAKE
+_pin_nearest torch 2.5.1 >\"\$LAB/pin.out\" 2>/dev/null")"
+	[[ "$(cat "$d/lab/pin.out")" == "2.5.0" ]] || pnote "torch 2.5.1 absent -> [$(cat "$d/lab/pin.out")], want 2.5.0 (no +cpu)"
+	verdict "pins: torch 2.5.1 absent -> nearest lower 2.5.0, local tag dropped"
+}
+
+# w2_dask.py imports dask.dataframe, which needs pyarrow; the lab venv and the
+# dev venv both have to list it (D1). Static rows: pins.sh needs a full closure.
+t16() {
+	local here_dir
+	here_dir="$(dirname "$0")/.."
+	grep -q "printf 'pyarrow" "$here_dir/pins.sh" || pnote "pins.sh does not write pyarrow"
+	grep -qx pyarrow "$here_dir/requirements-dev.txt" || pnote "requirements-dev.txt lacks pyarrow"
+	verdict "requirements: pyarrow listed for dask.dataframe (lab and dev)"
+}
+t17() {
+	local here_dir
+	here_dir="$(dirname "$0")/.."
+	grep -q "printf 'dask\\[distributed\\]" "$here_dir/pins.sh" || pnote "pins.sh lost dask[distributed]"
+	grep -q "printf 'ray\\[default\\]" "$here_dir/pins.sh" || pnote "pins.sh lost ray[default]"
+	verdict "requirements: dask[distributed] and ray[default] still listed"
+}
+
+printf 'scripts/campaign inventory/network/clocks/port-lines/pins case table\n\n'
 t1
 t2
 t3
@@ -254,6 +392,16 @@ t4
 t5
 t6
 t7
+t8
+t9
+t10
+t11
+t12
+t13
+t14
+t15
+t16
+t17
 printf '\n'
 
 total=$((pass + failed))

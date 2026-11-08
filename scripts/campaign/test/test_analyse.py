@@ -351,3 +351,47 @@ def test_predictions(labs):
     assert "WARN prediction-missed plain W1 min_n=4 speedup=1.0" in out
     # ray's prediction (min_n=2, speedup 2.0) holds: no warning
     assert "WARN prediction-missed ray W1" not in out
+
+
+def _lab_with(tmp_path_factory, rows):
+    lab = tmp_path_factory.mktemp("d1")
+    (lab / "runs.jsonl").write_text(
+        "\n".join(__import__("json").dumps(r) for r in rows) + "\n")
+    return lab
+
+
+def test_missing_warn_smallest_n(tmp_path_factory):  # M3
+    rows = _seq("E1", "W1", "pipedpeer", 1, [100] * 5, ref="reference")
+    rows += _seq("E1", "W1", "pipedpeer", 2, [50] * 5)
+    rows += _seq("E1", "W1", "pipedpeer", 4, [25] * 5)
+    rows += _seq("E1", "W1", "ray", 4, [26] * 5)    # never ran n=1, n=2
+    res = _run(_lab_with(tmp_path_factory, rows))
+    assert res.returncode == 0, res.stderr
+    assert "WARN missing E1 W1 ray n=1" in res.stdout
+    assert "WARN missing E1 W1 ray n=2" in res.stdout
+    assert "missing E1 W1 pipedpeer" not in res.stdout   # opposite: complete
+
+
+def test_spread_boundary_never_repeats_same_k(tmp_path_factory):  # L3
+    # IQR/median is exactly 0.10 with 5 repeats: asking for 5 again is no advice
+    rows = _seq("E1", "W1", "pipedpeer", 1, [90, 95, 100, 105, 110],
+                ref="reference")
+    res = _run(_lab_with(tmp_path_factory, rows), "--spread")
+    assert res.returncode == 0, res.stderr
+    assert "RAISE-REPEATS 6" in res.stdout
+    assert "RAISE-REPEATS 5" not in res.stdout
+
+
+def test_e1b_efficiency_noisy_ci(tmp_path_factory):  # T2
+    rows = _seq("E1b", "W1", "pipedpeer", 1, [100, 98, 102, 100, 101],
+                size={"BENCH_ITEMS": 300}, ref="reference")
+    rows += _seq("E1b", "W1", "pipedpeer", 2, [96, 100, 98, 99, 97],
+                 size={"BENCH_ITEMS": 600})
+    lab = _lab_with(tmp_path_factory, rows)
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    r = _pick(_read_csv(lab, "E1b-efficiency.csv"), system="pipedpeer", n=2)
+    pt, lo, hi = (float(r[k]) for k in
+                  ("efficiency", "efficiency_lo", "efficiency_hi"))
+    assert lo < pt < hi
+    assert 0.9 < lo and hi < 1.1

@@ -43,6 +43,11 @@ BINDIR=$(dirname "$PY")
 RAY_ADDR=${RAY_ADDR:-127.0.0.1:6379}
 DASK_ADDR=${DASK_ADDR:-tcp://127.0.0.1:8786}
 CASE_TMO=${CASE_TMO:-90}
+# Cluster start waits: START_TRIES polls START_WAIT seconds apart (the selftest
+# shrinks them).
+START_TRIES=${START_TRIES:-30}
+START_WAIT=${START_WAIT:-2}
+RAYROOT=${PORTS_RAYROOT:-/tmp/opencode}
 RAY_PORT=${RAY_PORT:-6379}
 DASK_PORT=${DASK_PORT:-8786}
 
@@ -54,6 +59,12 @@ while getopts k: opt; do
 	esac
 done
 
+# The runner's own rows (fake clusters, private HOME): run first, once.
+if [ -z "${PORTS_IN_SELFTEST:-}" ] && [ -z "$FILTER" ]; then
+	echo "ports_test: selftest of the runner ..."
+	bash "$here/ports_selftest.sh" || { echo "ports_test: selftest failed" >&2; exit 1; }
+fi
+
 if [ ! -x "$PY" ]; then
 	echo "SKIP all rows: dev venv missing ($PY)."
 	echo "  uv venv --python 3.11 \${XDG_CACHE_HOME:-\$HOME/.cache}/pipedpeer-lab-dev/venv"
@@ -64,7 +75,8 @@ fi
 # Own state dir (the mktemp pattern of scripts/bench-pool.sh, never /tmp by
 # name), the relative work dir a PC-side run has (workload files top level,
 # ports under baselines/), and per-row output/error captures inside it.
-statedir=$(mktemp -d "${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/ports-test.XXXXXX")
+mkdir -p "$HOME/.local/state/pipedpeer" "$RAYROOT"
+statedir=$(mktemp -d "$HOME/.local/state/pipedpeer/ports-test.XXXXXX")
 mkdir -p "$statedir/logs" "$statedir/work"
 logs="$statedir/logs"
 workdir="$statedir/work"
@@ -72,44 +84,54 @@ mkdir -p "$statedir/state"
 export XDG_STATE_HOME="$statedir/state"
 # Ray's AF_UNIX socket paths must stay under 107 bytes, so its temp dir lives
 # in the short /tmp/opencode tree rather than under the (long) state dir.
-raydir=$(mktemp -d /tmp/opencode/ports-ray.XXXXXX)
+raydir=$(mktemp -d "$RAYROOT/ports-ray.XXXXXX")
 (cd "$REPO/docs/benchmarks/workloads" && cp -r -- *.py baselines "$workdir/")
 FILTERED() { [ -z "$FILTER" ] || case $1 in *"$FILTER"*) return 0 ;; *) return 1 ;; esac; }
 
 # Teardown at exit, before any row runs: stop what we started, keep the state
 # dir when something failed or PORTS_KEEP=1.
+# Cluster state: 0 not up, 1 up and ours (stopped at exit), 2 already up.
+# RAY_OURS is set before `ray start` runs, so a kill during startup still
+# stops the head.
+RAY_STATE=0
+DASK_STATE=0
+DASK_PIDS=
+RAY_OURS=0
+KEEP=0
 cleanup() {
-	local rc=$?
-	if [ -n "$DASK_PIDS" ]; then
-		# shellcheck disable=SC2086
-		kill $DASK_PIDS >/dev/null 2>&1
-	fi
-	if [ "$RAY_STATE" = 1 ]; then
+	trap '' INT TERM
+	local p
+	for p in $DASK_PIDS; do
+		pkill -TERM -P "$p" >/dev/null 2>&1 # a worker's nanny and children
+		kill "$p" >/dev/null 2>&1
+	done
+	if [ "$RAY_OURS" = 1 ]; then
 		"$BINDIR/ray" stop --force >/dev/null 2>&1
 	fi
-	if [ "$rc" = 0 ] && [ "${PORTS_KEEP:-0}" != 1 ]; then
+	if [ "$KEEP" != 1 ] && [ "${PORTS_KEEP:-0}" != 1 ]; then
 		rm -rf "$statedir" "$raydir"
 	else
 		echo "kept for debugging: $statedir"
 	fi
 }
+# A kill (timeout, Ctrl-C) must run the cleanup too: exit turns the signal
+# into the EXIT trap.
+trap 'exit 143' INT TERM
 trap cleanup EXIT
 
 # --- clusters ---------------------------------------------------------------
 
-RAY_STATE=0 # 0 never came up; 1 came up (ours, stopped at exit); 2 already up
-DASK_STATE=0
-DASK_PIDS=
 ray_ready() { timeout 15 "$PY" -c "import ray; ray.init(address='$RAY_ADDR')" >/dev/null 2>&1; }
 port_ready() { timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1" 2>/dev/null; }
 
-start_ray() { # status on stdout, notes on stderr
+start_ray() { # sets RAY_STATE: 0 not up, 1 ours, 2 already up; notes on stderr
 	if port_ready "$RAY_PORT"; then
-		if ray_ready; then echo 2; return 0; fi
+		if ray_ready; then RAY_STATE=2; return 0; fi
 		echo "note: port $RAY_PORT is taken but is not a ray head; ray rows skipped" >&2
 		return 0
 	fi
 	mkdir -p "$raydir"
+	RAY_OURS=1 # from here a kill must stop the head
 	if ! "$BINDIR/ray" start --head --port="$RAY_PORT" --object-store-memory=200000000 \
 		--temp-dir "$raydir" --include-dashboard=False >"$logs/ray-start.log" 2>&1; then
 		echo "note: local ray head did not start (see $logs/ray-start.log); ray rows skipped" >&2
@@ -117,11 +139,11 @@ start_ray() { # status on stdout, notes on stderr
 	fi
 	local i=0
 	# Wait, bounded (~2 min): the head's first import is slow but not forever.
-	until ray_ready || [ $i -ge 30 ]; do
+	until ray_ready || [ $i -ge "$START_TRIES" ]; do
 		i=$((i + 1))
-		sleep 2
+		sleep "$START_WAIT"
 	done
-	if ray_ready; then echo 1; return 0; fi
+	if ray_ready; then RAY_STATE=1; return 0; fi
 	echo "note: local ray head did not become ready (see $logs/ray-start.log); ray rows skipped" >&2
 }
 
@@ -131,13 +153,14 @@ dask_workers_ready() {
 from dask.distributed import Client
 c = Client('$DASK_ADDR')
 c.wait_for_workers(2, timeout=75)
-assert len(c.nthreads) >= 2, len(c.nthreads)
-" >/dev/null 2>&1
+n = len(c.scheduler_info()['workers'])
+assert n >= 2, n
+" >"$logs/dask-ready.log" 2>&1
 }
 
 start_dask() {
 	if port_ready "$DASK_PORT"; then
-		if dask_ready; then echo 2; return 0; fi
+		if dask_ready; then DASK_STATE=2; return 0; fi
 		echo "note: port $DASK_PORT is taken but is not a dask scheduler; dask rows skipped" >&2
 		return 0
 	fi
@@ -145,9 +168,9 @@ start_dask() {
 		>"$logs/dask-scheduler.log" 2>&1 &
 	DASK_PIDS=$!
 	local i=0
-	until port_ready "$DASK_PORT" || [ $i -ge 30 ]; do
+	until port_ready "$DASK_PORT" || [ $i -ge "$START_TRIES" ]; do
 		i=$((i + 1))
-		sleep 2
+		sleep "$START_WAIT"
 	done
 	if ! port_ready "$DASK_PORT"; then
 		echo "note: local dask scheduler did not start (see $logs/dask-scheduler.log); dask rows skipped" >&2
@@ -160,14 +183,16 @@ start_dask() {
 		--local-directory "$statedir/dw2" >"$logs/dask-worker2.log" 2>&1 &
 	DASK_PIDS="$DASK_PIDS $!"
 	if dask_workers_ready; then
-		echo 1
+		DASK_STATE=1
 		return 0
 	fi
 	echo "note: local dask workers did not join (see $logs/dask-worker*.log); dask rows skipped" >&2
 }
 
-RAY_STATE=$(start_ray 2>"$statedir/cluster-notes")
-DASK_STATE=$(start_dask 2>>"$statedir/cluster-notes")
+echo "ports_test: starting the local ray head ..."
+start_ray
+echo "ports_test: starting the local dask scheduler and workers ..."
+start_dask
 RAY_UP=0
 [ "$RAY_STATE" != 0 ] && RAY_UP=1
 DASK_UP=0
@@ -320,7 +345,7 @@ cd "$workdir" || exit 1
 shopt -s nullglob
 # Each ports_*.sh is rows only, in the workload order of its unit; the runner
 # owns the DSL above and the clusters.
-for f in "$here"/ports_*.sh; do
+for f in "$here"/ports_w[0-9]*.sh; do
 	source "$f"
 done
 shopt -u nullglob
@@ -328,6 +353,7 @@ shopt -u nullglob
 total=$((ROWPASS + ROWSKIP + ROWFAIL))
 echo "PORTS rows=$total pass=$ROWPASS skip=$ROWSKIP fail=$ROWFAIL"
 if [ "$ROWFAIL" -gt 0 ]; then
+	KEEP=1
 	exit 1
 fi
 exit 0

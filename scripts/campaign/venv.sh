@@ -5,9 +5,8 @@
 # pins.sh), but Ubuntu desktop 22.04/24.04 ships Python 3.10/3.12 and may
 # lack python3-venv, so uv installs the single CPython into
 # ~/pipedpeer-lab/py, and the campaign's venv is `~/pipedpeer-lab/venv`
-# made with that interpreter's own python `$LAB/python-version` (x.y, from
-# pins.sh), peeked at `pip install -q -r requirements.txt` (the official pip
-# way over the venv's own bin).
+# made by `uv venv --seed` from `$LAB/python-version` (x.y, from pins.sh),
+# then `pip install -q -r requirements.txt` with the venv's own pip.
 #
 # After the fan-out, each PC runs versions.py with its fresh venv; pc00's
 # line is the reference, and any PC whose line differs is listed in
@@ -75,6 +74,15 @@ _pin_of() {
 	return 1
 }
 
+# venv_command <x.y>: the remote command that builds the venv. uv with an
+# install dir keeps CPython under py/ in its own directory and creates no
+# py/bin/python3.x, so the venv comes from `uv venv` (it finds the managed
+# interpreter through UV_PYTHON_INSTALL_DIR) with pip seeded.
+# shellcheck disable=SC2088
+venv_command() {
+	printf '%s' "export UV_PYTHON_INSTALL_DIR=~/pipedpeer-lab/py && ~/pipedpeer-lab/bin/uv python install --no-bin $1 && ~/pipedpeer-lab/bin/uv venv --managed-python --python $1 --seed ~/pipedpeer-lab/venv && ${VENV_PIP:-~/pipedpeer-lab/venv/bin/pip install -q -r ~/pipedpeer-lab/requirements.txt} && cd ~/pipedpeer-lab/work && ~/pipedpeer-lab/venv/bin/python versions.py"
+}
+
 main() {
 	case "${1:-}" in
 		"") ;;
@@ -121,7 +129,9 @@ main() {
 	local -a ids=()
 	mapfile -t ids <"$hostfile"
 
-	lab_fanout venv-dirs "$hostfile" 'mkdir -p ~/pipedpeer-lab/bin ~/pipedpeer-lab/py ~/pipedpeer-lab/work' || true
+	lab_fanout venv-dirs "$hostfile" 'mkdir -p ~/pipedpeer-lab/bin ~/pipedpeer-lab/py ~/pipedpeer-lab/work' ||
+		lab_log "venv: mkdir failed on some PC(s); see logs/venv-dirs/FAILED"
+
 	local pc
 	for pc in "${ids[@]}"; do
 		lab_rsync "$uv" "$pc:pipedpeer-lab/bin/uv"
@@ -130,8 +140,7 @@ main() {
 	done
 
 	local venvcmd
-	# shellcheck disable=SC2088
-	venvcmd="~/pipedpeer-lab/bin/uv python install $pyver --install-dir ~/pipedpeer-lab/py && ~/pipedpeer-lab/py/bin/python$pyver -m venv ~/pipedpeer-lab/venv && ${VENV_PIP:-~/pipedpeer-lab/venv/bin/pip install -q -r ~/pipedpeer-lab/requirements.txt} && cd ~/pipedpeer-lab/work && ~/pipedpeer-lab/venv/bin/python versions.py"
+	venvcmd="$(venv_command "$pyver")"
 	lab_log "venv: building $pyver venvs on ${#ids[@]} PCs"
 	if ! lab_fanout venv "$hostfile" "$venvcmd"; then
 		lab_log "venv: the venv build step failed on every PC"

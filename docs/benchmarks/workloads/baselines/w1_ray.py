@@ -7,6 +7,7 @@
 # on one machine that is the same nprocs BENCH_PROCS would name.
 # Original result line, byte-for-byte: POOLMAP-OK items=%d seconds=%.4f checksum=%.6f
 import os
+import socket
 import time
 
 import ray
@@ -21,6 +22,9 @@ def work(i):
 
 
 if __name__ == "__main__":
+    # Fail fast: ray.init retries an unreachable head for minutes.
+    _host, _, _port = os.environ["RAY_ADDRESS"].rpartition(":")
+    socket.create_connection((_host, int(_port)), timeout=5).close()
     ray.init(address=os.environ["RAY_ADDRESS"])
     n = int(os.environ.get("BENCH_ITEMS", "48"))
     t0 = time.perf_counter()

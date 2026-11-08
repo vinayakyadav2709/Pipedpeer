@@ -66,6 +66,8 @@ _pin_nearest() {
 		lab_log "pins: pip index versions $pkg gave nothing; keeping the exact pin $wanted"
 		return 1
 	fi
+	# The PyTorch CPU index lists "2.5.1+cpu": compare without the local tag.
+	avail="$(printf '%s\n' "$avail" | sed 's/+.*//')"
 	if printf '%s\n' "$avail" | grep -qxF -- "$wanted"; then
 		printf '%s\n' "$wanted"
 		return 0
@@ -186,6 +188,7 @@ main() {
 		printf 'torch==%s+cpu\n' "$tr_base"
 		printf 'ray[default]\n'
 		printf 'dask[distributed]\n'
+		printf 'pyarrow\n' # dask.dataframe (w2_dask.py) imports it
 	} >"$req"
 
 	# wheel availability; a missing pin falls back to the nearest lower one
@@ -224,4 +227,6 @@ main() {
 	printf 'PINS python=%s torch=%s ray=%s dask=%s\n' "$py" "$tr" "$ra" "$da"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

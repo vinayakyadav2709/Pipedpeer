@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from dask import dataframe as dd
 from dask.distributed import Client
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, parallel_backend
 
 SPIN = 10_000_000
 TILES, TILE_ROWS, WIDTH = 64, 40, 1600
@@ -68,7 +68,7 @@ def main():
         print(f"Pool: {args.items} items, checksum {sum(out)}")
 
     def joblib_tiles():
-        with Parallel(n_jobs=-1, backend="dask"):
+        with parallel_backend("dask"):  # registers the backend on every joblib version
             counts = Parallel(n_jobs=-1)(delayed(mandel_tile)(t) for t in range(TILES))
         print(f"joblib: {TILES} Mandelbrot tiles, {sum(counts)} points inside")
 

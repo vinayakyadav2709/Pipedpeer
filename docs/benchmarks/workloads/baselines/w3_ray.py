@@ -5,6 +5,7 @@
 # Follows: https://docs.ray.io/en/latest/ray-more-libs/joblib.html
 # Result line, byte-for-byte: accuracy: <x:.4f>
 import os
+import socket
 import time
 
 import numpy as np
@@ -25,6 +26,9 @@ print(f"training RandomForest(n_estimators={trees}, n_jobs=-1) ...")
 
 import ray
 
+# Fail fast: ray.init retries an unreachable head for minutes.
+_host, _, _port = os.environ["RAY_ADDRESS"].rpartition(":")
+socket.create_connection((_host, int(_port)), timeout=5).close()
 ray.init(address=os.environ["RAY_ADDRESS"])
 from ray.util.joblib import register_ray
 
