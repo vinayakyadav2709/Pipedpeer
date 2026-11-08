@@ -1,4 +1,4 @@
-.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check
+.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check campaign-test campaign-lint
 
 build:
 	cd src && CGO_ENABLED=0 go build -o ../bin/pipedpeer .
@@ -23,8 +23,20 @@ lint:
 	cd src && go vet ./... && test -z "$$(gofmt -l .)"
 
 # ruff + pytest over the job shim's Python; needs uv.
-shim-check:
-	./scripts/shim-check.sh
+campaign-lint:
+	shellcheck -x scripts/campaign/*.sh scripts/campaign/test/*.sh
+
+campaign-test:
+	bash scripts/campaign/test/lib_test.sh
+	bash scripts/campaign/test/inventory_test.sh
+	bash scripts/campaign/test/cluster_test.sh
+	bash scripts/campaign/test/scan_test.sh
+	bash scripts/campaign/test/install_test.sh
+	bash scripts/campaign/test/metrics_test.sh
+	bash scripts/campaign/test/upload_test.sh
+	bash scripts/campaign/test/run_test.sh
+	bash scripts/campaign/test/ports_test.sh
+	python3 -m pytest -q scripts/campaign/test/test_analyse.py
 
 lab-up:
 	./scripts/lab-up.sh
