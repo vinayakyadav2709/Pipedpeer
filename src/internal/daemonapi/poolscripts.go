@@ -60,7 +60,10 @@ def _fan_width(n_items, required_mem):
     assumed to be a conservative 256MB rather than zero."""
     if n_items <= 1:
         return 1
-    n = os.cpu_count() or 1
+    try:
+        n = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        n = os.cpu_count() or 1
     override = os.environ.get("PIPEDPEER_WORKER_PROCS", "").strip()
     if override:
         try:
