@@ -251,8 +251,10 @@ Dropped: Optuna interception, NPU support.
      `Closure already on the node; nothing to send` and 0 of 47 workspace
      files sent. `cpu.py` plain 19.4 s, `pipedpeer run` 25.1 s although
      the script part was faster (17.4 s): on demo-sized scripts pipedpeer
-     looks slower than Python. Cache the export by store path and skip
-     the upload round trip when the node already has the closure.
+     looks slower than Python. The closure skip already exists
+     (`daemonctl/upload.go:72`); the 5.2 s stage timed workspace packing,
+     not the export (stage renamed "pack workspace"). Re-measure in the
+     lab's fixed-cost runs; fix only if it stays over ~1 s.
    - **No progress while a run builds its environment.** `pipedpeer run
      cpu.py` on a phone printed only the GPU warning for 1.5+ min while
      it built for aarch64; nothing reached either daemon. Without `-v`

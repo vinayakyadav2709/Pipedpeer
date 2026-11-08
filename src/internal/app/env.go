@@ -238,14 +238,14 @@ func BuildEnvironment(ctx context.Context, absScriptPath string, opts EnvOptions
 		recordEnv(envIndexPath(), template, nixPkgs, storePath)
 	}
 
-	stage(5, "Exporting closure...")
+	stage(5, "Packing workspace...")
 	env.StorePath = storePath
 	detail("      Store path: %s\n", storePath)
 
-	env.NarPath = filepath.Join(tmpDir, "closure.nar")
 	// The NAR is not exported here: UploadJob exports it on demand only when a
 	// target daemon lacks the closure (shared stores mean most uploads skip it
 	// entirely), so a 6GB gzip export doesn't run on every repeated run.
+	env.NarPath = filepath.Join(tmpDir, "closure.nar")
 
 	if err := packWorkspace(ctx, env, opts, projectRoot, absScriptPath); err != nil {
 		env.Close()
@@ -370,7 +370,7 @@ var buildStageNames = map[int]string{
 	2: "resolve packages",
 	3: "generate flake",
 	4: "nix build",
-	5: "export closure",
+	5: "pack workspace",
 }
 
 func buildStageName(step int, title string) string {
