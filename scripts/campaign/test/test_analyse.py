@@ -449,3 +449,65 @@ ray,kill,1,1.0,30,0,
     rows = _read_csv(lab, "E6.csv")
     assert _pick(rows, system="pipedpeer")["result_ok_all"] == "true"
     assert _pick(rows, system="ray")["result_ok_all"] == "false"   # recorded failure
+
+
+def _e4_runs_lab(tmp_path_factory):
+    """As the Docker run left it: E4 runs in runs.jsonl AND the E4 table."""
+    lab = tmp_path_factory.mktemp("e4runs")
+    rows = _seq("E4", "W1", "pipedpeer", 2, [10, 11, 10, 12, 10])
+    (lab / "runs.jsonl").write_text(
+        "\n".join(__import__("json").dumps(r) for r in rows) + "\n")
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e4.csv").write_text(E4_CSV)
+    return lab
+
+
+def test_exp_csv_without_workload_column_no_keyerror(tmp_path_factory):  # F2
+    lab = _e4_runs_lab(tmp_path_factory)
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "KeyError" not in res.stderr
+    assert "SKIP FIGURE e4-speedup" in res.stdout
+    assert "no workload column" in res.stdout
+
+
+def test_exp_csv_with_workload_still_plotted(tmp_path_factory):  # F2 opposite
+    lab = tmp_path_factory.mktemp("e1wl")
+    _write_tight_lab(lab)
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "no workload column" not in res.stdout
+    assert (lab / "figures" / "e1-speedup-w1.png").exists()
+
+
+def test_e5_spread_zero_warned_and_reported(tmp_path_factory):  # F2
+    lab = tmp_path_factory.mktemp("e5spread")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e5.csv").write_text("""\
+system,phase,pc,ready_s,rx_bytes,reused,spread
+pipedpeer,cold,pc00,1.0,10,0,0
+pipedpeer,cold,pc01,,10,0,0
+ray,cold,pc00,2.0,10,0,
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    rows = _read_csv(lab, "E5.csv")
+    assert _pick(rows, system="pipedpeer")["spread_all"] == "false"
+    assert "WARN E5 pipedpeer" in res.stdout
+    assert _pick(rows, system="ray")["spread_all"] == ""   # opposite: unknown
+
+
+def test_e5_spread_one_not_warned(tmp_path_factory):  # F2 opposite
+    lab = tmp_path_factory.mktemp("e5spread1")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e5.csv").write_text("""\
+system,phase,pc,ready_s,rx_bytes,reused,spread
+pipedpeer,cold,pc00,1.0,10,0,1
+pipedpeer,cold,pc01,2.0,10,0,1
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert _pick(_read_csv(lab, "E5.csv"), system="pipedpeer")["spread_all"] == "true"
+    assert "WARN E5" not in res.stdout

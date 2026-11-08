@@ -81,6 +81,29 @@ print("%s,%d" % ("" if not w else w, 1 if d.get("result_ok") is True else 0))
 '
 }
 
+# e6_interrupt_run <id>: SIGINT to the `pipedpeer run` client on pc00 (the
+# process whose argv is <...>/pipedpeer run ..., not the shell wrapper that
+# started it, which would ignore or outlive the signal). Returns 1 and logs
+# when no such process exists.
+# shellcheck disable=SC2016  # the remote script is literal
+E6_INT_SCRIPT='found=0
+for p in $(pgrep -f "pipedpeer run"); do
+  [ "$p" = "$$" ] && continue
+  mapfile -d "" a </proc/$p/cmdline 2>/dev/null || continue
+  for i in "${!a[@]}"; do
+    if [ "${a[i]##*/}" = pipedpeer ] && [ "${a[i+1]:-}" = run ]; then
+      kill -INT "$p" && found=1
+    fi
+  done
+done
+[ "$found" = 1 ]'
+e6_interrupt_run() {
+  if ! lab_ssh pc00 "bash -c $(printf '%q' "$E6_INT_SCRIPT")"; then
+    lab_log "e6 $1: no pipedpeer run process found on pc00 to interrupt; stop latency left empty"
+    return 1
+  fi
+}
+
 # e6_jobs_total <pc>: JOBS summed over the rows of that PC's `pipedpeer
 # status` table; the JOBS column is found by the header's position (the table
 # is tab-aligned). Prints nothing and returns 1 when the table is unreadable.
@@ -175,8 +198,12 @@ e6_main() {
       if e6_wait_running "$id"; then
         sleep "$AFTER"
         t_int="$(date +%s%N)"
-        lab_ssh pc00 "pkill -INT -f '[p]ipedpeer run'" ||
-          lab_log "e6 $id: no pipedpeer run to interrupt on pc00"
+        if ! e6_interrupt_run "$id"; then
+          wait "$pid" || lab_log "e6 $id: campaign_run_one returned $?"
+          rec="$(e6_record "$id")"
+          printf 'pipedpeer,ctrlc,%s,,%s,\n' "$i" "$rec" >>"$out"
+          continue
+        fi
         while :; do
           all_zero=1
           for p in "${hosts[@]}"; do

@@ -11,20 +11,30 @@ REPO="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 CAMP="$REPO/scripts/campaign"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
 mkdir -p "$STATE"
-pass=0; failed=0; problems=(); dirs=()
+pass=0; failed=0; problems=()
+# newdir runs in $(...): an array append there is lost, so dirs go to a file
+DIRS_FILE="$(mktemp)"
 cleanup() {
-  local d
-  for d in "${dirs[@]}"; do
+  local d e p
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
     pkill -f -- "$d/" 2>/dev/null || true
+    for e in /proc/[0-9]*/environ; do
+      p="${e#/proc/}"; p="${p%/environ}"
+      [[ "$p" == "$$" || "$p" == "$BASHPID" ]] && continue
+      if tr '\0' '\n' 2>/dev/null <"$e" | grep -qE -- "=$d([/:]|\$)"; then kill -KILL "$p" 2>/dev/null || true; fi
+    done
     rm -rf "$d"
-  done
+  done <"$DIRS_FILE"
+  rm -f "$DIRS_FILE"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 ok() { pass=$((pass + 1)); echo "ok   $1"; }
 bad() { failed=$((failed + 1)); echo "FAIL $1 -- $2"; }
 pnote() { problems+=("$*"); }
 verdict() { if ((${#problems[@]} == 0)); then ok "$1"; else bad "$1" "${problems[*]}"; fi; problems=(); }
-newdir() { local d; d="$(mktemp -d "$STATE/e-exp-test.XXXXXX")"; mkdir -p "$d/home"; dirs+=("$d"); echo "$d"; }
+newdir() { local d; d="$(mktemp -d "$STATE/e-exp-test.XXXXXX")"; mkdir -p "$d/home"; echo "$d" >>"$DIRS_FILE"; echo "$d"; }
 
 # shellcheck source=/dev/null
 source "$REPO/scripts/campaign/test/fakelab.sh"
@@ -63,6 +73,9 @@ case "${1:-}" in
     receipt=""
     for a in "$@"; do case "$a" in PIPEDPEER_RECEIPT=*) receipt="${a#PIPEDPEER_RECEIPT=}" ;; esac; done
     receipt="${receipt/#\~/$HOME}"
+    # real daemon: a receipt path the user names replaces its own, and the run
+    # record then holds no other machine's steps (only the driver's script step)
+    if [[ -n "$receipt" ]]; then : >"$HOME/.user_receipt"; else rm -f "$HOME/.user_receipt"; fi
     # a background start leaves SIGINT ignored; put the default back, as a service has it
     if [[ -z "${FAKE_INT_RESET:-}" ]]; then
       FAKE_INT_RESET=1 exec perl -e '$SIG{INT}="DEFAULT"; exec @ARGV' bash "$0" "$@"
@@ -83,6 +96,10 @@ case "${1:-}" in
     [[ -n "$t0" ]] || t0=0
     # per PC: first compute starts (i+1) s after the run's t0; hostnames as in hosts.tsv
     printf '{"run_id":"x","names":{"m0":"pc00.lab","m1":"pc01.lab"},"steps":['
+    if [[ -f "$HOME/.user_receipt" || -n "${FAKE_ONE_PC:-}" ]]; then
+      printf '{"machine":"m0","node":"m0","chunk":0,"step":"script","start_ns":%s,"dur_ns":1000}]}\n' "$t0"
+      exit 0
+    fi
     printf '{"machine":"m0","node":"m0","chunk":0,"step":"compute","start_ns":%s,"dur_ns":1000},' "$((t0 + 1000000000))"
     printf '{"machine":"m0","node":"m1","chunk":1,"step":"env_send","start_ns":%s,"dur_ns":10,"bytes":5000},' "$((t0 + 100))"
     printf '{"machine":"m1","node":"m1","chunk":1,"step":"compute","start_ns":%s,"dur_ns":1000}]}\n' "$((t0 + 2000000000))" ;;
@@ -395,7 +412,23 @@ else
   pnote "no e5.csv"
 fi
 [[ -f "$d/hosts/pc00/runs/E5-pipedpeer-cold-n2/timeline.json" ]] || pnote "pipedpeer cold timeline not fetched"
+[[ "$(grep -c '^pipedpeer,[^,]*,pc0[01],[^,]*,[^,]*,[^,]*,1$' "$csv")" == 8 ]] || pnote "pipedpeer rows not all spread=1: $(grep '^pipedpeer' "$csv" | tr '\n' ' ')"
+[[ "$(grep -c '^\(pip\|ray\),.*,$' "$csv")" == 16 ]] || pnote "pip/ray rows should leave spread empty"
+! grep -rq 'PIPEDPEER_RECEIPT' "$d/hosts/pc00/runs"/E5-pipedpeer-*/cmd.sh 2>/dev/null || pnote "e5 pipedpeer run still names PIPEDPEER_RECEIPT (daemon drops the other machines' steps)"
 verdict "e5: cold + 3 updates per arm, per-PC ready_s relative to the arm start, rx_bytes, reused"
+
+# F2: e5 Pool did not reach a second PC -> spread 0 and logged, never taken as good
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  export FAKE_ONE_PC=1
+  cd "$REPO"
+  bash "$CAMP/e5.sh" --n 2 --updates 1
+) >"$d/out" 2>&1 || pnote "e5 exit $? ($(tail -3 "$d/out" | tr '\n' ' '))"
+csv="$d/analysis-input/e5.csv"
+[[ "$(grep -c '^pipedpeer,[^,]*,pc0[01],[^,]*,[^,]*,[^,]*,0$' "$csv" 2>/dev/null)" == 4 ]] || pnote "one-PC run not spread=0: $(grep '^pipedpeer' "$csv" 2>/dev/null | tr '\n' ' ')"
+grep -q 'NOT SPREAD' "$d/campaign.log" || pnote "no NOT SPREAD reason logged"
+verdict "e5: Pool stayed on one PC -> spread 0 recorded and logged"
 
 # --------------------------------------------------------------------- e6
 # kill run: wall_s and result_ok from runs.jsonl; kill_at_s measured from t0
@@ -488,6 +521,77 @@ PY
   for m in $want; do [[ " $got " == *" $m "* ]] || pnote "$f does not import $m (has: $got)"; done
   verdict "$f imports $want"
 done
+
+# F2: Ctrl-C arm signals the pipedpeer run process itself, not a wrapper; none -> logged, rc 1
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d"
+  cd "$REPO"
+  # shellcheck source=/dev/null
+  source "$CAMP/e6.sh"
+  e6_interrupt_run E6c-none 2>"$d/err" && echo "none-rc0" || echo "none-rc1"
+  # a wrapper whose command line mentions "pipedpeer run" but is not the client
+  HOME="$d/pc00" bash -c 'sleep 30; : pipedpeer run decoy' &
+  decoy=$!
+  HOME="$d/pc00" FAKE_RUN_SLEEP=30 pipedpeer run job.py >/dev/null 2>&1 &
+  sleep 1
+  e6_interrupt_run E6c-live 2>>"$d/err" && echo "live-rc0" || echo "live-rc1"
+  sleep 1
+  pgrep -f "$d/verif/pipedpeer run" >/dev/null && echo "client-alive" || echo "client-gone"
+  kill -0 "$decoy" 2>/dev/null && echo "decoy-alive" || echo "decoy-gone"
+  kill "$decoy" 2>/dev/null || true
+) >"$d/out" 2>&1
+grep -qx 'none-rc1' "$d/out" || pnote "no run: expected rc 1: $(tr '\n' ' ' <"$d/out")"
+grep -q 'no pipedpeer run process found' "$d/err" "$d/campaign.log" 2>/dev/null || pnote "no-run reason not logged"
+grep -qx 'live-rc0' "$d/out" || pnote "live run: expected rc 0: $(tr '\n' ' ' <"$d/out")"
+grep -qx 'client-gone' "$d/out" || pnote "SIGINT did not reach the run client"
+grep -qx 'decoy-alive' "$d/out" || pnote "decoy wrapper was signalled"
+verdict "e6 Ctrl-C: signal reaches the run process; no run -> logged rc 1"
+
+# F2: e11 result_ok: null in the record -> empty + reason, never the text null; true/false as recorded
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d"
+  cd "$REPO"
+  printf '%s\n' '{"run_id":"E11-W1-pipedpeer-n2-r1","result_ok":null}' \
+    '{"run_id":"E11-W1-pipedpeer-n3-r1","result_ok":true}' \
+    '{"run_id":"E11-W1-pipedpeer-n4-r1","result_ok":false}' >"$d/runs.jsonl"
+  # shellcheck source=/dev/null
+  source "$CAMP/e11.sh"
+  for k in 2 3 4 9; do echo "k$k=[$(e11_result_ok "E11-W1-pipedpeer-n$k-r1" 2>>"$d/err")]"; done
+) >"$d/out" 2>&1
+grep -qx 'k2=\[\]' "$d/out" || pnote "null not empty: $(tr '\n' ' ' <"$d/out")"
+grep -qx 'k3=\[true\]' "$d/out" || pnote "true not true"
+grep -qx 'k4=\[false\]' "$d/out" || pnote "false not false"
+grep -qx 'k9=\[\]' "$d/out" || pnote "no record not empty"
+grep -q 'null' "$d/out" && pnote "text null leaked"
+grep -q 'has no result_ok' "$d/err" "$d/campaign.log" 2>/dev/null || pnote "reason for the empty value not logged"
+verdict "e11 result_ok: null/no record -> empty + reason; true/false as recorded"
+
+# F2: LAB_MEM_SPARE fractional keeps the gate; junk is a clear error; whole numbers as before
+d="$(newdir)"
+(
+  # shellcheck source=/dev/null
+  source "$REPO/scripts/lib/lab.sh"
+  gib=1073741824
+  pp_meminfo() { case "$1" in MemTotal) echo $((100 * gib)) ;; MemAvailable) echo "$gib" ;; esac; }
+  pp_running_mem() { echo 0; }
+  export LAB_MEM_WAIT=0
+  want=$((gib * 8 / 10))
+  LAB_MEM_SPARE=0.5 pp_lab_mem_check "$want" t 2>&1 && echo "half-pass" || echo "half-refused"
+  LAB_MEM_SPARE=0.1 pp_lab_mem_check "$want" t 2>&1 && echo "tenth-pass" || echo "tenth-refused"
+  LAB_MEM_SPARE=1 pp_lab_mem_check "$want" t 2>&1 && echo "one-pass" || echo "one-refused"
+  LAB_MEM_SPARE=lots pp_lab_mem_check "$want" t 2>&1 && echo "junk-pass" || echo "junk-refused"
+) >"$d/out" 2>&1
+grep -qx 'half-refused' "$d/out" || pnote "LAB_MEM_SPARE=0.5 gate skipped: $(tr '\n' ' ' <"$d/out")"
+grep -qx 'tenth-pass' "$d/out" || pnote "0.1 spare should pass"
+grep -qx 'one-refused' "$d/out" || pnote "spare 1 should refuse (1 GiB avail, 0.8 wanted)"
+grep -qx 'junk-refused' "$d/out" || pnote "junk spare not refused"
+grep -q 'LAB_MEM_SPARE must be a number' "$d/out" || pnote "no clear error for junk"
+grep -q 'arithmetic\|syntax' "$d/out" && pnote "bash arithmetic error printed"
+verdict "LAB_MEM_SPARE 0.5 gate applied; 0.1 passes; 1 as before; junk -> clear error"
 
 total=$((pass + failed))
 echo "PASS $pass/$total"

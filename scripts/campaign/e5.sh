@@ -16,12 +16,13 @@
 # pipedpeer: ready = first `compute` step per node in the job's timeline.
 # pip: ready = the PC's own clock after its venv install finished.
 # ray: ready = the task start each node reports (docs/benchmarks/workloads/e5_ray.py).
-# TODO(real lab): on the Docker lab (2 PCs, both healthy in `pipedpeer status`)
-# every timeline holds only env_build, env_send and script, all on pc00, so no
-# `compute` step exists, no pipedpeer ready time is written and ready_s stays
-# empty. The step names above are therefore unconfirmed; check on real PCs
-# whether e5_env.py's Pool map reaches the second PC (then `compute` should
-# appear) and cold-cache start (it does start cold: env_build runs each time).
+# Why no `-e PIPEDPEER_RECEIPT=...` on the run: a receipt path the user names
+# replaces the daemon's own, so the run record loses the other machines' steps
+# (no `compute` on pc01, "ran on pc00 100%") and `pipedpeer jobs last --receipt`
+# says "No receipt". The record is read after the run with `jobs last --export
+# json`. The spread column says whether `compute` ran on 2 or more PCs; a run
+# that stayed on one PC is written spread=0 and logged, never taken as good.
+# TODO(real lab): cold-cache start (it does start cold: env_build runs each time).
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -128,6 +129,19 @@ for pc in ids:
 PY
 }
 
+# e5_spread_of <id> <ready lines> <var>: 1 when 2 or more PCs have a compute
+# step, else 0 (logged: the Pool stayed on one PC, the run is not a result).
+e5_spread_of() {
+  local k
+  k="$(printf '%s\n' "$2" | awk 'NF {c++} END {print c+0}')"
+  if ((k >= 2)); then
+    printf -v "$3" '%s' 1
+  else
+    printf -v "$3" '%s' 0
+    lab_log "e5 $1: NOT SPREAD: compute ran on $k PC(s), the Pool map did not reach a second PC; spread=0"
+  fi
+}
+
 e5_main() {
   local DRY=0 N=32 UPDATES=3
   while (($#)); do
@@ -148,7 +162,8 @@ e5_main() {
 
   local hfile out phase arm pc id dir cmd ready_txt t_start line p pip_txt
   local -a ids phases
-  local -A ready rx
+  local -A ready rx spread
+  local spread_v
   hfile="$(lab_hosts "$N")" || return 1
   mapfile -t ids <"$hfile"
   phases=(cold)
@@ -185,13 +200,16 @@ e5_main() {
       e5_rx_before
       case "$arm" in
         pipedpeer)
-          cmd="cd ~/pipedpeer-lab/work && pipedpeer run --distribute force -e PIPEDPEER_RECEIPT=~/pipedpeer-lab/runs/$id/receipt.json $script && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$id/timeline.json"
+          cmd="cd ~/pipedpeer-lab/work && pipedpeer run --distribute force $script && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$id/timeline.json && pipedpeer jobs last --receipt >~/pipedpeer-lab/runs/$id/receipt.txt"
           lab_detach pc00 "$id" "$cmd" || { lab_log "e5 $id: detach failed"; continue; }
           lab_wait pc00 "$id" 600 >/dev/null || lab_log "e5 $id: did not finish in time"
           lab_fetch pc00 "$id" "$dir" || lab_log "e5 $id: fetch failed"
           e5_rx_after "$arm" "$phase"
           if ! ready_txt="$(E5_DIR="$dir" e5_py pipedpeer)"; then
             lab_log "e5 $id: no ready times (timeline unusable)"; ready_txt=""
+          else
+            e5_spread_of "$id" "$ready_txt" spread_v
+            spread[$arm,$phase]="$spread_v"
           fi
           ;;
         ray)
@@ -237,7 +255,7 @@ e5_main() {
     done
   done
 
-  printf 'system,phase,pc,ready_s,rx_bytes,reused\n' >"$out"
+  printf 'system,phase,pc,ready_s,rx_bytes,reused,spread\n' >"$out"
   local rv rxv cold reused
   for arm in pipedpeer pip ray; do
     for phase in "${phases[@]}"; do
@@ -253,7 +271,7 @@ e5_main() {
         else
           lab_log "e5 $arm/$phase/$pc: no cold or phase rx_bytes; reused left empty"
         fi
-        printf '%s,%s,%s,%s,%s,%s\n' "$arm" "$phase" "$pc" "$rv" "$rxv" "$reused" >>"$out"
+        printf '%s,%s,%s,%s,%s,%s,%s\n' "$arm" "$phase" "$pc" "$rv" "$rxv" "$reused" "${spread[$arm,$phase]:-}" >>"$out"
       done
     done
   done

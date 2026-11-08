@@ -24,20 +24,42 @@ source "$REPO/scripts/campaign/test/fakelab.sh"
 # one line in $RESULTS, and the final count is read back from it.
 RESULTS="$(mktemp)"
 problems=()
-dirs=()
+
+# Rows call newdir inside $(...), a subshell, so an array append there is
+# lost; the dirs are written to a file the parent reads. (The old array stayed
+# empty, so nothing was removed and no row's processes were ever stopped: a
+# run.sh left behind by a killed test kept polling for its job for an hour.)
+DIRS_FILE="$RESULTS.dirs"
+
+# kill_dir_procs <dir>: SIGKILL every process whose environment names <dir>
+# (LAB / LAB_RESULTS / HOME of a row), except this shell. A command line does
+# not carry the lab dir; the environment does.
+kill_dir_procs() {
+	local e p
+	for e in /proc/[0-9]*/environ; do
+		p="${e#/proc/}"; p="${p%/environ}"
+		[[ "$p" == "$$" || "$p" == "$BASHPID" ]] && continue
+		if tr '\0' '\n' 2>/dev/null <"$e" | grep -qE -- "=$1([/:]|\$)"; then
+			kill -KILL "$p" 2>/dev/null || true
+		fi
+	done
+}
 
 cleanup() {
 	local d
 	if [[ "${LAB_TEST_KEEP:-0}" == 1 ]]; then
-		printf 'kept: %s\n' "${dirs[*]}" >&2
+		printf 'kept: %s\n' "$(tr '\n' ' ' <"$DIRS_FILE" 2>/dev/null)" >&2
 		return
 	fi
-	for d in "${dirs[@]}"; do
+	while IFS= read -r d; do
+		[[ -n "$d" ]] || continue
+		kill_dir_procs "$d"
 		rm -rf "$d"
-	done
-	rm -f "$RESULTS"
+	done <"$DIRS_FILE" 2>/dev/null
+	rm -f "$RESULTS" "$DIRS_FILE"
 }
 trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 ok() { echo ok >>"$RESULTS"; printf 'ok   %s\n' "$1"; }
 bad() { echo bad >>"$RESULTS"; printf 'FAIL %s%s\n' "$1" "${2:+ -- $2}"; }
@@ -59,7 +81,7 @@ newdir() {
 	local d
 	d="$(mktemp -d "$STATE/campaign-run-test.XXXXXX")"
 	mkdir -p "$d/home" "$d/bin"
-	dirs+=("$d")
+	printf '%s\n' "$d" >>"$DIRS_FILE"
 	printf '%s\n' "$d"
 }
 
@@ -543,6 +565,20 @@ grep -q 'remote_items=0' "$LAB/BLOCKERS.md" 2>/dev/null || pnote "skipped SMOKE 
 run.sh SMOKE --workloads W2 --systems pipedpeer --sizes 2 --repeats 1 >/dev/null 2>&1
 [[ "$(grep -c 'remote_items=0' "$LAB/BLOCKERS.md")" == 1 ]] || pnote "a second resume duplicated the BLOCKERS line"
 verdict "SMOKE gate fires for a skipped run, once")
+
+# --- F2: cleanup stops a row's leftover processes and finds the dirs ---------
+(d=$(newdir)
+grep -qxF -- "$d" "$DIRS_FILE" || pnote "newdir in \$(...) was not recorded for cleanup"
+LAB_RESULTS="$d" sleep 300 &
+orphan=$!
+LAB_RESULTS="$d-other" sleep 300 &
+bystander=$!
+kill_dir_procs "$d"
+sleep 0.3
+kill -0 "$orphan" 2>/dev/null && pnote "a process carrying the row's dir survived cleanup"
+kill -0 "$bystander" 2>/dev/null || pnote "cleanup killed a process of another dir"
+kill "$bystander" "$orphan" 2>/dev/null || true
+verdict "cleanup kills processes of the row's dir only, and knows every dir")
 
 # --- F1: the summary fails when a row fails -----------------------------------
 (d=$(newdir)

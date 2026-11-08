@@ -292,14 +292,20 @@ def table_e5(data):
                   if r["system"] == sys_ and r["phase"] == phase]
             ready = [float(r["ready_s"]) for r in rs if r["ready_s"] != ""]
             reuse = [float(r["reused"]) for r in rs if r["reused"] != ""]
+            spread = [float(r["spread"]) for r in rs
+                      if r.get("spread", "") != ""]
             rows.append({"system": sys_, "phase": phase,
                          "ready_s_max": max(ready) if ready else None,
                          "ready_s_median": float(np.median(ready)) if ready else None,
                          "rx_total": sum(float(r["rx_bytes"]) for r in rs
                                          if r["rx_bytes"] != ""),
-                         "reused_all": (min(reuse) > 0) if reuse else None})
+                         "reused_all": (min(reuse) > 0) if reuse else None,
+                         "spread_all": ((min(spread) > 0) if spread else None)})
+        if spread and min(spread) == 0:
+            print(f"WARN E5 {sys_}: some runs did not spread across PCs "
+                  "(spread=0); their ready times do not measure shipping")
     cols = ["system", "phase", "ready_s_max", "ready_s_median", "rx_total",
-            "reused_all"]
+            "reused_all", "spread_all"]
     return cols, rows
 
 
@@ -416,6 +422,13 @@ def make_figures(lab, groups, weak):
     for exp in sorted(groups):
         rows = _read_csv_rows(analysis / f"{exp}.csv")
         if not rows:
+            continue
+        if "workload" not in rows[0]:
+            # extras_tables wrote this experiment's own table over the
+            # per-workload one; say so rather than fail on the missing column
+            print(f"SKIP FIGURE {exp.lower()}-speedup (analysis/{exp}.csv "
+                  f"has no workload column: it is the {exp} table, absent "
+                  "per-workload speedup rows)")
             continue
         for w in sorted({r["workload"] for r in rows}):
             curve(f"{exp.lower()}-speedup-{w.lower()}",

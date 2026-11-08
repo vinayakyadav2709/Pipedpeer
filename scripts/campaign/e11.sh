@@ -46,6 +46,29 @@ read_counters() {
   printf '%s\n' "$v"
 }
 
+# e11_result_ok <run_id>: "true" or "false" as recorded in runs.jsonl; empty
+# (with the reason logged) when the record has no value or there is no record.
+# Never the text "null".
+e11_result_ok() {
+  local v
+  v="$(python3 - "$LAB/runs.jsonl" "$1" <<'PY'
+import json, sys
+try:
+    for ln in open(sys.argv[1]):
+        d = json.loads(ln)
+        if d.get("run_id") == sys.argv[2]:
+            v = d.get("result_ok")
+            print("" if v is None else str(bool(v)).lower())
+            sys.exit(0)
+except FileNotFoundError:
+    pass
+sys.exit(3)
+PY
+)" || { lab_log "e11 $1: no record in runs.jsonl; result_ok left empty"; return 0; }
+  [[ -n "$v" ]] || lab_log "e11 $1: the record has no result_ok (no reference to check against); left empty"
+  printf '%s\n' "$v"
+}
+
 e11_idle() { "${E11_IDLE_SLEEP:-sleep}" "$1"; }
 
 e11_main() {
@@ -144,6 +167,7 @@ print(int(v) if v == int(v) else round(v, 2))
 
     if [[ "$k" == "$all" ]]; then
       campaign_run_one E11 W1 pipedpeer "$k" 1 0 || lab_log "e11: the W1 run at all=$k did not finish cleanly"
+      lab_log "e11: W1 run at all=$k result_ok=$(e11_result_ok "E11-W1-pipedpeer-n$k-r1")"
     fi
     unset kstart
   done

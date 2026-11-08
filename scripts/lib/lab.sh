@@ -1,3 +1,4 @@
+# shellcheck shell=bash disable=SC2034
 # Shared helpers for the container labs (lab-emu.sh, lab-net.sh).
 # Source it after lib/runtime.sh; do not execute it.
 #
@@ -48,7 +49,12 @@ pp_lab_mem_check() {
 	local total running cap avail why waited=0 limit="${LAB_MEM_WAIT:-600}"
 	# Every lab container has a memory cap, so a short spare only risks the
 	# lab OOMing, never the host; 4 GB is the default for a desktop in use.
-	local spare="${LAB_MEM_SPARE:-4}"
+	local spare="${LAB_MEM_SPARE:-4}" spare_b
+	if ! [[ "$spare" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+		echo "$label: LAB_MEM_SPARE must be a number of GB (e.g. 4 or 0.5), got '$spare'" >&2
+		return 1
+	fi
+	spare_b="$(awk -v s="$spare" -v g="$gib" 'BEGIN { printf "%d", s * g }')"
 	total="$(pp_meminfo MemTotal)"
 	cap=$((total - 5 * gib))
 	if ((want > cap)); then
@@ -63,8 +69,8 @@ pp_lab_mem_check() {
 		if ((running + want > cap)); then
 			why="$(printf '%.1f GB wanted + %.1f GB in running containers > %.1f GB cap (host RAM - 5 GB)' \
 				"$(bc_g "$want")" "$(bc_g "$running")" "$(bc_g "$cap")")"
-		elif ((avail - spare * gib < want)); then
-			why="$(printf '%.1f GB wanted, MemAvailable %.1f GB (needs %d GB spare; LAB_MEM_SPARE)' "$(bc_g "$want")" "$(bc_g "$avail")" "$spare")"
+		elif ((avail - spare_b < want)); then
+			why="$(printf '%.1f GB wanted, MemAvailable %.1f GB (needs %s GB spare; LAB_MEM_SPARE)' "$(bc_g "$want")" "$(bc_g "$avail")" "$spare")"
 		fi
 		[[ -z "$why" ]] && return 0
 		if ((waited >= limit)); then
