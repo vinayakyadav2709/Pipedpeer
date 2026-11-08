@@ -35,6 +35,7 @@ campaign-test:
 	bash scripts/campaign/test/metrics_test.sh
 	bash scripts/campaign/test/upload_test.sh
 	bash scripts/campaign/test/run_test.sh
+	bash scripts/campaign/test/exp_test.sh
 	bash scripts/campaign/test/ports_test.sh
 	python3 -m pytest -q scripts/campaign/test/test_analyse.py
 
