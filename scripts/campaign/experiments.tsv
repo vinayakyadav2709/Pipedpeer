@@ -1,0 +1,24 @@
+# Pipedpeer lab campaign experiment matrix (brief S9; cases in
+# docs/benchmarks/campaign-cases.md). Tab separated, one row per
+# (workload set, systems, sizes) slice:
+#   experiment workload systems sizes repeats warmup timeout_s size_mode
+# systems: plain pipedpeer pipedpeer-headcount pipedpeer-noshim ray dask ssh
+#          pipedpeer-exact pipedpeer-fast torchrun
+# sizes: comma list of N, or `scaling` = 1,2,4,8,16,24,32; plain runs only at
+#        n=1 (a higher N needs a cluster to split a run across). E8's sizes are
+#        the DDP ranks / node counts. Slices of E8 keep per-system sizes, so
+#        E8 has one row per system subset.
+# warmup: warm-up runs (r0) per (workload, system, N) before the shuffled repeats.
+# timeout_s: lab_wait timeout for one run (ASSUMED: none of the steps pin
+#        these numbers; they are deliberately generous, ~10x a measured run).
+# E8's repeats are the seeds: 11,12,13 = BENCH_SEED = 10 + repeat (run.sh sets it).
+experiment	workload	systems	sizes	repeats	warmup	timeout_s	size_mode
+REF	W1,W2,W3,T1,idle,trivial	plain	1	1	0	3600	strong
+FC	trivial	pipedpeer,ray,dask,ssh	2	10	0	600	strong
+E1	W1,W2,W3	plain,pipedpeer,ray,dask,ssh	scaling	5	1	7200	strong
+E1b	W1	pipedpeer,ray,dask,ssh	scaling	5	0	7200	weak
+E7	idle	pipedpeer,pipedpeer-noshim	1	5	0	1800	strong
+E8	T1	pipedpeer-exact	2,4,8	3	0	10800	strong
+E8	T1	pipedpeer-fast	2,4	3	0	10800	strong
+E8	T1	torchrun	2,4,8	3	0	10800	strong
+SMOKE	W1,W2,W3	plain,pipedpeer,ray,dask,ssh	1,2	1	0	900	strong
