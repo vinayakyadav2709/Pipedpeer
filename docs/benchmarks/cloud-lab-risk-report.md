@@ -152,7 +152,36 @@ the head container carries Dask too. Left as is, and recorded.
   memory is MemTotal or a smaller cgroup limit (`LAB_MEM_PROBE`). The thresholds
   come from the table above, with headroom (v1).
 
-## Task 5: steps 5–8: TASK5-RESULT
+## Task 5: steps 5–8: done; all four pass, after one harness fix
+
+`UBU_LAB_FROM=5 scripts/campaign/test-ubuntu-lab.sh test`, with `UBU_LAB_SLEEP`
+and `UBU_LAB_DROP` at their defaults (600 s job, 90 s drop).
+`CAMPAIGN_TIMEOUT_CAP_S` was left **unset**: it only lowers a run's timeout
+(`run.sh:546`), so unset gives the full `experiments.tsv` timeouts. Log:
+`cloud-lab/ubuntu-lab-steps.log`.
+
+- **Step 5** (pins, venv): PASS. The first try failed on the VM, not the harness:
+  the E19 purge had replaced the `nss-cacert` store path, which dropped the
+  interception-CA patch. Re-patched, then PASS.
+- **Step 6** (driver off the network for 90 s during a 600 s detached job): PASS.
+  The job was not started twice and its result was fetched. Retries on a dropped
+  SSH work (v1; one bridge network).
+- **Step 7** (SMOKE, REF, FC, E7, E8, e4 dry-run, e5, e6, e11, upload to the local
+  `rclone serve s3`, analyse): PASS. The first try stopped in REF only because this
+  session's machine restarted, which killed dockerd. After the containers were
+  restarted it passed whole, in about 50 minutes.
+- **Step 8** (uninstall, undo, compare with the step-1 snapshot):
+  - First FAIL on all three PCs: `/usr/bin/bash: /tmp/lab-pc.sh: No such file or
+    directory`. The restart was a reboot, and systemd cleans `/tmp`.
+  - **Harness bug** (ef613de): every post-setup command
+    pointed at `/tmp/lab-pc.sh`, though setup keeps its own copy in
+    `/var/lib/pipedpeer-lab/`. Ports and undo now use that copy, in the test,
+    OPERATOR.md, LAB-GUIDE.md and preflight. Step 8 also tolerates a rerun.
+  - Then PASS: every PC was identical to its step-1 snapshot, even after the
+    reboot.
+
+Does not prove: undo against a real GNOME session (gsettings) or a real ufw on
+the host. Steps 6 and 7 ran on one bridge network.
 
 ## Task 6: E19's purge and warm-up retry: done, the purge was broken
 
@@ -278,4 +307,15 @@ tells the operator to send that folder and not try fixes.
   left unset for task 5, so the `experiments.tsv` timeouts applied.
 - `e19_test.sh` row H3 fails on this VM (`chmod 555` does not stop root); it fails
   the same way without these changes.
-- `make campaign-test` FULL-SUITE-RESULT
+- `make campaign-test` (whole suite, once at the end; failures rerun alone, none
+  reported LOAD-ONLY): **26 of 30 files pass**. The 4 failures are this machine's:
+  - `e19_test.sh` H3 and `test_sweep.py::test_fileio_read_only_dir_names_the_path`
+    need a non-root user (read-only dirs do not stop root).
+  - `upload_test.sh` needs `rclone`, which I could not install on this host (the
+    download was refused).
+  - `ports_test.sh` fails the same 2 rows ("ray stopped, nothing left") on
+    unchanged `dev`.
+
+  One earlier commit message says 29; the right count is 26.
+- Earlier in the session, single files failed under load (the `cpu_sampler` row
+  in `e19_test`, the E17 Ctrl-C row) and passed when rerun alone.
