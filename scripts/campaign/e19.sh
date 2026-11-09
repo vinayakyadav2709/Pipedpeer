@@ -27,7 +27,7 @@
 # repeat, and a rerun skips the repeats already recorded.
 #
 # Output $LAB/analysis-input/e19.csv:
-#   system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status
+#   system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status,purged_bytes,closure_bytes
 # kind is baseline, join, or join_aborted for a repeat that gave no join rows.
 # join_status is ok, partial (exit 2, confirmed by the cluster), timeout, failed, no_result or no_cores on a join row, and
 # why the repeat stopped on a join_aborted row: cluster_failed, no_baseline,
@@ -47,8 +47,8 @@ source "$CAMP/run.sh"
 
 CLUSTER_SH="${CLUSTER_SH:-$CAMP/cluster.sh}"
 
-E19_CSV_HEADER='system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status'
-E19_ROWS_HEAD='e19-rows-v1 rid|sys|kind|i|pc|join_s|first_work_s|wall_s|seed_s|jwarm|status|csum'
+E19_CSV_HEADER='system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status,purged_bytes,closure_bytes'
+E19_ROWS_HEAD='e19-rows-v2 rid|sys|kind|i|pc|join_s|first_work_s|wall_s|seed_s|jwarm|status|csum|purged|closure'
 E19_STORE_PATH_RE='^/nix/store/[a-z0-9]{32}-[A-Za-z0-9._+-]+$'
 
 e19_usage() {
@@ -426,15 +426,15 @@ e19_journal_add() {
 # no join rows, so it shows in the CSV and not as a gap.
 e19_abort_repeat() {
   local id="$1" sys="$2" rep="$3" status="$4" wall="${5:-}"
-  e19_journal_add "$id|$sys|join_aborted|$rep||||$wall|||$status|"
+  e19_journal_add "$id|$sys|join_aborted|$rep||||$wall|||$status|||"
 }
 
 # e19_recorded <run_id>: true when the journal holds a finished result for the
 # run. A repeat stopped by a cluster failure or a missing baseline is retried.
 e19_recorded() {
-  local id="$1" line rid sys kind i pc js fw wall seed warm status csum
+  local id="$1" line rid sys kind i pc js fw wall seed warm status csum pbytes cbytes
   while IFS= read -r line; do
-    IFS='|' read -r rid sys kind i pc js fw wall seed warm status csum <<<"$line"
+    IFS='|' read -r rid sys kind i pc js fw wall seed warm status csum pbytes cbytes <<<"$line"
     [[ "$rid" == "$id" ]] || continue
     case "$kind/$status" in
       join_aborted/cluster_failed | join_aborted/no_baseline) continue ;;
@@ -474,12 +474,12 @@ e19_init_outputs() {
 # e19_render_csv <interim|final>: rewrite the CSV from the journal: last row wins
 # per run, kind and PC; a repeat that has join rows drops an earlier abort row.
 e19_render_csv() {
-  local mode="$1" line rid sys kind i pc js fw wall seed warm status csum key tmp res_map ok_val
+  local mode="$1" line rid sys kind i pc js fw wall seed warm status csum pbytes cbytes key tmp res_map ok_val
   local -A last_line=() key_seen=() has_join=() ok_map=() pair_seen=()
   local -a keys=() pairs=()
   while IFS= read -r line; do
     [[ -n "$line" && "$line" != "$E19_ROWS_HEAD" ]] || continue
-    IFS='|' read -r rid sys kind i pc js fw wall seed warm status csum <<<"$line"
+    IFS='|' read -r rid sys kind i pc js fw wall seed warm status csum pbytes cbytes <<<"$line"
     key="$rid|$kind|$pc"
     if [[ -z "${key_seen[$key]:-}" ]]; then
       keys+=("$key")
@@ -506,10 +506,10 @@ e19_render_csv() {
   {
     printf '%s\n' "$E19_CSV_HEADER"
     for key in "${keys[@]}"; do
-      IFS='|' read -r rid sys kind i pc js fw wall seed warm status csum <<<"${last_line[$key]}"
+      IFS='|' read -r rid sys kind i pc js fw wall seed warm status csum pbytes cbytes <<<"${last_line[$key]}"
       if [[ "$kind" == join_aborted && -n "${has_join[$rid]:-}" ]]; then continue; fi
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$sys" "$kind" "$i" "$pc" "$js" "$fw" "$wall" "${ok_map[$rid]:-}" "$seed" "$warm" "$status"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$sys" "$kind" "$i" "$pc" "$js" "$fw" "$wall" "${ok_map[$rid]:-}" "$seed" "$warm" "$status" "$pbytes" "$cbytes"
     done
   } >"$tmp"
   mv -f "$tmp" "$E19_CSV"
@@ -559,50 +559,98 @@ e19_prepare() {
   }
 }
 
-# e19_purge_and_probe <pc> <closure path or ""> <run_id>: remove the closure and
-# the closure caches, then print what the disk says: 0 gone, 1 still there,
-# nothing when it cannot be told.
-e19_purge_and_probe() {
-  local pc="$1" path="$2" id="$3" out rc=0 rel=""
-  [[ -z "$path" ]] || rel="${path#/nix/store/}"
-  out="$(lab_ssh "$pc" "
-    d=\"\${XDG_DATA_HOME:-\$HOME/.local/share}/pipedpeer\"
-    sys='${E19_SYS_STORE:-/nix/store}'
-    rm -rf \"\$d/work/nar-cache\" \"\$d/closure-cache\" || echo \"NOTE cache removal failed\"
-    rel='$rel'
-    if [ -n \"\$rel\" ]; then
-      # private store: plain rm; system store (root-owned): through the Nix daemon
-      if [ -e \"\$d/nix/store/\$rel\" ]; then
-        rm -rf \"\$d/nix/store/\$rel\" 2>&1 | sed 's/^/NOTE private store rm: /'
-      fi
-      if [ -e \"\$sys/\$rel\" ]; then
-        if command -v nix-store >/dev/null 2>&1; then
-          nix-store --delete \"\$sys/\$rel\" 2>&1 | sed 's/^/NOTE nix-store --delete: /'
-        else
-          echo 'NOTE nix-store not found; the system-store closure cannot be deleted'
-        fi
-      fi
-      if [ -e \"\$d/nix/store/\$rel\" ] || [ -e \"\$sys/\$rel\" ]; then echo present; else echo absent; fi
+# e19_purge_script: the body run on a joiner (after sys=, rel= are set): remove
+# the closure caches, then the closure's requisites, dependents first, each
+# --delete on its own so a refusal (a shared dependency) is logged and the rest
+# still go. Prints NOTE lines, "BYTES <purged> <closure>" (nar bytes of the
+# requisites present before the purge, and of those gone after), then
+# present|absent for the top path.
+e19_purge_script() {
+  cat <<'EOS'
+d="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer"
+rm -rf "$d/work/nar-cache" "$d/closure-cache" || echo "NOTE cache removal failed"
+purged=0; total=0
+if [ -n "$rel" ]; then
+  # private store: plain rm of the closure's top path
+  if [ -e "$d/nix/store/$rel" ]; then
+    sz="$(du -sb "$d/nix/store/$rel" 2>/dev/null | cut -f1)"
+    case "$sz" in ''|*[!0-9]*) echo "NOTE private store size unknown for $rel"; sz=0 ;; esac
+    total=$((total + sz))
+    rm -rf "$d/nix/store/$rel" 2>&1 | sed 's/^/NOTE private store rm: /'
+    [ -e "$d/nix/store/$rel" ] || purged=$((purged + sz))
+  fi
+  # system store (root-owned): requisites through the Nix daemon
+  if [ -e "$sys/$rel" ]; then
+    if command -v nix-store >/dev/null 2>&1; then
+      reqs="$(nix-store -qR "$sys/$rel" 2>&1)" || { echo "NOTE nix-store -qR failed, only the top path is deleted: $reqs"; reqs=; }
+      list="$sys/$rel"
+      for p in $(printf '%s\n' "$reqs" | tac); do
+        [ "$p" = "$sys/$rel" ] || list="$list $p"
+      done
+      for p in $list; do
+        case "$p" in
+          "$sys"/?*) ;;
+          *) echo "NOTE skipped requisite outside the store: $p"; continue ;;
+        esac
+        [ -e "$p" ] || continue
+        sz="$(nix-store -q --size "$p" 2>/dev/null)"
+        case "$sz" in ''|*[!0-9]*) echo "NOTE size unknown for $p"; sz=0 ;; esac
+        total=$((total + sz))
+        o="$(nix-store --delete "$p" 2>&1)" || echo "NOTE nix-store --delete refused $p: $o"
+        [ -e "$p" ] || purged=$((purged + sz))
+      done
+    else
+      echo 'NOTE nix-store not found; the system-store closure cannot be deleted'
     fi
-  " 2>&1)" || rc=$?
+  fi
+  echo "BYTES $purged $total"
+  if [ -e "$d/nix/store/$rel" ] || [ -e "$sys/$rel" ]; then echo present; else echo absent; fi
+fi
+EOS
+}
+
+# e19_purge_and_probe <pc> <closure path or ""> <run_id>: purge, then print
+# "warm|purged_bytes|closure_bytes". warm is 0 when at least 90% of the closure
+# bytes went, else 1; with no byte count it is what the disk says for the top
+# path. Prints nothing when it cannot be told or no path is known.
+e19_purge_and_probe() {
+  local pc="$1" path="$2" id="$3" out rc=0 rel="" b64 note bytes="" purged="" total="" last warm=""
+  [[ -z "$path" ]] || rel="${path#/nix/store/}"
+  b64="$(e19_purge_script | base64 -w0)"
+  out="$(lab_ssh "$pc" "sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
   if ((rc != 0)); then
     lab_log "e19 $id: closure purge on $pc failed (ssh exit $rc): ${out:-(no output)}; joiner_warm left empty"
     return 0
   fi
-  local note
   while IFS= read -r note; do
     [[ "$note" == NOTE\ * ]] && lab_log "e19 $id: purge on $pc: ${note#NOTE }"
   done <<<"$out"
-  out="$(grep -v '^NOTE ' <<<"$out" | tail -1 || true)"
   [[ -n "$path" ]] || return 0
-  case "$out" in
-    absent) printf 0 ;;
-    present)
-      lab_log "e19 $id: closure still on $pc after the purge; flagged joiner_warm=1"
-      printf 1
-      ;;
-    *) lab_log "e19 $id: no answer from $pc on the closure ('$out'); joiner_warm left empty" ;;
-  esac
+  bytes="$(grep '^BYTES ' <<<"$out" | tail -1 || true)"
+  last="$(grep -v '^NOTE \|^BYTES ' <<<"$out" | tail -1 || true)"
+  if [[ "$bytes" =~ ^BYTES\ ([0-9]+)\ ([0-9]+)$ ]]; then
+    purged="${BASH_REMATCH[1]}"
+    total="${BASH_REMATCH[2]}"
+  fi
+  if [[ -n "$total" ]] && ((total > 0)); then
+    if ((purged * 100 >= total * 90)); then
+      warm=0
+    else
+      warm=1
+      lab_log "e19 $id: only $purged of $total closure bytes removed on $pc; flagged joiner_warm=1"
+    fi
+  else
+    case "$last" in
+      absent) warm=0 ;;
+      present)
+        warm=1
+        lab_log "e19 $id: closure still on $pc after the purge; flagged joiner_warm=1"
+        ;;
+      *) lab_log "e19 $id: no answer from $pc on the closure ('$last'); joiner_warm left empty"
+         return 0 ;;
+    esac
+  fi
+  printf '%s|%s|%s' "$warm" "$purged" "$total"
 }
 
 # e19_join_script <sys> <id> <driver ip> <joiner ip> <cores> <invite code>:
@@ -838,7 +886,9 @@ e19_one_repeat() {
       seed_s="$(e19_extract_seed_s "$jpc" "$(lab_ip "$jpc")")"
     fi
 
-    e19_journal_add "$run_id|$sys|join|$rep|$jpc|$join_s|$first_work_s|$run_wall|$seed_s|${warm_of[$jpc]:-}|$status|$run_csum"
+    local jwarm="" jpurged="" jclosure=""
+    IFS="|" read -r jwarm jpurged jclosure <<<"${warm_of[$jpc]:-}"
+    e19_journal_add "$run_id|$sys|join|$rep|$jpc|$join_s|$first_work_s|$run_wall|$seed_s|$jwarm|$status|$run_csum|$jpurged|$jclosure"
   done
 }
 
@@ -862,7 +912,7 @@ e19_one_system() {
 
   IFS='|' read -r base_wall base_csum base_start base_exit <<<"$(e19_extract_run_info "$base_id")"
   if ! e19_recorded "$base_id"; then
-    e19_journal_add "$base_id|$sys|baseline|0||||$base_wall||||$base_csum"
+    e19_journal_add "$base_id|$sys|baseline|0||||$base_wall||||$base_csum||"
   fi
   if [[ "$base_exit" == 0 ]] && e19_is_number "$base_wall"; then
     usable=1

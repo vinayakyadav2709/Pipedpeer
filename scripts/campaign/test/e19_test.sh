@@ -685,7 +685,7 @@ d="$(newdir)"
 mkdir -p "$d/analysis-input"
 printf 'system,kind,i,pc,join_s,first_work_s,wall_s,result_ok\nray,baseline,0,,,,1.0,1\n' >"$(csv_of "$d")"
 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
-[[ "$(head -1 "$(csv_of "$d")")" == *,join_status ]] || pnote "header: $(head -1 "$(csv_of "$d")")"
+[[ "$(head -1 "$(csv_of "$d")")" == *,join_status,purged_bytes,closure_bytes ]] || pnote "header: $(head -1 "$(csv_of "$d")")"
 [[ "$(grep -c 'wall_s' "$(csv_of "$d")")" == 1 ]] || pnote "two headers in one file"
 ls "$d/analysis-input/"e19.csv.old-* >/dev/null 2>&1 || pnote "old-format file not kept aside"
 verdict "L1 a CSV of an older column order is moved aside, never mixed"
@@ -783,6 +783,53 @@ d="$(newdir)"
 FAKE_STATUS_ROWS=2 run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 [[ "$(st "$d")" == ok ]] || pnote "exit 0: want ok: $(cat "$(csv_of "$d")")"
 verdict "E2-3 exit 0: ok, unchanged"
+
+# ---------------------------------------------------------------------- FIX-V5d: purge the closure's requisites
+# Fake nix-store: -qR lists dependencies first (the top path last), --size reads
+# <path>.size, --delete refuses the paths named in $FAKELAB_DIR/refuse.
+CLOSURE_STUB='case "$1" in
+  -qR) cat "$2.reqs" 2>/dev/null || echo "$2" ;;
+  -q) cat "$3.size" ;;
+  --delete) echo "$2" >>"$FAKELAB_DIR/nixstore.log"
+    if grep -qx -- "$2" "$FAKELAB_DIR/refuse" 2>/dev/null; then echo "error: cannot delete path $2: still alive" >&2; exit 1; fi
+    rm -rf "$2" ;;
+esac'
+mk_closure() { # <d> <top size> <dep1 size> <dep2 size>
+  local s="$1/sysstore" t="$RELP"
+  mkdir -p "$s/$t" "$s/dep1-x" "$s/dep2-x"
+  echo "$2" >"$s/$t.size"; echo "$3" >"$s/dep1-x.size"; echo "$4" >"$s/dep2-x.size"
+  printf '%s\n' "$s/dep2-x" "$s/dep1-x" "$s/$t" >"$s/$t.reqs"
+}
+run_closure() { NIX_STUB="$CLOSURE_STUB" E19_SYS_STORE="$1/sysstore" E19_STORE_PATH="$SP" run_e19 "$1" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?: $(tail -3 "$1/e19.log")"; }
+
+d="$(newdir)"; mk_closure "$d" 10 20 70
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" && ! -e "$d/sysstore/$RELP" ]] || pnote "requisites remain"
+[[ "$(head -1 "$d/nixstore.log")" == "$d/sysstore/$RELP" ]] || pnote "dependents not first: $(tr '\n' ' ' <"$d/nixstore.log")"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 100 && "$(col "$(csv_of "$d")" 13 join)" == 100 ]] || pnote "want warm 0, bytes 100/100: $(cat "$(csv_of "$d")")"
+verdict "V5d all requisites deletable: dependents first, warm 0, purged_bytes = closure_bytes"
+
+d="$(newdir)"; mk_closure "$d" 10 80 10
+echo "$d/sysstore/dep1-x" >"$d/refuse"
+run_closure "$d"
+[[ -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "wrong paths removed"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 && "$(col "$(csv_of "$d")" 12 join)" == 20 && "$(col "$(csv_of "$d")" 13 join)" == 100 ]] || pnote "want warm 1, bytes 20/100: $(cat "$(csv_of "$d")")"
+grep -q 'refused.*dep1-x.*still alive' "$d/campaign.log" || pnote "refusal not logged with the path"
+verdict "V5d shared dependency refused, under 90% removed: warm 1, refusal logged"
+
+d="$(newdir)"; mk_closure "$d" 50 5 45
+echo "$d/sysstore/dep1-x" >"$d/refuse"
+run_closure "$d"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 95 && "$(col "$(csv_of "$d")" 13 join)" == 100 ]] || pnote "want warm 0, bytes 95/100: $(cat "$(csv_of "$d")")"
+grep -q 'refused.*dep1-x' "$d/campaign.log" || pnote "refusal not logged"
+verdict "V5d refused dependency but 95% removed: warm 0, bytes 95/100"
+
+d="$(newdir)"
+store="$d/pc01/.local/share/pipedpeer/nix/store"; mkdir -p "$store/keep" "$d/sysstore/keep"
+NIX_STUB="$CLOSURE_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH=/nix/store/ run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ -e "$store/keep" && -e "$d/sysstore/keep" && ! -e "$d/nixstore.log" ]] || pnote "something was deleted for /nix/store/"
+[[ -z "$(col "$(csv_of "$d")" 10 join)" && -z "$(col "$(csv_of "$d")" 12 join)" && -z "$(col "$(csv_of "$d")" 13 join)" ]] || pnote "warm and bytes must be empty: $(cat "$(csv_of "$d")")"
+verdict "V5d /nix/store/ as the path: nothing deleted, warm and bytes empty"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"
