@@ -151,7 +151,9 @@ def _verdict(lo, hi):
 def _group_row(exp, w, s, n, g):
     med = float(np.median(g.walls)) if g.walls else None
     ref = Counter(g.refs).most_common(1)[0][0] if g.refs else "none"
-    ok_all = (not any(v is False or v == 0 or v == "0" or v == "false" for v in g.oks)) if g.oks else None
+    known = [v for v in g.oks if v is not None]
+    # no reference in any run: nothing was checked, so neither True nor False
+    ok_all = (not any(v is False or v == 0 or v == "0" or v == "false" for v in known)) if known else None
     return {
         "experiment": exp, "workload": w, "system": s, "n": n,
         "size": g.size(), "repeats": len(g.walls), "dropped": g.dropped,
@@ -220,6 +222,8 @@ def check_groups(groups, exp, warns):
                         warns.append(f"result_ok-false {rid}")
             have = sorted(groups[exp][w][s])
             for n in ns_all:
+                if have == [1]:
+                    break  # single-machine arm (plain): never planned at N>1
                 if n not in have:
                     warns.append(f"missing {exp} {w} {s} n={n}")
 
@@ -254,7 +258,7 @@ def check_predictions(lab, speedups, warns):
         ok_speed = ("speedup" not in params
                     or (math.isfinite(at)
                         and at >= float(params["speedup"]) * 0.9))
-        held = ("min_n" not in params or mine == int(params["min_n"])) \
+        held = ("min_n" not in params or (mine is not None and mine <= int(params["min_n"]))) \
             and ok_speed
         if not held:
             warns.append(f"prediction-missed {system} {workload} {rest}")
@@ -363,8 +367,9 @@ def table_e5(data):
             rows.append({"system": sys_, "phase": phase,
                          "ready_s_max": max(ready) if ready else None,
                          "ready_s_median": float(np.median(ready)) if ready else None,
-                         "rx_total": sum(float(r["rx_bytes"]) for r in rs
-                                         if r["rx_bytes"] != ""),
+                         "rx_total": (sum(float(r["rx_bytes"]) for r in rs)
+                                      if all(r["rx_bytes"] != "" for r in rs)
+                                      else None),
                          "reused_all": (min(reuse) > 0) if reuse else None,
                          "spread_all": ((min(spread) > 0) if spread else None),
                          "status": status})
@@ -445,12 +450,16 @@ def vmstat_util(path):
     """Mean (us+sy) from a vmstat -t log; None when unparseable."""
     idx = idx_sy = None
     vals = []
+    first = True
     for line in path.read_text().splitlines():
         parts = line.split()
         if idx is None:
             if "us" in parts and "sy" in parts:
                 idx, idx_sy = parts.index("us"), parts.index("sy")
         elif len(parts) > max(idx, idx_sy):
+            if first:
+                first = False  # first vmstat line averages since boot
+                continue
             try:
                 vals.append(float(parts[idx]) + float(parts[idx_sy]))
             except ValueError:

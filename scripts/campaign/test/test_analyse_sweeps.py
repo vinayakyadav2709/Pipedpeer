@@ -411,3 +411,37 @@ def test_e11_table_shows_a_partial_join():
 def test_e11_table_shows_a_full_join():
     _, rows = table_e11([_e11_row("16/16")])
     assert rows[0]["joined"] == "16/16"
+
+
+# --- FX3 (final-triage FU-D) ---
+def test_e18_timeouts_leave_a_censor_note(tmp_path):  # H10
+    p = tmp_path / "e18.csv"
+    p.write_text("system,i,pc,detect_s,timed_out\n"
+                 "ray,1,pc1,4,0\nray,2,pc1,,1\nray,3,pc1,,1\n")
+    _, rows = analyse_sweeps.table_e18_from_csv(p)
+    assert rows[0]["detect_s_median"] == pytest.approx(4.0)
+    assert "2 of 3" in rows[0]["note"]
+
+
+def test_e18_no_timeout_no_note(tmp_path):  # H10 opposite
+    p = tmp_path / "e18.csv"
+    p.write_text("system,i,pc,detect_s,timed_out\nray,1,pc1,4,0\n")
+    _, rows = analyse_sweeps.table_e18_from_csv(p)
+    assert rows[0]["note"] == ""
+
+
+def test_e17_zero_new_remote_items_kept(tmp_path):  # M10
+    p = tmp_path / "e17.csv"
+    p.write_text("i,kill_at_s,job_wall_s,job_result_ok,new_join_s,new_join_ok,new_remote_items,old_invite_joined\n"
+                 "1,5,15,1,12,1,0,0\n2,5,15,1,12,1,10,0\n")
+    _, rows = analyse_sweeps.table_e17_from_csv(p)
+    assert rows[0]["new_remote_items_median"] == pytest.approx(5.0)
+
+
+def test_e19_runs_join_counts_runs_not_joiners(tmp_path):  # H09
+    p = tmp_path / "e19.csv"
+    p.write_text("system,kind,i,pc,join_s,first_work_s,wall_s,result_ok\n"
+                 "ray,join,1,pc3,5,9,60,1\nray,join,1,pc4,6,9,60,1\n"
+                 "ray,join,2,pc3,5,9,60,1\nray,join,2,pc4,6,9,60,1\n")
+    _, rows = analyse_sweeps.table_e19_from_csv(p)
+    assert rows[0]["runs_join"] == 2

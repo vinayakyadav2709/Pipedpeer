@@ -347,8 +347,9 @@ def test_figures(labs):  # PNG and PDF for every listed figure
 
 def test_predictions(labs):
     out = labs["plain"]
-    # plain predicted min_n=4 but beats its own N=1 already at n=2
-    assert "WARN prediction-missed plain W1 min_n=4 speedup=1.0" in out
+    # plain predicted min_n=4 and beats its own N=1 already at n=2: earlier
+    # crossover than predicted is not a miss (M11)
+    assert "WARN prediction-missed plain W1 min_n=4" not in out
     # ray's prediction (min_n=2, speedup 2.0) holds: no warning
     assert "WARN prediction-missed ray W1" not in out
 
@@ -661,3 +662,58 @@ def test_five_repeats_still_repeats_ok(tmp_path_factory):  # F3 L4 opposite
     _write_tight_lab(lab)
     res = _run(lab, "--spread")
     assert "REPEATS-OK" in res.stdout and "REPEATS-NONE" not in res.stdout
+
+
+# --- FX3 (final-triage FU-C): direct unit rows ---
+sys.path.insert(0, str(HERE))
+import analyse as _an  # noqa: E402
+
+
+def _grp(oks):
+    g = _an.Group(planned=1)
+    for i, ok in enumerate(oks):
+        g.add(f"r{i}", 10.0, ok, "none", {})
+    return _an._group_row("E1", "W1", "pipedpeer", 2, g)["result_ok_all"]
+
+
+def test_result_ok_all_none_when_no_reference():  # H07
+    assert _grp([None, None]) is None
+
+
+def test_result_ok_all_false_and_true():  # H07 opposite
+    assert _grp([1, 0]) is False
+    assert _grp([1, 1]) is True
+
+
+def test_no_missing_warning_for_single_n_system(tmp_path_factory):  # M01
+    rows = _seq("E1", "W1", "pipedpeer", 1, [100] * 5, ref="reference")
+    rows += _seq("E1", "W1", "pipedpeer", 2, [50] * 5)
+    rows += _seq("E1", "W1", "plain", 1, [100] * 5)
+    res = _run(_lab_with(tmp_path_factory, rows))
+    assert "missing E1 W1 plain" not in res.stdout
+
+
+def test_vmstat_skips_since_boot_sample(tmp_path):  # M02
+    p = tmp_path / "x.vmstat"
+    p.write_text(VMSTAT_TMPL.format(u1=1, s1=1, u2=40, s2=10))
+    assert _an.vmstat_util(p) == pytest.approx(50.0)
+
+
+def test_e5_rx_total_empty_when_a_pc_missing():  # M09
+    base = {"system": "ray", "phase": "cold", "ready_s": "5", "reused": "1",
+            "spread": "1"}
+    _, rows = _an.table_e5([dict(base, rx_bytes="10"), dict(base, rx_bytes="")])
+    assert rows[0]["rx_total"] is None
+    _, rows = _an.table_e5([dict(base, rx_bytes="10"), dict(base, rx_bytes="5")])
+    assert rows[0]["rx_total"] == 15
+
+
+def test_prediction_earlier_crossover_holds():  # M11
+    warns = []
+    lab = Path(__import__("tempfile").mkdtemp())
+    (lab / "predictions.md").write_text("PRED plain W1 min_n=4 speedup=1.0\n")
+    _an.check_predictions(lab, {("plain", "W1", 2): 1.5, ("plain", "W1", 4): 2.0}, warns)
+    assert not warns
+    warns = []
+    _an.check_predictions(lab, {("plain", "W1", 2): 0.5, ("plain", "W1", 8): 2.0}, warns)
+    assert warns  # crossover later than predicted still misses

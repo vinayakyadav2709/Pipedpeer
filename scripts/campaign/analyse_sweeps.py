@@ -295,7 +295,7 @@ def table_e17_from_csv(csv_path):
         elif r.get("new_join_s"):
             new_joins.append(float(r["new_join_s"]))
 
-        if r.get("new_remote_items"):
+        if r.get("new_remote_items") not in ("", None):
             new_remotes.append(float(r["new_remote_items"]))
 
         if str(r.get("old_invite_joined", "")).strip() in ("1", "true", "True"):
@@ -329,7 +329,7 @@ def table_e18_from_csv(csv_path):
     if not rows_data:
         return None, []
 
-    cols = ["system", "runs", "detect_s_median", "timed_out_count"]
+    cols = ["system", "runs", "detect_s_median", "timed_out_count", "note"]
     rows = []
 
     systems = sorted({r.get("system") for r in rows_data if r.get("system")})
@@ -348,6 +348,8 @@ def table_e18_from_csv(csv_path):
             "system": s, "runs": len(s_rows),
             "detect_s_median": float(np.median(detect_times)) if detect_times else None,
             "timed_out_count": timed_out_cnt,
+            "note": (f"{timed_out_cnt} of {len(s_rows)} runs timed out: median is over "
+                     "detected runs only, a lower bound" if timed_out_cnt else ""),
         })
     return cols, rows
 
@@ -393,8 +395,8 @@ def table_e19_from_csv(csv_path):
 
         rows.append({
             "system": s,
-            "runs_baseline": len(base_rows),
-            "runs_join": len(join_rows),
+            "runs_baseline": len({r.get("i") for r in base_rows}),
+            "runs_join": len({r.get("i") for r in join_rows}),  # one row per joiner PC
             "join_s_median": float(np.median(join_times)) if join_times else None,
             "first_work_s_median": float(np.median(work_times)) if work_times else None,
             "wall_baseline_s_median": float(np.median(base_walls)) if base_walls else None,
