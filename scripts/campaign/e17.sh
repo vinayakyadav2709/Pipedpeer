@@ -18,7 +18,8 @@
 # Environment (tests; the campaign leaves them alone):
 #   E17_START_WAIT_S (120), E17_JOIN_S (120), E17_POLL_S (1),
 #   E17_CONNECT_TIMEOUT_S (120), E17_OLD_INVITE_TIMEOUT_S (60),
-#   E17_JOB_TIMEOUT_S (600), E17_RESTART_WAIT_S (120).
+#   E17_JOB_TIMEOUT_S (600), E17_RESTART_WAIT_S (120), E17_MEDIAN_WALL_S (unset:
+#   the E1 median, else the W1 calibration target; sets the kill point).
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -62,11 +63,18 @@ e17_plan() {
   printf 'KILL_AT 30%% of the pipedpeer E1 W1 median wall: SIGKILL then stop on %s\n' "${all[0]}"
 }
 
-# e17_median_wall: the E1 W1 median wall on pipedpeer at this N, else 10 s.
+# e17_median_wall: the wall the kill point is 30% of. E17_MEDIAN_WALL_S when
+# set; else the E1 W1 median on pipedpeer at this N; else (no E1 yet, as in
+# the Session 1 check) the W1 calibration target in sizes.env; else 10 s.
+# A fixed 10 s let a short calibrated job finish before the kill (emulated lab).
 e17_median_wall() {
-  python3 - "$LAB/runs.jsonl" "$N" <<'PY'
-import json, sys
-runs, n = sys.argv[1], int(sys.argv[2])
+  if [[ -n "${E17_MEDIAN_WALL_S:-}" ]]; then
+    printf '%s\n' "$E17_MEDIAN_WALL_S"
+    return 0
+  fi
+  python3 - "$LAB/runs.jsonl" "$N" "$LAB/sizes.env" <<'PY'
+import json, re, sys
+runs, n, sizes = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 vals = []
 try:
     for ln in open(runs):
@@ -78,9 +86,23 @@ try:
 except FileNotFoundError:
     sys.stderr.write("e17: no runs.jsonl; median wall taken as 10 s\n")
 vals.sort()
-if not vals:
-    sys.stderr.write("e17: no E1 W1 runs for pipedpeer at n=%d; median wall taken as 10 s\n" % n)
-print(vals[len(vals) // 2] if vals else 10)
+if vals:
+    print(vals[len(vals) // 2])
+    sys.exit(0)
+target = None
+try:
+    for ln in open(sizes):
+        m = re.search(r"plain W1=.*target ([0-9.]+)s", ln)
+        if m:
+            target = float(m.group(1))
+except FileNotFoundError:
+    pass
+if target:
+    sys.stderr.write("e17: no E1 W1 runs for pipedpeer at n=%d; median wall taken as the W1 calibration target, %g s\n" % (n, target))
+    print("%g" % target)
+else:
+    sys.stderr.write("e17: no E1 W1 runs for pipedpeer at n=%d and no W1 target in sizes.env; median wall taken as 10 s\n" % n)
+    print(10)
 PY
 }
 

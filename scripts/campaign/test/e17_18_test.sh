@@ -247,6 +247,22 @@ e17_inproc() {
 	e17_main "$@"
 }
 # ---------------------------------------------------------------- E17 rows
+# e17_median_wall: the wall the kill point is 30% of. With no E1 runs (the
+# Session 1 check) the calibration target from sizes.env stands in, not a
+# fixed 10 s that a short calibrated job finishes before; E17_MEDIAN_WALL_S wins
+for c in "env|E17_MEDIAN_WALL_S=7|-|7" "target|-|# calibrated 2026-11-09 on pc00 plain W1=0.234s at 48 items, target 4s|4" "none|-|-|10"; do
+	IFS='|' read -r cname cenv cline want <<<"$c"
+	d="$(newdir)"
+	got="$(
+		setup_lab "$d" 3 >/dev/null 2>&1
+		[[ "$cline" == - ]] || echo "$cline" >>"$d/sizes.env"
+		[[ "$cenv" == - ]] || export "${cenv?}"
+		# shellcheck source=/dev/null
+		source "$CAMP/e17.sh"
+		N=2 e17_median_wall 2>/dev/null
+	)" || got="rc=$?"
+	if [[ "$got" == "$want" ]]; then ok "e17 median wall without E1 runs ($cname): $want"; else bad "e17 median wall without E1 runs ($cname)" "got [$got] want [$want]"; fi
+done
 # dry-run: the plan, and nothing else
 d="$(newdir)"
 res="$(
