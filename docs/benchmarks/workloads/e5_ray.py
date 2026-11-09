@@ -24,7 +24,7 @@ def requirements(path):
     with open(os.path.expanduser(path), encoding="utf-8") as fh:
         for line in fh:
             line = line.split("#", 1)[0].strip()
-            if line and not line.startswith("-"):
+            if line:
                 out.append(line)
     return out
 
@@ -46,22 +46,45 @@ def main():
         print(f"e5_ray: {len(nodes)} alive nodes, expected {args.nodes}", file=sys.stderr)
         return 1
 
+    extras = [p for p in args.extra.split(",") if p]
+
     @ray.remote(num_cpus=0)
-    def probe():
-        t = time.time_ns()
-        return ray.util.get_node_ip_address(), t
+    def probe(extra=()):
+        import joblib  # noqa: F401
+        import numpy  # noqa: F401
+        import pandas  # noqa: F401
+        import scipy  # noqa: F401
+        import sklearn  # noqa: F401
+        for m in extra:
+            __import__(m)
+
+        def work(i):
+            acc = 0.0
+            for k in range(1, 2000):
+                acc += (i + k) ** 0.5
+            return acc
+
+        work(0)
+        return ray.util.get_node_ip_address(), time.time_ns()
 
     refs = [
         probe.options(
             runtime_env={"pip": pip},
             scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=n["NodeID"], soft=False),
-        ).remote()
+        ).remote(extras)
         for n in nodes
     ]
-    for ip, t in ray.get(refs):
-        print(f"E5-RAY node={ip} start_ns={t}")
-    print(f"E5-OK nodes={len(nodes)}")
-    return 0
+    failed = 0
+    for n, ref in zip(nodes, refs):
+        try:
+            ip, t = ray.get(ref)
+        except Exception as exc:  # one PC's failed env must not lose the others' times
+            failed += 1
+            print(f"e5_ray: no ready time for {n.get('NodeManagerAddress')}: {exc}", file=sys.stderr)
+            continue
+        print(f"E5-RAY node={ip} start_ns={t}", flush=True)
+    print(f"E5-OK nodes={len(nodes) - failed}")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ if mode == "pipedpeer":
         if node is None or mach is None:
             warn("compute step on unknown node/machine %r/%r" % (s.get("node"), s.get("machine")))
             continue
-        t = s["start_ns"] - off.get(mach, 0.0)
+        t = s["start_ns"] + s.get("dur_ns", 0) - off.get(mach, 0.0)
         if node not in ready or t < ready[node]:
             ready[node] = t
 elif mode == "pip":
@@ -238,6 +238,8 @@ e5_main() {
           fi
           ;;
         ray)
+          # tqdm makes Ray rebuild its whole env (runtime_env pip changes),
+          # so update phases are cold installs for Ray.
           local with=""
           [[ "$phase" != cold ]] && with=" --with tqdm"
           cmd="cd ~/pipedpeer-lab/work && RAY_ADDRESS=$(lab_ip pc00):6379 ~/pipedpeer-lab/venv/bin/python e5_ray.py --nodes $N$with"
@@ -252,10 +254,10 @@ e5_main() {
           ;;
         pip)
           if [[ "$phase" == cold ]]; then
-            cmd='rm -rf ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/venv/bin/python -m venv ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/e5-venv/bin/pip install -q --no-cache-dir -r ~/pipedpeer-lab/requirements.txt && date +%s%N'
+            cmd='rm -rf ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/venv/bin/python -m venv ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/e5-venv/bin/pip install -q --no-cache-dir -r ~/pipedpeer-lab/requirements.txt && ~/pipedpeer-lab/e5-venv/bin/python -c "exec(\"def work(i):\\n    acc = 0.0\\n    for k in range(1, 2000):\\n        acc += (i + k) ** 0.5\\n    return acc\\nimport joblib, numpy, pandas, scipy, sklearn\\nwork(0)\")" && date +%s%N'
           else
             # shellcheck disable=SC2088  # the tilde is for the remote shell
-            cmd='~/pipedpeer-lab/e5-venv/bin/pip install -q --no-cache-dir tqdm && date +%s%N'
+            cmd='~/pipedpeer-lab/e5-venv/bin/pip install -q --no-cache-dir tqdm && ~/pipedpeer-lab/e5-venv/bin/python -c "exec(\"def work(i):\\n    acc = 0.0\\n    for k in range(1, 2000):\\n        acc += (i + k) ** 0.5\\n    return acc\\nimport joblib, numpy, pandas, scipy, sklearn, tqdm\\nwork(0)\")" && date +%s%N'
           fi
           t_start="$(date +%s%N)"
           lab_fanout "e5-pip-$phase" "$hfile" "$cmd" >/dev/null ||
