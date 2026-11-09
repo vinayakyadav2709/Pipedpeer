@@ -63,6 +63,45 @@ if calibrate_scale 48 abc 120 >/dev/null 2>&1; then pnote "non-numeric measureme
 verdict "calibrate_scale: 30 s at 48 items, target 120 -> 192; 0 s / empty / junk -> error"
 )
 
+# --- the sweep keys: pure rows ----------------------------------------------------
+key() { sed -n "s/^$1=//p" <<<"$2"; }
+(
+source "$CAL"
+set +e
+got="$(calibrate_sweep_keys 120 8 48 30)"
+[[ "$(key SWEEP_TOTAL_MS "$got")" == 960000 ]] || pnote "total: $got"
+[[ "$(key SWEEP_DATA_ITEMS "$got")" == 64 ]] || pnote "data items: $got"
+[[ "$(key SWEEP_DATA_TASK_MS "$got")" == 2000 ]] || pnote "data ms: $got"
+[[ "$(key NOOP_ITEMS "$got")" == 50000 ]] || pnote "noop: $got"
+[[ "$(key LAT_CALLS "$got")" == 1000 ]] || pnote "lat: $got"
+[[ "$(key ELASTIC_ITEMS "$got")" == 153600 ]] || pnote "elastic: $got"
+[[ "$(key ELASTIC_TASK_MS "$got")" == 100 ]] || pnote "elastic ms: $got"
+[[ "$(key FILEIO_FILES "$got")" == 4096 ]] || pnote "files: $got"
+[[ "$(key FILEIO_FILE_KB "$got")" == 64 ]] || pnote "kb: $got"
+[[ "$(key SWEEP_ITERS_PER_MS "$got")" == 12 ]] || pnote "iters: $got"
+verdict "sweep keys: target 120, 8 cores, W1 48 items in 30 s"
+)
+(
+source "$CAL"
+set +e
+got="$(calibrate_sweep_keys 5 8 48 30)"
+[[ "$(key SWEEP_TOTAL_MS "$got")" == 40000 ]] || pnote "total: $got"
+[[ "$(key SWEEP_DATA_ITEMS "$got")" == 8 ]] || pnote "data items: $got"
+[[ "$(key SWEEP_DATA_TASK_MS "$got")" == 200 ]] || pnote "data ms: $got"
+[[ "$(key NOOP_ITEMS "$got")" == 2000 ]] || pnote "noop: $got"
+[[ "$(key LAT_CALLS "$got")" == 50 ]] || pnote "lat: $got"
+[[ "$(key FILEIO_FILES "$got")" == 256 ]] || pnote "files: $got"
+verdict "sweep keys: target 5 picks the small sizes"
+)
+(
+source "$CAL"
+set +e
+got="$(calibrate_sweep_keys 120 8 48 100000)"
+[[ "$(key SWEEP_ITERS_PER_MS "$got")" == 1 ]] || pnote "iters: $got"
+if calibrate_sweep_keys 120 8 48 0 >/dev/null 2>&1; then pnote "0 s measurement accepted"; fi
+verdict "sweep keys: very slow W1 floors at 1 iteration per ms; 0 s is an error"
+)
+
 # --- real detached runs on the fake lab -----------------------------------------
 (d=$(newdir)
 row_setup "$d" 'sleep 1; echo ran'
@@ -74,10 +113,11 @@ w1="$(sed -n 's/^W1_ITEMS=//p' "$d/sizes.env")"
 # stretches process start, and 40 (m 2.4 s) failed there without a code fault.
 # The upper bound 100 (m < 0.96 s) still catches a measurement that skips the sleep.
 [[ "$w1" =~ ^[0-9]+$ ]] && ((w1 >= 24 && w1 <= 100)) || pnote "W1_ITEMS=$w1 not near 48*2/1.x"
-for k in BENCH_PROCS W1_WEAK_PER_PC W2_ITEMS W3_TREES T1_EPOCHS; do
+for k in BENCH_PROCS W1_WEAK_PER_PC W2_ITEMS W3_TREES T1_EPOCHS SWEEP_ITERS_PER_MS SWEEP_TOTAL_MS SWEEP_DATA_ITEMS SWEEP_DATA_TASK_MS NOOP_ITEMS LAT_CALLS ELASTIC_TASK_MS ELASTIC_ITEMS FILEIO_FILES FILEIO_FILE_KB; do
 	grep -q "^$k=[0-9]" "$d/sizes.env" || pnote "sizes.env lacks $k"
 done
 grep -q '^BENCH_PROCS=8$' "$d/sizes.env" || pnote "BENCH_PROCS not pc00's nproc 8"
+grep -q '^# sweep keys derived from the W1 run$' "$d/sizes.env" || pnote "missing sweep comment"
 [[ "$(grep -c '^# calibrated .* plain=\|^# calibrated .* plain [A-Z0-9]*=' "$d/sizes.env")" == 4 ]] || pnote "want 4 measured-seconds comments: $(grep '#' "$d/sizes.env")"
 verdict "calibrate on the fake lab writes sizes.env with measured seconds as comments")
 

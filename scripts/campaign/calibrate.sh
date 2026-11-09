@@ -81,6 +81,31 @@ _cal_run() {
 	printf '%s\n' "$secs"
 }
 
+# calibrate_sweep_keys <target s> <procs> <W1 items> <W1 seconds>: the sweep
+# lines of sizes.env, formulas in the batch brief's Contracts. Fails on a
+# measurement that is not a positive number.
+calibrate_sweep_keys() {
+	local t="$1" p="$2" items="$3" s1="$4" big=0 iters
+	iters="$(awk -v c="$items" -v m="$s1" -v p="$p" 'BEGIN {
+		if (m !~ /^[0-9.]+$/ || m + 0 <= 0) exit 1
+		r = int(59999 * c / (m * p * 1000) + 0.5)
+		print (r < 1 ? 1 : r)
+	}')" || return 1
+	((t >= 60)) && big=1
+	cat <<EOF
+SWEEP_ITERS_PER_MS=$iters
+SWEEP_TOTAL_MS=$((t * p * 1000))
+SWEEP_DATA_ITEMS=$((big ? 64 : 8))
+SWEEP_DATA_TASK_MS=$((big ? 2000 : 200))
+NOOP_ITEMS=$((big ? 50000 : 2000))
+LAT_CALLS=$((big ? 1000 : 50))
+ELASTIC_TASK_MS=100
+ELASTIC_ITEMS=$((t * 16 * p * 10))
+FILEIO_FILES=$((big ? 4096 : 256))
+FILEIO_FILE_KB=64
+EOF
+}
+
 calibrate_main() {
 	local target=120 force=0
 	TIMEOUT_S=1800
@@ -121,6 +146,9 @@ calibrate_main() {
 	w3="$(calibrate_scale "$CAL_W3_TREES" "$s3" "$target")" || { lab_log "calibrate: W3 measured [$s3] s"; return 1; }
 	t1="$(calibrate_scale "$CAL_T1_EPOCHS" "$st" "$target")" || { lab_log "calibrate: T1 measured [$st] s"; return 1; }
 
+	local sweep_keys
+	sweep_keys="$(calibrate_sweep_keys "$target" "$procs" "$CAL_W1_ITEMS" "$s1")" || { lab_log "calibrate: sweep keys failed, W1 measured [$s1] s"; return 1; }
+
 	local day tmp
 	day="$(date +%F)"
 	tmp="$LAB/sizes.env.tmp"
@@ -131,11 +159,13 @@ W1_WEAK_PER_PC=$w1weak
 W2_ITEMS=$w2
 W3_TREES=$w3
 T1_EPOCHS=$t1
+$sweep_keys
 # calibrated $day on pc00 plain W1=${s1}s at $CAL_W1_ITEMS items, target ${target}s
 # calibrated $day on pc00 plain W2=${s2}s at $CAL_W2_ITEMS items, target ${target}s
 # calibrated $day on pc00 plain W3=${s3}s at $CAL_W3_TREES trees, target ${target}s
 # calibrated $day on pc00 plain T1=${st}s at $CAL_T1_EPOCHS epochs, target ${target}s
 # W1_WEAK_PER_PC: items one PC does in ${CAL_WEAK_TARGET_S}s
+# sweep keys derived from the W1 run
 ENV
 	mv "$tmp" "$LAB/sizes.env"
 	lab_log "calibrate: wrote $LAB/sizes.env (W1=$w1 W1_WEAK_PER_PC=$w1weak W2=$w2 W3=$w3 T1=$t1)"
