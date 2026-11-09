@@ -14,16 +14,8 @@ Driver tools (Fedora; `check-driver.sh` prints the same line per missing tool):
 
     sudo dnf install -y pssh parallel rsync nmap iperf3 openssh-clients python3-matplotlib python3-pandas python3-scipy python3-pytest rclone ShellCheck uv
 
-R2 credentials, one file, mode 600 (replace the four placeholders):
-
-    mkdir -p ~/.config/pipedpeer-lab && install -m 600 /dev/null ~/.config/pipedpeer-lab/r2.env
-    cat >~/.config/pipedpeer-lab/r2.env <<'EOF'
-    RCLONE_CONFIG_R2_TYPE=s3
-    RCLONE_CONFIG_R2_PROVIDER=Cloudflare
-    RCLONE_CONFIG_R2_ACCESS_KEY_ID=<access key id>
-    RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=<secret access key>
-    RCLONE_CONFIG_R2_ENDPOINT=https://<account id>.r2.cloudflarestorage.com
-    EOF
+Cloudflare R2 is not used. Results are saved locally in `results/lab/` and copied
+to Google Drive after each lab session and before any PC cleanup.
 
 The lab key the PCs will trust (the check below needs it; `serve.sh` reuses it):
 
@@ -31,7 +23,7 @@ The lab key the PCs will trust (the check below needs it; `serve.sh` reuses it):
 
 Check the driver (everything must print `OK`, last line `DRIVER-OK`):
 
-    scripts/campaign/check-driver.sh
+    scripts/campaign/check-driver.sh --no-r2
 
 Rehearse once on Ubuntu containers (3 GB of RAM free; minutes to an hour).
 The rehearsal installs the local build, so build it first:
@@ -70,7 +62,8 @@ The rehearsal installs the local build, so build it first:
        scripts/campaign/install.sh <version>
        scripts/campaign/network.sh
 
-6. Workload files, pinned versions, one venv per PC, workload sizes:
+6. Workload files, pinned versions, one venv per PC, workload sizes (re-calibrate
+   first since `sizes.env` contains new keys for sweeps, noop, lat, elastic and fileio):
 
        scripts/campaign/stage.sh
        scripts/campaign/pins.sh
@@ -92,20 +85,38 @@ The rehearsal installs the local build, so build it first:
 
 ## Sessions 2 and 3
 
+Experiments can be executed across sessions; each run logs its progress and
+rerunning any `run.sh` line automatically skips completed runs in `runs.jsonl`.
+Operator attendance per experiment:
+- **E4** (uneven machines), **E5** (environment distribution), **E6** (node
+  faults, killed by the script), **E13-E16**, **E20**, **E17-E19**: unattended.
+- **E11** (cluster size): the setup line must first be run on every available
+  PC, by hand; the measurement then runs unattended.
+- **E3** (optional manual setup timing): the operator follows each tool's quick
+  start by hand.
+
+Commands:
+
     scripts/campaign/run.sh E1
     python3 scripts/campaign/analyse.py --spread
-    scripts/campaign/upload.sh
     scripts/campaign/run.sh E1b
-    scripts/campaign/upload.sh
     scripts/campaign/run.sh E7
     scripts/campaign/run.sh E8
-    scripts/campaign/upload.sh
+    scripts/campaign/run.sh E13
+    scripts/campaign/run.sh E14
+    scripts/campaign/run.sh E15
+    scripts/campaign/run.sh E16
+    scripts/campaign/run.sh E20
     scripts/campaign/e4.sh
-    scripts/campaign/e5.sh --n 2
-    scripts/campaign/e6.sh --n 2
+    scripts/campaign/e5.sh --n 32
+    scripts/campaign/e6.sh --n 16
     scripts/campaign/e11.sh
-    scripts/campaign/upload.sh
+    scripts/campaign/e17.sh
+    scripts/campaign/e18.sh
+    scripts/campaign/e19.sh
     python3 scripts/campaign/analyse.py
+
+Copy `results/lab/` to Google Drive after each session and before any PC cleanup.
 
 `analyse.py --spread` prints `REPEATS-OK` or `RAISE-REPEATS <k>`; for the
 latter see "What to do when". Rerunning any `run.sh` line skips runs already in
@@ -136,5 +147,5 @@ before setup (same five commands).
 | `TIMEOUT <run id>` | the run unit is left running; wait, then rerun the same `run.sh` line (it fetches the finished run) |
 | `NOT-READY <system> want=<n> have=<k>` | `scripts/campaign/cluster.sh down`, then `scripts/campaign/cluster.sh up <n>`; if it repeats, exclude the PC as in the first row |
 | `RAISE-REPEATS <k>` | `scripts/campaign/run.sh <experiment> --repeats <k>` for the experiment named in the `SPREAD` lines, then `analyse.py --spread` again |
-| `UPLOAD-FAILED <why>` | fix the cause (network, `r2.env`), run `scripts/campaign/upload.sh` again |
+| `UPLOAD-FAILED <why>` | expected since Cloudflare R2 is not used; copy `results/lab/` to Google Drive manually after each session and before PC cleanup |
 | A line in `results/lab/BLOCKERS.md` | stop that experiment, read the line, tell the project owner; later experiments may go on |
