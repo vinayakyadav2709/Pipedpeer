@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -147,8 +146,9 @@ func TestPlanSharesSplitPolicy(t *testing.T) {
 
 			var buf bytes.Buffer
 			if c.wantLog != "" {
+				old := log.Writer()
+				defer log.SetOutput(old)
 				log.SetOutput(&buf)
-				t.Cleanup(func() { log.SetOutput(os.Stderr) })
 			}
 
 			pm := newPrimed()
@@ -159,8 +159,8 @@ func TestPlanSharesSplitPolicy(t *testing.T) {
 				// Compute the expected measured plan identically.
 				pm2 := newPrimed()
 				want := schedule.Compute(
-					schedule.Options{Items: 20},
-					pm2.devicesFor([]string{"fast", "slow"}, "", false),
+					schedule.Options{Items: c.items},
+					pm2.devicesFor(c.peers, "", c.includeLocal),
 				)
 				if len(got) != len(want.Shares) {
 					t.Fatalf("measured plan: got %d shares, want %d", len(got), len(want.Shares))

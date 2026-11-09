@@ -649,6 +649,9 @@ var daemonVersion = func(port int) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("daemon /health: %s", resp.Status)
+	}
 	var h struct {
 		Capabilities map[string]string `json:"capabilities"`
 	}
