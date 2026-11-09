@@ -562,7 +562,14 @@ run_all() {
 				done
 				((${#sys_at_n[@]})) || continue
 
-				"$CLUSTER_SH" up "$n"
+				# Every system at this N shares these machines: a start that
+				# fails voids the comparison here, never a smaller cluster
+				# reported as N. The next N starts its clusters afresh.
+				if ! "$CLUSTER_SH" up "$n"; then
+					lab_log "run_all: cluster up $n failed for $exp $w; skipping this N, see logs/cluster-reset and NOT-READY lines"
+					_run_blocker "cluster up failed: $exp $w n=$n"
+					continue
+				fi
 				# one tag per workload: a second workload at the same N would
 				# otherwise meet the first one's ALREADY-METRICS
 				"$METRICS_SH" start "$exp-$w-n$n" "$LAB/hosts-$n.txt" ||

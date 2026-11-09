@@ -665,6 +665,26 @@ STUB_W3_ACC=0.9450 campaign_run_one U3 W3 ray 2 1 0 30 strong >/dev/null 2>&1 ||
 [[ "$(rec_field U3-W3-ray-n2-r1 result_ok)" == false ]] || pnote "W3 ray 0.0050 off judged $(rec_field U3-W3-ray-n2-r1 result_ok), want false (ray stays exact)"
 verdict "W3 accuracy: ssh within 0.005 is ok, beyond not; other systems exact")
 
+# --- a cluster that will not start at one N: that N is skipped and named ------
+cluster_fails_at_1() {
+	export CLUSTER_SH="$1/failing-cluster.sh"
+	printf '#!/usr/bin/env bash\necho "cluster $*" >>"%s/stubs.log"\n[[ "$*" != "up 1" ]]\n' "$1" >"$CLUSTER_SH"
+	chmod +x "$CLUSTER_SH"
+}
+(d=$(newdir)
+row_setup "$d"
+cluster_fails_at_1 "$d"
+rc=0; run.sh E1 --workloads W1 --systems pipedpeer --sizes 1,2 --repeats 1 >/dev/null 2>"$d/err" || rc=$?
+[[ "$(grep -c '"n":1' "$LAB/runs.jsonl")" == 0 ]] || pnote "runs recorded at the N whose cluster failed (rc=$rc)"
+grep -qs 'cluster up failed: E1 W1 n=1' "$LAB/BLOCKERS.md" || pnote "no BLOCKERS line for the failed start (rc=$rc); err: $(tail -1 "$d/err")"
+verdict "cluster up failing at one N: no runs there, named in BLOCKERS")
+(d=$(newdir)
+row_setup "$d"
+cluster_fails_at_1 "$d"
+rc=0; run.sh E1 --workloads W1 --systems pipedpeer --sizes 1,2 --repeats 1 >/dev/null 2>"$d/err" || rc=$?
+[[ "$(grep -c '"n":2' "$LAB/runs.jsonl" 2>/dev/null)" -gt 0 ]] || pnote "N=2 did not run after N=1 failed to start (rc=$rc)"
+verdict "cluster up failing at one N: the next N still runs")
+
 nrows=$(wc -l <"$RESULTS")
 nfail=$(grep -c '^bad$' "$RESULTS" || true)
 npass=$((nrows - nfail))
