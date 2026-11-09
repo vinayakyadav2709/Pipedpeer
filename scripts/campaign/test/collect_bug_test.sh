@@ -5,6 +5,7 @@
 # (test/fakelab.sh); their pipedpeer is a stub that prints an invite code.
 #
 #   B1 a run that died before any result (no runs.jsonl): the bundle is made
+#      (ssh here reads its stdin as a real one does; sizes.env is kept)
 #      anyway with the driver's logs, versions, and one report per PC (version,
 #      status, journals, warm-up log, Ray logs, memory evidence); analyse.py's
 #      outcome is recorded, not fatal; prints BUG-BUNDLE <dir>; exit 0
@@ -59,6 +60,12 @@ EOF
 	mkdir -p "$d/ray/logs"
 	echo "RAYLET-MARK memory pressure" >"$d/ray/logs/raylet.out"
 	echo "$(date -Is) e17.sh: E17: connect on pc03 with pipedpeer connect DRVSECRET77xyz failed" >>"$d/lab/campaign.log"
+	# a real ssh reads its stdin; the fake one does not, which hid a loop over
+	# hosts.tsv losing every PC after the first (found on the container lab)
+	mv "$d/lab/bin/ssh" "$d/lab/bin/ssh.fake"
+	printf '#!/usr/bin/env bash\ncat >/dev/null\nexec "%s" "$@"\n' "$d/lab/bin/ssh.fake" >"$d/lab/bin/ssh"
+	chmod +x "$d/lab/bin/ssh"
+	printf 'W1_ITEMS=48\n' >"$d/lab/sizes.env"
 	export LAB_RESULTS="$d/lab" LAB_RAY_SESSION="$d/ray" LAB_RETRY_SLEEP=0
 }
 
@@ -80,6 +87,7 @@ for pc in pc00 pc01; do
 	grep -q '^## memory' "$f" || pnote "$pc: no memory section"
 done
 grep -qE '^analyse: ' "$d/bundle/SUMMARY.txt" 2>/dev/null || pnote "SUMMARY.txt does not record analyse.py's outcome"
+[[ -f "$d/bundle/results/lab/sizes.env" ]] || pnote "sizes.env (no secret, needed to debug) was left out"
 (cd "$d/bundle" && sha256sum --quiet -c MANIFEST.sha256) || pnote "manifest does not verify"
 verdict "B1 no runs.jsonl: bug bundle with driver logs, versions, one report per PC; analyse outcome recorded")
 

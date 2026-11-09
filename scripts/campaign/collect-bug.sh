@@ -80,11 +80,12 @@ collect_bug() {
 			rel="${f#"$to/results/lab/"}"
 			why=""
 			case "${f##*/}" in
-				r2.env | *.env) why="environment file (credentials)" ;;
+				r2.env) why="R2 credentials" ;;
 				cluster.json) why="cluster token" ;;
 				*.pem | *.key | id_* | pipedpeer-lab | pipedpeer-lab-pc00) why="key file" ;;
 			esac
 			if [[ -z "$why" ]] && grep -Iq 'PRIVATE KEY' "$f" 2>/dev/null; then why="contains a private key"; fi
+			if [[ -z "$why" ]] && grep -IqE '^(RCLONE_CONFIG_[A-Z0-9_]*(SECRET|KEY)[A-Z_]*|AWS_SECRET_ACCESS_KEY)=' "$f" 2>/dev/null; then why="holds credentials"; fi
 			if [[ -n "$why" ]]; then
 				rm -f "$f"
 				echo "left out: results/lab/$rel ($why)" >>"$sum"
@@ -126,7 +127,8 @@ collect_bug() {
 		while IFS= read -r pc; do
 			n_pc=$((n_pc + 1))
 			rc=0
-			out="$(lab_ssh "$pc" "echo $b64 | base64 -d | timeout 120 bash" 2>&1)" || rc=$?
+			# </dev/null: ssh reads stdin, which is the hosts.tsv loop here
+			out="$(lab_ssh "$pc" "echo $b64 | base64 -d | timeout 120 bash" 2>&1 </dev/null)" || rc=$?
 			if ((rc != 0)) && [[ "$out" != *"## host"* ]]; then
 				n_miss=$((n_miss + 1))
 				printf 'no answer from %s (ssh exit %s)\n%s\n' "$pc" "$rc" "$out" >"$to/pcs/$pc.txt"
