@@ -31,6 +31,7 @@ from pipedpeer_shim.pool_pacing import (
 )
 from pipedpeer_shim.pool_race import (
     _RemotePairs,
+    _offload_items,
     _race_items,
 )
 from pipedpeer_shim.pool_resources import (
@@ -63,6 +64,7 @@ class _ClusterPool:
         self._pending = 0
         self._measure_items = 4
         self._spilled = False
+        self._said_small = False
         self._threads = None
         self._batcher = None
         atexit.register(self.close)
@@ -198,11 +200,23 @@ class _ClusterPool:
         if len(items) <= self._measure_items:
             # Too few items to measure. Forced, they still ship: nothing is
             # left for a tail, so without this a one-item map never leaves.
+            # Not through the race: its local lane starts first and its first
+            # take is the whole of a list this short, so no peer would get any.
             if core._FORCE and items:
                 payload = _func_payload(func) or _func_pickle(func)
                 if payload is not None:
                     _decide("pool.map", True, "forced")
-                    return self._race(func, items, starmap, 0, payload, catch)
+                    return self._race(func, items, starmap, 0, payload, catch, offload=True)
+                _decide("pool.map", False, "forced, but the function cannot be sent, by source or by value")
+                _record("pool", len(items), False, "unshippable")
+                _log("kernel %r cannot ship at all, by source or by value; "
+                     "staying local" % getattr(func, "__name__", "?"))
+            elif items and not self._said_small:
+                # Once per pool: the receipt keeps a limited number of decisions,
+                # and a loop of small maps would use them all up.
+                self._said_small = True
+                _decide("pool.map", False, "too few items to measure (%d or fewer stay local)"
+                        % self._measure_items)
             return self._local(func, items, starmap, catch)
         # Measure the first few locally, then decide whether to spill the rest.
         # The batch is as wide as the pool: measuring four items on a twenty
@@ -288,7 +302,9 @@ class _ClusterPool:
             return ctx.starmap(func, items)
         return ctx.map(func, items)
 
-    def _race(self, func, items, starmap, per_item_cost, payload, catch=False):
+    def _race(self, func, items, starmap, per_item_cost, payload, catch=False, offload=False):
+        """Run items on the cluster and here at once; with offload, on the
+        cluster alone, and here only for what it could not take."""
         self._spilled = True
 
         def run_local(vals):
@@ -301,8 +317,9 @@ class _ClusterPool:
                 return ctx.starmap(_apply, [(func, v) for v in vals])
             return ctx.map(func, vals)
 
-        return _race_items(items, per_item_cost, self._procs, run_local,
-                           lambda chunk: self._remote_chunk(payload, chunk, starmap))
+        dispatch = _offload_items if offload else _race_items
+        return dispatch(items, per_item_cost, self._procs, run_local,
+                        lambda chunk: self._remote_chunk(payload, chunk, starmap))
 
     @staticmethod
     def _remote_chunk(payload, chunk, starmap, kind="pool"):

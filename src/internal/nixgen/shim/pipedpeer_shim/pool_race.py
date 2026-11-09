@@ -4,7 +4,7 @@ import time
 
 from pipedpeer_shim import record
 from pipedpeer_shim.core import (
-    _OFFLOAD_HERE, _offload_warn,
+    _OFFLOAD_HERE, _log, _offload_warn,
 )
 from pipedpeer_shim.stats import (
     _add_stat, _record_local,
@@ -34,9 +34,9 @@ class _RemotePairs(list):
 
 
 def _offload_items(items, per_item_cost, width, run_local, run_remote):
-    """_race_items under --offload: every chunk goes to the cluster and no
-    local core races it. A chunk the cluster could not take runs here, said
-    out loud, so the run still finishes."""
+    """_race_items under --offload, and for a forced map too small to measure:
+    every chunk goes to the cluster and no local core races it. A chunk the
+    cluster could not take runs here, said out loud, so the run still finishes."""
     from concurrent.futures import ThreadPoolExecutor
     pacing = _cluster_pacing()
     size = max(1, min(_chunk_floor(per_item_cost, width, pacing), len(items)))
@@ -47,6 +47,7 @@ def _offload_items(items, per_item_cost, width, run_local, run_remote):
     for chunk, res in zip(chunks, answers):
         if res is None:
             _offload_warn("%d item(s)" % len(chunk), "the cluster could not take them")
+            _log("%d item(s) ran on this machine: the cluster could not take them" % len(chunk))
             vals = run_local([p[1] for p in chunk])
             _record_local(len(chunk))
             res = list(zip([p[0] for p in chunk], vals))
