@@ -422,7 +422,7 @@ t10() {
 	verdict "-h prints usage and exits 0"
 }
 
-# a capped PC (the head too) starts Ray with --num-cpus; an uncapped one does not
+# a capped PC (the head too) starts Ray with --num-cpus=<cap>; an uncapped one with the probed count
 t11() {
 	local d rc=0
 	d="$(newdir)"
@@ -454,10 +454,15 @@ Recent runs:
 EOF
 		export PIPEDPEER_STATUS_FILE="$d/status.txt"
 		export PY_FAKE_OUT=2
+		# the probe runs on the "PC" (this host): fixture values, no quota found
+		mkdir -p "$d/cg"
+		printf '0::/none\n' >"$d/proc_cgroup"
+		export PP_CG_ROOT="$d/cg" PP_PROC_CGROUP="$d/proc_cgroup" PP_NPROC=5
 		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray
 	) >"$d/log" 2>&1 || true
-	! grep -q 'num-cpus' "$d/units.log" || pnote "uncapped Ray got --num-cpus: $(grep lab-ray "$d/units.log" | tr '\n' '|')"
-	verdict "ray --cap: head and worker started with --num-cpus; no cap, no flag"
+	grep -q 'ray start --head --port=6379 --num-cpus=5' "$d/units.log" || pnote "uncapped head not started with the probed --num-cpus=5: $(grep lab-ray "$d/units.log" | tr '\n' '|')"
+	grep -q 'ray start --address=[0-9.]*:6379 --num-cpus=5' "$d/units.log" || pnote "uncapped worker not started with the probed --num-cpus=5"
+	verdict "ray --cap: head and worker started with --num-cpus; no cap, the probed count"
 }
 
 # R2 M3: a capped head whose Ray CPUs differ from the cap is logged (not restarted); one that agrees is not

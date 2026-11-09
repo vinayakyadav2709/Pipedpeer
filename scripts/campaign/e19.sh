@@ -403,9 +403,10 @@ e19_on_signal() {
 }
 
 # e19_joiner_cores <pc>: its worker count, as cluster.sh computes for Dask:
-# hosts.tsv cores capped by CLUSTER_CAP_CPU. Empty (logged) when unknown.
+# hosts.tsv cores capped by CLUSTER_CAP_CPU and by lab_usable_cpus. Empty
+# (logged) when unknown.
 e19_joiner_cores() {
-  local pc="$1" cores
+  local pc="$1" cores usable
   cores="$(awk -F'\t' -v p="$pc" '$1 == p { print $5; exit }' "$LAB/hosts.tsv" 2>/dev/null || true)"
   if [[ ! "$cores" =~ ^[0-9]+$ ]] || ((cores < 1)); then
     lab_log "e19: no core count for $pc in hosts.tsv"
@@ -413,6 +414,12 @@ e19_joiner_cores() {
   fi
   if [[ "${CLUSTER_CAP_CPU:-}" =~ ^[0-9]+$ ]] && ((CLUSTER_CAP_CPU >= 1 && CLUSTER_CAP_CPU < cores)); then
     cores="$CLUSTER_CAP_CPU"
+  fi
+  # what the joiner can really use (cpuset and cgroup quota); hosts.tsv is nproc
+  if usable="$(lab_usable_cpus "$pc")"; then
+    ((usable < cores)) && cores="$usable"
+  else
+    lab_log "e19: $pc's usable CPU count unknown; using hosts.tsv/cap value $cores"
   fi
   printf '%s' "$cores"
 }
@@ -673,7 +680,7 @@ EOF
       [[ "$sys" == dask* ]] && pollsys="dask"
       poll_b64="$(e19_join_poll_py | base64 -w0)"
       if [[ "$pollsys" == ray ]]; then
-        starter="systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$driver:6379 --block"
+        starter="systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$driver:6379${cores:+ --num-cpus=$cores} --block"
       else
         starter="systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$driver:8786 --nworkers $cores --nthreads 1"
         want="$cores"

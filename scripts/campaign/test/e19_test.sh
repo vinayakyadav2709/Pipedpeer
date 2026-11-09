@@ -666,7 +666,8 @@ verdict "M8 opposite: a good run keeps its join row and wall_s"
 
 # ---------------------------------------------------------------------- M11 / L3 + opposite
 d="$(newdir)"
-WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
+# the joiner's usable-CPU probe runs on this host: fixed at 8 with no quota
+PP_NPROC=8 PP_CG_ROOT="$d/no-cgroup" PP_PROC_CGROUP=/dev/null WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
 grep -q -- '--nworkers 8 ' "$d/units.log" 2>/dev/null || pnote "--nworkers not from hosts.tsv: $(cat "$d/units.log" 2>/dev/null)"
 grep -qE '^poll - dask 10\.99\.0\.10 10\.99\.0\.11 8 ' "$d/poll.log" 2>/dev/null || pnote "poll want not 8: $(cat "$d/poll.log" 2>/dev/null)"
 verdict "M11 dask workers come from hosts.tsv cores (8), the poll wants 8"

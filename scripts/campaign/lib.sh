@@ -135,6 +135,40 @@ lab_ip() {
 	printf '%s\n' "$ip"
 }
 
+# LAB_CPUS_PROBE: a sh script run on a PC; prints how many CPUs its
+# processes can really use. nproc is the affinity mask (cpuset, AllowedCPUs);
+# it is lowered to the CPU quota of the PC's own cgroup or any ancestor (v2
+# cpu.max, v1 cpu.cfs_quota_us/cpu.cfs_period_us), rounded down, never below
+# 1. Ray counts the host's CPUs instead: in the laptop's container lab it saw
+# 16 under a 3-CPU docker cap. PP_CG_ROOT, PP_PROC_CGROUP and PP_NPROC let
+# test/cluster_cpus_test.sh feed it fixture trees.
+# shellcheck disable=SC2016  # expanded on the PC
+LAB_CPUS_PROBE='r=${PP_CG_ROOT:-/sys/fs/cgroup}; pcg=${PP_PROC_CGROUP:-/proc/self/cgroup}; n=${PP_NPROC:-$(nproc)}
+lim() { [ "$1" -gt 0 ] 2>/dev/null && [ "$2" -gt 0 ] 2>/dev/null || return 0; c=$(($1 / $2)); [ "$c" -lt 1 ] && c=1; [ "$c" -lt "$n" ] && n=$c; return 0; }
+walk() { p=$2; while :; do
+  if [ "$3" = 2 ] && [ -r "$1$p/cpu.max" ]; then read -r q per <"$1$p/cpu.max"; [ "$q" = max ] || lim "$q" "$per"; fi
+  if [ "$3" = 1 ] && [ -r "$1$p/cpu.cfs_quota_us" ] && [ -r "$1$p/cpu.cfs_period_us" ]; then lim "$(cat "$1$p/cpu.cfs_quota_us")" "$(cat "$1$p/cpu.cfs_period_us")"; fi
+  if [ -z "$p" ] || [ "$p" = / ]; then break; fi; p=${p%/*}; done; }
+while IFS=: read -r _ ctl path; do case ",$ctl," in
+  ,,) walk "$r" "$path" 2 ;;
+  *,cpu,*) for d in "$r/cpu,cpuacct" "$r/cpuacct,cpu" "$r/cpu"; do if [ -d "$d" ]; then walk "$d" "$path" 1; break; fi; done ;;
+esac; done <"$pcg"
+echo "$n"'
+
+# lab_usable_cpus <pc>: LAB_CPUS_PROBE's count on that PC, printed. Returns 1
+# (and logs the PC and what came back) when the probe fails or prints no number.
+lab_usable_cpus() {
+	local pc="${1:?usage: lab_usable_cpus <pc>}" n
+	n="$(lab_ssh "$pc" "$LAB_CPUS_PROBE" 2>/dev/null)" || n=""
+	n="$(printf '%s' "$n" | tr -d '[:space:]')"
+	if [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1)); then
+		printf '%s\n' "$n"
+		return 0
+	fi
+	lab_log "$pc: could not read its usable CPU count (got [$n])"
+	return 1
+}
+
 # --- transport ------------------------------------------------------------
 
 # lab_ssh <pc> <cmd...>: ssh -F $LAB/ssh_config <pc> -- <cmd>, retried up to

@@ -393,17 +393,24 @@ _cluster_cores_line() {
 
 # --- ray caps ---------------------------------------------------------------
 
-# _cluster_ray_cpus_flag <pc>: " --num-cpus=N" when <pc> is capped, else empty.
-# Ray takes its CPU count from the machine, not from AllowedCPUs, so every capped
-# PC (the head too) is started with the flag instead of being restarted later.
+# _cluster_ray_cpus_flag <pc>: " --num-cpus=N" for every Ray start. A --cap
+# wins; otherwise N is lab_usable_cpus (lib.sh) on that PC (Ray's own
+# count ignores AllowedCPUs on some builds and a cgroup quota always). A probe
+# that fails is logged and no flag is passed, so Ray falls back to its own count.
 _cluster_ray_cpus_flag() {
-	local pc="$1" k
+	local pc="$1" k n
 	for ((k = 0; k < ${#CLUSTER_CAP_PC[@]}; k++)); do
 		if [[ "${CLUSTER_CAP_PC[$k]}" == "$pc" ]]; then
 			printf ' --num-cpus=%s' "${CLUSTER_CAP_CPU[$k]}"
 			return 0
 		fi
 	done
+	if n="$(lab_usable_cpus "$pc")"; then
+		lab_log "ray on $pc: --num-cpus=$n (affinity and cgroup quota as the PC reports them)"
+		printf ' --num-cpus=%s' "$n"
+	else
+		lab_log "ray on $pc: no usable CPU count; Ray picks its own, which may count CPUs a quota denies"
+	fi
 }
 
 # _cluster_dask_cores <pc>: the core count for a Dask worker on <pc>, from
