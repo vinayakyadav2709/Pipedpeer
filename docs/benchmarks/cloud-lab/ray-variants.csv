@@ -1,0 +1,9 @@
+# Ray on the emulated lab (one VM, cgroup v1): E19 --n 1 --add 1 --repeats 1 --systems ray
+# variant = head --num-cpus and pc00 container memory limit; usage includes page cache
+variant,baseline_wall_s,join_wall_s,join_s,result_ok,peak_usage_mb,peak_rss_mb,failcnt,max_task_workers_per_10s_sample
+n3-4g,27.062,30.084,5.258,1,3261,1236,0,3
+unset4g,27.452,30.653,6.625,1,3273,1238,0,3
+n2-4g,27.467,31.565,6.885,1,3308,1267,0,4
+n4-4g,28.211,30.546,4.71,1,3284,1238,0,3
+n16-3g,26.415,30.653,7.018,1,3071,1234,0,3
+n3-3g,26.184,29.453,5.807,1,2999,1238,0,3
