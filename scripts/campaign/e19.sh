@@ -567,9 +567,10 @@ e19_prepare() {
 }
 
 # e19_purge_script: the body run on a joiner (after sys=, rel= are set): remove
-# the closure caches, then the closure's requisites, dependents first, each
-# --delete on its own so a refusal (a shared dependency) is logged and the rest
-# still go. Prints NOTE lines, "BYTES <purged> <closure>" (nar bytes of the
+# the closure caches, then the closure's requisites with every store path that
+# refers to them (the common environment shares python and its libraries),
+# each --delete on its own and in passes so a refusal (a GC-rooted referrer)
+# is logged and the rest still go. Prints NOTE lines, "BYTES <purged> <closure>" (nar bytes of the
 # requisites present before the purge, and of those gone after), then
 # present|absent for the top path.
 e19_purge_script() {
@@ -579,21 +580,34 @@ rm -rf "$d/work/nar-cache" "$d/closure-cache" || echo "NOTE cache removal failed
 purged=0; total=0
 if [ -n "$rel" ]; then
   # private store: plain rm of the closure's top path
+  had_private=0
   if [ -e "$d/nix/store/$rel" ]; then
+    had_private=1
     sz="$(du -sb "$d/nix/store/$rel" 2>/dev/null | cut -f1)"
     case "$sz" in ''|*[!0-9]*) echo "NOTE private store size unknown for $rel"; sz=0 ;; esac
     total=$((total + sz))
     rm -rf "$d/nix/store/$rel" 2>&1 | sed 's/^/NOTE private store rm: /'
     [ -e "$d/nix/store/$rel" ] || purged=$((purged + sz))
   fi
-  # system store (root-owned): requisites through the Nix daemon
-  if [ -e "$sys/$rel" ]; then
+  # system store (root-owned): requisites through the Nix daemon. A top path
+  # an earlier repeat removed leaves its dependencies here: pc00's list
+  # ($pc00reqs, base64) names them.
+  pc00list="$(printf '%s' "${pc00reqs:-}" | base64 -d 2>/dev/null)"
+  if [ ! -e "$sys/$rel" ] && [ -z "$pc00list" ] && [ "$had_private" = 0 ]; then echo NEED-PC00-REQS; fi
+  if [ -e "$sys/$rel" ] || [ -n "$pc00list" ]; then
     if command -v nix-store >/dev/null 2>&1; then
-      reqs="$(nix-store -qR "$sys/$rel" 2>&1)" || { echo "NOTE nix-store -qR failed, only the top path is deleted: $reqs"; reqs=; }
+      if [ -e "$sys/$rel" ]; then
+        reqs="$(nix-store -qR "$sys/$rel" 2>&1)" || { echo "NOTE nix-store -qR failed, only the top path is deleted: $reqs"; reqs=; }
+      else
+        reqs="$pc00list"
+        echo "NOTE top path $rel already gone here; requisites taken from pc00's closure"
+      fi
       list="$sys/$rel"
       for p in $(printf '%s\n' "$reqs" | tac); do
         [ "$p" = "$sys/$rel" ] || list="$list $p"
       done
+      # sizes first: the byte counts are of the closure as it was
+      sizes=""
       for p in $list; do
         case "$p" in
           "$sys"/?*) ;;
@@ -603,7 +617,41 @@ if [ -n "$rel" ]; then
         sz="$(nix-store -q --size "$p" 2>/dev/null)"
         case "$sz" in ''|*[!0-9]*) echo "NOTE size unknown for $p"; sz=0 ;; esac
         total=$((total + sz))
-        o="$(nix-store --delete "$p" 2>&1)" || echo "NOTE nix-store --delete refused $p: $o"
+        sizes="$sizes $p:$sz"
+      done
+      # Paths outside the closure that refer into it go too: on a PC whose
+      # install built the common environment, python and its libraries are
+      # also referenced by that environment, and Nix refuses to delete a path
+      # while a referrer exists. Referrers first, then the closure, dependents
+      # first; passes repeat until nothing more goes (a GC-rooted referrer
+      # keeps its part of the closure and is logged).
+      extra=""
+      refs="$(nix-store -q --referrers-closure $list 2>&1)" || { echo "NOTE nix-store -q --referrers-closure failed, only the closure is deleted: $refs"; refs=; }
+      for p in $refs; do
+        case " $list " in *" $p "*) ;; *) case "$p" in "$sys"/?*) extra="$extra $p" ;; esac ;; esac
+      done
+      todo="$extra $list"
+      pass=0
+      while [ -n "$(echo $todo)" ] && [ "$pass" -lt 50 ]; do
+        pass=$((pass + 1)); left=""; moved=0
+        for p in $todo; do
+          [ -e "$p" ] || continue
+          nix-store --delete "$p" >/dev/null 2>&1 || true
+          if [ -e "$p" ]; then left="$left $p"; else moved=1; fi
+        done
+        todo="$left"
+        [ "$moved" = 1 ] || break
+      done
+      gone=0
+      for p in $extra; do [ -e "$p" ] || gone=$((gone + 1)); done
+      [ "$gone" = 0 ] || echo "NOTE deleted $gone path(s) outside the closure that referred to it (the common environment and build inputs)"
+      for p in $todo; do
+        case " $list " in *" $p "*) ;; *) continue ;; esac
+        [ -e "$p" ] || continue
+        o="$(nix-store --delete "$p" 2>&1)" || echo "NOTE nix-store --delete refused $p: $(printf '%s' "$o" | grep -m1 -iE 'error|cannot' || printf '%s' "$o" | tail -1)"
+      done
+      for e in $sizes; do
+        p="${e%:*}"; sz="${e##*:}"
         [ -e "$p" ] || purged=$((purged + sz))
       done
     else
@@ -625,6 +673,16 @@ e19_purge_and_probe() {
   [[ -z "$path" ]] || rel="${path#/nix/store/}"
   b64="$(e19_purge_script | base64 -w0)"
   out="$(lab_ssh "$pc" "sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
+  # the joiner had lost the top path (an earlier repeat's purge): its
+  # dependencies are named by pc00's list, where the closure is whole
+  if ((rc == 0)) && grep -q '^NEED-PC00-REQS$' <<<"$out"; then
+    local pc00reqs=""
+    pc00reqs="$(lab_ssh pc00 "nix-store -qR '${E19_SYS_STORE:-/nix/store}/$rel'" 2>/dev/null | base64 -w0)" ||
+      lab_log "e19 $id: could not list the closure's requisites on pc00; $pc's leftover dependencies are not purged"
+    if [[ -n "$pc00reqs" ]]; then
+      out="$(lab_ssh "$pc" "sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; pc00reqs='$pc00reqs'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
+    fi
+  fi
   if ((rc != 0)); then
     lab_log "e19 $id: closure purge on $pc failed (ssh exit $rc): ${out:-(no output)}; joiner_warm left empty"
     return 0

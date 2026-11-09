@@ -788,11 +788,17 @@ verdict "E2-3 exit 0: ok, unchanged"
 # ---------------------------------------------------------------------- FIX-V5d: purge the closure's requisites
 # Fake nix-store: -qR lists dependencies first (the top path last), --size reads
 # <path>.size, --delete refuses the paths named in $FAKELAB_DIR/refuse.
+# -q --referrers-closure prints <path>.refs (the path and every path that
+# refers to it), or the path alone; --delete also refuses while a path named
+# in <path>.blockers (a referrer) is still there, as Nix does.
 CLOSURE_STUB='case "$1" in
   -qR) cat "$2.reqs" 2>/dev/null || echo "$2" ;;
-  -q) cat "$3.size" ;;
+  -q) if [ "$2" = --referrers-closure ]; then shift 2; for p in "$@"; do cat "$p.refs" 2>/dev/null || echo "$p"; done; else cat "$3.size"; fi ;;
   --delete) echo "$2" >>"$FAKELAB_DIR/nixstore.log"
     if grep -qx -- "$2" "$FAKELAB_DIR/refuse" 2>/dev/null; then echo "error: cannot delete path $2: still alive" >&2; exit 1; fi
+    for b in $(cat "$2.blockers" 2>/dev/null); do
+      if [ -e "$b" ]; then echo "error: Cannot delete path $2 because it is referenced by path $b" >&2; exit 1; fi
+    done
     rm -rf "$2" ;;
 esac'
 mk_closure() { # <d> <top size> <dep1 size> <dep2 size>
@@ -831,6 +837,47 @@ NIX_STUB="$CLOSURE_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH=/nix/store/ 
 [[ -e "$store/keep" && -e "$d/sysstore/keep" && ! -e "$d/nixstore.log" ]] || pnote "something was deleted for /nix/store/"
 [[ -z "$(col "$(csv_of "$d")" 10 join)" && -z "$(col "$(csv_of "$d")" 12 join)" && -z "$(col "$(csv_of "$d")" 13 join)" ]] || pnote "warm and bytes must be empty: $(cat "$(csv_of "$d")")"
 verdict "V5d /nix/store/ as the path: nothing deleted, warm and bytes empty"
+
+# ---------------------------------------------------------------------- the common environment shares the closure
+# On a PC whose install built the common environment, python and its
+# libraries are also referenced by that environment's paths, which are not in
+# the job's closure: Nix refuses to delete them while those exist (emulated
+# lab: 223824 of 219985368 bytes purged, joiner_warm 1). The purge takes the
+# referrers too; a referrer that is GC-rooted stays, and that is logged.
+mk_shared() { # <d>: closure top -> dep1, dep2; env-x (outside) refers to dep1
+  local s="$1/sysstore"
+  mk_closure "$1" 10 80 10
+  mkdir -p "$s/env-x"
+  echo 5 >"$s/env-x.size"
+  echo "$s/env-x" >"$s/dep1-x.blockers"
+  printf '%s\n' "$s/dep1-x" "$s/env-x" >"$s/dep1-x.refs"
+}
+d="$(newdir)"; mk_shared "$d"
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/env-x" && ! -e "$d/sysstore/$RELP" ]] || pnote "shared dependency or its outside referrer remain: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 100 && "$(col "$(csv_of "$d")" 13 join)" == 100 ]] || pnote "want warm 0, bytes 100/100 (closure bytes only): $(cat "$(csv_of "$d")")"
+grep -q '1 path(s) outside the closure' "$d/campaign.log" || pnote "the outside referrers deleted were not logged"
+verdict "purge: a dependency the common environment also uses goes, with that referrer; warm 0"
+
+d="$(newdir)"; mk_shared "$d"
+echo "$d/sysstore/env-x" >"$d/refuse"
+run_closure "$d"
+[[ -e "$d/sysstore/env-x" && -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "rooted referrer case: wrong paths removed: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "want warm 1: $(cat "$(csv_of "$d")")"
+grep -q 'refused.*dep1-x.*referenced by path.*env-x' "$d/campaign.log" || pnote "the refusal and its referrer were not logged"
+verdict "purge: a rooted outside referrer stays and keeps the dependency; logged, warm 1"
+
+# A later repeat: the joiner lost the closure's top path in the previous purge
+# but still has its dependencies (emulated lab, repeat 2: 0/0 bytes, warm 0
+# while python and the libraries were on disk). The requisites come from pc00,
+# where the closure is whole.
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rm -rf "${d:?}/sysstore/$RELP"
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "dependencies left on the joiner: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 90 && "$(col "$(csv_of "$d")" 13 join)" == 90 ]] || pnote "want warm 0, bytes 90/90: $(cat "$(csv_of "$d")")"
+grep -q 'requisites taken from pc00' "$d/campaign.log" || pnote "the fallback to pc00's list was not logged"
+verdict "purge: top path already gone on the joiner, its dependencies purged from pc00's list"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"
