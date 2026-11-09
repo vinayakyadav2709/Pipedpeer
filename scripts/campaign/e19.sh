@@ -150,7 +150,6 @@ e19_running_now() {
   out="$(lab_ssh pc00 'R=~/pipedpeer-lab/runs/'"$id"'; t=$(cat $R/t0 2>/dev/null); if [ -n "$t" ]; then if [ ! -e $R/exit ]; then echo "$t $(date +%s%N) live"; else echo "$t $(date +%s%N) done"; fi; fi' 2>/dev/null)" || out=""
   if [[ "$out" =~ ^([0-9]+)\ ([0-9]+)\ (live|done)$ ]]; then
     RUN_ELAPSED_NS=$((BASH_REMATCH[2] - BASH_REMATCH[1]))
-    POLL_NS="$(date +%s%N)"
     return 0
   fi
   return 1
@@ -267,7 +266,6 @@ e19_main() {
     return 1
   fi
 
-  local -a cluster_hosts=("${all_hosts[@]:0:$N}")
   local -a joiner_hosts=("${all_hosts[@]:$N:$ADD}")
 
   mkdir -p "$LAB/analysis-input"
@@ -485,7 +483,7 @@ e19_main() {
 
   # Write out final rows to e19.csv
   for row in "${buffered_rows[@]}"; do
-    IFS='|' read -r rid sys kind i pc join_s first_work_s wall_s seed_s jwarm csum <<<"$row"
+    IFS='|' read -r rid sys kind i pc join_s first_work_s wall_s seed_s jwarm _csum <<<"$row"
     local result_ok="${ok_map[$rid]:-}"
     printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
       "$sys" "$kind" "$i" "$pc" "$join_s" "$first_work_s" "$wall_s" "$result_ok" "$seed_s" "$jwarm" >>"$csv"

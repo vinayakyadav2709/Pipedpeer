@@ -99,3 +99,29 @@ Recent runs:
 | A ratio interval that crosses both 0.9 and 1.1 | verdict `unresolved`, never "same" |
 | A system missing at some N | flagged `missing`; no curve interpolates across it |
 | Ray or Dask ignoring a CPU cap | Ray restarted with `--num-cpus`, logged and stated in the results |
+
+## 7. Task-size and data-size sweeps
+
+| Case | Source | Handling |
+|---|---|---|
+| Task much smaller than the framework's call overhead | foreseen | Ray and Dask batch to about 100 ms per remote task where their documentation advises it; the batch size is in the script header |
+| Pipedpeer keeps small tasks on one machine | `poolrun.go:130-152` | a result, not a failure: default settings, with the remote share from the receipt in the table |
+| No-op throughput and single-call latency | foreseen | raw per-task cost, unbatched; Pipedpeer runs with `--distribute force` and is labelled so |
+| Identical payload objects in one list | foreseen | each item builds its own payload; pickle memoisation would otherwise hide the transfer |
+| ssh baseline regenerating a payload on the remote PC | foreseen | payload files are sent with the run; the part fails if its file is missing |
+| Total payload near the pool request ceiling | `poolhandlers.go:58,66-71` | 64 x 20 MB = 1.28 GB, under 2 GiB; a lower cgroup budget halves the ceiling, so a local-only decision is reported with its receipt |
+| An older `sizes.env` without the sweep keys | foreseen | the run stops and names the key; re-calibrate |
+
+## 8. Membership and failure
+
+| Case | Source | Handling |
+|---|---|---|
+| Introducer killed during a job | foreseen | LAN discovery off; the daemon is killed and its unit stopped (it restarts itself in 5 s otherwise); the job must still finish with the right result |
+| New PC joining after the introducer died | foreseen | invite from a surviving member; measured to healthy on both sides, then a forced job from the new PC |
+| An invite issued by the dead introducer | foreseen | expected not to join within 60 s; a join is logged as unexpected |
+| "New" PC already known to other members | lab | its own node list is moved aside and restored afterwards; stated as a re-join; E11 measures first-ever start |
+| PC joining after a job's upload | `execupload.go:175` | no closure for that job; elasticity is measured with the environment already on the joiners |
+| CPU busy during framework worker start-up | foreseen | first work = a streak of at least 5 s at half the cores or more, timed on the joining PC so clocks do not matter |
+| Target PC never reported dead | foreseen | row with `timed_out=1` at 120 s |
+| Another PC's state changes while waiting | foreseen | only the target's own row counts |
+| Private Nix store when the sandbox is off | `execrun.go:284` | the run fails with its reason, never a silent fallback to the sandbox |

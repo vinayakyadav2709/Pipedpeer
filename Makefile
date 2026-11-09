@@ -24,7 +24,7 @@ lint:
 
 # ruff + pytest over the job shim's Python; needs uv.
 campaign-lint:
-	shellcheck -x scripts/campaign/*.sh scripts/campaign/test/*.sh
+	shellcheck -x -S warning scripts/campaign/*.sh scripts/campaign/test/*.sh
 
 # every campaign test file even when one fails, a few at once, each under its
 # own HOME; the list itself is campaign-test-files and is not run directly

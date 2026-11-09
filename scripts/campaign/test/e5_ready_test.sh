@@ -3,7 +3,6 @@
 set -euo pipefail
 
 REPO="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
-CAMP="$REPO/scripts/campaign"
 WORKLOADS="$REPO/docs/benchmarks/workloads"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
 mkdir -p "$STATE"

@@ -8,6 +8,7 @@ FAKELAB_LIB="$REPO/scripts/campaign/test/fakelab.sh"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
 mkdir -p "$STATE"
 
+# shellcheck source=scripts/campaign/test/fakelab.sh
 source "$FAKELAB_LIB"
 
 pass=0

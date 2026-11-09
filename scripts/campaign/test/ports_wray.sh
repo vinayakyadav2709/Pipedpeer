@@ -2,8 +2,7 @@
 # shellcheck shell=bash
 PY=${PORTS_PY:?ports_test.sh exports PORTS_PY}
 RAY_ADDR=${PORTS_RAY_ADDR:?}
-hosts2=${PORTS_HOSTS2:?}
-workdir=${PORTS_WORKDIR:?}
+: "${PORTS_HOSTS2:?}" "${PORTS_WORKDIR:?}"
 REPO=${REPO:?ports_test.sh sets REPO}
 logs=${logs:?ports_test.sh sets logs}
 

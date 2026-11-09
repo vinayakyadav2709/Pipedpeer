@@ -52,6 +52,8 @@ setup_lab() {
   export HOME="$dir/home" LAB_RESULTS="$dir" LAB_RETRY_SLEEP=0.2 LAB_POLL_S=1
   export CLUSTER_SH="$v/cluster.sh" METRICS_SH="$v/metrics.sh" UPLOAD_SH="$v/upload.sh"
   export E4_LOG_WAIT_S=2 E4_JOIN_S=4
+  # literal tilde on purpose: the remote shell expands it
+  # shellcheck disable=SC2088
   export LAB_NET_DEV='~/net_dev'
   export PATH="$v:$PATH"
   cat >"$v/pipedpeer" <<'EOF'
