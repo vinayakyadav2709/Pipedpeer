@@ -65,9 +65,12 @@ real machines:
   transfer, nix store mode, `pipedpeer-bare`, E14's 20 MB payloads against the
   pool body limit, torchrun at N=2 and a real join are checked by the two-PC
   check at the start of Session 1 in `scripts/campaign/OPERATOR.md`. Two arms
-  have not completed even in containers: Ray fails in a 3 GB container (likely
-  memory, not proven) and E17 needs three PCs, so the first real session is
-  their first run.
+  have not completed even in containers, so the first real session is their
+  first run. Ray forms a 2-node cluster with a 3 GB head (ready in 13 s, no
+  out-of-memory kill), but E19's Ray run then held its container at the 3 GB
+  limit until it stopped answering: Ray counts the host's 16 CPUs there, and
+  no Ray workload finished. On the first real PC, watch Ray's memory on the
+  first run. E17 needs three PCs.
 - **The phone** (Samsung S20 FE 5G, Snapdragon 865): run on 2026-10-16 with
   Play Termux, Debian + Nix in proot: pool and torch chunks from laptop A
   verified (numbers in the report's results table). Still open: a run
