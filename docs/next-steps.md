@@ -64,7 +64,10 @@ real machines:
   containers. CPU-busy thresholds (the E19 sampler against `top`), real network
   transfer, nix store mode, `pipedpeer-bare`, E14's 20 MB payloads against the
   pool body limit, torchrun at N=2 and a real join are checked by the two-PC
-  check at the start of Session 1 in `scripts/campaign/OPERATOR.md`.
+  check at the start of Session 1 in `scripts/campaign/OPERATOR.md`. Two arms
+  have not completed even in containers: Ray fails in a 3 GB container (likely
+  memory, not proven) and E17 needs three PCs, so the first real session is
+  their first run.
 - **The phone** (Samsung S20 FE 5G, Snapdragon 865): run on 2026-10-16 with
   Play Termux, Debian + Nix in proot: pool and torch chunks from laptop A
   verified (numbers in the report's results table). Still open: a run
@@ -81,6 +84,15 @@ real machines:
 - **Demo-day recording**: every run, exported with
   `pipedpeer jobs --export-all <dir> --since <day>` on each machine, goes into
   the paper.
+- **E19 cold-joiner purge**: no container run has purged a real closure from a
+  joiner, because at n=1 the joiner never held it (`joiner_warm=0` is correct
+  there, and the byte columns are 0). On the first real session, confirm
+  `purged_bytes` is close to `closure_bytes` on a joiner that ran the job
+  before, and that `nix-store --delete` refusals are reported.
+- **Campaign tables with missing runs**: `<EXP>.csv` still gives a median when
+  fewer runs are usable than planned, as with E13 at 1 of 5 (only the run's
+  `WARN invalid` line says so; `<EXP>-speedup.csv` leaves it empty). Quote
+  medians from the speedup table, or check the warnings first.
 
 ## 3. Known gaps, left by choice
 
@@ -151,6 +163,8 @@ paper and report describe both as they are):
   initialisation sits outside the timing window.
 
 Dropped: Optuna interception, NPU support.
+
+- **Login prompts in the NAT lab image.** `lab/nat/compose.yml:116` runs a privileged Debian container with `/sbin/init`. If that image starts getty, it opens the host's real terminals, as the Ubuntu test image did before its gettys were masked. Check it and mask them the same way before the next run of that lab.
 
 ## 4. Future work, in priority order
 
