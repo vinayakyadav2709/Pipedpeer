@@ -38,7 +38,7 @@ This records the initial system state, installs all required Fedora packages (vi
 
 ## Step 3: Run Lab Sessions
 
-Follow `scripts/campaign/OPERATOR.md` starting from **Session 1**:
+Follow `scripts/campaign/OPERATOR.md` starting from **Session 1**. Do its two-PC check (steps C1-C11, own results folder `$HOME/pipedpeer-rc-check`) first; a failure there stops the lab until the project owner has read it. Then the full session:
 
 1. **Serve setup files** (keep running in a dedicated terminal):
    ```bash

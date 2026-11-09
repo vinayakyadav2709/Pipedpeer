@@ -42,6 +42,122 @@ The rehearsal installs the local build, so build it first:
 
 ## Session 1
 
+Start with the two-PC check. It is the first thing run on real PCs, before any
+other test: Docker cannot show CPU-busy thresholds, real network transfer, the
+nix store mode or a real join. It runs on 2 PCs with its own results folder, so
+nothing from it can reach `results/lab`. In every terminal used for the check
+(also the `serve.sh` one), first:
+
+    export LAB_RESULTS="$HOME/pipedpeer-rc-check"
+    mkdir -p "$LAB_RESULTS" && echo "rc-check-$(date +%F)" >"$LAB_RESULTS/campaign_id"
+    bash -c 'source scripts/campaign/lib.sh; echo "$LAB"'
+
+Pass: the last line is `$HOME/pipedpeer-rc-check` spelled out (an absolute path
+without spaces). Anything else (empty, relative, `results/lab`): stop and report.
+Close these terminals, or `unset LAB_RESULTS`, before "The full session" below.
+
+Why this is enough: every file the scripts keep on the driver (`hosts.tsv`,
+`ssh_config`, `known_hosts`, `sizes.env`, `runs.jsonl`, `campaign_id`, `serve/`,
+logs) is built from `$LAB`, and no script names `results/lab` outside comments
+and usage text. Shared by both folders on purpose: the lab key
+`~/.ssh/pipedpeer-lab` and the ssh control sockets `~/.ssh/cm-*`, which hold no
+results. The PCs are shared too: what the check installs stays on them until
+C10 and C11.
+
+C1. Serve and set up two PCs (second terminal, leave it running; `<driver ip>`
+    and `<lab cidr>` as in step 1 of the full session). On each of the two PCs
+    take the baseline snapshot (step 2 of the full session), then the user types
+    the setup line printed here:
+
+        scripts/campaign/serve.sh <driver ip> <lab cidr>
+
+    Pass: each PC prints one `LAB-PC host=...` line. Otherwise stop and report.
+
+C2. Find them, then inventory, install, stage, venv:
+
+        scripts/campaign/scan.sh <lab cidr> --pc00 <pc00 ip>
+        scripts/campaign/inventory.sh
+        scripts/campaign/install.sh <version>
+        scripts/campaign/network.sh
+        scripts/campaign/stage.sh
+        scripts/campaign/pins.sh
+        scripts/campaign/venv.sh
+
+    Pass: `scan.sh` lists exactly two PCs, and no command prints `FAIL`,
+    `FAILED` or exits non-zero. Otherwise stop and report the first failing line.
+
+C3. Short sizes (target 5 s, only in `$LAB_RESULTS`), then the smoke run:
+
+        scripts/campaign/calibrate.sh --target 5
+        scripts/campaign/run.sh SMOKE --sizes 1,2
+
+    Pass: `calibrate.sh` ends by printing `sizes.env`; `run.sh` ends without
+    `NOT-READY`, `TIMEOUT` or `FAILED`. Otherwise stop and report.
+
+C4. The four runs, one command at a time:
+
+        scripts/campaign/e18.sh --n 2 --repeats 1
+        scripts/campaign/e19.sh --n 1 --add 1 --repeats 1
+        scripts/campaign/run.sh E20 --repeats 1
+        scripts/campaign/run.sh E14 --sizes 2 --workloads DS20M --repeats 1
+
+    Pass: each exits 0 and prints no `NOT-READY` or `TIMEOUT`, and `$LAB_RESULTS/BLOCKERS.md` does not exist.
+    `UPLOAD-FAILED` is expected (no R2) and is not a failure. Otherwise stop and
+    report which command and its last 20 lines.
+
+C5. The sampler against `top`. Run `e19.sh --n 1 --add 1 --repeats 1` once more
+    and, while it runs, on the joining PC (the one that is not pc00):
+
+        top -b -n 3 -d 2 | grep '^%Cpu'
+
+    Pass: `top` shows the cores busy (`us`+`sy` above 50 %) during the same
+    seconds that `$LAB_RESULTS/analysis-input/e19.csv` gives a `first_work_s`
+    for that run, and no `first_work_s` is reported while `top` shows idle. If
+    they disagree, stop and report both numbers.
+
+C6. `pipedpeer-bare` really ran (the store is not private):
+
+        grep '"system":"pipedpeer-bare"' "$LAB_RESULTS/runs.jsonl" | grep -c '"result_ok":true'
+
+    Pass: 1 or more. Otherwise
+    stop and report.
+
+C7. E14's 20 MB payloads pass the pool body limit:
+
+        grep '"workload":"DS20M"' "$LAB_RESULTS/runs.jsonl" | grep -c '"result_ok":true'
+
+    Pass: 1 or more for `pipedpeer`. If it is 0, or `err` files under
+    `$LAB_RESULTS/hosts/*/runs/*` mention a body limit or `413`: stop and report.
+
+C8. torchrun at N=2 (E8 needs it):
+
+        scripts/campaign/run.sh E8 --systems torchrun --sizes 2 --repeats 1
+
+    Pass: exits 0 without `NOT-READY`. Otherwise stop and report.
+
+C9. The ssh drop: during a detached `run.sh SMOKE --sizes 2 --repeats 1` (new
+    `--repeats` value so it is not skipped), switch the laptop WiFi off for 60 s,
+    then on. Pass: the command finishes by itself, and
+    `grep -c '"workload":"W1"' "$LAB_RESULTS/runs.jsonl"` does not grow by more
+    than the runs it started (no run twice). Otherwise stop and report.
+
+C10. Leave one PC (the Leaving section, with `LAB_RESULTS` still set, applied to
+     the PC you choose by editing `$f` to one id). Pass: `journalctl -u lab-undo`
+     on it ends with `undo complete`, and the snapshot comparison is clean.
+
+C11. Write down, per item above, "what differed from Docker, on 2 real PCs, one
+     LAN" in `$LAB_RESULTS/rc-report.md`, and give the folder to the project owner.
+     Then clean up so nothing from the check can be mistaken for a result:
+
+         unset LAB_RESULTS
+         ls results/lab/runs.jsonl 2>&1   # pass: "No such file" (or the real runs only)
+
+     Keep `$HOME/pipedpeer-rc-check` until the owner has read it. The other PC
+     keeps the install; "The full session" repeats `install.sh`, which is safe
+     to repeat. E17 needs three PCs and is not part of this check.
+
+## The full session
+
 1. Serve the setup files (second terminal; leave it running). `<driver ip>` is
    the driver's address on the lab network, `<lab cidr>` the lab subnet:
 
@@ -53,11 +169,7 @@ The rehearsal installs the local build, so build it first:
    hibernate.target hybrid-sleep.target`. "Leaving" compares against it.
    Then the user types the setup line `serve.sh` printed (it is also in
    `results/lab/serve/SETUP-LINE.txt`). It prints one `LAB-PC host=...` line.
-   Before the full install, check two PCs end to end (real conditions): the
-   setup line typed by the user, `scan.sh`, `install.sh`, `run.sh SMOKE
-   --sizes 1,2`, an ssh drop (laptop WiFi off 60 s during a detached run; it
-   must finish and be fetched once), then the leaving steps below on one PC.
-   Only then set up the rest.
+   Before the full install, do the two-PC check above. Only then set up the rest.
 3. Find the PCs; `<pc00 ip>` is the PC nearest the driver:
 
        scripts/campaign/scan.sh <lab cidr> --pc00 <pc00 ip>

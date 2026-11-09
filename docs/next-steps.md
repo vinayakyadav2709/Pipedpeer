@@ -60,6 +60,11 @@ real machines:
 - **The two laptops over Tailscale** running `cpu.py`, `gpu.py`, `both.py`, and
   `--ddp 1` against automatic mode (the manual checklist in
   [pipedpeer-demo/TESTING.md](../pipedpeer-demo/TESTING.md)). TODO(verify).
+- **The lab harness on real PCs**: `scripts/campaign/` has run only on Docker
+  containers. CPU-busy thresholds (the E19 sampler against `top`), real network
+  transfer, nix store mode, `pipedpeer-bare`, E14's 20 MB payloads against the
+  pool body limit, torchrun at N=2 and a real join are checked by the two-PC
+  check at the start of Session 1 in `scripts/campaign/OPERATOR.md`.
 - **The phone** (Samsung S20 FE 5G, Snapdragon 865): run on 2026-10-16 with
   Play Termux, Debian + Nix in proot: pool and torch chunks from laptop A
   verified (numbers in the report's results table). Still open: a run
