@@ -3,6 +3,8 @@
 # Distributed: the n_jobs=-1 fit, via joblib.parallel_backend("dask").
 # Local: data generation, prediction, accuracy, result lines.
 # Follows: https://docs.dask.org/en/stable/
+# Disclosure: no scatter of X/y (Dask prefers workers loading data; the driver builds
+# them locally and joblib ships them per task, per RD).
 # Result line, byte-for-byte: accuracy: <x:.4f>
 import os
 import time

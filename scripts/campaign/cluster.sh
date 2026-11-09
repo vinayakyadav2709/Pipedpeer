@@ -28,6 +28,9 @@ CLUSTER_SYS=()
 CLUSTER_IDS=()
 CLUSTER_N=0
 CLUSTER_CAP_PC=()
+# CLUSTER_CAP_CPU is also allowed as an environment-wide scalar cap (CLUSTER_CAP_CPU=4)
+# for the Dask worker core count; keep it before the array is reset below.
+_CLUSTER_CAP_CPU_ENV="${CLUSTER_CAP_CPU:-}"
 CLUSTER_CAP_CPU=()
 CLUSTER_RESET_ON_EXIT=0
 
@@ -345,6 +348,8 @@ _cluster_write_cores() {
 		_cluster_cores_line ray "$ray_cmd"
 	fi
 	if _cluster_has dask; then
+		# Dask's per-worker memory limit is total divided by workers; summing
+		# nthreads gives the cores the cluster actually uses (one thread per worker).
 		dask_cmd="~/pipedpeer-lab/venv/bin/python -c \"from dask.distributed import Client; c=Client('tcp://$ip:8786'); print(sum(w.get('nthreads', 0) for w in c.scheduler_info()['workers'].values()))\""
 		_cluster_cores_line dask "$dask_cmd"
 	fi
@@ -381,6 +386,33 @@ _cluster_ray_cpus_flag() {
 			return 0
 		fi
 	done
+}
+
+# _cluster_dask_cores <pc>: the core count for a Dask worker on <pc>, from
+# hosts.tsv column 5, capped by a per-PC --cap and by the CLUSTER_CAP_CPU env
+# cap. Empty when the PC has no usable core count (so the worker is skipped).
+_cluster_dask_cores() {
+	local pc="$1" base="" cap="" eff="" k
+	base="$(awk -F'\t' -v pc="$pc" '$1 == pc { print $5; exit }' "$LAB/hosts.tsv" 2>/dev/null || true)"
+	if [[ ! "$base" =~ ^[0-9]+$ ]] || ((base < 1)); then
+		printf ''
+		return 0
+	fi
+	eff="$base"
+	# per-PC cap from --cap
+	for ((k = 0; k < ${#CLUSTER_CAP_PC[@]}; k++)); do
+		if [[ "${CLUSTER_CAP_PC[$k]}" == "$pc" ]]; then
+			cap="${CLUSTER_CAP_CPU[$k]}"
+			if [[ "$cap" =~ ^[0-9]+$ ]] && ((cap >= 1 && cap < eff)); then
+				eff="$cap"
+			fi
+		fi
+	done
+	# env-wide cap
+	if [[ "$_CLUSTER_CAP_CPU_ENV" =~ ^[0-9]+$ ]] && ((_CLUSTER_CAP_CPU_ENV >= 1 && _CLUSTER_CAP_CPU_ENV < eff)); then
+		eff="$_CLUSTER_CAP_CPU_ENV"
+	fi
+	printf '%s\n' "$eff"
 }
 
 # _cluster_wait_ray_cpus <pc> <ip> <want>: poll Ray's node list until <ip>
@@ -475,7 +507,7 @@ cluster_up() {
 	cluster_reset_caps || true
 	trap cluster_cleanup EXIT
 
-	local hostfile pc00_id pc00_ip i k pc
+	local hostfile pc00_id pc00_ip i k pc cores dask_total=0
 	local -a others=()
 	hostfile="$(lab_hosts "$CLUSTER_N")" || return 1
 	mapfile -t CLUSTER_IDS <"$hostfile"
@@ -524,8 +556,15 @@ cluster_up() {
 			_cluster_fail "up: could not start the Dask scheduler on $pc00_id" || return 1
 		fi
 		for ((i = 0; i < CLUSTER_N; i++)); do
-			if ! lab_ssh "${CLUSTER_IDS[$i]}" "systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$pc00_ip:8786"; then
-				_cluster_fail "up: could not start the Dask worker on ${CLUSTER_IDS[$i]}" || return 1
+			pc="${CLUSTER_IDS[$i]}"
+			cores="$(_cluster_dask_cores "$pc")"
+			if [[ -z "$cores" ]]; then
+				lab_log "up: dask: no core count for $pc in hosts.tsv; not starting its worker (listed as not ready)"
+				continue
+			fi
+			dask_total=$((dask_total + cores))
+			if ! lab_ssh "$pc" "systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$pc00_ip:8786 --nworkers $cores --nthreads 1"; then
+				_cluster_fail "up: could not start the Dask worker on $pc" || return 1
 			fi
 		done
 	fi
@@ -549,7 +588,7 @@ cluster_up() {
 		case "$pc" in
 			pipedpeer) cluster_wait_pipedpeer "$CLUSTER_N" || return 1 ;;
 			ray) _cluster_wait_count ray "$CLUSTER_N" "$_RAY_COUNT_CMD" || return 1 ;;
-			dask) _cluster_wait_count dask "$CLUSTER_N" "$(_dask_count_cmd "$pc00_ip")" || return 1 ;;
+			dask) _cluster_wait_count dask "$CLUSTER_N" "$(_dask_count_cmd "$pc00_ip" "$dask_total")" || return 1 ;;
 		esac
 	done
 	if _cluster_has ray && ((${#CLUSTER_CAP_PC[@]} > 0)); then
@@ -591,10 +630,12 @@ cluster_down() {
 _CLUSTER_STOP_UNITS='systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler; do if [ "$(systemctl --user show -p ActiveState --value $u 2>/dev/null)" = active ]; then echo "$u is still active" >&2; exit 1; fi; systemctl --user reset-failed $u 2>/dev/null; done; exit 0'
 _RAY_COUNT_CMD="~/pipedpeer-lab/venv/bin/python -c \"import ray; ray.init(address='auto'); print(len([x for x in ray.nodes() if x['Alive']]))\""
 
-# _dask_count_cmd <scheduler ip>: the Dask worker count on that scheduler.
+# _dask_count_cmd <scheduler ip> <total workers>: the number of distinct hosts
+# reporting workers, or 0 while fewer than <total> workers have started (a
+# PC's first worker registers before the rest of its --nworkers).
 _dask_count_cmd() {
-	local ip="$1"
-	printf '%s\n' "~/pipedpeer-lab/venv/bin/python -c \"from dask.distributed import Client; print(len(Client('tcp://$ip:8786').scheduler_info()['workers']))\""
+	local ip="$1" total="$2"
+	printf '%s\n' "~/pipedpeer-lab/venv/bin/python -c \"from dask.distributed import Client; w=list(Client('tcp://$ip:8786').scheduler_info()['workers'].values()); print(len({x['host'] for x in w}) if len(w) >= $total else 0)\""
 }
 
 # --- main -------------------------------------------------------------------

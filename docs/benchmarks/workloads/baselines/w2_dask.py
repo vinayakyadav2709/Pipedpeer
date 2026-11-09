@@ -4,6 +4,9 @@
 # (joblib.parallel_backend("dask")). Local on pc00: the numpy SVD; the pandas
 # part uses dask.dataframe per the Dask docs (from_pandas + groupby/agg + .compute()).
 # Follows: https://docs.dask.org/en/stable/scheduling.html
+# Disclosure: Dask workers run one thread each (cluster.sh --nworkers <cores>
+# --nthreads 1); the pandas stage uses dd.from_pandas with npartitions=2, which
+# Dask's docs warn is often slower than plain pandas for in-RAM data (M2).
 # Original result lines, byte-for-byte:
 #   cpu.py on <cores> local cores
 #   Pool: <items> items, checksum <sum>

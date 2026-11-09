@@ -4,8 +4,9 @@
 # Local: the checksum reduction and the result line.
 # Follows: https://docs.dask.org/en/stable/scheduling.html (dask.distributed for
 # Pool-shaped work; distributed's own multiprocessing docs recommend client.map).
-# The distributed scheduler has no fixed pool size for map: every worker runs as
-# many tasks as it has threads, so BENCH_PROCS is not read (a changed line).
+# cluster.sh starts Dask with --nworkers <cores> --nthreads 1, so each worker runs
+# one task at a time and the cluster behaves like a pool of cores; BENCH_PROCS is
+# not read (a changed line).
 # Original result line, byte-for-byte: POOLMAP-OK items=%d seconds=%.4f checksum=%.6f
 import os
 import time
