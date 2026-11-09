@@ -116,11 +116,15 @@ e17_record() {
 import json, sys
 d = json.load(sys.stdin)
 w = d.get("wall_s")
-print("%s,%s" % ("" if not w else w, 1 if d.get("result_ok") is True else 0))
+r = d.get("result_ok")
+print("%s,%s" % ("" if not w else w, "" if r is None else (1 if r is True else 0)))
 ')"; then
     lab_log "E17 $id: the runs.jsonl record is not usable; wall and result left empty"
     printf ',\n'
     return 0
+  fi
+  if [[ "$out" == *, ]]; then
+    lab_log "E17 $id: result_ok is null in runs.jsonl (no reference checksum: run REF first); job_result_ok left empty, not 0"
   fi
   printf '%s\n' "$out"
 }
@@ -431,6 +435,14 @@ e17_main() {
     fi
     kill_at="" wall="" okv="" join_s="" join_ok="" remote="" old_joined="0"
 
+    # the joiners leave the cluster before the job: a joiner still running
+    # as a member took the job's work on the emulated lab (N+1 machines)
+    local j
+    for j in "${joiners[@]}"; do
+      lab_ssh "$j" 'pipedpeer stop 2>/dev/null || true' || lab_log "E17 $id: could not stop $j's daemon before the job; it may take work"
+      e17_move_aside "$j" || lab_log "E17 $id: $j's files were not moved aside; its state is not isolated"
+    done
+
     # the old invite must be issued before the introducer dies
     old_code="$(e17_invite "$pc00" 2>/dev/null)" || old_code=""
     if [[ -z "$old_code" ]]; then
@@ -458,10 +470,6 @@ e17_main() {
 
     # a new code from the surviving introducer, on a fresh joiner
     join_ok=0
-    local j
-    for j in "${joiners[@]}"; do
-      e17_move_aside "$j" || lab_log "E17 $id: $j's files were not moved aside; its state is not isolated"
-    done
     code="$(e17_invite "$submit" 2>/dev/null)" || code=""
     if [[ -z "$code" ]]; then
       lab_log "E17 $id: no invite from $submit after the kill; new_join_s and new_join_ok left empty"
@@ -471,7 +479,12 @@ e17_main() {
       t0="$(date +%s%N)"
       rc2=0
       lab_ssh "${joiners[0]}" "cd ~/pipedpeer-lab/work && timeout ${E17_CONNECT_TIMEOUT_S:-120} pipedpeer connect $(printf '%q' "$code")" || rc2=$?
-      if ((rc2 == 0)); then
+      if ((rc2 == 2)); then
+        # partly connected: the survivor's invite still names the dead
+        # introducer; the join counts when both views confirm it (install.sh's rule)
+        lab_log "E17 $id: connect on ${joiners[0]} exited 2 (partly connected); confirming the join on $submit and ${joiners[0]}"
+      fi
+      if ((rc2 == 0 || rc2 == 2)); then
         if join_s="$(e17_wait_join "$submit" "${joiners[0]}" "$N" "${E17_JOIN_S:-120}" "$t0")"; then
           join_ok=1
         else

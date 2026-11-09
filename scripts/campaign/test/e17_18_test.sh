@@ -106,6 +106,8 @@ case "${1:-}" in
 				done
 				printf '\n'; } >"$FAKELAB_DIR/status.$me"
 		fi
+		# FAKE_CONNECT_RC=2: "partly connected" (a dead member in the invite)
+		exit "${FAKE_CONNECT_RC:-0}"
 		exit 0 ;;
 	run)
 		small=0
@@ -307,6 +309,85 @@ res="$(
 	echo ROW-OK
 )" 2>"$d/err" || true
 verdict_row "e17 forced job fails: its exit code is logged, new_remote_items empty" "$res" "$d/err"
+
+# the joiners are out of the cluster before the job starts (stopped, files
+# aside), so the job measures the N members and not a joiner too; the
+# restore still runs at the end
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	stop_ln="$(grep -n '^pc03 pipedpeer stop' "$d/pipedpeer.log" | head -1 | cut -d: -f1)"
+	run_ln="$(grep -n '^pc01 pipedpeer run' "$d/pipedpeer.log" | head -1 | cut -d: -f1)"
+	[[ -n "$stop_ln" && -n "$run_ln" ]] && ((stop_ln < run_ln)) || rbad "joiner pc03 not stopped before the job (stop line ${stop_ln:-none}, run line ${run_ln:-none})"
+	stop4="$(grep -n '^pc04 pipedpeer stop' "$d/pipedpeer.log" | head -1 | cut -d: -f1)"
+	[[ -n "$stop4" ]] && ((stop4 < run_ln)) || rbad "joiner pc04 not stopped before the job"
+	[[ ! -e "$d/pc03/.local/share/pipedpeer/nodes.db.e17-backup" ]] || rbad "pc03's files not restored at the end"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 joiners stopped and moved aside before the job, restored after" "$res" "$d/err"
+
+# connect exits 2 ("partly connected": the dead introducer is in the
+# survivor's invite) but the survivor and the joiner both show the join:
+# that is a join, as install.sh counts it
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3 FAKE_CONNECT_RC=2
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 1 ]] || rbad "new_join_ok [$join_ok] for exit 2 confirmed by status ($row)"
+	[[ -n "$join_s" ]] || rbad "new_join_s empty"
+	[[ "$ritm" == 64 ]] || rbad "new_remote_items [$ritm]"
+	grep -q 'partly connected' "$d/campaign.log" || rbad "exit 2 not logged as partly connected"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 connect exit 2 confirmed by status: a join" "$res" "$d/err"
+
+# exit 2 that the status never confirms stays a failed join
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_CONNECT_RC=2
+	export E17_START_WAIT_S=5 E17_JOIN_S=2 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 0 ]] || rbad "new_join_ok [$join_ok] for an unconfirmed exit 2 ($row)"
+	[[ -z "$join_s" ]] || rbad "new_join_s [$join_s] for an unconfirmed join"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 connect exit 2 the status never confirms: not a join" "$res" "$d/err"
+
+# no reference checksum: result_ok is null in runs.jsonl, which is unknown,
+# not wrong: job_result_ok is empty and the reason is logged
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	rm -f "$d/reference/W1-strong.txt"
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ -n "$wall" ]] || rbad "job_wall_s empty ($row)"
+	[[ -z "$okv" ]] || rbad "job_result_ok [$okv] for a null result_ok"
+	grep -q 'result_ok is null' "$d/campaign.log" || rbad "the null result was not logged"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 null result_ok (no reference): job_result_ok empty, logged" "$res" "$d/err"
 
 # job ended before the kill: kill_at_s empty, row kept; an old invite that
 # still joins is recorded and logged as unexpected
