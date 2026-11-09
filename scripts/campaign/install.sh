@@ -309,6 +309,8 @@ main() {
 	local -A warmup_sec=()
 	local -A warmup_state=()
 	local -A warmup_last_mtime=()
+	local -A warmup_miss=()
+	local miss_max="${CAMPAIGN_WARMUP_MISS_MAX:-3}"
 	local -A warmup_last_change=()
 	local -A warmup_last_line=()
 	local poll_s="${CAMPAIGN_WARMUP_POLL_S:-${LAB_POLL_S:-15}}"
@@ -352,6 +354,14 @@ printf "OK\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line"
 		for pc in "${warmup_pending[@]}"; do
 			out="$(cat "$LAB/logs/warmup-poll/$pc" 2>/dev/null || true)"
 			if [[ -z "$out" || "$out" == MISSING* ]]; then
+				# one failed probe is not a verdict: the PC is dropped after
+				# $miss_max consecutive empty or MISSING probes
+				warmup_miss[$pc]=$((${warmup_miss[$pc]:-0} + 1))
+				if ((warmup_miss[$pc] < miss_max)); then
+					lab_log "install: warmup $pc: probe ${warmup_miss[$pc]}/$miss_max empty or log missing; retrying"
+					next_pending+=("$pc")
+					continue
+				fi
 				warmup_state[$pc]="missing"
 				warmup_sec[$pc]="-"
 				fail_v[$pc]="warmup: log missing"
@@ -360,6 +370,7 @@ printf "OK\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line"
 			fi
 
 			if [[ "$out" == OK$'\t'* ]]; then
+				warmup_miss[$pc]=0
 				IFS=$'\t' read -r _ p_mtime p_head p_tail <<<"$out"
 				if [[ "$p_mtime" != "${warmup_last_mtime[$pc]:-}" ]]; then
 					warmup_last_mtime[$pc]="$p_mtime"

@@ -149,12 +149,25 @@ scan_local_ips() {
 	} | sed '/^$/d'
 }
 
-# scan_read_line <ip>: the LAB-PC line, as root. One attempt: a scan is
-# discovery, and a PC that does not answer now is answered by rerunning.
+# scan_read_line <ip>: the LAB-PC line. Root first; a hardened sshd refuses
+# root, so then the lab user's login (--user, else $LAB_USER, else "lab") reads
+# the same world-readable file. One attempt each: a scan is discovery, and a PC
+# that does not answer now is answered by rerunning.
 scan_read_line() {
-	local ip="$1"
-	ssh -F "$ssh_config" -o User=root "$ip" -- \
-		"cat /var/lib/pipedpeer-lab/lab-pc.line" 2>/dev/null
+	local ip="$1" u line
+	if line="$(ssh -F "$ssh_config" -o User=root "$ip" -- \
+		"cat /var/lib/pipedpeer-lab/lab-pc.line" 2>/dev/null)" && [[ -n "${line// /}" ]]; then
+		printf '%s\n' "$line"
+		return 0
+	fi
+	u="${user_override:-${LAB_USER:-lab}}"
+	lab_log "scan: $ip: root login gave no LAB-PC line; trying user $u"
+	if line="$(ssh -F "$ssh_config" -o User="$u" "$ip" -- \
+		"cat /var/lib/pipedpeer-lab/lab-pc.line" 2>/dev/null)" && [[ -n "${line// /}" ]]; then
+		printf '%s\n' "$line"
+		return 0
+	fi
+	return 1
 }
 
 # scan_field <line> <key>: the value of <key>= in a LAB-PC line.

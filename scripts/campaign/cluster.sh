@@ -23,6 +23,9 @@ _CLUSTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_CLUSTER_DIR/lib.sh"
 
 CLUSTER_READY_S="${CLUSTER_READY_S:-120}"
+_CLUSTER_WORKER_FAILED=0
+# CLUSTER_DASK_ALLOWED_FAILURES: unset keeps Dask's default; set it to change
+# how often a task may lose its worker before the scheduler gives up on it.
 
 CLUSTER_SYS=()
 CLUSTER_IDS=()
@@ -155,6 +158,17 @@ _cluster_fail() {
 	lab_log "$*"
 	CLUSTER_RESET_ON_EXIT=1
 	return 1
+}
+
+# _cluster_worker_fail <sys> <pc> <why>: a worker that would not start. The PC
+# is listed NOT-READY, the other PCs are still started, and up fails at the end:
+# a smaller cluster is never run and reported as N.
+_cluster_worker_fail() {
+	local sys="$1" pc="$2" why="$3"
+	printf 'NOT-READY %s pc=%s\n' "$sys" "$pc"
+	lab_log "NOT-READY $sys pc=$pc ($why)"
+	CLUSTER_RESET_ON_EXIT=1
+	_CLUSTER_WORKER_FAILED=1
 }
 
 _cluster_not_ready() {
@@ -547,12 +561,12 @@ cluster_up() {
 		fi
 		for ((i = 1; i < CLUSTER_N; i++)); do
 			if ! lab_ssh "${CLUSTER_IDS[$i]}" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379$(_cluster_ray_cpus_flag "${CLUSTER_IDS[$i]}") --block"; then
-				_cluster_fail "up: could not start the Ray worker on ${CLUSTER_IDS[$i]}" || return 1
+				_cluster_worker_fail ray "${CLUSTER_IDS[$i]}" "could not start the Ray worker"
 			fi
 		done
 	fi
 	if _cluster_has dask; then
-		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-dask-scheduler --collect ~/pipedpeer-lab/venv/bin/dask scheduler --port 8786"; then
+		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-dask-scheduler --collect ${CLUSTER_DASK_ALLOWED_FAILURES:+env DASK_DISTRIBUTED__SCHEDULER__ALLOWED_FAILURES=$CLUSTER_DASK_ALLOWED_FAILURES }~/pipedpeer-lab/venv/bin/dask scheduler --port 8786"; then
 			_cluster_fail "up: could not start the Dask scheduler on $pc00_id" || return 1
 		fi
 		for ((i = 0; i < CLUSTER_N; i++)); do
@@ -564,9 +578,14 @@ cluster_up() {
 			fi
 			dask_total=$((dask_total + cores))
 			if ! lab_ssh "$pc" "systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$pc00_ip:8786 --nworkers $cores --nthreads 1"; then
-				_cluster_fail "up: could not start the Dask worker on $pc" || return 1
+				_cluster_worker_fail dask "$pc" "could not start the Dask worker"
 			fi
 		done
+	fi
+
+	if ((_CLUSTER_WORKER_FAILED)); then
+		lab_log "up: $CLUSTER_N PCs wanted, a worker did not start; this N is unavailable"
+		return 1
 	fi
 
 	# the PCs' ssh/torchrun settings need ips, not ids

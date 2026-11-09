@@ -79,6 +79,13 @@ new_lab() {
 # copy, log the arguments, then hand over to the fake-lab stub.
 set -uo pipefail
 printf '%s\n' "$*" >>"${FAKELAB_DIR:?}/scan-args.log"
+# SCAN_TEST_REFUSE=<user>: that login is refused, as a hardened sshd would
+for u in ${SCAN_TEST_REFUSE:-}; do
+	if [[ "$*" == *"User=$u "* ]]; then
+		echo "Permission denied (publickey)." >&2
+		exit 255
+	fi
+done
 host=""
 skip=0
 for a in "$@"; do
@@ -143,6 +150,40 @@ cfg_user() {
 		/^Host / { f = 0 }
 		f && $1 == "User" { print $2; exit }
 	' "$1"
+}
+
+# --- row 8: root ssh refused -> the lab user's login (FU-I) ---------------
+
+row_root_refused() {
+	local out rc=0
+	new_lab rootno 2 || return
+	pc_line 10.99.0.21 pc00 alice
+	pc_line 10.99.0.22 pc01 lab
+	scan_add 10.99.0.21
+	scan_add 10.99.0.22
+	out="$(SCAN_TEST_REFUSE=root bash "$scan" --user lab 10.99.0.0/24 2>"$state/rootno.err")" || rc=$?
+	check_eq "root refused: scan exit" 0 "$rc"
+	check_eq "root refused: both PCs kept" "SCAN found=2 new=2 unreachable=0" "$out"
+	check_has "root refused: the lab user's login was tried" \
+		"$(cat "$FAKELAB_DIR/scan-args.log" 2>/dev/null)" "-o User=lab"
+
+	# the opposite: root answers, so no fallback login is tried
+	new_lab rootok 1 || return
+	pc_line 10.99.0.21 pc00 lab
+	scan_add 10.99.0.21
+	bash "$scan" --user lab 10.99.0.0/24 >/dev/null 2>"$state/rootok.err" || true
+	if grep -q "User=lab" "$FAKELAB_DIR/scan-args.log" 2>/dev/null; then
+		bad "root accepted: no fallback login"
+	else
+		ok "root accepted: no fallback login"
+	fi
+
+	# both refused: left out, loudly
+	new_lab bothno 1 || return
+	pc_line 10.99.0.21 pc00 lab
+	scan_add 10.99.0.21
+	out="$(SCAN_TEST_REFUSE="root lab" bash "$scan" 10.99.0.0/24 2>"$state/bothno.err")" || rc=$?
+	check_has "both refused: UNREACHABLE" "$out" "UNREACHABLE 10.99.0.21"
 }
 
 # --- row 1: two PCs, two lab users ---------------------------------------
@@ -341,6 +382,7 @@ PY
 	serve_pid=""
 }
 
+row_root_refused
 row_users
 row_fresh
 row_rescan

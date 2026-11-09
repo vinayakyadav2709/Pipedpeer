@@ -271,8 +271,71 @@ t7() { local d got; d="$(newdir)"; got="$(ready_expr "$d" "8,8" 2>&1)"; [[ "$got
 t8() { local d got; d="$(newdir)"; got="$(ready_expr "$d" "8,1" 2>&1)"; [[ "$got" == 0 ]] || pnote "got $got"; verdict "real expression: 2 PCs but only 9 of 16 workers up -> not ready"; }
 t9() { local d got; d="$(newdir)"; got="$(ready_expr "$d" "16" 2>&1)"; [[ "$got" == 1 ]] || pnote "got $got"; verdict "real expression: 1 PC holding all 16 workers -> 1 PC, not 2"; }
 
+# Rows 10-13 (FU-F): a worker that does not start, and the Dask allowed-failures override.
+_fail_unit_on() { # <dir> <pc> <unit>: that unit's systemd-run fails on that PC
+	cat >"$1/verif/systemd-run" <<EOF
+#!/usr/bin/env bash
+if [[ "\$(basename "\$HOME")" == "$2" && "\$*" == *"$3"* ]]; then
+	echo "systemd-run: simulated start failure" >&2
+	exit 1
+fi
+exec "\$FAKELAB_DIR/bin/systemd-run" "\$@"
+EOF
+	chmod +x "$1/verif/systemd-run"
+}
+_status_2() {
+	fx "$1/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+EOF
+}
+_worker_fail_row() { # <sys> <unit> <label>
+	local sys="$1" unit="$2" d rc=0
+	d="$(newdir)"
+	(
+		ss_setup "$d" 3
+		_fail_unit_on "$d" pc01 "$unit"
+		_status_2 "$d"
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		export PY_FAKE_OUT=3
+		bash "$REPO/scripts/campaign/cluster.sh" up 3 --systems "$sys"
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" rc 1 "up with a failed $sys worker"
+	grep -q "NOT-READY $sys pc=pc01" "$d/log" || pnote "no 'NOT-READY $sys pc=pc01'"
+	grep -q 'CLUSTER-UP' "$d/log" && pnote "a smaller cluster was reported up"
+	# the other PCs are still tried: the PC list is complete, not cut at the first failure
+	grep -q "$unit" "$d/units.log" 2>/dev/null || true
+	[[ "$(grep -c "$unit" "$d/units.log" 2>/dev/null || true)" -ge 2 ]] || pnote "PCs after the failed one were not started"
+	verdict "$3"
+}
+t10() { _worker_fail_row dask lab-dask-worker "Dask worker fails on pc01 -> NOT-READY dask pc=pc01, the rest started, no CLUSTER-UP"; }
+t11() { _worker_fail_row ray lab-ray "Ray worker fails on pc01 -> NOT-READY ray pc=pc01, the rest started, no CLUSTER-UP"; }
+_allowed_row() { # <value or empty> <label>
+	local v="$1" d rc=0
+	d="$(newdir)"
+	(
+		ss_setup "$d" 2
+		_status_2 "$d"
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		export PY_FAKE_OUT=2
+		if [[ -n "$v" ]]; then export CLUSTER_DASK_ALLOWED_FAILURES="$v"; else unset CLUSTER_DASK_ALLOWED_FAILURES; fi
+		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems dask
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	if [[ -n "$v" ]]; then
+		grep 'lab-dask-scheduler' "$d/units.log" | grep -q "DASK_DISTRIBUTED__SCHEDULER__ALLOWED_FAILURES=$v" || pnote "scheduler has no allowed-failures=$v"
+	else
+		grep 'lab-dask-scheduler' "$d/units.log" | grep -q ALLOWED_FAILURES && pnote "unset override still changed the scheduler"
+	fi
+	verdict "$2"
+}
+t12() { _allowed_row 10 "CLUSTER_DASK_ALLOWED_FAILURES=10 -> scheduler started with it"; }
+t13() { _allowed_row "" "no override -> the scheduler keeps Dask's default"; }
+
 printf 'scripts/campaign/cluster_dask_test.sh case table\n\n'
-t1; t2; t3; t4; t5; t6; t7; t8; t9
+t1; t2; t3; t4; t5; t6; t7; t8; t9; t10; t11; t12; t13
 printf '\n'
 total=$((pass + failed))
 if ((failed == 0)); then

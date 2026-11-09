@@ -312,12 +312,58 @@ t6_timeout() {
 	verdict "timeout -> named with last log line"
 }
 
+# --- Case 7: one missing probe, then the log appears -> PC kept (FU-E) ----
+t7_late_log() {
+	local d rc=0 bg_pid
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 5 "done"
+		(
+			sleep 1
+			set_warmup_log "$d/pc01" 5 "done"
+		) &
+		bg_pid=$!
+		export CAMPAIGN_WARMUP_POLL_S=1
+		export CAMPAIGN_WARMUP_STALL_S=60
+		export CAMPAIGN_WARMUP_TIMEOUT_S=60
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+		wait "$bg_pid" 2>/dev/null || true
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	grep -q '^rc=0$' "$d/log" || pnote "one missing probe dropped a PC"
+	grep -q 'INSTALL ok=2 failed=0' "$d/log" || pnote "no 'INSTALL ok=2 failed=0'"
+	verdict "one missing probe then the log -> PC kept"
+}
+
+# --- Case 8: three consecutive missing probes -> dropped, not on the first
+t8_three_missing() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 5 "done"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=1$' "$d/log" || pnote "expected exit 1"
+	grep -q 'FAILED pc01:.*missing' "$d/log" || pnote "pc01 not reported missing"
+	local n
+	n="$(count "$d/campaign.log" 'warmup pc01: log missing')"
+	[[ "$n" == 1 ]] || pnote "missing logged $n times (want once, after 3 probes)"
+	[[ "$(count "$d/campaign.log" 'warmup pc01: probe 1/3')" == 1 ]] || pnote "first miss not logged as a retry"
+	verdict "three consecutive missing probes -> dropped"
+}
+
 t1_all_done
 t2_already_done
 t3_one_failed
 t4_log_stalls
 t5_log_missing
 t6_timeout
+t7_late_log
+t8_three_missing
 
 printf 'PASS %d/%d\n' "$pass" "$((pass + failed))"
 ((failed == 0)) || exit 1
