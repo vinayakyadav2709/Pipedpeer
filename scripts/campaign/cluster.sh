@@ -288,24 +288,28 @@ cluster_cleanup() {
 # single stdout line is the current count. ssh trouble is "not yet".
 _cluster_wait_count() {
 	local sys="$1" want="$2" count_cmd="$3"
-	local f out have deadline
+	local f e out have deadline
 	f="$(_cluster_tmp)"
+	e="$(_cluster_tmp)"
 	deadline=$(( $(date +%s) + CLUSTER_READY_S ))
 	while :; do
 		have=""
 		# a probe that hangs (Ray with no head waits for one) must not outlast the deadline
-		if lab_ssh "${CLUSTER_IDS[0]}" "timeout 30 $count_cmd" >"$f" 2>/dev/null; then
+		if lab_ssh "${CLUSTER_IDS[0]}" "timeout 30 $count_cmd" >"$f" 2>"$e"; then
 			out="$(tr -d '[:space:]' <"$f" || true)"
 			if [[ "$out" =~ ^[0-9]+$ ]]; then
 				have="$out"
 			fi
 		fi
 		if [[ "$have" == "$want" ]]; then
-			rm -f "$f"
+			rm -f "$f" "$e"
 			return 0
 		fi
 		if (($(date +%s) >= deadline)); then
-			rm -f "$f"
+			if [[ -s "$e" ]]; then
+				lab_log "NOT-READY $sys: last probe error: $(tail -n 8 "$e" | tr '\n' ' ' | cut -c1-800)"
+			fi
+			rm -f "$f" "$e"
 			_cluster_not_ready "$sys" "$want" "${have:-unknown}"
 			return 1
 		fi

@@ -72,6 +72,7 @@ _verif_python() {
 #!/usr/bin/env bash
 if [[ "$*" == *NodeManagerAddress* && -n "${PY_FAKE_NODES:-}" ]]; then printf '%s\n' "$PY_FAKE_NODES"; exit 0; fi
 if [[ "$*" == *"sum(w.get"* && -n "${PY_FAKE_CORES:-}" ]]; then printf '%s\n' "$PY_FAKE_CORES"; exit 0; fi
+if [[ -n "${PY_FAKE_ERR:-}" ]]; then printf '%s\n' "$PY_FAKE_ERR" >&2; exit 1; fi
 printf '%s\n' "${PY_FAKE_OUT:?PY_FAKE_OUT unset}"
 EOF
 	chmod +x "$d/pc00/pipedpeer-lab/venv/bin/python"
@@ -335,7 +336,29 @@ t12() { _allowed_row 10 "CLUSTER_DASK_ALLOWED_FAILURES=10 -> scheduler started w
 t13() { _allowed_row "" "no override -> the scheduler keeps Dask's default"; }
 
 printf 'scripts/campaign/cluster_dask_test.sh case table\n\n'
-t1; t2; t3; t4; t5; t6; t7; t8; t9; t10; t11; t12; t13
+# Rows 14-15: a probe that keeps failing leaves its own error in the log, so
+# NOT-READY have=unknown can be diagnosed; a probe that merely counts low adds nothing.
+_probe_row() {
+	local err="$1" want_have="$2" name="$3" d
+	d="$(newdir)"
+	(
+		ss_setup "$d" 2
+		export PY_FAKE_OUT=1 PY_FAKE_ERR="$err"
+		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1
+	grep -q "NOT-READY ray want=2 have=$want_have" "$d/log" || pnote "no NOT-READY have=$want_have line"
+	if [[ -n "$err" ]]; then
+		grep -qF "$err" "$d/campaign.log" || pnote "the probe's error is not in campaign.log"
+	elif grep -q 'last probe error' "$d/campaign.log"; then
+		pnote "a clean probe logged an error line"
+	fi
+	verdict "$name"
+}
+t14() { _probe_row "ConnectionError: GCS unreachable" unknown "Ray probe keeps failing -> NOT-READY have=unknown and its stderr in the log"; }
+t15() { _probe_row "" 1 "Ray probe counts too few, no stderr -> NOT-READY have=1, no error line"; }
+
+t1; t2; t3; t4; t5; t6; t7; t8; t9; t10; t11; t12; t13; t14; t15
 printf '\n'
 total=$((pass + failed))
 if ((failed == 0)); then
