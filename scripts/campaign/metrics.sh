@@ -3,7 +3,7 @@
 # lab PC under systemd-run --user, and on stop convert sar to CSV, pull the
 # daemon log, then rsync metrics/ and runs/ back into $LAB/hosts/<pc>/.
 # All changes land on the PCs and in $LAB only; run.sh calls start/stop
-# around each experiment (tag = <experiment>-n<n>, e.g. E1-n8).
+# around each experiment (tag = <experiment>-<workload>-n<n>, e.g. E1-W1-n8).
 #
 # Why a tag and not a per-run unit: the metrics cover a whole experiment at
 # one N, so host metrics line up with every run in that tag.

@@ -90,14 +90,21 @@ _run_id_in_runs() {
 	grep -qF -- "\"run_id\":\"$1\"" "$LAB/runs.jsonl" 2>/dev/null
 }
 
+# _get_version: the daemon version on the submit PC (the driver has no daemon).
+# `)` ends the field. A failure is logged and leaves it empty.
 _get_version() {
-	pipedpeer status 2>/dev/null | head -1 |
-		grep -o 'version=[^ ]*' | cut -d= -f2 || true
+	local pc="${CAMPAIGN_SUBMIT_PC:-pc00}" v rc=0
+	v="$(lab_ssh "$pc" "pipedpeer status 2>/dev/null | head -1 | grep -o 'version=[^ )]*' | cut -d= -f2")" || rc=$?
+	if ((rc != 0)); then
+		lab_log "version: pipedpeer status on $pc failed (exit $rc); the version stays empty"
+		return 0
+	fi
+	printf '%s\n' "$v"
 }
 
 # _run_size_json <w> <n>: the size object of the runs.jsonl line.
 _run_size_json() {
-	local w="$1" n="$2" items
+	local w="$1" n="$2" items ms payload params
 	case "$w" in
 		W1 | idle)
 			if [[ "${BENCH_WEAK:-}" == 1 ]]; then
@@ -111,6 +118,14 @@ _run_size_json() {
 		W3) printf '{"BENCH_TREES":%s}' "${W3_TREES:?W3_TREES not in sizes.env}" ;;
 		T1) printf '{"BENCH_EPOCHS":%s}' "${T1_EPOCHS:?T1_EPOCHS not in sizes.env}" ;;
 		trivial) printf '{}' ;;
+		TS1 | TS10 | TS100 | TS1000 | DS10K | DS1M | DS20M | SB | EL)
+			params="$(_sys_sweep_params "$w")" || return 1
+			read -r items ms payload <<<"$params"
+			printf '{"items":%s,"task_ms":%s,"payload_bytes":%s}' "$items" "$ms" "$payload"
+			;;
+		noop) printf '{"items":%s}' "${NOOP_ITEMS:?NOOP_ITEMS not in sizes.env}" ;;
+		lat) printf '{"calls":%s}' "${LAT_CALLS:?LAT_CALLS not in sizes.env}" ;;
+		fileio) printf '{"files":%s,"file_kb":%s}' "${FILEIO_FILES:?FILEIO_FILES not in sizes.env}" "${FILEIO_FILE_KB:?FILEIO_FILE_KB not in sizes.env}" ;;
 		*) echo "run: unknown workload $w" >&2; return 1 ;;
 	esac
 }
@@ -124,17 +139,20 @@ _run_size_json() {
 _run_record() {
 	local run_id="$1" exp="$2" w="$3" sys="$4" n="$5" rep="$6" warm="$7"
 	local rc="$8" note="$9" hosts="${10}"
-	local dir="$LAB/hosts/pc00/runs/$run_id"
+	local dir="$LAB/hosts/${CAMPAIGN_SUBMIT_PC:-pc00}/runs/$run_id"
 	local sizekey="strong" reffile="" refout=""
 	[[ -n "${PYRUN_MODE:-}" ]] && sizekey="$PYRUN_MODE"
 	if [[ "$sizekey" == weak || "$sizekey" == n* ]]; then
 		sizekey="n$n"   # weak sizes have their own per-N references (majority pass)
 	fi
-	if [[ "$w" != trivial ]]; then
+	# trivial, noop, lat, fileio and EL have no reference file: their verdict is
+	# the result line count (or none at all for EL).
+	case "$w" in trivial | noop | lat | fileio | EL) ;; *)
 		reffile="$LAB/reference/${w}-${sizekey}.txt"
 		refout="$reffile"   # a successful REF run writes this file (below)
 		[[ -s "$reffile" ]] || reffile=""
-	fi
+		;;
+	esac
 	mkdir -p "$(dirname "$LAB/runs.jsonl")"
 	PYRUN_RUN_ID="$run_id" PYRUN_EXP="$exp" PYRUN_WORKLOAD="$w" PYRUN_SYSTEM="$sys" \
 		PYRUN_N="$n" PYRUN_REPEAT="$rep" PYRUN_WARMUP="$warm" PYRUN_RC="$rc" \
@@ -204,11 +222,15 @@ def tail(line):
 
 if w == "trivial":
     result_ok = any(l.strip() == "TRIVIAL-OK" for l in result_lines)
+elif w in ("noop", "lat", "fileio"):
+    result_ok = len(result_lines) == 1
+elif w == "EL":
+    result_ok = None  # no reference: the join and the wall time are the finding
 elif reffile:
     ref = "reference"
     with open(reffile, encoding="utf-8") as fh:
         ref_lines = [l.rstrip("\n") for l in fh if l.strip()]
-    if w in ("W1", "idle") and ref_lines and result_lines:
+    if (w in ("W1", "idle") or w.startswith(("TS", "DS")) or w == "SB") and ref_lines and result_lines:
         def _ck(s):
             for tok in s.split():
                 if tok.startswith("checksum="):
@@ -239,7 +261,7 @@ elif reffile:
 # never taken from a failed run.
 refout = env.get("PYRUN_REFOUT", "")
 if env["PYRUN_EXP"] == "REF" and refout and not reffile and exit_code == 0 \
-        and result_lines and w != "trivial":
+        and result_lines and w not in ("trivial", "noop", "lat", "fileio", "EL"):
     os.makedirs(os.path.dirname(refout), exist_ok=True)
     with open(refout, "w", encoding="utf-8") as fh:
         fh.write("\n".join(result_lines) + "\n")
@@ -285,13 +307,15 @@ RUNREC_PY
 }
 
 # campaign_run_one <exp> <w> <system> <n> <repeat> <warmup 0|1> [timeout_s] [mode]
-# One run: detach on pc00, wait, fetch, record. A timeout returns 124 (the
-# unit stays running), a transport failure its own code; every completed run
-# yields a runs.jsonl line. Needs sizes.env loaded (run_all does it; load it
+# One run: detach on the submit PC (CAMPAIGN_SUBMIT_PC, default pc00), wait,
+# fetch, record. A timeout stops the run's unit and returns 124, a transport
+# failure its own code; every completed run yields a runs.jsonl line. Default
+# timeout: CAMPAIGN_DEFAULT_TIMEOUT_S or 3600. Needs sizes.env loaded (run_all does it; load it
 # before calling this directly) and $LAB/hosts.tsv from scan.sh.
 campaign_run_one() {
 	local exp="$1" w="$2" sys="$3" n="$4" rep="$5" warm="$6"
-	local timeout_s="${7:-0}"
+	local timeout_s="${7:-${CAMPAIGN_DEFAULT_TIMEOUT_S:-3600}}"
+	local pc="${CAMPAIGN_SUBMIT_PC:-pc00}"
 	PYRUN_MODE="${8:-strong}"
 	_load_sizes >/dev/null 2>&1 || true
 	local run_id hfile dir rc=0 code cmd prefix envs rec_rc="" note=""
@@ -312,8 +336,8 @@ campaign_run_one() {
 		prefix="export $envs; "
 	fi
 	cmd="$(sys_cmd "$sys" "$w" "$n" "$run_id")"
-	lab_detach pc00 "$run_id" "$prefix$cmd" || return 1
-	code="$(lab_wait pc00 "$run_id" "$timeout_s")" || rc=$?
+	lab_detach "$pc" "$run_id" "$prefix$cmd" || return 1
+	code="$(lab_wait "$pc" "$run_id" "$timeout_s")" || rc=$?
 	if ((rc == 124)); then
 		note="timeout"
 		rec_rc=124
@@ -322,9 +346,15 @@ campaign_run_one() {
 		lab_log "run $run_id: lab_wait returned $rc; recording the run with exit_code null"
 	fi
 
-	dir="$LAB/hosts/pc00/runs/$run_id"
-	lab_fetch pc00 "$run_id" "$dir" ||
-		lab_log "run $run_id: fetch failed after wait; recording what pc00 kept"
+	dir="$LAB/hosts/$pc/runs/$run_id"
+	lab_fetch "$pc" "$run_id" "$dir" ||
+		lab_log "run $run_id: fetch failed after wait; recording what $pc kept"
+	if ((rc == 124)); then
+		# A hung run would load every later one. A nohup run has no unit: the
+		# stop then fails, which is logged and does not stop the campaign.
+		lab_ssh "$pc" "systemctl --user stop lab-$run_id" >/dev/null 2>&1 ||
+			lab_log "run $run_id: could not stop unit lab-$run_id on $pc (a nohup run has no unit)"
+	fi
 
 	PYRUN_GIT_COMMIT="${PYRUN_GIT_COMMIT:-}"
 	PIPEDPEER_VERSION="${PIPEDPEER_VERSION:-}"
@@ -439,7 +469,7 @@ def val(r):
         return "|".join(sorted(lines))
     if w == "W3":
         return lines[0].strip()
-    return None
+    return None  # noop, lat, fileio, sweeps: no majority vote
 
 
 changed = 0
@@ -510,6 +540,10 @@ run_all() {
 		fi
 		[[ -n "$sizes" ]] && row_sizes="$sizes"
 		[[ -n "$reps" ]] && row_reps="$reps"
+		# CAMPAIGN_TIMEOUT_CAP_S: a verifier's shorter pass; never raises a timeout
+		if [[ -n "${CAMPAIGN_TIMEOUT_CAP_S:-}" ]] && ((row_to > CAMPAIGN_TIMEOUT_CAP_S)); then
+			row_to="$CAMPAIGN_TIMEOUT_CAP_S"
+		fi
 		if [[ "$row_sizes" == "scaling" ]]; then
 			row_sizes="$SCALING_SIZES"
 		fi
@@ -529,8 +563,10 @@ run_all() {
 				((${#sys_at_n[@]})) || continue
 
 				"$CLUSTER_SH" up "$n"
-				"$METRICS_SH" start "$exp-n$n" "$LAB/hosts-$n.txt" ||
-					lab_log "metrics start $exp-n$n failed; continuing without it"
+				# one tag per workload: a second workload at the same N would
+				# otherwise meet the first one's ALREADY-METRICS
+				"$METRICS_SH" start "$exp-$w-n$n" "$LAB/hosts-$n.txt" ||
+					lab_log "metrics start $exp-$w-n$n failed; continuing without it"
 				if ((row_warm > 0)); then
 					for sys in "${sys_at_n[@]}"; do
 						BENCH_SEED=""
@@ -565,8 +601,8 @@ run_all() {
 						fi
 					done
 				done
-				"$METRICS_SH" stop "$exp-n$n" "$LAB/hosts-$n.txt" ||
-					lab_log "metrics stop $exp-n$n failed"
+				"$METRICS_SH" stop "$exp-$w-n$n" "$LAB/hosts-$n.txt" ||
+					lab_log "metrics stop $exp-$w-n$n failed"
 				"$UPLOAD_SH" || lab_log "upload failed; runs continue (S10 handles the retry)"
 			done
 		done
@@ -590,7 +626,7 @@ _run_classify() {
 		lab_log "WARN result_ok=false $run_id"
 	fi
 	if ((rc == 124)); then
-		lab_log "run $run_id: TIMEOUT; left running"
+		lab_log "run $run_id: TIMEOUT; its unit was stopped"
 		return 0
 	fi
 	if ((rc != 0)); then
