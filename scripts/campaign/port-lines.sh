@@ -36,6 +36,9 @@ original_for() {
 	t1) printf '%s' "$REPO/docs/benchmarks/workloads/t1_mlp.py" ;;
 	idle) printf '%s' "$REPO/docs/benchmarks/workloads/pool_idle.py" ;;
 	trivial) printf '%s' "$REPO/docs/benchmarks/workloads/trivial.py" ;;
+	sweep) printf '%s' "$REPO/docs/benchmarks/workloads/sweep_map.py" ;;
+	noop) printf '%s' "$REPO/docs/benchmarks/workloads/noop_map.py" ;;
+	lat) printf '%s' "$REPO/docs/benchmarks/workloads/lat_map.py" ;;
 	*) return 1 ;;
 	esac
 }
@@ -86,13 +89,14 @@ trap 'rm -f "$tmp_out"' EXIT
 printf 'port,original,changed_lines\n' >>"$tmp_out"
 printf 'pipedpeer,,0\n' >>"$tmp_out"
 
-for port in "$BAS"/*_ray.py "$BAS"/*_dask.py "$BAS"/*_ssh_part.py "$BAS"/*_torchrun.py "$BAS"/*_ssh.sh; do
+for port in "$BAS"/*_ray.py "$BAS"/*_ray_pool.py "$BAS"/*_dask.py "$BAS"/*_ssh_part.py "$BAS"/*_torchrun.py "$BAS"/*_ssh.sh; do
 	[ -f "$port" ] || continue
 	case ${port##*/} in
 	*_ssh.sh) continue ;; # counted with its part; trivial_ssh.sh alone has no part
 	esac
 	w=${port##*/}
 	w=${w%_ray.py}
+	w=${w%_ray_pool.py} # the labelled Pool arm of E6; its name is its label
 	w=${w%_dask.py}
 	w=${w%_ssh_part.py}
 	w=${w%_torchrun.py}

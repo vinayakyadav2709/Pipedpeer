@@ -1,4 +1,4 @@
-.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check campaign-test campaign-lint
+.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check campaign-test campaign-lint campaign-test-files
 
 build:
 	cd src && CGO_ENABLED=0 go build -o ../bin/pipedpeer .
@@ -26,7 +26,13 @@ lint:
 campaign-lint:
 	shellcheck -x scripts/campaign/*.sh scripts/campaign/test/*.sh
 
+# every campaign test file even when one fails, a few at once, each under its
+# own HOME; the list itself is campaign-test-files and is not run directly
 campaign-test:
+	bash scripts/campaign/test/run_all.sh
+
+campaign-test-files:
+	bash scripts/campaign/test/run_all_test.sh
 	bash scripts/campaign/test/lib_test.sh
 	bash scripts/campaign/test/inventory_test.sh
 	bash scripts/campaign/test/cluster_test.sh
@@ -40,7 +46,16 @@ campaign-test:
 	bash scripts/campaign/test/exp_test.sh
 	bash scripts/campaign/test/ports_test.sh
 	bash scripts/campaign/test/venv_test.sh
-	python3 -m pytest -q scripts/campaign/test/test_analyse.py
+	bash scripts/campaign/test/install_warmup_test.sh
+	bash scripts/campaign/test/cluster_dask_test.sh
+	bash scripts/campaign/test/batch_run_test.sh
+	bash scripts/campaign/test/e5_ready_test.sh
+	bash scripts/campaign/test/e6_arms_test.sh
+	bash scripts/campaign/test/e11_interval_test.sh
+	bash scripts/campaign/test/pins_ray_dask_test.sh
+	bash scripts/campaign/test/e17_18_test.sh
+	bash scripts/campaign/test/e19_test.sh
+	python3 -m pytest -q scripts/campaign/test/test_analyse.py scripts/campaign/test/test_analyse_sweeps.py scripts/campaign/test/test_sweep.py scripts/campaign/test/test_cpu_sampler.py
 
 lab-up:
 	./scripts/lab-up.sh

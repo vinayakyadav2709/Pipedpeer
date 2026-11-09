@@ -75,7 +75,8 @@ case_setup() {
 	# INSTALL-STUB stands in for scripts/install-pipedpeer.sh in the fake lab
 	cat >"$dir/bin/INSTALL-STUB" <<'IS'
 #!/usr/bin/env bash
-exit 0
+# The real installer ends by running setup, which starts the warm-up.
+exec pipedpeer setup -y
 IS
 	chmod +x "$dir/bin/INSTALL-STUB"
 	# the real installer would download from GitHub; the tests stub it out
@@ -161,6 +162,12 @@ case "${1:-}" in
 		printf 'version=%s\n' "$VERSION"
 		;;
 	setup)
+		# Real setup starts the layer warm-up; install.sh waits on this log.
+		mkdir -p "$HOME/.local/state/pipedpeer"
+		{
+			printf '%s building the common environment (numpy, pandas, torch CPU) build=test torch=CPU\n' "$(date -Is)"
+			printf 'done\n'
+		} >"$HOME/.local/state/pipedpeer/warmup.log"
 		exit 0
 		;;
 	*)

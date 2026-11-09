@@ -301,6 +301,148 @@ main() {
 		echo "WARNING: pc00 ssh key could not be created; ssh baseline will fail" >&2
 	fi
 
+	# wait until each PC's warmup.log last line is done (WU1).
+	# A failed build, a timeout, or a log unchanged for stall_s (default 15 min)
+	# goes in fail_v[pc] with the last log line; the other PCs go on.
+	# Writes $LAB/warmup-times.tsv (pc<TAB>seconds<TAB>state).
+	local -a warmup_pending=()
+	local -A warmup_sec=()
+	local -A warmup_state=()
+	local -A warmup_last_mtime=()
+	local -A warmup_last_change=()
+	local -A warmup_last_line=()
+	local poll_s="${CAMPAIGN_WARMUP_POLL_S:-${LAB_POLL_S:-15}}"
+	local timeout_s="${CAMPAIGN_WARMUP_TIMEOUT_S:-3600}"
+	local stall_s="${CAMPAIGN_WARMUP_STALL_S:-900}"
+	local t_wait_start t_now
+	t_wait_start="$(date +%s)"
+	t_now="$t_wait_start"
+
+	for pc in "${ids[@]}"; do
+		if [[ -n "${fail_v[$pc]:-}" ]]; then
+			warmup_state[$pc]="failed"
+			warmup_sec[$pc]="-"
+		else
+			warmup_pending+=("$pc")
+			warmup_last_mtime[$pc]=""
+			warmup_last_change[$pc]="$t_wait_start"
+			warmup_last_line[$pc]=""
+		fi
+	done
+
+	local probe_cmd
+	# shellcheck disable=SC2016
+	probe_cmd='log="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/warmup.log"
+if [[ ! -f "$log" ]]; then
+	echo "MISSING"
+	exit 0
+fi
+mtime="$(stat -c %Y "$log" 2>/dev/null || date -r "$log" +%s 2>/dev/null || echo 0)"
+head_line="$(head -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
+tail_line="$(tail -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
+printf "OK\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line"
+'
+	local pending_file="$LAB/warmup-pending.txt"
+	local out p_mtime p_head p_tail start_tok start_ep sec unch elap
+	while ((${#warmup_pending[@]} > 0)); do
+		printf '%s\n' "${warmup_pending[@]}" >"$pending_file"
+		lab_fanout warmup-poll "$pending_file" "$probe_cmd" >/dev/null 2>&1 || true
+
+		local -a next_pending=()
+		for pc in "${warmup_pending[@]}"; do
+			out="$(cat "$LAB/logs/warmup-poll/$pc" 2>/dev/null || true)"
+			if [[ -z "$out" || "$out" == MISSING* ]]; then
+				warmup_state[$pc]="missing"
+				warmup_sec[$pc]="-"
+				fail_v[$pc]="warmup: log missing"
+				lab_log "install: warmup $pc: log missing"
+				continue
+			fi
+
+			if [[ "$out" == OK$'\t'* ]]; then
+				IFS=$'\t' read -r _ p_mtime p_head p_tail <<<"$out"
+				if [[ "$p_mtime" != "${warmup_last_mtime[$pc]:-}" ]]; then
+					warmup_last_mtime[$pc]="$p_mtime"
+					warmup_last_change[$pc]="$t_now"
+					warmup_last_line[$pc]="$p_tail"
+				fi
+
+				if [[ "$p_tail" == "done" ]]; then
+					start_tok="${p_head%% *}"
+					start_ep="$(date -d "$start_tok" +%s 2>/dev/null || echo 0)"
+					sec=0
+					if ((p_mtime > 0 && start_ep > 0 && p_mtime >= start_ep)); then
+						sec=$((p_mtime - start_ep))
+					fi
+					warmup_state[$pc]="done"
+					warmup_sec[$pc]="$sec"
+					warmup_last_line[$pc]="done"
+					continue
+				fi
+
+				if [[ "$p_tail" == failed* ]]; then
+					start_tok="${p_head%% *}"
+					start_ep="$(date -d "$start_tok" +%s 2>/dev/null || echo 0)"
+					sec="-"
+					if ((p_mtime > 0 && start_ep > 0 && p_mtime >= start_ep)); then
+						sec=$((p_mtime - start_ep))
+					fi
+					warmup_state[$pc]="failed"
+					warmup_sec[$pc]="$sec"
+					warmup_last_line[$pc]="$p_tail"
+					fail_v[$pc]="warmup: $p_tail"
+					lab_log "install: warmup $pc: $p_tail"
+					continue
+				fi
+
+				unch=$((t_now - warmup_last_change[$pc]))
+				if ((unch >= stall_s)); then
+					warmup_state[$pc]="stalled"
+					warmup_sec[$pc]="$unch"
+					fail_v[$pc]="warmup: stalled (last: ${p_tail:-none})"
+					lab_log "install: warmup $pc: stalled after ${unch}s (last: ${p_tail:-none})"
+					continue
+				fi
+
+				next_pending+=("$pc")
+			else
+				warmup_state[$pc]="failed"
+				warmup_sec[$pc]="-"
+				fail_v[$pc]="warmup: unreadable probe output"
+				lab_log "install: warmup $pc: unreadable probe output"
+			fi
+		done
+		warmup_pending=("${next_pending[@]}")
+		((${#warmup_pending[@]} == 0)) && break
+
+		t_now="$(date +%s)"
+		elap=$((t_now - t_wait_start))
+		if ((elap >= timeout_s)); then
+			for pc in "${warmup_pending[@]}"; do
+				warmup_state[$pc]="timeout"
+				warmup_sec[$pc]="$elap"
+				fail_v[$pc]="warmup: timed out after ${timeout_s}s (last: ${warmup_last_line[$pc]:-none})"
+				lab_log "install: warmup $pc: timed out after ${timeout_s}s (last: ${warmup_last_line[$pc]:-none})"
+			done
+			warmup_pending=()
+			break
+		fi
+
+		sleep "$poll_s"
+		t_now="$(date +%s)"
+	done
+	rm -f "$pending_file"
+
+	# warmup-times.tsv
+	local wt="$LAB/warmup-times.tsv"
+	{
+		printf 'pc\tseconds\tstate\n'
+		for pc in "${ids[@]}"; do
+			printf '%s\t%s\t%s\n' "$pc" "${warmup_sec[$pc]:--}" "${warmup_state[$pc]:-failed}"
+		done
+	} >"$wt"
+	lab_log "install: wrote $wt"
+
 	# install.csv
 	local csv="$LAB/install.csv"
 	{

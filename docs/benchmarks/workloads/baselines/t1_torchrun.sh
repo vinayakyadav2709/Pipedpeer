@@ -35,10 +35,12 @@ done <"$LAB_HOSTS_FILE"
 
 # Wait for any rank. One that fails ends the run at once: a surviving rank
 # would otherwise wait for it in the rendezvous until its timeout.
-remaining=${#pids[@]}
-while [ "$remaining" -gt 0 ]; do
+# Only ranks still running are waited on: bash answers `wait -n` for a pid it
+# already reaped with that pid's old status, so a later failure would be missed.
+live=("${pids[@]}")
+while [ "${#live[@]}" -gt 0 ]; do
   rc=0
-  wait -n -p done_pid "${pids[@]}" || rc=$?
+  wait -n -p done_pid "${live[@]}" || rc=$?
   if [ "$rc" != 0 ]; then
     for r in "${!pids[@]}"; do
       if [ "${pids[$r]}" = "${done_pid:-}" ]; then
@@ -52,6 +54,10 @@ while [ "$remaining" -gt 0 ]; do
     wait 2>/dev/null || true
     exit 1
   fi
-  remaining=$((remaining - 1))
+  still=()
+  for p in "${live[@]}"; do
+    [ "$p" = "$done_pid" ] || still+=("$p")
+  done
+  live=("${still[@]}")
 done
 cat "$tmpd/rank0.out"

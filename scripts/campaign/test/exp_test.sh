@@ -175,7 +175,9 @@ case "$*" in
 add=100; for a in "$@"; do [[ "$a" == -r ]] && add=5000; done
 awk -v b="$add" '$1=="eth0:" {$2+=b} {print}' "$HOME/net_dev" >"$HOME/net_dev.new" && mv "$HOME/net_dev.new" "$HOME/net_dev"
 PIP
-    chmod +x "$3/bin/pip" ;;
+    # e5 proves the venv by importing and running work there before stamping the finish
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$3/bin/python"
+    chmod +x "$3/bin/pip" "$3/bin/python" ;;
   *e5_ray.py*)
     now="$(date +%s%N)"
     echo "E5-RAY node=10.99.0.10 start_ns=$((now + 1000000000))"
@@ -356,8 +358,17 @@ lo="${inc#*,}"; inc="${inc%%,*}"
 for h in "$FAKELAB_DIR"/pc*/net_dev; do
   awk -v b="$inc" -v l="$lo" '$1=="eth0:" {$2+=b} $1=="lo:" {$2+=l} {print}' "$h" >"$h.new" && mv "$h.new" "$h"
 done
+echo $(($(cat "$FAKELAB_DIR/clock_s") + 60)) >"$FAKELAB_DIR/clock_s"
 EOF
   chmod +x "$d/verif/idle-sleep"
+  # e11 divides by the measured interval, so the idle window has to move the clock.
+  cat >"$d/verif/date" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == "+%s%N" ]] && { echo "$(cat "$FAKELAB_DIR/clock_s")000000000"; exit 0; }
+exec /usr/bin/date "$@"
+EOF
+  chmod +x "$d/verif/date"
+  echo 1000000 >"$d/clock_s"
   printf '1000,0\n4000,99999\n' >"$d/idle-seq"
   export E11_IDLE_SLEEP="$d/verif/idle-sleep"
   cd "$REPO"

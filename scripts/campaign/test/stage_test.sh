@@ -83,7 +83,7 @@ verdict "one PC unreachable: reported failed, exit non-zero, others staged")
 row_setup "$d"
 bash "$STAGE" >"$d/out" 2>"$d/err" || pnote "stage.sh failed: $(tail -3 "$d/err")"
 w="$(work "$d" pc00)"
-names="$( (grep -ohE '[A-Za-z0-9_]+\.py' "$CAMP/systems.sh" "$CAMP/e5.sh" "$CAMP/e6.sh" "$CAMP/lib.sh" | grep -v '^_\|^t1_torchrun'; \
+names="$( (grep -ohE '(baselines/)?[A-Za-z0-9_]+\.py' "$CAMP/systems.sh" "$CAMP/e5.sh" "$CAMP/e6.sh" "$CAMP/lib.sh" | grep -v '^_\|^t1_torchrun'; \
 	for s in w1 w2 w3 trivial; do echo "baselines/${s}_ray.py baselines/${s}_dask.py baselines/${s}_ssh.sh" | tr ' ' '\n'; done; \
 	echo baselines/t1_torchrun.py; echo baselines/t1_torchrun.sh) | sort -u)"
 n=0

@@ -80,7 +80,7 @@ field() { cut -f"$1"; }
 t1() {
 	local d f
 	f="$(mktemp "$STATE/inv-row-t1.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/sample.txt" <<'SAMPLE'
 os_id=ubuntu
@@ -123,7 +123,7 @@ EOF
 t2() {
 	local d f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/sample.txt" <<'SAMPLE'
 os_id=ubuntu
@@ -153,7 +153,7 @@ EOF
 t3() {
 	local d f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/ping.txt" <<'SAMPLE'
 PING 192.168.1.51 (192.168.1.51) 56(84) bytes of data.
@@ -175,7 +175,7 @@ EOF
 t4() {
 	local d f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/ping.txt" <<'SAMPLE'
 PING 192.168.1.51 (192.168.1.51) 56(84) bytes of data.
@@ -195,7 +195,7 @@ EOF
 t5() {
 	local d f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/iperf.json" <<'SAMPLE'
 {"error": "unable to connect to server: Connection refused"}
@@ -214,7 +214,7 @@ EOF
 t6() {
 	local d f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/iperf.json" <<'SAMPLE'
 {"end": {"sum_received": {"bits_per_second": 941176470588.2354}}}
@@ -231,7 +231,7 @@ EOF
 t7() {
 	local d f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	cat >"$f" <<'EOF'
 cat >"$LAB/sample.txt" <<'SAMPLE'
 home_fs=nfs4
@@ -251,7 +251,7 @@ EOF
 _row() {
 	local f
 	f="$(mktemp "$STATE/inv-row.XXXXXX")"
-	dirs+=("$(dirname "$f")")
+	dirs+=("$f")
 	printf '%s\n' "$1" >"$f"
 	row_setup "$f"
 }
@@ -396,6 +396,31 @@ t18() {
 	verdict "port-lines: the torchrun port is one row (diff + glue); other ports unchanged"
 }
 
+# port-lines.sh: the sweep, no-op and latency ports are measured against their originals
+t19() {
+	local d w port orig
+	d="$(_row 'bash "$REPO/scripts/campaign/port-lines.sh" >/dev/null 2>&1; cp "$LAB/port-lines.csv" "$LAB/pl.out"')"
+	for w in sweep_ray:sweep_map noop_ray:noop_map noop_dask:noop_map lat_ray:lat_map lat_dask:lat_map sweep_dask:sweep_map; do
+		port="${w%%:*}"
+		orig="${w##*:}"
+		grep -qE "^baselines/$port\.py,docs/benchmarks/workloads/$orig\.py,[0-9]+$" "$d/lab/pl.out" ||
+			pnote "$port has no row against $orig.py"
+	done
+	verdict "port-lines: sweep, noop and lat ports each have a row against their originals"
+}
+
+# port-lines.sh: the labelled Pool arm for Ray is its own row; the idiomatic w1_ray.py keeps its own
+t20() {
+	local d want got
+	d="$(_row 'bash "$REPO/scripts/campaign/port-lines.sh" >/dev/null 2>&1; cp "$LAB/port-lines.csv" "$LAB/pl.out"')"
+	local b="$REPO/docs/benchmarks/workloads/baselines"
+	want=$(diff -u "$REPO/docs/benchmarks/workloads/pool_map.py" "$b/w1_ray_pool.py" | grep -c '^[+-][^+-]' || true)
+	got=$(awk -F, '$1 == "baselines/w1_ray_pool.py" { print $3 }' "$d/lab/pl.out")
+	[[ "$got" == "$want" ]] || pnote "w1_ray_pool counted '$got', want $want"
+	[[ "$(grep -c '^baselines/w1_ray\.py,' "$d/lab/pl.out")" == 1 ]] || pnote "w1_ray.py must keep its own row"
+	verdict "port-lines: w1_ray_pool.py is its own row and w1_ray.py keeps its row"
+}
+
 printf 'scripts/campaign inventory/network/clocks/port-lines/pins case table\n\n'
 t1
 t2
@@ -415,6 +440,8 @@ t15
 t16
 t17
 t18
+t19
+t20
 printf '\n'
 
 total=$((pass + failed))

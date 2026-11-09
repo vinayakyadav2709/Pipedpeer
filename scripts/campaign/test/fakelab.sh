@@ -259,6 +259,14 @@ fi
 exec "$@"
 FAKELAB-SUDO
 
+	# Commands sent to a fake PC run here, so systemctl must not reach this
+	# machine's service manager. Tests that assert on calls install their own.
+	cat >"$dir/bin/systemctl" <<'FAKELAB-SYSTEMCTL'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FAKELAB_DIR/fakelab-systemctl.log"
+FAKELAB-SYSTEMCTL
+	chmod +x "$dir/bin/systemctl"
+
 	cat >"$dir/bin/nmap" <<'FAKELAB-NMAP'
 #!/usr/bin/env bash
 # Fake-lab nmap: whatever $SCAN_NMAP_CMD prints, with nmap's own arguments
