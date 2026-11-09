@@ -293,8 +293,8 @@ e17_restore_files() {
 e17_small_job() {
   local joiner="$1" rc=0 jd txt out
   # shellcheck disable=SC2016  # expanded on the joiner
-  if ! lab_ssh "$joiner" "cd ~/pipedpeer-lab/work && timeout ${E17_JOB_TIMEOUT_S:-600} pipedpeer run --distribute force -e BENCH_ITEMS=64 -e BENCH_PROCS=0 pool_map.py" >/dev/null; then
-    rc=$?
+  lab_ssh "$joiner" "cd ~/pipedpeer-lab/work && timeout ${E17_JOB_TIMEOUT_S:-600} pipedpeer run --distribute force -e BENCH_ITEMS=64 -e BENCH_PROCS=0 pool_map.py" >/dev/null || rc=$?
+  if ((rc != 0)); then
     lab_log "E17 $joiner: the 64-item forced job failed (exit $rc); new_remote_items left empty"
     return 1
   fi

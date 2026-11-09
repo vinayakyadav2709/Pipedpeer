@@ -114,6 +114,7 @@ case "${1:-}" in
 		((small)) && sleep_s="${FAKE_SMALL_SLEEP:-0.2}"
 		[[ "$sleep_s" == 0 ]] || sleep "$sleep_s"
 		[[ "${FAKE_RUN_FAIL:-0}" == 1 ]] && { echo boom >&2; exit 1; }
+		((small)) && [[ -n "${FAKE_SMALL_FAIL_RC:-}" ]] && { echo "small boom" >&2; exit "$FAKE_SMALL_FAIL_RC"; }
 		echo "POOLMAP-OK items=10 seconds=1.0000 checksum=5.000000"
 		if [[ -f "$FAKELAB_DIR/receipt.json" ]]; then
 			jd="$HOME/.local/share/pipedpeer/jobs/$(date +%s%N)"
@@ -287,6 +288,25 @@ res="$(
 	echo ROW-OK
 )" 2>"$d/err" || true
 verdict_row "e17 a true result after the kill: wall/result from runs.jsonl, join and remote_items" "$res" "$d/err"
+
+# the forced job on the joiner fails: its real exit code is logged (the bug was
+# "exit 0", read from the negated if) and new_remote_items stays empty
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_SMALL_FAIL_RC=3 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 1 ]] || rbad "new_join_ok [$join_ok]"
+	[[ -z "$ritm" ]] || rbad "new_remote_items [$ritm] after a failed forced job"
+	grep -q 'the 64-item forced job failed (exit 3)' "$d/campaign.log" || rbad "exit code not logged: $(grep 'forced job' "$d/campaign.log" | tail -1)"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 forced job fails: its exit code is logged, new_remote_items empty" "$res" "$d/err"
 
 # job ended before the kill: kill_at_s empty, row kept; an old invite that
 # still joins is recorded and logged as unexpected
