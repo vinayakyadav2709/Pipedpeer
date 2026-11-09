@@ -23,7 +23,9 @@ e6_usage() { echo "usage: e6.sh [--n N] [--systems a,b] [--kills K] [--ctrlc K] 
 
 # e6_median_wall <system>: median wall of the E1 W1 runs at N, else 60.
 e6_median_wall() {
-  python3 - "$LAB/runs.jsonl" "$1" "$N" <<'PY'
+  local sys="$1"
+  [[ "$sys" == "ray-pool" ]] && sys="ray"
+  python3 - "$LAB/runs.jsonl" "$sys" "$N" <<'PY'
 import json, sys
 runs, system, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
 vals = []
@@ -83,7 +85,9 @@ e6_record() {
 import json, sys
 d = json.load(sys.stdin)
 w = d.get("wall_s")
-print("%s,%d" % ("" if not w else w, 1 if d.get("result_ok") is True else 0))
+ro = d.get("result_ok")
+ro_out = "" if ro is None else ("1" if ro else "0")
+print("%s,%s" % ("" if not w else w, ro_out))
 '
 }
 
@@ -129,7 +133,7 @@ e6_jobs_total() {
 
 e6_main() {
   local DRY=0 N=16 KILLS=3 CTRLC=3 AFTER=10 ONLY=both
-  local -a systems=(pipedpeer ray dask)
+  local -a systems=(pipedpeer ray ray-pool dask)
   while (($#)); do
     case "$1" in
       --dry-run) DRY=1; shift ;;
@@ -154,7 +158,7 @@ e6_main() {
   local out="$LAB/analysis-input/e6.csv"
   [[ -f "$out" ]] || printf 'system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s\n' >"$out"
 
-  local -A unit=([pipedpeer]=pipedpeer.service [ray]=lab-ray [dask]=lab-dask-worker)
+  local -A unit=([pipedpeer]=pipedpeer.service [ray]=lab-ray [ray-pool]=lab-ray [dask]=lab-dask-worker)
   # the kill target is the 6th PC of the PCs in use (the 2nd on a small
   # cluster), never a name guessed from the list of all PCs
   local kill_pc p sys i id med remain kill_at pid rec now_ns
