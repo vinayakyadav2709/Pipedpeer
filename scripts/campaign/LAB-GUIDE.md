@@ -65,14 +65,15 @@ On the driver:
 
 ```bash
 source scripts/campaign/lib.sh
-f=$(lab_hosts <number of PCs>)
+f=$LAB/hosts-leaving.txt   # every PC in hosts.tsv, also the excluded ones
+awk -F'\t' '!/^#/ && NF >= 2 { print $1 }' "$LAB/hosts.tsv" >"$f"
 lab_fanout uninstall "$f" 'pipedpeer uninstall -y'
 lab_fanout undo "$f" 'sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo'
 ```
 
 On each lab PC:
 - Check that `journalctl -u lab-undo` ends with `undo complete`.
-- Verify the system matches its initial snapshot.
+- Verify the system matches its initial snapshot. The undo also removes `~/pipedpeer-lab`, `~/.ssh/pipedpeer-lab-pc00*` and, where setup found none, Nix.
 
 *What to do if this fails:* If a lab PC is unreachable or fails undo, log in locally and run `sudo bash /tmp/lab-pc.sh undo` directly on that machine.
 

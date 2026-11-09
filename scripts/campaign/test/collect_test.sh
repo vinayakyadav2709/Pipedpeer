@@ -90,6 +90,11 @@ out="$(LAB_RESULTS="$d/lab" bash "$COLLECT" --to "$bundle_target" 2>"$d/err")" |
 [[ -f "$bundle_target/scripts/campaign/experiments.tsv" ]] || pnote "missing experiments.tsv"
 # - PAPER-UPDATE.md
 [[ -f "$bundle_target/PAPER-UPDATE.md" ]] || pnote "missing PAPER-UPDATE.md"
+# - docs/diagrams, analyse scripts, analysis CSVs written by analyse.py
+[[ -f "$bundle_target/docs/diagrams/fig_1_paper_arch.png" ]] || pnote "missing docs/diagrams"
+[[ -f "$bundle_target/scripts/campaign/analyse.py" ]] || pnote "missing analyse.py"
+[[ -f "$bundle_target/scripts/campaign/analyse_sweeps.py" ]] || pnote "missing analyse_sweeps.py"
+ls "$bundle_target"/results/lab/analysis/*.csv >/dev/null 2>&1 || pnote "no results/lab/analysis/*.csv"
 # - copy of wipe.sh
 [[ -f "$bundle_target/wipe.sh" ]] || pnote "missing wipe.sh"
 # - source.txt (commit id, git status --short)
@@ -301,6 +306,21 @@ rc=0
 ((rc != 0)) || pnote "exited 0 outside a checkout"
 [[ ! -f "$d/home/.local/state/pipedpeer-lab-setup/record" ]] || pnote "recorded a non-repo: $(cat "$d/home/.local/state/pipedpeer-lab-setup/record")"
 verdict "setup-driver.sh outside a checkout: refuses, records nothing")
+
+# --- 15. a lab dir with only runs.jsonl: analysis CSVs still reach the bundle --
+(d=$(newdir)
+mkdir -p "$d/lab"
+cat >"$d/lab/runs.jsonl" <<-EOF
+	{"experiment": "E1", "workload": "W1", "system": "pipedpeer", "n": 1, "repeat": 1, "wall_s": 10.5, "result_ok": 1}
+	{"experiment": "E1", "workload": "W1", "system": "pipedpeer", "n": 2, "repeat": 1, "wall_s": 6.5, "result_ok": 1}
+EOF
+b="$d/bundle15"
+rc=0
+LAB_RESULTS="$d/lab" bash "$COLLECT" --to "$b" >"$d/out" 2>"$d/err" || rc=$?
+((rc == 0)) || pnote "collect.sh failed: $(cat "$d/err")"
+ls "$b"/results/lab/analysis/*.csv >/dev/null 2>&1 || pnote "no analysis CSV in the bundle (lab had: $(ls "$d/lab"))"
+(cd "$b" && sha256sum --quiet -c MANIFEST.sha256) || pnote "manifest does not cover the bundle"
+verdict "only runs.jsonl in the lab dir: analysis CSVs reach the bundle")
 
 nrows=$(wc -l <"$RESULTS")
 nfail=$(grep -c '^bad$' "$RESULTS" || true)

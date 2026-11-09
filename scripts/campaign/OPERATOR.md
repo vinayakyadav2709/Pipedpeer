@@ -14,7 +14,7 @@ captive portal or WiFi isolation.
 
 Driver tools (Fedora; `check-driver.sh` prints the same line per missing tool):
 
-    sudo dnf install -y pssh parallel rsync nmap iperf3 openssh-clients python3-matplotlib python3-pandas python3-scipy python3-pytest rclone ShellCheck uv
+    sudo dnf install -y pssh parallel rsync nmap iperf3 openssh-clients python3-matplotlib python3-pandas python3-scipy python3-pytest rclone ShellCheck uv golang podman make
 
 Cloudflare R2 is not used. Results are saved locally in `results/lab/` and copied
 to Google Drive after each lab session and before any PC cleanup.
@@ -22,6 +22,10 @@ to Google Drive after each lab session and before any PC cleanup.
 The lab key the PCs will trust (the check below needs it; `serve.sh` reuses it):
 
     [ -f ~/.ssh/pipedpeer-lab ] || ssh-keygen -t ed25519 -N '' -f ~/.ssh/pipedpeer-lab
+
+Or let `scripts/campaign/setup-driver.sh` do it: it records whether Nix was
+already on the driver (so `wipe.sh` removes only what the campaign added),
+installs the packages above, builds pipedpeer and runs `check-driver.sh`.
 
 Check the driver (everything must print `OK`, last line `DRIVER-OK`):
 
@@ -49,6 +53,11 @@ The rehearsal installs the local build, so build it first:
    hibernate.target hybrid-sleep.target`. "Leaving" compares against it.
    Then the user types the setup line `serve.sh` printed (it is also in
    `results/lab/serve/SETUP-LINE.txt`). It prints one `LAB-PC host=...` line.
+   Before the full install, check two PCs end to end (real conditions): the
+   setup line typed by the user, `scan.sh`, `install.sh`, `run.sh SMOKE
+   --sizes 1,2`, an ssh drop (laptop WiFi off 60 s during a detached run; it
+   must finish and be fetched once), then the leaving steps below on one PC.
+   Only then set up the rest.
 3. Find the PCs; `<pc00 ip>` is the PC nearest the driver:
 
        scripts/campaign/scan.sh <lab cidr> --pc00 <pc00 ip>
@@ -80,10 +89,10 @@ The rehearsal installs the local build, so build it first:
 
 8. Write `results/lab/predictions.md`, one line per prediction, before any
    E1 run: `PRED <system> <workload> min_n=<N> speedup=<x>`.
-9. Real-conditions check on 2 PCs before the long runs: the setup line typed by
-   the user, `scan.sh`, `install.sh`, `run.sh SMOKE --sizes 1,2`, an ssh drop
-   (laptop WiFi off 60 s during a detached run; it must finish and be fetched
-   once), then the leaving steps below on one PC.
+Before each long run, check that no PC is idle-suspending or locked:
+`systemctl is-enabled sleep.target suspend.target` prints `masked` on every PC.
+Setup masks them; a PC that rebooted or a user who logged in on the console can
+undo that, and a PC that sleeps mid-run is a failed run.
 
 ## Sessions 2 and 3
 
@@ -120,6 +129,10 @@ Commands:
 
 Run `scripts/campaign/collect.sh` to package results for Google Drive after each session and before any PC cleanup.
 
+All tables use one clock, the driver's. Only a duration measured across two
+PCs (for example a join time taken on the joiner after t0 on the driver) is
+corrected by the offsets from `clocks.sh`; nothing else is shifted.
+
 `analyse.py --spread` prints `REPEATS-OK` or `RAISE-REPEATS <k>`; for the
 latter see "What to do when". Rerunning any `run.sh` line skips runs already in
 `runs.jsonl`.
@@ -129,16 +142,19 @@ latter see "What to do when". Rerunning any `run.sh` line skips runs already in
 On the driver, in this order (the repository is only there; the PCs get the
 commands over ssh):
 
-    source scripts/campaign/lib.sh   # from the repo root; defines lab_hosts, lab_fanout
-    f=$(lab_hosts <number of PCs>)
+    source scripts/campaign/lib.sh   # from the repo root; defines lab_fanout, $LAB
+    f=$LAB/hosts-leaving.txt         # every PC in hosts.tsv, also the excluded ones
+    awk -F'\t' '!/^#/ && NF >= 2 { print $1 }' "$LAB/hosts.tsv" >"$f"
     lab_fanout uninstall "$f" 'pipedpeer uninstall -y'
     lab_fanout undo "$f" 'sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo'
 
 The undo stops sshd, so the fan-out cannot read its answer. Check on each PC
 (or its screen): `journalctl -u lab-undo` ends with `undo complete`. If
 `/tmp/lab-pc.sh` is gone (reboot), type the setup line's download part again
-first. Then compare each PC with the snapshot taken in Session 1, step 2,
-before setup (same five commands).
+first. The undo also removes `~/pipedpeer-lab` and `~/.ssh/pipedpeer-lab-pc00*`
+on the PC, and Nix where setup found none (a Nix that was there before is left).
+Then compare each PC with the snapshot taken in Session 1, step 2, before
+setup (same five commands, plus `ls ~/pipedpeer-lab ~/.ssh`).
 
 ## What to do when
 

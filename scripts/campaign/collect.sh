@@ -75,10 +75,18 @@ if [[ -f "$REPO/docs/benchmarks/campaign-cases.md" ]]; then
 	cp "$REPO/docs/benchmarks/campaign-cases.md" "$TO_DIR/docs/benchmarks/"
 fi
 
+if [[ -d "$REPO/docs/diagrams" ]]; then
+	cp -a "$REPO/docs/diagrams" "$TO_DIR/docs/"
+fi
+
 mkdir -p "$TO_DIR/scripts/campaign"
 if [[ -f "$REPO/scripts/campaign/experiments.tsv" ]]; then
 	cp "$REPO/scripts/campaign/experiments.tsv" "$TO_DIR/scripts/campaign/"
 fi
+# The scripts that made the tables, so the offline paper build can redo them.
+for f in "$REPO"/scripts/campaign/analyse*.py; do
+	[[ -f "$f" ]] && cp "$f" "$TO_DIR/scripts/campaign/"
+done
 
 if [[ -f "$REPO/scripts/campaign/PAPER-UPDATE.md" ]]; then
 	cp "$REPO/scripts/campaign/PAPER-UPDATE.md" "$TO_DIR/PAPER-UPDATE.md"
@@ -115,6 +123,16 @@ if ((analysis_rc != 0)); then
 fi
 
 mv "$analysis_tmp" "$TO_DIR/analysis.txt"
+# analyse.py writes analysis/ after step 3 copied the lab dir: copy it now.
+if [[ -d "$LAB/analysis" ]]; then
+	mkdir -p "$TO_DIR/results/lab/analysis"
+	cp -a "$LAB/analysis"/. "$TO_DIR/results/lab/analysis/" || {
+		echo "collect.sh: could not copy $LAB/analysis; no manifest written, so the bundle is unfinished" >&2
+		exit 1
+	}
+else
+	echo "collect.sh: warning: analyse.py left no tables in $LAB/analysis" >&2
+fi
 if [[ -d "$LAB/figures" ]]; then
 	cp -a "$LAB/figures"/. "$TO_DIR/figures/" || {
 		echo "collect.sh: could not copy figures from $LAB/figures; no manifest written, so the bundle is unfinished" >&2

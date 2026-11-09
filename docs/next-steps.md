@@ -125,6 +125,9 @@ paper and report describe both as they are):
   (`numpy_ops.py:33`, `:350-352`, `:404`). Fix: sum per-node CPU rates.
 - ~~The placement health factor h is always 1.0.~~ Fixed 2026-11-03 (23137d0): halved on an
   unreachable mark or failed job (floor 0.1), +0.1 per healthy poll.
+- E15 (lab campaign): the pipedpeer arm splits the work into chunks (product
+  behaviour); the baselines do not. The paper states this. Environment
+  initialisation sits outside the timing window.
 
 Dropped: Optuna interception, NPU support.
 
