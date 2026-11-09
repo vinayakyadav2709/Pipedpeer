@@ -78,6 +78,7 @@ me="$(basename "$HOME")"
 echo "$me pipedpeer $*" >>"$FAKELAB_DIR/pipedpeer.log"
 case "${1:-}" in
   invite)
+    [[ -z "${FAKE_INVITE_EMPTY:-}" ]] || exit 0
     echo "pipedpeer connect pp1-faketoken12345"
     ;;
   connect)
@@ -118,6 +119,12 @@ exit 0
 EOF
   chmod +x "$v/systemctl"
 
+  printf '%s\n' BENCH_PROCS=1 W1_ITEMS=10 W1_WEAK_PER_PC=1 W2_ITEMS=10 W3_TREES=1 T1_EPOCHS=1 \
+    SWEEP_ITERS_PER_MS=100 SWEEP_TOTAL_MS=10 SWEEP_DATA_ITEMS=10 SWEEP_DATA_TASK_MS=1 NOOP_ITEMS=10 LAT_CALLS=10 \
+    ELASTIC_TASK_MS=1 ELASTIC_ITEMS=10 FILEIO_FILES=1 FILEIO_FILE_KB=1 >"$dir/sizes.env"
+  # the real user journal must not leak into the lab
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$v/journalctl"
+  chmod +x "$v/journalctl"
   export PATH="$v:$PATH"
 }
 
@@ -282,6 +289,122 @@ else
   pnote "nodes.db not restored"
 fi
 verdict "trap on INT: nodes.db back on every joiner (asserted on fake HOME)"
+
+# stub venv on every PC: python (the join poll) sleeps FAKE_POLL_SLEEP, exits FAKE_POLL_RC
+mkvenv() {
+  local d="$1" pc
+  for pc in "$d"/pc*; do
+    mkdir -p "$pc/pipedpeer-lab/venv/bin"
+    cat >"$pc/pipedpeer-lab/venv/bin/python" <<'EOF2'
+#!/usr/bin/env bash
+cat >/dev/null
+echo "poll $*" >>"$FAKELAB_DIR/poll.log"
+sleep "${FAKE_POLL_SLEEP:-0}"
+exit "${FAKE_POLL_RC:-0}"
+EOF2
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$pc/pipedpeer-lab/venv/bin/ray"
+    cp "$pc/pipedpeer-lab/venv/bin/ray" "$pc/pipedpeer-lab/venv/bin/dask"
+    chmod +x "$pc"/pipedpeer-lab/venv/bin/*
+  done
+}
+
+# ---------------------------------------------------------------------- Case 10: no fallback wrappers
+d="$(newdir)"
+( setup_lab "$d" 2 ) >/dev/null
+got="$(export LAB_RESULTS="$d" ELASTIC_ITEMS=19200 ELASTIC_TASK_MS=50 SWEEP_ITERS_PER_MS=100; source "$CAMP/e19.sh" && _run_size_json EL 4 2>&1)" || pnote "size json exit: $got"
+[[ "$got" == '{"items":19200,"task_ms":50,"payload_bytes":0}' ]] || pnote "ELASTIC_ITEMS set: $got"
+got="$(unset ELASTIC_ITEMS; export LAB_RESULTS="$d"; source "$CAMP/e19.sh" 2>&1 && _run_size_json EL 4 2>&1)" && pnote "ELASTIC_ITEMS unset must fail, got: $got"
+[[ "$got" != *BENCH_ITEMS* ]] || pnote "fallback wrapper still present: $got"
+a="$(source "$CAMP/run.sh" >/dev/null 2>&1; declare -f _run_size_json | md5sum)"
+b="$(export LAB_RESULTS="$d"; source "$CAMP/e19.sh" >/dev/null 2>&1; declare -f _run_size_json | md5sum)"
+[[ "$a" == "$b" ]] || pnote "_run_size_json differs from run.sh"
+verdict "sourcing e19.sh leaves run.sh's _run_size_json; unset sizes fail, no silent default"
+
+# ---------------------------------------------------------------------- Case 11: ray join waits for the poll
+d="$(newdir)"
+(
+  setup_lab "$d" 2; mkvenv "$d"
+  export LAB_RESULTS="$d" FAKE_POLL_SLEEP=2 E19_STORE_PATH=
+  cd "$REPO"
+  bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems ray
+) >"$d/e19.log" 2>&1 || pnote "e19 ray exit $? ($(tail -5 "$d/e19.log"))"
+row="$(grep ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
+js="$(awk -F, '{print $5}' <<<"$row")"
+python3 -c "import sys; assert float(sys.argv[1]) >= 2.0, sys.argv[1]" "${js:-x}" 2>/dev/null || pnote "ray join_s '$js' < 2 (row: $row, log: $(tail -3 "$d/e19.log"))"
+grep -q "poll - ray " "$d/poll.log" 2>/dev/null || pnote "poll not run for ray"
+verdict "ray join_s covers the poll (2 s stub), not the start call's 0.05 s"
+
+# ---------------------------------------------------------------------- Case 12: ray never ready
+d="$(newdir)"
+(
+  setup_lab "$d" 2; mkvenv "$d"
+  export LAB_RESULTS="$d" FAKE_POLL_RC=1 E19_STORE_PATH=
+  cd "$REPO"
+  bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems ray
+) >"$d/e19.log" 2>&1 || pnote "e19 ray exit $?"
+row="$(grep ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
+[[ -n "$row" ]] || pnote "no join row"
+[[ -z "$(awk -F, '{print $5}' <<<"$row")" ]] || pnote "join_s not empty when not ready: $row"
+grep -q "join command failed" "$d/e19.log" 2>/dev/null || grep -q "failed" "$LAB_RESULTS/lab.log" 2>/dev/null || true
+verdict "ray not ready: join_s empty, not 0.05"
+
+# ---------------------------------------------------------------------- Case 13: dask join waits for the poll
+d="$(newdir)"
+(
+  setup_lab "$d" 2; mkvenv "$d"
+  export LAB_RESULTS="$d" FAKE_POLL_SLEEP=2 E19_STORE_PATH=
+  cd "$REPO"
+  bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems dask
+) >"$d/e19.log" 2>&1 || pnote "e19 dask exit $? ($(tail -5 "$d/e19.log"))"
+row="$(grep ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
+js="$(awk -F, '{print $5}' <<<"$row")"
+python3 -c "import sys; assert float(sys.argv[1]) >= 2.0, sys.argv[1]" "${js:-x}" 2>/dev/null || pnote "dask join_s '$js' < 2"
+grep -q "poll - dask " "$d/poll.log" 2>/dev/null || pnote "poll not run for dask"
+verdict "dask join_s covers the poll"
+
+# ---------------------------------------------------------------------- Case 14: store path derived, closure purged, joiner_warm 0
+d="$(newdir)"
+sp="/nix/store/abcdefghijklmnopqrstuvwxyz012345-env"
+mkdir -p "$d/pc00/.local/state/pipedpeer" "$d/pc01/.local/share/pipedpeer/nix/store/abcdefghijklmnopqrstuvwxyz012345-env"
+echo "{\"msg\":\"peer took the closure\",\"store\":\"$sp\",\"secs\":1.5}" >"$d/pc00/.local/state/pipedpeer/daemon.log"
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d"
+  unset E19_STORE_PATH
+  cd "$REPO"
+  bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 2 --systems pipedpeer
+) >"$d/e19.log" 2>&1 || pnote "e19 exit $? ($(tail -5 "$d/e19.log"))"
+[[ ! -e "$d/pc01/.local/share/pipedpeer/nix/store/abcdefghijklmnopqrstuvwxyz012345-env" ]] || pnote "closure not purged on the joiner"
+rows="$(grep -c ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
+[[ "$rows" == 2 ]] || pnote "expected 2 join rows, got $rows"
+bad_warm="$(grep ',join,' "$d/analysis-input/e19.csv" | awk -F, '$10 != "0"' || true)"
+[[ -z "$bad_warm" ]] || pnote "joiner_warm not 0 in: $bad_warm"
+verdict "closure path from the daemon log: purged before each repeat, joiner_warm 0 in both"
+
+# ---------------------------------------------------------------------- Case 15: no store path -> joiner_warm empty, logged
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d"
+  unset E19_STORE_PATH
+  cd "$REPO"
+  bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems pipedpeer
+) >"$d/e19.log" 2>&1 || pnote "e19 exit $?"
+row="$(grep ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
+[[ -n "$row" && -z "$(awk -F, '{print $10}' <<<"$row")" ]] || pnote "joiner_warm should be empty (unknown): $row"
+verdict "no closure path found: joiner_warm empty, not a false 0"
+
+# ---------------------------------------------------------------------- Case 16: empty invite code
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d" FAKE_INVITE_EMPTY=1
+  cd "$REPO"
+  bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems pipedpeer
+) >"$d/e19.log" 2>&1 || pnote "e19 exit $?"
+[[ ! -f "$d/pc01/.connected" ]] || pnote "joiner connected with an empty code"
+! grep -q ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || pnote "join row written for an aborted repeat"
+verdict "empty invite code: repeat aborted, no join, no row"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"

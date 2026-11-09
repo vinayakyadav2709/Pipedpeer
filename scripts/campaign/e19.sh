@@ -31,64 +31,6 @@ source "$CAMP/run.sh"
 
 CLUSTER_SH="${CLUSTER_SH:-$CAMP/cluster.sh}"
 
-# Fallbacks for EL in case systems.sh was not yet updated by other units
-if ! _sys_script EL >/dev/null 2>&1; then
-  eval "_orig_sys_script() $(declare -f _sys_script | tail -n +2)"
-  _sys_script() {
-    if [[ "$1" == EL ]]; then
-      printf '%s' 'sweep_map.py'
-    else
-      _orig_sys_script "$@"
-    fi
-  }
-fi
-
-if ! _sys_port EL >/dev/null 2>&1; then
-  eval "_orig_sys_port() $(declare -f _sys_port | tail -n +2)"
-  _sys_port() {
-    if [[ "$1" == EL ]]; then
-      printf '%s' 'sweep'
-    else
-      _orig_sys_port "$@"
-    fi
-  }
-fi
-
-if ! _sys_sizeenv EL 1 >/dev/null 2>&1; then
-  eval "_orig_sys_sizeenv() $(declare -f _sys_sizeenv | tail -n +2)"
-  _sys_sizeenv() {
-    if [[ "$1" == EL ]]; then
-      printf 'BENCH_ITEMS=%s BENCH_TASK_MS=%s BENCH_ITERS_PER_MS=%s BENCH_PROCS=%s BENCH_PAYLOAD_BYTES=0' \
-        "${ELASTIC_ITEMS:-1000}" "${ELASTIC_TASK_MS:-100}" "${SWEEP_ITERS_PER_MS:-100}" "${BENCH_PROCS:-0}"
-    else
-      _orig_sys_sizeenv "$@"
-    fi
-  }
-fi
-
-# Fallback for sys_result_regex if EL not in systems.sh
-if ! sys_result_regex EL >/dev/null 2>&1; then
-  eval "_orig_sys_result_regex() $(declare -f sys_result_regex | tail -n +2)"
-  sys_result_regex() {
-    if [[ "$1" == EL ]]; then
-      printf '%s\n' '^SWEEP-OK items=[0-9]+ seconds=[0-9.]+ checksum=[0-9.]+$'
-    else
-      _orig_sys_result_regex "$@"
-    fi
-  }
-fi
-
-if ! _run_size_json EL 1 >/dev/null 2>&1; then
-  eval "_orig_run_size_json() $(declare -f _run_size_json | tail -n +2)"
-  _run_size_json() {
-    if [[ "$1" == EL ]]; then
-      printf '{"BENCH_ITEMS":%s}' "${ELASTIC_ITEMS:-1000}"
-    else
-      _orig_run_size_json "$@"
-    fi
-  }
-fi
-
 e19_usage() {
   echo "usage: e19.sh [--n 16] [--add 16] [--repeats 3] [--systems pipedpeer,ray,dask] [--dry-run] [-h]"
 }
@@ -222,6 +164,55 @@ PY
   echo "$secs"
 }
 
+# e19_join_poll_py: python run on the joiner, in the campaign venv. Polls the
+# driver's cluster view until this joiner's own node (Ray) or all its workers
+# (Dask) are listed, so t1 is "usable by the scheduler", not "start returned".
+# args: system, driver ip, joiner ip, workers expected, timeout s. Exit 0 when
+# ready, 1 on timeout (join_s is then left empty by the caller).
+e19_join_poll_py() {
+  cat <<'PY'
+import sys, time
+system, driver, me, want, limit = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), float(sys.argv[5])
+deadline = time.time() + limit
+def count():
+    if system == "ray":
+        import ray
+        if not ray.is_initialized():
+            ray.init(address=driver + ":6379", logging_level="ERROR", log_to_driver=False)
+        return sum(1 for n in ray.nodes() if n.get("Alive") and n.get("NodeManagerAddress") == me)
+    from distributed import Client
+    global client
+    if client is None:
+        client = Client(driver + ":8786", timeout=10)
+    return sum(1 for a in client.scheduler_info()["workers"] if a.split("://")[-1].rsplit(":", 1)[0] == me)
+client = None
+while time.time() < deadline:
+    try:
+        got = count()
+    except Exception as e:
+        sys.stderr.write("join poll: %s\n" % e)
+        got = 0
+    if got >= want:
+        sys.exit(0)
+    time.sleep(0.5)
+sys.stderr.write("join poll: %s on %s not ready after %ss\n" % (system, me, limit))
+sys.exit(1)
+PY
+}
+
+# e19_derive_store_path <pc>: the closure's store path, from the newest
+# "peer took the closure" line of the driver's daemon log (field store).
+# Empty when there is none.
+e19_derive_store_path() {
+  local pc="$1" line path
+  line="$(lab_ssh "$pc" '
+    { cat "${PIPEDPEER_DAEMON_STATE_DIR:-$HOME/.local/state}/pipedpeer/daemon.log" 2>/dev/null || true
+      journalctl --user -u pipedpeer.service --no-pager 2>/dev/null || true
+    } | grep "peer took the closure" | tail -1' 2>/dev/null || true)"
+  path="$(grep -oE '/nix/store/[a-z0-9]{32}-[A-Za-z0-9._+-]+' <<<"$line" | head -1 || true)"
+  printf '%s' "$path"
+}
+
 # Track joiners where nodes.db was moved aside so trap restores them
 declare -a E19_JOINERS_ASIDE=()
 e19_cleanup() {
@@ -322,6 +313,14 @@ e19_main() {
     buffered_rows+=("$base_id|$sys|baseline|0||||$base_wall|||$base_csum")
     checksum_pairs+=("$base_id:$base_csum")
 
+    if [[ "$sys" == pipedpeer* && -z "${E19_STORE_PATH:-}" ]]; then
+      E19_STORE_PATH="$(e19_derive_store_path pc00)"
+      export E19_STORE_PATH
+      if [[ -z "$E19_STORE_PATH" ]]; then
+        lab_log "e19: no closure store path in pc00's daemon log; joiner_warm left empty (unknown), closure not purged"
+      fi
+    fi
+
     local med_wall="${base_wall:-60}"
     if python3 -c "import sys; float(sys.argv[1])" "$med_wall" 2>/dev/null; then
       :
@@ -348,8 +347,9 @@ e19_main() {
           " 2>/dev/null || true
 
           # Check /v1/store?path=...&runnable=1
-          local warm=0
+          local warm=""
           if [[ -n "$closure_path" ]]; then
+            warm=0
             local chk
             chk="$(lab_ssh "$jpc" "curl -s -m 2 'http://127.0.0.1:4242/v1/store?path=${closure_path}&runnable=1' 2>/dev/null || true")"
             if [[ "$chk" == *'"cached":true'* || "$chk" == *'"cached": true'* ]]; then
@@ -384,13 +384,19 @@ e19_main() {
       fi
 
       # At 30%: join on each joiner
-      local pp_code="" pc00_ip
+      local pp_code="" pc00_ip join_skip=0
+      local -a join_pids=()
       pc00_ip="$(lab_ip pc00)"
       if [[ "$sys" == pipedpeer* ]]; then
-        pp_code="$(lab_ssh pc00 'pipedpeer invite 2>/dev/null' | awk '{print $NF}' | tail -1)"
+        pp_code="$(lab_ssh pc00 'pipedpeer invite 2>/dev/null' | awk '{print $NF}' | tail -1 || true)"
+        if [[ -z "$pp_code" ]]; then
+          lab_log "e19 $run_id: pipedpeer invite on pc00 printed no code; repeat aborted, no join row"
+          join_skip=1
+        fi
       fi
 
       for jpc in "${joiner_hosts[@]}"; do
+        ((join_skip)) && break
         local jcores
         jcores="$(awk -v p="$jpc" '$1==p {print $5}' "$LAB/hosts-$total_nodes.txt" 2>/dev/null || echo 8)"
         local jcmd=""
@@ -398,21 +404,33 @@ e19_main() {
           pipedpeer*)
             jcmd="t0=\$(date +%s%N); echo \"\$t0\" > ~/pipedpeer-lab/runs/$run_id/join.stamp; pipedpeer connect $pp_code; rc=\$?; t1=\$(date +%s%N); echo \"\$t0 \$t1 \$rc\" > ~/pipedpeer-lab/runs/$run_id/join.res; exit \$rc"
             ;;
-          ray*)
-            jcmd="t0=\$(date +%s%N); echo \"\$t0\" > ~/pipedpeer-lab/runs/$run_id/join.stamp; systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --block; rc=\$?; t1=\$(date +%s%N); echo \"\$t0 \$t1 \$rc\" > ~/pipedpeer-lab/runs/$run_id/join.res; exit \$rc"
-            ;;
-          dask*)
-            jcmd="t0=\$(date +%s%N); echo \"\$t0\" > ~/pipedpeer-lab/runs/$run_id/join.stamp; systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$pc00_ip:8786 --nworkers $jcores --nthreads 1; rc=\$?; t1=\$(date +%s%N); echo \"\$t0 \$t1 \$rc\" > ~/pipedpeer-lab/runs/$run_id/join.res; exit \$rc"
+          ray* | dask*)
+            local pollsys jip poll_b64 starter
+            pollsys="ray"; [[ "$sys" == dask* ]] && pollsys="dask"
+            jip="$(lab_ip "$jpc")"
+            poll_b64="$(e19_join_poll_py | base64 -w0)"
+            if [[ "$pollsys" == ray ]]; then
+              starter="systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --block"
+            else
+              starter="systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$pc00_ip:8786 --nworkers $jcores --nthreads 1"
+            fi
+            jcmd="t0=\$(date +%s%N); echo \"\$t0\" > ~/pipedpeer-lab/runs/$run_id/join.stamp; $starter; rc=\$?; if [ \$rc -eq 0 ]; then echo $poll_b64 | base64 -d | ~/pipedpeer-lab/venv/bin/python - $pollsys $pc00_ip $jip $([[ "$pollsys" == ray ]] && echo 1 || echo "$jcores") ${E19_JOIN_WAIT_S:-180}; rc=\$?; fi; t1=\$(date +%s%N); echo \"\$t0 \$t1 \$rc\" > ~/pipedpeer-lab/runs/$run_id/join.res; exit \$rc"
             ;;
         esac
 
         (
           lab_ssh "$jpc" "$jcmd"
         ) >/dev/null 2>&1 &
+        join_pids+=("$!")
       done
 
       # Wait for the join commands to start / finish, and the run to complete
       wait "$run_pid" || lab_log "e19 $run_id: campaign_run_one finished"
+      # the join commands write join.res when their poll ends: read it only after
+      local jp
+      for jp in "${join_pids[@]}"; do
+        wait "$jp" || true
+      done
 
       # Read job wall & checksum
       read -r run_wall run_csum <<<"$(e19_extract_run_info "$run_id")"
@@ -420,6 +438,10 @@ e19_main() {
 
       # Collect each joiner's metrics
       for jpc in "${joiner_hosts[@]}"; do
+        if ((join_skip)); then
+          lab_ssh "$jpc" "kill \$(cat ~/pipedpeer-lab/runs/$run_id/sampler.pid 2>/dev/null) 2>/dev/null || true" 2>/dev/null || true
+          continue
+        fi
         local jcores
         jcores="$(awk -v p="$jpc" '$1==p {print $5}' "$LAB/hosts-$total_nodes.txt" 2>/dev/null || echo 8)"
         local jres_line
