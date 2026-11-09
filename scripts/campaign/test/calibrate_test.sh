@@ -69,8 +69,11 @@ row_setup "$d" 'sleep 1; echo ran'
 out="$(bash "$CAL" --target 2 2>"$d/err")" || pnote "calibrate failed: $(tail -3 "$d/err")"
 [[ -s "$d/sizes.env" ]] || pnote "no sizes.env"
 w1="$(sed -n 's/^W1_ITEMS=//p' "$d/sizes.env")"
-# measured is about 1.0-1.9 s (ssh and process start add to the 1 s sleep) -> 48*2/m
-[[ "$w1" =~ ^[0-9]+$ ]] && ((w1 >= 40 && w1 <= 100)) || pnote "W1_ITEMS=$w1 not near 48*2/1.x"
+# measured is about 1.0-1.9 s (ssh and process start add to the 1 s sleep) -> 48*2/m.
+# The lower bound 24 (m up to 4 s) is the loaded-machine allowance: a busy host
+# stretches process start, and 40 (m 2.4 s) failed there without a code fault.
+# The upper bound 100 (m < 0.96 s) still catches a measurement that skips the sleep.
+[[ "$w1" =~ ^[0-9]+$ ]] && ((w1 >= 24 && w1 <= 100)) || pnote "W1_ITEMS=$w1 not near 48*2/1.x"
 for k in BENCH_PROCS W1_WEAK_PER_PC W2_ITEMS W3_TREES T1_EPOCHS; do
 	grep -q "^$k=[0-9]" "$d/sizes.env" || pnote "sizes.env lacks $k"
 done

@@ -89,7 +89,7 @@ e11_main() {
   fi
 
   local all hfile allfile k pc out limit
-  all="$(awk '!/^#/ && NF {c++} END {print c+0}' "$LAB/hosts.tsv")"
+  all="$(lab_available_count)"
   limit="${E11_JOIN_S:-120}"
   _load_sizes || return 1
   mkdir -p "$LAB/analysis-input"

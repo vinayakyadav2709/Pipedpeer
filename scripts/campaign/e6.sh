@@ -45,16 +45,21 @@ PY
 # e6_wait_running <run_id>: until the run on pc00 has a t0 and no exit file.
 # Sets RUN_ELAPSED_NS (pc00's clock now minus t0, both read on pc00) and
 # POLL_NS (the driver's clock at that moment).
-e6_wait_running() {
-  local id="$1" out deadline=$((SECONDS + ${E6_START_WAIT_S:-120}))
+e6_running_now() {
+  local id="$1" out
   # shellcheck disable=SC2016  # remote script
+  out="$(lab_ssh pc00 'R=~/pipedpeer-lab/runs/'"$id"'; t=$(cat $R/t0 2>/dev/null); if [ -n "$t" ] && [ ! -e $R/exit ]; then echo "$t $(date +%s%N)"; fi' 2>/dev/null)" || out=""
+  if [[ "$out" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
+    RUN_ELAPSED_NS=$((BASH_REMATCH[2] - BASH_REMATCH[1]))
+    POLL_NS="$(date +%s%N)"
+    return 0
+  fi
+  return 1
+}
+e6_wait_running() {
+  local id="$1" deadline=$((SECONDS + ${E6_START_WAIT_S:-120}))
   while ((SECONDS < deadline)); do
-    out="$(lab_ssh pc00 'R=~/pipedpeer-lab/runs/'"$id"'; t=$(cat $R/t0 2>/dev/null); if [ -n "$t" ] && [ ! -e $R/exit ]; then echo "$t $(date +%s%N)"; fi' 2>/dev/null)" || out=""
-    if [[ "$out" =~ ^([0-9]+)\ ([0-9]+)$ ]]; then
-      RUN_ELAPSED_NS=$((BASH_REMATCH[2] - BASH_REMATCH[1]))
-      POLL_NS="$(date +%s%N)"
-      return 0
-    fi
+    e6_running_now "$id" && return 0
     sleep 0.2
   done
   lab_log "e6 $id: never seen running within ${E6_START_WAIT_S:-120}s"
@@ -95,6 +100,7 @@ for p in $(pgrep -f "pipedpeer run"); do
   for i in "${!a[@]}"; do
     if [ "${a[i]##*/}" = pipedpeer ] && [ "${a[i+1]:-}" = run ]; then
       kill -INT "$p" && found=1
+      break
     fi
   done
 done
@@ -149,8 +155,13 @@ e6_main() {
   [[ -f "$out" ]] || printf 'system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s\n' >"$out"
 
   local -A unit=([pipedpeer]=pipedpeer.service [ray]=lab-ray [dask]=lab-dask-worker)
-  local kill_pc=pc05 p sys i id med remain kill_at pid rec now_ns
-  ((N < 6)) && kill_pc=pc01
+  # the kill target is the 6th PC of the PCs in use (the 2nd on a small
+  # cluster), never a name guessed from the list of all PCs
+  local kill_pc p sys i id med remain kill_at pid rec now_ns
+  local -a kill_hosts
+  mapfile -t kill_hosts <"$(lab_hosts "$N")"
+  kill_pc="${kill_hosts[5]:-${kill_hosts[1]:-}}"
+  [[ -n "$kill_pc" ]] || { lab_log "e6: no PC to kill among $N"; return 1; }
 
   "$CLUSTER_SH" up "$N" || { lab_log "e6: cluster up failed"; return 1; }
 
@@ -169,10 +180,15 @@ e6_main() {
         if e6_wait_running "$id"; then
           remain="$(python3 -c "print(max(0.0, 0.3 * $med - $RUN_ELAPSED_NS / 1e9))")"
           sleep "$remain"
-          now_ns="$(date +%s%N)"
-          kill_at="$(python3 -c "print(round(($RUN_ELAPSED_NS + $now_ns - $POLL_NS) / 1e9, 3))")"
-          lab_ssh "$kill_pc" "systemctl --user kill -s SIGKILL ${unit[$sys]}" ||
-            lab_log "e6 $id: SIGKILL of ${unit[$sys]} on $kill_pc failed; the run was not disturbed"
+          # a run that ended while we waited was not disturbed: no kill, no kill_at_s
+          if e6_running_now "$id"; then
+            now_ns="$(date +%s%N)"
+            kill_at="$(python3 -c "print(round(($RUN_ELAPSED_NS + $now_ns - $POLL_NS) / 1e9, 3))")"
+            lab_ssh "$kill_pc" "systemctl --user kill -s SIGKILL ${unit[$sys]}" ||
+              lab_log "e6 $id: SIGKILL of ${unit[$sys]} on $kill_pc failed; the run was not disturbed"
+          else
+            lab_log "e6 $id: run had already ended before the kill; no kill sent, kill_at_s left empty"
+          fi
         else
           lab_log "e6 $id: no kill (run not seen running); kill_at_s left empty"
         fi

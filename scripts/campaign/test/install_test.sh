@@ -127,7 +127,11 @@ case "${1:-}" in
 		for d in "$dir"/pc*; do
 			[[ -d "$d" ]] || continue
 			h="$(basename "$d").lab"
-			printf '%s  healthy  peer  8c 1%%  31GiB  none 0  0  -\n' "$h"
+			state=healthy
+			# a PC whose connect failed is not in the leader's table as healthy
+			dn="$(basename "$d")"
+			if [[ ",$CONNECT_FAIL," == *",$dn,"* && -z "${STUB_FAILED_STILL_HEALTHY:-}" ]]; then state=offline; fi
+			printf '%s  %s  peer  8c 1%%  31GiB  none 0  0  -\n' "$h" "$state"
 		done
 		;;
 	invite)
@@ -168,8 +172,7 @@ PP-STUB
 	chmod +x "$bin/pipedpeer"
 }
 
-# uv_stub <bin_dir>: fake `uv python install <v> --install-dir <d>` writes
-# <d>/bin/python<v>, a wrapper that execs the driver's python3. Enough for
+# uv_stub <bin_dir>: fake uv whose venv python execs the driver's python3. Enough for
 # the fake lab; the real PCs get the real uv.
 uv_stub() {
 	local bin="$1"
@@ -178,23 +181,23 @@ uv_stub() {
 # Fake uv for campaign tests.
 set -euo pipefail
 UV_STUB_GUARD_EMAIL_testbench=pipedpeer
+# the calls venv.sh makes: `uv python install --no-bin <v>` (managed CPython
+# under $UV_PYTHON_INSTALL_DIR) and `uv venv --managed-python --python <v>
+# --seed <dir>`, which makes <dir>/bin/python (the driver's python3) and pip
 if [[ "${1:-}" == python && "${2:-}" == install ]]; then
-	ver="${3:?}"
-	install_dir=""
-	shift 2
-	while (($#)); do
-		case "$1" in
-			--install-dir) install_dir="${2:-}"; shift 2 ;;
-			*) shift ;;
-		esac
-	done
-	[[ -n "$install_dir" ]] || {
-		echo "stub uv: no --install-dir" >&2
+	[[ -n "${UV_PYTHON_INSTALL_DIR:-}" ]] || {
+		echo "stub uv: no UV_PYTHON_INSTALL_DIR" >&2
 		exit 3
 	}
-	mkdir -p "$install_dir/bin"
-	printf '#!/usr/bin/env bash\nexec python3 "$@"\n' >"$install_dir/bin/python$ver"
-	chmod +x "$install_dir/bin/python$ver"
+	mkdir -p "$UV_PYTHON_INSTALL_DIR"
+	exit 0
+fi
+if [[ "${1:-}" == venv ]]; then
+	dest="${*: -1}"
+	mkdir -p "$dest/bin"
+	printf '#!/usr/bin/env bash\nexec python3 "$@"\n' >"$dest/bin/python"
+	printf '#!/usr/bin/env bash\nexit 0\n' >"$dest/bin/pip"
+	chmod +x "$dest/bin/python" "$dest/bin/pip"
 	exit 0
 fi
 echo "stub uv: unknown args: ${1:-} ${2:-}" >&2
@@ -268,7 +271,7 @@ t3() {
 		conf "$d" <<'EOF'
 STUB_CONNECT_FAIL_PC=pc01
 EOF
-		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		timeout 60 bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234 </dev/null
 		printf 'rc=%s\n' "$?"
 	) >"$d/log" 2>&1 || rc=$?
 	(($rc == 0)) || pnote "row exited $rc"
@@ -276,6 +279,24 @@ EOF
 	line "$d/logs/install/FAILED" pc01 || pnote "FAILED does not list pc01"
 	line "$d/install.csv" "pc01,0.0.1-test.20261108-abc1234,1,node-pc01" || pnote "pc01 row must record connect_exit 1"
 	verdict "connect exit 1 always -> FAILED, exit 1"
+}
+
+# connect exit 1 but the leader's table shows the PC healthy -> counts ok (and does not hang on stdin)
+t3b() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		conf "$d" <<'EOF'
+STUB_CONNECT_FAIL_PC=pc01
+STUB_FAILED_STILL_HEALTHY=1
+EOF
+		timeout 60 bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234 </dev/null
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	grep -q 'INSTALL ok=3 failed=0' "$d/log" || pnote "healthy in the leader's table must count ok: $(tail -3 "$d/log" | tr '\n' ' ')"
+	verdict "connect exit 1 but healthy on pc00 -> ok"
 }
 
 # two PCs with the same node id -> DUPLICATE-NODE-ID, exit 1
@@ -412,6 +433,7 @@ printf 'scripts/campaign install/pins/venv case table\n\n'
 t1
 t2
 t3
+t3b
 t4
 t5
 t6

@@ -141,7 +141,7 @@ case "$*" in
 	*pool_idle.py*) echo "POOLIDLE-OK items=4800 seconds=1.5000 checksum=${BENCH_STUB_BAD:-42.0}" ;;
 	*trivial.py*) echo "TRIVIAL-OK" ;;
 	*cpu.py*|*w2_*) echo "Pool: 128 items, checksum 100.0"; echo "joblib: 64 Mandelbrot tiles, 24 points inside"; echo "numpy: largest singular value 1.2346"; echo "pandas: 5 rows -> 2 cities, total rain 100.1" ;;
-	*w3_*|*w3_rf.py*) echo "accuracy: 0.9400" ;;
+	*w3_*|*w3_rf.py*) echo "accuracy: ${STUB_W3_ACC:-0.9400}" ;;
 	*t1_*|*t1_mlp.py*) echo "final loss: 0.490000"; echo "weight checksum: 1.234567890" ;;
 	*) echo "python-stub: no result lines for [$*]" >&2; exit 3 ;;
 esac
@@ -155,7 +155,7 @@ PYSTUB
 		case "$w" in
 			w1) lines='echo "POOLMAP-OK items=${BENCH_ITEMS:-4800} seconds=1.0000 checksum=42.0"' ;;
 			w2) lines='echo "Pool: 128 items, checksum 100.0"; echo "joblib: 64 Mandelbrot tiles, 24 points inside"; echo "numpy: largest singular value 1.2346"; echo "pandas: 5 rows -> 2 cities, total rain 100.1"' ;;
-			w3) lines='echo "accuracy: 0.9400"' ;;
+			w3) lines='echo "accuracy: ${STUB_W3_ACC:-0.9400}"' ;;
 			trivial) lines='echo "TRIVIAL-OK"' ;;
 		esac
 		sh="$dir/pc00/pipedpeer-lab/work/baselines/${w}_ssh.sh"
@@ -618,6 +618,42 @@ cmd="$(cd "$CAMP" && LAB="$LAB" bash -c 'source ./lib.sh; source ./systems.sh; s
 cmd="$(cd "$CAMP" && LAB="$LAB" bash -c 'source ./lib.sh; source ./systems.sh; source "$1/sizes.env"; sys_cmd ray W1 2' _ "$d" 2>"$d/err")" || true
 [[ "$cmd" != *PARALLEL_SSH* ]] || pnote "PARALLEL_SSH leaked into the ray command"
 verdict "ssh baseline command: pc00 key and first-contact host key, only for ssh")
+
+(d=$(newdir)
+row_setup "$d"
+rm -rf "$LAB/reference"
+out="$(run.sh REF --workloads W1 --sizes 1 2>"$d/err")" || pnote "REF failed: $(tail -3 "$d/err")"
+[[ -s "$LAB/reference/W1-strong.txt" ]] || pnote "REF wrote no reference/W1-strong.txt"
+grep -q 'checksum=' "$LAB/reference/W1-strong.txt" 2>/dev/null || pnote "reference holds no result line: $(cat "$LAB/reference/W1-strong.txt" 2>&1)"
+[[ ! -e "$LAB/reference/W2-strong.txt" ]] || pnote "REF of W1 wrote another workload's reference"
+verdict "REF run writes the workload's reference file from its result lines")
+
+(d=$(newdir)
+row_setup "$d"
+echo "W1 keep-me checksum=1" >"$LAB/reference/W1-strong.txt"
+out="$(run.sh REF --workloads W1 --sizes 1 2>"$d/err")" || pnote "REF failed: $(tail -3 "$d/err")"
+[[ "$(cat "$LAB/reference/W1-strong.txt")" == "W1 keep-me checksum=1" ]] || pnote "REF overwrote an existing reference"
+verdict "REF run never overwrites an existing reference")
+
+(d=$(newdir)
+row_setup "$d"
+for sysn in plain pipedpeer ray; do
+	cmd="$(cd "$CAMP" && LAB="$LAB" bash -c 'source ./lib.sh; source ./systems.sh; source "$1/sizes.env"; sys_cmd "$2" W2 2 r1' _ "$d" "$sysn" 2>"$d/err")" || pnote "sys_cmd $sysn W2 failed: $(cat "$d/err")"
+	[[ "$(grep -o -- '--items' <<<"$cmd" | wc -l)" == 1 ]] || pnote "$sysn W2 command has not exactly one --items: $cmd"
+done
+cmd="$(cd "$CAMP" && LAB="$LAB" bash -c 'source ./lib.sh; source ./systems.sh; source "$1/sizes.env"; sys_cmd pipedpeer W2 2 r1' _ "$d" 2>"$d/err")" || true
+[[ "$cmd" == *'cp "$r" "$DEST" || echo'* ]] || pnote "a failed receipt copy would fail the run: $cmd"
+verdict "W2 commands carry --items once; a failed receipt copy does not fail the run")
+
+(d=$(newdir)
+row_setup "$d"
+STUB_W3_ACC=0.9450 campaign_run_one U W3 ssh 2 1 0 30 strong >/dev/null 2>&1 || true
+STUB_W3_ACC=0.9500 campaign_run_one U2 W3 ssh 2 1 0 30 strong >/dev/null 2>&1 || true
+STUB_W3_ACC=0.9450 campaign_run_one U3 W3 ray 2 1 0 30 strong >/dev/null 2>&1 || true
+[[ "$(rec_field U-W3-ssh-n2-r1 result_ok)" == true ]] || pnote "W3 ssh 0.0050 off judged $(rec_field U-W3-ssh-n2-r1 result_ok), want true (workloads.md)"
+[[ "$(rec_field U2-W3-ssh-n2-r1 result_ok)" == false ]] || pnote "W3 ssh 0.0100 off judged $(rec_field U2-W3-ssh-n2-r1 result_ok), want false"
+[[ "$(rec_field U3-W3-ray-n2-r1 result_ok)" == false ]] || pnote "W3 ray 0.0050 off judged $(rec_field U3-W3-ray-n2-r1 result_ok), want false (ray stays exact)"
+verdict "W3 accuracy: ssh within 0.005 is ok, beyond not; other systems exact")
 
 nrows=$(wc -l <"$RESULTS")
 nfail=$(grep -c '^bad$' "$RESULTS" || true)

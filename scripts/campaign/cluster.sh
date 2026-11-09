@@ -370,12 +370,56 @@ _cluster_cores_line() {
 
 # --- ray caps ---------------------------------------------------------------
 
+# _cluster_ray_cpus_flag <pc>: " --num-cpus=N" when <pc> is capped, else empty.
+# Ray takes its CPU count from the machine, not from AllowedCPUs, so every capped
+# PC (the head too) is started with the flag instead of being restarted later.
+_cluster_ray_cpus_flag() {
+	local pc="$1" k
+	for ((k = 0; k < ${#CLUSTER_CAP_PC[@]}; k++)); do
+		if [[ "${CLUSTER_CAP_PC[$k]}" == "$pc" ]]; then
+			printf ' --num-cpus=%s' "${CLUSTER_CAP_CPU[$k]}"
+			return 0
+		fi
+	done
+}
+
+# _cluster_wait_ray_cpus <pc> <ip> <want>: poll Ray's node list until <ip>
+# reports <want> CPUs (a restarted worker reconnects late), up to
+# CLUSTER_READY_S. Returns 1, with a log line, when it never does.
+_cluster_wait_ray_cpus() {
+	local pc="$1" ip="$2" want="$3" q f deadline got=""
+	q="import ray
+ray.init(address='auto')
+for n in ray.nodes():
+    if n['Alive']:
+        print(n['NodeManagerAddress'].split(':')[0], int(n['Resources'].get('CPU', 0)))"
+	q="timeout 30 ~/pipedpeer-lab/venv/bin/python -c \"$q\""
+	f="$(_cluster_tmp)"
+	deadline=$(( $(date +%s) + CLUSTER_READY_S ))
+	while :; do
+		if lab_ssh "${CLUSTER_IDS[0]}" "$q" >"$f" 2>/dev/null; then
+			got="$(awk -v ip="$ip" '$1 == ip {c = $2} END {print c}' "$f")"
+			if [[ "$got" == "$want" ]]; then
+				rm -f "$f"
+				return 0
+			fi
+		fi
+		if (($(date +%s) >= deadline)); then
+			rm -f "$f"
+			lab_log "cap $pc: Ray did not report $want CPUs for $ip within ${CLUSTER_READY_S}s (last: ${got:-none})"
+			return 1
+		fi
+		sleep "$(lab_poll_sleep)"
+	done
+}
+
 _cluster_ray_cap_fix() {
 	# Ray invents its worker CPU count from the scheduler affinity mask that
 	# AllowedCPUs does not touch on every build; where it disagrees with the
 	# cap on a worker PC, restart that worker with --num-cpus instead. The
-	# head is not restarted (that would tear the cluster down to rebuild it);
-	# a head mismatch is logged for the experiment to block on.
+	# head is started with --num-cpus when capped (see cluster_up) and is not
+	# restarted here (that would tear the cluster down to rebuild it); a head
+	# mismatch is logged for the experiment to block on.
 	local q f pc ip node_ip node_cpus found pc00_ip i k
 	pc00_ip="$(lab_ip "${CLUSTER_IDS[0]}")"
 	q="import ray
@@ -408,6 +452,9 @@ for n in ray.nodes():
 				lab_log "ray ignores AllowedCPUs on $pc; passed --num-cpus=${CLUSTER_CAP_CPU[$k]}"
 				if ! lab_ssh "$pc" "systemctl --user stop lab-ray; systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --num-cpus=${CLUSTER_CAP_CPU[$k]} --block"; then
 					lab_log "cap $pc: restarting the Ray worker with --num-cpus FAILED"
+				else
+					# the old node entry lingers until it times out: wait for the new one
+					_cluster_wait_ray_cpus "$pc" "$ip" "${CLUSTER_CAP_CPU[$k]}" || true
 				fi
 			else
 				lab_log "cap $pc: Ray reports $found CPUs, as capped"
@@ -460,11 +507,11 @@ cluster_up() {
 		if ! lab_fanout cluster-ray-stop "$hostfile" '~/pipedpeer-lab/venv/bin/ray stop --force' >/dev/null; then
 			lab_log "up: ray stop failed somewhere (maybe nothing was running); see logs/cluster-ray-stop"
 		fi
-		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --head --port=6379 --block"; then
+		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --head --port=6379$(_cluster_ray_cpus_flag "$pc00_id") --block"; then
 			_cluster_fail "up: could not start the Ray head on $pc00_id" || return 1
 		fi
 		for ((i = 1; i < CLUSTER_N; i++)); do
-			if ! lab_ssh "${CLUSTER_IDS[$i]}" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --block"; then
+			if ! lab_ssh "${CLUSTER_IDS[$i]}" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379$(_cluster_ray_cpus_flag "${CLUSTER_IDS[$i]}") --block"; then
 				_cluster_fail "up: could not start the Ray worker on ${CLUSTER_IDS[$i]}" || return 1
 			fi
 		done

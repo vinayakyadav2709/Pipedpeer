@@ -14,7 +14,7 @@
 #
 # Environment: UBU_LAB_N (PCs, default 3), UBU_LAB_SLEEP (step 6 job, seconds,
 # default 600), UBU_LAB_DROP (step 6 disconnect, seconds, default 90),
-# UBU_LAB_FROM (test starts at that step), UBU_LAB_SKIP (space-separated step numbers to leave out), UBU_LAB_RMI=1 (down also removes the images), LAB_MEM_SPARE (see lib/lab.sh), UBU_LAB_MEM (memory per PC, default 2048m) and UBU_LAB_MEM1 (pc00, default 3072m: it holds the Ray head and Dask scheduler, which OOM at 2g).
+# UBU_LAB_FROM (test starts at that step), UBU_LAB_SKIP (space-separated step numbers to leave out), UBU_LAB_RMI=1 (down also removes the images), LAB_MEM_SPARE (see lib/lab.sh), UBU_LAB_MEM (memory per PC, default 2048m) and UBU_LAB_DRV_MEM (driver, default 3072m: ray and dask OOM below it), UBU_LAB_MEM1 (pc00, default 3072m: it holds the Ray head and Dask scheduler, which OOM at 2g).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,7 +102,7 @@ cmd_up() {
 			--network "$NET" --ip "$(pc_ip "$k")" "pp-ubu:$rel" >/dev/null
 	done
 	rec container "$DRV"
-	$rt run -d --name "$DRV" --hostname "$DRV" --memory 512m --memory-swap 512m \
+	$rt run -d --name "$DRV" --hostname "$DRV" --memory "${UBU_LAB_DRV_MEM:-3072m}" --memory-swap "${UBU_LAB_DRV_MEM:-3072m}" \
 		-v "$repo:/repo:ro" -v "$VOL:/lab-results" \
 		-e LAB_RESULTS=/lab-results -e REPO=/repo -e PP_BINARY=/repo/bin/pipedpeer \
 		--network "$NET" --ip "$(drv_ip)" "$IMG_DRV" >/dev/null
@@ -127,16 +127,20 @@ cmd_down() {
 		echo "down: nothing recorded in $created"
 		return 0
 	fi
-	local c n v i
+	local c n v i left=0
 	rt="$(recorded runtime | head -1)"
 	[[ -n "$rt" ]] || rt=docker
 	for c in $(recorded container); do
-		$rt rm -f "$c" >/dev/null 2>&1 || echo "down: container $c not removed" >&2
+		$rt rm -f "$c" >/dev/null 2>&1 || { echo "down: container $c not removed" >&2; left=1; }
 	done
-	for n in $(recorded network); do $rt network rm "$n" >/dev/null 2>&1 || echo "down: network $n not removed" >&2; done
-	for v in $(recorded volume); do $rt volume rm "$v" >/dev/null 2>&1 || echo "down: volume $v not removed" >&2; done
+	for n in $(recorded network); do $rt network rm "$n" >/dev/null 2>&1 || { echo "down: network $n not removed" >&2; left=1; }; done
+	for v in $(recorded volume); do $rt volume rm "$v" >/dev/null 2>&1 || { echo "down: volume $v not removed" >&2; left=1; }; done
 	if [[ "${UBU_LAB_RMI:-0}" == 1 ]]; then
 		for i in $(recorded image); do $rt rmi "$i" >/dev/null 2>&1 || echo "down: image $i not removed" >&2; done
+	fi
+	if ((left)); then
+		echo "down: something was not removed; $created kept so down can be run again" >&2
+		return 1
 	fi
 	rm -rf "$snapdir"
 	rm -f "$created"
@@ -230,6 +234,7 @@ step3() {
 step4() {
 	STEP_K=4
 	local out k apparmor=""
+	[[ -x "$repo/bin/pipedpeer" ]] || fail "step 4 needs $repo/bin/pipedpeer: run 'make build' first"
 	out="$(dr "PP_BINARY=/repo/bin/pipedpeer ./install.sh dev" 2>&1)" || fail "install.sh: $(printf '%s\n' "$out" | tail -8)"
 	printf '%s\n' "$out" | grep -q "INSTALL ok=$N failed=0" || fail "install.sh: $(printf '%s\n' "$out" | tail -5)"
 	local ids
@@ -319,7 +324,7 @@ chmod 600 ~/.config/pipedpeer-lab/r2.env'
 		}
 	done
 	dr "grep -q UPLOAD-OK $log/upload.log" || fail "upload.sh printed no UPLOAD-OK"
-	pass "every experiment ran through the real runner; upload and analyse done"
+	pass "SMOKE, REF, FC, E7, E8, e5, e6, e11 ran for real; e4 only as --dry-run and E1/E1b not at all; upload and analyse done"
 }
 
 step8() {

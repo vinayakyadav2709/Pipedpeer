@@ -22,7 +22,9 @@
 # says "No receipt". The record is read after the run with `jobs last --export
 # json`. The spread column says whether `compute` ran on 2 or more PCs; a run
 # that stayed on one PC is written spread=0 and logged, never taken as good.
-# TODO(real lab): cold-cache start (it does start cold: env_build runs each time).
+# Cold start: pipedpeer builds its environment on every run (env_build); pip
+# runs with --no-cache-dir so a pip cache left by an earlier arm or by venv.sh
+# cannot make the cold or update rx_bytes look small.
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -172,6 +174,27 @@ e5_main() {
   out="$LAB/analysis-input/e5.csv"
   export E5_HOSTS="$LAB/hosts.tsv" E5_CLOCKS="$LAB/clocks.csv" E5_IDS="${ids[*]}"
 
+  # the CSV is written phase by phase: an interrupted multi-hour run keeps
+  # every phase it finished (the header is written once, here)
+  printf 'system,phase,pc,ready_s,rx_bytes,reused,spread\n' >"$out"
+  e5_emit() { # <arm> <phase>: the rows of one finished phase
+    local rv rxv cold reused
+    for pc in "${ids[@]}"; do
+      rv="${ready[$1,$2,$pc]:-}"
+      rxv="${rx[$1,$2,$pc]:-}"
+      cold="${rx[$1,cold,$pc]:-}"
+      reused=""
+      if [[ "$2" == cold ]]; then
+        reused=0
+      elif [[ -n "$rxv" && -n "$cold" ]] && ((cold > 0)); then
+        reused=$((rxv * 10 < cold ? 1 : 0))
+      else
+        lab_log "e5 $1/$2/$pc: no cold or phase rx_bytes; reused left empty"
+      fi
+      printf '%s,%s,%s,%s,%s,%s,%s\n' "$1" "$2" "$pc" "$rv" "$rxv" "$reused" "${spread[$1,$2]:-}" >>"$out"
+    done
+  }
+
   "$CLUSTER_SH" up "$N" || { lab_log "e5: cluster up failed"; return 1; }
   # shellcheck disable=SC2064
   trap "\"$CLUSTER_SH\" down || true" EXIT
@@ -202,10 +225,11 @@ e5_main() {
       case "$arm" in
         pipedpeer)
           cmd="cd ~/pipedpeer-lab/work && pipedpeer run --distribute force $script && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$id/timeline.json && pipedpeer jobs last --receipt >~/pipedpeer-lab/runs/$id/receipt.txt"
-          lab_detach pc00 "$id" "$cmd" || { lab_log "e5 $id: detach failed"; continue; }
+          lab_detach pc00 "$id" "$cmd" || { lab_log "e5 $id: detach failed"; e5_emit "$arm" "$phase"; continue; }
           lab_wait pc00 "$id" 600 >/dev/null || lab_log "e5 $id: did not finish in time"
-          lab_fetch pc00 "$id" "$dir" || lab_log "e5 $id: fetch failed"
+          # RX is read before the artifacts are fetched: pip's read has no fetch either
           e5_rx_after "$arm" "$phase"
+          lab_fetch pc00 "$id" "$dir" || lab_log "e5 $id: fetch failed"
           if ! ready_txt="$(E5_DIR="$dir" e5_py pipedpeer)"; then
             lab_log "e5 $id: no ready times (timeline unusable)"; ready_txt=""
           else
@@ -217,20 +241,21 @@ e5_main() {
           local with=""
           [[ "$phase" != cold ]] && with=" --with tqdm"
           cmd="cd ~/pipedpeer-lab/work && RAY_ADDRESS=$(lab_ip pc00):6379 ~/pipedpeer-lab/venv/bin/python e5_ray.py --nodes $N$with"
-          lab_detach pc00 "$id" "$cmd" || { lab_log "e5 $id: detach failed"; continue; }
+          lab_detach pc00 "$id" "$cmd" || { lab_log "e5 $id: detach failed"; e5_emit "$arm" "$phase"; continue; }
           lab_wait pc00 "$id" 900 >/dev/null || lab_log "e5 $id: did not finish in time"
-          lab_fetch pc00 "$id" "$dir" || lab_log "e5 $id: fetch failed"
+          # RX is read before the artifacts are fetched: pip's read has no fetch either
           e5_rx_after "$arm" "$phase"
+          lab_fetch pc00 "$id" "$dir" || lab_log "e5 $id: fetch failed"
           if ! ready_txt="$(E5_DIR="$dir" e5_py ray)"; then
             lab_log "e5 $id: no ready times (ray output unusable)"; ready_txt=""
           fi
           ;;
         pip)
           if [[ "$phase" == cold ]]; then
-            cmd='rm -rf ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/venv/bin/python -m venv ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/e5-venv/bin/pip install -q -r ~/pipedpeer-lab/requirements.txt && date +%s%N'
+            cmd='rm -rf ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/venv/bin/python -m venv ~/pipedpeer-lab/e5-venv && ~/pipedpeer-lab/e5-venv/bin/pip install -q --no-cache-dir -r ~/pipedpeer-lab/requirements.txt && date +%s%N'
           else
             # shellcheck disable=SC2088  # the tilde is for the remote shell
-            cmd='~/pipedpeer-lab/e5-venv/bin/pip install -q tqdm && date +%s%N'
+            cmd='~/pipedpeer-lab/e5-venv/bin/pip install -q --no-cache-dir tqdm && date +%s%N'
           fi
           t_start="$(date +%s%N)"
           lab_fanout "e5-pip-$phase" "$hfile" "$cmd" >/dev/null ||
@@ -253,27 +278,7 @@ e5_main() {
       while read -r pc line; do
         [[ -n "$pc" ]] && ready[$arm,$phase,$pc]="$line"
       done <<<"$ready_txt"
-    done
-  done
-
-  printf 'system,phase,pc,ready_s,rx_bytes,reused,spread\n' >"$out"
-  local rv rxv cold reused
-  for arm in pipedpeer pip ray; do
-    for phase in "${phases[@]}"; do
-      for pc in "${ids[@]}"; do
-        rv="${ready[$arm,$phase,$pc]:-}"
-        rxv="${rx[$arm,$phase,$pc]:-}"
-        cold="${rx[$arm,cold,$pc]:-}"
-        reused=""
-        if [[ "$phase" == cold ]]; then
-          reused=0
-        elif [[ -n "$rxv" && -n "$cold" ]] && ((cold > 0)); then
-          reused=$((rxv * 10 < cold ? 1 : 0))
-        else
-          lab_log "e5 $arm/$phase/$pc: no cold or phase rx_bytes; reused left empty"
-        fi
-        printf '%s,%s,%s,%s,%s,%s,%s\n' "$arm" "$phase" "$pc" "$rv" "$rxv" "$reused" "${spread[$arm,$phase]:-}" >>"$out"
-      done
+      e5_emit "$arm" "$phase"
     done
   done
   echo "E5-DONE csv=$out"

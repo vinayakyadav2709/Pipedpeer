@@ -117,6 +117,12 @@ _lab_available_hosts() {
 	' "$LAB/hosts.tsv"
 }
 
+# lab_available_count: how many PCs lab_hosts can hand out (hosts.tsv rows
+# minus excluded.txt).
+lab_available_count() {
+	_lab_available_hosts | awk 'END { print NR + 0 }'
+}
+
 # lab_ip <pc>: the ip column for that id.
 lab_ip() {
 	local pc="${1:?usage: lab_ip <pc>}" ip

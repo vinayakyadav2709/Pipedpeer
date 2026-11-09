@@ -374,7 +374,6 @@ verdict "e11: join_s parsed, base 1000 end 5000 baseline 1000 idle 60 -> 3000 by
 d="$(newdir)"
 (
   setup_lab "$d" 2
-  cp "$CAMP/test/exp_test.sh" /dev/null
   cat >"$d/verif/idle-sleep" <<'EOF'
 #!/usr/bin/env bash
 for h in "$FAKELAB_DIR"/pc*/net_dev; do
@@ -625,6 +624,68 @@ grep -qx 'junk-refused' "$d/out" || pnote "junk spare not refused"
 grep -q 'LAB_MEM_SPARE must be a number' "$d/out" || pnote "no clear error for junk"
 grep -q 'arithmetic\|syntax' "$d/out" && pnote "bash arithmetic error printed"
 verdict "LAB_MEM_SPARE 0.5 gate applied; 0.1 passes; 1 as before; junk -> clear error"
+
+# F3: a rerun of e4 keeps one header and one row per run; another system adds rows, wipes none
+d="$(newdir)"
+(
+  setup_lab "$d" 4
+  cd "$REPO"
+  bash "$CAMP/e4.sh" --systems pipedpeer --repeats 2
+  bash "$CAMP/e4.sh" --systems pipedpeer --repeats 2
+  cp "$d/analysis-input/e4.csv" "$d/after-rerun.csv"
+  bash "$CAMP/e4.sh" --systems ray --repeats 2
+) >"$d/out" 2>&1 || pnote "e4 exit $? ($(tail -3 "$d/out" | tr '\n' ' '))"
+[[ "$(grep -c '^system,' "$d/after-rerun.csv" 2>/dev/null)" == 1 ]] || pnote "rerun: header not exactly once: $(tr '\n' '|' <"$d/after-rerun.csv")"
+[[ "$(grep -c '^pipedpeer,' "$d/after-rerun.csv" 2>/dev/null)" == 2 ]] || pnote "rerun: pipedpeer rows != 2 (duplicates or lost): $(tr '\n' '|' <"$d/after-rerun.csv")"
+csv="$d/analysis-input/e4.csv"
+[[ "$(grep -c '^pipedpeer,' "$csv")" == 2 && "$(grep -c '^ray,' "$csv")" == 2 && "$(grep -c '^system,' "$csv")" == 1 ]] || pnote "second system wiped or duplicated rows: $(tr '\n' '|' <"$csv")"
+verdict "e4 rerun: one header, one row per run; a second system adds its rows and keeps the first's"
+
+# F3: e5 CSV has its header once, first
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  cd "$REPO"
+  bash "$CAMP/e5.sh" --n 2 --updates 1
+) >"$d/out" 2>&1 || pnote "e5 exit $? ($(tail -3 "$d/out" | tr '\n' ' '))"
+csv="$d/analysis-input/e5.csv"
+[[ "$(grep -c '^system,\|^arm,' "$csv" 2>/dev/null)" == 1 && "$(head -1 "$csv" | grep -c ',')" == 1 ]] || pnote "e5.csv header not once and first: $(head -3 "$csv" 2>&1 | tr '\n' '|')"
+[[ "$(awk -F, 'NR>1' "$csv" | wc -l)" == 12 ]] || pnote "e5 --updates 1 rows != 12 (3 arms x 2 phases x 2 PCs): $(wc -l <"$csv")"
+verdict "e5 CSV: header once and first, a row per arm, phase and PC as each phase finishes"
+
+# F3: e6_running_now sees a run that has not ended and refuses one that has (the kill must not hit a finished run)
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d"
+  # shellcheck source=/dev/null
+  source "$CAMP/e6.sh"
+  mkdir -p "$d/pc00/pipedpeer-lab/runs/R-live" "$d/pc00/pipedpeer-lab/runs/R-done"
+  date +%s%N >"$d/pc00/pipedpeer-lab/runs/R-live/t0"
+  date +%s%N >"$d/pc00/pipedpeer-lab/runs/R-done/t0"
+  echo 0 >"$d/pc00/pipedpeer-lab/runs/R-done/exit"
+  e6_running_now R-live && echo live-yes || echo live-no
+  e6_running_now R-done && echo done-yes || echo done-no
+  e6_running_now R-none && echo none-yes || echo none-no
+) >"$d/out" 2>&1
+grep -qx 'live-yes' "$d/out" || pnote "a running run was not seen: $(tr '\n' ' ' <"$d/out")"
+grep -qx 'done-no' "$d/out" || pnote "a finished run counted as running"
+grep -qx 'none-no' "$d/out" || pnote "an unknown run counted as running"
+verdict "e6_running_now: running yes; ended or unknown no"
+
+# F3: lab_available_count is the hosts.tsv rows minus excluded.txt
+d="$(newdir)"
+(
+  setup_lab "$d" 4
+  # shellcheck source=/dev/null
+  source "$CAMP/lib.sh"
+  echo "all=$(lab_available_count)"
+  printf 'pc02 # broken disk\n' >"$LAB/excluded.txt"
+  echo "less=$(lab_available_count)"
+) >"$d/out" 2>&1
+grep -qx 'all=4' "$d/out" || pnote "4 PCs, none excluded: $(tr '\n' ' ' <"$d/out")"
+grep -qx 'less=3' "$d/out" || pnote "one excluded PC still counted: $(tr '\n' ' ' <"$d/out")"
+verdict "lab_available_count: excluded PCs are not counted"
 
 total=$((pass + failed))
 echo "PASS $pass/$total"

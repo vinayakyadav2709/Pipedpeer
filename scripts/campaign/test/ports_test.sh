@@ -47,7 +47,11 @@ CASE_TMO=${CASE_TMO:-90}
 # shrinks them).
 START_TRIES=${START_TRIES:-30}
 START_WAIT=${START_WAIT:-2}
-RAYROOT=${PORTS_RAYROOT:-/tmp/opencode}
+# Ray's socket paths need a short dir: a private mktemp -d under /tmp, removed
+# at exit (never a fixed shared name).
+RAYROOT=${PORTS_RAYROOT:-$(mktemp -d /tmp/ports-ray-root.XXXXXX)}
+RAYROOT_OWN=0
+[ -n "${PORTS_RAYROOT:-}" ] || RAYROOT_OWN=1
 RAY_PORT=${RAY_PORT:-6379}
 DASK_PORT=${DASK_PORT:-8786}
 
@@ -83,7 +87,7 @@ workdir="$statedir/work"
 mkdir -p "$statedir/state/pipedpeer" # the ssh baselines mktemp under it
 export XDG_STATE_HOME="$statedir/state"
 # Ray's AF_UNIX socket paths must stay under 107 bytes, so its temp dir lives
-# in the short /tmp/opencode tree rather than under the (long) state dir.
+# in the short $RAYROOT tree rather than under the (long) state dir.
 raydir=$(mktemp -d "$RAYROOT/ports-ray.XXXXXX")
 (cd "$REPO/docs/benchmarks/workloads" && cp -r -- *.py baselines "$workdir/")
 FILTERED() { [ -z "$FILTER" ] || case $1 in *"$FILTER"*) return 0 ;; *) return 1 ;; esac; }
@@ -106,10 +110,25 @@ cleanup() {
 		kill "$p" >/dev/null 2>&1
 	done
 	if [ "$RAY_OURS" = 1 ]; then
-		"$BINDIR/ray" stop --force >/dev/null 2>&1
+		# `ray stop --force` kills every ray of this user. Our head is found by
+		# its temp dir; the host-wide stop runs only when no ray process outside
+		# ours exists (it also clears stragglers), else it is skipped and said.
+		local mine foreign
+		mine=$(pgrep -f -- "$raydir" 2>/dev/null | tr '\n' ' ')
+		# shellcheck disable=SC2086
+		[ -z "$mine" ] || kill -TERM $mine >/dev/null 2>&1
+		foreign=$(pgrep -f '^[^ ]*/?(raylet|gcs_server)( |$)' 2>/dev/null | grep -vxF -f <(tr ' ' '\n' <<<"$mine") | grep -vx "$$" | head -1)
+		if [ -z "$foreign" ]; then
+			"$BINDIR/ray" stop --force >/dev/null 2>&1
+		else
+			echo "note: another ray (pid $foreign) is running; not running 'ray stop --force', stopped only the head in $raydir" >&2
+			# shellcheck disable=SC2086
+			[ -z "$mine" ] || { sleep 1; kill -KILL $mine >/dev/null 2>&1; }
+		fi
 	fi
 	if [ "$KEEP" != 1 ] && [ "${PORTS_KEEP:-0}" != 1 ]; then
 		rm -rf "$statedir" "$raydir"
+		[ "$RAYROOT_OWN" != 1 ] || rmdir "$RAYROOT" 2>/dev/null
 	else
 		echo "kept for debugging: $statedir"
 	fi
@@ -281,6 +300,10 @@ port_expect() {
 	lo=$(_norm "$lo")
 	lp=$(_norm "$lp")
 	if [ "$lo" = "$lp" ]; then
+		row_pass "$name"
+	elif [ -n "${PORT_TOL:-}" ] && awk -v a="${lo##* }" -v b="${lp##* }" -v t="$PORT_TOL" \
+		'BEGIN { d = a - b; if (d < 0) d = -d; exit !(a != "" && b != "" && a + 0 == a && b + 0 == b && d <= t) }'; then
+		# the number after the last space may differ by PORT_TOL (workloads.md)
 		row_pass "$name"
 	else
 		row_fail "$name" "result lines differ: original [$lo] port [$lp]"

@@ -100,7 +100,9 @@ metrics_stop() {
 	while IFS= read -r pc; do
 		[[ -z "$pc" || "$pc" == \#* ]] && continue
 		mkdir -p "$LAB/hosts/$pc"
-		if ! lab_rsync "$pc:pipedpeer-lab/metrics" "$pc:pipedpeer-lab/runs" \
+		# runs/ exists only on pc00; --ignore-missing-args keeps a worker's pull
+		# (metrics/ alone) from ending in exit 23
+		if ! lab_rsync --ignore-missing-args "$pc:pipedpeer-lab/metrics" "$pc:pipedpeer-lab/runs" \
 			"$LAB/hosts/$pc/"; then
 			lab_log "metrics stop: pull $pc failed; the other PCs continue"
 		fi

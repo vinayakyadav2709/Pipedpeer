@@ -79,11 +79,13 @@ sys_cmd() {
 	sizeenv="$(_sys_sizeenv "$w" "$n")"
 	pairs="$(_pp_size_args "$sizeenv")"
 	stem="$(_sys_port "$w")"
+	# $script already carries W2's --items (an extra $args there doubled it); the
+	# baselines (ray, dask, ssh) take it from $args.
 	case "$w" in W2) args="--items ${W2_ITEMS:?W2_ITEMS not in sizes.env}" ;; esac
 
 	case "$sys" in
 		plain)
-			printf '%s\n' "~/pipedpeer-lab/venv/bin/python $script $args"
+			printf '%s\n' "~/pipedpeer-lab/venv/bin/python $script"
 			;;
 		pipedpeer | pipedpeer-headcount | pipedpeer-noshim)
 			local shim="" grab
@@ -93,11 +95,11 @@ sys_cmd() {
 			# daemon keeps the receipt in the run's job dir; copy the newest one out.
 			# A run without one (shim off) is recorded as none, with a line on stderr.
 			# shellcheck disable=SC2016 # expands on the PC
-			grab='jd="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/jobs"; r="$jd/$(ls -t "$jd" | head -1)/receipt.json"; if [ -f "$r" ]; then cp "$r" "$DEST"; else echo "no receipt in the job dir: remote work not recorded" >&2; fi'
+			grab='jd="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/jobs"; r="$jd/$(ls -t "$jd" | head -1)/receipt.json"; if [ -f "$r" ]; then cp "$r" "$DEST" || echo "receipt copy failed: remote work not recorded" >&2; else echo "no receipt in the job dir: remote work not recorded" >&2; fi'
 			if [[ -n "$run_id" ]]; then
-				printf '%s\n' "pipedpeer run $pairs $shim $script $args && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$run_id/timeline.json && { DEST=\"\$HOME/pipedpeer-lab/runs/$run_id/receipt.json\"; $grab; }"
+				printf '%s\n' "pipedpeer run $pairs $shim $script && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$run_id/timeline.json && { DEST=\"\$HOME/pipedpeer-lab/runs/$run_id/receipt.json\"; $grab; }"
 			else
-				printf '%s\n' "pipedpeer run $pairs $shim $script $args && pipedpeer jobs last --export json >timeline.json && { DEST=receipt.json; $grab; }"
+				printf '%s\n' "pipedpeer run $pairs $shim $script && pipedpeer jobs last --export json >timeline.json && { DEST=receipt.json; $grab; }"
 			fi
 			;;
 		pipedpeer-exact | pipedpeer-fast)

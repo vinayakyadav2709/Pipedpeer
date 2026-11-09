@@ -118,7 +118,7 @@ main() {
 		exit 1
 	}
 	local count
-	count="$(awk -F'\t' '$1 !~ /^#/ && NF >= 2 { c++ } END { print c + 0 }' "$LAB/hosts.tsv")"
+	count="$(lab_available_count)"
 	[[ "$count" -gt 0 ]] || {
 		echo "no PC rows in $LAB/hosts.tsv" >&2
 		exit 1

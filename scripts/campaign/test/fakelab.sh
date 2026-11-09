@@ -222,6 +222,8 @@ fi
 unit=""
 rest=()
 while (( $# )); do
+	# once the command started, every further word (flags too) is its argument
+	if [[ ${#rest[@]} -gt 0 ]]; then rest+=("$1"); shift; continue; fi
 	case "$1" in
 		--unit=*) unit="${1#--unit=}"; shift ;;
 		--unit) unit="${2:-}"; shift 2 ;;

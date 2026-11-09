@@ -462,13 +462,23 @@ def _e4_runs_lab(tmp_path_factory):
     return lab
 
 
-def test_exp_csv_without_workload_column_no_keyerror(tmp_path_factory):  # F2
+def test_exp_csv_without_workload_column_no_keyerror(tmp_path_factory):  # F2, F3 M6
     lab = _e4_runs_lab(tmp_path_factory)
     res = _run(lab)
     assert res.returncode == 0, res.stderr
     assert "KeyError" not in res.stderr
-    assert "SKIP FIGURE e4-speedup" in res.stdout
-    assert "no workload column" in res.stdout
+    # the E4 table keeps analysis/E4.csv; the per-workload speedups are beside it
+    assert "system" in _read_csv(lab, "E4.csv")[0]
+    assert "workload" in _read_csv(lab, "E4-speedup.csv")[0]
+    assert "no workload column" not in res.stdout
+
+
+def test_e4_speedup_rows_survive_extras(tmp_path_factory):  # F3 M6 opposite: E1 keeps E1.csv
+    lab = tmp_path_factory.mktemp("e1name")
+    _write_tight_lab(lab)
+    assert _run(lab).returncode == 0
+    assert "workload" in _read_csv(lab, "E1.csv")[0]
+    assert not (lab / "analysis" / "E1-speedup.csv").exists()
 
 
 def test_exp_csv_with_workload_still_plotted(tmp_path_factory):  # F2 opposite
@@ -511,3 +521,76 @@ pipedpeer,cold,pc01,2.0,10,0,1
     assert res.returncode == 0, res.stderr
     assert _pick(_read_csv(lab, "E5.csv"), system="pipedpeer")["spread_all"] == "true"
     assert "WARN E5" not in res.stdout
+
+
+def test_null_wall_s_does_not_crash(tmp_path_factory):  # F3 measure H6
+    import json
+    lab = tmp_path_factory.mktemp("nullwall")
+    rows = _tight_rows()
+    rows[0]["wall_s"] = None
+    rows[0]["exit_code"] = 124
+    (lab / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "wall_s is null" in res.stdout
+
+
+def test_no_null_wall_no_warning(tmp_path_factory):  # F3 H6 opposite
+    lab = tmp_path_factory.mktemp("fullwall")
+    _write_tight_lab(lab)
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "wall_s is null" not in res.stdout
+
+
+def test_e5_spread_zero_in_cold_warned_when_update_spreads(tmp_path_factory):  # F3 measure M8
+    lab = tmp_path_factory.mktemp("e5cold")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e5.csv").write_text("""\
+system,phase,pc,ready_s,rx_bytes,reused,spread
+pipedpeer,cold,pc00,1.0,10,0,0
+pipedpeer,cold,pc01,2.0,10,0,0
+pipedpeer,update1,pc00,1.0,10,1,1
+pipedpeer,update1,pc01,2.0,10,1,1
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "WARN E5 pipedpeer cold" in res.stdout
+    assert "WARN E5 pipedpeer update1" not in res.stdout
+
+
+def test_e11_missing_counter_total_left_empty(tmp_path_factory):  # F3 measure M7
+    lab = tmp_path_factory.mktemp("e11gap")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e11.csv").write_text("""\
+k,pc,join_s,bytes_per_min,is_introducer
+2,pc00,,100,1
+2,pc01,3,,0
+4,pc00,,100,1
+4,pc01,3,200,0
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    rows = _read_csv(lab, "E11.csv")
+    assert _pick(rows, k=2)["bytes_per_min_total"] == ""
+    assert _pick(rows, k=4)["bytes_per_min_total"] == "300.0" or float(_pick(rows, k=4)["bytes_per_min_total"]) == 300.0
+    assert "WARN E11 k=2" in res.stdout
+
+
+def test_single_repeat_is_not_repeats_ok(tmp_path_factory):  # F3 measure L4
+    import json
+    lab = tmp_path_factory.mktemp("onerep")
+    rows = _seq("E1", "W1", "pipedpeer", 1, [10], ref="reference")
+    (lab / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    res = _run(lab, "--spread")
+    assert res.returncode == 0, res.stderr
+    assert "REPEATS-NONE" in res.stdout and "REPEATS-OK" not in res.stdout
+
+
+def test_five_repeats_still_repeats_ok(tmp_path_factory):  # F3 L4 opposite
+    lab = tmp_path_factory.mktemp("fiverep")
+    _write_tight_lab(lab)
+    res = _run(lab, "--spread")
+    assert "REPEATS-OK" in res.stdout and "REPEATS-NONE" not in res.stdout

@@ -57,6 +57,11 @@ def load_runs(path):
         r = json.loads(line)
         if r.get("warmup"):
             continue
+        if r.get("wall_s") is None:
+            # timed out or lost: no wall time, so it cannot enter a median
+            print(f"WARN {r.get('run_id') or '?'}: wall_s is null "
+                  f"(exit_code {r.get('exit_code')}); run left out of the tables")
+            continue
         g = groups[r["experiment"]][r["workload"]][r["system"]][int(r["n"])]
         g.add(r.get("run_id") or "", float(r["wall_s"]),
               bool(r.get("result_ok")), str(r.get("ref") or ""),
@@ -203,6 +208,12 @@ def check_predictions(lab, speedups, warns):
             warns.append(f"prediction-missed {system} {workload} {rest}")
 
 
+def speedup_name(exp):
+    """File of an experiment's per-workload speedup table: E4..E11 also have
+    their own table under analysis/<EXP>.csv, so theirs is <EXP>-speedup.csv."""
+    return f"{exp}-speedup.csv" if exp in EXPS else f"{exp}.csv"
+
+
 def spread_report(groups):
     max_spread = 0.0
     used = 0  # most repeats any group ran
@@ -219,7 +230,9 @@ def spread_report(groups):
                     sp = iqr / med if med else 0.0
                     max_spread = max(max_spread, sp)
                     print(f"SPREAD {exp} {w} {s} n={n} {sp:.4f}")
-    if max_spread < 0.10:
+    if used < 2:
+        print("REPEATS-NONE (no group ran 2 or more repeats: spread unknown)")
+    elif max_spread < 0.10:
         print("REPEATS-OK")
     else:
         # Variance scales with 1/k, so k grows with the square of the spread
@@ -301,9 +314,9 @@ def table_e5(data):
                                          if r["rx_bytes"] != ""),
                          "reused_all": (min(reuse) > 0) if reuse else None,
                          "spread_all": ((min(spread) > 0) if spread else None)})
-        if spread and min(spread) == 0:
-            print(f"WARN E5 {sys_}: some runs did not spread across PCs "
-                  "(spread=0); their ready times do not measure shipping")
+            if spread and min(spread) == 0:
+                print(f"WARN E5 {sys_} {phase}: some runs did not spread across PCs "
+                      "(spread=0); their ready times do not measure shipping")
     cols = ["system", "phase", "ready_s_max", "ready_s_median", "rx_total",
             "reused_all", "spread_all"]
     return cols, rows
@@ -343,11 +356,13 @@ def table_e11(data):
         joins = [float(r["join_s"]) for r in rs if r["join_s"] != ""]
         intro = [r["pc"] for r in rs
                  if r.get("is_introducer", "") not in ("", "0", "False", "false")]
+        got = [float(r["bytes_per_min"]) for r in rs if r["bytes_per_min"] != ""]
+        if len(got) != len(rs):
+            print(f"WARN E11 k={k}: {len(rs) - len(got)} of {len(rs)} PCs have no "
+                  "bytes_per_min; the total is left empty, not a partial sum")
         rows.append({"k": k, "pcs": len(rs),
                      "join_s_median": float(np.median(joins)) if joins else None,
-                     "bytes_per_min_total": sum(float(r["bytes_per_min"])
-                                                for r in rs
-                                                if r["bytes_per_min"] != ""),
+                     "bytes_per_min_total": sum(got) if got and len(got) == len(rs) else None,
                      "introducer_pc": intro[0] if intro else ""})
     cols = ["k", "pcs", "join_s_median", "bytes_per_min_total", "introducer_pc"]
     return cols, rows
@@ -420,15 +435,8 @@ def make_figures(lab, groups, weak):
         save(fig, name)
 
     for exp in sorted(groups):
-        rows = _read_csv_rows(analysis / f"{exp}.csv")
+        rows = _read_csv_rows(analysis / speedup_name(exp))
         if not rows:
-            continue
-        if "workload" not in rows[0]:
-            # extras_tables wrote this experiment's own table over the
-            # per-workload one; say so rather than fail on the missing column
-            print(f"SKIP FIGURE {exp.lower()}-speedup (analysis/{exp}.csv "
-                  f"has no workload column: it is the {exp} table, absent "
-                  "per-workload speedup rows)")
             continue
         for w in sorted({r["workload"] for r in rows}):
             curve(f"{exp.lower()}-speedup-{w.lower()}",
@@ -479,11 +487,17 @@ def make_figures(lab, groups, weak):
         save(fig, "e5-bars")
     e11 = _read_csv_rows(analysis / "E11.csv")
     if e11:
-        ks = [int(r["k"]) for r in e11]
         fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-        axes[0].plot(ks, [float(r["join_s_median"]) for r in e11], "o-")
+        jr = [r for r in e11 if r["join_s_median"] != ""]
+        br = [r for r in e11 if r["bytes_per_min_total"] != ""]
+        if len(jr) != len(e11) or len(br) != len(e11):
+            print("WARN e11-membership figure leaves out k with an empty "
+                  "join_s_median or bytes_per_min_total")
+        axes[0].plot([int(r["k"]) for r in jr],
+                     [float(r["join_s_median"]) for r in jr], "o-")
         axes[0].set(xlabel="cluster size k", ylabel="join s (median)")
-        axes[1].bar(ks, [float(r["bytes_per_min_total"]) for r in e11])
+        axes[1].bar([int(r["k"]) for r in br],
+                    [float(r["bytes_per_min_total"]) for r in br])
         axes[1].set(xlabel="cluster size k", ylabel="idle bytes/min")
         save(fig, "e11-membership")
     util = {}
@@ -520,7 +534,7 @@ def main(argv=None):
     weak = {e for e in groups if _is_weak(groups, e)}
     for exp in sorted(groups):
         check_groups(groups, exp, warns)
-        write_csv(lab / "analysis" / f"{exp}.csv", EXP_COLS,
+        write_csv(lab / "analysis" / speedup_name(exp), EXP_COLS,
                   exp_speed_rows(groups, exp, speedups=speedups))
         if exp in weak:
             write_csv(lab / "analysis" / f"{exp}-efficiency.csv", EFF_COLS,

@@ -123,14 +123,23 @@ else
 fi
 
 out="$LAB/analysis-input/e4.csv"
-printf 'system,repeat,wall_s,result_ok,share_pc00,share_pc01,share_pc02,share_pc03\n' >"$out"
+# kept when it exists: a later `--systems ray` run adds rows, it does not wipe the others
+[[ -s "$out" ]] || printf 'system,repeat,wall_s,result_ok,share_pc00,share_pc01,share_pc02,share_pc03\n' >"$out"
+
+# e4_put <system> <repeat> <fields>: the row for that run, replacing an earlier row of the same run.
+e4_put() {
+  local tmp="$out.tmp"
+  awk -F, -v s="$1" -v r="$2" '!($1 == s && $2 == r)' "$out" >"$tmp" && mv "$tmp" "$out"
+  echo "$1,$2,$3" >>"$out"
+}
 
 # e4_row <system> <repeat>: one CSV row from the run's runs.jsonl record.
 e4_row() {
   local s="$1" r="$2" id="E4-W1-$1-n4-r$2" rec line
   rec="$(grep -F -- "\"run_id\":\"$id\"" "$LAB/runs.jsonl" 2>/dev/null | tail -1 || true)"
   if [[ -z "$rec" ]]; then
-    lab_log "E4 $id: no record in runs.jsonl; no CSV row"
+    lab_log "E4 $id: no record in runs.jsonl; row written with empty wall_s and result_ok"
+    e4_put "$s" "$r" ",,,,,"
     return 0
   fi
   if ! line="$(printf '%s' "$rec" >"$LAB/.e4_rec.json"; E4_RECFILE="$LAB/.e4_rec.json" E4_HOSTS="$LAB/hosts.tsv" E4_IDS="${ids[*]}" E4_SYS="$s" python3 - <<'PY'
@@ -162,7 +171,13 @@ if os.environ["E4_SYS"].startswith("pipedpeer"):
             if k == "local":
                 pc = ids[0]
             elif k.startswith("peer:"):
-                pc = ip2pc.get(k.split(":")[1])
+                # peer:<ip>:<port>, peer:[<ipv6>]:<port> or a bare ipv6 address
+                host = k[len("peer:"):]
+                if host.startswith("["):
+                    host = host[1:host.index("]")] if "]" in host else host[1:]
+                elif host.count(":") == 1:
+                    host = host.split(":")[0]
+                pc = ip2pc.get(host)
             else:
                 pc = None
             if pc in ids:
@@ -177,14 +192,15 @@ print(",".join([str(wall), str(ok)] + shares))
 PY
   )"; then
     rm -f "$LAB/.e4_rec.json"
-    lab_log "E4 $id: no CSV row (record unusable)"
+    lab_log "E4 $id: record unusable; row written with empty wall_s and result_ok"
+    e4_put "$s" "$r" ",,,,,"
     return 0
   fi
   rm -f "$LAB/.e4_rec.json"
   if [[ "$s" == pipedpeer* && "$line" == *,,,* ]]; then
     lab_log "E4 $id: no receipt shares (no receipt by_where in the record); shares left empty"
   fi
-  echo "$s,$r,$line" >>"$out"
+  e4_put "$s" "$r" "$line"
 }
 
 # hc_lines: how many headcount plan lines the pc0 daemon has logged so far.

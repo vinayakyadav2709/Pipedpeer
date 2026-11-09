@@ -12,7 +12,7 @@ captive portal or WiFi isolation.
 
 Driver tools (Fedora; `check-driver.sh` prints the same line per missing tool):
 
-    sudo dnf install -y pssh parallel rsync nmap iperf3 openssh-clients python3-matplotlib python3-pandas python3-scipy rclone ShellCheck uv
+    sudo dnf install -y pssh parallel rsync nmap iperf3 openssh-clients python3-matplotlib python3-pandas python3-scipy python3-pytest rclone ShellCheck uv
 
 R2 credentials, one file, mode 600 (replace the four placeholders):
 
@@ -25,11 +25,18 @@ R2 credentials, one file, mode 600 (replace the four placeholders):
     RCLONE_CONFIG_R2_ENDPOINT=https://<account id>.r2.cloudflarestorage.com
     EOF
 
+The lab key the PCs will trust (the check below needs it; `serve.sh` reuses it):
+
+    [ -f ~/.ssh/pipedpeer-lab ] || ssh-keygen -t ed25519 -N '' -f ~/.ssh/pipedpeer-lab
+
 Check the driver (everything must print `OK`, last line `DRIVER-OK`):
 
     scripts/campaign/check-driver.sh
 
-Rehearse once on Ubuntu containers (3 GB of RAM free; minutes to an hour):
+Rehearse once on Ubuntu containers (3 GB of RAM free; minutes to an hour).
+The rehearsal installs the local build, so build it first:
+
+    make build
 
     scripts/campaign/test-ubuntu-lab.sh up
     scripts/campaign/test-ubuntu-lab.sh test
@@ -102,7 +109,8 @@ latter see "What to do when". Rerunning any `run.sh` line skips runs already in
 
 ## Leaving
 
-On every PC, in this order:
+On the driver, in this order (the repository is only there; the PCs get the
+commands over ssh):
 
     source scripts/campaign/lib.sh   # from the repo root; defines lab_hosts, lab_fanout
     f=$(lab_hosts <number of PCs>)
@@ -112,7 +120,9 @@ On every PC, in this order:
 The undo stops sshd, so the fan-out cannot read its answer. Check on each PC
 (or its screen): `journalctl -u lab-undo` ends with `undo complete`. If
 `/tmp/lab-pc.sh` is gone (reboot), type the setup line's download part again
-first. Then compare each PC with the snapshot taken before setup (`dpkg -l`,
+first. Then compare each PC with the snapshot taken before setup (take it on
+each PC before typing the setup line, and keep the files off the PC:
+`dpkg -l`,
 `ls /etc/sudoers.d`, `~/.ssh/authorized_keys`, `ufw status verbose`,
 `systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target`).
 

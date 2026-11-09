@@ -64,7 +64,7 @@ _status_field() {
 # _status_pc_healthy <status> <hostname>: $host's table row says healthy
 # (STATE is column 2; the table ends at the first blank line).
 _status_pc_healthy() {
-	awk -v h="$2" '
+	printf '%s\n' "$1" | awk -v h="$2" '
 		/^$/ { in_table = 0 }
 		/^NAME[[:space:]]+STATE/ { in_table = 1; next }
 		in_table && $1 == h && $2 == "healthy" { found = 1 }

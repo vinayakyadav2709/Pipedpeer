@@ -94,6 +94,19 @@ ok=1
 	[ "$(grep -c stopped "$t/ray.log")" = 1 ] && [ "$(leftovers)" = 0 ] && ok=0
 row "runner ends, one total, ray stopped, nothing left" $ok "rc=$rc totals=$n ray.log=$(tr '\n' ' ' <"$t/ray.log") left=$(leftovers) pids=$(alive_pids | tr "\n" " ") dirs=$(find "$t/home/.local/state/pipedpeer" "$t/raytmp" -mindepth 1 -maxdepth 1 2>&1 | tr "\n" " ")"
 
+# 1b. a ray of someone else is running: our head is stopped by its dir, the
+# host-wide `ray stop --force` does not run and the other ray lives on
+bash -c 'exec -a raylet sleep 6005' &
+foreign=$!
+sleep 0.3
+run_runner 60 -k zz-no-row
+ok=1
+kill -0 "$foreign" 2>/dev/null && [ "$rc" = 0 ] && [ "$(grep -c stopped "$t/ray.log")" = 0 ] &&
+	grep -q 'another ray' "$t/out" && ok=0
+row "foreign ray present -> host-wide ray stop skipped, it lives" $ok "rc=$rc alive=$(kill -0 "$foreign" 2>&1 && echo y) ray.log=$(tr '\n' ' ' <"$t/ray.log") out=$(tail -3 "$t/out" | tr '\n' '|')"
+kill "$foreign" 2>/dev/null
+wait "$foreign" 2>/dev/null
+
 # 2. a ray head that does not start is "not up": its row is skipped
 FAKE_RAY_FAIL=1 run_runner 60 -k w1-ray
 grep -q '^SKIP w1-ray: local ray cluster not up' "$t/out"
@@ -148,6 +161,7 @@ ok=1
 row "t1_torchrun.sh: all ranks ok -> exit 0, rank 0 output" $ok "rc=$rc out=$(head -2 "$t/t1.out" | tr '\n' '|')"
 
 BPY="${PORTS_DEV_PY:-${XDG_CACHE_HOME:-$HOME/.cache}/pipedpeer-lab-dev/venv/bin/python}"
+[ -x "$BPY" ] || BPY=python3 # no dev venv: the WORLD_SIZE row needs only python3
 BENCH_EXPECT_WORLD=2 "${BPY:-python3}" "$BAS/t1_torchrun.py" >"$t/py.out" 2>"$t/py.err"
 rc=$?
 ok=1

@@ -39,6 +39,8 @@ campaign-test:
 	bash scripts/campaign/test/stage_test.sh
 	bash scripts/campaign/test/exp_test.sh
 	bash scripts/campaign/test/ports_test.sh
+	bash scripts/campaign/test/ports_selftest.sh
+	bash scripts/campaign/test/venv_test.sh
 	python3 -m pytest -q scripts/campaign/test/test_analyse.py
 
 lab-up:

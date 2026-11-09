@@ -384,6 +384,18 @@ t17() {
 	verdict "requirements: dask[distributed] and ray[default] still listed"
 }
 
+# port-lines.sh: the torchrun port (t1) is counted: diff of the .py plus the .sh glue
+t18() {
+	local d want got
+	d="$(_row 'bash "$REPO/scripts/campaign/port-lines.sh" >/dev/null 2>&1; cp "$LAB/port-lines.csv" "$LAB/pl.out"')"
+	local b="$REPO/docs/benchmarks/workloads/baselines"
+	want=$(( $(diff -u "$REPO/docs/benchmarks/workloads/t1_mlp.py" "$b/t1_torchrun.py" | grep -c '^[+-][^+-]' || true) + $(grep -Evc '^[[:space:]]*(#|$)' "$b/t1_torchrun.sh") ))
+	got=$(awk -F, '$1 == "baselines/t1_torchrun.py" { print $3 }' "$d/lab/pl.out")
+	[[ "$got" == "$want" && "$want" -gt 0 ]] || pnote "t1_torchrun counted '$got', want $want"
+	[[ "$(grep -c 't1_torchrun' "$d/lab/pl.out")" == 1 ]] || pnote "t1_torchrun must be one row: $(grep t1_torchrun "$d/lab/pl.out" | tr '\n' '|')"
+	verdict "port-lines: the torchrun port is one row (diff + glue); other ports unchanged"
+}
+
 printf 'scripts/campaign inventory/network/clocks/port-lines/pins case table\n\n'
 t1
 t2
@@ -402,6 +414,7 @@ t14
 t15
 t16
 t17
+t18
 printf '\n'
 
 total=$((pass + failed))

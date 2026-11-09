@@ -125,19 +125,20 @@ _run_record() {
 	local run_id="$1" exp="$2" w="$3" sys="$4" n="$5" rep="$6" warm="$7"
 	local rc="$8" note="$9" hosts="${10}"
 	local dir="$LAB/hosts/pc00/runs/$run_id"
-	local sizekey="strong" reffile=""
+	local sizekey="strong" reffile="" refout=""
 	[[ -n "${PYRUN_MODE:-}" ]] && sizekey="$PYRUN_MODE"
 	if [[ "$sizekey" == weak || "$sizekey" == n* ]]; then
 		sizekey="n$n"   # weak sizes have their own per-N references (majority pass)
 	fi
 	if [[ "$w" != trivial ]]; then
 		reffile="$LAB/reference/${w}-${sizekey}.txt"
+		refout="$reffile"   # a successful REF run writes this file (below)
 		[[ -s "$reffile" ]] || reffile=""
 	fi
 	mkdir -p "$(dirname "$LAB/runs.jsonl")"
 	PYRUN_RUN_ID="$run_id" PYRUN_EXP="$exp" PYRUN_WORKLOAD="$w" PYRUN_SYSTEM="$sys" \
 		PYRUN_N="$n" PYRUN_REPEAT="$rep" PYRUN_WARMUP="$warm" PYRUN_RC="$rc" \
-		PYRUN_NOTE="$note" PYRUN_DIR="$dir" PYRUN_REFFILE="$reffile" \
+		PYRUN_NOTE="$note" PYRUN_DIR="$dir" PYRUN_REFFILE="$reffile" PYRUN_REFOUT="$refout" \
 		PYRUN_HOSTS="$hosts" PYRUN_RUNSLOG="$LAB/runs.jsonl" \
 		PYRUN_SYSTEMS_REGEX="$(sys_result_regex "$w")" \
 		PYRUN_SIZEJSON="$(_run_size_json "$w" "$n")" \
@@ -218,6 +219,13 @@ elif reffile:
         result_ok = len(result_lines) == 4 and sorted(result_lines) == sorted(ref_lines)
     elif w == "W3" and ref_lines and result_lines:
         result_ok = ref_lines[0].strip() == result_lines[0].strip()
+        if not result_ok and env["PYRUN_SYSTEM"] == "ssh":
+            # workloads.md: the ssh port trains disjoint tree subsets, so its
+            # accuracy may differ by up to 0.005 (the others stay exact)
+            try:
+                result_ok = abs(tail(ref_lines[0]) - tail(result_lines[0])) <= 0.005 + 1e-9
+            except (ValueError, IndexError):
+                result_ok = False
     elif w == "T1":
         fl = [l for l in ref_lines if l.startswith("final loss")]
         fg = [l for l in result_lines if l.startswith("final loss")]
@@ -225,6 +233,17 @@ elif reffile:
         mine = tail(fg[0]) if fg else None
         result_ok = base is not None and mine is not None and \
             abs(mine - base) <= 0.01 * abs(base)
+
+# REF is the plain single-node run: its result lines become the reference
+# every later run is judged against (workloads.md). Never overwritten, and
+# never taken from a failed run.
+refout = env.get("PYRUN_REFOUT", "")
+if env["PYRUN_EXP"] == "REF" and refout and not reffile and exit_code == 0 \
+        and result_lines and w != "trivial":
+    os.makedirs(os.path.dirname(refout), exist_ok=True)
+    with open(refout, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(result_lines) + "\n")
+    sys.stderr.write("reference written: %s\n" % refout)
 
 if exit_code != 0:
     result_ok = False  # a job that failed or whose end is unknown is not a result

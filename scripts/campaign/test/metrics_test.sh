@@ -198,7 +198,10 @@ t2() {
 		pnote "no sar-data warning for pc01"
 	[[ ! -f "$d/hosts/pc01/metrics/smoke-n1.net.csv" ]] ||
 		pnote "pc01 should have no net.csv"
-	verdict "stop with no sar on pc01 -> warning, all PCs pulled"
+	# workers have no runs/ dir (only pc00 does): that is not a failed pull
+	! grep -q 'metrics stop: pull .* failed' "$d/log" "$d/logs"/lab*.log 2>/dev/null ||
+		pnote "a worker pull without runs/ was logged as failed"
+	verdict "stop with no sar on pc01 -> warning, all PCs pulled, no runs/ is not an error"
 }
 
 printf 'scripts/campaign/metrics.sh case table\n\n'

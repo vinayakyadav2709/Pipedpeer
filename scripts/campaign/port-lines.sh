@@ -71,6 +71,7 @@ row() { # <port_path> <w>
 	glue=""
 	case $name in
 	*_ssh_part.py) glue=${name%_ssh_part.py}_ssh.sh ;;
+	*_torchrun.py) glue=${name%_torchrun.py}_torchrun.sh ;; # torchrun launcher
 	esac
 	if [ -n "$glue" ] && [ -f "$BAS/$glue" ]; then
 		lines=$((lines + $(sh_lines "$BAS/$glue")))
@@ -85,7 +86,7 @@ trap 'rm -f "$tmp_out"' EXIT
 printf 'port,original,changed_lines\n' >>"$tmp_out"
 printf 'pipedpeer,,0\n' >>"$tmp_out"
 
-for port in "$BAS"/*_ray.py "$BAS"/*_dask.py "$BAS"/*_ssh_part.py "$BAS"/*_ssh.sh; do
+for port in "$BAS"/*_ray.py "$BAS"/*_dask.py "$BAS"/*_ssh_part.py "$BAS"/*_torchrun.py "$BAS"/*_ssh.sh; do
 	[ -f "$port" ] || continue
 	case ${port##*/} in
 	*_ssh.sh) continue ;; # counted with its part; trivial_ssh.sh alone has no part
@@ -94,6 +95,7 @@ for port in "$BAS"/*_ray.py "$BAS"/*_dask.py "$BAS"/*_ssh_part.py "$BAS"/*_ssh.s
 	w=${w%_ray.py}
 	w=${w%_dask.py}
 	w=${w%_ssh_part.py}
+	w=${w%_torchrun.py}
 	w=${w%_ssh_part.sh}
 	row "$port" "$w"
 done

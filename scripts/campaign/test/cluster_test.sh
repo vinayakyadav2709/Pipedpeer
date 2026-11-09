@@ -306,7 +306,9 @@ EOF
 	first_stop="$(grep '^pc01 stop' "$order" 2>/dev/null | head -1 || true)"
 	[[ "$first_stop" =~ sudo=([0-9]+) && ${BASH_REMATCH[1]} -ge 1 ]] || pnote "pc01 daemon not restarted after the cap: [$first_stop]"
 	[[ "$(grep -c '^pc01 stop' "$order" 2>/dev/null || true)" -ge 2 ]] || pnote "pc01 daemon not restarted after the reset"
-	grep -q '^pc03 start' "$order" 2>/dev/null && pnote "uncapped pc03 restarted"
+	# pc00 is in the 2-node cluster and uncapped: the cap must not stop it
+	# (pc03 never took part, so a check on it could not fail)
+	! grep -q '^pc00 stop' "$order" 2>/dev/null || pnote "uncapped pc00 was stopped by the cap: $(grep '^pc00' "$order" | tr '\n' ' ')"
 	verdict "--cap pc01=2 -> set-property logged, daemon restarted after the cap and the reset, kept on clean exit, reset by down"
 }
 
@@ -418,6 +420,44 @@ t10() {
 	verdict "-h prints usage and exits 0"
 }
 
+# a capped PC (the head too) starts Ray with --num-cpus; an uncapped one does not
+t11() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		export PY_FAKE_OUT=2
+		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray --cap pc00=4 --cap pc01=2
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q 'ray start --head --port=6379 --num-cpus=4' "$d/units.log" || pnote "capped head not started with --num-cpus=4: $(grep lab-ray "$d/units.log" | tr '\n' '|')"
+	grep -q 'ray start --address=[0-9.]*:6379 --num-cpus=2' "$d/units.log" || pnote "capped worker not started with --num-cpus=2"
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		export PY_FAKE_OUT=2
+		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray
+	) >"$d/log" 2>&1 || true
+	! grep -q 'num-cpus' "$d/units.log" || pnote "uncapped Ray got --num-cpus: $(grep lab-ray "$d/units.log" | tr '\n' '|')"
+	verdict "ray --cap: head and worker started with --num-cpus; no cap, no flag"
+}
+
 printf 'scripts/campaign/cluster.sh case table\n\n'
 t1
 t2
@@ -429,6 +469,7 @@ t7
 t8
 t9
 t10
+t11
 printf '\n'
 
 total=$((pass + failed))
