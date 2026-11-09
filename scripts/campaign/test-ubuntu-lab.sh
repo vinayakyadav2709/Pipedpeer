@@ -14,7 +14,10 @@
 #
 # Environment: UBU_LAB_N (PCs, default 3), UBU_LAB_SLEEP (step 6 job, seconds,
 # default 600), UBU_LAB_DROP (step 6 disconnect, seconds, default 90),
-# UBU_LAB_FROM (test starts at that step), UBU_LAB_SKIP (space-separated step numbers to leave out), UBU_LAB_RMI=1 (down also removes the images), LAB_MEM_SPARE (see lib/lab.sh), UBU_LAB_MEM (memory per PC, default 2048m) and UBU_LAB_DRV_MEM (driver, default 3072m: ray and dask OOM below it), UBU_LAB_MEM1 (pc00, default 3072m: it holds the Ray head and Dask scheduler, which OOM at 2g).
+# UBU_LAB_FROM (test starts at that step), UBU_LAB_SKIP (space-separated step numbers to leave out), UBU_LAB_RMI=1 (down also removes the images), LAB_MEM_SPARE (see lib/lab.sh), UBU_LAB_MEM (memory per PC, default 2048m) and UBU_LAB_DRV_MEM (driver, default 3072m: ray and dask OOM below it), UBU_LAB_MEM1 (pc00, default 3072m: it holds the Ray head and Dask scheduler, which OOM at 2g),
+# UBU_LAB_CPUSET (optional, e.g. 1-15: passed as --cpuset-cpus to every lab
+# container, PCs and driver, so a suspect CPU such as CPU 0 can be avoided;
+# unset means no pinning).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,7 +37,7 @@ created="$state_dir/ubulab.created"
 snapdir="$state_dir/ubulab-snap"
 PASSWORD_FILE=/home/lab/.labpw
 
-usage() { sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 pp_lab_runtime || exit 1
 
@@ -89,6 +92,11 @@ cmd_up() {
 
 	local sysd=()
 	if [[ "$rt" == podman ]]; then sysd=(--systemd=always); fi
+	local cpuset=()
+	if [[ -n "${UBU_LAB_CPUSET:-}" ]]; then
+		cpuset=(--cpuset-cpus "$UBU_LAB_CPUSET")
+		echo "pinning every lab container to CPUs $UBU_LAB_CPUSET (UBU_LAB_CPUSET)"
+	fi
 	local mem
 	for ((k = 1; k <= N; k++)); do
 		rel="$(pc_release "$k")"
@@ -98,11 +106,11 @@ cmd_up() {
 		rec container "ubu$k"
 		$rt run -d --name "ubu$k" --hostname "ubu$k" --privileged --cgroupns=host \
 			-v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
-			--memory "$mem" --memory-swap "$mem" "${sysd[@]}" \
+			--memory "$mem" --memory-swap "$mem" "${sysd[@]}" "${cpuset[@]}" \
 			--network "$NET" --ip "$(pc_ip "$k")" "pp-ubu:$rel" >/dev/null
 	done
 	rec container "$DRV"
-	$rt run -d --name "$DRV" --hostname "$DRV" --memory "${UBU_LAB_DRV_MEM:-3072m}" --memory-swap "${UBU_LAB_DRV_MEM:-3072m}" \
+	$rt run -d --name "$DRV" --hostname "$DRV" --memory "${UBU_LAB_DRV_MEM:-3072m}" --memory-swap "${UBU_LAB_DRV_MEM:-3072m}" "${cpuset[@]}" \
 		-v "$repo:/repo:ro" -v "$VOL:/lab-results" \
 		-e LAB_RESULTS=/lab-results -e REPO=/repo -e PP_BINARY=/repo/bin/pipedpeer \
 		--network "$NET" --ip "$(drv_ip)" "$IMG_DRV" >/dev/null
