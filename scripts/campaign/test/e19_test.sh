@@ -55,6 +55,7 @@ setup_lab() {
   cat >"$v/cluster.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "cluster $*" >>"$LAB_RESULTS/cluster.log"
+echo "cluster $*" >>"$LAB_RESULTS/order.log"
 exit 0
 EOF
   chmod +x "$v/cluster.sh"
@@ -86,6 +87,7 @@ case "${1:-}" in
       echo "connection failed on $me" >&2
       exit 1
     fi
+    if [[ -n "${FAKE_CONNECT_255:-}" ]]; then exit 255; fi
     echo "connected" >"$HOME/.connected"
     ;;
   stop)
@@ -99,6 +101,9 @@ case "${1:-}" in
     ;;
   run)
     if [[ -n "${FAKE_RUN_SLEEP:-}" ]]; then sleep "$FAKE_RUN_SLEEP"; fi
+    run_no=$(($(cat "$FAKELAB_DIR/run.count" 2>/dev/null || echo 0) + 1))
+    echo "$run_no" >"$FAKELAB_DIR/run.count"
+    if [[ -n "${FAKE_RUN_FAIL_FROM:-}" ]] && ((run_no >= FAKE_RUN_FAIL_FROM)); then exit 1; fi
     echo "SWEEP-OK items=10 seconds=1.0000 checksum=5.000000"
     ;;
   jobs)
@@ -115,6 +120,7 @@ EOF
 #!/usr/bin/env bash
 me="$(basename "$HOME")"
 echo "$me systemctl $*" >>"$FAKELAB_DIR/systemctl.log"
+[[ "$*" != *"stop pipedpeer.service"* && "$*" != *"stop lab-ray"* ]] || echo "$me stop" >>"$FAKELAB_DIR/order.log"
 exit 0
 EOF
   chmod +x "$v/systemctl"
@@ -257,6 +263,13 @@ else
 fi
 verdict "join command fails on one PC: row empty, the others go on"
 
+# with_sigint <cmd...>: run cmd with SIGINT at its default, as a Ctrl-C target.
+# A background job of a non-interactive shell starts with SIGINT ignored, and
+# bash cannot trap a signal that was ignored at entry.
+with_sigint() {
+  exec python3 -c 'import os,signal,sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+}
+
 # ---------------------------------------------------------------------- Case 9: trap on INT restores nodes.db
 d="$(newdir)"
 db_dir="$d/pc01/.local/share/pipedpeer"
@@ -265,7 +278,7 @@ echo "original_nodes_db" >"$db_dir/nodes.db"
 (
   setup_lab "$d" 2
   export LAB_RESULTS="$d"
-  FAKE_RUN_SLEEP=10 bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems pipedpeer &
+  FAKE_RUN_SLEEP=10 with_sigint bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems pipedpeer &
   pid=$!
   deadline=$((SECONDS + 5))
   while ((SECONDS < deadline)); do
@@ -290,17 +303,69 @@ else
 fi
 verdict "trap on INT: nodes.db back on every joiner (asserted on fake HOME)"
 
+# mkjob <lab> <id> <started_at> <store>: a job record on pc00, as the daemon writes it
+mkjob() {
+  local jd="$1/pc00/.local/share/pipedpeer/jobs/$2"
+  mkdir -p "$jd"
+  printf '{"id":"%s","status":"finished","started_at":"%s","script_path":"x","remote":"","target_id":"","store_path":"%s"}\n' "$2" "$3" "$4" >"$jd/metadata.json"
+}
+
 # stub venv on every PC: python (the join poll) sleeps FAKE_POLL_SLEEP, exits FAKE_POLL_RC
 mkvenv() {
   local d="$1" pc
+  mkdir -p "$d/fakepy"
+  cat >"$d/fakepy/ray.py" <<'EOF3'
+import os, sys, time
+time.sleep(float(os.environ.get("FAKE_IMPORT_SLEEP", "0")))
+_t = None
+def is_initialized():
+    return _t is not None
+def init(address=None, **kw):
+    global _t
+    err = os.environ.get("FAKE_POLL_ERROR")
+    if err:
+        raise RuntimeError(err)
+    if _t is None:
+        _t = time.time()
+def nodes():
+    if os.environ.get("FAKE_POLL_RC") == "1" or time.time() - _t < float(os.environ.get("FAKE_POLL_SLEEP", "0")):
+        return []
+    return [{"Alive": True, "NodeManagerAddress": sys.argv[3], "Resources": {"CPU": 8.0}}]
+EOF3
+  cat >"$d/fakepy/distributed.py" <<'EOF3'
+import os, sys, time
+time.sleep(float(os.environ.get("FAKE_IMPORT_SLEEP", "0")))
+class _Sched:
+    def __init__(self):
+        self.workers = {"tcp://%s:%d" % (sys.argv[3], 40000 + i): None for i in range(int(sys.argv[4]))}
+        self.workers["tcp://10.1.1.1:1"] = None
+class Client:
+    def __init__(self, addr, timeout=10):
+        self.t = None
+    def _ready(self):
+        if self.t is None:
+            self.t = time.time()
+        return os.environ.get("FAKE_POLL_RC") != "1" and time.time() - self.t >= float(os.environ.get("FAKE_POLL_SLEEP", "0"))
+    def scheduler_info(self):
+        with open(os.environ["FAKELAB_DIR"] + "/poll.log", "a") as f:
+            f.write("scheduler_info called\n")
+        return {"workers": _Sched().workers if self._ready() else {}}
+    def run_on_scheduler(self, fn, **kw):
+        if not self._ready():
+            return 0
+        return fn(dask_scheduler=_Sched(), **kw)
+EOF3
   for pc in "$d"/pc*; do
     mkdir -p "$pc/pipedpeer-lab/venv/bin"
+    # the real poller runs, on the fake ray and distributed modules below
     cat >"$pc/pipedpeer-lab/venv/bin/python" <<'EOF2'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-" ]]; then
+  echo "poll $*" >>"$FAKELAB_DIR/poll.log"
+  PYTHONPATH="$FAKELAB_DIR/fakepy" exec python3 "$@"
+fi
 cat >/dev/null
-echo "poll $*" >>"$FAKELAB_DIR/poll.log"
-sleep "${FAKE_POLL_SLEEP:-0}"
-exit "${FAKE_POLL_RC:-0}"
+exit 0
 EOF2
     printf '#!/usr/bin/env bash\nexit 0\n' >"$pc/pipedpeer-lab/venv/bin/ray"
     cp "$pc/pipedpeer-lab/venv/bin/ray" "$pc/pipedpeer-lab/venv/bin/dask"
@@ -338,14 +403,13 @@ verdict "ray join_s covers the poll (2 s stub), not the start call's 0.05 s"
 d="$(newdir)"
 (
   setup_lab "$d" 2; mkvenv "$d"
-  export LAB_RESULTS="$d" FAKE_POLL_RC=1 E19_STORE_PATH=
+  export LAB_RESULTS="$d" FAKE_POLL_RC=1 E19_STORE_PATH= E19_JOIN_WAIT_S=2
   cd "$REPO"
   bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems ray
 ) >"$d/e19.log" 2>&1 || pnote "e19 ray exit $?"
 row="$(grep ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
 [[ -n "$row" ]] || pnote "no join row"
 [[ -z "$(awk -F, '{print $5}' <<<"$row")" ]] || pnote "join_s not empty when not ready: $row"
-grep -q "join command failed" "$d/e19.log" 2>/dev/null || grep -q "failed" "$LAB_RESULTS/lab.log" 2>/dev/null || true
 verdict "ray not ready: join_s empty, not 0.05"
 
 # ---------------------------------------------------------------------- Case 13: dask join waits for the poll
@@ -366,7 +430,10 @@ verdict "dask join_s covers the poll"
 d="$(newdir)"
 sp="/nix/store/abcdefghijklmnopqrstuvwxyz012345-env"
 mkdir -p "$d/pc00/.local/state/pipedpeer" "$d/pc01/.local/share/pipedpeer/nix/store/abcdefghijklmnopqrstuvwxyz012345-env"
-echo "{\"msg\":\"peer took the closure\",\"store\":\"$sp\",\"secs\":1.5}" >"$d/pc00/.local/state/pipedpeer/daemon.log"
+echo "{\"msg\":\"peer took the closure\",\"store\":\"/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-other\",\"secs\":1.5}" >"$d/pc00/.local/state/pipedpeer/daemon.log"
+mkdir -p "$d/pc01/.local/share/pipedpeer/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-other"
+mkjob "$d" oldjob 2020-01-01T00:00:00.123456789Z /nix/store/yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy-old
+mkjob "$d" thisjob 2099-01-01T00:00:00.123456789Z "$sp"
 (
   setup_lab "$d" 2
   export LAB_RESULTS="$d"
@@ -375,14 +442,19 @@ echo "{\"msg\":\"peer took the closure\",\"store\":\"$sp\",\"secs\":1.5}" >"$d/p
   bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 2 --systems pipedpeer
 ) >"$d/e19.log" 2>&1 || pnote "e19 exit $? ($(tail -5 "$d/e19.log"))"
 [[ ! -e "$d/pc01/.local/share/pipedpeer/nix/store/abcdefghijklmnopqrstuvwxyz012345-env" ]] || pnote "closure not purged on the joiner"
+[[ -e "$d/pc01/.local/share/pipedpeer/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-other" ]] || pnote "another closure, named by the daemon log, was purged"
 rows="$(grep -c ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
 [[ "$rows" == 2 ]] || pnote "expected 2 join rows, got $rows"
 bad_warm="$(grep ',join,' "$d/analysis-input/e19.csv" | awk -F, '$10 != "0"' || true)"
 [[ -z "$bad_warm" ]] || pnote "joiner_warm not 0 in: $bad_warm"
-verdict "closure path from the daemon log: purged before each repeat, joiner_warm 0 in both"
+verdict "closure path from this run's job record, not the daemon log: purged before each repeat, joiner_warm 0 in both"
 
 # ---------------------------------------------------------------------- Case 15: no store path -> joiner_warm empty, logged
 d="$(newdir)"
+sp="/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-other"
+mkdir -p "$d/pc00/.local/state/pipedpeer" "$d/pc01/.local/share/pipedpeer/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-other"
+echo "{\"msg\":\"peer took the closure\",\"store\":\"$sp\",\"secs\":1.5}" >"$d/pc00/.local/state/pipedpeer/daemon.log"
+mkjob "$d" oldjob 2020-01-01T00:00:00Z "$sp"
 (
   setup_lab "$d" 2
   export LAB_RESULTS="$d"
@@ -392,6 +464,7 @@ d="$(newdir)"
 ) >"$d/e19.log" 2>&1 || pnote "e19 exit $?"
 row="$(grep ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || true)"
 [[ -n "$row" && -z "$(awk -F, '{print $10}' <<<"$row")" ]] || pnote "joiner_warm should be empty (unknown): $row"
+[[ -e "$d/pc01/.local/share/pipedpeer/nix/store/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz-other" ]] || pnote "an old job's closure was purged"
 verdict "no closure path found: joiner_warm empty, not a false 0"
 
 # ---------------------------------------------------------------------- Case 16: empty invite code
@@ -404,7 +477,238 @@ d="$(newdir)"
 ) >"$d/e19.log" 2>&1 || pnote "e19 exit $?"
 [[ ! -f "$d/pc01/.connected" ]] || pnote "joiner connected with an empty code"
 ! grep -q ',join,' "$d/analysis-input/e19.csv" 2>/dev/null || pnote "join row written for an aborted repeat"
-verdict "empty invite code: repeat aborted, no join, no row"
+grep -q ',join_aborted,1,.*invite_failed' "$d/analysis-input/e19.csv" 2>/dev/null || pnote "aborted repeat not counted: $(cat "$d/analysis-input/e19.csv")"
+verdict "L2 empty invite code: repeat aborted, no join row, one counted join_aborted row"
+
+
+# Helpers for the rows below
+csv_of() { printf '%s' "$1/analysis-input/e19.csv"; }
+run_e19() { # <d> <n> <e19 args...>; env is set by the caller
+  local d="$1" n="$2"; shift 2
+  ( setup_lab "$d" "$n"; [[ -z "${WITH_VENV:-}" ]] || mkvenv "$d"; export LAB_RESULTS="$d"; cd "$REPO"; bash "$CAMP/e19.sh" "$@" ) >"$d/e19.log" 2>&1
+}
+col() { awk -F, -v c="$2" -v k="$3" '$2 == k { print $c }' "$1" 2>/dev/null || true; }
+SP=/nix/store/abcdefghijklmnopqrstuvwxyz012345-env
+RELP=abcdefghijklmnopqrstuvwxyz012345-env
+
+# ---------------------------------------------------------------------- H2 + opposite
+d="$(newdir)"
+WITH_VENV=1 run_e19 "$d" 2 --n 1 --add 1 --repeats 2 --systems ray || pnote "exit $?: $(tail -3 "$d/e19.log")"
+seq_got="$(grep '^cluster up' "$d/cluster.log" 2>/dev/null | awk '{print $3}' | tr '\n' ' ' || true)"
+[[ "$seq_got" == "2 1 1 " ]] || pnote "cluster ups, want 2 1 1 (N+ADD once, then N before baseline and repeat 2), got: $seq_got"
+stops="$(grep -c '^pc01 stop' "$d/order.log" || true)"
+((stops >= 2)) || pnote "joiner stopped $stops times, want one per repeat before its start"
+last_stop="$(grep -n '^pc01 stop' "$d/order.log" 2>/dev/null | tail -1 | cut -d: -f1 || true)"
+last_up="$(grep -n '^cluster up 1' "$d/order.log" 2>/dev/null | tail -1 | cut -d: -f1 || true)"
+[[ -n "$last_stop" && -n "$last_up" ]] && ((last_stop < last_up)) || pnote "joiner stop not before cluster up N: $(tr '\n' ';' <"$d/order.log")"
+verdict "H2 repeat 2 stops the joiners again and starts from a fresh N cluster (M10: the head restart clears the old node)"
+
+d="$(newdir)"
+WITH_VENV=1 run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+seq_got="$(grep '^cluster up' "$d/cluster.log" 2>/dev/null | awk '{print $3}' | tr '\n' ' ' || true)"
+[[ "$seq_got" == "2 1 " ]] || pnote "one repeat: want ups 2 1, got: $seq_got"
+verdict "H2 opposite: one repeat, no extra cluster up N"
+
+# ---------------------------------------------------------------------- H3
+d="$(newdir)"
+store="$d/pc01/.local/share/pipedpeer/nix/store"
+mkdir -p "$store/$RELP"
+chmod 555 "$store"
+E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?: $(tail -3 "$d/e19.log")"
+chmod 755 "$store"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "purge failed on disk, want joiner_warm 1: $(cat "$(csv_of "$d")")"
+verdict "H3 closure still on the joiner's disk with its daemon stopped: joiner_warm 1, not 0"
+
+d="$(newdir)"
+FAKELAB_FAIL=pc01 E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?: $(tail -3 "$d/e19.log")"
+row="$(grep ',join,' "$(csv_of "$d")" 2>/dev/null || true)"
+[[ -n "$row" ]] || pnote "no row for the unreachable joiner"
+[[ -z "$(col "$(csv_of "$d")" 10 join)" ]] || pnote "joiner_warm must be empty when the joiner cannot answer: $row"
+verdict "H3 opposite: joiner cannot be asked: joiner_warm empty"
+
+# ---------------------------------------------------------------------- M1, M2
+d="$(newdir)"
+WITH_VENV=1 FAKE_IMPORT_SLEEP=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?: $(tail -3 "$d/e19.log")"
+js="$(col "$(csv_of "$d")" 5 join)"
+python3 -c "import sys; assert 0 <= float(sys.argv[1]) < 1.5" "${js:-x}" 2>/dev/null || pnote "join_s '$js' holds the 2 s import"
+verdict "M1 ray: join_s excludes the poller's own import time"
+
+d="$(newdir)"
+WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
+if grep -q "scheduler_info called" "$d/poll.log" 2>/dev/null; then pnote "poller serialises the worker list"; fi
+[[ "$(col "$(csv_of "$d")" 11 join)" == ok ]] || pnote "dask status: $(cat "$(csv_of "$d")")"
+verdict "M2 dask: the poll asks the scheduler for one count, never the full worker list"
+
+# ---------------------------------------------------------------------- M3 + opposite
+d="$(newdir)"
+WITH_VENV=1 FAKE_POLL_RC=1 E19_JOIN_WAIT_S=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+[[ "$(col "$(csv_of "$d")" 11 join)" == timeout ]] || pnote "want join_status timeout: $(cat "$(csv_of "$d")")"
+verdict "M3 a join that never gets ready: join_status timeout, so slow joins stay counted"
+
+d="$(newdir)"
+WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+[[ "$(col "$(csv_of "$d")" 11 join)" == ok ]] || pnote "want join_status ok: $(cat "$(csv_of "$d")")"
+verdict "M3 opposite: a join that gets ready: join_status ok"
+
+# ---------------------------------------------------------------------- M4 + opposite
+d="$(newdir)"
+WITH_VENV=1 FAKE_POLL_ERROR=ray-version-mismatch E19_JOIN_WAIT_S=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+grep -q "ray-version-mismatch" "$d/campaign.log" || pnote "the poll's reason is not in campaign.log"
+verdict "M4 the join poll's reason reaches the campaign log"
+
+d="$(newdir)"
+WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+if grep -q "join log" "$d/campaign.log"; then pnote "join log printed for a good join"; fi
+verdict "M4 opposite: a good join logs no join output"
+
+# ---------------------------------------------------------------------- M5 interrupted keeps rows, M6 INT stops the script
+d="$(newdir)"
+db_dir="$d/pc01/.local/share/pipedpeer"
+mkdir -p "$db_dir"
+echo "original_nodes_db" >"$db_dir/nodes.db"
+rc=0
+(
+  setup_lab "$d" 2
+  export LAB_RESULTS="$d" FAKE_RUN_SLEEP=2
+  with_sigint bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 3 --systems pipedpeer &
+  pid=$!
+  deadline=$((SECONDS + 40))
+  while ((SECONDS < deadline)); do
+    grep -q ',join,1,' "$d/analysis-input/e19.csv" 2>/dev/null && break
+    sleep 0.1
+  done
+  grep -q ',join,1,' "$d/analysis-input/e19.csv" 2>/dev/null && touch "$d/saw_row"
+  kill -INT "$pid"
+  rc=0; wait "$pid" || rc=$?
+  echo "$rc" >"$d/rc"
+) >"$d/e19.log" 2>&1 || true
+[[ -f "$d/saw_row" ]] || pnote "repeat 1's row was not on disk while the script ran"
+[[ "$(cat "$d/rc" 2>/dev/null)" == 130 ]] || pnote "exit after INT: $(cat "$d/rc" 2>/dev/null), want 130"
+[[ "$(grep -c ',join,3,' "$(csv_of "$d")" 2>/dev/null || true)" == 0 ]] || pnote "script went on after INT"
+[[ "$(cat "$db_dir/nodes.db" 2>/dev/null)" == original_nodes_db ]] || pnote "nodes.db not restored"
+[[ ! -e "$db_dir/nodes.db.aside" ]] || pnote ".aside left behind"
+verdict "M5 M6 INT mid-campaign: exits 130, repeat 1's rows kept, nodes.db restored"
+
+d="$(newdir)"
+export WITH_VENV=1
+run_e19 "$d" 2 --n 1 --add 1 --repeats 2 --systems ray || pnote "first exit $?"
+before="$(wc -l <"$(csv_of "$d")" || true)"
+ups_before="$(grep -c '^cluster up' "$d/cluster.log" || true)"
+( export FAKE_RUN_SLEEP=0; run_e19 "$d" 2 --n 1 --add 1 --repeats 2 --systems ray ) || pnote "second exit"
+after="$(wc -l <"$(csv_of "$d")" || true)"
+unset WITH_VENV
+[[ "$before" == "$after" && "$before" -ge 4 ]] || pnote "rerun changed the row count, or too few rows: $before -> $after"
+verdict "M5 rerun of a finished campaign: no duplicate rows"
+
+# ---------------------------------------------------------------------- M6 existing .aside survives
+d="$(newdir)"
+db_dir="$d/pc01/.local/share/pipedpeer"
+mkdir -p "$db_dir"
+echo "from_an_interrupted_run" >"$db_dir/nodes.db"
+echo "the_real_original" >"$db_dir/nodes.db.aside"
+run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ "$(cat "$db_dir/nodes.db" 2>/dev/null)" == the_real_original ]] || pnote "original lost: $(cat "$db_dir/nodes.db" 2>/dev/null)"
+verdict "M6 an .aside left by an earlier run is the original and is not overwritten"
+
+d="$(newdir)"
+db_dir="$d/pc01/.local/share/pipedpeer"
+mkdir -p "$db_dir"
+echo "orig" >"$db_dir/nodes.db"
+echo "orig-wal" >"$db_dir/nodes.db-wal"
+run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ "$(cat "$db_dir/nodes.db" 2>/dev/null)" == orig ]] || pnote "nodes.db not restored"
+[[ "$(cat "$db_dir/nodes.db-wal" 2>/dev/null)" == orig-wal ]] || pnote "WAL file not restored with the db"
+verdict "M6 opposite: a plain run restores nodes.db and its WAL"
+
+# ---------------------------------------------------------------------- M7 + opposite
+d="$(newdir)"
+FAKE_CONNECT_255=1 E19_JOIN_WAIT_S=3 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+got="$(grep -c 'pc01 pipedpeer connect' "$d/pipedpeer.log" || true)"
+[[ "$got" == 1 ]] || pnote "connect ran $got times, want 1"
+verdict "M7 an ssh drop during the join does not run the join again"
+
+d="$(newdir)"
+E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+got="$(grep -c 'pc01 pipedpeer connect' "$d/pipedpeer.log" || true)"
+[[ "$got" == 1 ]] || pnote "connect ran $got times, want 1"
+[[ "$(col "$(csv_of "$d")" 11 join)" == ok ]] || pnote "status: $(cat "$(csv_of "$d")")"
+verdict "M7 opposite: a normal join runs once"
+
+# ---------------------------------------------------------------------- M8
+d="$(newdir)"
+FAKE_RUN_FAIL_FROM=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ ! -f "$d/pc01/.connected" ]] || pnote "joined with no baseline"
+grep -q ',join_aborted,1,.*no_baseline' "$(csv_of "$d")" 2>/dev/null || pnote "no counted row: $(cat "$(csv_of "$d")")"
+grep -q 'baseline' "$d/campaign.log" || pnote "baseline failure not logged"
+verdict "M8 failed baseline: no invented 60 s join, repeat counted as no_baseline, logged"
+
+d="$(newdir)"
+E19_START_WAIT_S=0 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ ! -f "$d/pc01/.connected" ]] || pnote "joined a run never seen running"
+grep -q ',join_aborted,1,.*run_not_seen' "$(csv_of "$d")" 2>/dev/null || pnote "no counted row: $(cat "$(csv_of "$d")")"
+verdict "M8 run never seen running: no join fires, repeat counted"
+
+d="$(newdir)"
+FAKE_RUN_FAIL_FROM=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+! grep -q ',join,' "$(csv_of "$d")" 2>/dev/null || pnote "join row from a failed run: $(cat "$(csv_of "$d")")"
+grep -q ',join_aborted,1,.*run_failed' "$(csv_of "$d")" 2>/dev/null || pnote "no counted row: $(cat "$(csv_of "$d")")"
+grep -q 'run_failed\|exit\|failed' "$d/campaign.log" || pnote "failed run not logged"
+verdict "M8 join run fails: no join row, counted as run_failed"
+
+d="$(newdir)"
+E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+python3 -c "import sys; float(sys.argv[1])" "$(col "$(csv_of "$d")" 7 join)" 2>/dev/null || pnote "no wall_s: $(cat "$(csv_of "$d")")"
+verdict "M8 opposite: a good run keeps its join row and wall_s"
+
+# ---------------------------------------------------------------------- M11 / L3 + opposite
+d="$(newdir)"
+WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
+grep -q -- '--nworkers 8 ' "$d/units.log" 2>/dev/null || pnote "--nworkers not from hosts.tsv: $(cat "$d/units.log" 2>/dev/null)"
+grep -qE '^poll - dask 10\.99\.0\.10 10\.99\.0\.11 8 ' "$d/poll.log" 2>/dev/null || pnote "poll want not 8: $(cat "$d/poll.log" 2>/dev/null)"
+verdict "M11 dask workers come from hosts.tsv cores (8), the poll wants 8"
+
+d="$(newdir)"
+( setup_lab "$d" 2; mkvenv "$d"
+  awk -F'\t' -v OFS='\t' '$1 == "pc01" { $5 = "" } { print }' "$d/hosts.tsv" >"$d/hosts.tsv.new" && mv "$d/hosts.tsv.new" "$d/hosts.tsv"
+  export LAB_RESULTS="$d" E19_STORE_PATH=
+  cd "$REPO"; bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems dask ) >"$d/e19.log" 2>&1 || pnote "exit $?: $(tail -3 "$d/e19.log")"
+if grep -q -- '--nworkers' "$d/units.log" 2>/dev/null; then pnote "worker started with no core count: $(cat "$d/units.log")"; fi
+[[ "$(col "$(csv_of "$d")" 11 join)" == no_cores ]] || pnote "want status no_cores: $(cat "$(csv_of "$d")")"
+verdict "M11 L3 joiner with no core count: no broken command, row says no_cores"
+
+# ---------------------------------------------------------------------- L1 + opposite
+d="$(newdir)"
+mkdir -p "$d/analysis-input"
+printf 'system,kind,i,pc,join_s,first_work_s,wall_s,result_ok\nray,baseline,0,,,,1.0,1\n' >"$(csv_of "$d")"
+E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+[[ "$(head -1 "$(csv_of "$d")")" == *,join_status ]] || pnote "header: $(head -1 "$(csv_of "$d")")"
+[[ "$(grep -c 'wall_s' "$(csv_of "$d")")" == 1 ]] || pnote "two headers in one file"
+ls "$d/analysis-input/"e19.csv.old-* >/dev/null 2>&1 || pnote "old-format file not kept aside"
+verdict "L1 a CSV of an older column order is moved aside, never mixed"
+
+d="$(newdir)"
+E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+if ls "$d/analysis-input/"e19.csv.old-* >/dev/null 2>&1; then pnote "fresh file moved aside"; fi
+verdict "L1 opposite: the current column order stays in place"
+
+# ---------------------------------------------------------------------- L4 + opposite
+d="$(newdir)"
+store="$d/pc01/.local/share/pipedpeer/nix/store"
+mkdir -p "$store/keep"
+E19_STORE_PATH=/nix/store/ run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ -e "$store/keep" ]] || pnote "a hand-set /nix/store/ wiped the joiner's private store"
+[[ -z "$(col "$(csv_of "$d")" 10 join)" ]] || pnote "joiner_warm not empty for a refused path"
+grep -q 'E19_STORE_PATH' "$d/campaign.log" || pnote "refused path not logged"
+verdict "L4 E19_STORE_PATH=/nix/store/: refused and logged, the private store stays"
+
+d="$(newdir)"
+store="$d/pc01/.local/share/pipedpeer/nix/store"
+mkdir -p "$store/$RELP" "$store/keep"
+E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ ! -e "$store/$RELP" ]] || pnote "valid closure not purged"
+[[ -e "$store/keep" ]] || pnote "other paths went too"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "joiner_warm: $(cat "$(csv_of "$d")")"
+verdict "L4 opposite: a real store path is purged, the rest stays, joiner_warm 0"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"
