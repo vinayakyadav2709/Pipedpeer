@@ -418,7 +418,17 @@ row="$(grep '"experiment":"T"' "$LAB/runs.jsonl" | head -1)"
 [[ -n "$row" ]] || pnote "no runs.jsonl line after timeout"
 grep -q '"exit_code":124' <<<"$row" || pnote "exit_code not 124: $row"
 grep -q '"note":"timeout"' <<<"$row" || pnote "note not timeout: $row"
+# R2 H1: a timeout has no end stamp, so its wall_s is null, never 0.0
+grep -q '"wall_s":null' <<<"$row" || pnote "timeout wall_s not null: $row"
 verdict "timeout recorded exit_code 124 note timeout, campaign continued")
+
+# --- row 7b (R2 H1 opposite): a finished run has a positive wall_s ----------
+(d=$(newdir)
+row_setup "$d"
+campaign_run_one T W1 pipedpeer 1 2 0 20 strong >/dev/null 2>&1 || true
+row="$(grep '"experiment":"T"' "$LAB/runs.jsonl" | head -1)"
+grep -Eq '"wall_s":[0-9]*\.?[0-9]*[1-9]' <<<"$row" || pnote "finished run wall_s not positive: $row"
+verdict "finished run has positive wall_s")
 
 # --- row 8: pc00 ssh drop for 2 polls -> run finishes, one line -------------
 (d=$(newdir)

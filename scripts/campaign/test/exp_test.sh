@@ -485,6 +485,23 @@ grep -q 'pc01 systemctl --user kill -s SIGKILL pipedpeer.service' "$d/systemctl.
 [[ "$(grep -c '^cluster up' "$d/cluster.log")" -ge 2 ]] || pnote "agent not restarted after the kill"
 verdict "e6 kill run finishes -> wall_s from runs.jsonl, measured kill_at_s, cluster up again"
 
+# R2 H2: the run ends before the kill is due -> never disturbed, so no kill_at_s,
+# and wall_s/result_ok stay empty (an undisturbed run proves no recovery)
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  for w in 10 10 10; do
+    printf '{"run_id":"E1-W1-pipedpeer-n2-r%s","experiment":"E1","workload":"W1","system":"pipedpeer","n":2,"repeat":1,"warmup":false,"wall_s":%s,"result_ok":true}\n' "$w" "$w" >>"$d/runs.jsonl"
+  done
+  export FAKE_RUN_SLEEP=2
+  cd "$REPO"
+  bash "$CAMP/e6.sh" --n 2 --only kill --systems pipedpeer --kills 1
+) >"$d/out" 2>&1 || pnote "e6 exit $? ($(tail -3 "$d/out" | tr '\n' ' '))"
+row="$(sed -n 2p "$d/analysis-input/e6.csv" 2>/dev/null || true)"
+[[ "$row" == "pipedpeer,kill,1,,,,"* ]] || pnote "undisturbed run row not empty after i: [$row]"
+! grep -q 'SIGKILL' "$d/systemctl.log" 2>/dev/null || pnote "a kill was sent to a finished run"
+verdict "e6 run ended before the kill -> no kill_at_s, wall_s and result_ok empty"
+
 # a crashing run: result_ok false, not 1
 d="$(newdir)"
 (

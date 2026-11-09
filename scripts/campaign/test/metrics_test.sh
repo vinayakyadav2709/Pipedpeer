@@ -177,6 +177,8 @@ t2() {
 		lab_hosts 3 >/dev/null
 		bash "$METRICS" start smoke-n1 "$d/hosts-3.txt"
 		rm -f "$d/pc01/pipedpeer-lab/metrics/smoke-n1.sa"
+		# a worker has no runs/ (only pc00 does): the pull must not call that a failure
+		rm -rf "$d/pc01/pipedpeer-lab/runs" "$d/pc02/pipedpeer-lab/runs"
 		bash "$METRICS" stop smoke-n1 "$d/hosts-3.txt"
 		printf 'rc=%s\n' "$?"
 	) >"$d/log" 2>&1 || rc=$?

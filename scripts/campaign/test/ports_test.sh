@@ -49,9 +49,9 @@ START_TRIES=${START_TRIES:-30}
 START_WAIT=${START_WAIT:-2}
 # Ray's socket paths need a short dir: a private mktemp -d under /tmp, removed
 # at exit (never a fixed shared name).
-RAYROOT=${PORTS_RAYROOT:-$(mktemp -d /tmp/ports-ray-root.XXXXXX)}
+# Created only after the dev-venv check below: a skipped run must leave nothing.
+RAYROOT=${PORTS_RAYROOT:-}
 RAYROOT_OWN=0
-[ -n "${PORTS_RAYROOT:-}" ] || RAYROOT_OWN=1
 RAY_PORT=${RAY_PORT:-6379}
 DASK_PORT=${DASK_PORT:-8786}
 
@@ -75,6 +75,7 @@ if [ ! -x "$PY" ]; then
 	echo "  uv pip install --python <venv>/bin/python -r scripts/campaign/requirements-dev.txt"
 	exit 0
 fi
+[ -n "$RAYROOT" ] || { RAYROOT=$(mktemp -d -t ports-ray-root.XXXXXX); RAYROOT_OWN=1; }
 
 # Own state dir (the mktemp pattern of scripts/bench-pool.sh, never /tmp by
 # name), the relative work dir a PC-side run has (workload files top level,

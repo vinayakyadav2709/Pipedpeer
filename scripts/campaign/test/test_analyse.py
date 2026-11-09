@@ -434,6 +434,43 @@ pipedpeer,1,,,0.5
     assert pip["median_wall_s"] == "" and "1" in pip["note"]
 
 
+def test_zero_wall_s_left_out_of_medians(tmp_path_factory):  # R2 H1
+    import json
+    lab = tmp_path_factory.mktemp("zerowall")
+    rows = _tight_rows()
+    rows[0]["wall_s"] = 0.0
+    rows[0]["exit_code"] = 124
+    (lab / "runs.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "wall_s is null or 0" in res.stdout
+    assert rows[0]["run_id"] in res.stdout
+
+
+def test_positive_wall_s_kept_no_warning(tmp_path_factory):  # R2 H1 opposite
+    lab = tmp_path_factory.mktemp("poswall")
+    _write_tight_lab(lab)
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert "wall_s is null or 0" not in res.stdout
+
+
+def test_e6_kill_without_kill_at_proves_no_recovery(tmp_path_factory):  # R2 H2
+    lab = tmp_path_factory.mktemp("e6undist")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e6.csv").write_text("""\
+system,kind,i,kill_at_s,wall_s,result_ok,stop_latency_s
+pipedpeer,kill,1,,7.5,1,
+ray,kill,1,2.0,30,1,
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    rows = _read_csv(lab, "E6.csv")
+    assert _pick(rows, system="pipedpeer")["result_ok_all"] == ""   # never disturbed
+    assert _pick(rows, system="ray")["result_ok_all"] == "true"     # killed and finished
+
+
 def test_e6_empty_result_ok_not_zero(tmp_path_factory):  # F1
     lab = tmp_path_factory.mktemp("e6lab")
     _write_tight_lab(lab)

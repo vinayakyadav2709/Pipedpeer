@@ -40,9 +40,8 @@ joblib_count = sum(r["joblib_count"] for r in rows)
 dt = max(r["seconds"] for r in rows)
 
 print(f"cpu.py on {os.cpu_count()} local cores")
-print(f"  Pool took {dt:.1f}s")
+print(f"  Pool and joblib took {dt:.1f}s together (slowest PC)")
 print(f"Pool: {items} items, checksum {sum(pool_out)}")
-print(f"  joblib took {dt:.1f}s")
 print(f"joblib: 64 Mandelbrot tiles, {joblib_count} points inside")
 
 # numpy (local)

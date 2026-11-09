@@ -185,7 +185,7 @@ e6_main() {
             now_ns="$(date +%s%N)"
             kill_at="$(python3 -c "print(round(($RUN_ELAPSED_NS + $now_ns - $POLL_NS) / 1e9, 3))")"
             lab_ssh "$kill_pc" "systemctl --user kill -s SIGKILL ${unit[$sys]}" ||
-              lab_log "e6 $id: SIGKILL of ${unit[$sys]} on $kill_pc failed; the run was not disturbed"
+              { kill_at=""; lab_log "e6 $id: SIGKILL of ${unit[$sys]} on $kill_pc failed; the run was not disturbed"; }
           else
             lab_log "e6 $id: run had already ended before the kill; no kill sent, kill_at_s left empty"
           fi
@@ -194,6 +194,8 @@ e6_main() {
         fi
         wait "$pid" || lab_log "e6 $id: campaign_run_one returned $?"
         rec="$(e6_record "$id")"
+        # no kill reached the run: it proves no recovery, so its wall_s and result_ok stay empty
+        if [[ -z "$kill_at" ]]; then rec=","; fi
         printf '%s,kill,%s,%s,%s,\n' "$sys" "$i" "$kill_at" "$rec" >>"$out"
         "$CLUSTER_SH" up "$N" || lab_log "e6: cluster up after the kill failed; later runs may be short of PCs"
       done

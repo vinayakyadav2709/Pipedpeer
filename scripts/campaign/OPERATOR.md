@@ -49,7 +49,11 @@ The rehearsal installs the local build, so build it first:
 
        scripts/campaign/serve.sh <driver ip> <lab cidr>
 
-2. On each PC the user types the setup line `serve.sh` printed (it is also in
+2. On each PC, before anything is typed, take the baseline snapshot (kept off
+   the PC): `dpkg -l`, `ls /etc/sudoers.d`, `~/.ssh/authorized_keys`,
+   `ufw status verbose`, `systemctl is-enabled sleep.target suspend.target
+   hibernate.target hybrid-sleep.target`. "Leaving" compares against it.
+   Then the user types the setup line `serve.sh` printed (it is also in
    `results/lab/serve/SETUP-LINE.txt`). It prints one `LAB-PC host=...` line.
 3. Find the PCs; `<pc00 ip>` is the PC nearest the driver:
 
@@ -120,11 +124,8 @@ commands over ssh):
 The undo stops sshd, so the fan-out cannot read its answer. Check on each PC
 (or its screen): `journalctl -u lab-undo` ends with `undo complete`. If
 `/tmp/lab-pc.sh` is gone (reboot), type the setup line's download part again
-first. Then compare each PC with the snapshot taken before setup (take it on
-each PC before typing the setup line, and keep the files off the PC:
-`dpkg -l`,
-`ls /etc/sudoers.d`, `~/.ssh/authorized_keys`, `ufw status verbose`,
-`systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target`).
+first. Then compare each PC with the snapshot taken in Session 1, step 2,
+before setup (same five commands).
 
 ## What to do when
 

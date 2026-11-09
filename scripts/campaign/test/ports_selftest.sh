@@ -98,14 +98,36 @@ row "runner ends, one total, ray stopped, nothing left" $ok "rc=$rc totals=$n ra
 # host-wide `ray stop --force` does not run and the other ray lives on
 bash -c 'exec -a raylet sleep 6005' &
 foreign=$!
+echo "$foreign" >>"$t/pids" # R2 M1: the exit trap kills it if the script is interrupted here
 sleep 0.3
 run_runner 60 -k zz-no-row
 ok=1
 kill -0 "$foreign" 2>/dev/null && [ "$rc" = 0 ] && [ "$(grep -c stopped "$t/ray.log")" = 0 ] &&
 	grep -q 'another ray' "$t/out" && ok=0
 row "foreign ray present -> host-wide ray stop skipped, it lives" $ok "rc=$rc alive=$(kill -0 "$foreign" 2>&1 && echo y) ray.log=$(tr '\n' ' ' <"$t/ray.log") out=$(tail -3 "$t/out" | tr '\n' '|')"
+ok=1
+grep -qx "$foreign" "$t/pids" && ok=0
+row "foreign ray pid is registered for the exit trap's kill" $ok "pids=$(tr '\n' ' ' <"$t/pids")"
 kill "$foreign" 2>/dev/null
 wait "$foreign" 2>/dev/null
+
+# 1c. R2 H3: without the dev venv the runner skips and leaves no ray-root dir;
+# with one it makes its own and removes it. TMPDIR is private to the row.
+mkdir -p "$t/tmpa" "$t/tmpb"
+TMPDIR="$t/tmpa" HOME="$t/home" PORTS_DEV_PY="$t/no-such-python" PORTS_IN_SELFTEST=1 \
+	bash "$runner" >"$t/out" 2>&1
+rc=$?
+ok=1
+grep -q '^SKIP all rows' "$t/out" && [ "$rc" = 0 ] && [ -z "$(ls -A "$t/tmpa")" ] && ok=0
+row "no dev venv -> skip, no ray-root dir left" $ok "rc=$rc left=$(ls -A "$t/tmpa" | tr '\n' ' ')"
+: >"$t/ray.log"
+FAKE_RAY_FAIL=1 TMPDIR="$t/tmpb" HOME="$t/home" FAKE_LOG="$t/ray.log" FAKE_PIDS="$t/pids" PORTS_DEV_PY="$t/bin/python" \
+	START_TRIES=2 START_WAIT=0.2 RAY_PORT=47379 DASK_PORT=47786 PORTS_IN_SELFTEST=1 \
+	timeout 60 bash "$runner" -k zz-no-row >"$t/out" 2>&1
+rc=$?
+ok=1
+grep -q '^PORTS rows=' "$t/out" && [ "$rc" = 0 ] && [ -z "$(ls -A "$t/tmpb")" ] && ok=0
+row "dev venv present -> own ray-root dir made and removed" $ok "rc=$rc left=$(ls -A "$t/tmpb" | tr '\n' ' ')"
 
 # 2. a ray head that does not start is "not up": its row is skipped
 FAKE_RAY_FAIL=1 run_runner 60 -k w1-ray

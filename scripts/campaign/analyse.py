@@ -57,9 +57,10 @@ def load_runs(path):
         r = json.loads(line)
         if r.get("warmup"):
             continue
-        if r.get("wall_s") is None:
-            # timed out or lost: no wall time, so it cannot enter a median
-            print(f"WARN {r.get('run_id') or '?'}: wall_s is null "
+        if r.get("wall_s") is None or float(r["wall_s"]) <= 0:
+            # timed out or lost: no wall time (older records wrote 0.0), so it
+            # cannot enter a median
+            print(f"WARN {r.get('run_id') or '?'}: wall_s is null or 0 "
                   f"(exit_code {r.get('exit_code')}); run left out of the tables")
             continue
         g = groups[r["experiment"]][r["workload"]][r["system"]][int(r["n"])]
@@ -328,8 +329,10 @@ def _med(choice, rs, col):
 
 
 def _all_ok(rs):
-    """False if any recorded result_ok is 0; empty cells (no record) skipped."""
-    vals = [float(r["result_ok"]) for r in rs if r["result_ok"] != ""]
+    """False if any recorded result_ok is 0; empty cells (no record) skipped.
+    A kill row with no kill_at_s was never disturbed: it proves no recovery."""
+    vals = [float(r["result_ok"]) for r in rs if r["result_ok"] != ""
+            and not (r.get("kind") == "kill" and r.get("kill_at_s", "") == "")]
     return all(v != 0 for v in vals) if vals else None
 
 

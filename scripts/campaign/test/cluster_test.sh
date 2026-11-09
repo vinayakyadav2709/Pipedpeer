@@ -116,6 +116,8 @@ _verif_python() { # _verif_python <dir> <pc>: a venv python that prints "$PY_FAK
 	cat >"$d/$pc/pipedpeer-lab/venv/bin/python" <<'EOF'
 #!/usr/bin/env bash
 # test stub venv python: whatever the integer-bearing answer is today.
+# the node listing (ip cpus per line) is PY_FAKE_NODES when set
+if [[ "$*" == *NodeManagerAddress* && -n "${PY_FAKE_NODES:-}" ]]; then printf '%s\n' "$PY_FAKE_NODES"; exit 0; fi
 printf '%s\n' "${PY_FAKE_OUT:?PY_FAKE_OUT unset}"
 EOF
 	chmod +x "$d/$pc/pipedpeer-lab/venv/bin/python"
@@ -458,6 +460,36 @@ EOF
 	verdict "ray --cap: head and worker started with --num-cpus; no cap, no flag"
 }
 
+# R2 M3: a capped head whose Ray CPUs differ from the cap is logged (not restarted); one that agrees is not
+t12() {
+	local d out want
+	for want in 8 4; do
+		d="$(newdir)"
+		(
+			ss7_setup "$d" 4
+			fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+			export PIPEDPEER_STATUS_FILE="$d/status.txt"
+			export PY_FAKE_OUT=2
+			export PY_FAKE_NODES="10.99.0.10 $want
+10.99.0.11 2"
+			bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray --cap pc00=4 --cap pc01=2
+		) >"$d/log" 2>&1 || true
+		out="$(cat "$d/log" "$d/campaign.log" 2>/dev/null)"
+		if [[ $want == 8 ]]; then
+			grep -q 'cap pc00: Ray HEAD reports 8 CPUs' <<<"$out" || pnote "head mismatch not logged: $(grep -v "resetting\|sudo.log" "$d/log" | tail -8 | tr "\n" "|")"
+		else
+			! grep -q 'Ray HEAD reports' <<<"$out" || pnote "head at the cap logged as a mismatch"
+		fi
+	done
+	verdict "ray cap: head CPUs off the cap logged; head at the cap not"
+}
+
 printf 'scripts/campaign/cluster.sh case table\n\n'
 t1
 t2
@@ -470,6 +502,7 @@ t8
 t9
 t10
 t11
+t12
 printf '\n'
 
 total=$((pass + failed))

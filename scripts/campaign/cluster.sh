@@ -434,7 +434,7 @@ for n in ray.nodes():
 		rm -f "$f"
 		return 0
 	fi
-	for ((i = 1; i < CLUSTER_N; i++)); do
+	for ((i = 0; i < CLUSTER_N; i++)); do
 		pc="${CLUSTER_IDS[$i]}"
 		for ((k = 0; k < ${#CLUSTER_CAP_PC[@]}; k++)); do
 			[[ "${CLUSTER_CAP_PC[$k]}" == "$pc" ]] || continue
@@ -448,6 +448,9 @@ for n in ray.nodes():
 			done <"$f"
 			if [[ ! "$found" =~ ^[0-9]+$ ]]; then
 				lab_log "cap $pc: not (yet) among Ray's nodes; the --num-cpus check is skipped for it"
+			elif ((found != CLUSTER_CAP_CPU[k] && i == 0)); then
+				# the head is not restarted (that rebuilds the cluster): logged for the experiment to block on
+				lab_log "cap $pc: Ray HEAD reports $found CPUs, capped to ${CLUSTER_CAP_CPU[$k]}; not restarted"
 			elif ((found != CLUSTER_CAP_CPU[k])); then
 				lab_log "ray ignores AllowedCPUs on $pc; passed --num-cpus=${CLUSTER_CAP_CPU[$k]}"
 				if ! lab_ssh "$pc" "systemctl --user stop lab-ray; systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --num-cpus=${CLUSTER_CAP_CPU[$k]} --block"; then

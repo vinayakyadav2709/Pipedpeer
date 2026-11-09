@@ -263,7 +263,7 @@ rec = {
     "start_ns": t0,
     "end_ns": t1,
     "first_out_ns": num(os.path.join(d, "first_out_ns")),
-    "wall_s": round((t1 - t0) / 1e9, 3) if t0 and t1 else 0.0,
+    "wall_s": round((t1 - t0) / 1e9, 3) if t0 and t1 else None,
     "exit_code": exit_code,
     "note": env["PYRUN_NOTE"],
     "result_lines": result_lines,
