@@ -419,8 +419,10 @@ def table_e11(data):
         rows.append({"k": k, "pcs": len(rs),
                      "join_s_median": float(np.median(joins)) if joins else None,
                      "bytes_per_min_total": sum(got) if got and len(got) == len(rs) else None,
-                     "introducer_pc": intro[0] if intro else ""})
-    cols = ["k", "pcs", "join_s_median", "bytes_per_min_total", "introducer_pc"]
+                     "introducer_pc": intro[0] if intro else "",
+                     "joined": rs[0].get("joined", "")})
+    cols = ["k", "pcs", "join_s_median", "bytes_per_min_total", "introducer_pc",
+            "joined"]
     return cols, rows
 
 

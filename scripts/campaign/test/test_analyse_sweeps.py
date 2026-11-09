@@ -21,7 +21,7 @@ import pytest
 HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 
-from analyse import EXP_COLS, Group, check_groups, exp_speed_rows, load_runs
+from analyse import EXP_COLS, Group, check_groups, exp_speed_rows, load_runs, table_e11
 import analyse_sweeps
 
 
@@ -396,3 +396,18 @@ def test_unreadable_runs_line_is_logged(tmp_path, capsys):
     p.write_text('{"workload": "noop"}\n{broken\n')
     assert len(analyse_sweeps._load_run_records(p)) == 1
     assert "runs.jsonl" in capsys.readouterr().out
+
+
+def _e11_row(joined):
+    return {"k": "16", "pc": "pc00", "join_s": "4", "bytes_per_min": "600",
+            "is_introducer": "1", "joined": joined}
+
+
+def test_e11_table_shows_a_partial_join():
+    _, rows = table_e11([_e11_row("15/16")])
+    assert rows[0]["joined"] == "15/16"
+
+
+def test_e11_table_shows_a_full_join():
+    _, rows = table_e11([_e11_row("16/16")])
+    assert rows[0]["joined"] == "16/16"

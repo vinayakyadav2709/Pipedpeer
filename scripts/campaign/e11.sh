@@ -2,7 +2,7 @@
 # e11.sh (brief S15): cluster size. For each size k (default 8, 16, 32, all):
 # how long until k daemons show healthy on pc00 (join_s) and the idle
 # membership traffic per PC (bytes_per_min). Writes analysis-input/e11.csv:
-#   k,pc,join_s,bytes_per_min,is_introducer
+#   k,pc,join_s,bytes_per_min,is_introducer,joined
 #
 #   e11.sh [--sizes 8,16,32,all] [--idle <s>] [--dry-run] [-h]
 #
@@ -44,6 +44,48 @@ read_counters() {
     return 1
   fi
   printf '%s\n' "$v"
+}
+
+# e11_read_counters_fanout <step> <hostsfile>
+# Reads default-route NIC counters and timestamps for all PCs in <hostsfile>
+# in parallel using lab_fanout.
+# Writes $LAB/logs/<step>/counters.tsv (pc<TAB>bytes<TAB>ts)
+# and $LAB/logs/<step>/timestamps.tsv (pc<TAB>ts).
+# shellcheck disable=SC2016  # the remote script is literal
+e11_read_counters_fanout() {
+  local step="${1:?usage: e11_read_counters_fanout <step> <hostsfile>}"
+  local hostsfile="${2:?usage: e11_read_counters_fanout <step> <hostsfile>}"
+  local probe_cmd outdir log out pc val ts
+
+  probe_cmd='m=rxtx; nic=$(ip route show default 2>/dev/null | awk '"'"'{for(i=1;i<NF;i++) if($i=="dev"){print $(i+1); exit}}'"'"'); f=${LAB_NET_DEV:-/proc/net/dev}; f=${f/#\~/$HOME}; v=""; if [ -f "$f" ]; then v=$(awk -v n="$nic" -v m="$m" '"'"'{sub(":"," ")} $1==n {printf "%.0f\n", $2+(m=="rx"?0:$10)}'"'"' "$f" 2>/dev/null | tail -1); fi; ts=$(date +%s%N); printf "%s\t%s\n" "${v:-NONE}" "$ts"'
+
+  lab_fanout "$step" "$hostsfile" "$probe_cmd" >/dev/null 2>&1 || true
+
+  outdir="$LAB/logs/$step"
+  mkdir -p "$outdir"
+  : >"$outdir/counters.tsv"
+  : >"$outdir/timestamps.tsv"
+
+  while IFS= read -r pc; do
+    [[ -z "$pc" || "$pc" == \#* ]] && continue
+    log="$outdir/$pc"
+    val=""
+    ts=""
+    if [[ -f "$log" ]]; then
+      out="$(cat "$log" 2>/dev/null || true)"
+      out="${out//[[:space:]]/ }"
+      read -r val ts <<<"$out"
+    fi
+
+    if [[ ! "$val" =~ ^[0-9]+$ || ! "$ts" =~ ^[0-9]+$ ]]; then
+      val=""
+      ts=""
+      lab_log "e11 $pc: counter unreadable ($step)"
+    fi
+
+    printf '%s\t%s\t%s\n' "$pc" "${val:--}" "${ts:--}" >>"$outdir/counters.tsv"
+    printf '%s\t%s\n' "$pc" "${ts:--}" >>"$outdir/timestamps.tsv"
+  done <"$hostsfile"
 }
 
 # e11_result_ok <run_id>: "true" or "false" as recorded in runs.jsonl; empty
@@ -94,24 +136,32 @@ e11_main() {
   _load_sizes || return 1
   mkdir -p "$LAB/analysis-input"
   out="$LAB/analysis-input/e11.csv"
-  printf 'k,pc,join_s,bytes_per_min,is_introducer\n' >"$out"
+  printf 'k,pc,join_s,bytes_per_min,is_introducer,joined\n' >"$out"
 
   allfile="$(lab_hosts "$all")"
   e11_stop_all "$allfile"
 
   # Baseline: the same idle window with every daemon stopped.
-  local -A base=() cstart=()
-  while IFS= read -r pc; do cstart[$pc]="$(read_counters "$pc" || true)"; done <"$allfile"
+  local -A base=() base_ns=() cstart=() cstart_ts=()
+  e11_read_counters_fanout "e11-counters-base-start" "$allfile"
+  while IFS=$'\t' read -r pc val ts; do
+    [[ "$val" == "-" ]] && val=""
+    cstart[$pc]="$val"
+    cstart_ts[$pc]="$ts"
+  done <"$LAB/logs/e11-counters-base-start/counters.tsv"
+
   e11_idle "$IDLE"
-  local end
-  while IFS= read -r pc; do
-    end="$(read_counters "$pc" || true)"
-    if [[ -n "${cstart[$pc]}" && -n "$end" ]]; then
-      base[$pc]=$((end - cstart[$pc]))
+
+  e11_read_counters_fanout "e11-counters-base-end" "$allfile"
+  while IFS=$'\t' read -r pc val ts; do
+    [[ "$val" == "-" ]] && val=""
+    if [[ -n "${cstart[$pc]:-}" && -n "$val" ]] && ((ts > cstart_ts[$pc])); then
+      base[$pc]=$((val - cstart[$pc]))
+      base_ns[$pc]=$((ts - cstart_ts[$pc]))
     else
       lab_log "e11 $pc: baseline counters unreadable; its bytes_per_min stays empty"
     fi
-  done <"$allfile"
+  done <"$LAB/logs/e11-counters-base-end/counters.tsv"
 
   for k in ${SIZES//,/ }; do
     [[ "$k" == all ]] && k="$all"
@@ -139,37 +189,60 @@ e11_main() {
       sleep 2
     done
 
-    local -A kstart=()
-    while IFS= read -r pc; do kstart[$pc]="$(read_counters "$pc" || true)"; done <"$hfile"
+    local -A kstart=() kstart_ts=()
+    e11_read_counters_fanout "e11-counters-$k-start" "$hfile"
+    while IFS=$'\t' read -r pc val ts; do
+      [[ "$val" == "-" ]] && val=""
+      kstart[$pc]="$val"
+      kstart_ts[$pc]="$ts"
+    done <"$LAB/logs/e11-counters-$k-start/counters.tsv"
+
     e11_idle "$IDLE"
-    local bpm intro first
+
+    local -A kend=() kend_ts=()
+    e11_read_counters_fanout "e11-counters-$k-end" "$hfile"
+    while IFS=$'\t' read -r pc val ts; do
+      [[ "$val" == "-" ]] && val=""
+      kend[$pc]="$val"
+      kend_ts[$pc]="$ts"
+    done <"$LAB/logs/e11-counters-$k-end/counters.tsv"
+
+    local bpm intro first joined end s_ts e_ts
     first="$(head -1 "$hfile")"
+    joined="${got}/${k}"
     while IFS= read -r pc; do
-      end="$(read_counters "$pc" || true)"
+      end="${kend[$pc]:-}"
       bpm=""
-      if [[ -n "${kstart[$pc]}" && -n "$end" && -n "${base[$pc]:-}" ]]; then
+      s_ts="${kstart_ts[$pc]:-}"
+      e_ts="${kend_ts[$pc]:-}"
+      if [[ -n "${kstart[$pc]:-}" && -n "$end" && -n "${base[$pc]:-}" ]]; then
         bpm="$(python3 -c "
-d = $end - ${kstart[$pc]} - ${base[$pc]}
+import sys
+interval_ns = $e_ts - $s_ts
+if interval_ns <= 0:
+    sys.stderr.write('e11 $pc: end read is not after the start read; rate left empty\n')
+    sys.exit(0)
+# The baseline window has its own measured length: scale its bytes to this one.
+d = $end - ${kstart[$pc]} - ${base[$pc]} * interval_ns / ${base_ns[$pc]}
 if d < 0:
-    import sys
     sys.stderr.write('e11 $pc: delta below the baseline (%d); counted as 0\n' % d)
     d = 0
-v = d * 60 / $IDLE
-print(int(v) if v == int(v) else round(v, 2))
+v = round(d * 60e9 / interval_ns, 2)
+print(int(v) if v == int(v) else v)
 ")"
       else
         lab_log "e11 k=$k $pc: counters unreadable; bytes_per_min left empty"
       fi
       intro=0
       [[ "$pc" == "$first" ]] && intro=1
-      printf '%s,%s,%s,%s,%s\n' "$k" "$pc" "$join_s" "$bpm" "$intro" >>"$out"
+      printf '%s,%s,%s,%s,%s,%s\n' "$k" "$pc" "$join_s" "$bpm" "$intro" "$joined" >>"$out"
     done <"$hfile"
 
     if [[ "$k" == "$all" ]]; then
       campaign_run_one E11 W1 pipedpeer "$k" 1 0 || lab_log "e11: the W1 run at all=$k did not finish cleanly"
       lab_log "e11: W1 run at all=$k result_ok=$(e11_result_ok "E11-W1-pipedpeer-n$k-r1")"
     fi
-    unset kstart
+    unset kstart kstart_ts kend kend_ts
   done
   echo "E11-DONE csv=$out"
 }
