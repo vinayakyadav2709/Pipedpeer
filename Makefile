@@ -55,6 +55,8 @@ campaign-test-files:
 	bash scripts/campaign/test/pins_ray_dask_test.sh
 	bash scripts/campaign/test/e17_18_test.sh
 	bash scripts/campaign/test/e19_test.sh
+	bash scripts/campaign/test/collect_test.sh
+	bash scripts/campaign/test/wipe_test.sh
 	python3 -m pytest -q scripts/campaign/test/test_analyse.py scripts/campaign/test/test_analyse_sweeps.py scripts/campaign/test/test_sweep.py scripts/campaign/test/test_cpu_sampler.py
 
 lab-up:

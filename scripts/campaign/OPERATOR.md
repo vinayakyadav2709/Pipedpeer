@@ -1,5 +1,7 @@
 # Operator sheet
 
+For a complete walkthrough from a fresh clone, see `LAB-GUIDE.md`.
+
 Run everything from the repo root on the driver (the laptop) unless a line says
 otherwise. Paths below are relative to `scripts/campaign/`; results land in
 `results/lab/` (`$LAB_RESULTS` moves it). Each command prints its own
@@ -116,7 +118,7 @@ Commands:
     scripts/campaign/e19.sh
     python3 scripts/campaign/analyse.py
 
-Copy `results/lab/` to Google Drive after each session and before any PC cleanup.
+Run `scripts/campaign/collect.sh` to package results for Google Drive after each session and before any PC cleanup.
 
 `analyse.py --spread` prints `REPEATS-OK` or `RAISE-REPEATS <k>`; for the
 latter see "What to do when". Rerunning any `run.sh` line skips runs already in
