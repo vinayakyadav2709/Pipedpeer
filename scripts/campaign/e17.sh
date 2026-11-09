@@ -30,6 +30,7 @@ D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E17_MEMBERS=()
 E17_MOVED=() # "pc<TAB>file<TAB>existed"
 E17_JOB_PID=""
+E17_CONNECT_PID=""
 E17_ENV_SET=0
 E17_RUN_ELAPSED_NS=0
 E17_POLL_NS=0
@@ -208,13 +209,21 @@ e17_wait_pc_healthy() {
   done
 }
 
-# e17_wait_join <observer> <joiner> <want> <limit_s> <t0_ns>: prints the
-# join's measured seconds when both views show want healthy rows; returns 1
-# (and logs both counts) on timeout.
+# e17_wait_join <observer> <joiner> <want> <limit_s> <t0_ns> [connect pid]:
+# prints the join's measured seconds when both views show want healthy rows;
+# returns 1 (and logs both counts) on timeout, or one poll after the connect
+# process ended without the join showing.
 e17_wait_join() {
-  local obs="$1" join="$2" want="$3" limit="$4" t0="$5" go gj now deadline
+  local obs="$1" join="$2" want="$3" limit="$4" t0="$5" cpid="${6:-}" go gj now deadline last=0
   deadline=$(($(date +%s) + limit))
   while :; do
+    if [[ -n "$cpid" ]] && ! kill -0 "$cpid" 2>/dev/null; then
+      ((last)) && {
+        lab_log "E17: connect on $join ended and $obs shows ${go:-unknown}, $join ${gj:-unknown} healthy; wanted $want on both"
+        return 1
+      }
+      last=1
+    fi
     go="$(e17_healthy_count_on "$obs" "$LAB/logs/e17-status-join-obs.txt" 2>/dev/null || echo 0)"
     gj="$(e17_healthy_count_on "$join" "$LAB/logs/e17-status-join-new.txt" 2>/dev/null || echo 0)"
     if ((go >= want && gj >= want)); then
@@ -355,6 +364,11 @@ e17_cleanup() {
     kill "$E17_JOB_PID" 2>/dev/null || true
     wait "$E17_JOB_PID" 2>/dev/null || true
     E17_JOB_PID=""
+  fi
+  if [[ -n "${E17_CONNECT_PID:-}" ]]; then
+    kill "$E17_CONNECT_PID" 2>/dev/null || true
+    wait "$E17_CONNECT_PID" 2>/dev/null || true
+    E17_CONNECT_PID=""
   fi
   e17_restore_files
   if ((E17_ENV_SET)); then
@@ -497,26 +511,32 @@ e17_main() {
       lab_log "E17 $id: no invite from $submit after the kill; new_join_s and new_join_ok left empty"
       join_ok=""
     else
-      local t0 rc2
+      local t0 rc2 seen=0 js=""
       t0="$(date +%s%N)"
       rc2=0
-      lab_ssh "${joiners[0]}" "cd ~/pipedpeer-lab/work && timeout ${E17_CONNECT_TIMEOUT_S:-120} pipedpeer connect $(printf '%q' "$code")" || rc2=$?
-      if ((rc2 == 2)); then
-        # partly connected: the survivor's invite still names the dead
-        # introducer; the join counts when both views confirm it (install.sh's rule)
-        lab_log "E17 $id: connect on ${joiners[0]} exited 2 (partly connected); confirming the join on $submit and ${joiners[0]}"
+      # connect runs while both views are polled: with the dead introducer in
+      # the survivor's invite connect waits its full 60 s for it, long after
+      # the join is visible, so timing connect would time that wait
+      lab_ssh "${joiners[0]}" "cd ~/pipedpeer-lab/work && timeout ${E17_CONNECT_TIMEOUT_S:-120} pipedpeer connect $(printf '%q' "$code")" &
+      E17_CONNECT_PID=$!
+      if js="$(e17_wait_join "$submit" "${joiners[0]}" "$N" "${E17_JOIN_S:-120}" "$t0" "$E17_CONNECT_PID")"; then
+        seen=1
       fi
-      if ((rc2 == 0 || rc2 == 2)); then
-        if join_s="$(e17_wait_join "$submit" "${joiners[0]}" "$N" "${E17_JOIN_S:-120}" "$t0")"; then
-          join_ok=1
-        else
-          join_ok=0
-          join_s=""
-        fi
+      wait "$E17_CONNECT_PID" || rc2=$?
+      E17_CONNECT_PID=""
+      if ((rc2 == 2)); then
+        # partly connected: the join counts when both views confirm it (install.sh's rule)
+        lab_log "E17 $id: connect on ${joiners[0]} exited 2 (partly connected); the join counts only as both views confirm it"
+      fi
+      if ((seen)) && ((rc2 == 0 || rc2 == 2)); then
+        join_ok=1
+        join_s="$js"
       else
         join_ok=0
         join_s=""
-        lab_log "E17 $id: connect on ${joiners[0]} failed (exit $rc2; a timeout is 124)"
+        if ((rc2 != 0 && rc2 != 2)); then
+          lab_log "E17 $id: connect on ${joiners[0]} failed (exit $rc2; a timeout is 124)"
+        fi
       fi
       if [[ "$join_ok" == 1 ]]; then
         remote="$(e17_small_job "${joiners[0]}")" || remote=""

@@ -106,6 +106,9 @@ case "${1:-}" in
 				done
 				printf '\n'; } >"$FAKELAB_DIR/status.$me"
 		fi
+		# FAKE_CONNECT_LINGER: the join is visible, connect keeps waiting (for
+		# the dead introducer, up to its 60 s) before it exits
+		[[ -n "${FAKE_CONNECT_LINGER:-}" ]] && sleep "$FAKE_CONNECT_LINGER"
 		# FAKE_CONNECT_RC=2: "partly connected" (a dead member in the invite)
 		exit "${FAKE_CONNECT_RC:-0}"
 		exit 0 ;;
@@ -367,6 +370,24 @@ res="$(
 	echo ROW-OK
 )" 2>"$d/err" || true
 verdict_row "e17 connect exit 2 confirmed by status: a join" "$res" "$d/err"
+
+# the join is visible at once but connect waits 6 s more for the dead
+# introducer before exiting 2: new_join_s is the join, not connect's wait
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3 FAKE_CONNECT_RC=2 FAKE_CONNECT_LINGER=6
+	export E17_START_WAIT_S=5 E17_JOIN_S=10 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 1 ]] || rbad "new_join_ok [$join_ok] ($row)"
+	awk -v a="${join_s:-x}" 'BEGIN{exit !(a > 0 && a < 4.5)}' || rbad "new_join_s [$join_s] includes connect's wait (6 s), not the join"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 new_join_s is the join, not connect's wait for a dead member" "$res" "$d/err"
 
 # exit 2 that the status never confirms stays a failed join
 d="$(newdir)"
