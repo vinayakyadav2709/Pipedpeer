@@ -465,6 +465,32 @@ EOF
 	verdict "ray --cap: head and worker started with --num-cpus; no cap, the probed count"
 }
 
+# a head PC with too little memory for Ray: up refuses before starting it
+t11m() {
+	local d
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt" PY_FAKE_OUT=2
+		mkdir -p "$d/cg"
+		printf '0::/none\n' >"$d/proc_cgroup"
+		export PP_CG_ROOT="$d/cg" PP_PROC_CGROUP="$d/proc_cgroup" PP_NPROC=4 PP_MEMTOTAL_KIB=1048576
+		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || true
+	grep -q '^rc=1$' "$d/log" || pnote "up did not fail: $(tail -3 "$d/log" | tr '\n' '|')"
+	grep -q 'NOT-READY ray pc=pc00' "$d/log" || pnote "no NOT-READY ray pc=pc00"
+	! grep -q 'ray start --head' "$d/units.log" 2>/dev/null || pnote "the Ray head was started anyway"
+	verdict "ray: a 1 GiB head is refused before it starts (NOT-READY ray pc=pc00)"
+}
+
 # R2 M3: a capped head whose Ray CPUs differ from the cap is logged (not restarted); one that agrees is not
 t12() {
 	local d out want
@@ -507,6 +533,7 @@ t8
 t9
 t10
 t11
+t11m
 t12
 printf '\n'
 

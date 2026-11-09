@@ -27,6 +27,20 @@
 #   e19 joiner cores: hosts.tsv 4, probe 8 (ordinary: the smaller wins)           4
 #   e19 joiner cores: probe fails -> hosts.tsv value, logged                      16 + log line
 #   e19 ray join script: the starter carries --num-cpus=<cores>                   --num-cpus=3
+#
+# Memory for Ray (_cluster_ray_mem_check <pc> head|worker; lib.sh's
+# LAB_MEM_PROBE: MemTotal, lowered to a cgroup memory limit on the PC's own
+# cgroup or an ancestor). Emulated lab (one VM, cgroup v1): the pc00
+# container peaked at 1.24 GB RSS and 3.0-3.3 GB with page cache while Ray
+# ran. Refuse under CLUSTER_RAY_HEAD_MIN_MIB (2048) / CLUSTER_RAY_WORKER_MIN_MIB
+# (1024), warn under CLUSTER_RAY_HEAD_WARN_MIB (4096) / ..._WORKER_WARN_MIB (2048):
+#   head 1024 MiB                     rc 1, RAY-MEMORY pc00 ... refused
+#   head 3072 MiB                     rc 0, warning logged
+#   head 8192 MiB (ordinary)          rc 0, nothing logged
+#   worker 900 MiB                    rc 1
+#   worker 1536 MiB                   rc 0, warning
+#   16 GiB MemTotal, 1.5 GiB cgroup limit on an ancestor, head   rc 1 (the limit counts)
+#   probe fails                       rc 0, "memory unknown" logged with the PC
 set -euo pipefail
 REPO="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
@@ -164,6 +178,42 @@ if [[ "$starter" == *"ray start --address=10.0.0.2:6379 --num-cpus=3 --block"* ]
 else
 	bad "e19 ray join script: the starter carries --num-cpus=3" "starter [$starter]"
 fi
+
+# --- memory for Ray -------------------------------------------------------------
+mem_row() { # <name> <pc> <role> <want rc> <log regex or - for none expected> [env...]
+	local name="$1" pc="$2" role="$3" want="$4" logre="$5" d rc
+	shift 5
+	d="$TMP/mem-${name//[^a-z0-9]/_}"
+	rc="$(
+		fakelab_init "$d" 2 >/dev/null 2>&1 || exit 90
+		mkdir -p "$d/nocg"
+		export LAB_RESULTS="$d" PP_CG_ROOT="$d/nocg" PP_PROC_CGROUP=/dev/null "$@"
+		# shellcheck source=/dev/null
+		source "$REPO/scripts/campaign/cluster.sh"
+		r=0
+		_cluster_ray_mem_check "$pc" "$role" >/dev/null 2>&1 || r=$?
+		echo "$r"
+	)" || rc="sub=$?"
+	if [[ "$rc" != "$want" ]]; then
+		bad "ray memory: $name" "rc [$rc] want [$want]; log: $(tail -2 "$d/campaign.log" 2>/dev/null | tr '\n' ' ')"
+	elif [[ "$logre" == - ]] && grep -q 'RAY-MEMORY' "$d/campaign.log" 2>/dev/null; then
+		bad "ray memory: $name" "unexpected log: $(grep RAY-MEMORY "$d/campaign.log")"
+	elif [[ "$logre" != - ]] && ! grep -qE "$logre" "$d/campaign.log" 2>/dev/null; then
+		bad "ray memory: $name" "no log /$logre/: $(tail -2 "$d/campaign.log" 2>/dev/null | tr '\n' ' ')"
+	else
+		ok "ray memory: $name -> rc $want"
+	fi
+}
+mem_row "head 1024 MiB refused" pc00 head 1 'RAY-MEMORY pc00 have=1024 MiB.*refused' PP_MEMTOTAL_KIB=1048576
+mem_row "head 3072 MiB warned" pc00 head 0 'RAY-MEMORY pc00 have=3072 MiB.*warning' PP_MEMTOTAL_KIB=3145728
+mem_row "head 8192 MiB fine" pc00 head 0 - PP_MEMTOTAL_KIB=8388608
+mem_row "worker 900 MiB refused" pc01 worker 1 'RAY-MEMORY pc01 have=900 MiB.*refused' PP_MEMTOTAL_KIB=921600
+mem_row "worker 1536 MiB warned" pc01 worker 0 'RAY-MEMORY pc01 have=1536 MiB.*warning' PP_MEMTOTAL_KIB=1572864
+mkdir -p "$TMP/memcg/cg/docker/x"
+printf '1610612736\n' >"$TMP/memcg/cg/docker/x/memory.max"
+printf '0::/docker/x/user.slice\n' >"$TMP/memcg/proc_cgroup"
+mem_row "a cgroup limit under MemTotal counts" pc00 head 1 'RAY-MEMORY pc00 have=1536 MiB' PP_MEMTOTAL_KIB=16777216 PP_CG_ROOT="$TMP/memcg/cg" PP_PROC_CGROUP="$TMP/memcg/proc_cgroup"
+mem_row "probe fails: memory unknown, not refused" pc01 worker 0 'pc01: memory unknown' FAKELAB_FAIL=pc01 LAB_RETRY_SLEEP=0
 
 printf 'PASS %s/%s\n' "$pass" "$((pass + failed))"
 ((failed == 0))

@@ -413,6 +413,36 @@ _cluster_ray_cpus_flag() {
 	fi
 }
 
+# _cluster_ray_mem_check <pc> head|worker: refuse (return 1) a PC with less
+# memory than Ray needs there, warn below a comfortable amount; both logged as
+# "RAY-MEMORY <pc> have=<n> MiB ...". On the emulated lab (one VM, cgroup v1)
+# pc00's container peaked at 1.24 GB RSS and 3.0-3.3 GB with page cache while
+# Ray, the Dask scheduler and workers and the daemon ran there; Ray itself took
+# the host's memory for its own (10 GiB in a 4 GiB container), so it does not
+# guard this. A probe that fails is logged and not refused.
+_cluster_ray_mem_check() {
+	local pc="$1" role="$2" have min warn
+	if [[ "$role" == head ]]; then
+		min="${CLUSTER_RAY_HEAD_MIN_MIB:-2048}"
+		warn="${CLUSTER_RAY_HEAD_WARN_MIB:-4096}"
+	else
+		min="${CLUSTER_RAY_WORKER_MIN_MIB:-1024}"
+		warn="${CLUSTER_RAY_WORKER_WARN_MIB:-2048}"
+	fi
+	have="$(lab_mem_mib "$pc")" || {
+		lab_log "ray on $pc: memory unknown; not checked against the $min MiB a Ray $role needs"
+		return 0
+	}
+	if ((have < min)); then
+		lab_log "RAY-MEMORY $pc have=$have MiB need=$min MiB for a Ray $role: refused (give it more memory, or exclude it / pick another pc00)"
+		return 1
+	fi
+	if ((have < warn)); then
+		lab_log "RAY-MEMORY $pc have=$have MiB: warning, a Ray $role is comfortable from $warn MiB; a stall at the limit is possible"
+	fi
+	return 0
+}
+
 # _cluster_dask_cores <pc>: the core count for a Dask worker on <pc>, from
 # hosts.tsv column 5, capped by a per-PC --cap and by the CLUSTER_CAP_CPU env
 # cap. Empty when the PC has no usable core count (so the worker is skipped).
@@ -566,6 +596,17 @@ cluster_up() {
 	if _cluster_has ray; then
 		if ! lab_fanout cluster-ray-stop "$hostfile" '~/pipedpeer-lab/venv/bin/ray stop --force' >/dev/null; then
 			lab_log "up: ray stop failed somewhere (maybe nothing was running); see logs/cluster-ray-stop"
+		fi
+		if ! _cluster_ray_mem_check "$pc00_id" head; then
+			_cluster_worker_fail ray "$pc00_id" "too little memory for the Ray head"
+			_cluster_fail "up: the Ray head on $pc00_id was not started: too little memory (RAY-MEMORY in the log)" || return 1
+		fi
+		for ((i = 1; i < CLUSTER_N; i++)); do
+			_cluster_ray_mem_check "${CLUSTER_IDS[$i]}" worker ||
+				_cluster_worker_fail ray "${CLUSTER_IDS[$i]}" "too little memory for a Ray worker"
+		done
+		if ((_CLUSTER_WORKER_FAILED)); then
+			_cluster_fail "up: a PC has too little memory for Ray; nothing of Ray was started" || return 1
 		fi
 		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --head --port=6379$(_cluster_ray_cpus_flag "$pc00_id") --block"; then
 			_cluster_fail "up: could not start the Ray head on $pc00_id" || return 1

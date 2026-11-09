@@ -169,6 +169,35 @@ lab_usable_cpus() {
 	return 1
 }
 
+# LAB_MEM_PROBE: a sh script run on a PC; prints "<MemTotal kB> <limit kB>",
+# the limit being the smallest cgroup memory limit on the PC's own cgroup or
+# an ancestor (v2 memory.max, v1 memory.limit_in_bytes), empty when none.
+# MemTotal alone misses a limit (inside the container lab it is the host's).
+# PP_MEMTOTAL_KIB, PP_CG_ROOT and PP_PROC_CGROUP are for the tests.
+# shellcheck disable=SC2016  # expanded on the PC
+LAB_MEM_PROBE='r=${PP_CG_ROOT:-/sys/fs/cgroup}; pcg=${PP_PROC_CGROUP:-/proc/self/cgroup}
+t=${PP_MEMTOTAL_KIB:-$(awk "/MemTotal/ {print \$2}" /proc/meminfo)}; lim=""
+for d in $(awk -F: "\$1 == \"0\" || \$2 ~ /(^|,)memory(,|\$)/ {print \$3}" "$pcg"); do while :; do
+  for f in "$r$d/memory.max" "$r/memory$d/memory.limit_in_bytes"; do
+    if [ -r "$f" ]; then v=$(cat "$f"); case $v in max|"") ;; *) v=$((v / 1024)); if [ -z "$lim" ] || [ "$v" -lt "$lim" ]; then lim=$v; fi ;; esac; fi
+  done
+  if [ -z "$d" ] || [ "$d" = / ]; then break; fi; d=${d%/*}; done; done
+echo "$t $lim"'
+
+# lab_mem_mib <pc>: the memory that PC's processes can use, in MiB (MemTotal or
+# a smaller cgroup limit). Returns 1, logged with the PC, when the probe fails.
+lab_mem_mib() {
+	local pc="${1:?usage: lab_mem_mib <pc>}" out t lim
+	out="$(lab_ssh "$pc" "$LAB_MEM_PROBE" 2>/dev/null)" || out=""
+	read -r t lim <<<"$out"
+	if [[ ! "${t:-}" =~ ^[0-9]+$ ]]; then
+		lab_log "$pc: memory unknown (probe gave [$out])"
+		return 1
+	fi
+	if [[ "${lim:-}" =~ ^[0-9]+$ ]] && ((lim < t)); then t="$lim"; fi
+	printf '%s\n' "$((t / 1024))"
+}
+
 # --- transport ------------------------------------------------------------
 
 # lab_ssh <pc> <cmd...>: ssh -F $LAB/ssh_config <pc> -- <cmd>, retried up to
