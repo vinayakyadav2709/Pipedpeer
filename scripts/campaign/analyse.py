@@ -480,7 +480,8 @@ def make_figures(lab, groups, weak):
         width = 0.8 / len(phases)
         for i, ph in enumerate(phases):
             xs = np.arange(len(systems)) + i * width
-            vals = [float(r["ready_s_max"])
+            # an arm whose run never reported a ready time has no bar (NaN), not a crash
+            vals = [float(r["ready_s_max"]) if r["ready_s_max"] != "" else float("nan")
                     for r in e5 if r["phase"] == ph]
             ax.bar(xs, vals, width, label=ph)
         ax.set_xticks(np.arange(len(systems)) + width * (len(phases) - 1) / 2)

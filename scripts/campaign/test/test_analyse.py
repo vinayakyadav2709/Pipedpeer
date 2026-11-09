@@ -560,6 +560,36 @@ pipedpeer,cold,pc01,2.0,10,0,1
     assert "WARN E5" not in res.stdout
 
 
+def test_e5_arm_without_ready_time_has_no_bar(tmp_path_factory):  # V1 part 2
+    lab = tmp_path_factory.mktemp("e5noready")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e5.csv").write_text("""\
+system,phase,pc,ready_s,rx_bytes,reused,spread
+pipedpeer,cold,pc00,1.0,10,0,1
+ray,cold,pc00,,10,0,
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert (lab / "figures" / "e5-bars.png").exists()
+    assert _pick(_read_csv(lab, "E5.csv"), system="ray")["ready_s_max"] == ""
+
+
+def test_e5_arm_with_ready_time_keeps_its_value(tmp_path_factory):  # V1 opposite
+    lab = tmp_path_factory.mktemp("e5ready")
+    _write_tight_lab(lab)
+    (lab / "analysis-input").mkdir()
+    (lab / "analysis-input" / "e5.csv").write_text("""\
+system,phase,pc,ready_s,rx_bytes,reused,spread
+pipedpeer,cold,pc00,1.0,10,0,1
+ray,cold,pc00,2.5,10,0,
+""")
+    res = _run(lab)
+    assert res.returncode == 0, res.stderr
+    assert (lab / "figures" / "e5-bars.png").exists()
+    assert float(_pick(_read_csv(lab, "E5.csv"), system="ray")["ready_s_max"]) == pytest.approx(2.5)
+
+
 def test_null_wall_s_does_not_crash(tmp_path_factory):  # F3 measure H6
     import json
     lab = tmp_path_factory.mktemp("nullwall")
