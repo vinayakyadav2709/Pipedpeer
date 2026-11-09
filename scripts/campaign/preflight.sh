@@ -114,7 +114,7 @@ pf_judge() {
 		for p in 4242/tcp 4242/udp 4243/udp 4244/udp; do
 			[[ " ${kv[ufw_rules]:-} " == *" $p "* ]] || miss+=" $p"
 		done
-		[[ -z "$miss" ]] || out "FAIL firewall: ufw is active without${miss}: from the driver run lab_fanout ports <hosts file> 'sudo bash /tmp/lab-pc.sh ports' (or the setup line again)"
+		[[ -z "$miss" ]] || out "FAIL firewall: ufw is active without${miss}: from the driver run lab_fanout ports <hosts file> 'sudo bash /var/lib/pipedpeer-lab/lab-pc.sh ports' (or the setup line again)"
 	elif [[ "${kv[nft_drop]:-0}" =~ ^[0-9]+$ ]] && ((kv[nft_drop] > 0)); then
 		out "WARN firewall: ufw is off but nftables drops input by default; allow 4242/tcp and 4242-4244/udp from the lab subnet, or the daemons cannot meet"
 	fi

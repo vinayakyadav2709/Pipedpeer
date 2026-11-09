@@ -221,7 +221,7 @@ step3() {
 	printf '%s\n' "$out" | grep -q "SCAN found=$N " || fail "scan.sh did not find $N PCs: $(printf '%s\n' "$out" | tail -5)"
 	out="$(dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s3-true \$f true" 2>&1)" || fail "pssh true: $(printf '%s\n' "$out" | tail -5)"
 	printf '%s\n' "$out" | grep -q "FANOUT step=s3-true ok=$N failed=0" || fail "pssh true not green: $(printf '%s\n' "$out" | tail -5)"
-	out="$(dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s3-ports \$f 'sudo bash /tmp/lab-pc.sh ports'" 2>&1)" \
+	out="$(dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s3-ports \$f 'sudo bash /var/lib/pipedpeer-lab/lab-pc.sh ports'" 2>&1)" \
 		|| fail "ports (ufw inactive): $(printf '%s\n' "$out" | tail -5)"
 	printf '%s\n' "$out" | grep -q "FANOUT step=s3-ports ok=$N failed=0" || fail "ports not green with ufw inactive"
 	for ((k = 1; k <= N; k++)); do
@@ -229,7 +229,7 @@ step3() {
 			|| fail "ufw --force enable did not leave ufw active on ubu$k"
 	done
 	for c in 1 2; do # twice: the rules must appear once
-		out="$(dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s3-ports-ufw$c \$f 'sudo bash /tmp/lab-pc.sh ports'" 2>&1)" \
+		out="$(dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s3-ports-ufw$c \$f 'sudo bash /var/lib/pipedpeer-lab/lab-pc.sh ports'" 2>&1)" \
 			|| fail "ports (ufw active, run $c): $(printf '%s\n' "$out" | tail -5)"
 		printf '%s\n' "$out" | grep -q "FANOUT step=s3-ports-ufw$c ok=$N failed=0" || fail "ports not green with ufw active (run $c)"
 	done
@@ -342,9 +342,9 @@ step8() {
 	local k out tries d
 	# The PCs the earlier steps used (lab_hosts N), not every PC in the host table: a
 	# down or unrelated PC must not turn the fanout into a failure.
-	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-uninstall \$f 'pipedpeer uninstall -y'" >/dev/null 2>&1 \
+	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-uninstall \$f 'if command -v pipedpeer >/dev/null; then pipedpeer uninstall -y; else echo "pipedpeer already uninstalled"; fi'" >/dev/null 2>&1 \
 		|| fail "pipedpeer uninstall -y failed on every PC"
-	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-undo \$f 'sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo'" >/dev/null 2>&1 \
+	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-undo \$f 'sudo systemctl reset-failed lab-undo 2>/dev/null; sudo systemd-run --unit=lab-undo bash /var/lib/pipedpeer-lab/lab-pc.sh undo'" >/dev/null 2>&1 \
 		|| fail "could not start the detached undo"
 	for ((k = 1; k <= N; k++)); do
 		tries=0

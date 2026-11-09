@@ -312,11 +312,11 @@ commands over ssh):
     f=$LAB/hosts-leaving.txt         # every PC in hosts.tsv, also the excluded ones
     awk -F'\t' '!/^#/ && NF >= 2 { print $1 }' "$LAB/hosts.tsv" >"$f"
     lab_fanout uninstall "$f" 'pipedpeer uninstall -y'
-    lab_fanout undo "$f" 'sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo'
+    lab_fanout undo "$f" 'sudo systemd-run --unit=lab-undo bash /var/lib/pipedpeer-lab/lab-pc.sh undo'
 
 The undo stops sshd, so the fan-out cannot read its answer. Check on each PC
 (or its screen): `journalctl -u lab-undo` ends with `undo complete`. If
-`/tmp/lab-pc.sh` is gone (reboot), type the setup line's download part again
+`/var/lib/pipedpeer-lab/lab-pc.sh` is gone (it is removed only by a finished undo), type the setup line's download part again
 first. The undo also removes `~/pipedpeer-lab` and `~/.ssh/pipedpeer-lab-pc00*`
 on the PC, and Nix where setup found none (a Nix that was there before is left).
 Then compare each PC with the snapshot taken in Session 1, step 2, before
