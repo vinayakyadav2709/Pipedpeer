@@ -94,7 +94,8 @@ if mode == "pipedpeer":
     for s in tl.get("steps") or []:
         if s.get("step") != "compute":
             continue
-        node, mach = pcof(s.get("node")), pcof(s.get("machine"))
+        # node "" = work the origin machine ran itself
+        node, mach = pcof(s.get("node") or s.get("machine")), pcof(s.get("machine"))
         if node is None or mach is None:
             warn("compute step on unknown node/machine %r/%r" % (s.get("node"), s.get("machine")))
             continue

@@ -80,7 +80,7 @@ statedir=$(mktemp -d "$HOME/.local/state/pipedpeer/ports-test.XXXXXX")
 mkdir -p "$statedir/logs" "$statedir/work"
 logs="$statedir/logs"
 workdir="$statedir/work"
-mkdir -p "$statedir/state"
+mkdir -p "$statedir/state/pipedpeer" # the ssh baselines mktemp under it
 export XDG_STATE_HOME="$statedir/state"
 # Ray's AF_UNIX socket paths must stay under 107 bytes, so its temp dir lives
 # in the short /tmp/opencode tree rather than under the (long) state dir.

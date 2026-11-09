@@ -27,7 +27,7 @@ port_dask_case w1-dask \
 port_ssh_case w1-ssh \
 	"$ORIG_W1" \
 	"BENCH_ITEMS=48 BENCH_PROCS=8 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' \
-	 LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/w1_ssh.sh" \
+	 LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/w1_ssh.sh" \
 	POOLMAP-OK
 
 port_ray_case idle-ray \
@@ -41,7 +41,7 @@ port_dask_case idle-dask \
 port_ssh_case idle-ssh \
 	"$ORIG_IDLE" \
 	"BENCH_ITEMS=16 BENCH_PROCS=8 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' \
-	 LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/idle_ssh.sh" \
+	 LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/idle_ssh.sh" \
 	POOLIDLE-OK
 
 port_ray_case trivial-ray \
@@ -54,7 +54,7 @@ port_dask_case trivial-dask \
 	'TRIVIAL-OK'
 port_exact_ssh_case trivial-ssh \
 	"$ORIG_TRIVIAL" \
-	"LAB_HOSTS_FILE='$hosts2' LAB_USER='$(id -un)' '$PY' baselines/trivial_ssh.sh" \
+	"LAB_HOSTS_FILE='$hosts2' LAB_USER='$(id -un)' bash baselines/trivial_ssh.sh" \
 	'TRIVIAL-OK'
 
 # Unreachable addresses: exit non-zero fast, never hang.

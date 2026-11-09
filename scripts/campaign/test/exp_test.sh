@@ -83,8 +83,13 @@ case "${1:-}" in
     if [[ -n "${FAKE_RUN_SLEEP:-}" ]]; then sleep "$FAKE_RUN_SLEEP" & wait $!; fi
     [[ -z "${FAKE_RUN_FAIL:-}" ]] || { echo "boom" >&2; exit 1; }
     echo "POOLMAP-OK items=10 seconds=1.0000 checksum=5.000000"
-    if [[ -n "$receipt" && -z "${FAKE_NO_RECEIPT:-}" && -f "$FAKELAB_DIR/receipt.json" ]]; then
-      mkdir -p "$(dirname "$receipt")"; cp "$FAKELAB_DIR/receipt.json" "$receipt"
+    if [[ -z "${FAKE_NO_RECEIPT:-}" && -f "$FAKELAB_DIR/receipt.json" ]]; then
+      if [[ -n "$receipt" ]]; then
+        mkdir -p "$(dirname "$receipt")"; cp "$FAKELAB_DIR/receipt.json" "$receipt"
+      else
+        # the daemon keeps its own receipt in the run's job dir
+        jd="$HOME/.local/share/pipedpeer/jobs/$(date +%s%N)"; mkdir -p "$jd"; cp "$FAKELAB_DIR/receipt.json" "$jd/receipt.json"
+      fi
     fi
     if [[ "$(cat "$HOME/.split" 2>/dev/null || true)" == headcount && -z "${FAKE_NO_HEADCOUNT_LOG:-}" ]]; then
       mkdir -p "$HOME/.local/state/pipedpeer"
@@ -100,8 +105,15 @@ case "${1:-}" in
       printf '{"machine":"m0","node":"m0","chunk":0,"step":"script","start_ns":%s,"dur_ns":1000}]}\n' "$t0"
       exit 0
     fi
-    printf '{"machine":"m0","node":"m0","chunk":0,"step":"compute","start_ns":%s,"dur_ns":1000},' "$((t0 + 1000000000))"
+    # real daemon: work the origin runs itself has node "" (seen on the Docker lab)
+    printf '{"machine":"m0","node":"","chunk":-1,"step":"compute","start_ns":%s,"dur_ns":1000},' "$((t0 + 1000000000))"
     printf '{"machine":"m0","node":"m1","chunk":1,"step":"env_send","start_ns":%s,"dur_ns":10,"bytes":5000},' "$((t0 + 100))"
+    # a long run's timeline is hundreds of KB: one argv/env string is capped at 128 KB
+    if [[ -n "${FAKE_BIG_TIMELINE:-}" ]]; then
+      for ((i = 0; i < 3000; i++)); do
+        printf '{"machine":"m1","node":"m1","chunk":%s,"step":"env_send","start_ns":%s,"dur_ns":10,"bytes":5000},' "$i" "$((t0 + 100))"
+      done
+    fi
     printf '{"machine":"m1","node":"m1","chunk":1,"step":"compute","start_ns":%s,"dur_ns":1000}]}\n' "$((t0 + 2000000000))" ;;
   *) echo "pipedpeer stub: unknown call: $*" >&2; exit 64 ;;
 esac
@@ -230,6 +242,27 @@ else
   pnote "no e4.csv"
 fi
 verdict "e4: cap args, 8 CSV columns filled from receipt by_where, down after the run"
+
+# e4/e6: a record over 128 KB (a real run's timeline) still gives its row
+d="$(newdir)"
+(
+  setup_lab "$d" 4
+  cd "$REPO"
+  FAKE_BIG_TIMELINE=1 bash "$CAMP/e4.sh" --systems pipedpeer --repeats 1
+) >"$d/out" 2>&1 || pnote "e4 exit $?"
+[[ "$(wc -c <"$d/runs.jsonl")" -gt 131072 ]] || pnote "record not over 128 KB: $(wc -c <"$d/runs.jsonl")"
+row="$(sed -n 2p "$d/analysis-input/e4.csv" 2>/dev/null || true)"
+[[ "$row" == pipedpeer,1,* && "$row" != *,,* ]] || pnote "e4 row from a big record: [$row] ($(grep -c 'Argument list' "$d/out") arg-list errors)"
+d="$(newdir)"
+(
+  setup_lab "$d" 2
+  python3 -c 'import json;print(json.dumps({"run_id":"E6-W1-pipedpeer-n2-r1","wall_s":7.5,"result_ok":True,"timeline":{"steps":["x"*100]*3000}},separators=(",",":")))' >"$d/runs.jsonl"
+  # shellcheck source=/dev/null
+  source "$CAMP/e6.sh"
+  printf 'rec=%s\n' "$(e6_record E6-W1-pipedpeer-n2-r1)"
+) >"$d/out" 2>&1 || pnote "e6_record exit $?"
+grep -qx 'rec=7.5,1' "$d/out" || pnote "e6_record from a big record: $(tail -n 2 "$d/out" | tr '\n' ' ')"
+verdict "e4 and e6 read a record over 128 KB"
 
 # e4: receipt missing -> shares empty, reason logged
 d="$(newdir)"

@@ -104,7 +104,7 @@ linger() {
 }
 
 setup() {
-  pkg openssh-server sysstat curl iperf3 parallel rsync   # sysstat: `sar`; curl: the product installer; rsync: every fetch and stage
+  pkg openssh-server sysstat curl iperf3 parallel bzip2 rsync   # bzip2: GNU parallel --sshlogin execs it (absent on minimal images); sysstat: `sar`; curl: the product installer; rsync: every fetch and stage
 
   # Ubuntu 24.04 starts sshd by socket activation, 22.04 as a service.
   if ! { systemctl is-active --quiet ssh.service || systemctl is-active --quiet ssh.socket; }; then

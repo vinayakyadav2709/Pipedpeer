@@ -46,19 +46,19 @@ port_dask_case w2-dask-pandas \
 
 port_ssh_case w2-ssh-pool \
 	"$ORIG_W2" \
-	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/w2_ssh.sh" \
+	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/w2_ssh.sh" \
 	'Pool:'
 port_ssh_case w2-ssh-joblib \
 	"$ORIG_W2" \
-	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/w2_ssh.sh" \
+	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/w2_ssh.sh" \
 	'joblib:'
 port_ssh_case w2-ssh-numpy \
 	"$ORIG_W2" \
-	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/w2_ssh.sh" \
+	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/w2_ssh.sh" \
 	'numpy:'
 port_ssh_case w2-ssh-pandas \
 	"$ORIG_W2" \
-	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/w2_ssh.sh" \
+	"BENCH_ITEMS=48 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/w2_ssh.sh" \
 	'pandas:'
 
 port_fail_ray_case w2-ray-bad-address \

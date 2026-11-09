@@ -285,11 +285,12 @@ cat >"\$R/cmd.sh" <<'__PIPEDPEER_CMD_EOF__'
 cd ~/pipedpeer-lab/work || exit 1
 R=$r
 date +%s%N >"\$R/t0"
-( $cmd ) > >(python3 ~/pipedpeer-lab/work/stamp.py "\$R/first_out_ns" >"\$R/out") 2>"\$R/err"
-rc=\$?
+# A pipe, not a process substitution: the shell waits for stamp.py, so the unit
+# cannot end (and kill it) before it has written the last line.
+( $cmd ) 2>"\$R/err" | python3 ~/pipedpeer-lab/work/stamp.py "\$R/first_out_ns" >"\$R/out"
+rc=\${PIPESTATUS[0]}
 echo "\$rc" >"\$R/exit.tmp"
 date +%s%N >"\$R/t1"
-wait
 mv "\$R/exit.tmp" "\$R/exit"
 exit "\$rc"
 __PIPEDPEER_CMD_EOF__

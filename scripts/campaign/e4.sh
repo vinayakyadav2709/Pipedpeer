@@ -133,9 +133,10 @@ e4_row() {
     lab_log "E4 $id: no record in runs.jsonl; no CSV row"
     return 0
   fi
-  if ! line="$(E4_REC="$rec" E4_HOSTS="$LAB/hosts.tsv" E4_IDS="${ids[*]}" E4_SYS="$s" python3 - <<'PY'
+  if ! line="$(printf '%s' "$rec" >"$LAB/.e4_rec.json"; E4_RECFILE="$LAB/.e4_rec.json" E4_HOSTS="$LAB/hosts.tsv" E4_IDS="${ids[*]}" E4_SYS="$s" python3 - <<'PY'
 import json, os, sys
-d = json.loads(os.environ["E4_REC"])
+with open(os.environ["E4_RECFILE"]) as fh:
+    d = json.load(fh)
 ids = os.environ["E4_IDS"].split()
 wall = d.get("wall_s")
 if not wall:
@@ -175,9 +176,11 @@ if os.environ["E4_SYS"].startswith("pipedpeer"):
 print(",".join([str(wall), str(ok)] + shares))
 PY
   )"; then
+    rm -f "$LAB/.e4_rec.json"
     lab_log "E4 $id: no CSV row (record unusable)"
     return 0
   fi
+  rm -f "$LAB/.e4_rec.json"
   if [[ "$s" == pipedpeer* && "$line" == *,,,* ]]; then
     lab_log "E4 $id: no receipt shares (no receipt by_where in the record); shares left empty"
   fi

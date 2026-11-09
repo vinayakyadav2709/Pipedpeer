@@ -454,6 +454,27 @@ t5
 t6
 t7
 t8
+# the run's exit marker appears only after the output reader finished: a unit
+# that ends with the shell kills a reader still holding the last line (seen on a
+# 24.04 container: out empty, exit 0)
+t18() {
+	local d rc=0 sh
+	d="$(newdir)"
+	sh="$d/slowbin"; mkdir -p "$sh"
+	printf '#!/usr/bin/env bash\nsleep 2\nexec %s "$@"\n' "$(command -v python3)" >"$sh/python3"; chmod +x "$sh/python3"
+	(
+		case_setup "$d"
+		PATH="$sh:$PATH"
+		lab_detach pc00 r18 'sleep 1; echo done'
+		lab_wait pc00 r18 30 >/dev/null
+		sleep 0.2
+		printf 'out=%s\n' "$(cat "$d/pc00/pipedpeer-lab/runs/r18/out" 2>/dev/null)"
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	want_val "$d/log" out "done" "out read when the exit marker is there"
+	verdict "slow output reader: out is complete once lab_wait returns"
+}
+
 t9
 t10
 t11
@@ -463,6 +484,7 @@ t14
 t15
 t16
 t17
+t18
 printf '\n'
 
 total=$((pass + failed))

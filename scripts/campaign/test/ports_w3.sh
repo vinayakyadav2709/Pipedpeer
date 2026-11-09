@@ -18,7 +18,7 @@ port_dask_case w3-dask-accuracy \
 	'accuracy:'
 port_ssh_case w3-ssh-accuracy \
 	"$ORIG_W3" \
-	"BENCH_TREES=20 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' '$PY' baselines/w3_ssh.sh" \
+	"BENCH_TREES=20 LAB_HOSTS_FILE='$hosts2' LAB_N=2 LAB_USER='$(id -un)' LAB_PY='$PY' LAB_WORKDIR='$workdir' bash baselines/w3_ssh.sh" \
 	'accuracy:'
 
 port_fail_ray_case w3-ray-bad-address \

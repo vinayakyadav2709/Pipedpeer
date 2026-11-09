@@ -190,9 +190,14 @@ case "$sub" in
 		script="$1"
 		for kv in "${env_extra[@]}"; do export "${kv%%=*}"="${kv#*=}"; done
 		[[ -n "${CAMP_STUB_SLEEP:-}" ]] && sleep "$CAMP_STUB_SLEEP"
+		rc_json=$(printf '{"remote_items":%s,"local_items":0,"dispatched_items":1,"mapped_items":1,"remote_failures":0,"remote_used":true,"steps":[]}\n' "${STUB_REMOTE_ITEMS:-10}")
 		if [[ -n "${PIPEDPEER_RECEIPT:-}" ]]; then
 			mkdir -p "$(dirname "$PIPEDPEER_RECEIPT")"
-			printf '{"remote_items":%s,"local_items":0,"dispatched_items":1,"mapped_items":1,"remote_failures":0,"remote_used":true,"steps":[]}\n' "${STUB_REMOTE_ITEMS:-10}" >"$PIPEDPEER_RECEIPT"
+			printf '%s\n' "$rc_json" >"$PIPEDPEER_RECEIPT"
+		else
+			# the daemon keeps its own receipt in the run's job dir
+			jd="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/jobs/$(date +%s%N)"; mkdir -p "$jd"
+			[[ -n "${STUB_NO_RECEIPT:-}" ]] || printf '%s\n' "$rc_json" >"$jd/receipt.json"
 		fi
 		case "$script" in
 			*pool_map.py*|*w1_*) echo "POOLMAP-OK items=${BENCH_ITEMS:-4800} seconds=1.0000 checksum=${BENCH_STUB_BAD:-42.0}" ;;
@@ -580,6 +585,24 @@ kill -0 "$bystander" 2>/dev/null || pnote "cleanup killed a process of another d
 kill "$bystander" "$orphan" 2>/dev/null || true
 verdict "cleanup kills processes of the row's dir only, and knows every dir")
 
+# --- E2: pipedpeer records the daemon's receipt, not a user-named one -----------
+(d=$(newdir)
+row_setup "$d"
+run.sh SMOKE --workloads W2 --systems pipedpeer --sizes 2 --repeats 1 >/dev/null 2>"$d/err" || true
+cmdf="$(find "$LAB/hosts" -name cmd.sh 2>/dev/null | head -1)"
+[[ -n "$cmdf" ]] || pnote "no cmd.sh found"
+! grep -q 'PIPEDPEER_RECEIPT' "${cmdf:-/nonexistent}" 2>/dev/null || pnote "pipedpeer run still names PIPEDPEER_RECEIPT (the record would lose the remote steps)"
+[[ "$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["receipt"]["remote_items"])' "$LAB/runs.jsonl" 2>/dev/null)" == 10 ]] || pnote "run with remote work: record lacks the daemon receipt remote_items=10"
+verdict "pipedpeer run with remote work: record holds the daemon's receipt")
+
+(d=$(newdir)
+row_setup "$d"
+STUB_NO_RECEIPT=1 run.sh SMOKE --workloads W2 --systems pipedpeer --sizes 2 --repeats 1 >/dev/null 2>"$d/err" || true
+r="$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["receipt"])' "$LAB/runs.jsonl" 2>&1)"
+[[ "$r" == None ]] || pnote "run without a receipt: record receipt not none: $r"
+grep -rq 'no receipt in the job dir' "$LAB"/hosts/*/runs/*/ "$d/err" 2>/dev/null || pnote "no logged reason for the missing receipt"
+verdict "pipedpeer run with no receipt: recorded as none, reason logged")
+
 # --- F1: the summary fails when a row fails -----------------------------------
 (d=$(newdir)
 rc=0
@@ -587,6 +610,14 @@ RUN_TEST_FORCE_FAIL=1 bash "${BASH_SOURCE[0]}" >"$d/out" 2>&1 || rc=$?
 ((rc != 0)) || pnote "exit 0 although a row failed"
 grep -qx 'FAIL 0/1 passed' "$d/out" || pnote "summary not FAIL 0/1: $(tail -2 "$d/out" | tr '\n' ' ')"
 verdict "a failing row prints FAIL p/n and exits non-zero")
+
+(d=$(newdir)
+row_setup "$d"
+cmd="$(cd "$CAMP" && LAB="$LAB" bash -c 'source ./lib.sh; source ./systems.sh; source "$1/sizes.env"; sys_cmd ssh W1 2' _ "$d" 2>"$d/err")" || pnote "sys_cmd ssh W1 failed: $(cat "$d/err")"
+[[ "$cmd" == *"PARALLEL_SSH='ssh -i ~/.ssh/pipedpeer-lab-pc00 "*"StrictHostKeyChecking=accept-new'"*"baselines/w1_ssh.sh"* ]] || pnote "ssh baseline command lacks pc00's key and host-key option: $cmd"
+cmd="$(cd "$CAMP" && LAB="$LAB" bash -c 'source ./lib.sh; source ./systems.sh; source "$1/sizes.env"; sys_cmd ray W1 2' _ "$d" 2>"$d/err")" || true
+[[ "$cmd" != *PARALLEL_SSH* ]] || pnote "PARALLEL_SSH leaked into the ray command"
+verdict "ssh baseline command: pc00 key and first-contact host key, only for ssh")
 
 nrows=$(wc -l <"$RESULTS")
 nfail=$(grep -c '^bad$' "$RESULTS" || true)

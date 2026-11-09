@@ -86,12 +86,18 @@ sys_cmd() {
 			printf '%s\n' "~/pipedpeer-lab/venv/bin/python $script $args"
 			;;
 		pipedpeer | pipedpeer-headcount | pipedpeer-noshim)
-			local shim=""
+			local shim="" grab
 			[[ "$sys" == pipedpeer-noshim ]] && shim="-e PIPEDPEER_SHIM=0"
+			# No `-e PIPEDPEER_RECEIPT=`: a path the user names replaces the daemon's own
+			# receipt, and the run record then loses every other machine's steps. The
+			# daemon keeps the receipt in the run's job dir; copy the newest one out.
+			# A run without one (shim off) is recorded as none, with a line on stderr.
+			# shellcheck disable=SC2016 # expands on the PC
+			grab='jd="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer/jobs"; r="$jd/$(ls -t "$jd" | head -1)/receipt.json"; if [ -f "$r" ]; then cp "$r" "$DEST"; else echo "no receipt in the job dir: remote work not recorded" >&2; fi'
 			if [[ -n "$run_id" ]]; then
-				printf '%s\n' "pipedpeer run -e PIPEDPEER_RECEIPT=~/pipedpeer-lab/runs/$run_id/receipt.json $pairs $shim $script $args && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$run_id/timeline.json"
+				printf '%s\n' "pipedpeer run $pairs $shim $script $args && pipedpeer jobs last --export json >~/pipedpeer-lab/runs/$run_id/timeline.json && { DEST=\"\$HOME/pipedpeer-lab/runs/$run_id/receipt.json\"; $grab; }"
 			else
-				printf '%s\n' "pipedpeer run -e PIPEDPEER_RECEIPT=receipt.json $pairs $shim $script $args && pipedpeer jobs last --export json >timeline.json"
+				printf '%s\n' "pipedpeer run $pairs $shim $script $args && pipedpeer jobs last --export json >timeline.json && { DEST=receipt.json; $grab; }"
 			fi
 			;;
 		pipedpeer-exact | pipedpeer-fast)
@@ -106,7 +112,9 @@ sys_cmd() {
 			printf '%s\n' "DASK_SCHEDULER=tcp://$(lab_ip pc00):8786 ~/pipedpeer-lab/venv/bin/python baselines/${stem}_dask.py $args"
 			;;
 		ssh)
-			printf '%s\n' "LAB_N=$n LAB_HOSTS_FILE=~/pipedpeer-lab/hosts-$n.txt $sizeenv bash baselines/${stem}_ssh.sh $args"
+			# pc00's own key (install.sh) and a first-contact host key: parallel's
+			# ssh is told so, no ~/.ssh/config is left on the PC.
+			printf '%s\n' "PARALLEL_SSH='ssh -i ~/.ssh/pipedpeer-lab-pc00 -o BatchMode=yes -o StrictHostKeyChecking=accept-new' LAB_N=$n LAB_HOSTS_FILE=~/pipedpeer-lab/hosts-$n.txt $sizeenv bash baselines/${stem}_ssh.sh $args"
 			;;
 		torchrun)
 			[[ "$w" == T1 ]] || { echo "sys: torchrun runs only T1" >&2; return 1; }

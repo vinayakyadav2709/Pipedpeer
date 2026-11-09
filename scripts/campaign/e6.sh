@@ -73,13 +73,15 @@ e6_record() {
     echo ","
     return 0
   fi
-  E6_REC="$rec" python3 -c '
-import json, os
-d = json.loads(os.environ["E6_REC"])
+  # stdin, not the environment: a long run's record is over the 128 KB limit of one env string
+  printf '%s' "$rec" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
 w = d.get("wall_s")
 print("%s,%d" % ("" if not w else w, 1 if d.get("result_ok") is True else 0))
 '
 }
+
 
 # e6_interrupt_run <id>: SIGINT to the `pipedpeer run` client on pc00 (the
 # process whose argv is <...>/pipedpeer run ..., not the shell wrapper that
