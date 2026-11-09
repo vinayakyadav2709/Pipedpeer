@@ -2,7 +2,7 @@
 # Port of docs/benchmarks/workloads/w3_rf.py (W3) for the plain-ssh baseline.
 # Each PC trains a subset of the trees (random_state=7+part) and returns its
 # predict_proba on the test set; pc00 averages them and scores.
-# Prints one JSON line: {"part":i,"proba":[[p0,p1],...],"seconds":s}
+# Prints one JSON line: {"part":i,"trees":t,"proba":[[p0,p1],...],"seconds":s}
 import json
 import os
 import sys
@@ -38,7 +38,7 @@ def main(argv):
     clf.fit(X_train, y_train)
     proba = clf.predict_proba(X_test)
     dt = time.perf_counter() - t0
-    print(json.dumps({"part": part, "proba": proba.tolist(), "seconds": dt}))
+    print(json.dumps({"part": part, "trees": n_trees, "proba": proba.tolist(), "seconds": dt}))
 
 
 if __name__ == "__main__":

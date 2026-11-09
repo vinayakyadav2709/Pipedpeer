@@ -7,7 +7,9 @@
 # Local: nothing else.
 # Follows: https://www.gnu.org/software/parallel/parallel_tutorial.html
 # Prints one JSON line on stdout:
-#   {"part":i,"items":k,"seconds":s,"out":[p(i) for i in i::n]}
+#   {"part":i,"items":k,"procs":p,"seconds":s,"out":[p(i) for i in i::n]}
+# procs is the Pool size used: BENCH_PROCS when it is a positive number, else
+# this PC's os.cpu_count() (0 and unset both mean "this PC's cores").
 # The out list round-trips through json (shortest-repr floats), so the join can
 # recompute `sum(out)` in item order and get the original's checksum bit for bit
 # (a sum of part sums could round differently).
@@ -38,15 +40,18 @@ def main(argv):
         sys.stderr.write("usage: w1_ssh_part.py --part i --parts n (0 <= i < n)\n")
         raise SystemExit(2)
     n = int(os.environ.get("BENCH_ITEMS", "48"))
+    # 0 or unset: this PC's cores (the campaign passes 0 to mean "each PC's nproc").
+    procs = int(os.environ.get("BENCH_PROCS", "0") or 0) or (os.cpu_count() or 1)
     items = list(range(part, n, parts))
     t0 = time.perf_counter()
-    with Pool(int(os.environ.get("BENCH_PROCS", "8"))) as p:
+    with Pool(procs) as p:
         out = p.map(work, items)
     dt = time.perf_counter() - t0
     # Correctness: the same computation, serially (as the original).
     if os.environ.get("BENCH_VERIFY") == "1":
         assert out == [work(i) for i in items], "results differ from serial"
-    print(json.dumps({"part": part, "items": len(out), "seconds": dt, "out": out}))
+    print(json.dumps({"part": part, "items": len(out), "procs": procs,
+                      "seconds": dt, "out": out}))
 
 
 if __name__ == "__main__":

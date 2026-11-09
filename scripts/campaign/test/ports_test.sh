@@ -369,7 +369,7 @@ cd "$workdir" || exit 1
 shopt -s nullglob
 # Each ports_*.sh is rows only, in the workload order of its unit; the runner
 # owns the DSL above and the clusters.
-for f in "$here"/ports_w[0-9]*.sh; do
+for f in "$here"/ports_w*.sh; do
 	source "$f"
 done
 shopt -u nullglob

@@ -3,7 +3,9 @@
 # One part of the Pool items and of the Mandelbrot tiles, run on one lab PC by
 # w2_ssh.sh (GNU parallel --sshlogin); numpy and pandas stay local on pc00.
 # Prints one JSON line:
-#   {"part":i,"pool_out":[...],"joblib_count":n,"seconds":s}
+#   {"part":i,"pool_out":[...],"joblib_count":n,"procs":p,"seconds":s}
+# procs is the Pool size used: BENCH_PROCS when positive, else this PC's
+# os.cpu_count() (0 and unset both mean "this PC's cores").
 import json
 import os
 import sys
@@ -49,11 +51,12 @@ def main(argv):
         sys.stderr.write("usage: w2_ssh_part.py --part i --parts n\n")
         raise SystemExit(2)
     n = int(os.environ.get("BENCH_ITEMS", "128"))
+    procs = int(os.environ.get("BENCH_PROCS", "0") or 0) or (os.cpu_count() or 1)
     items = list(range(part, n, parts))
     tiles = list(range(part, TILES, parts))
     t0 = time.perf_counter()
     from multiprocessing import Pool as MPool
-    with MPool(int(os.environ.get("BENCH_PROCS", "8"))) as p:
+    with MPool(procs) as p:
         pool_out = p.map(score, items)
     counts = Parallel(n_jobs=-1)(delayed(mandel_tile)(t) for t in tiles)
     dt = time.perf_counter() - t0
@@ -61,7 +64,7 @@ def main(argv):
         assert pool_out == [score(i) for i in items]
         assert counts == [mandel_tile(t) for t in tiles]
     print(json.dumps({"part": part, "pool_out": pool_out, "joblib_count": sum(counts),
-                     "seconds": dt}))
+                     "procs": procs, "seconds": dt}))
 
 
 if __name__ == "__main__":
