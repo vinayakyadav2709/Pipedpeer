@@ -341,6 +341,9 @@ campaign_run_one() {
 	if ((rc == 124)); then
 		note="timeout"
 		rec_rc=124
+	elif ((rc == 125)); then
+		note="unit-died"
+		lab_log "run $run_id: the unit died without an exit file (OOM or killed); recording the run as failed"
 	elif ((rc != 0)); then
 		note="lost-connection"
 		lab_log "run $run_id: lab_wait returned $rc; recording the run with exit_code null"

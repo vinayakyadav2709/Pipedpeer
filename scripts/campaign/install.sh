@@ -329,6 +329,14 @@ main() {
 	local miss_max="${CAMPAIGN_WARMUP_MISS_MAX:-3}"
 	local -A warmup_last_change=()
 	local -A warmup_last_line=()
+	local -A warmup_retries=()
+	local -A warmup_retry_sig=()
+	local -A warmup_retry_at=()
+	local restart_wait_s="${CAMPAIGN_WARMUP_RESTART_WAIT_S:-120}"
+	# A `connect` restarts the daemon under a new cluster token, so a warm-up
+	# still building on a joined PC fails (401). The failed warm-up is started
+	# again (backoff skipped) up to this many times per PC.
+	local retry_max="${CAMPAIGN_WARMUP_RETRIES:-2}"
 	local poll_s="${CAMPAIGN_WARMUP_POLL_S:-${LAB_POLL_S:-15}}"
 	local timeout_s="${CAMPAIGN_WARMUP_TIMEOUT_S:-3600}"
 	local stall_s="${CAMPAIGN_WARMUP_STALL_S:-900}"
@@ -358,10 +366,11 @@ fi
 mtime="$(stat -c %Y "$log" 2>/dev/null || date -r "$log" +%s 2>/dev/null || echo 0)"
 head_line="$(head -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
 tail_line="$(tail -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
-printf "OK\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line"
+nlines="$(wc -l <"$log" 2>/dev/null | tr -d " ")"
+printf "OK\t%s\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line" "$nlines"
 '
 	local pending_file="$LAB/warmup-pending.txt"
-	local out p_mtime p_head p_tail start_tok start_ep sec unch elap
+	local out p_mtime p_head p_tail p_nl start_tok host_r sig start_ep sec unch elap
 	while ((${#warmup_pending[@]} > 0)); do
 		printf '%s\n' "${warmup_pending[@]}" >"$pending_file"
 		lab_fanout warmup-poll "$pending_file" "$probe_cmd" >/dev/null 2>&1 || true
@@ -387,7 +396,7 @@ printf "OK\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line"
 
 			if [[ "$out" == OK$'\t'* ]]; then
 				warmup_miss[$pc]=0
-				IFS=$'\t' read -r _ p_mtime p_head p_tail <<<"$out"
+				IFS=$'\t' read -r _ p_mtime p_head p_tail p_nl <<<"$out"
 				if [[ "$p_mtime" != "${warmup_last_mtime[$pc]:-}" ]]; then
 					warmup_last_mtime[$pc]="$p_mtime"
 					warmup_last_change[$pc]="$t_now"
@@ -405,6 +414,32 @@ printf "OK\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line"
 					warmup_sec[$pc]="$sec"
 					warmup_last_line[$pc]="done"
 					continue
+				fi
+
+				if [[ "$p_tail" == failed* && "$pc" != pc00 ]]; then
+					sig="$p_mtime:$p_nl"
+					if [[ "$sig" == "${warmup_retry_sig[$pc]:-}" ]] &&
+						((t_now - warmup_retry_at[$pc] < restart_wait_s)); then
+						# the restart has not rewritten the log yet
+						next_pending+=("$pc")
+						continue
+					fi
+					if ((${warmup_retries[$pc]:-0} < retry_max)); then
+						warmup_retries[$pc]=$((${warmup_retries[$pc]:-0} + 1))
+						host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+						lab_log "install: warmup $pc ($host_r): $p_tail; restarting it (${warmup_retries[$pc]}/$retry_max, the connect token swap can kill a running build)"
+						if lab_ssh "$pc" 'PIPEDPEER_WARMUP_RETRY=1 pipedpeer setup -y' >/dev/null 2>&1; then
+							warmup_retry_sig[$pc]="$sig"
+							warmup_retry_at[$pc]="$t_now"
+							warmup_last_change[$pc]="$t_now"
+							next_pending+=("$pc")
+							continue
+						fi
+						lab_log "install: warmup $pc ($host_r): restart command failed"
+					elif ((${warmup_retries[$pc]:-0} > 0)); then
+						host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+						lab_log "install: warmup $pc ($host_r): $p_tail; retries exhausted (${warmup_retries[$pc]}/$retry_max)"
+					fi
 				fi
 
 				if [[ "$p_tail" == failed* ]]; then

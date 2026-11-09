@@ -475,6 +475,90 @@ t18() {
 	verdict "slow output reader: out is complete once lab_wait returns"
 }
 
+# --- V5b: a unit that died without an exit file is detected --------------
+# The fake PC's systemctl answers is-active with $d/unit-state (0 active,
+# 3 inactive); the run dir holds cmd.sh as lab_detach leaves it.
+dead_setup() {
+	local d="$1" id="$2" state="$3"
+	printf '%s\n' "$state" >"$d/unit-state"
+	cat >"$d/bin/systemctl" <<SYSTEMCTL
+#!/usr/bin/env bash
+if [[ "\$*" == *is-active* ]]; then exit "\$(cat "$d/unit-state")"; fi
+exit 0
+SYSTEMCTL
+	chmod +x "$d/bin/systemctl"
+	mkdir -p "$d/pc00/pipedpeer-lab/runs/$id"
+	: >"$d/pc00/pipedpeer-lab/runs/$id/cmd.sh"
+}
+
+# inactive unit, no exit file: failure after the short grace, not the timeout
+t19() {
+	local d rc=0 t0 dur
+	d="$(newdir)"
+	t0="$(date +%s)"
+	(
+		case_setup "$d"
+		dead_setup "$d" r19 3
+		export LAB_DEAD_GRACE_S=2
+		lab_wait pc00 r19 20
+		printf 'wait_rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	dur=$(($(date +%s) - t0))
+	want_val "$d/log" wait_rc 125 "lab_wait on a dead unit"
+	line "$d/log" "DEAD r19" || pnote "no DEAD r19 line"
+	((dur < 30)) || pnote "took ${dur}s, expected the short grace"
+	verdict "unit inactive and no exit file -> DEAD, rc 125, after the grace"
+}
+
+# active unit, no exit file: keeps waiting until the timeout
+t20() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		dead_setup "$d" r20 0
+		export LAB_DEAD_GRACE_S=1
+		lab_wait pc00 r20 4
+		printf 'wait_rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" wait_rc 124 "lab_wait on a live unit"
+	verdict "unit active and no exit file -> keeps waiting (timeout 124)"
+}
+
+# exit file present, unit gone: the normal answer
+t21() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		dead_setup "$d" r21 3
+		echo 5 >"$d/pc00/pipedpeer-lab/runs/r21/exit"
+		lab_wait pc00 r21 30
+		printf 'wait_rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" wait_rc 0 "lab_wait with an exit file"
+	line "$d/log" 5 || pnote "did not print 5"
+	verdict "exit file present (unit gone) -> normal, prints the code"
+}
+
+# exit file arrives inside the grace: normal
+t22() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		dead_setup "$d" r22 3
+		export LAB_DEAD_GRACE_S=6
+		(sleep 2; echo 0 >"$d/pc00/pipedpeer-lab/runs/r22/exit") &
+		lab_wait pc00 r22 60
+		printf 'wait_rc=%s\n' "$?"
+		wait
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" wait_rc 0 "lab_wait, exit inside the grace"
+	line "$d/log" 0 || pnote "did not print 0"
+	verdict "exit file arrives inside the grace -> normal"
+}
+
 t9
 t10
 t11
@@ -485,6 +569,10 @@ t15
 t16
 t17
 t18
+t19
+t20
+t21
+t22
 printf '\n'
 
 total=$((pass + failed))

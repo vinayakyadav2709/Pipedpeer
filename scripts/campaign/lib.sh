@@ -304,6 +304,7 @@ chmod +x "\$R/cmd.sh"
 if ! systemd-run --user --unit=lab-$run_id --collect bash "\$R/cmd.sh"; then
 	echo "WARNING systemd-run --user failed on $run_id; using nohup" >&2
 	nohup bash "\$R/cmd.sh" >/dev/null 2>&1 &
+	echo \$! >"\$R/nohup.pid"
 fi
 EOF
 }
@@ -335,20 +336,34 @@ lab_detach() {
 
 # lab_wait <pc> <run_id> <timeout_s>: poll for the run's exit file. A failed
 # ssh is "not yet" (logged), never a reason to touch the run. On timeout the
-# unit is left running, the timeout is logged, and the answer is 124.
+# unit is left running, the timeout is logged, and the answer is 124. A unit
+# that is no longer running (and no nohup process) while there is still no
+# exit file is dead (OOM, killed): after LAB_DEAD_GRACE_S (default 10) of
+# consecutive DEAD answers it prints DEAD <run_id> and returns 125.
 lab_wait() {
 	local pc="${1:?usage: lab_wait <pc> <run_id> <timeout_s>}"
 	local run_id="${2:?usage: lab_wait <pc> <run_id> <timeout_s>}"
 	local timeout_s="${3:-0}" poll elapsed=0 wait_for=0 left=0 code=""
+	local grace="${LAB_DEAD_GRACE_S:-10}" dead_s=0 was_dead=0 probe
 	# shellcheck disable=SC2088
-	local path="~/pipedpeer-lab/runs/$run_id/exit"
+	local rdir="~/pipedpeer-lab/runs/$run_id"
+	probe="cat $rdir/exit 2>/dev/null || { if [ -f $rdir/cmd.sh ] && ! systemctl --user is-active --quiet lab-$run_id 2>/dev/null && ! { [ -f $rdir/nohup.pid ] && kill -0 \$(cat $rdir/nohup.pid) 2>/dev/null; }; then echo DEAD; else echo WAITING; fi; }"
 	poll="$(lab_poll_sleep)"
 
 	while :; do
-		code=""
-		if code="$(lab_ssh "$pc" "cat $path 2>/dev/null || echo WAITING")"; then
+		code="" was_dead=0
+		if code="$(lab_ssh "$pc" "$probe")"; then
 			code="${code//[[:space:]]/}"
 			case "$code" in
+				DEAD)
+					if ((dead_s >= grace)); then
+						printf 'DEAD %s\n' "$run_id"
+						lab_log "wait $run_id on $pc: the unit is gone and there is no exit file; recording a failure"
+						return 125
+					fi
+					was_dead=1
+					lab_log "wait $run_id on $pc: unit gone, no exit file yet (${dead_s}s of ${grace}s grace)"
+					;;
 				'' | WAITING) lab_log "wait $run_id on $pc: not finished yet" ;;
 				*[!0-9]*) lab_log "wait $run_id on $pc: unexpected exit file content [$code]" ;;
 				*)
@@ -359,6 +374,7 @@ lab_wait() {
 		else
 			lab_log "wait $run_id on $pc: ssh failed; still waiting"
 		fi
+		((was_dead)) || dead_s=0
 
 		if ((timeout_s > 0 && elapsed >= timeout_s)); then
 			printf 'TIMEOUT %s\n' "$run_id"
@@ -374,8 +390,10 @@ lab_wait() {
 		if ((wait_for > 0)); then
 			sleep "$wait_for"
 			elapsed=$((elapsed + wait_for))
+			((was_dead)) && dead_s=$((dead_s + wait_for))
 		else
 			elapsed=$((elapsed + 1))
+			((was_dead)) && dead_s=$((dead_s + 1))
 		fi
 	done
 }

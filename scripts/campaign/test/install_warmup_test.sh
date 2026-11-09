@@ -90,6 +90,10 @@ case "${1:-}" in
 		printf 'version=%s\n' "$VERSION"
 		;;
 	setup)
+		echo "setup ${PIPEDPEER_WARMUP_RETRY:-noretry}" >>"$HOME/setup-calls"
+		if [[ -n "${PIPEDPEER_WARMUP_RETRY:-}" && -f "$HOME/retry-result" ]]; then
+			cat "$HOME/retry-result" >>"$HOME/.local/state/pipedpeer/warmup.log"
+		fi
 		exit 0
 		;;
 	*)
@@ -118,6 +122,7 @@ IS
 	export LAB_RESULTS="$dir"
 	export LAB_RETRY_SLEEP=1
 	export LAB_POLL_S=1
+	export CAMPAIGN_WARMUP_RESTART_WAIT_S=2
 	unset XDG_STATE_HOME
 	# shellcheck source=/dev/null
 	source "$LIB" || exit 91
@@ -356,7 +361,66 @@ t8_three_missing() {
 	verdict "three consecutive missing probes -> dropped"
 }
 
+# --- Case 9: connect swapped the token under a warm-up that then failed -> retried, done
+t9_token_swap_retry() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 10 "done"
+		set_warmup_log "$d/pc01" 10 "failed (exit 1); details above"
+		echo done >"$d/pc01/retry-result"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=0$' "$d/log" || pnote "expected exit 0 after the warm-up retry"
+	grep -q 'INSTALL ok=2 failed=0' "$d/log" || pnote "no 'INSTALL ok=2 failed=0'"
+	grep -q $'pc01\t[0-9-]\+\tdone' "$d/warmup-times.tsv" || pnote "pc01 not done"
+	[[ "$(count "$d/pc01/setup-calls" 'setup 1')" == 1 ]] || pnote "pc01 warm-up not retried once with the retry env"
+	verdict "warm-up failed after the connect token swap -> restarted, waited, done"
+}
+
+# --- Case 10: no connect (pc00) -> a failed warm-up stays failed, no retry
+t10_no_swap_no_retry() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 10 "failed (exit 1); details above"
+		set_warmup_log "$d/pc01" 10 "done"
+		echo done >"$d/pc00/retry-result"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=1$' "$d/log" || pnote "expected exit 1"
+	grep -q 'FAILED pc00:.*failed (exit 1)' "$d/log" || pnote "pc00 failure not reported"
+	[[ ! -f "$d/pc00/setup-calls" ]] || ! grep -q 'setup 1' "$d/pc00/setup-calls" || pnote "pc00 (never connected) was retried"
+	verdict "no token swap (pc00) -> failed warm-up unchanged, not retried"
+}
+
+# --- Case 11: it fails for another reason too -> retries exhausted, logged with host
+t11_retries_exhausted() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 10 "done"
+		set_warmup_log "$d/pc01" 10 "failed (exit 1); details above"
+		echo "failed (exit 1); details above" >"$d/pc01/retry-result"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=1$' "$d/log" || pnote "expected exit 1"
+	grep -q 'FAILED pc01:.*failed (exit 1)' "$d/log" || pnote "pc01 failure not reported"
+	[[ "$(count "$d/pc01/setup-calls" 'setup 1')" == 2 ]] || pnote "want 2 retries (default), got $(count "$d/pc01/setup-calls" 'setup 1')"
+	grep -q 'warmup pc01 (pc01.lab): .*retries exhausted' "$d/campaign.log" || pnote "exhaustion not logged with the host"
+	verdict "warm-up keeps failing -> retries exhausted, logged with host, failed"
+}
+
 t1_all_done
+t9_token_swap_retry
+t10_no_swap_no_retry
+t11_retries_exhausted
 t2_already_done
 t3_one_failed
 t4_log_stalls
