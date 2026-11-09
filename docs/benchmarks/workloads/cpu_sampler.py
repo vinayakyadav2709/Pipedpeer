@@ -97,6 +97,10 @@ def find_first_work_s(sampler_lines, join_ns, cores, min_streak=5, threshold_rat
             busy = float(parts[1])
         except ValueError:
             continue
+        if t_ns < join_ns:
+            # before the join: not this joiner's work; also breaks a streak
+            streak = []
+            continue
         if busy >= threshold:
             streak.append((t_ns, busy))
             if len(streak) == min_streak:

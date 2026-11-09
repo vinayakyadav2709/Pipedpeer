@@ -137,3 +137,18 @@ def test_cpu_sampler_cli_two_reads(tmp_path):
     ns, busy = int(first_sample[0]), float(first_sample[1])
     assert ns > 0
     assert pytest.approx(busy, 0.1) == 4.0
+
+
+def _lines(join_ns, secs):
+    return [f"{join_ns + s * 1_000_000_000} 6.0" for s in secs]
+
+
+def test_streak_straddling_join_measured_from_first_in_window_sample():
+    join_ns = 1_000_000_000_000
+    res = cpu_sampler.find_first_work_s(_lines(join_ns, range(-3, 6)), join_ns, cores=8)
+    assert res == 0.0
+
+
+def test_streak_all_before_join_gives_no_value():
+    join_ns = 1_000_000_000_000
+    assert cpu_sampler.find_first_work_s(_lines(join_ns, range(-6, 0)), join_ns, cores=8) is None

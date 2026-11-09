@@ -3,7 +3,7 @@
 # Case table for scripts/campaign/e19.sh and cpu_sampler.py on the fake lab.
 set -euo pipefail
 
-REPO="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+REPO="${REPO:-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)}"
 CAMP="$REPO/scripts/campaign"
 WORKLOADS="$REPO/docs/benchmarks/workloads"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
@@ -88,6 +88,7 @@ case "${1:-}" in
       exit 1
     fi
     if [[ -n "${FAKE_CONNECT_255:-}" ]]; then exit 255; fi
+    if [[ -n "${FAKE_CONNECT_RC:-}" ]]; then echo "partly connected: 10.9.9.9 unreachable" >&2; exit "$FAKE_CONNECT_RC"; fi
     echo "connected" >"$HOME/.connected"
     ;;
   stop)
@@ -97,7 +98,9 @@ case "${1:-}" in
     rm -f "$HOME/.stopped"
     ;;
   status)
-    echo -e "NAME\tSTATE\tJOBS\n$me\thealthy\t0"
+    echo -e "NAME\tSTATE\tJOBS"
+    for ((i = 0; i < ${FAKE_STATUS_ROWS:-1}; i++)); do echo -e "$me-$i\thealthy\t0"; done
+    echo
     ;;
   run)
     if [[ -n "${FAKE_RUN_SLEEP:-}" ]]; then sleep "$FAKE_RUN_SLEEP"; fi
@@ -485,7 +488,8 @@ verdict "L2 empty invite code: repeat aborted, no join row, one counted join_abo
 csv_of() { printf '%s' "$1/analysis-input/e19.csv"; }
 run_e19() { # <d> <n> <e19 args...>; env is set by the caller
   local d="$1" n="$2"; shift 2
-  ( setup_lab "$d" "$n"; [[ -z "${WITH_VENV:-}" ]] || mkvenv "$d"; export LAB_RESULTS="$d"; cd "$REPO"; bash "$CAMP/e19.sh" "$@" ) >"$d/e19.log" 2>&1
+  ( setup_lab "$d" "$n"; [[ -z "${WITH_VENV:-}" ]] || mkvenv "$d"
+    if [[ -n "${NIX_STUB:-}" ]]; then printf '#!/usr/bin/env bash\n%s\n' "$NIX_STUB" >"$d/bin/nix-store"; chmod +x "$d/bin/nix-store"; fi; export LAB_RESULTS="$d"; cd "$REPO"; bash "$CAMP/e19.sh" "$@" ) >"$d/e19.log" 2>&1
 }
 col() { awk -F, -v c="$2" -v k="$3" '$2 == k { print $c }' "$1" 2>/dev/null || true; }
 SP=/nix/store/abcdefghijklmnopqrstuvwxyz012345-env
@@ -709,6 +713,76 @@ E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpee
 [[ -e "$store/keep" ]] || pnote "other paths went too"
 [[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "joiner_warm: $(cat "$(csv_of "$d")")"
 verdict "L4 opposite: a real store path is purged, the rest stays, joiner_warm 0"
+
+# ---------------------------------------------------------------------- FXR2-E2 defect 1: system-store purge through nix-store
+RM_STUB='echo "$*" >>"$FAKELAB_DIR/nixstore.log"; [ "$1" = --delete ] && rm -rf "$2"'
+d="$(newdir)"
+mkdir -p "$d/sysstore/$RELP"
+NIX_STUB="$RM_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ ! -e "$d/sysstore/$RELP" ]] || pnote "system-store closure not deleted"
+grep -q -- "--delete $d/sysstore/$RELP" "$d/nixstore.log" 2>/dev/null || pnote "nix-store --delete not called"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "joiner_warm: $(cat "$(csv_of "$d")")"
+verdict "E2-1 system-store path deleted through nix-store: absent, joiner_warm 0"
+
+d="$(newdir)"
+mkdir -p "$d/sysstore/$RELP"
+NIX_STUB='echo "error: cannot delete path: still alive" >&2; exit 1' E19_SYS_STORE="$d/sysstore" E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ -e "$d/sysstore/$RELP" ]] || pnote "refused path vanished"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "refusal: want joiner_warm 1: $(cat "$(csv_of "$d")")"
+grep -q 'still alive' "$d/campaign.log" || pnote "refusal reason not logged"
+verdict "E2-1 nix-store --delete refused: reason logged, joiner_warm 1"
+
+d="$(newdir)"
+mkdir -p "$d/pc01/.local/share/pipedpeer/nix/store/$RELP" "$d/sysstore"
+NIX_STUB="$RM_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ ! -e "$d/pc01/.local/share/pipedpeer/nix/store/$RELP" ]] || pnote "private path not removed"
+[[ ! -e "$d/nixstore.log" ]] || pnote "nix-store called for a private-store-only closure"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "joiner_warm: $(cat "$(csv_of "$d")")"
+verdict "E2-1 private-store path only: removed with rm, nix-store untouched, joiner_warm 0"
+
+# ---------------------------------------------------------------------- FXR2-E2 defect 2: samples before join_ns
+d="$(newdir)"; out_f="$d/samples.txt"; join_ns=1000000000000
+for i in -3 -2 -1 0 1 2 3 4 5; do echo "$((join_ns + i * 1000000000)) 6.0" >>"$out_f"; done
+res="$(python3 "$WORKLOADS/cpu_sampler.py" --streak "$out_f" "$join_ns" 8 2>&1)" || pnote "sampler failed: $res"
+[[ "$res" == "0.0" || "$res" == "0" ]] || pnote "straddling streak: want 0.0 from the first in-window sample, got $res"
+verdict "E2-2 streak straddling t0: measured from the first in-window sample"
+
+d="$(newdir)"; out_f="$d/samples.txt"
+for i in -6 -5 -4 -3 -2 -1; do echo "$((join_ns + i * 1000000000)) 6.0" >>"$out_f"; done
+res="$(python3 "$WORKLOADS/cpu_sampler.py" --streak "$out_f" "$join_ns" 8 2>&1)" || true
+[[ "$res" != -* ]] || pnote "all samples before t0: want no value, got $res"
+verdict "E2-2 all samples before t0: no value, not negative"
+
+d="$(newdir)"; out_f="$d/samples.txt"
+for i in 2 3 4 5 6 7; do echo "$((join_ns + i * 1000000000)) 6.0" >>"$out_f"; done
+res="$(python3 "$WORKLOADS/cpu_sampler.py" --streak "$out_f" "$join_ns" 8 2>&1)" || pnote "sampler failed: $res"
+[[ "$res" == "2.0" || "$res" == "2" ]] || pnote "streak after t0: want 2.0, got $res"
+verdict "E2-2 streak fully after t0: unchanged"
+
+# ---------------------------------------------------------------------- FXR2-E2 defect 3: connect exit 2
+st() { col "$(csv_of "$1")" 11 join; }
+d="$(newdir)"
+FAKE_CONNECT_RC=2 FAKE_STATUS_ROWS=2 E19_CONFIRM_WAIT_S=1 run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ "$(st "$d")" == partial ]] || pnote "exit 2 confirmed: want partial: $(cat "$(csv_of "$d")")"
+[[ -n "$(col "$(csv_of "$d")" 5 join)" ]] || pnote "partial row has no join_s"
+grep -q 'partly connected' "$d/campaign.log" || pnote "partial join not warned"
+verdict "E2-3 exit 2 and the cluster lists the node: partial with join_s, warned"
+
+d="$(newdir)"
+FAKE_CONNECT_RC=2 FAKE_STATUS_ROWS=1 E19_CONFIRM_WAIT_S=1 run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ "$(st "$d")" == failed ]] || pnote "exit 2 unconfirmed: want failed: $(cat "$(csv_of "$d")")"
+[[ -z "$(col "$(csv_of "$d")" 5 join)" ]] || pnote "failed row has a join_s"
+verdict "E2-3 exit 2, cluster does not list the node: failed"
+
+d="$(newdir)"
+FAKE_CONNECT_RC=1 FAKE_STATUS_ROWS=2 E19_CONFIRM_WAIT_S=1 run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ "$(st "$d")" == failed ]] || pnote "exit 1: want failed even when listed: $(cat "$(csv_of "$d")")"
+verdict "E2-3 exit 1: failed"
+
+d="$(newdir)"
+FAKE_STATUS_ROWS=2 run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+[[ "$(st "$d")" == ok ]] || pnote "exit 0: want ok: $(cat "$(csv_of "$d")")"
+verdict "E2-3 exit 0: ok, unchanged"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"

@@ -29,10 +29,10 @@
 # Output $LAB/analysis-input/e19.csv:
 #   system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status
 # kind is baseline, join, or join_aborted for a repeat that gave no join rows.
-# join_status is ok, timeout, failed, no_result or no_cores on a join row, and
+# join_status is ok, partial (exit 2, confirmed by the cluster), timeout, failed, no_result or no_cores on a join row, and
 # why the repeat stopped on a join_aborted row: cluster_failed, no_baseline,
 # run_not_seen, invite_failed, run_failed or interrupted. join_s is empty unless
-# the status is ok, so read medians together with the counts per status.
+# the status is ok or partial, so read medians together with the counts per status.
 
 set -euo pipefail
 
@@ -567,17 +567,33 @@ e19_purge_and_probe() {
   [[ -z "$path" ]] || rel="${path#/nix/store/}"
   out="$(lab_ssh "$pc" "
     d=\"\${XDG_DATA_HOME:-\$HOME/.local/share}/pipedpeer\"
-    rm -rf \"\$d/work/nar-cache\" \"\$d/closure-cache\" 2>/dev/null || true
+    sys='${E19_SYS_STORE:-/nix/store}'
+    rm -rf \"\$d/work/nar-cache\" \"\$d/closure-cache\" || echo \"NOTE cache removal failed\"
     rel='$rel'
     if [ -n \"\$rel\" ]; then
-      rm -rf \"\$d/nix/store/\$rel\" \"/nix/store/\$rel\" 2>/dev/null || true
-      if [ -e \"\$d/nix/store/\$rel\" ] || [ -e \"/nix/store/\$rel\" ]; then echo present; else echo absent; fi
+      # private store: plain rm; system store (root-owned): through the Nix daemon
+      if [ -e \"\$d/nix/store/\$rel\" ]; then
+        rm -rf \"\$d/nix/store/\$rel\" 2>&1 | sed 's/^/NOTE private store rm: /'
+      fi
+      if [ -e \"\$sys/\$rel\" ]; then
+        if command -v nix-store >/dev/null 2>&1; then
+          nix-store --delete \"\$sys/\$rel\" 2>&1 | sed 's/^/NOTE nix-store --delete: /'
+        else
+          echo 'NOTE nix-store not found; the system-store closure cannot be deleted'
+        fi
+      fi
+      if [ -e \"\$d/nix/store/\$rel\" ] || [ -e \"\$sys/\$rel\" ]; then echo present; else echo absent; fi
     fi
-  " 2>/dev/null)" || rc=$?
+  " 2>&1)" || rc=$?
   if ((rc != 0)); then
-    lab_log "e19 $id: closure purge on $pc failed (ssh exit $rc); joiner_warm left empty"
+    lab_log "e19 $id: closure purge on $pc failed (ssh exit $rc): ${out:-(no output)}; joiner_warm left empty"
     return 0
   fi
+  local note
+  while IFS= read -r note; do
+    [[ "$note" == NOTE\ * ]] && lab_log "e19 $id: purge on $pc: ${note#NOTE }"
+  done <<<"$out"
+  out="$(grep -v '^NOTE ' <<<"$out" | tail -1 || true)"
   [[ -n "$path" ]] || return 0
   case "$out" in
     absent) printf 0 ;;
@@ -625,6 +641,22 @@ fi
 EOF
       ;;
   esac
+}
+
+# e19_confirm_joined <joiners already in>: succeed when the driver's own
+# `pipedpeer status` lists at least N + that + 1 healthy nodes (polled up to
+# E19_CONFIRM_WAIT_S seconds).
+e19_confirm_joined() {
+  local want=$((N + $1 + 1)) end=$((SECONDS + ${E19_CONFIRM_WAIT_S:-20})) tab healthy=0
+  while :; do
+    tab="$(lab_ssh pc00 'pipedpeer status' 2>&1)" || tab=""
+    healthy="$(awk '/^NAME[ \t]+STATE/{t=1;next} t&&NF==0{exit} t&&$2=="healthy"{c++} END{print c+0}' <<<"$tab")"
+    if ((healthy >= want)); then return 0; fi
+    ((SECONDS < end)) || break
+    sleep 2
+  done
+  lab_log "e19: driver lists $healthy healthy nodes, want $want to confirm the partial join"
+  return 1
 }
 
 # e19_await_join_res <pc> <run_id> <deadline in SECONDS>: print join.res once it
@@ -747,6 +779,7 @@ e19_one_repeat() {
   fi
 
   local deadline=$((join_started + ${E19_JOIN_WAIT_S:-180} + 15))
+  local joined_so_far=0
   for jpc in "${joiner_hosts[@]}"; do
     local jres_line="" join_s="" status="no_result" first_work_s="" join_ns seed_s="" jout t0 t1 rc
     jcores="${cores_of[$jpc]}"
@@ -762,6 +795,16 @@ e19_one_repeat() {
             status="ok"
             join_s="$(python3 -c "print(round(($t1 - $t0) / 1e9, 3))")"
             ;;
+          2)
+            if [[ "$sys" == pipedpeer* ]] && e19_confirm_joined "$joined_so_far"; then
+              status="partial"
+              join_s="$(python3 -c "print(round(($t1 - $t0) / 1e9, 3))")"
+              lab_log "e19 $run_id: $jpc connect exited 2 (partly connected) but the cluster lists it; join_s kept, status partial; the join log below names the unreachable address"
+            else
+              status="failed"
+              lab_log "e19 $run_id: join command failed on $jpc (exit 2, not confirmed by the cluster)"
+            fi
+            ;;
           124)
             status="timeout"
             lab_log "e19 $run_id: join timed out on $jpc after ${E19_JOIN_WAIT_S:-180}s"
@@ -774,6 +817,7 @@ e19_one_repeat() {
       else
         lab_log "e19 $run_id: no join.res from $jpc"
       fi
+      if [[ "$status" == ok || "$status" == partial ]]; then joined_so_far=$((joined_so_far + 1)); fi
       if [[ "$status" != ok ]]; then
         jout="$(lab_ssh "$jpc" "tail -c 600 ~/pipedpeer-lab/runs/$run_id/join.log 2>/dev/null || true" 2>/dev/null | tr '\n' ' ' || true)"
         lab_log "e19 $run_id: $jpc join log: ${jout:-(empty)}"
