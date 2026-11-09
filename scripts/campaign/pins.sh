@@ -8,8 +8,9 @@
 #
 #   requirements.txt   numpy==, pandas==, scikit-learn==, joblib== (exact
 #                      closure versions), torch==<closure torch>+cpu with the
-#                      PyTorch CPU wheel index, ray[default], dask[distributed]
-#                      (no versions: the closure carries neither by default),
+#                      PyTorch CPU wheel index, ray[default]==, dask[distributed]==
+#                      (resolved once for the closure's Python version and
+#                      shared across all PCs, recorded in versions.csv),
 #                      no tqdm (E5 adds it)
 #   python-version     the closure's Python `x.y` (venv.sh installs it with uv)
 #
@@ -104,6 +105,35 @@ PYEOF
 	printf '%s\n' "$nearest"
 }
 
+# _resolve_pin <pkg> <pyver> [pip index args...]: find the latest compatible
+# version of pkg on the index for the target Python version.
+# Prints the version; returns non-zero when pip index fails or finds nothing.
+_resolve_pin() {
+	local pkg="$1" pyver="$2"
+	shift 2
+	local out rc=0 avail chosen
+	local -a args=()
+	if [[ -n "$pyver" && "$pyver" != "none" ]]; then
+		args+=(--python-version "${pyver%.*}")
+	fi
+	out="$(python3 -m pip index versions "${args[@]}" "$@" "$pkg" 2>&1)" || rc=$?
+	if ((rc != 0)); then
+		lab_log "pins: pip index versions $pkg failed (exit $rc): $out"
+		return "$rc"
+	fi
+	# shellcheck disable=SC2020
+	avail="$(printf '%s\n' "$out" | sed -n 's/^Available versions:[[:space:]]*//p' | head -1 | tr ', ' '\n\n' || true)"
+	chosen="$(printf '%s\n' "$avail" | sed '/^[[:space:]]*$/d' | head -1)"
+	if [[ -z "$chosen" ]]; then
+		chosen="$(printf '%s\n' "$out" | sed -n "s/^${pkg}[[:space:]]*(\([^)]*\)).*/\1/p" | head -1)"
+	fi
+	if [[ -z "$chosen" ]]; then
+		lab_log "pins: no available versions for $pkg: $out"
+		return 1
+	fi
+	printf '%s\n' "$chosen"
+}
+
 # _status_version <pc>: pipedpeer's version from that PC's status first line.
 _status_version() {
 	local pc="$1" out
@@ -158,6 +188,8 @@ main() {
 	pd="$(_pin_of "$line" pandas)" sk="$(_pin_of "$line" sklearn)"
 	jb="$(_pin_of "$line" joblib)" tr="$(_pin_of "$line" torch)"
 	ra="$(_pin_of "$line" ray)" da="$(_pin_of "$line" dask)"
+	[[ "$ra" == "none" ]] && ra=""
+	[[ "$da" == "none" ]] && da=""
 
 	local missing=0 v
 	for f in python numpy pandas sklearn joblib torch; do
@@ -178,6 +210,46 @@ main() {
 	((missing == 0)) || exit 1
 	ppver="$(_status_version pc00)" || ppver=""
 
+	# If ray or dask were not in the closure, check if previously resolved
+	# in versions.csv (second PC or re-run).
+	if [[ -f "$LAB/versions.csv" ]]; then
+		if [[ -z "$ra" ]]; then
+			ra="$(awk -F, '$1=="pipedpeer" {print $8}' "$LAB/versions.csv" 2>/dev/null || true)"
+			[[ "$ra" == "none" ]] && ra=""
+		fi
+		if [[ -z "$da" ]]; then
+			da="$(awk -F, '$1=="pipedpeer" {print $9}' "$LAB/versions.csv" 2>/dev/null || true)"
+			[[ "$da" == "none" ]] && da=""
+		fi
+	fi
+	# Or from requirements.txt if previously written.
+	if [[ -f "$LAB/requirements.txt" ]]; then
+		if [[ -z "$ra" ]]; then
+			ra="$(sed -n 's/^ray\(\[[^]]*\]\)\?==\([^ #]*\).*/\2/p' "$LAB/requirements.txt" | head -1)"
+		fi
+		if [[ -z "$da" ]]; then
+			da="$(sed -n 's/^dask\(\[[^]]*\]\)\?==\([^ #]*\).*/\2/p' "$LAB/requirements.txt" | head -1)"
+		fi
+	fi
+
+	# Resolve ray and dask once if still missing and wheel checks enabled.
+	if [[ "${PINS_WHEEL_CHECK:-1}" != 0 ]]; then
+		if [[ -z "$ra" ]]; then
+			ra="$(_resolve_pin ray "$py")" || {
+				lab_log "pins: failed to resolve version for ray (python $py)"
+				echo "pins: failed to resolve version for ray (python $py)" >&2
+				exit 1
+			}
+		fi
+		if [[ -z "$da" ]]; then
+			da="$(_resolve_pin dask "$py")" || {
+				lab_log "pins: failed to resolve version for dask (python $py)"
+				echo "pins: failed to resolve version for dask (python $py)" >&2
+				exit 1
+			}
+		fi
+	fi
+
 	# requirements.txt
 	local tr_base
 	tr_base="${tr%%+*}"
@@ -189,8 +261,16 @@ main() {
 		printf 'joblib==%s\n' "$jb"
 		printf -- '--extra-index-url https://download.pytorch.org/whl/cpu\n'
 		printf 'torch==%s+cpu\n' "$tr_base"
-		printf 'ray[default]\n'
-		printf 'dask[distributed]\n'
+		if [[ -n "$ra" && "${PINS_WHEEL_CHECK:-1}" != 0 ]]; then
+			printf 'ray[default]==%s\n' "$ra"
+		else
+			printf 'ray[default]\n'
+		fi
+		if [[ -n "$da" && "${PINS_WHEEL_CHECK:-1}" != 0 ]]; then
+			printf 'dask[distributed]==%s\n' "$da"
+		else
+			printf 'dask[distributed]\n'
+		fi
 		printf 'pyarrow\n' # dask.dataframe (w2_dask.py) imports it
 	} >"$req"
 
@@ -228,10 +308,10 @@ main() {
 			awk -F, 'NR == 1 || $1 != "pipedpeer"' "$LAB/versions.csv"
 		fi
 	} >"$tmp"
-	printf 'pipedpeer,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$py" "$np" "$pd" "$sk" "$jb" "$tr" "$ra" "$da" "${ppver:-none}" >>"$tmp"
+	printf 'pipedpeer,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$py" "$np" "$pd" "$sk" "$jb" "$tr" "${ra:-none}" "${da:-none}" "${ppver:-none}" >>"$tmp"
 	mv "$tmp" "$LAB/versions.csv"
-	lab_log "pins: python=$py numpy=$np pandas=$pd sklearn=$sk joblib=$jb torch=$tr ray=$ra dask=$da pipedpeer=${ppver:-none}"
-	printf 'PINS python=%s torch=%s ray=%s dask=%s\n' "$py" "$tr" "$ra" "$da"
+	lab_log "pins: python=$py numpy=$np pandas=$pd sklearn=$sk joblib=$jb torch=$tr ray=${ra:-none} dask=${da:-none} pipedpeer=${ppver:-none}"
+	printf 'PINS python=%s torch=%s ray=%s dask=%s\n' "$py" "$tr" "${ra:-none}" "${da:-none}"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
