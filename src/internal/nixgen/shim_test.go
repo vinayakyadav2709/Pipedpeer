@@ -122,10 +122,12 @@ if __name__ == "__main__":
 // /v1/pool/map for the shim: it executes the shipped worker source in-process,
 // serves the warm-worker _CACHE by cache_keys, and counts bandwidth probes.
 const shimFakeDaemon = `
+import atexit
 import base64
 import json
 import os
 import pickle
+import shutil
 import struct
 import sys
 import tempfile
@@ -142,6 +144,19 @@ POOL_CALLS = [0]
 FRAMES = []
 COUNT_LOCK = threading.Lock()
 TMP = tempfile.mkdtemp(prefix="pp-shim-")
+TMP_OWNER = os.getpid()
+
+
+def remove_tmp():
+    if os.getpid() != TMP_OWNER:
+        return
+    try:
+        shutil.rmtree(TMP)
+    except OSError as err:
+        print("pp-shim: could not remove", TMP, err, file=sys.stderr)
+
+
+atexit.register(remove_tmp)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
