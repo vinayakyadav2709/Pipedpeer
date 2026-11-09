@@ -193,7 +193,16 @@ class _ClusterPool:
                 _decide("pool.map", True, "--offload keeps this machine's share at 0")
                 return self._race(func, items, starmap, 0, payload, catch)
             _offload_warn("a pool.map", "its function cannot be sent, by source or by value")
-        if not self._remote or len(items) <= self._measure_items:
+        if not self._remote:
+            return self._local(func, items, starmap, catch)
+        if len(items) <= self._measure_items:
+            # Too few items to measure. Forced, they still ship: nothing is
+            # left for a tail, so without this a one-item map never leaves.
+            if core._FORCE and items:
+                payload = _func_payload(func) or _func_pickle(func)
+                if payload is not None:
+                    _decide("pool.map", True, "forced")
+                    return self._race(func, items, starmap, 0, payload, catch)
             return self._local(func, items, starmap, catch)
         # Measure the first few locally, then decide whether to spill the rest.
         # The batch is as wide as the pool: measuring four items on a twenty
