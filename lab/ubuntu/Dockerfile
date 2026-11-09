@@ -10,5 +10,8 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/* \
  && useradd -m -s /bin/bash -G sudo lab \
  && echo 'lab:lab' | chpasswd
+# The container runs --privileged, so /dev/tty1-6 are the host's real terminals:
+# a getty here would take over the terminal the host's desktop is running on.
+RUN systemctl mask getty.target getty@.service autovt@.service serial-getty@.service console-getty.service getty-static.service
 STOPSIGNAL SIGRTMIN+3
 CMD ["/lib/systemd/systemd"]
