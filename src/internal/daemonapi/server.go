@@ -67,6 +67,12 @@ type Lease struct {
 // Server is the daemon API server that manages job leases and resource reservations.
 type Server struct {
 	nodeID string
+	// firstPollDone is set once pollAllNodes has finished a cycle; until then
+	// an upload that knows no peers polls for them itself.
+	firstPollDone atomic.Bool
+	// joinSeed tracks environment sends to PCs that join during a job.
+	joinSeedOnce sync.Once
+	joinSeed     *joinSeeder
 	// recipes maps an uploaded store path to its nixgen.Recipe, for peers of
 	// another system (offerRecipes). ponytail: never pruned; a few hundred
 	// bytes per environment.

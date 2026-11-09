@@ -179,6 +179,7 @@ func (s *Server) SetSelfInfo(host string, daemonPort int, caps map[string]string
 //
 // Everything the orchestrator later reads from /v1/nodes is written here.
 func (s *Server) pollAllNodes() {
+	defer s.markFirstPollDone()
 	if s.store == nil {
 		return
 	}
@@ -257,6 +258,9 @@ func (s *Server) pollAllNodes() {
 	// 7. Keep the list of signing keys this cluster uses current, so nix can
 	//    require a signature and still accept peer closures.
 	s.refreshTrustedKeys()
+
+	// 8. Seed active job closures to healthy peers that joined since upload.
+	s.seedJoiningPeers()
 }
 
 // retryPending polls the forwarders AddPeer could not identify yet.
@@ -320,3 +324,7 @@ func (s *Server) tryPending(a string, since uint64) bool {
 	}
 	return ok
 }
+
+func (s *Server) markFirstPollDone() { s.firstPollDone.Store(true) }
+
+func (s *Server) isFirstPollDone() bool { return s.firstPollDone.Load() }

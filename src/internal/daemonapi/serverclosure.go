@@ -94,7 +94,7 @@ func (s *Server) healthyPeers() ([]PeerHealth, int) {
 // holding the closure on every chunk.
 func (s *Server) broadcastClosure(storePath string) []string {
 	targets, known := s.healthyPeers()
-	if len(targets) == 0 && known == 0 {
+	if len(targets) == 0 && known == 0 && !s.isFirstPollDone() {
 		// The poller has not finished its first cycle. A daemon that has just
 		// started still answers uploads, and /v1/nodes serves peer states
 		// persisted from a previous run, so both the submitter and the
@@ -120,10 +120,12 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	})
 	s.offerRecipes(storePath, foreign, false)
 	if len(targets) == 0 {
-		// Usually a timing problem: the health poller has not run since the
-		// peers were added, so they are known but not yet marked healthy.
-		log.Warn().Int("known_peers", known).
-			Msg("no healthy peers to broadcast the closure to; pool work will stay local")
+		if known > 0 {
+			// Usually a timing problem: the health poller has not run since the
+			// peers were added, so they are known but not yet marked healthy.
+			log.Warn().Int("known_peers", known).
+				Msg("no healthy peers to broadcast the closure to; pool work will stay local")
+		}
 		return nil
 	}
 	// A CUDA closure is several GB and only a GPU node can use it. The
@@ -158,27 +160,57 @@ func (s *Server) broadcastClosure(storePath string) []string {
 	var waitOn []PeerHealth
 	var waits []*seed
 	var fresh []int
+
+	type peerCheckResult struct {
+		ph        PeerHealth
+		sd        *seed
+		runnable  bool
+		importing bool
+		already   bool
+	}
+	results := make([]peerCheckResult, len(targets))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 16)
+
 	for i := range targets {
 		ph := targets[i]
 		if sd := s.seedFor(ph, storePath); sd != nil {
-			log.Info().Str("peer", ph.addr()).Str("store", storePath).
-				Msg("peer is already importing this closure from us; waiting on that send")
-			waitOn, waits = append(waitOn, ph), append(waits, sd)
+			results[i] = peerCheckResult{ph: ph, sd: sd, already: true}
 			continue
 		}
-		runnable, importing := s.peerStoreState(&ph, storePath, nil)
+		wg.Add(1)
+		go func(idx int, p PeerHealth) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			runnable, importing := s.peerStoreState(&p, storePath, nil)
+			results[idx] = peerCheckResult{
+				ph:        p,
+				runnable:  runnable,
+				importing: importing,
+			}
+		}(i, ph)
+	}
+	wg.Wait()
+
+	for _, res := range results {
 		switch {
-		case runnable:
-		case importing:
-			log.Info().Str("peer", ph.addr()).Str("store", storePath).
+		case res.already:
+			log.Info().Str("peer", res.ph.addr()).Str("store", storePath).
+				Msg("peer is already importing this closure from us; waiting on that send")
+			waitOn, waits = append(waitOn, res.ph), append(waits, res.sd)
+		case res.runnable:
+		case res.importing:
+			log.Info().Str("peer", res.ph.addr()).Str("store", storePath).
 				Msg("peer is already importing this closure from another node; not sending it again")
-			lines = append(lines, fmt.Sprintf("peer %s is still importing this environment; it joins the pool when the import finishes", ph.addr()))
+			lines = append(lines, fmt.Sprintf("peer %s is still importing this environment; it joins the pool when the import finishes", res.ph.addr()))
 		default:
-			sd, started := s.startSeed(ph, storePath)
+			sd, started := s.startSeed(res.ph, storePath)
 			if started {
 				fresh = append(fresh, len(waits))
 			}
-			waitOn, waits = append(waitOn, ph), append(waits, sd)
+			waitOn, waits = append(waitOn, res.ph), append(waits, sd)
 		}
 	}
 	if len(waits) == 0 {

@@ -147,14 +147,15 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 		s.jobs = make(map[string]*JobRecord)
 	}
 	s.jobs[jobID] = &JobRecord{
-		JobID:      jobID,
-		WorkDir:    workDir,
-		NarPath:    narPath,
-		StorePath:  storePath,
-		ScriptPath: scriptPath,
-		Status:     "uploaded",
-		CreatedAt:  time.Now(),
-		Uploaded:   uploaded,
+		JobID:         jobID,
+		WorkDir:       workDir,
+		NarPath:       narPath,
+		StorePath:     storePath,
+		ScriptPath:    scriptPath,
+		Status:        "uploaded",
+		CreatedAt:     time.Now(),
+		Uploaded:      uploaded,
+		SkipBroadcast: skipBroadcast == "1",
 	}
 	s.jobsMu.Unlock()
 	s.persist()
@@ -171,9 +172,13 @@ func (s *Server) handleJobUpload(w http.ResponseWriter, r *http.Request) {
 	var warnings []string
 	var seed time.Duration
 	if skipBroadcast != "1" {
+		cleanup := s.registerJobPeers(storePath)
 		seedStart := time.Now()
 		warnings = s.broadcastClosure(storePath)
 		seed = time.Since(seedStart)
+		if cleanup != nil {
+			cleanup()
+		}
 	}
 
 	writeJSON(w, http.StatusOK, UploadResponse{JobID: jobID, StorePath: storePath, NodeID: s.nodeID,

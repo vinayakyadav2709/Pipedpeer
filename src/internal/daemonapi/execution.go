@@ -163,6 +163,8 @@ type JobRecord struct {
 	// that outlived the old one, and nothing else (pids get reused).
 	Pgid      int   `json:",omitempty"`
 	PgidStart int64 `json:",omitempty"`
+	// SkipBroadcast: uploaded with skip_broadcast (e.g. DDP); no closure broadcast.
+	SkipBroadcast bool `json:",omitempty"`
 }
 
 // FileStamp identifies a file version well enough to tell whether a job
