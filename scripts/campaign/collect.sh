@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # collect.sh: gathers everything needed to update the paper into a single folder
 # for upload to Google Drive and offline processing.
+#
+# collect.sh --bug: one folder with everything needed to debug a failed run
+# (default ~/Documents/pipedpeer/bug-<time>): the lab dir, the driver's tool
+# versions, and from every PC in hosts.tsv its versions, status, daemon and
+# Ray/Dask journals, warm-up log, Ray's raylet.out/gcs_server.out, memory
+# evidence (cgroup v1 and v2 files, PSI, kernel OOM lines) and disk. It works
+# without runs.jsonl and when analyse.py fails. Secrets stay out: private keys,
+# r2.env and cluster.json are left out, invite codes and token=/secret= values
+# are redacted, and SUMMARY.txt names what was left out or not reached.
 set -euo pipefail
 
 usage() {
@@ -8,11 +17,15 @@ usage() {
 		usage: collect.sh [--to DIR]
 
 		Options:
-		  --to DIR    Target directory for bundle (default: ~/Documents/pipedpeer/lab-bundle)
+		  --to DIR    Target directory for bundle (default: ~/Documents/pipedpeer/lab-bundle,
+		              or ~/Documents/pipedpeer/bug-<time> with --bug)
+		  --bug       Bug report: logs, versions and memory evidence from the driver
+		              and every PC, secrets left out; send the folder, do not fix
 	EOF
 }
 
-TO_DIR="$HOME/Documents/pipedpeer/lab-bundle"
+TO_DIR=""
+BUG=0
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -23,6 +36,10 @@ while [[ $# -gt 0 ]]; do
 		fi
 		TO_DIR="$2"
 		shift 2
+		;;
+	--bug)
+		BUG=1
+		shift
 		;;
 	-h | --help)
 		usage
@@ -41,6 +58,14 @@ REPO="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)" || {
 	exit 1
 }
 LAB="${LAB_RESULTS:-$REPO/results/lab}"
+
+if ((BUG)); then
+	# shellcheck source=/dev/null
+	source "$REPO/scripts/campaign/collect-bug.sh"
+	collect_bug "${TO_DIR:-$HOME/Documents/pipedpeer/bug-$(date +%Y%m%d-%H%M%S)}"
+	exit $?
+fi
+TO_DIR="${TO_DIR:-$HOME/Documents/pipedpeer/lab-bundle}"
 
 # 1. Require runs.jsonl under results directory; create no folder if missing
 if [[ ! -f "$LAB/runs.jsonl" ]]; then
