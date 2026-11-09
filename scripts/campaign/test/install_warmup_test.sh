@@ -9,6 +9,10 @@
 #   4. log stalls -> named before timeout with last log line, other PCs kept, exit 1
 #   5. log missing -> named, other PCs kept, exit 1
 #   6. timeout -> named with last log line, exit 1
+#  10. pc00's own build fails during this install -> failed, not retried
+#  12. pc00's failed log is from an EARLIER install (unchanged by this one's
+#      setup, which the product's failure backoff refuses) -> restarted once
+#      with PIPEDPEER_WARMUP_RETRY=1, logged; it is not this install's result
 
 set -euo pipefail
 
@@ -91,6 +95,12 @@ case "${1:-}" in
 		;;
 	setup)
 		echo "setup ${PIPEDPEER_WARMUP_RETRY:-noretry}" >>"$HOME/setup-calls"
+		# setup-writes: the build this setup starts, and how its log ends (a
+		# fresh log, written during this install)
+		if [[ -z "${PIPEDPEER_WARMUP_RETRY:-}" && -f "$HOME/setup-writes" ]]; then
+			mkdir -p "$HOME/.local/state/pipedpeer"
+			{ printf '%s building the common environment build=test torch=CPU\n' "$(date -Is)"; cat "$HOME/setup-writes"; } >"$HOME/.local/state/pipedpeer/warmup.log"
+		fi
 		if [[ -n "${PIPEDPEER_WARMUP_RETRY:-}" && -f "$HOME/retry-result" ]]; then
 			cat "$HOME/retry-result" >>"$HOME/.local/state/pipedpeer/warmup.log"
 		fi
@@ -110,9 +120,10 @@ case_setup() {
 	cd "$REPO"
 	fakelab_init "$dir" "$n" || exit 90
 	pipedpeer_stub "$dir/bin"
+	# the released installer ends with `pipedpeer setup -y`, which starts the build
 	cat >"$dir/bin/INSTALL-STUB" <<'IS'
 #!/usr/bin/env bash
-exit 0
+exec pipedpeer setup -y >/dev/null
 IS
 	chmod +x "$dir/bin/INSTALL-STUB"
 	export INSTALL_CMD="INSTALL-STUB {version}"
@@ -368,7 +379,8 @@ t9_token_swap_retry() {
 	(
 		case_setup "$d" 2
 		set_warmup_log "$d/pc00" 10 "done"
-		set_warmup_log "$d/pc01" 10 "failed (exit 1); details above"
+		# this install's build on pc01 fails (the token swap kills it)
+		printf 'compiling\nfailed (exit 1); details above\n' >"$d/pc01/setup-writes"
 		echo "done" >"$d/pc01/retry-result"
 		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
 		printf 'rc=%s\n' "$?"
@@ -377,6 +389,7 @@ t9_token_swap_retry() {
 	grep -q 'INSTALL ok=2 failed=0' "$d/log" || pnote "no 'INSTALL ok=2 failed=0'"
 	grep -q $'pc01\t[0-9-]\+\tdone' "$d/warmup-times.tsv" || pnote "pc01 not done"
 	[[ "$(count "$d/pc01/setup-calls" 'setup 1')" == 1 ]] || pnote "pc01 warm-up not retried once with the retry env"
+	! grep -q 'from before this install' "$d/campaign.log" || pnote "a fresh failure was taken for a stale log"
 	verdict "warm-up failed after the connect token swap -> restarted, waited, done"
 }
 
@@ -386,7 +399,8 @@ t10_no_swap_no_retry() {
 	d="$(newdir)"
 	(
 		case_setup "$d" 2
-		set_warmup_log "$d/pc00" 10 "failed (exit 1); details above"
+		# this install's own build on pc00 fails (setup writes the log)
+		printf 'compiling\nfailed (exit 1); details above\n' >"$d/pc00/setup-writes"
 		set_warmup_log "$d/pc01" 10 "done"
 		echo "done" >"$d/pc00/retry-result"
 		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
@@ -405,7 +419,7 @@ t11_retries_exhausted() {
 	(
 		case_setup "$d" 2
 		set_warmup_log "$d/pc00" 10 "done"
-		set_warmup_log "$d/pc01" 10 "failed (exit 1); details above"
+		printf 'compiling\nfailed (exit 1); details above\n' >"$d/pc01/setup-writes"
 		echo "failed (exit 1); details above" >"$d/pc01/retry-result"
 		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
 		printf 'rc=%s\n' "$?"
@@ -417,10 +431,30 @@ t11_retries_exhausted() {
 	verdict "warm-up keeps failing -> retries exhausted, logged with host, failed"
 }
 
+# --- Case 12: a failed log left by an earlier install -> restarted once, logged
+t12_stale_failed_log() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 600 "failed (exit 1); details above"
+		set_warmup_log "$d/pc01" 10 "done"
+		echo "done" >"$d/pc00/retry-result"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=0$' "$d/log" || pnote "expected exit 0: $(grep -E 'FAILED|rc=' "$d/log" | tr '\n' ' ')"
+	[[ "$(count "$d/pc00/setup-calls" 'setup 1')" == 1 ]] || pnote "want pc00 restarted once with the retry env, got $(count "$d/pc00/setup-calls" 'setup 1')"
+	grep -q 'warmup pc00 .*from before this install' "$d/campaign.log" || pnote "the stale log was not logged as such"
+	grep -q $'pc00\t[0-9]\+\tdone' "$d/warmup-times.tsv" || pnote "pc00 not done in warmup-times.tsv"
+	verdict "a failed warm-up log from an earlier install -> restarted once, logged, done"
+}
+
 t1_all_done
 t9_token_swap_retry
 t10_no_swap_no_retry
 t11_retries_exhausted
+t12_stale_failed_log
 t2_already_done
 t3_one_failed
 t4_log_stalls
