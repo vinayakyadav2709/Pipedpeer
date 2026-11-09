@@ -222,9 +222,9 @@ def test_speedup_perfect(labs):  # 5 reps N=1 [100]*5, N=2 [50]*5 -> 2.0, CI [2,
     assert float(r["speedup_hi"]) == pytest.approx(2.0, abs=1e-6)
 
 
-def test_speedup_noisy(labs):  # N=2 [48..52] vs N=1 [100,99,101,100,100]
+def test_speedup_noisy(labs):  # N=2 [49..52] vs N=1 [100]*5 (a valid group)
     r = _pick(_read_csv(labs["main"], "E1.csv"), workload="W1",
-              system="pipedpeer", n=2)
+              system="dask", n=2)
     assert float(r["speedup"]) == pytest.approx(2.0, rel=1e-6)
     lo, hi = float(r["speedup_lo"]), float(r["speedup_hi"])
     assert lo < 2.0 < hi
@@ -717,3 +717,68 @@ def test_prediction_earlier_crossover_holds():  # M11
     warns = []
     _an.check_predictions(lab, {("plain", "W1", 2): 0.5, ("plain", "W1", 8): 2.0}, warns)
     assert warns  # crossover later than predicted still misses
+
+
+# --- FIX-V5c ---
+def _lab_with(tmp_path_factory, rows, e19=None):
+    lab = tmp_path_factory.mktemp("v5c")
+    (lab / "runs.jsonl").write_text(
+        "\n".join(__import__("json").dumps(r) for r in rows) + "\n")
+    if e19:
+        (lab / "analysis-input").mkdir()
+        (lab / "analysis-input" / "e19.csv").write_text(e19)
+    return lab
+
+
+def test_sweep_experiment_figures_build(tmp_path_factory):  # E13 csv has no workload column
+    rows = _seq("E13", "TS1", "pipedpeer", 1, [10] * 5, size={"items": 100})
+    rows += _seq("E13", "TS1", "pipedpeer", 2, [5] * 5, size={"items": 100})
+    lab = _lab_with(tmp_path_factory, rows)
+    p = _run(lab)
+    assert p.returncode == 0, p.stderr
+    assert "KeyError" not in p.stderr
+    sp = _read_csv(lab, "E13-speedup.csv")
+    assert {r["workload"] for r in sp} == {"TS1"}
+    assert "task_ms" in _read_csv(lab, "E13.csv")[0]
+    assert (lab / "figures" / "e13-speedup-ts1.png").exists()
+
+
+def test_invalid_group_has_no_median(labs):  # E1 W1 pipedpeer n=2 has 4 of 5 usable
+    r = _pick(_read_csv(labs["main"], "E1.csv"), workload="W1",
+              system="pipedpeer", n=2)
+    assert r["status"] == "invalid"
+    assert r["median_s"] == "" and r["q1_s"] == "" and r["speedup"] == ""
+
+
+def test_valid_group_keeps_median(labs):  # opposite
+    r = _pick(_read_csv(labs["main"], "E1.csv"), workload="W1",
+              system="dask", n=2)
+    assert r["status"] == "valid"
+    assert float(r["median_s"]) == pytest.approx(50.0)
+    assert float(r["speedup"]) == pytest.approx(2.0)
+
+
+E19_PARTIAL = """\
+system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status
+pipedpeer,baseline,0,,,,90,1,,,
+pipedpeer,join,1,pc01,10,20,95,1,0.5,0,ok
+pipedpeer,join,2,pc02,30,40,96,1,0.5,0,partial
+pipedpeer,join,3,pc03,,,97,1,0.5,0,failed
+"""
+
+
+def test_e19_partial_joins_counted_and_kept(tmp_path_factory):
+    lab = _lab_with(tmp_path_factory, _seq("E1", "W1", "plain", 1, [1] * 5),
+                    e19=E19_PARTIAL)
+    assert _run(lab).returncode == 0
+    r = _read_csv(lab, "E19.csv")[0]
+    assert float(r["join_s_median"]) == pytest.approx(20.0)  # ok 10 and partial 30
+    assert r["joins_not_ok"] == "2"
+
+
+def test_e19_all_ok_counts_zero(tmp_path_factory):
+    csv_ = E19_PARTIAL.replace("partial", "ok").replace("failed", "ok")
+    lab = _lab_with(tmp_path_factory, _seq("E1", "W1", "plain", 1, [1] * 5),
+                    e19=csv_)
+    assert _run(lab).returncode == 0
+    assert _read_csv(lab, "E19.csv")[0]["joins_not_ok"] == "0"

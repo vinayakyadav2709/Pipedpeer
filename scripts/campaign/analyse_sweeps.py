@@ -372,7 +372,7 @@ def table_e19_from_csv(csv_path):
 
     cols = ["system", "runs_baseline", "runs_join", "join_s_median",
             "first_work_s_median", "wall_baseline_s_median", "wall_join_s_median",
-            "result_ok_all"]
+            "result_ok_all", "joins_not_ok"]
     rows = []
 
     systems = sorted({r.get("system") for r in rows_data if r.get("system")})
@@ -402,6 +402,9 @@ def table_e19_from_csv(csv_path):
             "wall_baseline_s_median": float(np.median(base_walls)) if base_walls else None,
             "wall_join_s_median": float(np.median(join_walls)) if join_walls else None,
             "result_ok_all": all(all_oks) if all_oks else None,
+            # partial and failed joins stay in the statistics above; this is how many
+            "joins_not_ok": sum(1 for r in join_rows
+                                if (r.get("join_status") or "").strip() != "ok"),
         })
     return cols, rows
 

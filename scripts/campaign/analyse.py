@@ -20,6 +20,8 @@ from scipy import stats
 
 REPO = Path(__file__).resolve().parents[2]
 EXPS = ("E4", "E5", "E6", "E11")
+# E13..E20 write their own table to analysis/<EXP>.csv (no workload column)
+SWEEP_EXPS = tuple(f"E{i}" for i in range(13, 21))
 EXP_COLS = ["experiment", "workload", "system", "n", "size", "repeats",
             "dropped", "status",
             "median_s", "q1_s", "q3_s", "speedup", "speedup_lo", "speedup_hi",
@@ -149,7 +151,9 @@ def _verdict(lo, hi):
 
 
 def _group_row(exp, w, s, n, g):
-    med = float(np.median(g.walls)) if g.walls else None
+    # an invalid group (fewer usable repeats than planned) has no median
+    stats_ok = bool(g.walls) and not g.invalid
+    med = float(np.median(g.walls)) if stats_ok else None
     ref = Counter(g.refs).most_common(1)[0][0] if g.refs else "none"
     known = [v for v in g.oks if v is not None]
     # no reference in any run: nothing was checked, so neither True nor False
@@ -158,8 +162,8 @@ def _group_row(exp, w, s, n, g):
         "experiment": exp, "workload": w, "system": s, "n": n,
         "size": g.size(), "repeats": len(g.walls), "dropped": g.dropped,
         "status": g.status, "median_s": med,
-        "q1_s": float(np.percentile(g.walls, 25)) if g.walls else None,
-        "q3_s": float(np.percentile(g.walls, 75)) if g.walls else None,
+        "q1_s": float(np.percentile(g.walls, 25)) if stats_ok else None,
+        "q3_s": float(np.percentile(g.walls, 75)) if stats_ok else None,
         "result_ok_all": ok_all, "ref": ref,
     }
 
@@ -174,7 +178,8 @@ def exp_speed_rows(groups, exp, speedups=None, eff=False):
             for n in sorted(groups[exp][w][s]):
                 g = groups[exp][w][s][n]
                 row = _group_row(exp, w, s, n, g)
-                if n != 1 and base and base.walls and g.walls:
+                if (n != 1 and base and base.walls and g.walls
+                        and not base.invalid and not g.invalid):
                     pt, lo, hi = _boot_ratio(base.walls, g.walls)
                     row.update({key: pt, key + "_lo": lo, key + "_hi": hi})
                     if speedups is not None and math.isfinite(pt):
@@ -266,8 +271,10 @@ def check_predictions(lab, speedups, warns):
 
 def speedup_name(exp):
     """File of an experiment's per-workload speedup table: E4..E11 also have
-    their own table under analysis/<EXP>.csv, so theirs is <EXP>-speedup.csv."""
-    return f"{exp}-speedup.csv" if exp in EXPS else f"{exp}.csv"
+    their own table under analysis/<EXP>.csv, and so do E13..E20, so theirs is
+    <EXP>-speedup.csv."""
+    return (f"{exp}-speedup.csv" if exp in EXPS or exp in SWEEP_EXPS
+            else f"{exp}.csv")
 
 
 def spread_report(groups):
@@ -506,6 +513,10 @@ def make_figures(lab, groups, weak):
     for exp in sorted(groups):
         rows = _read_csv_rows(analysis / speedup_name(exp))
         if not rows:
+            continue
+        if "workload" not in rows[0]:
+            print(f"WARN {speedup_name(exp)} has no workload column; "
+                  f"speedup figures for {exp} skipped")
             continue
         for w in sorted({r["workload"] for r in rows}):
             curve(f"{exp.lower()}-speedup-{w.lower()}",
