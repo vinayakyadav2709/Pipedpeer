@@ -165,6 +165,8 @@ snap() {
 			echo "## sleep targets"; systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target 2>&1 || true
 			echo "## linger"; loginctl show-user lab --property=Linger 2>/dev/null | grep -qx Linger=yes && echo Linger=yes || echo Linger=no
 			echo "## ssh"; systemctl is-active ssh.service ssh.socket 2>&1 || true
+			echo "## lab user leftovers"; ls -d /home/lab/pipedpeer-lab /home/lab/.ssh/pipedpeer-lab-pc00* 2>&1 || true
+			echo "## nix"; ls -d /nix 2>&1 || true
 			echo "## lab state"; ls /var/lib/pipedpeer-lab 2>&1 || true' >"$out" 2>&1 || true
 	done
 }
@@ -330,6 +332,8 @@ chmod 600 ~/.config/pipedpeer-lab/r2.env'
 step8() {
 	STEP_K=8
 	local k out tries d
+	# The PCs the earlier steps used (lab_hosts N), not every PC in the host table: a
+	# down or unrelated PC must not turn the fanout into a failure.
 	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-uninstall \$f 'pipedpeer uninstall -y'" >/dev/null 2>&1 \
 		|| fail "pipedpeer uninstall -y failed on every PC"
 	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-undo \$f 'sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo'" >/dev/null 2>&1 \
@@ -347,7 +351,15 @@ step8() {
 	snap after
 	d=0
 	for ((k = 1; k <= N; k++)); do
-		if ! out="$(diff "$snapdir/before/ubu$k" "$snapdir/after/ubu$k")"; then
+		# Nix from the stock installer cannot be removed by undo; it says so and
+		# names the manual step. That is the expected path, not a leftover.
+		if on "ubu$k" 'journalctl -u lab-undo --no-pager 2>/dev/null | grep -q "Nix left in place (stock installer"'; then
+			echo "WARN ubu$k: stock-installer Nix left in place, as undo said; /nix not compared" >&2
+			if ! out="$(diff <(grep -vE "^(/nix|ls: cannot access '/nix')" "$snapdir/before/ubu$k") <(grep -vE "^(/nix|ls: cannot access '/nix')" "$snapdir/after/ubu$k"))"; then
+				printf 'ubu%s differs after undo:\n%s\n' "$k" "$out" >&2
+				d=1
+			fi
+		elif ! out="$(diff "$snapdir/before/ubu$k" "$snapdir/after/ubu$k")"; then
 			printf 'ubu%s differs after undo:\n%s\n' "$k" "$out" >&2
 			d=1
 		fi

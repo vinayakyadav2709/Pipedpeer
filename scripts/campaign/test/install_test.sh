@@ -436,6 +436,30 @@ t9() {
 	verdict "a PC whose versions line differs -> FAILED list, exit 1"
 }
 
+# install runs `lab-pc.sh mark` on every PC; one PC where it fails is warned
+# about by name and the install still finishes ok=3.
+t10() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		cat >"$d/fake-lab-pc.sh" <<'FLP'
+#!/usr/bin/env bash
+echo "mark $*" >>"$HOME/mark.log"
+[[ "$(basename "$HOME")" == pc01 ]] && exit 1
+exit 0
+FLP
+		export LAB_PC_SELF="$d/fake-lab-pc.sh"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	grep -q 'INSTALL ok=3 failed=0' "$d/log" || pnote "install did not finish ok=3"
+	[[ -f "$d/pc00/mark.log" && -f "$d/pc02/mark.log" ]] || pnote "mark did not run on pc00 and pc02"
+	grep -q 'mark failed on pc01' "$d/log" || pnote "no warning naming pc01"
+	grep -q 'mark failed on pc00' "$d/log" && pnote "warned about pc00, which succeeded"
+	verdict "mark fails on one PC -> warning names it, install continues"
+}
+
 printf 'scripts/campaign install/pins/venv case table\n\n'
 t1
 t2
@@ -447,6 +471,7 @@ t6
 t7
 t8
 t9
+t10
 printf '\n'
 
 total=$((pass + failed))

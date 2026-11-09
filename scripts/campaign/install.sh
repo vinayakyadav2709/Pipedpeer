@@ -156,6 +156,22 @@ main() {
 		lab_log "install: every PC failed the install step"
 		echo "every PC failed the install step" >&2
 	fi
+	# Record who installed Nix, so the last session's undo removes the Nix this
+	# install brought (and only that). lab-pc.sh setup left a copy of itself in
+	# its state dir (/tmp/lab-pc.sh may be gone after a reboot). A PC where this
+	# fails is warned about; the install goes on, and undo then leaves its Nix.
+	local lab_pc_self="${LAB_PC_SELF:-/var/lib/pipedpeer-lab/lab-pc.sh}" mark_failed=""
+	rc=0
+	lab_fanout install-mark "$hostfile" "sudo bash $lab_pc_self mark" || rc=$?
+	if [[ -f "$LAB/logs/install-mark/FAILED" ]]; then
+		mark_failed="$(tr '\n' ' ' <"$LAB/logs/install-mark/FAILED")"
+	elif ((rc != 0)); then
+		mark_failed="every PC"
+	fi
+	if [[ -n "$mark_failed" ]]; then
+		lab_log "install: WARNING: lab-pc.sh mark failed on ${mark_failed}; undo will leave Nix there if the install brought it"
+		echo "WARNING: lab-pc.sh mark failed on ${mark_failed}" >&2
+	fi
 	# A PC the install fan-out could not get through stays failed even when a
 	# later status query answers (the version it reports is not the one this
 	# run installed). These PCs are skipped in the status scan below.

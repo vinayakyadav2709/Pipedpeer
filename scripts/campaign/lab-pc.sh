@@ -13,17 +13,15 @@ LAB_USER="${SUDO_USER:-$(logname 2>/dev/null || echo root)}"
 HOME_DIR=$(getent passwd "$LAB_USER" | cut -d: -f6)
 STATE=/var/lib/pipedpeer-lab/state
 LINE_FILE=/var/lib/pipedpeer-lab/lab-pc.line
+SELF=/var/lib/pipedpeer-lab/lab-pc.sh   # setup's copy of this script: install.sh runs `mark` from it
 MARK="# pipedpeer-lab"
 SUDOERS=/etc/sudoers.d/pipedpeer-lab
+NIX_DIR=/nix
+RUN_USER_DIR=/run/user
 
 log()  { echo "[lab-pc] $*"; }
 die()  { echo "[lab-pc] ERROR: $*" >&2; exit 1; }
 record() { mkdir -p "$(dirname "$STATE")"; grep -qxF "$1" "$STATE" 2>/dev/null || echo "$1" >>"$STATE"; }
-
-[[ $EUID -eq 0 ]] || die "run with sudo"
-
-command -v apt-get >/dev/null 2>&1 || die "this script is for Ubuntu (apt) only"
-[[ -n $HOME_DIR ]] || die "no home directory for $LAB_USER"
 
 # Package names installed and running, to record only what apt actually added.
 installed_pkgs() { dpkg --get-selections | awk '$2 == "install" {print $1}' | sort; }
@@ -103,7 +101,24 @@ linger() {
   fi
 }
 
+# Who installed Nix. Only when setup found none: a Nix that appears later was
+# brought by the campaign's install and is recorded with the installer kind,
+# once. Run by `ports` (every session) and `mark`, after the install step; a
+# Nix installed by someone else between setup and undo is not recorded and so
+# never removed.
+mark_nix() {
+  grep -qxF nix-absent "$STATE" 2>/dev/null || return 0
+  grep -q '^nix-campaign ' "$STATE" 2>/dev/null && return 0
+  [[ -e $NIX_DIR ]] || return 0
+  if [[ -x $NIX_DIR/nix-installer ]]; then record "nix-campaign determinate"
+  else record "nix-campaign stock"; fi
+}
+
 setup() {
+  # Nix: if the campaign's installs bring it, undo removes it; if it was here
+  # before, undo leaves it. Absence is recorded once, the first time setup
+  # runs; mark_nix records who installed it once it appears.
+  if [[ ! -e $NIX_DIR ]] && ! grep -qxF nix-absent "$STATE" 2>/dev/null; then record nix-absent; fi
   pkg openssh-server sysstat curl iperf3 parallel bzip2 rsync   # bzip2: GNU parallel --sshlogin execs it (absent on minimal images); sysstat: `sar`; curl: the product installer; rsync: every fetch and stage
 
   # Ubuntu 24.04 starts sshd by socket activation, 22.04 as a service.
@@ -149,6 +164,7 @@ setup() {
 
   linger
   ports
+  mark_nix
   nosleep
 
   local ip line
@@ -158,14 +174,18 @@ setup() {
   echo "$line"
   install -d /var/lib/pipedpeer-lab
   echo "$line" >"$LINE_FILE"
+  # /tmp/lab-pc.sh can vanish on a reboot; the state dir's copy is removed with
+  # the state, and kept while a failed undo keeps it.
+  if [[ ! $SELF -ef ${BASH_SOURCE[0]} ]]; then install -m 0700 -o root "${BASH_SOURCE[0]}" "$SELF"; fi
 }
 
 stop_service() {
-  local u=$1
-  systemctl disable --now "$u.service" 2>/dev/null || log "WARNING: $u.service not stopped"
+  local u=$1 rc=0
+  systemctl disable --now "$u.service" 2>/dev/null || { log "WARNING: $u.service not stopped"; rc=1; }
   if systemctl list-unit-files --no-legend "$u.socket" 2>/dev/null | grep -q .; then
-    systemctl disable --now "$u.socket" 2>/dev/null || log "WARNING: $u.socket not stopped"
+    systemctl disable --now "$u.socket" 2>/dev/null || { log "WARNING: $u.socket not stopped"; rc=1; }
   fi
+  return $rc
 }
 
 undo_gset() {
@@ -173,18 +193,63 @@ undo_gset() {
   uid=$(id -u "$LAB_USER")
   if [[ -S /run/user/$uid/bus ]] && command -v gsettings >/dev/null 2>&1; then
     gs set "$schema" "$key" "$*" \
-      || log "WARNING: gsettings $schema $key not restored (log in as $LAB_USER and rerun undo)"
+      || { log "WARNING: gsettings $schema $key not restored (log in as $LAB_USER and rerun undo)"; return 1; }
   else
     log "WARNING: no GNOME session for $LAB_USER; gsettings $schema $key not restored (log in and rerun undo)"
+    return 1
   fi
+}
+
+# A failed undo step: say so, and remember it so the state is kept for a rerun.
+warn() { log "WARNING: $*"; }
+
+# systemctl --user as the lab user, on their runtime dir.
+user_sc() {
+  local uid; uid=$(id -u "$LAB_USER")
+  sudo -u "$LAB_USER" env "XDG_RUNTIME_DIR=$RUN_USER_DIR/$uid" \
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=$RUN_USER_DIR/$uid/bus" systemctl --user "$@"
+}
+
+# What the campaign left running or set on the PC, before anything under the
+# venv goes: the lab-* units (ray, dask, detached runs), strays started outside
+# a unit, and the AllowedCPUs cap. Nothing there, nothing done. Returns 1 when
+# a step failed.
+stop_lab_runtime() {
+  local uid u rc=0 units cap
+  uid=$(id -u "$LAB_USER")
+  if [[ -d $RUN_USER_DIR/$uid ]]; then
+    units=$(user_sc list-units --no-legend --plain 'lab-*' 2>/dev/null | awk '{print $1}') || units=""
+    for u in $units; do
+      log "stopping $u"
+      user_sc stop "$u" </dev/null || { warn "unit $u not stopped"; rc=1; }
+    done
+  fi
+  # Processes of the lab venv or work dir that no unit owns (nohup fallback).
+  if pgrep -u "$LAB_USER" -f "$HOME_DIR/pipedpeer-lab/" >/dev/null 2>&1; then
+    log "stopping leftover processes under $HOME_DIR/pipedpeer-lab"
+    pkill -u "$LAB_USER" -f "$HOME_DIR/pipedpeer-lab/" || warn "leftover processes not stopped"
+    sleep 1
+    if pgrep -u "$LAB_USER" -f "$HOME_DIR/pipedpeer-lab/" >/dev/null 2>&1; then
+      warn "processes still running under $HOME_DIR/pipedpeer-lab"; rc=1
+    fi
+  fi
+  cap=$(systemctl show "user-$uid.slice" --property=AllowedCPUs --value 2>/dev/null || true)
+  if [[ -n $cap ]]; then
+    log "resetting the AllowedCPUs cap ($cap) on user-$uid.slice"
+    systemctl set-property --runtime "user-$uid.slice" AllowedCPUs= </dev/null \
+      || { warn "AllowedCPUs cap on user-$uid.slice not reset"; rc=1; }
+  fi
+  return $rc
 }
 
 # Run over SSH, start it detached so stopping sshd cannot cut it off halfway:
 #   sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo
 # then read `journalctl -u lab-undo` (or the PC's screen) for "undo complete".
+# A step that fails keeps its state line (and "cleanup" for the file work), so
+# a rerun retries exactly that; the state is removed only when all went through.
 undo() {
   [[ -f $STATE ]] || { log "nothing recorded"; return 0; }
-  local l f pkgs=() u
+  local l f pkgs=() u nix_absent=0 nix_kind="" keep=() k
   # Started by "sudo systemd-run" there is no SUDO_USER, so LAB_USER above is
   # root; the user setup acted for is on the line it saved.
   if [[ -f $LINE_FILE ]]; then
@@ -193,32 +258,36 @@ undo() {
       LAB_USER=$u
       HOME_DIR=$(getent passwd "$LAB_USER" | cut -d: -f6)
     else
-      log "WARNING: cannot read the lab user from $LINE_FILE; acting for $LAB_USER"
+      warn "cannot read the lab user from $LINE_FILE; acting for $LAB_USER"
     fi
   fi
+  stop_lab_runtime || keep+=(cleanup)
   # Read STATE on fd 3, newest first, so a rule that depends on another is
   # removed after it; apt/ufw cannot swallow the list from stdin.
   while IFS= read -r l <&3; do
     case "$l" in
       "ufw-from "*) ufw delete allow from "${l#ufw-from }" >/dev/null </dev/null \
-                      || log "WARNING: ufw from ${l#ufw-from } not removed" ;;
+                      || { warn "ufw from ${l#ufw-from } not removed"; keep+=("$l"); } ;;
       "ufw "*)      ufw delete allow "${l#ufw }" >/dev/null </dev/null \
-                      || log "WARNING: ufw ${l#ufw } not removed" ;;
-      "started "*)  stop_service "${l#started }" ;;
-      sudoers)      rm -f "$SUDOERS" ;;
+                      || { warn "ufw ${l#ufw } not removed"; keep+=("$l"); } ;;
+      "started "*)  stop_service "${l#started }" || keep+=("$l") ;;
+      sudoers)      rm -f "$SUDOERS" || { warn "$SUDOERS not removed"; keep+=("$l"); } ;;
       "mask "*)     systemctl unmask "${l#mask }" >/dev/null \
-                      || log "WARNING: ${l#mask } not unmasked" ;;
+                      || { warn "${l#mask } not unmasked"; keep+=("$l"); } ;;
       "gset "*)     read -r -a f <<<"${l#gset }"
-                    if [[ ${#f[@]} -ge 3 ]]; then undo_gset "${f[0]}" "${f[1]}" "${f[@]:2}"
-                    else log "WARNING: malformed state line, left as is: $l"; fi ;;
+                    if [[ ${#f[@]} -ge 3 ]]; then undo_gset "${f[0]}" "${f[1]}" "${f[@]:2}" || keep+=("$l")
+                    else warn "malformed state line, left as is: $l"; keep+=("$l"); fi ;;
       linger)       loginctl disable-linger "$LAB_USER" \
-                      || log "WARNING: lingering for $LAB_USER not disabled" ;;
+                      || { warn "lingering for $LAB_USER not disabled"; keep+=("$l"); } ;;
       rootkey)      if [[ -f /root/.ssh/authorized_keys ]]; then
                       sed -i "\| $MARK\$|d" /root/.ssh/authorized_keys \
-                        || log "WARNING: driver key not removed from /root/.ssh/authorized_keys"
+                        || { warn "driver key not removed from /root/.ssh/authorized_keys"; keep+=("$l"); }
                     fi ;;
+      nix-absent)   nix_absent=1 ;;
+      "nix-campaign "*) nix_kind=${l#nix-campaign } ;;
+      cleanup)      ;;
       "pkg "*)      pkgs+=("${l#pkg }") ;;
-      *)            log "WARNING: unknown state line, left as is: $l" ;;
+      *)            warn "unknown state line, left as is: $l"; keep+=("$l") ;;
     esac
   done 3< <(tac "$STATE")
 
@@ -230,24 +299,67 @@ undo() {
     for f in "${pkgs[@]}"; do
       if [[ $f == openssh-server ]]; then
         systemctl disable --now ssh.socket ssh.service >/dev/null 2>&1 \
-          || log "WARNING: ssh not stopped before the purge"
+          || warn "ssh not stopped before the purge"
       fi
     done
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "${pkgs[@]}" </dev/null \
-      || log "WARNING: not all packages purged: ${pkgs[*]}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "${pkgs[@]}" </dev/null; then
+      warn "not all packages purged: ${pkgs[*]}"
+      for f in "${pkgs[@]}"; do keep+=("pkg $f"); done
+    fi
   fi
 
   if [[ -f $HOME_DIR/.ssh/authorized_keys ]]; then
     sed -i "\| $MARK\$|d" "$HOME_DIR/.ssh/authorized_keys" \
-      || log "WARNING: driver key not removed from $HOME_DIR/.ssh/authorized_keys"
+      || { warn "driver key not removed from $HOME_DIR/.ssh/authorized_keys"; keep+=(cleanup); }
+  fi
+  # What the campaign's install and cluster steps left in the lab user's home.
+  rm -rf "$HOME_DIR/pipedpeer-lab" \
+    || { warn "$HOME_DIR/pipedpeer-lab not removed"; keep+=(cleanup); }
+  rm -f "$HOME_DIR"/.ssh/pipedpeer-lab-pc00* \
+    || { warn "$HOME_DIR/.ssh/pipedpeer-lab-pc00 key not removed"; keep+=(cleanup); }
+  # known_hosts entries pc00's ssh added (accept-new) name PCs of the lab and
+  # are harmless; they are not removed.
+  # Nix only where setup found none and the campaign's own install was recorded
+  # (mark_nix): a Nix someone else installed meanwhile stays.
+  if [[ $nix_absent == 1 && -e $NIX_DIR ]]; then
+    case "$nix_kind" in
+      determinate)
+        if [[ -x $NIX_DIR/nix-installer ]]; then
+          "$NIX_DIR/nix-installer" uninstall --no-confirm </dev/null \
+            || { warn "Nix not removed; run $NIX_DIR/nix-installer uninstall by hand, then rerun undo"
+                 keep+=(nix-absent "nix-campaign determinate"); }
+        else
+          warn "Nix was recorded as installed by the campaign but $NIX_DIR/nix-installer is gone; left in place, remove it by hand"
+        fi ;;
+      stock)
+        warn "Nix left in place (stock installer, no $NIX_DIR/nix-installer): remove it by hand with the steps for a multi-user install at https://nix.dev/manual/nix/stable/installation/uninstall" ;;
+      *)
+        warn "Nix left in place: it was not recorded as installed by the campaign (run 'lab-pc.sh mark' after the install step)" ;;
+    esac
+  fi
+  if [[ ${#keep[@]} -gt 0 ]]; then
+    : >"$STATE.new"
+    # keep is newest first (the loop read tac); the file is oldest first.
+    for ((k = ${#keep[@]} - 1; k >= 0; k--)); do printf '%s\n' "${keep[k]}" >>"$STATE.new"; done
+    mv "$STATE.new" "$STATE"
+    warn "undo incomplete: $STATE kept with the steps to retry; rerun undo"
+    return 1
   fi
   rm -rf "$(dirname "$STATE")"
   log "undo complete"
 }
 
+# Sourced by the case-table test: functions only.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 0; fi
+
+[[ $EUID -eq 0 ]] || die "run with sudo"
+command -v apt-get >/dev/null 2>&1 || die "this script is for Ubuntu (apt) only"
+[[ -n $HOME_DIR ]] || die "no home directory for $LAB_USER"
+
 case "${1:-}" in
   setup) setup ;;
-  ports) ports ;;
+  ports) ports; mark_nix ;;
+  mark)  mark_nix ;;
   undo)  undo ;;
-  *) die "usage: lab-pc.sh setup|ports|undo" ;;
+  *) die "usage: lab-pc.sh setup|ports|mark|undo" ;;
 esac

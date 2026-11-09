@@ -46,6 +46,7 @@ campaign-test-files:
 	bash scripts/campaign/test/exp_test.sh
 	bash scripts/campaign/test/ports_test.sh
 	bash scripts/campaign/test/venv_test.sh
+	bash scripts/campaign/test/lab_pc_test.sh
 	bash scripts/campaign/test/install_warmup_test.sh
 	bash scripts/campaign/test/cluster_dask_test.sh
 	bash scripts/campaign/test/batch_run_test.sh
