@@ -16,8 +16,9 @@
 # daemons' health after install.sh shows 4242/tcp; network.sh shows ping).
 #
 # Environment: PF_MIN_RAM_GIB (worker, default 4), PF_MIN_RAM_GIB_PC00
-# (default 8: a 2-node Ray cluster's head needed more than 3 GB on the
-# emulated lab), PF_MIN_DISK_GIB (default 15: Nix closure plus venv took about
+# (default 8: on the emulated lab pc00's Ray head, Dask scheduler, workers
+# and daemon used 3.0-3.3 GB with page cache, 1.24 GB resident, next to which a
+# real PC also runs its desktop), PF_MIN_DISK_GIB (default 15: Nix closure plus venv took about
 # 5.5 GB per PC there), PF_MAX_OFFSET_MS (default 100).
 set -euo pipefail
 _PF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
