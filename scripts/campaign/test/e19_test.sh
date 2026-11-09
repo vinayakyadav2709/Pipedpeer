@@ -406,7 +406,7 @@ verdict "ray join_s covers the poll (2 s stub), not the start call's 0.05 s"
 d="$(newdir)"
 (
   setup_lab "$d" 2; mkvenv "$d"
-  export LAB_RESULTS="$d" FAKE_POLL_RC=1 E19_STORE_PATH= E19_JOIN_WAIT_S=2
+  export LAB_RESULTS="$d" FAKE_POLL_RC=1 E19_STORE_PATH='' E19_JOIN_WAIT_S=2
   cd "$REPO"
   bash "$CAMP/e19.sh" --n 1 --add 1 --repeats 1 --systems ray
 ) >"$d/e19.log" 2>&1 || pnote "e19 ray exit $?"
@@ -532,36 +532,36 @@ verdict "H3 opposite: joiner cannot be asked: joiner_warm empty"
 
 # ---------------------------------------------------------------------- M1, M2
 d="$(newdir)"
-WITH_VENV=1 FAKE_IMPORT_SLEEP=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?: $(tail -3 "$d/e19.log")"
+WITH_VENV=1 FAKE_IMPORT_SLEEP=2 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?: $(tail -3 "$d/e19.log")"
 js="$(col "$(csv_of "$d")" 5 join)"
 python3 -c "import sys; assert 0 <= float(sys.argv[1]) < 1.5" "${js:-x}" 2>/dev/null || pnote "join_s '$js' holds the 2 s import"
 verdict "M1 ray: join_s excludes the poller's own import time"
 
 d="$(newdir)"
-WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
+WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
 if grep -q "scheduler_info called" "$d/poll.log" 2>/dev/null; then pnote "poller serialises the worker list"; fi
 [[ "$(col "$(csv_of "$d")" 11 join)" == ok ]] || pnote "dask status: $(cat "$(csv_of "$d")")"
 verdict "M2 dask: the poll asks the scheduler for one count, never the full worker list"
 
 # ---------------------------------------------------------------------- M3 + opposite
 d="$(newdir)"
-WITH_VENV=1 FAKE_POLL_RC=1 E19_JOIN_WAIT_S=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+WITH_VENV=1 FAKE_POLL_RC=1 E19_JOIN_WAIT_S=2 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
 [[ "$(col "$(csv_of "$d")" 11 join)" == timeout ]] || pnote "want join_status timeout: $(cat "$(csv_of "$d")")"
 verdict "M3 a join that never gets ready: join_status timeout, so slow joins stay counted"
 
 d="$(newdir)"
-WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
 [[ "$(col "$(csv_of "$d")" 11 join)" == ok ]] || pnote "want join_status ok: $(cat "$(csv_of "$d")")"
 verdict "M3 opposite: a join that gets ready: join_status ok"
 
 # ---------------------------------------------------------------------- M4 + opposite
 d="$(newdir)"
-WITH_VENV=1 FAKE_POLL_ERROR=ray-version-mismatch E19_JOIN_WAIT_S=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+WITH_VENV=1 FAKE_POLL_ERROR=ray-version-mismatch E19_JOIN_WAIT_S=2 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
 grep -q "ray-version-mismatch" "$d/campaign.log" || pnote "the poll's reason is not in campaign.log"
 verdict "M4 the join poll's reason reaches the campaign log"
 
 d="$(newdir)"
-WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
 if grep -q "join log" "$d/campaign.log"; then pnote "join log printed for a good join"; fi
 verdict "M4 opposite: a good join logs no join output"
 
@@ -626,13 +626,13 @@ verdict "M6 opposite: a plain run restores nodes.db and its WAL"
 
 # ---------------------------------------------------------------------- M7 + opposite
 d="$(newdir)"
-FAKE_CONNECT_255=1 E19_JOIN_WAIT_S=3 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+FAKE_CONNECT_255=1 E19_JOIN_WAIT_S=3 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 got="$(grep -c 'pc01 pipedpeer connect' "$d/pipedpeer.log" || true)"
 [[ "$got" == 1 ]] || pnote "connect ran $got times, want 1"
 verdict "M7 an ssh drop during the join does not run the join again"
 
 d="$(newdir)"
-E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 got="$(grep -c 'pc01 pipedpeer connect' "$d/pipedpeer.log" || true)"
 [[ "$got" == 1 ]] || pnote "connect ran $got times, want 1"
 [[ "$(col "$(csv_of "$d")" 11 join)" == ok ]] || pnote "status: $(cat "$(csv_of "$d")")"
@@ -640,33 +640,33 @@ verdict "M7 opposite: a normal join runs once"
 
 # ---------------------------------------------------------------------- M8
 d="$(newdir)"
-FAKE_RUN_FAIL_FROM=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+FAKE_RUN_FAIL_FROM=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 [[ ! -f "$d/pc01/.connected" ]] || pnote "joined with no baseline"
 grep -q ',join_aborted,1,.*no_baseline' "$(csv_of "$d")" 2>/dev/null || pnote "no counted row: $(cat "$(csv_of "$d")")"
 grep -q 'baseline' "$d/campaign.log" || pnote "baseline failure not logged"
 verdict "M8 failed baseline: no invented 60 s join, repeat counted as no_baseline, logged"
 
 d="$(newdir)"
-E19_START_WAIT_S=0 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+E19_START_WAIT_S=0 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 [[ ! -f "$d/pc01/.connected" ]] || pnote "joined a run never seen running"
 grep -q ',join_aborted,1,.*run_not_seen' "$(csv_of "$d")" 2>/dev/null || pnote "no counted row: $(cat "$(csv_of "$d")")"
 verdict "M8 run never seen running: no join fires, repeat counted"
 
 d="$(newdir)"
-FAKE_RUN_FAIL_FROM=2 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+FAKE_RUN_FAIL_FROM=2 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 ! grep -q ',join,' "$(csv_of "$d")" 2>/dev/null || pnote "join row from a failed run: $(cat "$(csv_of "$d")")"
 grep -q ',join_aborted,1,.*run_failed' "$(csv_of "$d")" 2>/dev/null || pnote "no counted row: $(cat "$(csv_of "$d")")"
 grep -q 'run_failed\|exit\|failed' "$d/campaign.log" || pnote "failed run not logged"
 verdict "M8 join run fails: no join row, counted as run_failed"
 
 d="$(newdir)"
-E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 python3 -c "import sys; float(sys.argv[1])" "$(col "$(csv_of "$d")" 7 join)" 2>/dev/null || pnote "no wall_s: $(cat "$(csv_of "$d")")"
 verdict "M8 opposite: a good run keeps its join row and wall_s"
 
 # ---------------------------------------------------------------------- M11 / L3 + opposite
 d="$(newdir)"
-WITH_VENV=1 E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
+WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
 grep -q -- '--nworkers 8 ' "$d/units.log" 2>/dev/null || pnote "--nworkers not from hosts.tsv: $(cat "$d/units.log" 2>/dev/null)"
 grep -qE '^poll - dask 10\.99\.0\.10 10\.99\.0\.11 8 ' "$d/poll.log" 2>/dev/null || pnote "poll want not 8: $(cat "$d/poll.log" 2>/dev/null)"
 verdict "M11 dask workers come from hosts.tsv cores (8), the poll wants 8"
@@ -684,14 +684,14 @@ verdict "M11 L3 joiner with no core count: no broken command, row says no_cores"
 d="$(newdir)"
 mkdir -p "$d/analysis-input"
 printf 'system,kind,i,pc,join_s,first_work_s,wall_s,result_ok\nray,baseline,0,,,,1.0,1\n' >"$(csv_of "$d")"
-E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
 [[ "$(head -1 "$(csv_of "$d")")" == *,join_status,purged_bytes,closure_bytes ]] || pnote "header: $(head -1 "$(csv_of "$d")")"
 [[ "$(grep -c 'wall_s' "$(csv_of "$d")")" == 1 ]] || pnote "two headers in one file"
 ls "$d/analysis-input/"e19.csv.old-* >/dev/null 2>&1 || pnote "old-format file not kept aside"
 verdict "L1 a CSV of an older column order is moved aside, never mixed"
 
 d="$(newdir)"
-E19_STORE_PATH= run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
+E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems ray || pnote "exit $?"
 if ls "$d/analysis-input/"e19.csv.old-* >/dev/null 2>&1; then pnote "fresh file moved aside"; fi
 verdict "L1 opposite: the current column order stays in place"
 

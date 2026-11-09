@@ -811,8 +811,8 @@ e19_one_repeat() {
     lab_log "e19 $run_id: campaign_run_one exited $run_rc"
   fi
 
-  local run_wall run_csum run_start run_exit
-  IFS='|' read -r run_wall run_csum run_start run_exit <<<"$(e19_extract_run_info "$run_id")"
+  local run_wall run_csum run_exit
+  IFS='|' read -r run_wall run_csum _ run_exit <<<"$(e19_extract_run_info "$run_id")"
   if [[ -z "$aborted" ]] && { ((run_rc != 0)) || [[ "$run_exit" != 0 ]] || ! e19_is_number "$run_wall"; }; then
     lab_log "e19 $run_id: run failed (rc=$run_rc exit=$run_exit wall=$run_wall); no join rows"
     aborted="run_failed"
@@ -894,7 +894,8 @@ e19_one_repeat() {
 
 # e19_one_system <sys>: baseline and repeats (uses N, REPEATS, joiner_hosts).
 e19_one_system() {
-  local sys="$1" prepared=0 base_id="E19-EL-$sys-n$N-r0" rep run_id
+  local sys="$1"
+  local prepared=0 base_id="E19-EL-$sys-n$N-r0" rep run_id
   local base_wall base_csum base_start base_exit closure="" usable=0
 
   if ! _run_id_in_runs "$base_id"; then

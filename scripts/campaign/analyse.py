@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
+from analyse_sweeps import planned_repeats
+
 REPO = Path(__file__).resolve().parents[2]
 EXPS = ("E4", "E5", "E6", "E11")
 # E13..E20 write their own table to analysis/<EXP>.csv (no workload column)
@@ -103,19 +105,6 @@ def load_runs(path):
                 for g in ns.values():
                     g.planned = planned.get((exp, w), g.planned)
     return groups
-
-
-def planned_repeats(path=None):
-    """{(experiment, workload): repeats} from experiments.tsv."""
-    path = path or Path(__file__).resolve().with_name("experiments.tsv")
-    planned = {}
-    for line in Path(path).read_text().splitlines():
-        f = line.split("\t")
-        if line.startswith("#") or len(f) < 5 or f[0] == "experiment":
-            continue
-        for w in f[1].split(","):
-            planned[(f[0], w)] = int(f[4])
-    return planned
 
 
 def _boot_ratio(a, b):

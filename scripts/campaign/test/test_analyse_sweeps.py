@@ -176,6 +176,7 @@ def test_e19_baseline_row_not_averaged_in_join(tmp_path):
 pipedpeer,baseline,1,,,20.0,1
 pipedpeer,join,1,pc01,10.0,12.0,22.0,1
 pipedpeer,join,2,pc01,12.0,14.0,24.0,1
+pipedpeer,join,3,pc01,11.0,13.0,23.0,1
 """
     inp = tmp_path / "e19.csv"
     inp.write_text(csv_text)
@@ -335,7 +336,7 @@ def test_no_receipt_leaves_remote_share_empty():
 
 
 def test_receipt_gives_remote_share():
-    _, rows = analyse_sweeps.table_e13([_ts("pipedpeer", {"remote_items": 750})])
+    _, rows = analyse_sweeps.table_e13([_ts("pipedpeer", {"remote_items": 750})] * 5)
     assert rows[0]["remote_items_ratio"] == pytest.approx(0.75)
 
 
@@ -356,7 +357,7 @@ def test_noop_without_a_rate_line_is_not_invented(capsys):
 
 
 def test_noop_rate_line_is_read():
-    _, rows = analyse_sweeps.table_e15([_noop(1)])
+    _, rows = analyse_sweeps.table_e15([_noop(i) for i in (1, 2, 3)])
     assert rows[0]["median_tasks_per_s"] == pytest.approx(250.0)
 
 
@@ -365,7 +366,8 @@ def _e19_csv(tmp_path, extra=""):
     p.write_text("system,kind,i,pc,join_s,first_work_s,wall_s,result_ok\n"
                  "ray,baseline,1,,,,100,1\n"
                  "ray,join,1,pc3,5,9,60,1\n"
-                 "ray,join,2,pc3,5,9,62,1\n" + extra)
+                 "ray,join,2,pc3,5,9,62,1\n"
+                 "ray,join,3,pc3,5,9,61,1\n" + extra)
     return p
 
 
@@ -377,18 +379,18 @@ def test_e19_baseline_and_join_walls_are_separate(tmp_path):
 
 
 def test_e19_failed_run_leaves_the_wall_median(tmp_path):
-    _, rows = analyse_sweeps.table_e19_from_csv(_e19_csv(tmp_path, "ray,join,3,pc3,5,9,900,0\n"))
+    _, rows = analyse_sweeps.table_e19_from_csv(_e19_csv(tmp_path, "ray,join,4,pc3,5,9,900,0\n"))
     assert rows[0]["wall_join_s_median"] == pytest.approx(61.0)
     assert rows[0]["result_ok_all"] is False
 
 
 def test_e20_ignores_the_reference_runs_of_another_experiment():
     base = {"workload": "SB", "n": 1, "warmup": False, "exit_code": 0, "result_ok": True}
-    runs = [dict(base, experiment="E20", system="pipedpeer", wall_s=11.0),
-            dict(base, experiment="E20", system="pipedpeer-bare", wall_s=10.0),
+    runs = [dict(base, experiment="E20", system="pipedpeer", wall_s=11.0)] * 5 + [
+            dict(base, experiment="E20", system="pipedpeer-bare", wall_s=10.0)] * 5 + [
             dict(base, experiment="E99", system="pipedpeer", wall_s=99.0)]
     _, rows = analyse_sweeps.table_e20(runs)
-    assert rows[0]["runs_with"] == 1 and rows[0]["overhead_pct"] == pytest.approx(10.0)
+    assert rows[0]["runs_with"] == 5 and rows[0]["overhead_pct"] == pytest.approx(10.0)
 
 
 def test_unreadable_runs_line_is_logged(tmp_path, capsys):
@@ -445,3 +447,105 @@ def test_e19_runs_join_counts_runs_not_joiners(tmp_path):  # H09
                  "ray,join,2,pc3,5,9,60,1\nray,join,2,pc4,6,9,60,1\n")
     _, rows = analyse_sweeps.table_e19_from_csv(p)
     assert rows[0]["runs_join"] == 2
+
+
+# --- A group short of its planned repeats keeps its counts and has no statistics ---
+def _sweep(exp, workload, system, walls, ms=10, failed=0, lines=None, n=8):
+    base = {"experiment": exp, "workload": workload, "system": system, "n": n, "warmup": False,
+            "size": {"items": 1000, "task_ms": ms}, "result_lines": lines or []}
+    good = [dict(base, run_id=f"{exp}-{workload}-{system}-r{i}", wall_s=w, exit_code=0,
+                 result_ok=True, receipt={"remote_items": 500}) for i, w in enumerate(walls)]
+    bad = [dict(base, run_id=f"{exp}-{workload}-{system}-f{i}", wall_s=1.0, exit_code=124,
+                result_ok=False) for i in range(failed)]
+    return good + bad
+
+
+NOOP = ["NOOP-OK items=10 seconds=1 tasks_per_s=250.0"]
+LAT = ["LAT-OK n=9 p50_ms=1.0 p90_ms=2.0 p99_ms=3.0"]
+
+
+def test_e13_one_of_five_has_no_statistics():
+    _, rows = analyse_sweeps.table_e13(_sweep("E13", "TS10", "ray", [3.7]))
+    r = rows[0]
+    assert r["runs"] == 1
+    assert (r["median_wall_s"], r["iqr_s"], r["ratio_to_1core_ideal"], r["remote_items_ratio"]) == (None,) * 4
+
+
+def test_e13_four_good_one_failed_has_no_statistics_and_counts_the_drop():
+    _, rows = analyse_sweeps.table_e13(_sweep("E13", "TS10", "ray", [3, 3, 3, 3], failed=1))
+    assert rows[0]["median_wall_s"] is None and rows[0]["runs"] == 4 and rows[0]["dropped"] == 1
+
+
+def test_e13_five_of_five_keeps_its_statistics():
+    _, rows = analyse_sweeps.table_e13(_sweep("E13", "TS10", "ray", [1, 2, 3, 4, 5]))
+    assert rows[0]["median_wall_s"] == pytest.approx(3.0) and rows[0]["remote_items_ratio"] == pytest.approx(0.5)
+
+
+def test_e14_short_group_has_no_median_and_does_not_crash():
+    runs = _sweep("E14", "DS1M", "ray", [2.0]) + _sweep("E14", "DS10K", "ray", [1, 1, 1, 1, 1])
+    _, rows = analyse_sweeps.table_e14(runs)
+    r = [x for x in rows if x["payload_bytes"] == 1000000][0]
+    assert r["median_wall_s"] is None and r["added_s_vs_ds10k"] is None
+
+
+def test_e14_short_base_leaves_the_added_time_empty():
+    runs = _sweep("E14", "DS1M", "ray", [2] * 5) + _sweep("E14", "DS10K", "ray", [1])
+    _, rows = analyse_sweeps.table_e14(runs)
+    r = [x for x in rows if x["payload_bytes"] == 1000000][0]
+    assert r["median_wall_s"] == pytest.approx(2.0) and r["added_s_vs_ds10k"] is None
+
+
+def test_e14_full_groups_give_the_added_time():
+    runs = _sweep("E14", "DS1M", "ray", [2] * 5) + _sweep("E14", "DS10K", "ray", [1] * 5)
+    _, rows = analyse_sweeps.table_e14(runs)
+    r = [x for x in rows if x["payload_bytes"] == 1000000][0]
+    assert r["added_s_vs_ds10k"] == pytest.approx(1.0)
+
+
+def test_e15_two_of_three_has_no_rate():
+    _, rows = analyse_sweeps.table_e15(_sweep("E15", "noop", "ray", [1, 1], lines=NOOP))
+    assert rows[0]["median_tasks_per_s"] is None and rows[0]["runs"] == 2
+
+
+def test_e15_three_of_three_keeps_the_rate():
+    _, rows = analyse_sweeps.table_e15(_sweep("E15", "noop", "ray", [1, 1, 1], lines=NOOP))
+    assert rows[0]["median_tasks_per_s"] == pytest.approx(250.0)
+
+
+def test_e16_two_of_three_has_no_latency():
+    _, rows = analyse_sweeps.table_e16(_sweep("E16", "lat", "ray", [1, 1], lines=LAT))
+    r = rows[0]
+    assert r["runs"] == 2 and r["median_p50_ms"] is None and r["median_p99_ms"] is None and r["p50_min_ms"] is None
+
+
+def test_e16_three_of_three_keeps_the_latency():
+    _, rows = analyse_sweeps.table_e16(_sweep("E16", "lat", "ray", [1, 1, 1], lines=LAT))
+    assert rows[0]["median_p50_ms"] == pytest.approx(1.0) and rows[0]["p50_max_ms"] == pytest.approx(1.0)
+
+
+def _e19(tmp_path, repeats):
+    body = "system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,join_status\nray,baseline,1,,,,100,1,\n"
+    body += "".join(f"ray,join,{i},pc3,5,9,60,1,ok\n" for i in repeats)
+    p = tmp_path / "e19.csv"
+    p.write_text(body)
+    return p
+
+
+def test_e19_short_repeats_blank_the_join_columns_only(tmp_path):
+    _, rows = analyse_sweeps.table_e19_from_csv(_e19(tmp_path, [1, 2]))
+    r = rows[0]
+    assert (r["join_s_median"], r["first_work_s_median"], r["wall_join_s_median"]) == (None,) * 3
+    assert r["runs_join"] == 2 and r["wall_baseline_s_median"] == pytest.approx(100.0)
+
+
+def test_e19_three_repeats_keep_the_join_statistics(tmp_path):
+    _, rows = analyse_sweeps.table_e19_from_csv(_e19(tmp_path, [1, 2, 3]))
+    assert rows[0]["join_s_median"] == pytest.approx(5.0)
+
+
+def test_e20_short_arm_has_no_overhead():
+    runs = _sweep("E20", "SB", "pipedpeer", [11] * 5, n=1) + _sweep("E20", "SB", "pipedpeer-bare", [10], n=1)
+    _, rows = analyse_sweeps.table_e20(runs)
+    r = rows[0]
+    assert r["runs_with"] == 5 and r["runs_without"] == 1
+    assert (r["median_with_s"], r["median_without_s"], r["overhead_pct"], r["overhead_lo"]) == (None,) * 4

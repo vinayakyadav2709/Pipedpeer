@@ -89,10 +89,6 @@ real machines:
   there, and the byte columns are 0). On the first real session, confirm
   `purged_bytes` is close to `closure_bytes` on a joiner that ran the job
   before, and that `nix-store --delete` refusals are reported.
-- **Campaign tables with missing runs**: `<EXP>.csv` still gives a median when
-  fewer runs are usable than planned, as with E13 at 1 of 5 (only the run's
-  `WARN invalid` line says so; `<EXP>-speedup.csv` leaves it empty). Quote
-  medians from the speedup table, or check the warnings first.
 
 ## 3. Known gaps, left by choice
 

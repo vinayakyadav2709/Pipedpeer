@@ -369,7 +369,7 @@ t9_token_swap_retry() {
 		case_setup "$d" 2
 		set_warmup_log "$d/pc00" 10 "done"
 		set_warmup_log "$d/pc01" 10 "failed (exit 1); details above"
-		echo done >"$d/pc01/retry-result"
+		echo "done" >"$d/pc01/retry-result"
 		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
 		printf 'rc=%s\n' "$?"
 	) >"$d/log" 2>&1 || rc=$?
@@ -388,7 +388,7 @@ t10_no_swap_no_retry() {
 		case_setup "$d" 2
 		set_warmup_log "$d/pc00" 10 "failed (exit 1); details above"
 		set_warmup_log "$d/pc01" 10 "done"
-		echo done >"$d/pc00/retry-result"
+		echo "done" >"$d/pc00/retry-result"
 		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
 		printf 'rc=%s\n' "$?"
 	) >"$d/log" 2>&1 || rc=$?

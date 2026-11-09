@@ -81,7 +81,31 @@ def _valid_runs(runs):
     return valid
 
 
-def _sweep_row(sys_runs, valid, task_ms):
+def planned_repeats(path=None):
+    """{(experiment, workload): repeats} from experiments.tsv."""
+    path = path or Path(__file__).resolve().with_name("experiments.tsv")
+    planned = {}
+    for line in Path(path).read_text().splitlines():
+        f = line.split("\t")
+        if line.startswith("#") or len(f) < 5 or f[0] == "experiment":
+            continue
+        for w in f[1].split(","):
+            planned[(f[0], w)] = int(f[4])
+    return planned
+
+
+def _enough(experiment, workload, usable):
+    """Whether a group reached its planned repeats. A group that did not keeps
+    its counts and has no statistics: one good run of five is not a median."""
+    want = planned_repeats().get((experiment, workload))
+    if want is None:
+        print(f"WARN {experiment} {workload}: not in experiments.tsv; "
+              "its statistics are kept with no planned count to check them against")
+        return True
+    return usable >= want
+
+
+def _sweep_row(sys_runs, valid, task_ms, enough=True):
     """The columns E13 and E14 share. A system with no receipt has no remote
     share: an empty cell, never an assumed value."""
     walls = [float(r["wall_s"]) for r in valid]
@@ -97,8 +121,12 @@ def _sweep_row(sys_runs, valid, task_ms):
         rec = r.get("receipt")
         if items and isinstance(rec, dict) and rec.get("remote_items") is not None:
             remote.append(float(rec["remote_items"]) / items)
+    counts = {"runs": len(valid), "dropped": len(sys_runs) - len(valid)}
+    if not enough:
+        return {**counts, "median_wall_s": None, "iqr_s": None,
+                "ratio_to_1core_ideal": None, "remote_items_ratio": None}
     return {
-        "runs": len(valid), "dropped": len(sys_runs) - len(valid),
+        **counts,
         "median_wall_s": med_wall,
         "iqr_s": float(np.percentile(walls, 75) - np.percentile(walls, 25)),
         "ratio_to_1core_ideal": ideal / med_wall if ideal and med_wall else None,
@@ -125,7 +153,7 @@ def table_e13(lab_or_runs):
                 continue
 
             rows.append({"task_ms": ms, "system": sys_,
-                         **_sweep_row(sys_runs, valid, ms)})
+                         **_sweep_row(sys_runs, valid, ms, _enough("E13", w, len(valid)))})
     return cols, rows
 
 
@@ -146,7 +174,7 @@ def table_e14(lab_or_runs):
         if s not in ds10k_medians:
             s_runs = [x for x in runs if x.get("workload") == "DS10K" and x.get("system") == s]
             v = _valid_runs(s_runs)
-            if v:
+            if v and _enough("E14", "DS10K", len(v)):
                 ds10k_medians[s] = float(np.median([float(x["wall_s"]) for x in v]))
 
     for w, payload_b in payload_order:
@@ -158,9 +186,10 @@ def table_e14(lab_or_runs):
                 continue
 
             task_ms = (valid[0].get("size") or {}).get("task_ms")
-            row = _sweep_row(sys_runs, valid, task_ms)
+            row = _sweep_row(sys_runs, valid, task_ms, _enough("E14", w, len(valid)))
             base_10k = ds10k_medians.get(sys_)
-            added_s = row["median_wall_s"] - base_10k if base_10k is not None else None
+            added_s = (row["median_wall_s"] - base_10k
+                       if base_10k is not None and row["median_wall_s"] is not None else None)
             rows.append({"payload_bytes": payload_b, "system": sys_, **row,
                          "added_s_vs_ds10k": added_s})
     return cols, rows
@@ -210,7 +239,8 @@ def table_e15(lab_or_runs):
             rows.append({
                 "n": n, "system": label, "runs": len(rates),
                 "dropped": len(sys_runs) - len(rates),
-                "median_tasks_per_s": float(np.median(rates)),
+                "median_tasks_per_s": (float(np.median(rates))
+                                       if _enough("E15", "noop", len(rates)) else None),
             })
     return cols, rows
 
@@ -256,8 +286,13 @@ def table_e16(lab_or_runs):
         if not p50s:
             continue
 
+        counts = {"system": sys_, "runs": len(p50s), "dropped": len(sys_runs) - len(p50s)}
+        if not _enough("E16", "lat", len(p50s)):
+            rows.append({**dict.fromkeys(cols), **counts})
+            continue
+
         rows.append({
-            "system": sys_, "runs": len(p50s), "dropped": len(sys_runs) - len(p50s),
+            **counts,
             "median_p50_ms": float(np.median(p50s)),
             "median_p90_ms": float(np.median(p90s)),
             "median_p99_ms": float(np.median(p99s)),
@@ -365,6 +400,9 @@ def build_e18_table(lab):
 
 
 # --- E19: Cluster elasticity ---
+E19_PLANNED_REPEATS = 3  # e19.sh's default; E19 has no row in experiments.tsv
+
+
 def table_e19_from_csv(csv_path):
     rows_data = _read_csv_rows(Path(csv_path))
     if not rows_data:
@@ -392,6 +430,10 @@ def table_e19_from_csv(csv_path):
             return [float(r["wall_s"]) for r in rows_ if r.get("wall_s") not in ("", None)
                     and str(r.get("result_ok") or "").strip() in ("", "1", "true", "True")]
         base_walls, join_walls = walls(base_rows), walls(join_rows)
+        usable = {r.get("i") for r in join_rows if r.get("wall_s") not in ("", None)
+                  and str(r.get("result_ok") or "").strip() in ("", "1", "true", "True")}
+        if len(usable) < E19_PLANNED_REPEATS:
+            join_times, work_times, join_walls = [], [], []
 
         rows.append({
             "system": s,
@@ -435,6 +477,11 @@ def table_e20(lab_or_runs):
         without_runs = _valid_runs([r for r in w_runs if r.get("system") == "pipedpeer-bare"])
 
         if not with_runs or not without_runs:
+            continue
+
+        if not (_enough("E20", w, len(with_runs)) and _enough("E20", w, len(without_runs))):
+            rows.append({**dict.fromkeys(cols), "workload": w,
+                         "runs_with": len(with_runs), "runs_without": len(without_runs)})
             continue
 
         w_walls = np.asarray([float(r["wall_s"]) for r in with_runs], float)
