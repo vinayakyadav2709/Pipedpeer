@@ -51,7 +51,7 @@ def _main_rows():
     # E1 W1: pipedpeer gets warm-up 500 s, a result_ok=false repeat, noisy CI
     r += _seq("E1", "W1", "pipedpeer", 1, [100, 99, 101, 100, 100],
               warmup=(500,), ref="reference")
-    n2 = _seq("E1", "W1", "pipedpeer", 2, [48, 50, 52, 49, 51])
+    n2 = _seq("E1", "W1", "pipedpeer", 2, [48, 50, 50, 52, 51])
     n2[-1]["result_ok"] = False
     r += n2
     r += _seq("E1", "W1", "pipedpeer", 4, [25, 25, 25, 26, 25])
@@ -173,7 +173,7 @@ def _write_main_lab(lab: Path):
     for pc, (u1, s1, u2, s2) in cpu.items():
         m = lab / "hosts" / pc / "metrics"
         m.mkdir(parents=True)
-        (m / "E1-n32.vmstat").write_text(
+        (m / "E1-W1-n32.vmstat").write_text(
             VMSTAT_TMPL.format(u1=u1, s1=s1, u2=u2, s2=s2))
 
 

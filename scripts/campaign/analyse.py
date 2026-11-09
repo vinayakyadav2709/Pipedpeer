@@ -21,6 +21,7 @@ from scipy import stats
 REPO = Path(__file__).resolve().parents[2]
 EXPS = ("E4", "E5", "E6", "E11")
 EXP_COLS = ["experiment", "workload", "system", "n", "size", "repeats",
+            "dropped", "status",
             "median_s", "q1_s", "q3_s", "speedup", "speedup_lo", "speedup_hi",
             "result_ok_all", "ref"]
 EFF_COLS = [c if not c.startswith("speedup")
@@ -31,17 +32,41 @@ RATIO_COLS = ["workload", "n", "system", "vs", "ratio", "lo", "hi", "verdict"]
 class Group:
     """Repeats of one (experiment, workload, system, n), warm-ups excluded."""
 
-    def __init__(self):
+    def __init__(self, planned=5):
         self.walls, self.rids, self.oks, self.refs = [], [], [], []
+        self.kept_rids = []  # run ids of self.walls, same order
         self.sizes = Counter()
+        self.dropped = 0
+        self.planned = planned
 
-    def add(self, rid, wall, ok, ref, size):
-        self.walls.append(wall)
+    def add(self, rid, wall, ok, ref, size, exit_code=0):
+        # N1: drop runs with result_ok != 1 or exit_code != 0 before medians.
+        # result_ok null from a run with no reference is not a failure.
+        is_fail = wall is None  # timed out or lost: no wall time to use
+        if exit_code not in (0, "0", None):
+            is_fail = True
+        elif ok is not None and ok is not True and ok != 1 and ok != "1" and ok != "true":
+            is_fail = True
+
         self.rids.append(rid)
         self.oks.append(ok)
         self.refs.append(ref)
-        key = ";".join(f"{k}={v}" for k, v in sorted(size.items()))
+        key = ";".join(f"{k}={v}" for k, v in sorted((size or {}).items()))
         self.sizes[key] += 1
+
+        if is_fail:
+            self.dropped += 1
+        else:
+            self.walls.append(wall)
+            self.kept_rids.append(rid)
+
+    @property
+    def invalid(self):
+        return len(self.walls) < self.planned
+
+    @property
+    def status(self):
+        return "invalid" if self.invalid else "valid"
 
     def size(self):
         return self.sizes and self.sizes.most_common(1)[0][0] or ""
@@ -62,12 +87,33 @@ def load_runs(path):
             # cannot enter a median
             print(f"WARN {r.get('run_id') or '?'}: wall_s is null or 0 "
                   f"(exit_code {r.get('exit_code')}); run left out of the tables")
-            continue
+            wall = None
+        else:
+            wall = float(r["wall_s"])
         g = groups[r["experiment"]][r["workload"]][r["system"]][int(r["n"])]
-        g.add(r.get("run_id") or "", float(r["wall_s"]),
-              bool(r.get("result_ok")), str(r.get("ref") or ""),
-              r.get("size") or {})
+        g.add(r.get("run_id") or "", wall,
+              r.get("result_ok"), str(r.get("ref") or ""),
+              r.get("size") or {}, exit_code=r.get("exit_code", 0))
+    planned = planned_repeats()
+    for exp, workloads in groups.items():
+        for w, systems in workloads.items():
+            for ns in systems.values():
+                for g in ns.values():
+                    g.planned = planned.get((exp, w), g.planned)
     return groups
+
+
+def planned_repeats(path=None):
+    """{(experiment, workload): repeats} from experiments.tsv."""
+    path = path or Path(__file__).resolve().with_name("experiments.tsv")
+    planned = {}
+    for line in Path(path).read_text().splitlines():
+        f = line.split("\t")
+        if line.startswith("#") or len(f) < 5 or f[0] == "experiment":
+            continue
+        for w in f[1].split(","):
+            planned[(f[0], w)] = int(f[4])
+    return planned
 
 
 def _boot_ratio(a, b):
@@ -103,14 +149,16 @@ def _verdict(lo, hi):
 
 
 def _group_row(exp, w, s, n, g):
-    med = float(np.median(g.walls))
+    med = float(np.median(g.walls)) if g.walls else None
     ref = Counter(g.refs).most_common(1)[0][0] if g.refs else "none"
+    ok_all = (not any(v is False or v == 0 or v == "0" or v == "false" for v in g.oks)) if g.oks else None
     return {
         "experiment": exp, "workload": w, "system": s, "n": n,
-        "size": g.size(), "repeats": len(g.walls), "median_s": med,
-        "q1_s": float(np.percentile(g.walls, 25)),
-        "q3_s": float(np.percentile(g.walls, 75)),
-        "result_ok_all": all(g.oks), "ref": ref,
+        "size": g.size(), "repeats": len(g.walls), "dropped": g.dropped,
+        "status": g.status, "median_s": med,
+        "q1_s": float(np.percentile(g.walls, 25)) if g.walls else None,
+        "q3_s": float(np.percentile(g.walls, 75)) if g.walls else None,
+        "result_ok_all": ok_all, "ref": ref,
     }
 
 
@@ -124,7 +172,7 @@ def exp_speed_rows(groups, exp, speedups=None, eff=False):
             for n in sorted(groups[exp][w][s]):
                 g = groups[exp][w][s][n]
                 row = _group_row(exp, w, s, n, g)
-                if n != 1 and base and base.walls:
+                if n != 1 and base and base.walls and g.walls:
                     pt, lo, hi = _boot_ratio(base.walls, g.walls)
                     row.update({key: pt, key + "_lo": lo, key + "_hi": hi})
                     if speedups is not None and math.isfinite(pt):
@@ -145,7 +193,7 @@ def exp_ratio_rows(groups, exp):
                 if s == "pipedpeer":
                     continue
                 g = groups[exp][w][s].get(n)
-                if not g or not g.walls:
+                if not g or not g.walls or not base.walls:
                     continue
                 pt, lo, hi = _boot_ratio(g.walls, base.walls)
                 rows.append({"workload": w, "n": n, "system": s,
@@ -160,12 +208,15 @@ def check_groups(groups, exp, warns):
         ns_all = sorted({n for s in groups[exp][w] for n in groups[exp][w][s]})
         for s in sorted(groups[exp][w]):
             for n, g in sorted(groups[exp][w][s].items()):
-                med = float(np.median(g.walls))
-                for rid, wall in zip(g.rids, g.walls):
+                if g.invalid:
+                    warns.append(f"invalid {exp} {w} {s} n={n}: "
+                                 f"{len(g.walls)} of {g.planned} planned runs usable")
+                med = float(np.median(g.walls)) if g.walls else 0
+                for rid, wall in zip(g.kept_rids, g.walls):
                     if med and wall > 2 * med:
                         warns.append(f"slow-repeat {rid} {wall / med:.2f}× median")
                 for rid, ok in zip(g.rids, g.oks):
-                    if not ok:
+                    if ok is not None and not ok:
                         warns.append(f"result_ok-false {rid}")
             have = sorted(groups[exp][w][s])
             for n in ns_all:
@@ -308,18 +359,20 @@ def table_e5(data):
             reuse = [float(r["reused"]) for r in rs if r["reused"] != ""]
             spread = [float(r["spread"]) for r in rs
                       if r.get("spread", "") != ""]
+            status = "incomplete" if len(ready) < len(rs) else "complete"
             rows.append({"system": sys_, "phase": phase,
                          "ready_s_max": max(ready) if ready else None,
                          "ready_s_median": float(np.median(ready)) if ready else None,
                          "rx_total": sum(float(r["rx_bytes"]) for r in rs
                                          if r["rx_bytes"] != ""),
                          "reused_all": (min(reuse) > 0) if reuse else None,
-                         "spread_all": ((min(spread) > 0) if spread else None)})
+                         "spread_all": ((min(spread) > 0) if spread else None),
+                         "status": status})
             if spread and min(spread) == 0:
                 print(f"WARN E5 {sys_} {phase}: some runs did not spread across PCs "
                       "(spread=0); their ready times do not measure shipping")
     cols = ["system", "phase", "ready_s_max", "ready_s_median", "rx_total",
-            "reused_all", "spread_all"]
+            "reused_all", "spread_all", "status"]
     return cols, rows
 
 
@@ -382,6 +435,8 @@ def extras_tables(lab):
             continue
         cols, rows = build(data)
         write_csv(lab / "analysis" / f"{exp}.csv", cols, rows)
+    import analyse_sweeps
+    analyse_sweeps.run_sweeps(lab)
 
 
 def vmstat_util(path):
@@ -508,7 +563,7 @@ def make_figures(lab, groups, weak):
     hosts = lab / "hosts"
     if hosts.exists():
         for pc in sorted(hosts.glob("pc*")):
-            f = pc / "metrics" / "E1-n32.vmstat"
+            f = pc / "metrics" / "E1-W1-n32.vmstat"
             val = vmstat_util(f) if f.exists() else None
             if val is not None:
                 util[pc.name] = val
