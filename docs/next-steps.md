@@ -84,6 +84,22 @@ real machines:
 
 ## 3. Known gaps, left by choice
 
+Lab campaign limits, to account for when its results are written up:
+
+- E19 join times: before quoting a mean or median, count the rows whose
+  `join_status` is not `ok`. Timed-out joins have an empty `join_s`, so an
+  average over the filled cells leaves out the slowest joiners.
+- E19 "cold" joins remove the workload's top store path only. Its dependencies
+  stay on the joiner, so `seed_s` is a lower bound on a truly empty machine.
+- E19 Ray and Dask join times include starting Python and connecting to the
+  cluster; Pipedpeer's do not. A small constant bias against Ray and Dask
+  remains.
+- E19 `join_status=partial` is confirmed by the cluster's healthy-node count,
+  because the status output has no per-node join marker.
+- A forced small map sent to a peer that hangs can block for up to 600 s.
+  Forced maps over 4 items still race their tail on the local machine.
+- `lab-pc.sh undo` leaves the lab user's `known_hosts` entries.
+
 Parked by the user on 2026-10-15:
 
 - Removing a member's trust (untrust); expiring or single-use invites.
