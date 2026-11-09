@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # Port of pipedpeer-demo/cpu.py (W2) to Ray.
-# Distributed: the Pool items (as Ray tasks) and the joblib Mandelbrot tiles
-# (ray.util.joblib). Local on pc00: the numpy SVD and the pandas groupby, and
-# the result lines.
-# Follows: https://docs.ray.io/en/latest/ray-more-libs/multiprocessing.html
+# Distributed: the score items as Ray tasks (@ray.remote) and the joblib
+# Mandelbrot tiles (ray.util.joblib, via parallel_backend("ray")). The
+# dataframe part (numpy SVD, pandas groupby) stays local: a single in-memory
+# frame does not need distributing, and Ray's joblib docs do not tell a user
+# to distribute one (RD). Result lines unchanged.
+# Follows: https://docs.ray.io/en/latest/ray-more-libs/tasks.html
 #          https://docs.ray.io/en/latest/ray-more-libs/joblib.html
 # Original result lines, byte-for-byte:
 #   cpu.py on <cores> local cores
@@ -18,10 +20,10 @@ import socket
 import time
 
 import numpy as np
+import ray
 import pandas as pd
-from joblib import Parallel, delayed
+from joblib import Parallel, delayed, parallel_backend
 from ray.util.joblib import register_ray
-from ray.util.multiprocessing import Pool
 
 SPIN = 10_000_000
 TILES, TILE_ROWS, WIDTH = 64, 40, 1600
@@ -29,6 +31,7 @@ SVD_N = 2304
 ROWS = 3_000_000
 
 
+@ray.remote
 def score(seed):
     total = 0
     for i in range(SPIN):
@@ -70,13 +73,12 @@ def main():
     print(f"cpu.py on {os.cpu_count()} local cores")
 
     def pool():
-        with Pool() as p:
-            results = p.map(score, range(args.items))
+        results = ray.get([score.remote(i) for i in range(args.items)])
         print(f"Pool: {args.items} items, checksum {sum(results)}")
 
     def joblib_tiles():
         register_ray()
-        with Parallel(n_jobs=-1, backend="ray"):
+        with parallel_backend("ray"):
             counts = Parallel(n_jobs=-1)(delayed(mandel_tile)(t) for t in range(TILES))
         print(f"joblib: {TILES} Mandelbrot tiles, {sum(counts)} points inside")
 
