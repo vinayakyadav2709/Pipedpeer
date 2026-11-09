@@ -37,7 +37,7 @@ for i in range(items):
     pool_out.append(pool_parts[i % n][i // n])
 assert len(pool_out) == items
 joblib_count = sum(r["joblib_count"] for r in rows)
-dt = sum(r["seconds"] for r in rows)
+dt = max(r["seconds"] for r in rows)
 
 print(f"cpu.py on {os.cpu_count()} local cores")
 print(f"  Pool took {dt:.1f}s")

@@ -2,8 +2,9 @@
 # Port of docs/benchmarks/workloads/pool_idle.py (idle) to plain ssh: the item
 # list is split across the PCs in LAB_HOSTS_FILE (ips, one per line; LAB_N says
 # how many), each PC runs its part's Pool through GNU parallel --sshlogin, and
-# pc00 joins the parts and prints the original's one result line. Parts run one
-# at a time (parallel -j1), so seconds is the sum of the parts' seconds; the
+# pc00 joins the parts and prints the original's one result line. The "1/" slots in
+# the login file give each host one job and override -j1, so the parts run at
+# once and seconds is the slowest part (the harness times the run itself); the
 # checksum is recomputed over the whole item list in order, so it equals the
 # original's bit for bit; every part keeps the original's serial check.
 # Distributed: the Pool items, one part per PC. Local: the join and the line.
@@ -41,6 +42,6 @@ assert len(rows) == n, f"expected {n} parts, got {len(rows)}"
 out = [v for r in rows for v in r["out"]]
 expected_items = int(__import__("os").environ.get("BENCH_ITEMS", "0"))
 assert len(out) == expected_items, f"expected {expected_items} items, got {len(out)}"
-dt = sum(r["seconds"] for r in rows)
+dt = max(r["seconds"] for r in rows)
 print("POOLIDLE-OK items=%d seconds=%.4f checksum=%.6f" % (expected_items, dt, sum(out)))
 EOF
