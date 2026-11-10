@@ -221,13 +221,15 @@ _cluster_ray_mem_flag() {
 	local pc="$1" mib b o
 	b="${CLUSTER_RAY_MEMORY_BYTES:-}"
 	if [[ -z "$b" ]]; then
-		if ! mib="$(lab_mem_mib "$pc")"; then
-			lab_log "ray on $pc: no usable memory figure; Ray picks its own, which may count memory a cgroup limit denies"
+		if ! mib="$(lab_mem_mib "$pc")" || ! [[ "$mib" =~ ^[0-9]+$ ]] || ((mib == 0)); then
+			lab_log "ray on $pc: no usable memory figure (got '${mib:-}'); Ray picks its own, which may count memory a cgroup limit denies"
 			return 0
 		fi
-		b=$((mib * 1024 * 1024))
+		# Ray's own split of the total: 30% object store, the rest heap.
+		b=$((mib * 1024 * 1024 * 70 / 100))
+		o="${CLUSTER_RAY_OBJECT_STORE_BYTES:-$((mib * 1024 * 1024 * 30 / 100))}"
 	fi
-	o="${CLUSTER_RAY_OBJECT_STORE_BYTES:-$((b * 30 / 100))}"
+	o="${o:-${CLUSTER_RAY_OBJECT_STORE_BYTES:-$((b * 30 / 70))}}"
 	lab_log "ray on $pc: --memory=$b --object-store-memory=$o"
 	printf ' --memory=%s --object-store-memory=%s' "$b" "$o"
 }

@@ -199,6 +199,7 @@ func classify(s connSnapshot) connResult {
 		res.problems = append(res.problems, short8(u.Peer)+": "+u.Reason+" — fix: "+fixFor(u.Reason))
 	}
 	sort.Strings(res.healthy)
+	sort.Strings(res.problems) // stable order: waitConnected compares them across polls
 	switch {
 	case len(res.healthy) > 0 && len(res.problems) == 0:
 		res.outcome = connConnected

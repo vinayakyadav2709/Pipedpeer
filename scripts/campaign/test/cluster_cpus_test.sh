@@ -197,7 +197,7 @@ out="$(
 	e19_join_script ray E19-x 10.0.0.2 10.0.0.17 3 CODE pc01
 )"
 starter="$(printf '%s\n' "$out" | awk '/base64 -d/ {print $NF}' | base64 -d 2>/dev/null || true)"
-if [[ "$starter" == *"--num-cpus=3 --memory=4294967296 --object-store-memory=1288490188 --block"* ]]; then
+if [[ "$starter" == *"--num-cpus=3 --memory=3006477107 --object-store-memory=1288490188 --block"* ]]; then
 	ok "e19 ray join script: the starter carries --memory and --object-store-memory"
 else
 	bad "e19 ray join script: memory flags" "starter [$starter]"
@@ -273,12 +273,13 @@ mflag_row() { # <name> <want flag> <want log regex or -> [env...]
 		ok "mem flag: $name -> [$want]"
 	fi
 }
-# 4 GiB = 4294967296 bytes, 30% = 1288490188; 16 GiB = 17179869184, 30% = 5153960755
-mflag_row "4 GiB cgroup on a 16 GiB host" " --memory=4294967296 --object-store-memory=1288490188" "ray on pc00: --memory=4294967296" \
+# Ray's split: 4 GiB -> heap 70% 3006477107, store 30% 1288490188; 16 GiB -> 12025908428 / 5153960755
+mflag_row "4 GiB cgroup on a 16 GiB host" " --memory=3006477107 --object-store-memory=1288490188" "ray on pc00: --memory=3006477107" \
 	PP_MEMTOTAL_KIB=16777216 PP_CG_ROOT="$TMP/memcg4/cg" PP_PROC_CGROUP="$TMP/memcg4/proc_cgroup"
-mflag_row "no cgroup limit: MemTotal" " --memory=17179869184 --object-store-memory=5153960755" - PP_MEMTOTAL_KIB=16777216
+mflag_row "no cgroup limit: MemTotal" " --memory=12025908428 --object-store-memory=5153960755" - PP_MEMTOTAL_KIB=16777216
 mflag_row "probe fails: no flag, logged" "" "ray on pc00: no usable memory figure" FAKELAB_FAIL=pc00 LAB_RETRY_SLEEP=0
-mflag_row "explicit object store wins" " --memory=17179869184 --object-store-memory=1000" - PP_MEMTOTAL_KIB=16777216 CLUSTER_RAY_OBJECT_STORE_BYTES=1000
+mflag_row "explicit object store wins" " --memory=12025908428 --object-store-memory=1000" - PP_MEMTOTAL_KIB=16777216 CLUSTER_RAY_OBJECT_STORE_BYTES=1000
+mflag_row "probe reads 0 MiB: no flag, logged" "" "ray on pc00: no usable memory figure" PP_MEMTOTAL_KIB=0
 
 printf 'PASS %s/%s\n' "$pass" "$((pass + failed))"
 ((failed == 0))

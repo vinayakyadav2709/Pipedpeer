@@ -59,7 +59,8 @@ func RegisterRoot(storePath string) {
 		return
 	}
 	if err := os.Remove(link); err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "pipedpeer: warm-up: removing the earlier GC root %s: %v\n", link, err)
+		fmt.Fprintf(os.Stderr, "pipedpeer: warm-up: removing the earlier GC root %s: %v (environment left without a new root)\n", link, err)
+		return
 	}
 	if err := addRoot(link, storePath); err != nil {
 		fmt.Fprintf(os.Stderr, "pipedpeer: warm-up: could not keep %s from garbage collection: %v\n", storePath, err)
