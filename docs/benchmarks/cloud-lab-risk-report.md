@@ -83,8 +83,9 @@ Real runs, `analysis-input/e17.csv`
 | `5,1.609,2.765,1,60.579,1,14,0` | As row 3, with REF done | (fixed by b3905a5) |
 | `6,1.617,2.589,1,1.233,1,20,0` | **Clean.** Killed 1.6 s in, job right (`result_ok` 1), fresh PC joined via pc01's invite in 1.2 s, its forced job sent 20 items away | — |
 
-The 366 items in row 1, and the 20:50:58 restart in row 4, come from the session
-and its logs were not kept; they rest on the session's own record.
+The runs' log is [cloud-lab/e17-runs.log](cloud-lab/e17-runs.log) (row 1's 366
+items included). The 20:50:58 restart in row 4 came from the overlapping REF
+run, whose log was not kept; it rests on the session's own record.
 
 **E17 works end to end** (row 6): the job survives losing pc00, a fresh PC joins
 through the survivor's new invite, and work still leaves it.
@@ -122,9 +123,12 @@ table: `cloud-lab/ray-variants.csv`.
 - **With how much memory?** The whole pc00 container peaked at about 1.24 GB
   resident (Ray head, dashboard, Dask scheduler and 3 workers, the daemon, and the
   job) and 3.0–3.3 GB with page cache. Ten Ray dashboard processes alone hold about
-  100 MB each. The per-variant raymon samples were not kept (only the summary CSV
-  is); the process count and the per-process figures rest on the session's own
-  record.
+  100 MB each. Samples for two variants are kept: the 4 GB head
+  ([raymon-n3-4g.log](cloud-lab/raymon-n3-4g.log),
+  [raylet-unset4g.tail.out](cloud-lab/raylet-unset4g.tail.out)) and the 3 GB head
+  with `--num-cpus=16` ([raymon-n16-3g.log](cloud-lab/raymon-n16-3g.log),
+  [raylet-n16-3g.tail.out](cloud-lab/raylet-n16-3g.tail.out)); the other four
+  rest on the summary CSV and the session's own record.
 - **Is the stall caused by how many workers Ray starts?** Not supported here.
   `--num-cpus` 2 to 16 left the task workers at 3–4 and the RSS the same. With 16
   CPUs and a 3 GB head, usage sat at 3071/3072 MB, the laptop's exact figure, with
@@ -216,8 +220,8 @@ the host. Steps 6 and 7 ran on one bridge network.
 - **Repeat 4 after the fix:** `219761544` of `219761544` bytes, 142 outside paths
   deleted, `joiner_warm=0`, join ok (`join_s` 1.68), `result_ok` 1. The logs say
   "top path ... already gone here; requisites taken from pc00's closure" and
-  "deleted 142 path(s) outside the closure". The log was not kept; this rests on
-  the session's own record.
+  "deleted 142 path(s) outside the closure"
+  ([cloud-lab/e19-pipedpeer-runs.log](cloud-lab/e19-pipedpeer-runs.log)).
 - **Warm-up retry:** seen live in install.sh, not e19. Step 4's second run logged
   `warmup pc01 (ubu2): failed (exit 143) ...; restarting it (1/2, the connect token
   swap can kill a running build)`, and both PCs then reached `done`. No retry was
