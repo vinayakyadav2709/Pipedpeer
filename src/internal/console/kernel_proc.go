@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 )
 
 //go:embed kernel/driver.py
@@ -54,7 +56,7 @@ func startKernelProc(python, driverPath, dir string, env []string, onEvent func(
 	}
 
 	tail := &tailBuffer{limit: stderrTailBytes}
-	cmd := exec.Command(python, "-u", driverPath, fmt.Sprint(driverControlFD), fmt.Sprint(driverEventFD))
+	cmd := termuxexec.Command(python, "-u", driverPath, fmt.Sprint(driverControlFD), fmt.Sprint(driverEventFD))
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.Stdout = tail

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/pipedpeer/pipedpeer/internal/termuxexec"
 )
 
 const (
@@ -59,7 +61,7 @@ func (s *session) runClusterJob(ctx context.Context, e *execution) (string, *err
 		return fail("ClusterError", err.Error())
 	}
 
-	cmd := exec.Command(cfg.Executable, "run", script)
+	cmd := termuxexec.Command(cfg.Executable, "run", script)
 	cmd.Dir = dir
 	cmd.Env = cfg.Env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

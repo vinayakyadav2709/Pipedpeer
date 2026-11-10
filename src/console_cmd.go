@@ -41,7 +41,7 @@ you.`,
 			}
 			// Without the binary's path cluster cells cannot be submitted;
 			// the console still serves everything else.
-			executable, _ := os.Executable()
+			executable, _ := termuxexec.Executable()
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
