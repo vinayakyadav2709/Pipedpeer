@@ -301,8 +301,10 @@ verdict "figures cannot be copied: stops visibly, no manifest")
 mkdir -p "$d/home" "$d/notrepo"
 cp "$SETUP_DRIVER" "$d/notrepo/setup-driver.sh"
 rc=0
+# the ceiling keeps git from finding a checkout above $d: the row must work
+# with TMPDIR inside a repository too
 (cd "$d/notrepo" && env -u XDG_STATE_HOME HOME="$d/home" PIPEDPEER_OS_RELEASE="$FEDORA_OS" \
-	PIPEDPEER_SETUP_RECORD_ONLY=1 bash ./setup-driver.sh) >"$d/out" 2>"$d/err" || rc=$?
+	GIT_CEILING_DIRECTORIES="$d" PIPEDPEER_SETUP_RECORD_ONLY=1 bash ./setup-driver.sh) >"$d/out" 2>"$d/err" || rc=$?
 ((rc != 0)) || pnote "exited 0 outside a checkout"
 [[ ! -f "$d/home/.local/state/pipedpeer-lab-setup/record" ]] || pnote "recorded a non-repo: $(cat "$d/home/.local/state/pipedpeer-lab-setup/record")"
 verdict "setup-driver.sh outside a checkout: refuses, records nothing")

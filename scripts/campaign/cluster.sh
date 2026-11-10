@@ -433,11 +433,14 @@ _cluster_ray_mem_check() {
 		lab_log "ray on $pc: memory unknown; not checked against the $min MiB a Ray $role needs"
 		return 0
 	}
-	if ((have < min)); then
+	# The minimum is a nominal amount (a 2 GB PC reports about 1.9 GiB after
+	# the kernel's own reservation): compare with 10% slack, so a nominal PC
+	# passes and a truly smaller one does not.
+	if ((have < min * 9 / 10)); then
 		lab_log "RAY-MEMORY $pc have=$have MiB need=$min MiB for a Ray $role: refused (give it more memory, or exclude it / pick another pc00)"
 		return 1
 	fi
-	if ((have < warn)); then
+	if ((have < warn * 9 / 10)); then
 		lab_log "RAY-MEMORY $pc have=$have MiB: warning, a Ray $role is comfortable from $warn MiB; a stall at the limit is possible"
 	fi
 	return 0
@@ -558,6 +561,8 @@ for n in ray.nodes():
 
 cluster_up() {
 	_cluster_parse_args "$@"
+	# a failed worker in an earlier call must not fail this one
+	_CLUSTER_WORKER_FAILED=0
 	# a previous run that died hard may have left caps behind
 	cluster_reset_caps || true
 	trap cluster_cleanup EXIT

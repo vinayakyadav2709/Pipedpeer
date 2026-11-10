@@ -123,8 +123,9 @@ C3a. The reference checksums E17 compares against, then a small E17 (about
      filled (pc00 really died mid-job), `job_result_ok` 1 (the job survived
      with the right answer), `new_join_ok` 1 with a `new_join_s` of a few
      seconds (the third PC joined through pc01's new invite), and
-     `new_remote_items` above 0 (work still left it). `old_invite_joined` is 0
-     here by construction (it needs a second joiner). On the emulated lab a
+     `new_remote_items` above 0 (work still left it). `old_invite_joined` is empty
+     here (that arm needs a second joiner and did not run; 0 means it ran and
+     the old invite did not join). On the emulated lab a
      row looked like `6,1.617,2.589,1,1.233,1,20,0`. An empty field means a
      step timed out: the reason is in `$LAB_RESULTS/campaign.log` (grep E17).
      "partly connected" from connect is expected: pc01's invite still names

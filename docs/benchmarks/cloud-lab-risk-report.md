@@ -41,6 +41,8 @@ Ubuntu 24.04.5):
 - The container's `memory.limit_in_bytes` was 2147483648. Python allocating in
   100 MB steps was killed (137) at 2000 MB, and `OOMKilled=true`.
 
+The log was not kept; this rests on the session's own record.
+
 Does not prove: v2 behaviour (`memory.events`, `memory.pressure`, `memory.max`
 reclaim). The VM has no v2 memory controller in use.
 
@@ -49,7 +51,7 @@ reclaim). The VM has no v2 memory controller in use.
 f4842db. `--cpuset-cpus "$UBU_LAB_CPUSET"` goes to every lab container (PCs and
 driver), and unset means no pinning; documented in the header. With
 `UBU_LAB_CPUSET=1-3`, all four containers showed `Cpus_allowed_list: 1-3` and
-`nproc=3`.
+`nproc=3`. The log was not kept; this rests on the session's own record.
 
 ## Task 2: lab up, minimal E17: done; E17 works end to end, except the old-invite arm
 
@@ -81,6 +83,9 @@ Real runs, `analysis-input/e17.csv`
 | `5,1.609,2.765,1,60.579,1,14,0` | As row 3, with REF done | (fixed by b3905a5) |
 | `6,1.617,2.589,1,1.233,1,20,0` | **Clean.** Killed 1.6 s in, job right (`result_ok` 1), fresh PC joined via pc01's invite in 1.2 s, its forced job sent 20 items away | — |
 
+The 366 items in row 1, and the 20:50:58 restart in row 4, come from the session
+and its logs were not kept; they rest on the session's own record.
+
 **E17 works end to end** (row 6): the job survives losing pc00, a fresh PC joins
 through the survivor's new invite, and work still leaves it.
 
@@ -92,7 +97,8 @@ Also fixed: `e17_small_job` logged every failure as "exit 0" (f52d59e).
 **wget crash: did not recur.** It is used in the setup line, step 2 and the image
 builds, and no segfault was seen on CPUs 1–3. That is weak evidence: the
 containers were pinned away from CPU 0 and this is different hardware, so it
-neither confirms nor rules out the laptop's CPU 0.
+neither confirms nor rules out the laptop's CPU 0. The log was not kept; this
+rests on the session's own record.
 
 ## Task 3: Ray: done (v1)
 
@@ -103,7 +109,7 @@ RSS of every Ray process. The v2 `memory.events` and `memory.pressure` do not ex
 on this VM. `--num-cpus` was forced on the head through a copy of cluster.sh. Full
 table: `cloud-lab/ray-variants.csv`.
 
-| head `--num-cpus` / pc00 limit | baseline s | join s | `result_ok` | peak usage MB (with cache) | peak RSS MB | failcnt | task workers (max per sample) |
+| head `--num-cpus` / pc00 limit | baseline s | join_wall_s | `result_ok` | peak usage MB (with cache) | peak RSS MB | failcnt | task workers (max per sample) |
 |---|---|---|---|---|---|---|---|
 | 3 (probed) / 4 GB | 27.1 | 30.1 | 1 | 3261 | 1236 | 0 | 3 |
 | Ray's own / 4 GB | 27.5 | 30.7 | 1 | 3273 | 1238 | 0 | 3 |
@@ -116,7 +122,9 @@ table: `cloud-lab/ray-variants.csv`.
 - **With how much memory?** The whole pc00 container peaked at about 1.24 GB
   resident (Ray head, dashboard, Dask scheduler and 3 workers, the daemon, and the
   job) and 3.0–3.3 GB with page cache. Ten Ray dashboard processes alone hold about
-  100 MB each.
+  100 MB each. The per-variant raymon samples were not kept (only the summary CSV
+  is); the process count and the per-process figures rest on the session's own
+  record.
 - **Is the stall caused by how many workers Ray starts?** Not supported here.
   `--num-cpus` 2 to 16 left the task workers at 3–4 and the RSS the same. With 16
   CPUs and a 3 GB head, usage sat at 3071/3072 MB, the laptop's exact figure, with
@@ -157,8 +165,10 @@ the head container carries Dask too. Left as is, and recorded.
 `UBU_LAB_FROM=5 scripts/campaign/test-ubuntu-lab.sh test`, with `UBU_LAB_SLEEP`
 and `UBU_LAB_DROP` at their defaults (600 s job, 90 s drop).
 `CAMPAIGN_TIMEOUT_CAP_S` was left **unset**: it only lowers a run's timeout
-(`run.sh:546`), so unset gives the full `experiments.tsv` timeouts. Log:
-`cloud-lab/ubuntu-lab-steps.log`.
+(`run.sh:546`), so unset gives the full `experiments.tsv` timeouts.
+
+The log was not kept; this rests on the session's own record, including the
+"about 50 minutes" for step 7.
 
 - **Step 5** (pins, venv): PASS. The first try failed on the VM, not the harness:
   the E19 purge had replaced the `nss-cacert` store path, which dropped the
@@ -195,17 +205,21 @@ the host. Steps 6 and 7 ran on one bridge network.
   the warm-up runs, so the joiner could never start cold.
 - **Repeats 2 and 3: the purge read 0/0 and `joiner_warm=0` with python still on
   disk.** The previous purge had removed the top path, so `-qR` on the joiner
-  listed nothing.
+  listed nothing. Repeat 3's job took 50.8 s (row `pipedpeer,join,3` in
+  `cloud-lab/e19-pipedpeer.csv`), about 20 s more than its repeats; the run
+  recorded no cause for it.
 - **Fix** (586ab1f). Outside referrers are purged too, in passes; a rooted
   referrer is logged. A joiner without the top path asks pc00 for the list.
 - **Repeat 4 after the fix:** `219761544` of `219761544` bytes, 142 outside paths
   deleted, `joiner_warm=0`, join ok (`join_s` 1.68), `result_ok` 1. The logs say
   "top path ... already gone here; requisites taken from pc00's closure" and
-  "deleted 142 path(s) outside the closure".
+  "deleted 142 path(s) outside the closure". The log was not kept; this rests on
+  the session's own record.
 - **Warm-up retry:** seen live in install.sh, not e19. Step 4's second run logged
   `warmup pc01 (ubu2): failed (exit 143) ...; restarting it (1/2, the connect token
   swap can kill a running build)`, and both PCs then reached `done`. No retry was
-  triggered inside e19.
+  triggered inside e19. The log was not kept; this rests on the session's own
+  record.
 - **Not checked:** `seed_s` is 8.42 in every repeat, so it looks constant rather
   than measured per repeat.
 
@@ -248,8 +262,10 @@ redacted, and `SUMMARY.txt` names what was left out or not reached.
 
 The first live run found two bugs that the fake lab hid: ssh ate the hosts loop
 (1 of 3 PCs collected), and `sizes.env` was dropped. After the fix: 3 of 3 PCs, no
-key or code in the 6.4 MB bundle (`cloud-lab/bug-bundle-sample.txt`). OPERATOR.md
-tells the operator to send that folder and not try fixes.
+key or code in the bundle (`cloud-lab/bug-bundle-sample.txt`). That sample is a
+20 KB excerpt (the first 120 lines of each PC's report); the whole bundle was
+about 6.4 MB, and its size rests on the session's own record. OPERATOR.md tells
+the operator to send that folder and not try fixes.
 
 ## Answers
 
@@ -313,8 +329,9 @@ tells the operator to send that folder and not try fixes.
     need a non-root user (read-only dirs do not stop root).
   - `upload_test.sh` needs `rclone`, which I could not install on this host (the
     download was refused).
-  - `ports_test.sh` fails the same 2 rows ("ray stopped, nothing left") on
-    unchanged `dev`.
+  - `ports_test.sh`: the 2 rows that failed on this VM ("ray stopped, nothing
+    left") pass on an ordinary non-root PC (12 of 12 on unchanged code); here
+    root's view of the stopped units was the difference.
 
   One earlier commit message says 29; the right count is 26.
 - Earlier in the session, single files failed under load (the `cpu_sampler` row

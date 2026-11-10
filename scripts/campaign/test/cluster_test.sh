@@ -341,6 +341,60 @@ EOF
 	verdict "--cap on a NOT-READY exit -> AllowedCPUs= reset, caps.txt gone"
 }
 
+# a failed worker in an earlier cluster_up must not fail the next one when
+# cluster.sh is sourced into a persistent shell
+t7b() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		# shellcheck source=/dev/null
+		source "$CLUSTER_SH"
+		cluster_up 2 --systems pipedpeer
+		printf 'up1=%s\n' "$?"
+		_CLUSTER_WORKER_FAILED=1
+		cluster_up 2 --systems pipedpeer
+		printf 'up2=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" up1 0 "first up"
+	want_val "$d/log" up2 0 "second up after an earlier failed worker"
+	verdict "a stale worker-failed flag does not fail the next cluster_up"
+}
+
+# opposite: a plain second up in the same shell succeeds as before
+t7c() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		# shellcheck source=/dev/null
+		source "$CLUSTER_SH"
+		cluster_up 2 --systems pipedpeer
+		printf 'up1=%s\n' "$?"
+		cluster_up 2 --systems pipedpeer
+		printf 'up2=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" up1 0 "first up"
+	want_val "$d/log" up2 0 "second plain up"
+	verdict "opposite: two plain cluster_up calls in one shell both succeed"
+}
+
 # up 2 with all three systems -> units started, ready, cores recorded, ips pushed
 t8() {
 	local d rc=0
@@ -529,6 +583,8 @@ t4
 t5
 t6
 t7
+t7b
+t7c
 t8
 t9
 t10

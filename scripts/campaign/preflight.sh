@@ -34,13 +34,15 @@ PF_MAX_OFFSET_MS="${PF_MAX_OFFSET_MS:-100}"
 # shellcheck disable=SC2016  # expanded on the PC
 PF_REMOTE='. /etc/os-release 2>/dev/null; echo "os_id=${ID:-}"; echo "os_version=${VERSION_ID:-}"
 awk "/MemTotal/ {print \"mem_kib=\" \$2}" /proc/meminfo
-lim=""; for d in $(awk -F: "\$1 == \"0\" || \$2 ~ /(^|,)memory(,|\$)/ {print \$3}" /proc/self/cgroup); do while :; do for f in /sys/fs/cgroup$d/memory.max /sys/fs/cgroup/memory$d/memory.limit_in_bytes; do if [ -r $f ]; then v=$(cat $f); case $v in max|"") ;; *) v=$((v / 1024)); if [ -z "$lim" ] || [ "$v" -lt "$lim" ]; then lim=$v; fi ;; esac; fi; done; if [ -z "$d" ] || [ "$d" = / ]; then break; fi; d=${d%/*}; done; done
+lim=""; for d in $(awk -F: "\$1 == \"0\" || \$2 ~ /(^|,)memory(,|\$)/ {print \$3}" /proc/self/cgroup); do while :; do for f in /sys/fs/cgroup$d/memory.max /sys/fs/cgroup/memory$d/memory.limit_in_bytes; do if [ -r "$f" ]; then v=$(cat "$f"); case $v in max|"") ;; *) v=$((v / 1024)); if [ -z "$lim" ] || [ "$v" -lt "$lim" ]; then lim=$v; fi ;; esac; fi; done; if [ -z "$d" ] || [ "$d" = / ]; then break; fi; d=${d%/*}; done; done
 echo "mem_limit_kib=$lim"
 echo "nproc=$(nproc)"
 echo "usable_cpus=$(sh -c '"'"'%PROBE%'"'"' 2>/dev/null)"
 echo "disk_home_kib=$(df -Pk "$HOME" | awk "NR==2 {print \$4}")"
 if [ -d /nix ]; then n=/nix; else n=/; fi
-echo "disk_nix_kib=$(df -Pk $n | awk "NR==2 {print \$4}")"
+echo "disk_nix_kib=$(df -Pk "$n" | awk "NR==2 {print \$4}")"
+echo "disk_home_fs=$(df -Pk "$HOME" | awk "NR==2 {print \$1}")"
+echo "disk_nix_fs=$(df -Pk "$n" | awk "NR==2 {print \$1}")"
 for t in sleep.target suspend.target hibernate.target hybrid-sleep.target; do echo "$t=$(systemctl is-enabled $t 2>/dev/null || true)"; done
 echo "ntp_sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"
 if sudo -n ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -75,9 +77,13 @@ pf_judge() {
 		via=" (a cgroup memory limit, under the machine's $((kv[mem_kib] / 1048576)) GiB)"
 	fi
 	gib=$((mkib / 1048576))
+	# A nominal 8 GB PC reports about 7.6-7.9 GiB after the kernel's own
+	# reservation, so a nominal amount in MiB with 10% slack: 4 and 8 GB PCs
+	# pass, a real 3 or 6 GB one does not.
+	mib=$((mkib / 1024))
 	min="$PF_MIN_RAM_GIB"
 	[[ "$pc" == pc00 ]] && min="$PF_MIN_RAM_GIB_PC00"
-	if ((gib < min)); then
+	if ((mib < min * 1024 * 9 / 10)); then
 		if [[ "$pc" == pc00 ]]; then
 			out "FAIL ram: ${gib} GiB${via}, pc00 needs ${min} GiB (it runs the Ray head and the Dask scheduler next to its own work): rescan with --pc00 set to a PC with more memory"
 		else
@@ -100,28 +106,48 @@ pf_judge() {
 		out "WARN clock: NTP synchronised is '${kv[ntp_sync]:-unknown}': sudo timedatectl set-ntp true, wait a minute, then clocks.sh again"
 	fi
 
-	for p in disk_home_kib disk_nix_kib; do
-		[[ "${kv[$p]:-}" =~ ^[0-9]+$ ]] || continue
-		gib=$((kv[$p] / 1048576))
-		if ((gib < PF_MIN_DISK_GIB)); then
-			local where='the home dir'
-			[[ "$p" == disk_nix_kib ]] && where=/nix
-			out "FAIL disk: ${gib} GiB free for $where; the Nix closure and the venv need ${PF_MIN_DISK_GIB} GiB: free space (or exclude this PC)"
-		fi
-	done
+	# one line when /nix is the home dir's own filesystem, not two failures
+	# that read as two full disks
+	local dh="${kv[disk_home_kib]:-}" dn="${kv[disk_nix_kib]:-}" same_disk=0
+	if [[ "$dh" =~ ^[0-9]+$ && "$dn" =~ ^[0-9]+$ ]] &&
+		[[ -n "${kv[disk_home_fs]:-}" && "${kv[disk_home_fs]}" == "${kv[disk_nix_fs]:-}" ]] &&
+		(((dh / 1048576) < PF_MIN_DISK_GIB && (dn / 1048576) < PF_MIN_DISK_GIB)); then
+		same_disk=1
+		out "FAIL disk: $((dh / 1048576)) GiB free on the home dir and /nix (the same filesystem ${kv[disk_home_fs]}); the Nix closure and the venv need ${PF_MIN_DISK_GIB} GiB: free space (or exclude this PC)"
+	fi
+	if ((same_disk == 0)); then
+		for p in disk_home_kib disk_nix_kib; do
+			[[ "${kv[$p]:-}" =~ ^[0-9]+$ ]] || continue
+			gib=$((kv[$p] / 1048576))
+			if ((gib < PF_MIN_DISK_GIB)); then
+				local where='the home dir'
+				[[ "$p" == disk_nix_kib ]] && where=/nix
+				out "FAIL disk: ${gib} GiB free for $where; the Nix closure and the venv need ${PF_MIN_DISK_GIB} GiB: free space (or exclude this PC)"
+			fi
+		done
+	fi
 
 	if [[ "${kv[ufw]:-}" == active ]]; then
 		local miss=""
 		for p in 4242/tcp 4242/udp 4243/udp 4244/udp; do
 			[[ " ${kv[ufw_rules]:-} " == *" $p "* ]] || miss+=" $p"
 		done
-		[[ -z "$miss" ]] || out "FAIL firewall: ufw is active without${miss}: from the driver run lab_fanout ports <hosts file> 'sudo bash /var/lib/pipedpeer-lab/lab-pc.sh ports' (or the setup line again)"
+		[[ -z "$miss" ]] || out "FAIL firewall: ufw is active without${miss}: from the driver, after 'source scripts/campaign/lib.sh', run lab_fanout ports <hosts file> 'sudo bash /var/lib/pipedpeer-lab/lab-pc.sh ports' (or the setup line again)"
 	elif [[ "${kv[nft_drop]:-0}" =~ ^[0-9]+$ ]] && ((kv[nft_drop] > 0)); then
 		out "WARN firewall: ufw is off but nftables drops input by default; allow 4242/tcp and 4242-4244/udp from the lab subnet, or the daemons cannot meet"
 	fi
 
 	((n > 0)) || echo "PREFLIGHT $pc OK"
 	unset -f out
+}
+
+# pf_count <file>: "ok warn fail", one status per PC (its worst): an OK line
+# followed by a clock-offset WARN is one PC warned, not one OK and one WARN.
+pf_count() {
+	awk '
+		{ s[$2] = (s[$2] == "fail" || $3 == "FAIL") ? "fail" : (s[$2] == "warn" || $3 == "WARN") ? "warn" : "ok" }
+		END { for (p in s) { if (s[p] == "fail") f++; else if (s[p] == "warn") w++; else o++ }
+		      print o + 0, w + 0, f + 0 }' "$1"
 }
 
 # pf_clock_offsets: WARN lines for PCs whose |offset| in $LAB/clocks.csv is over the limit.
@@ -146,9 +172,7 @@ pf_main() {
 		done <"$hf"
 		pf_clock_offsets
 	} >"$res"
-	ok="$(grep -c ' OK$' "$res" || true)"
-	warn="$(grep -c ' WARN ' "$res" || true)"
-	fail="$(grep -c ' FAIL ' "$res" || true)"
+	read -r ok warn fail < <(pf_count "$res")
 	cat "$res"
 	echo "PREFLIGHT ok=$ok warn=$warn fail=$fail" | tee -a "$res"
 	lab_log "preflight: ok=$ok warn=$warn fail=$fail ($res)"

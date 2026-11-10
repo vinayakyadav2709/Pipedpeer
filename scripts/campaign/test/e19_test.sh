@@ -789,17 +789,28 @@ verdict "E2-3 exit 0: ok, unchanged"
 # Fake nix-store: -qR lists dependencies first (the top path last), --size reads
 # <path>.size, --delete refuses the paths named in $FAKELAB_DIR/refuse.
 # -q --referrers-closure prints <path>.refs (the path and every path that
-# refers to it), or the path alone; --delete also refuses while a path named
-# in <path>.blockers (a referrer) is still there, as Nix does.
+# refers to it), or the path alone; like Nix, it fails (exit 1, message on
+# stderr) when any path given does not exist. --delete also refuses while a
+# path named in <path>.blockers (a referrer) is still there, as Nix does.
 CLOSURE_STUB='case "$1" in
   -qR) cat "$2.reqs" 2>/dev/null || echo "$2" ;;
-  -q) if [ "$2" = --referrers-closure ]; then shift 2; for p in "$@"; do cat "$p.refs" 2>/dev/null || echo "$p"; done; else cat "$3.size"; fi ;;
+  -q) if [ "$2" = --referrers-closure ]; then shift 2
+    for p in "$@"; do if [ ! -e "$p" ]; then echo "error: path does not exist: $p" >&2; exit 1; fi; done
+    for p in "$@"; do cat "$p.refs" 2>/dev/null || echo "$p"; done
+  else cat "$3.size"; fi ;;
   --delete) echo "$2" >>"$FAKELAB_DIR/nixstore.log"
     if grep -qx -- "$2" "$FAKELAB_DIR/refuse" 2>/dev/null; then echo "error: cannot delete path $2: still alive" >&2; exit 1; fi
     for b in $(cat "$2.blockers" 2>/dev/null); do
       if [ -e "$b" ]; then echo "error: Cannot delete path $2 because it is referenced by path $b" >&2; exit 1; fi
     done
     rm -rf "$2" ;;
+esac'
+# A strict nix-store for pc00's -qR only: it fails (as Nix does for a path it
+# does not have), so the requisites fallback cannot be taken silently.
+QN_STUB='if [ "$1" = -qR ]; then echo "error: path does not exist: $2" >&2; exit 1; fi
+case "$1" in
+  -q) cat "$3.size" 2>/dev/null ;;
+  --delete) rm -rf "$2" ;;
 esac'
 mk_closure() { # <d> <top size> <dep1 size> <dep2 size>
   local s="$1/sysstore" t="$RELP"
@@ -878,6 +889,41 @@ run_closure "$d"
 [[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 90 && "$(col "$(csv_of "$d")" 13 join)" == 90 ]] || pnote "want warm 0, bytes 90/90: $(cat "$(csv_of "$d")")"
 grep -q 'requisites taken from pc00' "$d/campaign.log" || pnote "the fallback to pc00's list was not logged"
 verdict "purge: top path already gone on the joiner, its dependencies purged from pc00's list"
+
+# The top path is gone AND an outside referrer still refers into what is
+# left: the referrer query must run on the paths that exist, not fail on the
+# absent top path (real nix-store exits 1 on it).
+d="$(newdir)"; mk_shared "$d"
+rm -rf "${d:?}/sysstore/$RELP"
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/env-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "left behind with the top path gone: $(ls "$d/sysstore" | tr '\n' ' ')"
+grep -q 'outside closure, will delete: .*env-x' "$d/campaign.log" || pnote "the outside referrer was not named before deletion"
+grep -q 'referrers-closure failed' "$d/campaign.log" && pnote "the referrer query ran with the absent top path"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "want warm 0: $(cat "$(csv_of "$d")")"
+verdict "purge: top path gone, the remaining paths still find and delete their outside referrer"
+
+d="$(newdir)"; mk_shared "$d"
+run_closure "$d"
+[[ ! -e "$d/sysstore/env-x" && ! -e "$d/sysstore/dep1-x" ]] || pnote "ordinary case: shared referrer or dependency remain"
+grep -q 'outside closure, will delete: .*env-x' "$d/campaign.log" || pnote "ordinary case: the outside referrer was not named before deletion"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 100 ]] || pnote "ordinary case: want warm 0, bytes 100: $(cat "$(csv_of "$d")")"
+verdict "purge opposite: the top path present, its outside referrer named and removed, warm 0"
+
+# pc00 cannot list the requisites: the failure names pc00 and the reason
+# (a pipeline used to hide it behind base64's exit 0)
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rm -rf "${d:?}/sysstore/$RELP"
+NIX_STUB="$QN_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+grep -q "could not list the closure's requisites on pc00 (ssh exit 1)" "$d/campaign.log" || pnote "pc00's failed -qR was not logged with its exit: $(grep 'requisites' "$d/campaign.log" | tr '\n' ' ')"
+grep -q "leftover dependencies are not purged" "$d/campaign.log" || pnote "the consequence was not named"
+verdict "purge: pc00's failed requisite listing is logged with the PC and exit code"
+
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rm -rf "${d:?}/sysstore/$RELP"
+run_closure "$d"
+! grep -q "could not list the closure's requisites" "$d/campaign.log" || pnote "a working pc00 listing was reported as failed"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "ordinary fallback did not purge the dependencies"
+verdict "purge opposite: pc00's list is read, no failure logged, dependencies purged"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"

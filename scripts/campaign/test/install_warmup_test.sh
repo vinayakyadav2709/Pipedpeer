@@ -102,7 +102,13 @@ case "${1:-}" in
 			{ printf '%s building the common environment build=test torch=CPU\n' "$(date -Is)"; cat "$HOME/setup-writes"; } >"$HOME/.local/state/pipedpeer/warmup.log"
 		fi
 		if [[ -n "${PIPEDPEER_WARMUP_RETRY:-}" && -f "$HOME/retry-result" ]]; then
-			cat "$HOME/retry-result" >>"$HOME/.local/state/pipedpeer/warmup.log"
+			# retry-delay: a real build is asynchronous; the log is rewritten only
+			# when it starts producing, not by the setup command itself.
+			if [[ -f "$HOME/retry-delay" ]]; then
+				( sleep "$(cat "$HOME/retry-delay")"; cat "$HOME/retry-result" >>"$HOME/.local/state/pipedpeer/warmup.log" ) >/dev/null 2>&1 &
+			else
+				cat "$HOME/retry-result" >>"$HOME/.local/state/pipedpeer/warmup.log"
+			fi
 		fi
 		exit 0
 		;;
@@ -450,11 +456,35 @@ t12_stale_failed_log() {
 	verdict "a failed warm-up log from an earlier install -> restarted once, logged, done"
 }
 
+# --- Case 13: the stale restart on pc00 leaves the old failed log in place for
+# a poll: pc00 must wait for the restart like the other PCs, not fail on the
+# next poll (then the build rewrites the log and it is done)
+t13_stale_pc00_async_restart() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 600 "failed (exit 1); details above"
+		set_warmup_log "$d/pc01" 10 "done"
+		echo "done" >"$d/pc00/retry-result"
+		echo 2 >"$d/pc00/retry-delay"
+		CAMPAIGN_WARMUP_RESTART_WAIT_S=6 bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=0$' "$d/log" || pnote "expected exit 0: $(grep -E 'FAILED|rc=' "$d/log" | tr '\n' ' ')"
+	! grep -q '^FAILED pc00:' "$d/log" || pnote "pc00 failed while its restart was still building"
+	! grep -q 'warmup pc00: failed' "$d/campaign.log" || pnote "the old failure was judged before the restart could rewrite the log"
+	grep -q 'warmup pc00 .*from before this install' "$d/campaign.log" || pnote "the stale log was not logged as such"
+	grep -q $'pc00\t[0-9]\+\tdone' "$d/warmup-times.tsv" || pnote "pc00 not done in warmup-times.tsv: $(cat "$d/warmup-times.tsv" 2>/dev/null)"
+	verdict "a stale restart on pc00 with an unchanged log for a poll -> waited, not failed, then done"
+}
+
 t1_all_done
 t9_token_swap_retry
 t10_no_swap_no_retry
 t11_retries_exhausted
 t12_stale_failed_log
+t13_stale_pc00_async_restart
 t2_already_done
 t3_one_failed
 t4_log_stalls

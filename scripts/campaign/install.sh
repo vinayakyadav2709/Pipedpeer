@@ -443,7 +443,10 @@ printf "OK\t%s\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line" "$nlines"
 					lab_log "install: warmup $pc ($host_r): restarting the stale warm-up failed; its old failure stands"
 				fi
 
-				if [[ "$p_tail" == failed* && "$pc" != pc00 ]]; then
+				# pc00 never gets the token-swap retry, so its only restart is the
+				# stale one above: wait for that restart too when it happened.
+				if [[ "$p_tail" == failed* ]] &&
+					{ [[ "$pc" != pc00 ]] || [[ -n "${warmup_retry_sig[$pc]:-}" ]]; }; then
 					sig="$p_mtime:$p_nl"
 					if [[ "$sig" == "${warmup_retry_sig[$pc]:-}" ]] &&
 						((t_now - warmup_retry_at[$pc] < restart_wait_s)); then

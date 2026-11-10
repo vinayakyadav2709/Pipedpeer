@@ -342,7 +342,7 @@ step8() {
 	local k out tries d
 	# The PCs the earlier steps used (lab_hosts N), not every PC in the host table: a
 	# down or unrelated PC must not turn the fanout into a failure.
-	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-uninstall \$f 'if command -v pipedpeer >/dev/null; then pipedpeer uninstall -y; else echo "pipedpeer already uninstalled"; fi'" >/dev/null 2>&1 \
+	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-uninstall \$f 'if command -v pipedpeer >/dev/null; then pipedpeer uninstall -y; else echo pipedpeer already uninstalled; fi'" >/dev/null 2>&1 \
 		|| fail "pipedpeer uninstall -y failed on every PC"
 	dr "source lib.sh; f=\$(lab_hosts $N); lab_fanout s8-undo \$f 'sudo systemctl reset-failed lab-undo 2>/dev/null; sudo systemd-run --unit=lab-undo bash /var/lib/pipedpeer-lab/lab-pc.sh undo'" >/dev/null 2>&1 \
 		|| fail "could not start the detached undo"

@@ -39,6 +39,9 @@ verdict() {
 }
 # shellcheck source=/dev/null
 source "$REPO/scripts/campaign/test/fakelab.sh"
+# the redaction and the PC script, to test them on their own
+# shellcheck source=/dev/null
+source "$REPO/scripts/campaign/collect-bug.sh"
 
 # lab <dir>: a fake lab of 2 PCs whose pipedpeer stub prints an invite code
 lab() {
@@ -108,6 +111,74 @@ for f in stray-key r2.env cluster.json; do
 	grep -q "left out: .*$f" "$d/bundle/SUMMARY.txt" 2>/dev/null || pnote "SUMMARY.txt does not name $f as left out"
 done
 verdict "B2 secrets: codes redacted, keys/r2.env/cluster.json left out and named")
+
+# --- B5 a name with key/token/secret/password/credential, a bearer token, a
+# URL with user:pass@, and quoted invite codes: near-miss names go too
+(d="$(mktemp -d "$ROOT/b5.XXXX")"
+mkdir -p "$d/f"
+cat >"$d/f/secrets.txt" <<'EOF'
+sentry_key=0c7a3f7635bd9f9e92056c3c6e5f0b3a
+token=LOGTOKEN42 sent
+--api_key=APIKEY
+AWS_SESSION_TOKEN=AWSTOK
+sentry_token: COLONTOKEN
+Authorization: Bearer BEARER123
+check https://user:pass@example.com/path
+pipedpeer connect PPCODE123
+pipedpeer connect "QUOTED456"
+monkey=1
+EOF
+_bug_redact "$d/f"
+for s in 0c7a3f7635bd9f9e92056c3c6e5f0b3a LOGTOKEN42 APIKEY AWSTOK COLONTOKEN BEARER123 user:pass PPCODE123 QUOTED456; do
+	grep -qF -- "$s" "$d/f/secrets.txt" && pnote "[$s] not redacted: $(grep -F -- "$s" "$d/f/secrets.txt")"
+done
+grep -q 'pipedpeer connect <redacted>' "$d/f/secrets.txt" || pnote "plain invite code not redacted"
+grep -q '^monkey=<redacted>$' "$d/f/secrets.txt" || pnote "a name containing key but not a secret word was left readable: $(cat "$d/f/secrets.txt")"
+verdict "B5 near-miss secret names, bearer values, user:pass URLs and quoted codes are redacted")
+
+# --- B6 opposite: ordinary words stay readable
+(d="$(mktemp -d "$ROOT/b6.XXXX")"
+mkdir -p "$d/f"
+cat >"$d/f/plain.txt" <<'EOF'
+keyboard layout=us
+the worker joined
+keyboard
+notes: nothing secret here
+EOF
+cp "$d/f/plain.txt" "$d/before.txt"
+_bug_redact "$d/f"
+cmp -s "$d/before.txt" "$d/f/plain.txt" || pnote "ordinary text was changed: $(cat "$d/f/plain.txt")"
+verdict "B6 opposite: keyboard and plain prose stay readable")
+
+# --- B7 cgroup memory files are collected when the remote shell is dash,
+# on cgroup v2 and v1 (the brace expansion dash does not do left this empty)
+(d="$(mktemp -d "$ROOT/b7.XXXX")"
+mkdir -p "$d/cg/user.slice/run.scope" "$d/cg/memory/docker/abc"
+echo 123456 >"$d/cg/user.slice/run.scope/memory.current"
+echo 654321 >"$d/cg/user.slice/run.scope/memory.max"
+echo 222222 >"$d/cg/memory/docker/abc/memory.usage_in_bytes"
+echo 7 >"$d/cg/memory/docker/abc/memory.failcnt"
+printf '0::/user.slice/run.scope\n5:memory:/docker/abc\n' >"$d/proc_cgroup"
+cgmem_body="$(sed -n '/^cgmem() {/,/^}/p' <( _bug_pc_script ))"
+[[ -n "$cgmem_body" ]] || pnote "cgmem is not in the PC script"
+out="$(PP_CG_ROOT="$d/cg" PP_PROC_CGROUP="$d/proc_cgroup" sh -c "$cgmem_body
+cgmem" 2>&1)" || pnote "cgmem failed under sh: $out"
+grep -q -- "--- $d/cg/user.slice/run.scope/memory.current" <<<"$out" || pnote "v2 memory.current not collected: $out"
+grep -q '^123456$' <<<"$out" || pnote "v2 memory.current value missing"
+grep -q -- "--- $d/cg/memory/docker/abc/memory.usage_in_bytes" <<<"$out" || pnote "v1 usage_in_bytes not collected: $out"
+grep -q '^222222$' <<<"$out" || pnote "v1 usage_in_bytes value missing"
+verdict "B7 cgroup memory files collected under dash: v2 and v1")
+
+# --- B8 opposite: no cgroup files: a header line, no error
+(d="$(mktemp -d "$ROOT/b8.XXXX")"
+mkdir -p "$d/cg"
+r=0
+out="$(PP_CG_ROOT="$d/cg" PP_PROC_CGROUP=/dev/null sh -c "$(sed -n '/^cgmem() {/,/^}/p' <( _bug_pc_script ))
+cgmem" 2>&1)" || r=$?
+((r == 0)) || pnote "cgmem exited $r with no cgroup files"
+grep -q '^cgroup: v2 path ' <<<"$out" || pnote "no cgroup header: $out"
+grep -q '^--- ' <<<"$out" && pnote "invented a cgroup file: $out"
+verdict "B8 opposite: no cgroup files, a header and no error")
 
 # --- B3 ---------------------------------------------------------------------------
 (d="$(mktemp -d "$ROOT/b3.XXXX")"

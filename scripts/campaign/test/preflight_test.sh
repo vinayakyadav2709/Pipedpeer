@@ -72,19 +72,50 @@ row "pc00 below the Ray head minimum" pc00 'PREFLIGHT pc00 FAIL ram: .*Ray head'
 row "worker below the worker minimum" pc01 'PREFLIGHT pc01 FAIL ram: ' - mem_kib=2097152
 row "a cgroup memory limit under MemTotal" pc01 'PREFLIGHT pc01 FAIL ram: 3 GiB.*cgroup' - mem_limit_kib=3145728
 row "worker at the minimum" pc01 '^PREFLIGHT pc01 OK' 'FAIL ram' "mem_kib=$((PF_MIN_RAM_GIB * 1048576))"
+row "a nominal 8 GB pc00 reports 7.6 GiB" pc00 '^PREFLIGHT pc00 OK' 'FAIL ram' mem_kib=7969177
+row "opposite: a real 6 GB pc00 is still refused" pc00 'PREFLIGHT pc00 FAIL ram: ' - mem_kib=6291456
 row "usable CPUs below nproc" pc01 'PREFLIGHT pc01 WARN cpus: .*usable 3 of 16' - usable_cpus=3
 row "suspend not masked" pc01 'PREFLIGHT pc01 FAIL sleep: .*systemctl mask' - suspend.target=enabled
 row "NTP not synchronised" pc01 'PREFLIGHT pc01 WARN clock: .*timedatectl set-ntp true' - ntp_sync=no
 row "/nix short of space" pc01 'PREFLIGHT pc01 FAIL disk: 1 GiB free for /nix' - disk_nix_kib=1048576
 row "Ubuntu 20.04" pc01 'PREFLIGHT pc01 WARN os: ' - os_version=20.04
 row "not Ubuntu" pc01 'PREFLIGHT pc01 FAIL os: ' - os_id=fedora
-row "ufw active without 4243/udp" pc01 'PREFLIGHT pc01 FAIL firewall: .*lab-pc.sh ports' - ufw=active "ufw_rules=22/tcp 4242/tcp 4242/udp 4244/udp"
+row "ufw active without 4243/udp" pc01 'PREFLIGHT pc01 FAIL firewall: .*source scripts/campaign/lib.sh.*lab-pc.sh ports' - ufw=active "ufw_rules=22/tcp 4242/tcp 4242/udp 4244/udp"
 row "ufw active with every rule" pc01 '^PREFLIGHT pc01 OK' 'firewall' ufw=active "ufw_rules=22/tcp 4242/tcp 4242/udp 4243/udp 4244/udp"
 row "ufw off, nftables drop policy" pc01 'PREFLIGHT pc01 WARN firewall: .*4242/tcp' - nft_drop=2
 
 : >"$T/empty.txt"
 out="$(pf_judge pc02 "$T/empty.txt" 2>&1)" || true
 if grep -qE 'PREFLIGHT pc02 FAIL probe: .*no answer' <<<"$out"; then pass=$((pass + 1)); echo "ok   an empty answer"; else failed=$((failed + 1)); echo "FAIL an empty answer -- $out"; fi
+
+# one status per PC: an OK line plus a clock-offset WARN is one warned PC, not
+# one OK and one WARN
+{
+	printf 'PREFLIGHT pc00 OK\n'
+	printf 'PREFLIGHT pc01 OK\n'
+	printf 'PREFLIGHT pc01 WARN clock-offset: 180 ms\n'
+} >"$T/count.txt"
+counted="$(pf_count "$T/count.txt" 2>/dev/null || true)"
+if [[ "$counted" == "1 1 0" ]]; then pass=$((pass + 1)); echo "ok   counting: a warned PC is not also counted OK"; else failed=$((failed + 1)); echo "FAIL counting: a warned PC is not also counted OK -- got [$counted] want [1 1 0]"; fi
+
+# the opposite: plain OK PCs and a plain FAIL still count as they are
+{
+	printf 'PREFLIGHT pc00 OK\n'
+	printf 'PREFLIGHT pc01 OK\n'
+	printf 'PREFLIGHT pc02 FAIL ram: x\n'
+} >"$T/count2.txt"
+counted="$(pf_count "$T/count2.txt" 2>/dev/null || true)"
+if [[ "$counted" == "2 0 1" ]]; then pass=$((pass + 1)); echo "ok   counting opposite: OK and FAIL unchanged"; else failed=$((failed + 1)); echo "FAIL counting opposite: OK and FAIL unchanged -- got [$counted] want [2 0 1]"; fi
+
+# /nix on the home dir's filesystem: one disk line, not two
+{ good; printf 'disk_home_kib=1048576\ndisk_nix_kib=1048576\ndisk_home_fs=/dev/sda1\ndisk_nix_fs=/dev/sda1\n'; } >"$T/same.txt"
+same="$(pf_judge pc01 "$T/same.txt" 2>&1)" || true
+n_disk="$(grep -c 'FAIL disk' <<<"$same" || true)"
+if ((n_disk == 1)) && grep -q 'home dir and /nix' <<<"$same"; then pass=$((pass + 1)); echo "ok   same filesystem: one disk line naming both"; else failed=$((failed + 1)); echo "FAIL same filesystem: one disk line naming both -- $same"; fi
+
+diff="$( { good; printf 'disk_home_kib=1048576\ndisk_nix_kib=1048576\ndisk_home_fs=/dev/sda1\ndisk_nix_fs=/dev/sdb1\n'; } >"$T/diff.txt" ; pf_judge pc01 "$T/diff.txt" 2>&1)" || true
+n_disk="$(grep -c 'FAIL disk' <<<"$diff" || true)"
+if ((n_disk == 2)); then pass=$((pass + 1)); echo "ok   opposite: separate filesystems still get two disk lines"; else failed=$((failed + 1)); echo "FAIL opposite: separate filesystems still get two disk lines -- $diff"; fi
 
 printf 'id,offset_ms,rtt_ms,measured_at\npc00,3.1,0.4,x\npc01,-180.2,0.5,x\n' >"$LAB_RESULTS/clocks.csv"
 out="$(pf_clock_offsets 2>&1)" || true

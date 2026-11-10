@@ -69,7 +69,7 @@ me="$(basename "$HOME")"
 printf '%s pipedpeer %s\n' "$me" "$*" >>"$FAKELAB_DIR/pipedpeer.log"
 case "${1:-}" in
 	start) printf '%s\n' "${PIPEDPEER_NO_LAN_DISCOVERY-unset}" >"$HOME/.no_lan_env" ;;
-	stop) rm -f "$HOME/.no_lan_env" ;;
+	stop) [[ "${FAKE_STOP_FAIL:-0}" == 1 ]] && exit 1; rm -f "$HOME/.no_lan_env" ;;
 	status)
 		calls=0
 		[[ -f "$HOME/.status_calls" ]] && calls="$(cat "$HOME/.status_calls")"
@@ -350,6 +350,36 @@ res="$(
 )" 2>"$d/err" || true
 verdict_row "e17 joiners stopped and moved aside before the job, restored after" "$res" "$d/err"
 
+# a stop that fails on a joiner is logged with the joiner (it used to be
+# swallowed by || true, leaving no trace)
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_STOP_FAIL=1 FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 1 --repeats 1
+	grep -q 'could not stop pc03' "$d/campaign.log" || rbad "the failed stop was not logged: $(grep -c 'could not stop' "$d/campaign.log")"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 a joiner's failed stop is logged with the joiner" "$res" "$d/err"
+
+# the ordinary case: a stop that works leaves no failure line
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 1 --repeats 1
+	grep -q '^pc03 pipedpeer stop' "$d/pipedpeer.log" || rbad "pc03 was not stopped"
+	! grep -q 'could not stop' "$d/campaign.log" || rbad "a working stop was reported as failed"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 opposite: a working stop is not reported as failed" "$res" "$d/err"
+
 # connect exits 2 ("partly connected": the dead introducer is in the
 # survivor's invite) but the survivor and the joiner both show the join:
 # that is a join, as install.sh counts it
@@ -449,6 +479,42 @@ res="$(
 	echo ROW-OK
 )" 2>"$d/err" || true
 verdict_row "e17 job ended before the kill: row kept, kill_at_s empty; old invite joins -> 1 + log" "$res" "$d/err"
+
+# the old-invite arm did not run (one joiner): the field is empty, not 0
+# (0 reads as "tested, did not join")
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 1 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ -n "$row" ]] || rbad "no row"
+	[[ -z "$old" ]] || rbad "old_invite_joined [$old] for an arm that did not run"
+	grep -q 'old-invite arm did not run (recorded empty)' "$d/campaign.log" || rbad "the untested arm was not logged as such"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 old-invite arm not run: old_invite_joined empty, logged" "$res" "$d/err"
+
+# opposite: two joiners, the old invite does not join -> a tested 0
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$old" == 0 ]] || rbad "old_invite_joined [$old] for a tested arm"
+	grep -q 'the old invite did not join' "$d/campaign.log" || rbad "the tested arm's result was not logged"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 opposite: the old-invite arm runs and does not join -> 0" "$res" "$d/err"
 
 # connect hits its timeout: new_join_ok=0, new_join_s empty, next repeat runs
 d="$(newdir)"

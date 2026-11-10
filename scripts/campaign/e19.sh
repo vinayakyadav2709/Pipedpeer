@@ -625,10 +625,27 @@ if [ -n "$rel" ]; then
       # while a referrer exists. Referrers first, then the closure, dependents
       # first; passes repeat until nothing more goes (a GC-rooted referrer
       # keeps its part of the closure and is logged).
+      # Only paths that exist here go to nix-store: a top path an earlier
+      # repeat removed would otherwise end the whole query, and its referrers
+      # would never be found.
+      have=""
+      for p in $list; do
+        case "$p" in
+          "$sys"/?*) [ -e "$p" ] && have="$have $p" ;;
+        esac
+      done
       extra=""
-      refs="$(nix-store -q --referrers-closure $list 2>&1)" || { echo "NOTE nix-store -q --referrers-closure failed, only the closure is deleted: $refs"; refs=; }
-      for p in $refs; do
-        case " $list " in *" $p "*) ;; *) case "$p" in "$sys"/?*) extra="$extra $p" ;; esac ;; esac
+      if [ -n "$have" ]; then
+        refs="$(nix-store -q --referrers-closure $have 2>&1)" || { echo "NOTE nix-store -q --referrers-closure failed, only the closure is deleted: $refs"; refs=; }
+        for p in $refs; do
+          case " $list " in *" $p "*) ;; *) case "$p" in "$sys"/?*) extra="$extra $p" ;; esac ;; esac
+        done
+      else
+        echo "NOTE no closure path exists here; there are no referrers to delete"
+      fi
+      # These were not all created by the harness: name each one before it goes.
+      for p in $extra; do
+        [ -e "$p" ] && echo "NOTE outside closure, will delete: $p"
       done
       todo="$extra $list"
       pass=0
@@ -676,9 +693,13 @@ e19_purge_and_probe() {
   # the joiner had lost the top path (an earlier repeat's purge): its
   # dependencies are named by pc00's list, where the closure is whole
   if ((rc == 0)) && grep -q '^NEED-PC00-REQS$' <<<"$out"; then
-    local pc00reqs=""
-    pc00reqs="$(lab_ssh pc00 "nix-store -qR '${E19_SYS_STORE:-/nix/store}/$rel'" 2>/dev/null | base64 -w0)" ||
-      lab_log "e19 $id: could not list the closure's requisites on pc00; $pc's leftover dependencies are not purged"
+    local pc00reqs="" reqs_raw="" reqs_rc=0
+    reqs_raw="$(lab_ssh pc00 "nix-store -qR '${E19_SYS_STORE:-/nix/store}/$rel'" 2>&1)" || reqs_rc=$?
+    if ((reqs_rc != 0)); then
+      lab_log "e19 $id: could not list the closure's requisites on pc00 (ssh exit $reqs_rc): ${reqs_raw:-(no output)}; $pc's leftover dependencies are not purged"
+    else
+      pc00reqs="$(printf '%s' "$reqs_raw" | base64 -w0)"
+    fi
     if [[ -n "$pc00reqs" ]]; then
       out="$(lab_ssh "$pc" "sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; pc00reqs='$pc00reqs'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
     fi

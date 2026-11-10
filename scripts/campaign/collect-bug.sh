@@ -12,15 +12,20 @@ _bug_pc_script() {
 sec() { local t="$1" n="$2"; shift 2; echo; echo "## $t"; { "$@" 2>&1 || echo "(exit $?)"; } | tail -n "$n"; }
 st="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer"
 cgmem() {
-  local p v1 f d
-  p="$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
-  v1="$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3 }' /proc/self/cgroup)"
+  local p v1 f d s r pcg
+  r="${PP_CG_ROOT:-/sys/fs/cgroup}"
+  pcg="${PP_PROC_CGROUP:-/proc/self/cgroup}"
+  p="$(awk -F: '$1 == "0" { print $3 }' "$pcg")"
+  v1="$(awk -F: '$2 ~ /(^|,)memory(,|$)/ { print $3 }' "$pcg")"
   echo "cgroup: v2 path [${p:-none}] v1 memory path [${v1:-none}]"
   for d in "$p" "$v1"; do
     [ -n "$d" ] || continue
     while :; do
-      for f in /sys/fs/cgroup"$d"/memory.{current,max,peak,events,pressure} /sys/fs/cgroup/memory"$d"/memory.{usage_in_bytes,max_usage_in_bytes,limit_in_bytes,failcnt,oom_control}; do
-        [ -r "$f" ] && { echo "--- $f"; cat "$f"; }
+      # one name at a time: /bin/sh is dash and does not expand {a,b}
+      for s in current max peak events pressure usage_in_bytes max_usage_in_bytes limit_in_bytes failcnt oom_control; do
+        for f in "$r$d"/memory."$s" "$r/memory$d"/memory."$s"; do
+          [ -r "$f" ] && { echo "--- $f"; cat "$f"; }
+        done
       done
       if [ -z "$d" ] || [ "$d" = / ]; then break; fi
       d="${d%/*}"
@@ -48,14 +53,20 @@ sec "runs on this PC (newest 20)" 20 sh -c 'ls -t ~/pipedpeer-lab/runs'
 PC
 }
 
-# _bug_redact <dir>: invite codes and token/secret/password values in every text file.
+# _bug_redact <dir>: invite codes and secret values in every text file. A name
+# is treated as a secret when it contains key, token, secret, password or
+# credential and is set with = or :, so monkey=1 is redacted too: a false
+# redaction is acceptable, a leak is not. A bare word such as keyboard stays.
 _bug_redact() {
 	local f
 	while IFS= read -r -d '' f; do
 		grep -Iq . "$f" 2>/dev/null || continue
 		sed -E -i \
-			-e 's/(pipedpeer connect )[^[:space:]"'\'']+/\1<redacted>/g' \
-			-e 's/((token|secret|password|access_key)[A-Za-z_]*"?[[:space:]]*[=:][[:space:]]*"?)[^[:space:]",}]+/\1<redacted>/Ig' \
+			-e 's/(Authorization:[[:space:]]*(Bearer[[:space:]]+)?)[^[:space:],]+/\1<redacted>/Ig' \
+			-e 's/(Bearer[[:space:]]+)[^[:space:],]+/\1<redacted>/Ig' \
+			-e 's#(://)[^/[:space:]@]+:[^/[:space:]@]+@#\1<redacted>@#g' \
+			-e 's/([A-Za-z0-9_.-]*(key|token|secret|password|credential)[A-Za-z0-9_.-]*["'\'']?[[:space:]]*[=:][[:space:]]*["'\'']?)[^[:space:]"'\'',}]+/\1<redacted>/Ig' \
+			-e 's/(pipedpeer connect[[:space:]]+)["'\'']?[^[:space:]"'\'']+["'\'']?/\1<redacted>/g' \
 			"$f"
 	done < <(find "$1" -type f -print0)
 }

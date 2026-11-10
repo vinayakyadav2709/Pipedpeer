@@ -158,14 +158,18 @@ echo "$n"'
 # lab_usable_cpus <pc>: LAB_CPUS_PROBE's count on that PC, printed. Returns 1
 # (and logs the PC and what came back) when the probe fails or prints no number.
 lab_usable_cpus() {
-	local pc="${1:?usage: lab_usable_cpus <pc>}" n
-	n="$(lab_ssh "$pc" "$LAB_CPUS_PROBE" 2>/dev/null)" || n=""
+	local pc="${1:?usage: lab_usable_cpus <pc>}" n raw err rc=0
+	err="$(mktemp)"
+	# stdout is the count; stderr (ssh's own message) is kept for the log only
+	n="$(lab_ssh "$pc" "$LAB_CPUS_PROBE" 2>"$err")" || rc=$?
+	raw="$(tr '\n' ' ' <"$err")"
+	rm -f "$err"
 	n="$(printf '%s' "$n" | tr -d '[:space:]')"
-	if [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1)); then
+	if ((rc == 0)) && [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1)); then
 		printf '%s\n' "$n"
 		return 0
 	fi
-	lab_log "$pc: could not read its usable CPU count (got [$n])"
+	lab_log "$pc: could not read its usable CPU count (ssh exit $rc, got [$n], stderr [$raw])"
 	return 1
 }
 
@@ -187,11 +191,14 @@ echo "$t $lim"'
 # lab_mem_mib <pc>: the memory that PC's processes can use, in MiB (MemTotal or
 # a smaller cgroup limit). Returns 1, logged with the PC, when the probe fails.
 lab_mem_mib() {
-	local pc="${1:?usage: lab_mem_mib <pc>}" out t lim
-	out="$(lab_ssh "$pc" "$LAB_MEM_PROBE" 2>/dev/null)" || out=""
+	local pc="${1:?usage: lab_mem_mib <pc>}" out t lim err raw rc=0
+	err="$(mktemp)"
+	out="$(lab_ssh "$pc" "$LAB_MEM_PROBE" 2>"$err")" || rc=$?
+	raw="$(tr '\n' ' ' <"$err")"
+	rm -f "$err"
 	read -r t lim <<<"$out"
-	if [[ ! "${t:-}" =~ ^[0-9]+$ ]]; then
-		lab_log "$pc: memory unknown (probe gave [$out])"
+	if ((rc != 0)) || [[ ! "${t:-}" =~ ^[0-9]+$ ]]; then
+		lab_log "$pc: memory unknown (ssh exit $rc, probe gave [$out], stderr [$raw])"
 		return 1
 	fi
 	if [[ "${lim:-}" =~ ^[0-9]+$ ]] && ((lim < t)); then t="$lim"; fi

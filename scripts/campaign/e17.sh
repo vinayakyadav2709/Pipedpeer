@@ -469,13 +469,13 @@ e17_main() {
       echo "skipped $id"
       continue
     fi
-    kill_at="" wall="" okv="" join_s="" join_ok="" remote="" old_joined="0"
+    kill_at="" wall="" okv="" join_s="" join_ok="" remote="" old_joined=""
 
     # the joiners leave the cluster before the job: a joiner still running
     # as a member took the job's work on the emulated lab (N+1 machines)
     local j
     for j in "${joiners[@]}"; do
-      lab_ssh "$j" 'pipedpeer stop 2>/dev/null || true' || lab_log "E17 $id: could not stop $j's daemon before the job; it may take work"
+      lab_ssh "$j" 'pipedpeer stop' || lab_log "E17 $id: could not stop $j's daemon before the job; it may take work (ssh or pipedpeer stop failed)"
       e17_move_aside "$j" || lab_log "E17 $id: $j's files were not moved aside; its state is not isolated"
     done
 
@@ -543,12 +543,13 @@ e17_main() {
       fi
     fi
 
-    # the old invite arm, on the second joiner
+    # the old invite arm, on the second joiner. An arm that did not run
+    # leaves the field empty: 0 would read as "tested, did not join".
     if [[ -z "$old_code" ]]; then
-      old_joined=0
+      old_joined=""
     elif ((${#joiners[@]} < 2)); then
-      old_joined=0
-      lab_log "E17 $id: only one joiner; the old-invite arm is recorded as 0"
+      old_joined=""
+      lab_log "E17 $id: only one joiner; the old-invite arm did not run (recorded empty)"
     else
       rc2=0
       lab_ssh "${joiners[1]}" "timeout ${E17_OLD_INVITE_TIMEOUT_S:-60} pipedpeer connect $(printf '%q' "$old_code")" || rc2=$?

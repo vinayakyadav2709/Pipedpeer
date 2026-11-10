@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317  # rows run in subshells
+# shellcheck disable=SC2034  # the cap arrays are read by the sourced cluster.sh
 # Case table for the CPU count Ray is started with (cluster.sh
 # _CLUSTER_CPUS_PROBE and _cluster_ray_cpus_flag). Ray counts the host's CPUs
 # and ignores a cgroup CPU quota it cannot see (on the laptop's container lab
@@ -118,7 +119,9 @@ flag_row() { # <name> <want flag> <want log regex or -> [env...]
 	d="$TMP/flag-${name//[^a-z]/_}"
 	out="$(
 		fakelab_init "$d" 2 >/dev/null 2>&1 || exit 90
-		export LAB_RESULTS="$d" "$@"
+		export LAB_RESULTS="$d"
+		local kv
+		for kv in "$@"; do export "${kv?}"; done
 		# shellcheck source=/dev/null
 		source "$REPO/scripts/campaign/cluster.sh"
 		CLUSTER_CAP_PC=()
@@ -140,6 +143,8 @@ printf '0::/a\n' >"$TMP/fcg/proc_cgroup"
 flag_row "cap wins over the probe" " --num-cpus=2" - T_CAP=2 PP_CG_ROOT="$TMP/fcg/cg" PP_PROC_CGROUP="$TMP/fcg/proc_cgroup" PP_NPROC=16
 flag_row "uncapped PC gets the probed count" " --num-cpus=3" "ray on pc00: --num-cpus=3" PP_CG_ROOT="$TMP/fcg/cg" PP_PROC_CGROUP="$TMP/fcg/proc_cgroup" PP_NPROC=16
 flag_row "probe fails: no flag, logged with the PC" "" "pc00: could not read its usable CPU count" FAKELAB_FAIL=pc00 LAB_RETRY_SLEEP=0
+flag_row "probe fails: the ssh error is in the log, not just []" "" "pc00: could not read its usable CPU count .*fakelab ssh: pc00 is down" FAKELAB_FAIL=pc00 LAB_RETRY_SLEEP=0
+flag_row "opposite: a working probe still logs the count" " --num-cpus=8" "ray on pc00: --num-cpus=8" PP_NPROC=8 LAB_RETRY_SLEEP=0
 
 # --- e19's joiner -------------------------------------------------------------
 e19_row() { # <name> <hosts.tsv cores> <want> <want log regex or -> [env...]
@@ -148,7 +153,9 @@ e19_row() { # <name> <hosts.tsv cores> <want> <want log regex or -> [env...]
 	d="$TMP/e19-${name//[^a-z0-9]/_}"
 	out="$(
 		fakelab_init "$d" 2 >/dev/null 2>&1 || exit 90
-		export LAB_RESULTS="$d" "$@"
+		export LAB_RESULTS="$d"
+		local kv
+		for kv in "$@"; do export "${kv?}"; done
 		awk -F'\t' -v c="$hc" 'BEGIN{OFS="\t"} /^#/ {print; next} {$5 = c; print}' "$d/hosts.tsv" >"$d/h" && mv "$d/h" "$d/hosts.tsv"
 		# shellcheck source=/dev/null
 		source "$REPO/scripts/campaign/e19.sh" >/dev/null 2>&1
@@ -187,7 +194,9 @@ mem_row() { # <name> <pc> <role> <want rc> <log regex or - for none expected> [e
 	rc="$(
 		fakelab_init "$d" 2 >/dev/null 2>&1 || exit 90
 		mkdir -p "$d/nocg"
-		export LAB_RESULTS="$d" PP_CG_ROOT="$d/nocg" PP_PROC_CGROUP=/dev/null "$@"
+		export LAB_RESULTS="$d" PP_CG_ROOT="$d/nocg" PP_PROC_CGROUP=/dev/null
+		local kv
+		for kv in "$@"; do export "${kv?}"; done
 		# shellcheck source=/dev/null
 		source "$REPO/scripts/campaign/cluster.sh"
 		r=0
@@ -208,12 +217,18 @@ mem_row "head 1024 MiB refused" pc00 head 1 'RAY-MEMORY pc00 have=1024 MiB.*refu
 mem_row "head 3072 MiB warned" pc00 head 0 'RAY-MEMORY pc00 have=3072 MiB.*warning' PP_MEMTOTAL_KIB=3145728
 mem_row "head 8192 MiB fine" pc00 head 0 - PP_MEMTOTAL_KIB=8388608
 mem_row "worker 900 MiB refused" pc01 worker 1 'RAY-MEMORY pc01 have=900 MiB.*refused' PP_MEMTOTAL_KIB=921600
+mem_row "a nominal 2 GB head reports 1900 MiB: not refused" pc00 head 0 'RAY-MEMORY pc00 have=1900 MiB.*warning' PP_MEMTOTAL_KIB=1945600
+mem_row "opposite: a real 1.75 GB head is still refused" pc00 head 1 'RAY-MEMORY pc00 have=1792 MiB.*refused' PP_MEMTOTAL_KIB=1835008
+mem_row "a nominal 4 GB head reports 3900 MiB: no warning" pc00 head 0 - PP_MEMTOTAL_KIB=3993600
+mem_row "opposite: a 3 GB head (3000 MiB) is still warned" pc00 head 0 'RAY-MEMORY pc00 have=3000 MiB.*warning' PP_MEMTOTAL_KIB=3072000
 mem_row "worker 1536 MiB warned" pc01 worker 0 'RAY-MEMORY pc01 have=1536 MiB.*warning' PP_MEMTOTAL_KIB=1572864
 mkdir -p "$TMP/memcg/cg/docker/x"
 printf '1610612736\n' >"$TMP/memcg/cg/docker/x/memory.max"
 printf '0::/docker/x/user.slice\n' >"$TMP/memcg/proc_cgroup"
 mem_row "a cgroup limit under MemTotal counts" pc00 head 1 'RAY-MEMORY pc00 have=1536 MiB' PP_MEMTOTAL_KIB=16777216 PP_CG_ROOT="$TMP/memcg/cg" PP_PROC_CGROUP="$TMP/memcg/proc_cgroup"
 mem_row "probe fails: memory unknown, not refused" pc01 worker 0 'pc01: memory unknown' FAKELAB_FAIL=pc01 LAB_RETRY_SLEEP=0
+mem_row "probe fails: the ssh error is in the log, not just []" pc01 worker 0 'pc01: memory unknown .*fakelab ssh: pc01 is down' FAKELAB_FAIL=pc01 LAB_RETRY_SLEEP=0
+mem_row "opposite: a memory probe that answers is still used" pc01 worker 0 'RAY-MEMORY pc01 have=1536 MiB.*warning' PP_MEMTOTAL_KIB=1572864
 
 printf 'PASS %s/%s\n' "$pass" "$((pass + failed))"
 ((failed == 0))
