@@ -1,0 +1,95 @@
+######## e19pp
+stopped daemon
+2026-11-09T21:22:49+00:00 cluster.sh: fanout cluster-reset: ok=2 failed=0
+2026-11-09T21:22:49+00:00 cluster.sh: fanout cluster-start: ok=2 failed=0
+2026-11-09T21:22:50+00:00 cluster.sh: fanout cluster-ray-stop: ok=2 failed=0
+2026-11-09T21:22:50+00:00 cluster.sh: ray on pc00: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+2026-11-09T21:22:50+00:00 cluster.sh: ray on pc01: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+CLUSTER-UP n=2 systems=pipedpeer ray dask
+2026-11-09T21:23:00+00:00 cluster.sh: up: n=2 systems=pipedpeer ray dask
+stopped daemon
+stopped daemon
+2026-11-09T21:23:36+00:00 cluster.sh: fanout cluster-reset: ok=1 failed=0
+2026-11-09T21:23:36+00:00 cluster.sh: fanout cluster-start: ok=1 failed=0
+2026-11-09T21:23:37+00:00 cluster.sh: fanout cluster-ray-stop: ok=1 failed=0
+2026-11-09T21:23:37+00:00 cluster.sh: ray on pc00: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+CLUSTER-UP n=1 systems=pipedpeer ray dask
+2026-11-09T21:23:47+00:00 cluster.sh: up: n=1 systems=pipedpeer ray dask
+2026-11-09T21:23:47+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+2026-11-09T21:23:52+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+2026-11-09T21:23:57+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+2026-11-09T21:24:02+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+2026-11-09T21:24:07+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+2026-11-09T21:24:12+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+2026-11-09T21:24:17+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r0 on pc00: not finished yet
+recorded E19-EL-pipedpeer-n1-r0 ok=null ref=none
+RESULT E19-EL-pipedpeer-n1-r0 ok=null remote_items=0
+2026-11-09T21:24:25+00:00 e19.sh: e19 E19-EL-pipedpeer-n1-r1: only 223824 of 219985368 closure bytes removed on pc01; flagged joiner_warm=1
+2026-11-09T21:24:25+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+2026-11-09T21:24:30+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+2026-11-09T21:24:35+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+2026-11-09T21:24:40+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+2026-11-09T21:24:45+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+2026-11-09T21:24:50+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+2026-11-09T21:24:55+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r1 on pc00: not finished yet
+recorded E19-EL-pipedpeer-n1-r1 ok=null ref=none
+RESULT E19-EL-pipedpeer-n1-r1 ok=null remote_items=0
+rc=0
+(nix-store --delete refused lines: 24)
+######## e19pp2
+stopped daemon
+2026-11-09T21:32:45+00:00 cluster.sh: fanout cluster-reset: ok=2 failed=0
+2026-11-09T21:32:45+00:00 cluster.sh: fanout cluster-start: ok=2 failed=0
+2026-11-09T21:32:46+00:00 cluster.sh: fanout cluster-ray-stop: ok=2 failed=0
+2026-11-09T21:32:46+00:00 cluster.sh: ray on pc00: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+2026-11-09T21:32:46+00:00 cluster.sh: ray on pc01: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+CLUSTER-UP n=2 systems=pipedpeer ray dask
+2026-11-09T21:33:02+00:00 cluster.sh: up: n=2 systems=pipedpeer ray dask
+stopped daemon
+stopped daemon
+2026-11-09T21:33:38+00:00 cluster.sh: fanout cluster-reset: ok=1 failed=0
+2026-11-09T21:33:38+00:00 cluster.sh: fanout cluster-start: ok=1 failed=0
+2026-11-09T21:33:39+00:00 cluster.sh: fanout cluster-ray-stop: ok=1 failed=0
+2026-11-09T21:33:39+00:00 cluster.sh: ray on pc00: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+CLUSTER-UP n=1 systems=pipedpeer ray dask
+2026-11-09T21:33:49+00:00 cluster.sh: up: n=1 systems=pipedpeer ray dask
+2026-11-09T21:33:50+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+2026-11-09T21:33:55+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+2026-11-09T21:34:00+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+2026-11-09T21:34:05+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+2026-11-09T21:34:10+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+2026-11-09T21:34:15+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+2026-11-09T21:34:20+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r2 on pc00: not finished yet
+RESULT E19-EL-pipedpeer-n1-r2 ok=null remote_items=0
+recorded E19-EL-pipedpeer-n1-r2 ok=null ref=none
+rc=0
+(nix-store --delete refused lines: 0)
+######## e19pp4
+stopped daemon
+2026-11-09T21:50:13+00:00 cluster.sh: fanout cluster-reset: ok=2 failed=0
+2026-11-09T21:50:13+00:00 cluster.sh: fanout cluster-start: ok=2 failed=0
+2026-11-09T21:50:14+00:00 cluster.sh: fanout cluster-ray-stop: ok=2 failed=0
+2026-11-09T21:50:14+00:00 cluster.sh: ray on pc00: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+2026-11-09T21:50:14+00:00 cluster.sh: ray on pc01: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+CLUSTER-UP n=2 systems=pipedpeer ray dask
+2026-11-09T21:50:24+00:00 cluster.sh: up: n=2 systems=pipedpeer ray dask
+stopped daemon
+stopped daemon
+2026-11-09T21:51:00+00:00 cluster.sh: fanout cluster-reset: ok=1 failed=0
+2026-11-09T21:51:01+00:00 cluster.sh: fanout cluster-start: ok=1 failed=0
+2026-11-09T21:51:01+00:00 cluster.sh: fanout cluster-ray-stop: ok=1 failed=0
+2026-11-09T21:51:01+00:00 cluster.sh: ray on pc00: --num-cpus=3 (affinity and cgroup quota as the PC reports them)
+CLUSTER-UP n=1 systems=pipedpeer ray dask
+2026-11-09T21:51:11+00:00 cluster.sh: up: n=1 systems=pipedpeer ray dask
+2026-11-09T21:51:54+00:00 e19.sh: e19 E19-EL-pipedpeer-n1-r4: purge on pc01: top path w6cjl84hmjmqkw6hsva72i26kmk909jc-run already gone here; requisites taken from pc00's closure
+2026-11-09T21:51:54+00:00 e19.sh: e19 E19-EL-pipedpeer-n1-r4: purge on pc01: deleted 142 path(s) outside the closure that referred to it (the common environment and build inputs)
+2026-11-09T21:51:54+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r4 on pc00: not finished yet
+2026-11-09T21:51:59+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r4 on pc00: not finished yet
+2026-11-09T21:52:04+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r4 on pc00: not finished yet
+2026-11-09T21:52:09+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r4 on pc00: not finished yet
+2026-11-09T21:52:14+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r4 on pc00: not finished yet
+2026-11-09T21:52:20+00:00 e19.sh: wait E19-EL-pipedpeer-n1-r4 on pc00: not finished yet
+RESULT E19-EL-pipedpeer-n1-r4 ok=null remote_items=0
+recorded E19-EL-pipedpeer-n1-r4 ok=null ref=none
+rc=0
+(nix-store --delete refused lines: 0)

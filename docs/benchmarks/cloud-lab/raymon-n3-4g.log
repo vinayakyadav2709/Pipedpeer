@@ -1,0 +1,379 @@
+=== 2026-11-09T20:58:04+00:00
+usage_mb=3064 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1586 total_rss_mb=1073 total_shmem_mb=0 total_mapped_file_mb=196 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3727027
+    PID   RSS ELAPSED COMMAND
+  21804 141040    424 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  22186 139476    421 ray::DashboardAgent
+  21721 128060    426 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  21803 97884     424 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  21802 97084     424 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  22188 93268     421 ray::RuntimeEnvAgent
+  22298 90876     419 ray::IDLE
+  22297 90772     419 ray::IDLE
+  22099 88788     422 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  22299 88580     419 ray::IDLE
+  21723 74664     426 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  21725 72696     426 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  21761 49764     424 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-51-00_6
+  22100 33312     422 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=8
+=== 2026-11-09T20:58:14+00:00
+usage_mb=2218 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1586 total_rss_mb=250 total_shmem_mb=0 total_mapped_file_mb=184 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3729211
+    PID   RSS ELAPSED COMMAND
+  21721 128284    436 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  21802 97416     434 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  22188 94536     431 ray::RuntimeEnvAgent
+  21761 48792     434 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-51-00_6
+  23226  3656      10 systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler
+  23225  3056      10 bash -c systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler;
+  21803     0     434 [python] <defunct>
+  21804     0     434 [python] <defunct>
+  22099     0     432 [python] <defunct>
+  22100     0     432 [raylet] <defunct>
+ray_workers=3
+=== 2026-11-09T20:58:25+00:00
+usage_mb=2139 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1586 total_rss_mb=172 total_shmem_mb=0 total_mapped_file_mb=169 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3729211
+    PID   RSS ELAPSED COMMAND
+  21721 128284    446 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  21802 97432     444 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  21761 34368     444 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-51-00_6
+  23226  3656      20 systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler
+  23225  3056      20 bash -c systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler;
+  21803     0     444 [python] <defunct>
+  21804     0     444 [python] <defunct>
+  22099     0     442 [python] <defunct>
+  22100     0     442 [raylet] <defunct>
+ray_workers=2
+=== 2026-11-09T20:58:35+00:00
+usage_mb=2139 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1586 total_rss_mb=172 total_shmem_mb=0 total_mapped_file_mb=169 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3729211
+    PID   RSS ELAPSED COMMAND
+  21721 128288    456 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  21802 97468     454 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  21761 34368     454 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-51-00_6
+  23226  3656      30 systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler
+  23225  3056      30 bash -c systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler;
+  21803     0     454 [python] <defunct>
+  21804     0     454 [python] <defunct>
+  22099     0     452 [python] <defunct>
+  22100     0     452 [raylet] <defunct>
+ray_workers=2
+=== 2026-11-09T20:58:45+00:00
+usage_mb=2905 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1589 total_rss_mb=914 total_shmem_mb=0 total_mapped_file_mb=194 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3729211
+    PID   RSS ELAPSED COMMAND
+  23719 136068      1 ray::DashboardAgent
+  23387 133992      4 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  23303 123900      6 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  23386 98996       4 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  23721 93288       1 ray::RuntimeEnvAgent
+  23385 92804       4 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  23676 88276       2 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  23305 72528       6 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  23307 69924       5 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  23345 45400       4 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-58-41_2
+  23677 28108       2 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=5
+=== 2026-11-09T20:58:55+00:00
+usage_mb=3069 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1589 total_rss_mb=1076 total_shmem_mb=0 total_mapped_file_mb=196 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3752750
+    PID   RSS ELAPSED COMMAND
+  23719 138040     12 ray::DashboardAgent
+  23387 134048     15 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  23303 124628     17 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  23386 100776     15 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  23385 93776      15 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  23721 93308      12 ray::RuntimeEnvAgent
+  23810 90264      10 ray::IDLE
+  23811 88264      10 ray::IDLE
+  23812 88128      10 ray::IDLE
+  23676 88156      13 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  23305 72548      17 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  23307 69956      16 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24022 56120       1 /home/lab/pipedpeer-lab/venv/bin/python -c from dask.distributed import Client; c=Client('tcp://10.136.162.16:8786'); print(sum(w.get('nth
+  23345 50632      15 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-58-41_2
+  23677 30252      13 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=8
+=== 2026-11-09T20:59:05+00:00
+usage_mb=2215 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1589 total_rss_mb=243 total_shmem_mb=0 total_mapped_file_mb=182 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3761260
+    PID   RSS ELAPSED COMMAND
+  23303 124936     27 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  23385 94252      25 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  23721 93460      22 ray::RuntimeEnvAgent
+  23345 44664      25 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-58-41_2
+  23677 31032      23 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  24046  3768       8 systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler
+  24045  3196       8 bash -c systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler;
+  23386     0      25 [python] <defunct>
+  23387     0      25 [python] <defunct>
+  23676     0      23 [python] <defunct>
+ray_workers=4
+=== 2026-11-09T20:59:16+00:00
+usage_mb=2140 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1588 total_rss_mb=170 total_shmem_mb=0 total_mapped_file_mb=167 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3761260
+    PID   RSS ELAPSED COMMAND
+  23303 124940     37 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  23385 94288      35 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  23345 31868      35 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-58-41_2
+  24046  3768      18 systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler
+  24045  3196      18 bash -c systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler;
+  23386     0      35 [python] <defunct>
+  23387     0      35 [python] <defunct>
+  23676     0      33 [python] <defunct>
+  23677     0      33 [raylet] <defunct>
+ray_workers=2
+=== 2026-11-09T20:59:26+00:00
+usage_mb=2140 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1588 total_rss_mb=171 total_shmem_mb=0 total_mapped_file_mb=167 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3761260
+    PID   RSS ELAPSED COMMAND
+  23303 124956     47 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  23385 94320      45 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  23345 31872      45 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-58-41_2
+  24046  3768      28 systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler
+  24045  3196      28 bash -c systemctl --user stop lab-ray lab-dask-worker lab-dask-scheduler 2>/dev/null; for u in lab-ray lab-dask-worker lab-dask-scheduler;
+  23386     0      45 [python] <defunct>
+  23387     0      45 [python] <defunct>
+  23676     0      43 [python] <defunct>
+  23677     0      43 [raylet] <defunct>
+ray_workers=2
+=== 2026-11-09T20:59:36+00:00
+usage_mb=2907 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1590 total_rss_mb=914 total_shmem_mb=0 total_mapped_file_mb=193 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3761260
+    PID   RSS ELAPSED COMMAND
+  24525 135704      1 ray::DashboardAgent
+  24220 134204      2 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 123896      4 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 98980       2 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97144       1 ray::RuntimeEnvAgent
+  24214 92632       2 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88252       1 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72352       4 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70000       4 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 44688       2 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 28152       1 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=5
+=== 2026-11-09T20:59:46+00:00
+usage_mb=3231 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1615 total_rss_mb=1206 total_shmem_mb=0 total_mapped_file_mb=221 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3770401
+    PID   RSS ELAPSED COMMAND
+  24821 163696      4 /home/lab/pipedpeer-lab/venv/bin/python baselines/sweep_ray.py
+  24525 137536     12 ray::DashboardAgent
+  24862 135892      4 ray::run_batch
+  24860 134548      4 ray::run_batch
+  24220 134220     13 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24861 133964      4 ray::run_batch
+  24124 124500     15 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 100748     13 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97388      12 ray::RuntimeEnvAgent
+  24214 93628      13 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88160      12 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72384      15 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70044      15 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 54664      13 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 31592      12 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  24820  8012       4 python3 /home/lab/pipedpeer-lab/work/stamp.py /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/first_out_ns
+  24817  3224       4 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/cmd.sh
+  24819  2008       4 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/cmd.sh
+ray_workers=8
+=== 2026-11-09T20:59:56+00:00
+usage_mb=3240 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1615 total_rss_mb=1214 total_shmem_mb=0 total_mapped_file_mb=221 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3770401
+    PID   RSS ELAPSED COMMAND
+  24821 164200     14 /home/lab/pipedpeer-lab/venv/bin/python baselines/sweep_ray.py
+  24525 138068     22 ray::DashboardAgent
+  24862 136428     14 ray::run_batch
+  24860 135040     14 ray::run_batch
+  24861 134456     14 ray::IDLE
+  24220 134320     23 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124500     25 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101012     23 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97388      22 ray::RuntimeEnvAgent
+  24214 94168      23 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88236      22 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72384      25 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70068      25 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 56520      23 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 33464      22 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  24820  8012      14 python3 /home/lab/pipedpeer-lab/work/stamp.py /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/first_out_ns
+  24817  3224      14 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/cmd.sh
+  24819  2008      14 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/cmd.sh
+ray_workers=8
+=== 2026-11-09T21:00:06+00:00
+usage_mb=3243 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1615 total_rss_mb=1218 total_shmem_mb=0 total_mapped_file_mb=221 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3770401
+    PID   RSS ELAPSED COMMAND
+  24821 164684     24 /home/lab/pipedpeer-lab/venv/bin/python baselines/sweep_ray.py
+  24525 138244     32 ray::DashboardAgent
+  24862 136480     24 ray::IDLE
+  24860 135060     24 ray::run_batch
+  24861 134512     24 ray::run_batch
+  24220 134384     33 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504     35 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101096     33 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97388      32 ray::RuntimeEnvAgent
+  24214 94216      33 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88324      32 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72388      35 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70096      35 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 58636      33 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 34124      32 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  24820  8012      24 python3 /home/lab/pipedpeer-lab/work/stamp.py /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/first_out_ns
+  24817  3224      24 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/cmd.sh
+  24819  2008      24 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r0/cmd.sh
+ray_workers=8
+=== 2026-11-09T21:00:17+00:00
+usage_mb=3249 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=1224 total_shmem_mb=0 total_mapped_file_mb=220 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3770645
+    PID   RSS ELAPSED COMMAND
+  25068 162968      4 /home/lab/pipedpeer-lab/venv/bin/python baselines/sweep_ray.py
+  24525 138640     42 ray::DashboardAgent
+  25111 136988      3 ray::run_batch
+  25112 134720      3 ray::run_batch
+  25110 134840      3 ray::run_batch
+  24220 134428     43 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504     45 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101064     43 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488      42 ray::RuntimeEnvAgent
+  24214 94264      43 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88440      42 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72392      45 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70116      45 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 65224      43 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 34396      42 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  25067  8140       4 python3 /home/lab/pipedpeer-lab/work/stamp.py /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/first_out_ns
+  25064  3312       4 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/cmd.sh
+  25066  2000       4 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/cmd.sh
+ray_workers=8
+=== 2026-11-09T21:00:27+00:00
+usage_mb=3254 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=1229 total_shmem_mb=0 total_mapped_file_mb=220 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3770645
+    PID   RSS ELAPSED COMMAND
+  25068 163420     14 /home/lab/pipedpeer-lab/venv/bin/python baselines/sweep_ray.py
+  24525 138772     52 ray::DashboardAgent
+  25111 137496     13 ray::run_batch
+  25110 135328     13 ray::run_batch
+  25112 135228     13 ray::run_batch
+  24220 134500     53 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504     55 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101092     53 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488      52 ray::RuntimeEnvAgent
+  24214 94308      53 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88560      52 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72392      55 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70140      55 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 66744      53 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 34956      52 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  25067  8140      14 python3 /home/lab/pipedpeer-lab/work/stamp.py /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/first_out_ns
+  25064  3312      14 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/cmd.sh
+  25066  2000      14 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/cmd.sh
+ray_workers=8
+=== 2026-11-09T21:00:37+00:00
+usage_mb=3261 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=1236 total_shmem_mb=0 total_mapped_file_mb=221 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3783631
+    PID   RSS ELAPSED COMMAND
+  25068 163900     25 /home/lab/pipedpeer-lab/venv/bin/python baselines/sweep_ray.py
+  24525 138944     63 ray::DashboardAgent
+  24220 137284     64 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  25111 137540     24 ray::run_batch
+  25112 135252     24 ray::run_batch
+  25110 135352     24 ray::run_batch
+  24124 124504     66 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101092     64 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488      63 ray::RuntimeEnvAgent
+  24214 94344      64 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88636      63 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72392      66 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70156      66 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 69372      64 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 35536      63 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+  25067  8140      25 python3 /home/lab/pipedpeer-lab/work/stamp.py /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/first_out_ns
+  25064  3312      25 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/cmd.sh
+  25066  2000      25 /usr/bin/bash /home/lab/pipedpeer-lab/runs/E19-EL-ray-n1-r1/cmd.sh
+ray_workers=8
+=== 2026-11-09T21:00:47+00:00
+usage_mb=2978 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=960 total_shmem_mb=0 total_mapped_file_mb=196 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3783631
+    PID   RSS ELAPSED COMMAND
+  24525 139084     73 ray::DashboardAgent
+  24220 137308     74 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504     76 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101116     74 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488      73 ray::RuntimeEnvAgent
+  24214 94440      74 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88672      73 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72392      76 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24168 70244      74 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24128 70184      76 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24500 35528      73 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=5
+=== 2026-11-09T21:00:57+00:00
+usage_mb=2977 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=958 total_shmem_mb=0 total_mapped_file_mb=196 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3783631
+    PID   RSS ELAPSED COMMAND
+  24525 139108     83 ray::DashboardAgent
+  24220 136840     84 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504     86 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101132     84 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488      83 ray::RuntimeEnvAgent
+  24214 94460      84 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88564      83 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72392      86 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70212      86 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 69524      84 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 35088      83 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=5
+=== 2026-11-09T21:01:08+00:00
+usage_mb=2977 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=958 total_shmem_mb=0 total_mapped_file_mb=196 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3783631
+    PID   RSS ELAPSED COMMAND
+  24525 139156     93 ray::DashboardAgent
+  24220 136844     94 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504     96 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101116     94 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488      93 ray::RuntimeEnvAgent
+  24214 94480      94 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88664      93 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72396      96 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70228      96 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 68720      94 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 35248      93 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=5
+=== 2026-11-09T21:01:18+00:00
+usage_mb=2979 max_usage_mb=4096 limit_mb=4096 failcnt=0 oom_kill_disable=0 under_oom=0 oom_kill=0 
+total_cache_mb=1616 total_rss_mb=960 total_shmem_mb=0 total_mapped_file_mb=196 total_pgmajfault_mb=0 
+host_psi: some avg10=0.00 avg60=0.00 avg300=0.00 total=3783631
+    PID   RSS ELAPSED COMMAND
+  24525 139212    103 ray::DashboardAgent
+  24220 136844    104 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/dashboard.py --host=127.0.
+  24124 124504    106 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/ray start --head --port=6379 --num-cpus=3 --block
+  24215 101116    104 /home/lab/pipedpeer-lab/venv/bin/python -m ray.util.client.server --address=10.136.162.16:6379 --host=10.136.162.16 --port=10001 --mode=pr
+  24527 97488     103 ray::RuntimeEnvAgent
+  24214 94496     104 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/autoscaler/_private/monitor.py --
+  24499 88712     103 /home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/log_monitor.py --session
+  24126 72408     106 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  24128 70252     106 /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  24168 69196     104 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_20-59-33_6
+  24500 35240     103 /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_
+ray_workers=5

@@ -1,0 +1,181 @@
+######## e17
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+e17: no runs.jsonl; median wall taken as 10 s
+e17: no E1 W1 runs for pipedpeer at n=2; median wall taken as 10 s
+2026-11-09T20:30:23+00:00 e17.sh: E17: introducer pc00, submit pc01, members pc00 pc01, joiners pc02, median wall 10s
+Running as unit: lab-E17-W1-pipedpeer-n2-r1.service; invocation ID: 0d0f6219fabb4b24b8a9f30b37f42f0a
+2026-11-09T20:30:24+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r1 on pc01: not finished yet
+2026-11-09T20:30:29+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r1 on pc01: not finished yet
+recorded E17-W1-pipedpeer-n2-r1 ok=null ref=none
+RESULT E17-W1-pipedpeer-n2-r1 ok=null remote_items=366
+✓ joining through 10.136.162.17:4244, 10.136.162.16:4244
+! partly connected: 1 machine(s) reachable (ubu2), 1 not
+✗ 3e981a00: Get "http://10.136.162.16:4242/health": 10.136.162.16:4242 did not answer the cluster token check; not sending it: dial tcp 10.136.162.16:4242: connect: connection refused — fix: the machines cannot reach each other on 4242/tcp: run `pipedpeer doctor` on both (router or firewall betw
+pipedpeer: not using 10.136.162.16:4244 as introducer(s): a private address that did not answer from here
+✓ common environment: building in the background (`pipedpeer status` shows progress)
+2026-11-09T20:31:35+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r1: connect on pc02 failed (exit 2; a timeout is 124)
+2026-11-09T20:31:35+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r1: only one joiner; the old-invite arm is recorded as 0
+daemon running (node 3e981a00, port 4242)
+stopped daemon
+stopped daemon
+UPLOAD-FAILED no r2.env (looked at /root/.config/pipedpeer-lab/r2.env)
+2026-11-09T20:31:44+00:00 upload.sh: upload: no r2.env at /root/.config/pipedpeer-lab/r2.env
+2026-11-09T20:31:44+00:00 e17.sh: E17: upload failed; results stay in /lab-results
+E17-DONE csv=/lab-results/analysis-input/e17.csv
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+rc=0
+######## e17b
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+e17: no E1 W1 runs for pipedpeer at n=2; median wall taken as 10 s
+2026-11-09T20:35:37+00:00 e17.sh: E17: introducer pc00, submit pc01, members pc00 pc01, joiners pc02, median wall 10s
+skipped E17-W1-pipedpeer-n2-r1
+stopped daemon
+Running as unit: lab-E17-W1-pipedpeer-n2-r2.service; invocation ID: 88a968feb9f743979dfc285f73508dcc
+2026-11-09T20:35:37+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r2 on pc01: not finished yet
+2026-11-09T20:35:40+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r2: the job had already ended before the kill; kill_at_s left empty
+RESULT E17-W1-pipedpeer-n2-r2 ok=null remote_items=463
+recorded E17-W1-pipedpeer-n2-r2 ok=null ref=none
+2026-11-09T20:35:42+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r2: result_ok is null in runs.jsonl (no reference checksum: run REF first); job_result_ok left empty, not 0
+✓ joining through 10.136.162.17:4244, 10.136.162.16:4244
+✓ connected: 2 other machine(s): ubu1, ubu2
+✓ common environment: building in the background (`pipedpeer status` shows progress)
+pipedpeer: 4.7 s total — script 2.7 s, pipedpeer 2.0 s — ran on ubu2 45%, ubu3 32%, ubu1 23% of compute
+2026-11-09T20:35:48+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r2: only one joiner; the old-invite arm is recorded as 0
+daemon running (node 3e981a00, port 4242)
+stopped daemon
+stopped daemon
+UPLOAD-FAILED no r2.env (looked at /root/.config/pipedpeer-lab/r2.env)
+2026-11-09T20:35:50+00:00 upload.sh: upload: no r2.env at /root/.config/pipedpeer-lab/r2.env
+2026-11-09T20:35:50+00:00 e17.sh: E17: upload failed; results stay in /lab-results
+E17-DONE csv=/lab-results/analysis-input/e17.csv
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+rc=0
+######## e17c
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+e17: no E1 W1 runs for pipedpeer at n=2; median wall taken as the W1 calibration target, 5 s
+2026-11-09T20:38:46+00:00 e17.sh: E17: introducer pc00, submit pc01, members pc00 pc01, joiners pc02, median wall 5s
+skipped E17-W1-pipedpeer-n2-r1
+skipped E17-W1-pipedpeer-n2-r2
+stopped daemon
+Running as unit: lab-E17-W1-pipedpeer-n2-r3.service; invocation ID: c7233750c66044e18c9327503a783bc2
+2026-11-09T20:38:46+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r3 on pc01: not finished yet
+RESULT E17-W1-pipedpeer-n2-r3 ok=null remote_items=241
+recorded E17-W1-pipedpeer-n2-r3 ok=null ref=none
+2026-11-09T20:38:51+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r3: result_ok is null in runs.jsonl (no reference checksum: run REF first); job_result_ok left empty, not 0
+✓ joining through 10.136.162.17:4244, 10.136.162.16:4244
+! partly connected: 1 machine(s) reachable (ubu2), 1 not
+✗ 3e981a00: Get "http://10.136.162.16:4242/health": 10.136.162.16:4242 did not answer the cluster token check; not sending it: dial tcp 10.136.162.16:4242: connect: connection refused — fix: the machines cannot reach each other on 4242/tcp: run `pipedpeer doctor` on both (router or firewall betw
+pipedpeer: not using 10.136.162.16:4244 as introducer(s): a private address that did not answer from here
+✓ common environment: building in the background (`pipedpeer status` shows progress)
+2026-11-09T20:39:52+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r3: connect on pc02 exited 2 (partly connected); confirming the join on pc01 and pc02
+pipedpeer: 0.7 s total — script 0.6 s, pipedpeer 0.1 s — ran on ubu3 57%, ubu2 43% of compute
+2026-11-09T20:39:53+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r3: only one joiner; the old-invite arm is recorded as 0
+daemon running (node 3e981a00, port 4242)
+stopped daemon
+stopped daemon
+UPLOAD-FAILED no r2.env (looked at /root/.config/pipedpeer-lab/r2.env)
+2026-11-09T20:39:57+00:00 upload.sh: upload: no r2.env at /root/.config/pipedpeer-lab/r2.env
+2026-11-09T20:39:57+00:00 e17.sh: E17: upload failed; results stay in /lab-results
+E17-DONE csv=/lab-results/analysis-input/e17.csv
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+rc=0
+######## e17d
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+e17: no E1 W1 runs for pipedpeer at n=2; median wall taken as the W1 calibration target, 5 s
+2026-11-09T20:50:43+00:00 e17.sh: E17: introducer pc00, submit pc01, members pc00 pc01, joiners pc02, median wall 5s
+skipped E17-W1-pipedpeer-n2-r1
+skipped E17-W1-pipedpeer-n2-r2
+skipped E17-W1-pipedpeer-n2-r3
+stopped daemon
+Running as unit: lab-E17-W1-pipedpeer-n2-r4.service; invocation ID: 6e87d49b8e24491a9c2997f40f52c7a8
+2026-11-09T20:50:44+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r4 on pc01: not finished yet
+recorded E17-W1-pipedpeer-n2-r4 ok=true ref=reference
+RESULT E17-W1-pipedpeer-n2-r4 ok=true remote_items=247
+✓ joining through 10.136.162.17:4244, 10.136.162.16:4244
+✓ connected: 2 other machine(s): ubu1, ubu2
+pipedpeer: not using 10.136.162.16:4244 as introducer(s): a private address that did not answer from here
+✓ common environment: building in the background (`pipedpeer status` shows progress)
+pipedpeer: 3.5 s total — script 3.4 s, pipedpeer 0.1 s — ran on ubu1 49%, ubu3 43%, ubu2 8% of compute
+2026-11-09T20:51:03+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r4: only one joiner; the old-invite arm is recorded as 0
+daemon running (node 3e981a00, port 4242)
+stopped daemon
+stopped daemon
+UPLOAD-FAILED no r2.env (looked at /root/.config/pipedpeer-lab/r2.env)
+2026-11-09T20:51:04+00:00 upload.sh: upload: no r2.env at /root/.config/pipedpeer-lab/r2.env
+2026-11-09T20:51:04+00:00 e17.sh: E17: upload failed; results stay in /lab-results
+E17-DONE csv=/lab-results/analysis-input/e17.csv
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+rc=0
+######## e17e
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+e17: no E1 W1 runs for pipedpeer at n=2; median wall taken as the W1 calibration target, 5 s
+2026-11-09T20:51:41+00:00 e17.sh: E17: introducer pc00, submit pc01, members pc00 pc01, joiners pc02, median wall 5s
+skipped E17-W1-pipedpeer-n2-r1
+skipped E17-W1-pipedpeer-n2-r2
+skipped E17-W1-pipedpeer-n2-r3
+skipped E17-W1-pipedpeer-n2-r4
+stopped daemon
+Running as unit: lab-E17-W1-pipedpeer-n2-r5.service; invocation ID: 3dc2d23287cc4daa8fd8ff7aaa9441bd
+2026-11-09T20:51:41+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r5 on pc01: not finished yet
+RESULT E17-W1-pipedpeer-n2-r5 ok=true remote_items=246
+recorded E17-W1-pipedpeer-n2-r5 ok=true ref=reference
+✓ joining through 10.136.162.17:4244, 10.136.162.16:4244
+! partly connected: 1 machine(s) reachable (ubu2), 1 not
+✗ 3e981a00: Get "http://10.136.162.16:4242/health": 10.136.162.16:4242 did not answer the cluster token check; not sending it: dial tcp 10.136.162.16:4242: connect: connection refused — fix: the machines cannot reach each other on 4242/tcp: run `pipedpeer doctor` on both (router or firewall betw
+pipedpeer: not using 10.136.162.16:4244 as introducer(s): a private address that did not answer from here
+✓ common environment: building in the background (`pipedpeer status` shows progress)
+2026-11-09T20:52:47+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r5: connect on pc02 exited 2 (partly connected); confirming the join on pc01 and pc02
+pipedpeer: 0.9 s total — script 0.7 s, pipedpeer 0.1 s — ran on ubu3 57%, ubu2 43% of compute
+2026-11-09T20:52:48+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r5: only one joiner; the old-invite arm is recorded as 0
+daemon running (node 3e981a00, port 4242)
+stopped daemon
+stopped daemon
+UPLOAD-FAILED no r2.env (looked at /root/.config/pipedpeer-lab/r2.env)
+2026-11-09T20:52:52+00:00 upload.sh: upload: no r2.env at /root/.config/pipedpeer-lab/r2.env
+2026-11-09T20:52:52+00:00 e17.sh: E17: upload failed; results stay in /lab-results
+E17-DONE csv=/lab-results/analysis-input/e17.csv
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+rc=0
+######## e17f
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+e17: no E1 W1 runs for pipedpeer at n=2; median wall taken as the W1 calibration target, 5 s
+2026-11-09T20:56:39+00:00 e17.sh: E17: introducer pc00, submit pc01, members pc00 pc01, joiners pc02, median wall 5s
+skipped E17-W1-pipedpeer-n2-r1
+skipped E17-W1-pipedpeer-n2-r2
+skipped E17-W1-pipedpeer-n2-r3
+skipped E17-W1-pipedpeer-n2-r4
+skipped E17-W1-pipedpeer-n2-r5
+stopped daemon
+Running as unit: lab-E17-W1-pipedpeer-n2-r6.service; invocation ID: 3a5343317aa84b689e81edc947dd33ab
+2026-11-09T20:56:39+00:00 e17.sh: wait E17-W1-pipedpeer-n2-r6 on pc01: not finished yet
+recorded E17-W1-pipedpeer-n2-r6 ok=true ref=reference
+RESULT E17-W1-pipedpeer-n2-r6 ok=true remote_items=405
+✓ joining through 10.136.162.17:4244, 10.136.162.16:4244
+! partly connected: 1 machine(s) reachable (ubu2), 1 not
+✗ 3e981a00: Get "http://10.136.162.16:4242/health": 10.136.162.16:4242 did not answer the cluster token check; not sending it: dial tcp 10.136.162.16:4242: connect: connection refused — fix: the machines cannot reach each other on 4242/tcp: run `pipedpeer doctor` on both (router or firewall betw
+pipedpeer: not using 10.136.162.16:4244 as introducer(s): a private address that did not answer from here
+✓ common environment: building in the background (`pipedpeer status` shows progress)
+2026-11-09T20:57:45+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r6: connect on pc02 exited 2 (partly connected); the join counts only as both views confirm it
+pipedpeer: 2.8 s total — script 2.6 s, pipedpeer 0.1 s — ran on ubu3 58%, ubu2 42% of compute
+2026-11-09T20:57:48+00:00 e17.sh: E17 E17-W1-pipedpeer-n2-r6: only one joiner; the old-invite arm is recorded as 0
+daemon running (node 3e981a00, port 4242)
+stopped daemon
+stopped daemon
+UPLOAD-FAILED no r2.env (looked at /root/.config/pipedpeer-lab/r2.env)
+2026-11-09T20:57:50+00:00 upload.sh: upload: no r2.env at /root/.config/pipedpeer-lab/r2.env
+2026-11-09T20:57:50+00:00 e17.sh: E17: upload failed; results stay in /lab-results
+E17-DONE csv=/lab-results/analysis-input/e17.csv
+daemon running (node 3e981a00, port 4242)
+daemon running (node d05797ac, port 4242)
+rc=0
