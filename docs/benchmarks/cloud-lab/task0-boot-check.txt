@@ -1,0 +1,28 @@
+# Task 0: one Ubuntu 24.04 lab container boots systemd, runs user units, and enforces its memory limit.
+# Emulated: one VM, cgroup v1. Transcribed from the session's output.
+$ docker run -d --name t0 --hostname t0 --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+    --tmpfs /run --tmpfs /run/lock --memory 2048m --memory-swap 2048m pp-ubu:24.04
+1c6c39234a9000bf369a3c28dd2eb37e22724430853e357745bf87aaa3861d4b
+$ timeout 90 docker exec t0 systemctl is-system-running --wait
+running
+$ docker exec t0 systemctl --failed
+  UNIT LOAD ACTIVE SUB DESCRIPTION
+0 loaded units listed.
+
+# systemd-run --user, on the bare image:
+Failed to connect to bus: No such file or directory
+# after installing openssh-server, curl and rsync as lab-pc.sh does (brings in dbus and libpam-systemd 255.4-1ubuntu8.18):
+linger-ok
+Running as unit: t0probe.service; invocation ID: 76e4eb6bc5f94a5687f5100aee4f2c71
+active
+ControlGroup=/docker/1c6c3923.../user.slice/user-1001.slice/user@1001.service/app.slice/t0probe.service
+
+# memory limit:
+/sys/fs/cgroup/memory/docker/<id>/memory.limit_in_bytes = 2147483648
+python allocating 100 MB at a time: last line 2000, exit 137
+docker inspect: OOMKilled=true Memory=2147483648
+
+# versions:
+systemd 255 (255.4-1ubuntu8.18)
+VERSION="24.04.5 LTS (Noble Numbat)"
+kernel 6.18.44-fc-v310, Docker 29.9.2, cgroupfs driver, cgroup v1

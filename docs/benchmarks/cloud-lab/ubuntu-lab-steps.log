@@ -1,0 +1,29 @@
+# scripts/campaign/test-ubuntu-lab.sh, steps 1-8. Emulated: containers on one VM, cgroup v1.
+# Only the test script's own PASS/FAIL lines survive: step 8 removed the lab's results volume,
+# with the driver's campaign.log. Per-run prefixes shortened; step 7's commands folded.
+#### steps 1-4 (first run, then step 4 rerun after the CA patch, then after the install fix)
+STEP 1 PASS snapshot of 3 PCs (dpkg, sudoers.d, authorized_keys, ufw, sleep targets)
+STEP 2 PASS setup line as lab on 3 PCs; second run left the state file unchanged
+STEP 3 PASS scan found 3, pssh true green, ports green with ufw off and on (rules once)
+STEP 4 FAIL install.sh: FAILED pc00: warmup: failed (exit 1); details above
+STEP 4 FAIL install.sh: ... warmup pc01 (ubu2): failed (exit 1); details above; restarting it (1/2, the connect token swap can kill a running build)
+STEP 4 PASS install.sh ok=3, 3 distinct node ids; AppArmor profile NOT CHECKED (this kernel has no AppArmor)
+#### steps 5-6 (step 5 first failed: VM CA patch lost when the store path was replaced)
+STEP 5 PASS pins.sh and venv.sh built the same pinned venv on 22.04 and 24.04 (python 3.14)
+driver off the network for 90s (job: sleep 600)
+STEP 6 PASS job survived a 90s drop, was not started twice, result fetched
+#### step 7 (rerun after the session machine restarted), step 8
+step 7: ./check-driver.sh ... ./stage.sh ./inventory.sh ./clocks.sh ./network.sh
+step 7: ./calibrate.sh --target 5 --force   ./run.sh SMOKE   ./run.sh REF --sizes 1
+step 7: ./run.sh FC --repeats 2   ./run.sh E7 --repeats 1   ./run.sh E8 --sizes 2 --repeats 1
+step 7: ./e4.sh --dry-run   ./e5.sh --n 2   ./e6.sh --n 2   ./e11.sh --sizes 2 --idle 30
+step 7: ./upload.sh   python3 ./analyse.py --lab /lab-results
+STEP 7 PASS SMOKE, REF, FC, E7, E8, e5, e6, e11 ran for real; e4 only as --dry-run and E1/E1b not at all; upload and analyse done
+STEP 8 FAIL ubu1: no 'undo complete' in the journal after 120 s
+rc=1
+# each PC's undo journal for that failure:
+#   bash[...]: /usr/bin/bash: /tmp/lab-pc.sh: No such file or directory
+#   lab-undo.service: Main process exited, code=exited, status=127/n/a
+# after lab-pc.sh moved to /var/lib/pipedpeer-lab/:
+STEP 8 PASS uninstall and undo left every PC as step 1 found it
+rc=0

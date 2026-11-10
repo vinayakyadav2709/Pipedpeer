@@ -41,7 +41,7 @@ Ubuntu 24.04.5):
 - The container's `memory.limit_in_bytes` was 2147483648. Python allocating in
   100 MB steps was killed (137) at 2000 MB, and `OOMKilled=true`.
 
-The log was not kept; this rests on the session's own record.
+Output: [cloud-lab/task0-boot-check.txt](cloud-lab/task0-boot-check.txt).
 
 Does not prove: v2 behaviour (`memory.events`, `memory.pressure`, `memory.max`
 reclaim). The VM has no v2 memory controller in use.
@@ -167,8 +167,11 @@ and `UBU_LAB_DROP` at their defaults (600 s job, 90 s drop).
 `CAMPAIGN_TIMEOUT_CAP_S` was left **unset**: it only lowers a run's timeout
 (`run.sh:546`), so unset gives the full `experiments.tsv` timeouts.
 
-The log was not kept; this rests on the session's own record, including the
-"about 50 minutes" for step 7.
+The test script's PASS/FAIL lines are in
+[cloud-lab/ubuntu-lab-steps.log](cloud-lab/ubuntu-lab-steps.log). The driver's
+detailed `campaign.log` was not kept (step 8 removes the lab's results volume),
+so the per-run detail and the "about 50 minutes" for step 7 rest on the
+session's own record.
 
 - **Step 5** (pins, venv): PASS. The first try failed on the VM, not the harness:
   the E19 purge had replaced the `nss-cacert` store path, which dropped the
