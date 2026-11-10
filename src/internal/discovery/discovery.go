@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -71,9 +72,12 @@ var listenConfig = net.ListenConfig{
 
 // Advertiser broadcasts this node's presence on the LAN.
 type Advertiser struct {
-	info   ServiceInfo
-	stopCh chan struct{}
-	doneCh chan struct{}
+	info  ServiceInfo
+	loops sync.WaitGroup
+
+	mu      sync.Mutex
+	conns   []net.PacketConn
+	stopped bool
 }
 
 // OffEnv turns LAN discovery off when set to "1": the daemon neither answers
@@ -87,11 +91,7 @@ func Off() bool { return os.Getenv(OffEnv) == "1" }
 
 // NewAdvertiser creates a LAN advertiser.
 func NewAdvertiser(info ServiceInfo) *Advertiser {
-	return &Advertiser{
-		info:   info,
-		stopCh: make(chan struct{}),
-		doneCh: make(chan struct{}),
-	}
+	return &Advertiser{info: info}
 }
 
 // Start begins broadcasting presence and responding to discovery requests.
@@ -103,72 +103,62 @@ func (a *Advertiser) Start() error {
 	// Two listeners, one responder loop each: the multicast group catches
 	// probes from same-host daemons, the broadcast port catches probes from
 	// other machines. Both reuse the port so they never conflict.
-	a.doneCh = make(chan struct{}, 2)
-
 	mcast := &net.UDPAddr{IP: net.ParseIP(multicastGroup), Port: broadcastPort}
 	conn, err := listenConfig.ListenPacket(context.Background(), "udp4", mcast.String())
 	if err != nil {
 		return fmt.Errorf("listen multicast: %w", err)
 	}
-	go a.respondLoop(conn)
+	a.respond(conn)
 
-	bc, err := listenConfig.ListenPacket(context.Background(), "udp4", fmt.Sprintf(":%d", broadcastPort))
-	if err != nil {
-		// Same-host share is handled by multicast; a free broadcast port is
-		// best-effort (another daemon already holds it and responds on it).
-		// Stop() waits on doneCh with a bounded timeout, so dropping the
-		// second listener just means one fewer response path.
-		a.doneCh <- struct{}{}
-		return nil
+	// Same-host share is handled by multicast; a free broadcast port is
+	// best-effort (another daemon already holds it and responds on it).
+	if bc, err := listenConfig.ListenPacket(context.Background(), "udp4", fmt.Sprintf(":%d", broadcastPort)); err == nil {
+		a.respond(bc)
 	}
-	go a.respondLoop(bc)
 	return nil
 }
 
-func (a *Advertiser) respondLoop(conn net.PacketConn) {
-	defer conn.Close()
-	defer func() {
-		select {
-		case a.doneCh <- struct{}{}:
-		default:
-		}
-	}()
+// respond answers probes arriving on conn until Stop closes it.
+func (a *Advertiser) respond(conn net.PacketConn) {
+	a.mu.Lock()
+	if a.stopped {
+		a.mu.Unlock()
+		_ = conn.Close()
+		return
+	}
+	a.conns = append(a.conns, conn)
+	a.mu.Unlock()
+	a.loops.Go(func() { a.respondLoop(conn) })
+}
 
+func (a *Advertiser) respondLoop(conn net.PacketConn) {
+	data, _ := json.Marshal(a.info)
+	response := []byte(magicHeader + "|" + string(data))
 	buf := make([]byte, 1024)
 	for {
-		select {
-		case <-a.stopCh:
-			return
-		default:
-		}
-
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		n, addr, err := conn.ReadFrom(buf)
-		if err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			return
+		}
+		if err != nil || string(buf[:n]) != magicHeader {
 			continue
 		}
-
-		msg := string(buf[:n])
-		if msg != magicHeader {
-			continue
-		}
-
-		// Respond with our info, back to whoever probed.
-		data, _ := json.Marshal(a.info)
-		response := magicHeader + "|" + string(data)
-		_, _ = conn.WriteTo([]byte(response), addr)
+		_, _ = conn.WriteTo(response, addr)
 	}
 }
 
-// Stop halts the advertiser.
+// Stop halts the advertiser. Closing the sockets is what ends the responder
+// loops: each is blocked in a read with no deadline.
 func (a *Advertiser) Stop() {
-	select {
-	case <-a.stopCh:
-		return
-	default:
+	a.mu.Lock()
+	a.stopped = true
+	conns := a.conns
+	a.conns = nil
+	a.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
 	}
-	close(a.stopCh)
-	time.Sleep(600 * time.Millisecond)
+	a.loops.Wait()
 }
 
 // Discover finds nodes on the local network.

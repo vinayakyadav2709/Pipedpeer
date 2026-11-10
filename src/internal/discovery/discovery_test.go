@@ -2,7 +2,9 @@ package discovery
 
 import (
 	"net"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestReplyHostIsTheSource(t *testing.T) {
@@ -78,5 +80,55 @@ func TestAdvertiserStartStop(t *testing.T) {
 		return ch
 	}():
 		t.Fatal("advertiser stop timed out")
+	}
+}
+
+func TestAdvertiserAnswersProbesUntilStopped(t *testing.T) {
+	adv := NewAdvertiser(ServiceInfo{NodeID: "probe-test-node", DaemonPort: 38080})
+	if err := adv.Start(); err != nil {
+		t.Skipf("cannot listen for discovery here: %v", err)
+	}
+	stopped := false
+	defer func() {
+		if !stopped {
+			adv.Stop()
+		}
+	}()
+
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.WriteTo([]byte(magicHeader), &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: broadcastPort}); err != nil {
+		t.Skipf("cannot send a probe here: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 4096)
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no reply to a discovery probe: %v", err)
+	}
+	reply := string(buf[:n])
+	if !strings.HasPrefix(reply, magicHeader+"|") {
+		t.Fatalf("reply = %q, want it to start with the discovery header", reply)
+	}
+	// Another daemon on this machine shares the port and may be the one
+	// that answered.
+	if !strings.Contains(reply, "probe-test-node") {
+		t.Skipf("a different daemon answered the probe: %s", reply)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		adv.Stop()
+		adv.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+		stopped = true
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return")
 	}
 }
