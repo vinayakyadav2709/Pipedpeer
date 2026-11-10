@@ -270,17 +270,3 @@ func ClientConfig(addr string) *tls.Config {
 		MinVersion: tls.VersionTLS12,
 	}
 }
-
-// ForgetAll drops every pin, and reports how many. Useful where daemons are
-// genuinely disposable - a container lab recreates them on every run, so
-// their keys change every time and the refusal is expected rather than
-// suspicious.
-func ForgetAll() int {
-	pins.load()
-	pins.mu.Lock()
-	defer pins.mu.Unlock()
-	n := len(pins.pins)
-	pins.pins = map[string]pin{}
-	pins.save()
-	return n
-}

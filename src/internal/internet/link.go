@@ -175,7 +175,7 @@ func (m *Manager) serveLink(ctx context.Context, node string, conn *quic.Conn, l
 	}
 	// When the forwarder stops accepting, this link cannot carry anything
 	// more, and the manager has to be told. Returning quietly left the link
-	// in m.peers: Paths() went on reporting a route, the node table went on
+	// in m.peers: the manager went on reporting a route, the node table went on
 	// showing "punched", every poll went on failing, and nothing ever tried
 	// to reconnect - a cluster that had silently stopped distributing while
 	// claiming a direct path. Observed after a large closure transfer, and it

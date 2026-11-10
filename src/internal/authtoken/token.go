@@ -127,9 +127,6 @@ func Generate() string {
 	return hex.EncodeToString(b)
 }
 
-// Path is where the token lives, for messages to the operator.
-func Path() string { return clustercfg.Path() }
-
 // Middleware rejects requests without the token once one is configured.
 // Comparison is constant-time: a byte-by-byte compare leaks the token one
 // character at a time to anyone willing to measure.

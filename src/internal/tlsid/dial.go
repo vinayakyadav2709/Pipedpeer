@@ -39,19 +39,6 @@ func (m *schemeMemo) set(addr string, isTLS bool) {
 	m.tls[addr] = isTLS
 }
 
-// URL builds a request URL for a peer, choosing the scheme it is known to
-// speak. Unknown peers get https; Do falls back if that turns out wrong.
-func URL(addr, path string) string {
-	scheme := "https"
-	if speaks, known := schemes.get(addr); known && !speaks {
-		scheme = "http"
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return scheme + "://" + addr + path
-}
-
 // Client returns an http.Client that verifies peers by node key.
 func Client(addr string, base *http.Client) *http.Client {
 	c := &http.Client{}

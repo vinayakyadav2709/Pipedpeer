@@ -144,9 +144,6 @@ func Start() error { return run("start") }
 // Stop stops the unit.
 func Stop() error { return run("stop") }
 
-// Restart restarts the unit.
-func Restart() error { return run("restart") }
-
 // Active reports whether the unit is running and its main pid (0 when not).
 func Active() (bool, int) {
 	out, err := systemctl("show", "-p", "MainPID", "--value", Name)

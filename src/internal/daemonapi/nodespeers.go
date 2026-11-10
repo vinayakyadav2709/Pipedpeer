@@ -153,14 +153,6 @@ func (s *Server) StartPeerPoller(interval time.Duration) {
 	}()
 }
 
-func (s *Server) StopPeerPoller() {
-	s.peersMu.Lock()
-	if s.stopPoller != nil {
-		close(s.stopPoller)
-	}
-	s.peersMu.Unlock()
-}
-
 // SetSelfInfo tells the daemon how to describe itself in the node store, so
 // this machine is a placement candidate for every peer that polls it and shows
 // up in its own node list. host is the start-time guess; each poll publishes

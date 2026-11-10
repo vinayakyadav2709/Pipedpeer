@@ -53,9 +53,6 @@ func ddpExitCode(err error) int {
 	return -1
 }
 
-// ddpMissedStart reports whether a rank's job ended for missing the start.
-func ddpMissedStart(err error) bool { return ddpExitCode(err) == ddpMissedStartExit }
-
 // ddpHostName names a rank's machine the way a person knows it.
 func ddpHostName(n registry.NodeRecord) string {
 	if h := n.Capabilities["hostname"]; h != "" {

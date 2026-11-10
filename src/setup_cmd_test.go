@@ -14,13 +14,6 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/warmup"
 )
 
-// stubSetup replaces the three seams and counts calls.
-func stubSetup(t *testing.T, port int, outcome connOutcome) (warm, conn *[]string) {
-	t.Helper()
-	w, c, _ := stubSetupRuns(t, port, outcome)
-	return w, c
-}
-
 // stubSetupRuns also counts how often setup itself ran.
 func stubSetupRuns(t *testing.T, port int, outcome connOutcome) (warm, conn *[]string, runs *int) {
 	t.Helper()

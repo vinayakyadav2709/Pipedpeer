@@ -449,17 +449,6 @@ func (m *Manager) Peers() map[string]string {
 	return out
 }
 
-// Paths reports how each peer is reached, by node id (the key fingerprint).
-func (m *Manager) Paths() map[string]string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make(map[string]string, len(m.peers))
-	for node, link := range m.peers {
-		out[node] = link.path
-	}
-	return out
-}
-
 // Unreachable reports, by node id, why each peer that an introducer still
 // lists, or another member vouches for, has no direct path. A peer drops out
 // once it links or stops being listed and vouched for.

@@ -349,7 +349,7 @@ func TestUnreachablePeersCarryTheirReason(t *testing.T) {
 // TestAForwarderThatStopsAcceptingReleasesItsPeer.
 //
 // The forwarder is the only way HTTP crosses a direct link. When its accept
-// loop ended, serveLink returned quietly and left the link in place: Paths()
+// loop ended, serveLink returned quietly and left the link in place: the manager
 // went on reporting a route, the node table went on printing "punched", every
 // health poll failed, and no poll ever tried to reconnect - a cluster that
 // had silently stopped distributing while claiming a direct path to the peer

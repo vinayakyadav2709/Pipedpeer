@@ -103,23 +103,6 @@ func gb(b int64) string {
 	return strings.ReplaceAll(strings.ReplaceAll(humanize.IBytes(uint64(b)), " GiB", "G"), " MiB", "M")
 }
 
-// printNodes renders the daemon's view of the cluster and the peers it has
-// no direct path to.
-func printNodes(daemonPort int) error {
-	nodes, err := fetchClusterNodes(daemonPort)
-	if err != nil {
-		fmt.Println("No machines found (daemon unreachable; start it with: pipedpeer start)")
-		return nil
-	}
-	if len(nodes) == 0 {
-		fmt.Println("No machines found")
-	} else {
-		printNodeTable(os.Stdout, nodes)
-	}
-	printUnreachable(os.Stdout, daemonPort)
-	return nil
-}
-
 // printUnreachable lists peers with no direct path; a fetch error goes to stderr.
 func printUnreachable(w io.Writer, daemonPort int) {
 	bad, err := fetchUnreachable(daemonPort)

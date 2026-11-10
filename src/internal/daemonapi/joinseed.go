@@ -207,13 +207,6 @@ func (s *Server) joinSeedAttempted(storePath, peerKey string) bool {
 	return js.attempted[storePath][peerKey]
 }
 
-func (s *Server) joinSeedInFlight(storePath string) bool {
-	js := s.joinSeeder()
-	js.mu.Lock()
-	defer js.mu.Unlock()
-	return js.inFlight[storePath]
-}
-
 func (s *Server) joinSeedHasAttemptedSet(storePath string) bool {
 	js := s.joinSeeder()
 	js.mu.Lock()

@@ -569,11 +569,6 @@ func (s *Store) ResolveNodeID(idOrPrefix string) (string, error) {
 	}
 }
 
-func (s *Store) RemoveAll() error {
-	_, err := s.db.Exec(`DELETE FROM nodes`)
-	return err
-}
-
 // ListAll returns every node with Host/Port/Source/Reason taken from its
 // active path (or best candidate), ordered by node id.
 func (s *Store) ListAll() ([]Node, error) {
