@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -375,9 +376,8 @@ func TestMultiNodeSpill(t *testing.T) {
 // never subtracts capacity), with every value correct and in input order.
 //
 // The peer must genuinely have been attempted: a chunk that never tried to
-// spill would satisfy a bare length check just as well. runChunk records the
-// failure by marking the peer dead for the rest of the chunk, so that list is
-// the observable proof — the remote failure itself is not logged.
+// spill would satisfy a bare length check just as well, so the peer counts
+// the requests it refused.
 func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -390,9 +390,13 @@ func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
 
 	s := New("fallback-node-xxxxxxxx")
 	defer s.StopWarmWorkers()
-	// Point at an address that refuses connections.
-	const deadPeer = "127.0.0.1:1"
-	s.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{deadPeer} })
+	var asked atomic.Int32
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer peer.Close()
+	s.pool.SetPeerFn(func(_, _ string, _ http.Header) []string { return []string{peer.Listener.Addr().String()} })
 
 	var items []json.RawMessage
 	for i := 1; i <= 16; i++ {
@@ -412,15 +416,8 @@ func TestPoolSpillDeadPeerFallsBackToLocal(t *testing.T) {
 		}
 	}
 
-	s.pool.deadMu.Lock()
-	dead := s.pool.deadPeers[deadPeer]
-	n := len(s.pool.deadPeers)
-	s.pool.deadMu.Unlock()
-	if !dead {
-		t.Fatal("the unreachable peer was never tried: the chunk stayed local without attempting spill")
-	}
-	if n != 1 {
-		t.Fatalf("want exactly 1 peer recorded as failed, got %d", n)
+	if asked.Load() == 0 {
+		t.Fatal("the failing peer was never tried: the chunk stayed local without attempting spill")
 	}
 }
 
@@ -799,4 +796,45 @@ func mustPort(t *testing.T, hostport string) int {
 	}
 	p, _ := strconv.Atoi(port)
 	return p
+}
+
+// TestRunPartAllPeersDeadFallsBackToLocal covers a part whose whole candidate
+// list failed earlier in the same chunk: it must run locally.
+func TestRunPartAllPeersDeadFallsBackToLocal(t *testing.T) {
+	storePath := fakeRun(t, filepath.Join(t.TempDir(), "nix", "store", "fake"))
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	s := New("deadpeers-node-xxxxxxxx")
+	defer s.StopWarmWorkers()
+
+	dead := []string{"10.255.255.1:1", "10.255.255.2:1"}
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", dead: new(deadPeers),
+		items: []json.RawMessage{json.RawMessage("1"), json.RawMessage("2"), json.RawMessage("3")}}
+	for _, p := range dead {
+		ch.dead.mark(p)
+	}
+	results, err := s.pool.runPart(ch, 0, part{c: ch, peers: dead}, runPath, storePath, false)
+	if err != nil {
+		t.Fatalf("part with only dead peers failed: %v", err)
+	}
+	if got := unpickleInts(t, results); len(got) != 3 || got[0] != 2 || got[2] != 6 {
+		t.Fatalf("part with only dead peers returned %v, want [2 4 6] from a local run", got)
+	}
+}
+
+// TestRunPartAllPeersDeadErrorsWhenLocalImpossible is the other half: when the
+// local run cannot happen either, the part must fail loudly.
+func TestRunPartAllPeersDeadErrorsWhenLocalImpossible(t *testing.T) {
+	storePath := filepath.Join(t.TempDir(), "nix", "store", "fake")
+	runPath := filepath.Join(storePath, "bin", "run")
+
+	s := New("deadpeers-node-xxxxxxxx")
+	defer s.StopWarmWorkers()
+
+	ch := &chunk{funcSrc: doubleSrc, funcName: "double", dead: new(deadPeers), items: []json.RawMessage{json.RawMessage("1")}}
+	ch.dead.mark("10.255.255.1:1")
+	results, err := s.pool.runPart(ch, 0, part{c: ch, peers: []string{"10.255.255.1:1"}}, runPath, storePath, false)
+	if err == nil {
+		t.Fatalf("part with dead peers and no local runner returned %d results and no error", len(results))
+	}
 }

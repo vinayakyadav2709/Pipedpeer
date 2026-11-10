@@ -65,6 +65,8 @@ type chunk struct {
 	// away (its job was killed, or the origin dropped a forward), and that
 	// kills the local workers and drops the peer forwards started for it.
 	ctx context.Context
+	// dead is the failed-peer set of the runChunk call this chunk is part of.
+	dead *deadPeers
 }
 
 // context returns the chunk's request context; Background when the chunk was
@@ -201,12 +203,6 @@ type poolManager struct {
 	// outranks real workers (weak-orchestrator: laptop stays flat). need is
 	// the header each peer's runnable check sees (phone.Need; nil = none).
 	peerFn func(storePath, submitter string, need http.Header) []string
-
-	// deadPeers are peers that failed this chunk; later parts skip them and
-	// fall through to the next best candidate. Reset per runChunk so a peer
-	// that recovers mid-run is tried again.
-	deadMu    sync.Mutex
-	deadPeers map[string]bool
 
 	// rates is what every peer has actually managed, measured from the parts
 	// already sent to it. Sizing shares from advertised core counts alone
@@ -443,10 +439,9 @@ func (p *poolStats) add(f func(*poolStats)) {
 
 func newPoolManager() *poolManager {
 	return &poolManager{
-		workers:   make(map[string]*poolWorker),
-		deadPeers: make(map[string]bool),
-		rates:     newRateModel(),
-		warm:      make(map[string]bool),
+		workers: make(map[string]*poolWorker),
+		rates:   newRateModel(),
+		warm:    make(map[string]bool),
 	}
 }
 

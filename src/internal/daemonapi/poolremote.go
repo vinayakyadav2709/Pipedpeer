@@ -235,7 +235,7 @@ wait:
 			lateC = nil
 			elapsed := time.Since(started).Seconds()
 			if !peerCopy {
-				if alt, release, gain := pm.backupPeer(others, ch.fnFP, len(ch.items), expected, elapsed); alt != "" {
+				if alt, release, gain := pm.backupPeer(others, ch.dead, ch.fnFP, len(ch.items), expected, elapsed); alt != "" {
 					peerCopy = true
 					log.Printf("[pool] part %d: late on %s (expected %.1fs, now %.1fs); a copy on %s should save %.1fs, starting it, first to finish wins",
 						i, peer, expected, elapsed, alt, gain)

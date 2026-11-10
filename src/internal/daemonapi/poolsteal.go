@@ -144,11 +144,11 @@ func (pm *poolManager) partSlots(cands []string, fn string, n int) []slot {
 // backupPeer picks the peer among others with a free slot whose copy of a
 // late part (expected seconds on its node, elapsed so far) is predicted to
 // save the most, and books it. "" when none is worth it.
-func (pm *poolManager) backupPeer(others []string, fn string, n int, expected, elapsed float64) (string, func(), float64) {
+func (pm *poolManager) backupPeer(others []string, dead *deadPeers, fn string, n int, expected, elapsed float64) (string, func(), float64) {
 	best, bestGain := "", 0.0
 	var bestSlot slot
 	for i, c := range pm.partSlots(others, fn, n) {
-		if pm.peerDead(others[i]) || pm.book.held(c.key) >= max(c.depth, 1) {
+		if dead.has(others[i]) || pm.book.held(c.key) >= max(c.depth, 1) {
 			continue
 		}
 		if ok, gain := schedule.BackupWorth(expected, elapsed, c.pred, 0); ok && gain > bestGain {

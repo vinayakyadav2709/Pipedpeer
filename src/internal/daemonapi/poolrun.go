@@ -46,26 +46,11 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		log.Printf("[pool] --offload: no other machine shares this closure; running %d items on this machine", len(ch.items))
 	}
 
-	pm.deadMu.Lock()
-	pm.deadPeers = make(map[string]bool)
-	pm.deadMu.Unlock()
+	own := *ch
+	own.dead = new(deadPeers)
+	ch = &own
 
 	// One worker per participating node. Local is always included.
-	type part struct {
-		// c is the chunk with items narrowed to this part's share. Globals and
-		// mode flags travel with it so every worker gets the full context.
-		c *chunk
-		// run is set only for the local part; remote parts POST instead.
-		runPath string
-		// peers is the candidate list for this part, its own primary peer
-		// first (part i prefers peers[i]), the rest as fallback in ranked
-		// order. The part tries each in order, skipping dead ones, before
-		// going local.
-		peers []string
-		// steal lets the part start on another of peers than the planned
-		// one (a split share; never an affinity-routed item).
-		steal bool
-	}
 	var parts []part
 	items := ch.items
 	noSplit := ch.noSplit
@@ -227,148 +212,7 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		wg.Add(1)
 		go func(i int, p part) {
 			defer wg.Done()
-			var r []any
-			var e error
-			started := time.Now()
-			if p.runPath != "" {
-				r, e = pm.runLocal(runPath, storePath, p.c)
-				if e == nil {
-					d := time.Since(started)
-					ch.prov.record("local", len(p.c.items), d.Milliseconds(),
-						pm.step(pm.selfID, "compute", started, d, i))
-					pm.observeRate(localDeviceID, ch.fnFP, len(p.c.items), d)
-					pm.observeStats(pm.selfID, ch.fnFP, len(p.c.items), d.Seconds(), d.Seconds())
-				}
-			} else {
-				// Walk the ranked peer list; a failure falls through to the
-				// next best candidate. If every peer fails, the work is ours.
-				//
-				// One time budget for the whole walk. A peer that runs out of
-				// it is slow, not broken: its copy keeps running, a second copy
-				// starts here, and the first to finish wins. Handing the part
-				// to the next peer would only start it again from scratch (a
-				// one-item svd part tried four peers at 300 s each and hung for
-				// over 15 minutes), and dropping the peer's copy threw away
-				// minutes of nearly finished work.
-				deadline := started.Add(remotePartBudget)
-				raced := false
-				for pi := 0; pi < len(p.peers); pi++ {
-					peer := p.peers[pi]
-					if ctx.Err() != nil {
-						break
-					}
-					if pm.peerDead(peer) {
-						continue
-					}
-					left := time.Until(deadline)
-					if left <= 0 {
-						log.Printf("[pool] part %d: no time left of %s for another peer; running its %d items here", i, remotePartBudget, len(p.c.items))
-						break
-					}
-					// The node's depth gate: parts beyond what it should hold
-					// wait here, in the daemon's queue for that node, not on
-					// the wire. The wait is a "queue" step of the record.
-					// A split part may start on another live candidate
-					// instead, when that one has room and its planned node is
-					// predicted to stay busy longer (poolsteal.go).
-					cands := []string{peer}
-					if p.steal {
-						for _, q := range p.peers[pi+1:] {
-							if !pm.peerDead(q) {
-								cands = append(cands, q)
-							}
-						}
-					}
-					slots := pm.partSlots(cands, ch.fnFP, len(p.c.items))
-					qStart := time.Now()
-					k, release, gerr := pm.book.acquireFirst(ctx, slots)
-					if gerr != nil {
-						e = gerr
-						break
-					}
-					if k > 0 {
-						log.Printf("[pool] part %d: %s is still busy (%d parts); starting its %d items on %s instead",
-							i, peer, pm.book.held(slots[0].key), len(p.c.items), cands[k])
-						peer = cands[k]
-						pi-- // should the stand-in fail, the planned peer is next
-					}
-					key, expected := slots[k].key, slots[k].pred
-					var others []string
-					if p.steal {
-						for _, q := range cands {
-							if q != peer {
-								others = append(others, q)
-							}
-						}
-					}
-					waited := time.Since(qStart)
-					sent := time.Now()
-					var where string
-					var compute float64
-					if offHere {
-						// No local copy races a slow peer: this machine is
-						// kept off. A peer that fails hands on to the next.
-						where = "peer:" + peer
-						r, compute, e = pm.runRemote(peer, storePath, p.c, 0)
-					} else {
-						fresh := pm.expectedSec("", ch.fnFP, len(p.c.items))
-						r, compute, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left-waited, expected, fresh, others...)
-					}
-					release()
-					if e == nil {
-						d := time.Since(sent)
-						key = pm.key(peer) // the reply may have named the node
-						won := where == "peer:"+peer
-						switch {
-						case where == "local":
-							key = pm.selfID // the backup copy here won
-						case !won:
-							key = pm.key(strings.TrimPrefix(where, "peer:")) // a backup peer's copy won
-						}
-						steps := []runrec.Step{pm.step(key, "queue", qStart, waited, i)}
-						if compute > 0 && won {
-							steps = append(steps, pm.step(key, "compute", sent, time.Duration(compute*float64(time.Second)), i))
-						}
-						ch.prov.record(where, len(p.c.items), time.Since(started).Milliseconds(), steps...)
-						if won {
-							// Timed end to end, so the round trip and the closure
-							// transfer are in the number rather than assumed away.
-							// A backup's win is not measured: it started late, so
-							// d is not its time. The queue wait is not the peer's
-							// time, so it is left out.
-							pm.observeRate(key, ch.fnFP, len(p.c.items), d)
-							if compute <= 0 {
-								compute = d.Seconds()
-							}
-							pm.observeStats(key, ch.fnFP, len(p.c.items), compute, d.Seconds())
-						} else {
-							pm.observeLost(peer, ch.fnFP, len(p.c.items), d, expected)
-						}
-						break
-					}
-					if ctx.Err() != nil {
-						pm.observeLost(peer, ch.fnFP, len(p.c.items), time.Since(sent), expected)
-						break // the requester left; the peer did nothing wrong
-					}
-					if raced {
-						break // both copies failed; the local one was the fallback
-					}
-					pm.markPeerDead(peer)
-				}
-				if e != nil && ctx.Err() == nil && !raced {
-					// D2/D3 — a remote node adds capacity, never subtracts.
-					if offHere {
-						log.Printf("[pool] --offload: every peer failed part %d (%v); running its %d items on this machine", i, e, len(p.c.items))
-					}
-					r, e = pm.runLocal(runPath, storePath, p.c)
-					if e == nil {
-						// Deliberately not measured: this ran locally after a
-						// peer failed, so the elapsed time includes the failed
-						// attempt and would libel this node's own speed.
-						ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
-					}
-				}
-			}
+			r, e := pm.runPart(ch, i, p, runPath, storePath, offHere)
 			if err := ctx.Err(); err != nil {
 				// Cancelled: no local fallback, no "part failed" noise. The
 				// request logs the cancel once.
@@ -396,6 +240,173 @@ func (pm *poolManager) runChunk(runPath, storePath string, ch *chunk, submitter 
 		results = append(results, r...)
 	}
 	return results, nil
+}
+
+// part is one share of a chunk.
+type part struct {
+	// c is the chunk with items narrowed to this part's share. Globals and
+	// mode flags travel with it so every worker gets the full context.
+	c *chunk
+	// run is set only for the local part; remote parts POST instead.
+	runPath string
+	// peers is the candidate list for this part, its own primary peer
+	// first (part i prefers peers[i]), the rest as fallback in ranked
+	// order. The part tries each in order, skipping dead ones, before
+	// going local.
+	peers []string
+	// steal lets the part start on another of peers than the planned
+	// one (a split share; never an affinity-routed item).
+	steal bool
+}
+
+// runPart runs one part of ch: on the first live candidate peer that answers,
+// else here, so a remote node adds capacity and never subtracts it.
+func (pm *poolManager) runPart(ch *chunk, i int, p part, runPath, storePath string, offHere bool) ([]any, error) {
+	ctx := ch.context()
+	var r []any
+	var e error
+	started := time.Now()
+	if p.runPath != "" {
+		r, e = pm.runLocal(runPath, storePath, p.c)
+		if e == nil {
+			d := time.Since(started)
+			ch.prov.record("local", len(p.c.items), d.Milliseconds(),
+				pm.step(pm.selfID, "compute", started, d, i))
+			pm.observeRate(localDeviceID, ch.fnFP, len(p.c.items), d)
+			pm.observeStats(pm.selfID, ch.fnFP, len(p.c.items), d.Seconds(), d.Seconds())
+		}
+	} else {
+		// Walk the ranked peer list; a failure falls through to the
+		// next best candidate. If every peer fails, the work is ours.
+		//
+		// One time budget for the whole walk. A peer that runs out of
+		// it is slow, not broken: its copy keeps running, a second copy
+		// starts here, and the first to finish wins. Handing the part
+		// to the next peer would only start it again from scratch (a
+		// one-item svd part tried four peers at 300 s each and hung for
+		// over 15 minutes), and dropping the peer's copy threw away
+		// minutes of nearly finished work.
+		deadline := started.Add(remotePartBudget)
+		raced, ran := false, false
+		for pi := 0; pi < len(p.peers); pi++ {
+			peer := p.peers[pi]
+			if ctx.Err() != nil {
+				break
+			}
+			if ch.dead.has(peer) {
+				continue
+			}
+			left := time.Until(deadline)
+			if left <= 0 {
+				log.Printf("[pool] part %d: no time left of %s for another peer; running its %d items here", i, remotePartBudget, len(p.c.items))
+				break
+			}
+			// The node's depth gate: parts beyond what it should hold
+			// wait here, in the daemon's queue for that node, not on
+			// the wire. The wait is a "queue" step of the record.
+			// A split part may start on another live candidate
+			// instead, when that one has room and its planned node is
+			// predicted to stay busy longer (poolsteal.go).
+			cands := []string{peer}
+			if p.steal {
+				for _, q := range p.peers[pi+1:] {
+					if !ch.dead.has(q) {
+						cands = append(cands, q)
+					}
+				}
+			}
+			slots := pm.partSlots(cands, ch.fnFP, len(p.c.items))
+			qStart := time.Now()
+			k, release, gerr := pm.book.acquireFirst(ctx, slots)
+			if gerr != nil {
+				e = gerr
+				break
+			}
+			if k > 0 {
+				log.Printf("[pool] part %d: %s is still busy (%d parts); starting its %d items on %s instead",
+					i, peer, pm.book.held(slots[0].key), len(p.c.items), cands[k])
+				peer = cands[k]
+				pi-- // should the stand-in fail, the planned peer is next
+			}
+			key, expected := slots[k].key, slots[k].pred
+			var others []string
+			if p.steal {
+				for _, q := range cands {
+					if q != peer {
+						others = append(others, q)
+					}
+				}
+			}
+			waited := time.Since(qStart)
+			sent := time.Now()
+			var where string
+			var compute float64
+			if offHere {
+				// No local copy races a slow peer: this machine is
+				// kept off. A peer that fails hands on to the next.
+				where = "peer:" + peer
+				r, compute, e = pm.runRemote(peer, storePath, p.c, 0)
+			} else {
+				fresh := pm.expectedSec("", ch.fnFP, len(p.c.items))
+				r, compute, where, raced, e = pm.runRemoteRacing(i, peer, runPath, storePath, p.c, left-waited, expected, fresh, others...)
+			}
+			release()
+			if e == nil {
+				ran = true
+				d := time.Since(sent)
+				key = pm.key(peer) // the reply may have named the node
+				won := where == "peer:"+peer
+				switch {
+				case where == "local":
+					key = pm.selfID // the backup copy here won
+				case !won:
+					key = pm.key(strings.TrimPrefix(where, "peer:")) // a backup peer's copy won
+				}
+				steps := []runrec.Step{pm.step(key, "queue", qStart, waited, i)}
+				if compute > 0 && won {
+					steps = append(steps, pm.step(key, "compute", sent, time.Duration(compute*float64(time.Second)), i))
+				}
+				ch.prov.record(where, len(p.c.items), time.Since(started).Milliseconds(), steps...)
+				if won {
+					// Timed end to end, so the round trip and the closure
+					// transfer are in the number rather than assumed away.
+					// A backup's win is not measured: it started late, so
+					// d is not its time. The queue wait is not the peer's
+					// time, so it is left out.
+					pm.observeRate(key, ch.fnFP, len(p.c.items), d)
+					if compute <= 0 {
+						compute = d.Seconds()
+					}
+					pm.observeStats(key, ch.fnFP, len(p.c.items), compute, d.Seconds())
+				} else {
+					pm.observeLost(peer, ch.fnFP, len(p.c.items), d, expected)
+				}
+				break
+			}
+			if ctx.Err() != nil {
+				pm.observeLost(peer, ch.fnFP, len(p.c.items), time.Since(sent), expected)
+				break // the requester left; the peer did nothing wrong
+			}
+			if raced {
+				break // both copies failed; the local one was the fallback
+			}
+			ch.dead.mark(peer)
+		}
+		if !ran && ctx.Err() == nil && !raced {
+			// D2/D3 — a remote node adds capacity, never subtracts.
+			if offHere {
+				log.Printf("[pool] --offload: every peer failed part %d (%v); running its %d items on this machine", i, e, len(p.c.items))
+			}
+			r, e = pm.runLocal(runPath, storePath, p.c)
+			if e == nil {
+				// Deliberately not measured: this ran locally after a
+				// peer failed, so the elapsed time includes the failed
+				// attempt and would libel this node's own speed.
+				ch.prov.record("local", len(p.c.items), time.Since(started).Milliseconds())
+			}
+		}
+	}
+	return r, e
 }
 
 // affinityKey returns the routing key for noSplit item i: the cache key when
@@ -460,18 +471,31 @@ func (pm *poolManager) bestPeer(storePath, submitter, offload string, need http.
 	return ""
 }
 
-// peerDead reports whether a peer failed earlier in this chunk.
-func (pm *poolManager) peerDead(peer string) bool {
-	pm.deadMu.Lock()
-	defer pm.deadMu.Unlock()
-	return pm.deadPeers[peer]
+// deadPeers are the peers that failed during one runChunk call, so its other
+// parts skip them. It lives for that call only: concurrent chunks do not see
+// each other's failures, and a peer that recovers is tried on the next chunk.
+// The nil set (a chunk built outside runChunk) holds no peer.
+type deadPeers struct {
+	mu  sync.Mutex
+	set map[string]bool
 }
 
-// markPeerDead records that a peer failed so later parts skip it.
-func (pm *poolManager) markPeerDead(peer string) {
-	pm.deadMu.Lock()
-	defer pm.deadMu.Unlock()
-	pm.deadPeers[peer] = true
+func (d *deadPeers) has(peer string) bool {
+	if d == nil {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.set[peer]
+}
+
+func (d *deadPeers) mark(peer string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.set == nil {
+		d.set = make(map[string]bool)
+	}
+	d.set[peer] = true
 }
 
 // runLocal dispatches a sub-chunk to this node's warm worker (or cold path).
