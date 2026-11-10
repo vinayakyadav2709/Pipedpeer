@@ -135,6 +135,82 @@ lab_ip() {
 	printf '%s\n' "$ip"
 }
 
+# LAB_CPUS_PROBE: a sh script run on a PC; prints how many CPUs its
+# processes can really use. nproc is the affinity mask (cpuset, AllowedCPUs);
+# it is lowered to the CPU quota of the PC's own cgroup or any ancestor (v2
+# cpu.max, v1 cpu.cfs_quota_us/cpu.cfs_period_us), rounded down, never below
+# 1. Ray counts the host's CPUs instead: in the laptop's container lab it saw
+# 16 under a 3-CPU docker cap. PP_CG_ROOT, PP_PROC_CGROUP and PP_NPROC let
+# test/cluster_cpus_test.sh feed it fixture trees.
+# shellcheck disable=SC2016  # expanded on the PC
+LAB_CPUS_PROBE='r=${PP_CG_ROOT:-/sys/fs/cgroup}; pcg=${PP_PROC_CGROUP:-/proc/self/cgroup}; n=${PP_NPROC:-$(nproc)}
+lim() { [ "$1" -gt 0 ] 2>/dev/null && [ "$2" -gt 0 ] 2>/dev/null || return 0; c=$(($1 / $2)); [ "$c" -lt 1 ] && c=1; [ "$c" -lt "$n" ] && n=$c; return 0; }
+walk() { p=$2; while :; do
+  if [ "$3" = 2 ] && [ -r "$1$p/cpu.max" ]; then read -r q per <"$1$p/cpu.max"; [ "$q" = max ] || lim "$q" "$per"; fi
+  if [ "$3" = 1 ] && [ -r "$1$p/cpu.cfs_quota_us" ] && [ -r "$1$p/cpu.cfs_period_us" ]; then lim "$(cat "$1$p/cpu.cfs_quota_us")" "$(cat "$1$p/cpu.cfs_period_us")"; fi
+  if [ -z "$p" ] || [ "$p" = / ]; then break; fi; p=${p%/*}; done; }
+while IFS=: read -r _ ctl path; do case ",$ctl," in
+  ,,) walk "$r" "$path" 2 ;;
+  *,cpu,*) for d in "$r/cpu,cpuacct" "$r/cpuacct,cpu" "$r/cpu"; do if [ -d "$d" ]; then walk "$d" "$path" 1; break; fi; done ;;
+esac; done <"$pcg"
+echo "$n"'
+
+# lab_usable_cpus <pc>: LAB_CPUS_PROBE's count on that PC, printed. Returns 1
+# (and logs the PC and what came back) when the probe fails or prints no number.
+lab_usable_cpus() {
+	local pc="${1:?usage: lab_usable_cpus <pc>}" n raw err rc=0
+	mkdir -p "$LAB"
+	err="$(mktemp "$LAB/cpus_err.XXXXXX")"
+	trap 'rm -f "$err"' RETURN INT TERM
+	# stdout is the count; stderr (ssh's own message) is kept for the log only
+	n="$(lab_ssh "$pc" "$LAB_CPUS_PROBE" 2>"$err")" || rc=$?
+	raw="$(tr '\n' ' ' <"$err")"
+	rm -f "$err"
+	trap - RETURN INT TERM
+	n="$(printf '%s' "$n" | tr -d '[:space:]')"
+	if ((rc == 0)) && [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1)); then
+		printf '%s\n' "$n"
+		return 0
+	fi
+	lab_log "$pc: could not read its usable CPU count (ssh exit $rc, got [$n], stderr [$raw])"
+	return 1
+}
+
+# LAB_MEM_PROBE: a sh script run on a PC; prints "<MemTotal kB> <limit kB>",
+# the limit being the smallest cgroup memory limit on the PC's own cgroup or
+# an ancestor (v2 memory.max, v1 memory.limit_in_bytes), empty when none.
+# MemTotal alone misses a limit (inside the container lab it is the host's).
+# PP_MEMTOTAL_KIB, PP_CG_ROOT and PP_PROC_CGROUP are for the tests.
+# shellcheck disable=SC2016  # expanded on the PC
+LAB_MEM_PROBE='r=${PP_CG_ROOT:-/sys/fs/cgroup}; pcg=${PP_PROC_CGROUP:-/proc/self/cgroup}
+t=${PP_MEMTOTAL_KIB:-$(awk "/MemTotal/ {print \$2}" /proc/meminfo)}; lim=""
+for d in $(awk -F: "\$1 == \"0\" || \$2 ~ /(^|,)memory(,|\$)/ {print \$3}" "$pcg"); do while :; do
+  for f in "$r$d/memory.max" "$r/memory$d/memory.limit_in_bytes"; do
+    if [ -r "$f" ]; then v=$(cat "$f"); case $v in max|"") ;; *) v=$((v / 1024)); if [ -z "$lim" ] || [ "$v" -lt "$lim" ]; then lim=$v; fi ;; esac; fi
+  done
+  if [ -z "$d" ] || [ "$d" = / ]; then break; fi; d=${d%/*}; done; done
+echo "$t $lim"'
+
+# lab_mem_mib <pc>: the memory that PC's processes can use, in MiB (MemTotal or
+# a smaller cgroup limit). Returns 1, logged with the PC, when the probe fails.
+lab_mem_mib() {
+	local pc="${1:?usage: lab_mem_mib <pc>}" out t lim err raw rc=0
+	mkdir -p "$LAB"
+	err="$(mktemp "$LAB/mem_err.XXXXXX")"
+	trap 'rm -f "$err"' RETURN INT TERM
+	out="$(lab_ssh "$pc" "$LAB_MEM_PROBE" 2>"$err")" || rc=$?
+	raw="$(tr '\n' ' ' <"$err")"
+	rm -f "$err"
+	trap - RETURN INT TERM
+	read -r t lim <<<"$out"
+	if ((rc != 0)) || [[ ! "${t:-}" =~ ^[0-9]+$ ]]; then
+		lab_log "$pc: memory unknown (ssh exit $rc, probe gave [$out], stderr [$raw])"
+		return 1
+	fi
+	if [[ "${lim:-}" =~ ^[0-9]+$ ]] && ((lim < t)); then t="$lim"; fi
+	printf '%s\n' "$((t / 1024))"
+}
+
 # --- transport ------------------------------------------------------------
 
 # lab_ssh <pc> <cmd...>: ssh -F $LAB/ssh_config <pc> -- <cmd>, retried up to

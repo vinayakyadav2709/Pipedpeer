@@ -129,7 +129,7 @@ main() {
 	fi
 
 	# ship the installer (or the binary) and install on every PC
-	local pc out rc sv sn
+	local pc out rc sv sn p_mtime p_nl
 	rc=0
 	lab_fanout install-dirs "$hostfile" 'mkdir -p ~/pipedpeer-lab ~/.local/bin' || rc=$?
 	if ((rc != 0)); then
@@ -150,6 +150,31 @@ main() {
 	elif [[ -n "${INSTALL_CMD:-}" ]]; then
 		instcmd="${INSTALL_CMD//\{version\}/$version}"
 	fi
+	local probe_cmd
+	# shellcheck disable=SC2016
+	probe_cmd='log="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/warmup.log"
+if [[ ! -f "$log" ]]; then
+	echo "MISSING"
+	exit 0
+fi
+mtime="$(stat -c %Y "$log" 2>/dev/null || date -r "$log" +%s 2>/dev/null || echo 0)"
+head_line="$(head -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
+tail_line="$(tail -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
+nlines="$(wc -l <"$log" 2>/dev/null | tr -d " ")"
+printf "OK\t%s\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line" "$nlines"
+'
+	# The warm-up log as it is before setup runs. A failed log that setup leaves
+	# unchanged (the product's failure backoff refuses to restart a build that
+	# failed minutes ago) is from an earlier install, not this one's result.
+	local -A warmup_pre_sig=()
+	lab_fanout warmup-pre "$hostfile" "$probe_cmd" >/dev/null 2>&1 || lab_log "install: could not read every PC's warm-up log before setup; a stale failed log there may be taken for this install's"
+	for pc in "${ids[@]}"; do
+		out="$(cat "$LAB/logs/warmup-pre/$pc" 2>/dev/null || true)"
+		if [[ "$out" == OK$'\t'* ]]; then
+			IFS=$'\t' read -r _ p_mtime _ _ p_nl <<<"$out"
+			warmup_pre_sig[$pc]="$p_mtime:$p_nl"
+		fi
+	done
 	rc=0
 	lab_fanout install "$hostfile" "$instcmd" || rc=$?
 	if ((rc != 0)); then
@@ -332,6 +357,7 @@ main() {
 	local -A warmup_retries=()
 	local -A warmup_retry_sig=()
 	local -A warmup_retry_at=()
+	local -A warmup_stale_done=()
 	local restart_wait_s="${CAMPAIGN_WARMUP_RESTART_WAIT_S:-120}"
 	# A `connect` restarts the daemon under a new cluster token, so a warm-up
 	# still building on a joined PC fails (401). The failed warm-up is started
@@ -356,19 +382,6 @@ main() {
 		fi
 	done
 
-	local probe_cmd
-	# shellcheck disable=SC2016
-	probe_cmd='log="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/warmup.log"
-if [[ ! -f "$log" ]]; then
-	echo "MISSING"
-	exit 0
-fi
-mtime="$(stat -c %Y "$log" 2>/dev/null || date -r "$log" +%s 2>/dev/null || echo 0)"
-head_line="$(head -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
-tail_line="$(tail -n 1 "$log" 2>/dev/null | tr -d "\r\n")"
-nlines="$(wc -l <"$log" 2>/dev/null | tr -d " ")"
-printf "OK\t%s\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line" "$nlines"
-'
 	local pending_file="$LAB/warmup-pending.txt"
 	local out p_mtime p_head p_tail p_nl start_tok host_r sig start_ep sec unch elap
 	while ((${#warmup_pending[@]} > 0)); do
@@ -416,29 +429,49 @@ printf "OK\t%s\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line" "$nlines"
 					continue
 				fi
 
-				if [[ "$p_tail" == failed* && "$pc" != pc00 ]]; then
-					sig="$p_mtime:$p_nl"
-					if [[ "$sig" == "${warmup_retry_sig[$pc]:-}" ]] &&
-						((t_now - warmup_retry_at[$pc] < restart_wait_s)); then
-						# the restart has not rewritten the log yet
+				if [[ "$p_tail" == failed* && "$p_mtime:$p_nl" == "${warmup_pre_sig[$pc]:-}" && -z "${warmup_stale_done[$pc]:-}" ]]; then
+					warmup_stale_done[$pc]=1
+					host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+					lab_log "install: warmup $pc ($host_r): the failed log is from before this install (unchanged since; head: ${p_head:0:40}); restarting it once with PIPEDPEER_WARMUP_RETRY=1"
+					if lab_ssh "$pc" 'PIPEDPEER_WARMUP_RETRY=1 pipedpeer setup -y' >/dev/null 2>&1; then
+						warmup_retry_sig[$pc]="$p_mtime:$p_nl"
+						warmup_retry_at[$pc]="$t_now"
+						warmup_last_change[$pc]="$t_now"
 						next_pending+=("$pc")
 						continue
 					fi
-					if ((${warmup_retries[$pc]:-0} < retry_max)); then
-						warmup_retries[$pc]=$((${warmup_retries[$pc]:-0} + 1))
-						host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
-						lab_log "install: warmup $pc ($host_r): $p_tail; restarting it (${warmup_retries[$pc]}/$retry_max, the connect token swap can kill a running build)"
-						if lab_ssh "$pc" 'PIPEDPEER_WARMUP_RETRY=1 pipedpeer setup -y' >/dev/null 2>&1; then
-							warmup_retry_sig[$pc]="$sig"
-							warmup_retry_at[$pc]="$t_now"
-							warmup_last_change[$pc]="$t_now"
+					lab_log "install: warmup $pc ($host_r): restarting the stale warm-up failed; its old failure stands"
+				fi
+
+				# pc00 never gets the token-swap retry, so its only restart is the
+				# stale one above: wait for that restart too when it happened.
+				if [[ "$p_tail" == failed* ]]; then
+					sig="$p_mtime:$p_nl"
+					if [[ -n "${warmup_retry_sig[$pc]:-}" ]]; then
+						if [[ "$sig" == "${warmup_retry_sig[$pc]:-}" ]] &&
+							((t_now - warmup_retry_at[$pc] < restart_wait_s)); then
+							# the restart has not rewritten the log yet
 							next_pending+=("$pc")
 							continue
 						fi
-						lab_log "install: warmup $pc ($host_r): restart command failed"
-					elif ((${warmup_retries[$pc]:-0} > 0)); then
-						host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
-						lab_log "install: warmup $pc ($host_r): $p_tail; retries exhausted (${warmup_retries[$pc]}/$retry_max)"
+					fi
+					if [[ "$pc" != pc00 ]]; then
+						if ((${warmup_retries[$pc]:-0} < retry_max)); then
+							warmup_retries[$pc]=$((${warmup_retries[$pc]:-0} + 1))
+							host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+							lab_log "install: warmup $pc ($host_r): $p_tail; restarting it (${warmup_retries[$pc]}/$retry_max, the connect token swap can kill a running build)"
+							if lab_ssh "$pc" 'PIPEDPEER_WARMUP_RETRY=1 pipedpeer setup -y' >/dev/null 2>&1; then
+								warmup_retry_sig[$pc]="$sig"
+								warmup_retry_at[$pc]="$t_now"
+								warmup_last_change[$pc]="$t_now"
+								next_pending+=("$pc")
+								continue
+							fi
+							lab_log "install: warmup $pc ($host_r): restart command failed"
+						elif ((${warmup_retries[$pc]:-0} > 0)); then
+							host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+							lab_log "install: warmup $pc ($host_r): $p_tail; retries exhausted (${warmup_retries[$pc]}/$retry_max)"
+						fi
 					fi
 				fi
 

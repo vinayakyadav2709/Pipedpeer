@@ -341,6 +341,60 @@ EOF
 	verdict "--cap on a NOT-READY exit -> AllowedCPUs= reset, caps.txt gone"
 }
 
+# a failed worker in an earlier cluster_up must not fail the next one when
+# cluster.sh is sourced into a persistent shell
+t7b() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		# shellcheck source=/dev/null
+		source "$CLUSTER_SH"
+		cluster_up 2 --systems pipedpeer
+		printf 'up1=%s\n' "$?"
+		_CLUSTER_WORKER_FAILED=1
+		cluster_up 2 --systems pipedpeer
+		printf 'up2=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" up1 0 "first up"
+	want_val "$d/log" up2 0 "second up after an earlier failed worker"
+	verdict "a stale worker-failed flag does not fail the next cluster_up"
+}
+
+# opposite: a plain second up in the same shell succeeds as before
+t7c() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt"
+		# shellcheck source=/dev/null
+		source "$CLUSTER_SH"
+		cluster_up 2 --systems pipedpeer
+		printf 'up1=%s\n' "$?"
+		cluster_up 2 --systems pipedpeer
+		printf 'up2=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" up1 0 "first up"
+	want_val "$d/log" up2 0 "second plain up"
+	verdict "opposite: two plain cluster_up calls in one shell both succeed"
+}
+
 # up 2 with all three systems -> units started, ready, cores recorded, ips pushed
 t8() {
 	local d rc=0
@@ -422,7 +476,7 @@ t10() {
 	verdict "-h prints usage and exits 0"
 }
 
-# a capped PC (the head too) starts Ray with --num-cpus; an uncapped one does not
+# a capped PC (the head too) starts Ray with --num-cpus=<cap>; an uncapped one with the probed count
 t11() {
 	local d rc=0
 	d="$(newdir)"
@@ -454,10 +508,41 @@ Recent runs:
 EOF
 		export PIPEDPEER_STATUS_FILE="$d/status.txt"
 		export PY_FAKE_OUT=2
+		# the probe runs on the "PC" (this host): fixture values, no quota found
+		mkdir -p "$d/cg"
+		printf '0::/none\n' >"$d/proc_cgroup"
+		export PP_CG_ROOT="$d/cg" PP_PROC_CGROUP="$d/proc_cgroup" PP_NPROC=5
 		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray
 	) >"$d/log" 2>&1 || true
-	! grep -q 'num-cpus' "$d/units.log" || pnote "uncapped Ray got --num-cpus: $(grep lab-ray "$d/units.log" | tr '\n' '|')"
-	verdict "ray --cap: head and worker started with --num-cpus; no cap, no flag"
+	grep -q 'ray start --head --port=6379 --num-cpus=5' "$d/units.log" || pnote "uncapped head not started with the probed --num-cpus=5: $(grep lab-ray "$d/units.log" | tr '\n' '|')"
+	grep -q 'ray start --address=[0-9.]*:6379 --num-cpus=5' "$d/units.log" || pnote "uncapped worker not started with the probed --num-cpus=5"
+	verdict "ray --cap: head and worker started with --num-cpus; no cap, the probed count"
+}
+
+# a head PC with too little memory for Ray: up refuses before starting it
+t11m() {
+	local d
+	d="$(newdir)"
+	(
+		ss7_setup "$d" 4
+		fx "$d/status.txt" <<'EOF'
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+pc00  healthy  self  8c 1%   7.2 GiB   none 0     -
+pc01  healthy  pc01  8c 1%   7.2 GiB   none 0     -
+
+Recent runs:
+EOF
+		export PIPEDPEER_STATUS_FILE="$d/status.txt" PY_FAKE_OUT=2
+		mkdir -p "$d/cg"
+		printf '0::/none\n' >"$d/proc_cgroup"
+		export PP_CG_ROOT="$d/cg" PP_PROC_CGROUP="$d/proc_cgroup" PP_NPROC=4 PP_MEMTOTAL_KIB=1048576
+		bash "$REPO/scripts/campaign/cluster.sh" up 2 --systems ray
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || true
+	grep -q '^rc=1$' "$d/log" || pnote "up did not fail: $(tail -3 "$d/log" | tr '\n' '|')"
+	grep -q 'NOT-READY ray pc=pc00' "$d/log" || pnote "no NOT-READY ray pc=pc00"
+	! grep -q 'ray start --head' "$d/units.log" 2>/dev/null || pnote "the Ray head was started anyway"
+	verdict "ray: a 1 GiB head is refused before it starts (NOT-READY ray pc=pc00)"
 }
 
 # R2 M3: a capped head whose Ray CPUs differ from the cap is logged (not restarted); one that agrees is not
@@ -498,10 +583,13 @@ t4
 t5
 t6
 t7
+t7b
+t7c
 t8
 t9
 t10
 t11
+t11m
 t12
 printf '\n'
 

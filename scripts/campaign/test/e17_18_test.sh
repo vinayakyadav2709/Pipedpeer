@@ -69,7 +69,7 @@ me="$(basename "$HOME")"
 printf '%s pipedpeer %s\n' "$me" "$*" >>"$FAKELAB_DIR/pipedpeer.log"
 case "${1:-}" in
 	start) printf '%s\n' "${PIPEDPEER_NO_LAN_DISCOVERY-unset}" >"$HOME/.no_lan_env" ;;
-	stop) rm -f "$HOME/.no_lan_env" ;;
+	stop) [[ "${FAKE_STOP_FAIL:-0}" == 1 ]] && exit 1; rm -f "$HOME/.no_lan_env" ;;
 	status)
 		calls=0
 		[[ -f "$HOME/.status_calls" ]] && calls="$(cat "$HOME/.status_calls")"
@@ -106,6 +106,11 @@ case "${1:-}" in
 				done
 				printf '\n'; } >"$FAKELAB_DIR/status.$me"
 		fi
+		# FAKE_CONNECT_LINGER: the join is visible, connect keeps waiting (for
+		# the dead introducer, up to its 60 s) before it exits
+		[[ -n "${FAKE_CONNECT_LINGER:-}" ]] && sleep "$FAKE_CONNECT_LINGER"
+		# FAKE_CONNECT_RC=2: "partly connected" (a dead member in the invite)
+		exit "${FAKE_CONNECT_RC:-0}"
 		exit 0 ;;
 	run)
 		small=0
@@ -114,6 +119,7 @@ case "${1:-}" in
 		((small)) && sleep_s="${FAKE_SMALL_SLEEP:-0.2}"
 		[[ "$sleep_s" == 0 ]] || sleep "$sleep_s"
 		[[ "${FAKE_RUN_FAIL:-0}" == 1 ]] && { echo boom >&2; exit 1; }
+		((small)) && [[ -n "${FAKE_SMALL_FAIL_RC:-}" ]] && { echo "small boom" >&2; exit "$FAKE_SMALL_FAIL_RC"; }
 		echo "POOLMAP-OK items=10 seconds=1.0000 checksum=5.000000"
 		if [[ -f "$FAKELAB_DIR/receipt.json" ]]; then
 			jd="$HOME/.local/share/pipedpeer/jobs/$(date +%s%N)"
@@ -244,6 +250,22 @@ e17_inproc() {
 	e17_main "$@"
 }
 # ---------------------------------------------------------------- E17 rows
+# e17_median_wall: the wall the kill point is 30% of. With no E1 runs (the
+# Session 1 check) the calibration target from sizes.env stands in, not a
+# fixed 10 s that a short calibrated job finishes before; E17_MEDIAN_WALL_S wins
+for c in "env|E17_MEDIAN_WALL_S=7|-|7" "target|-|# calibrated 2026-11-09 on pc00 plain W1=0.234s at 48 items, target 4s|4" "none|-|-|10"; do
+	IFS='|' read -r cname cenv cline want <<<"$c"
+	d="$(newdir)"
+	got="$(
+		setup_lab "$d" 3 >/dev/null 2>&1
+		[[ "$cline" == - ]] || echo "$cline" >>"$d/sizes.env"
+		[[ "$cenv" == - ]] || export "${cenv?}"
+		# shellcheck source=/dev/null
+		source "$CAMP/e17.sh"
+		N=2 e17_median_wall 2>/dev/null
+	)" || got="rc=$?"
+	if [[ "$got" == "$want" ]]; then ok "e17 median wall without E1 runs ($cname): $want"; else bad "e17 median wall without E1 runs ($cname)" "got [$got] want [$want]"; fi
+done
 # dry-run: the plan, and nothing else
 d="$(newdir)"
 res="$(
@@ -288,6 +310,152 @@ res="$(
 )" 2>"$d/err" || true
 verdict_row "e17 a true result after the kill: wall/result from runs.jsonl, join and remote_items" "$res" "$d/err"
 
+# the forced job on the joiner fails: its real exit code is logged (the bug was
+# "exit 0", read from the negated if) and new_remote_items stays empty
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_SMALL_FAIL_RC=3 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 1 ]] || rbad "new_join_ok [$join_ok]"
+	[[ -z "$ritm" ]] || rbad "new_remote_items [$ritm] after a failed forced job"
+	grep -q 'the 64-item forced job failed (exit 3)' "$d/campaign.log" || rbad "exit code not logged: $(grep 'forced job' "$d/campaign.log" | tail -1)"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 forced job fails: its exit code is logged, new_remote_items empty" "$res" "$d/err"
+
+# the joiners are out of the cluster before the job starts (stopped, files
+# aside), so the job measures the N members and not a joiner too; the
+# restore still runs at the end
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	stop_ln="$(grep -n '^pc03 pipedpeer stop' "$d/pipedpeer.log" | head -1 | cut -d: -f1)"
+	run_ln="$(grep -n '^pc01 pipedpeer run' "$d/pipedpeer.log" | head -1 | cut -d: -f1)"
+	[[ -n "$stop_ln" && -n "$run_ln" ]] && ((stop_ln < run_ln)) || rbad "joiner pc03 not stopped before the job (stop line ${stop_ln:-none}, run line ${run_ln:-none})"
+	stop4="$(grep -n '^pc04 pipedpeer stop' "$d/pipedpeer.log" | head -1 | cut -d: -f1)"
+	[[ -n "$stop4" ]] && ((stop4 < run_ln)) || rbad "joiner pc04 not stopped before the job"
+	[[ ! -e "$d/pc03/.local/share/pipedpeer/nodes.db.e17-backup" ]] || rbad "pc03's files not restored at the end"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 joiners stopped and moved aside before the job, restored after" "$res" "$d/err"
+
+# a stop that fails on a joiner is logged with the joiner (it used to be
+# swallowed by || true, leaving no trace)
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_STOP_FAIL=1 FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 1 --repeats 1
+	grep -q 'could not stop pc03' "$d/campaign.log" || rbad "the failed stop was not logged: $(grep -c 'could not stop' "$d/campaign.log")"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 a joiner's failed stop is logged with the joiner" "$res" "$d/err"
+
+# the ordinary case: a stop that works leaves no failure line
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 1 --repeats 1
+	grep -q '^pc03 pipedpeer stop' "$d/pipedpeer.log" || rbad "pc03 was not stopped"
+	! grep -q 'could not stop' "$d/campaign.log" || rbad "a working stop was reported as failed"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 opposite: a working stop is not reported as failed" "$res" "$d/err"
+
+# connect exits 2 ("partly connected": the dead introducer is in the
+# survivor's invite) but the survivor and the joiner both show the join:
+# that is a join, as install.sh counts it
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3 FAKE_CONNECT_RC=2
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 1 ]] || rbad "new_join_ok [$join_ok] for exit 2 confirmed by status ($row)"
+	[[ -n "$join_s" ]] || rbad "new_join_s empty"
+	[[ "$ritm" == 64 ]] || rbad "new_remote_items [$ritm]"
+	grep -q 'partly connected' "$d/campaign.log" || rbad "exit 2 not logged as partly connected"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 connect exit 2 confirmed by status: a join" "$res" "$d/err"
+
+# the join is visible at once but connect waits 6 s more for the dead
+# introducer before exiting 2: new_join_s is the join, not connect's wait
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3 FAKE_CONNECT_RC=2 FAKE_CONNECT_LINGER=6
+	export E17_START_WAIT_S=5 E17_JOIN_S=10 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 1 ]] || rbad "new_join_ok [$join_ok] ($row)"
+	awk -v a="${join_s:-x}" 'BEGIN{exit !(a > 0 && a < 4.5)}' || rbad "new_join_s [$join_s] includes connect's wait (6 s), not the join"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 new_join_s is the join, not connect's wait for a dead member" "$res" "$d/err"
+
+# exit 2 that the status never confirms stays a failed join
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_CONNECT_RC=2
+	export E17_START_WAIT_S=5 E17_JOIN_S=2 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$join_ok" == 0 ]] || rbad "new_join_ok [$join_ok] for an unconfirmed exit 2 ($row)"
+	[[ -z "$join_s" ]] || rbad "new_join_s [$join_s] for an unconfirmed join"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 connect exit 2 the status never confirms: not a join" "$res" "$d/err"
+
+# no reference checksum: result_ok is null in runs.jsonl, which is unknown,
+# not wrong: job_result_ok is empty and the reason is logged
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	rm -f "$d/reference/W1-strong.txt"
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=2 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ -n "$wall" ]] || rbad "job_wall_s empty ($row)"
+	[[ -z "$okv" ]] || rbad "job_result_ok [$okv] for a null result_ok"
+	grep -q 'result_ok is null' "$d/campaign.log" || rbad "the null result was not logged"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 null result_ok (no reference): job_result_ok empty, logged" "$res" "$d/err"
+
 # job ended before the kill: kill_at_s empty, row kept; an old invite that
 # still joins is recorded and logged as unexpected
 d="$(newdir)"
@@ -311,6 +479,42 @@ res="$(
 	echo ROW-OK
 )" 2>"$d/err" || true
 verdict_row "e17 job ended before the kill: row kept, kill_at_s empty; old invite joins -> 1 + log" "$res" "$d/err"
+
+# the old-invite arm did not run (one joiner): the field is empty, not 0
+# (0 reads as "tested, did not join")
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 1 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ -n "$row" ]] || rbad "no row"
+	[[ -z "$old" ]] || rbad "old_invite_joined [$old] for an arm that did not run"
+	grep -q 'old-invite arm did not run (recorded empty)' "$d/campaign.log" || rbad "the untested arm was not logged as such"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 old-invite arm not run: old_invite_joined empty, logged" "$res" "$d/err"
+
+# opposite: two joiners, the old invite does not join -> a tested 0
+d="$(newdir)"
+res="$(
+	setup_lab "$d" 5
+	write_status "$d" pc00 3
+	write_status "$d" pc01 3
+	export FAKE_RUN_SLEEP=1 FAKE_CONNECT_SLEEP=0.1 FAKE_JOINED_ROWS=3
+	export E17_START_WAIT_S=5 E17_JOIN_S=5 E17_POLL_S=0.2
+	e17_inproc --n 3 --joiners 2 --repeats 1
+	row="$(sed -n 2p "$d/analysis-input/e17.csv" 2>/dev/null || true)"
+	IFS=, read -r i kat wall okv join_s join_ok ritm old <<<"$row"
+	[[ "$old" == 0 ]] || rbad "old_invite_joined [$old] for a tested arm"
+	grep -q 'the old invite did not join' "$d/campaign.log" || rbad "the tested arm's result was not logged"
+	echo ROW-OK
+)" 2>"$d/err" || true
+verdict_row "e17 opposite: the old-invite arm runs and does not join -> 0" "$res" "$d/err"
 
 # connect hits its timeout: new_join_ok=0, new_join_s empty, next repeat runs
 d="$(newdir)"

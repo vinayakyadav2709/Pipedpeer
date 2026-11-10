@@ -51,6 +51,13 @@ setup_lab() {
   mkdir -p "$v"
   export HOME="$dir/home" LAB_RESULTS="$dir" LAB_RETRY_SLEEP=0.1 LAB_POLL_S=1
   export CLUSTER_SH="$v/cluster.sh" METRICS_SH="$v/metrics.sh" UPLOAD_SH="$v/upload.sh"
+  mkdir -p "$dir/lab-state"
+  if [[ -n "${FAKE_PRE_EXISTING_NIX:-}" ]]; then
+    : >"$dir/lab-state/state"
+  else
+    echo "nix-campaign determinate" >"$dir/lab-state/state"
+  fi
+  export E19_LAB_STATE="$dir/lab-state/state"
 
   cat >"$v/cluster.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -666,7 +673,8 @@ verdict "M8 opposite: a good run keeps its join row and wall_s"
 
 # ---------------------------------------------------------------------- M11 / L3 + opposite
 d="$(newdir)"
-WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
+# the joiner's usable-CPU probe runs on this host: fixed at 8 with no quota
+PP_NPROC=8 PP_CG_ROOT="$d/no-cgroup" PP_PROC_CGROUP=/dev/null WITH_VENV=1 E19_STORE_PATH='' run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems dask || pnote "exit $?: $(tail -3 "$d/e19.log")"
 grep -q -- '--nworkers 8 ' "$d/units.log" 2>/dev/null || pnote "--nworkers not from hosts.tsv: $(cat "$d/units.log" 2>/dev/null)"
 grep -qE '^poll - dask 10\.99\.0\.10 10\.99\.0\.11 8 ' "$d/poll.log" 2>/dev/null || pnote "poll want not 8: $(cat "$d/poll.log" 2>/dev/null)"
 verdict "M11 dask workers come from hosts.tsv cores (8), the poll wants 8"
@@ -787,12 +795,29 @@ verdict "E2-3 exit 0: ok, unchanged"
 # ---------------------------------------------------------------------- FIX-V5d: purge the closure's requisites
 # Fake nix-store: -qR lists dependencies first (the top path last), --size reads
 # <path>.size, --delete refuses the paths named in $FAKELAB_DIR/refuse.
+# -q --referrers-closure prints <path>.refs (the path and every path that
+# refers to it), or the path alone; like Nix, it fails (exit 1, message on
+# stderr) when any path given does not exist. --delete also refuses while a
+# path named in <path>.blockers (a referrer) is still there, as Nix does.
 CLOSURE_STUB='case "$1" in
   -qR) cat "$2.reqs" 2>/dev/null || echo "$2" ;;
-  -q) cat "$3.size" ;;
+  -q) if [ "$2" = --referrers-closure ]; then shift 2
+    for p in "$@"; do if [ ! -e "$p" ]; then echo "error: path does not exist: $p" >&2; exit 1; fi; done
+    for p in "$@"; do cat "$p.refs" 2>/dev/null || echo "$p"; done
+  else cat "$3.size"; fi ;;
   --delete) echo "$2" >>"$FAKELAB_DIR/nixstore.log"
     if grep -qx -- "$2" "$FAKELAB_DIR/refuse" 2>/dev/null; then echo "error: cannot delete path $2: still alive" >&2; exit 1; fi
+    for b in $(cat "$2.blockers" 2>/dev/null); do
+      if [ -e "$b" ]; then echo "error: Cannot delete path $2 because it is referenced by path $b" >&2; exit 1; fi
+    done
     rm -rf "$2" ;;
+esac'
+# A strict nix-store for pc00's -qR only: it fails (as Nix does for a path it
+# does not have), so the requisites fallback cannot be taken silently.
+QN_STUB='if [ "$1" = -qR ]; then echo "error: path does not exist: $2" >&2; exit 1; fi
+case "$1" in
+  -q) cat "$3.size" 2>/dev/null ;;
+  --delete) rm -rf "$2" ;;
 esac'
 mk_closure() { # <d> <top size> <dep1 size> <dep2 size>
   local s="$1/sysstore" t="$RELP"
@@ -830,6 +855,105 @@ NIX_STUB="$CLOSURE_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH=/nix/store/ 
 [[ -e "$store/keep" && -e "$d/sysstore/keep" && ! -e "$d/nixstore.log" ]] || pnote "something was deleted for /nix/store/"
 [[ -z "$(col "$(csv_of "$d")" 10 join)" && -z "$(col "$(csv_of "$d")" 12 join)" && -z "$(col "$(csv_of "$d")" 13 join)" ]] || pnote "warm and bytes must be empty: $(cat "$(csv_of "$d")")"
 verdict "V5d /nix/store/ as the path: nothing deleted, warm and bytes empty"
+
+# ---------------------------------------------------------------------- the common environment shares the closure
+# On a PC whose install built the common environment, python and its
+# libraries are also referenced by that environment's paths, which are not in
+# the job's closure: Nix refuses to delete them while those exist (emulated
+# lab: 223824 of 219985368 bytes purged, joiner_warm 1). The purge takes the
+# referrers too; a referrer that is GC-rooted stays, and that is logged.
+mk_shared() { # <d>: closure top -> dep1, dep2; env-x (outside) refers to dep1
+  local s="$1/sysstore"
+  mk_closure "$1" 10 80 10
+  mkdir -p "$s/env-x"
+  echo 5 >"$s/env-x.size"
+  echo "$s/env-x" >"$s/dep1-x.blockers"
+  printf '%s\n' "$s/dep1-x" "$s/env-x" >"$s/dep1-x.refs"
+}
+d="$(newdir)"; mk_shared "$d"
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/env-x" && ! -e "$d/sysstore/$RELP" ]] || pnote "shared dependency or its outside referrer remain: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 100 && "$(col "$(csv_of "$d")" 13 join)" == 100 ]] || pnote "want warm 0, bytes 100/100 (closure bytes only): $(cat "$(csv_of "$d")")"
+grep -q '1 path(s) outside the closure' "$d/campaign.log" || pnote "the outside referrers deleted were not logged"
+verdict "purge: a dependency the common environment also uses goes, with that referrer; warm 0"
+
+d="$(newdir)"; mk_shared "$d"
+echo "$d/sysstore/env-x" >"$d/refuse"
+run_closure "$d"
+[[ -e "$d/sysstore/env-x" && -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "rooted referrer case: wrong paths removed: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "want warm 1: $(cat "$(csv_of "$d")")"
+grep -q 'refused.*dep1-x.*referenced by path.*env-x' "$d/campaign.log" || pnote "the refusal and its referrer were not logged"
+verdict "purge: a rooted outside referrer stays and keeps the dependency; logged, warm 1"
+
+# A later repeat: the joiner lost the closure's top path in the previous purge
+# but still has its dependencies (emulated lab, repeat 2: 0/0 bytes, warm 0
+# while python and the libraries were on disk). The requisites come from pc00,
+# where the closure is whole.
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rm -rf "${d:?}/sysstore/$RELP"
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "dependencies left on the joiner: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 90 && "$(col "$(csv_of "$d")" 13 join)" == 90 ]] || pnote "want warm 0, bytes 90/90: $(cat "$(csv_of "$d")")"
+grep -q 'requisites taken from pc00' "$d/campaign.log" || pnote "the fallback to pc00's list was not logged"
+verdict "purge: top path already gone on the joiner, its dependencies purged from pc00's list"
+
+# The top path is gone AND an outside referrer still refers into what is
+# left: the referrer query must run on the paths that exist, not fail on the
+# absent top path (real nix-store exits 1 on it).
+d="$(newdir)"; mk_shared "$d"
+rm -rf "${d:?}/sysstore/$RELP"
+run_closure "$d"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/env-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "left behind with the top path gone: $(ls "$d/sysstore" | tr '\n' ' ')"
+grep -q 'outside closure, will delete: .*env-x' "$d/campaign.log" || pnote "the outside referrer was not named before deletion"
+grep -q 'referrers-closure failed' "$d/campaign.log" && pnote "the referrer query ran with the absent top path"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "want warm 0: $(cat "$(csv_of "$d")")"
+verdict "purge: top path gone, the remaining paths still find and delete their outside referrer"
+
+d="$(newdir)"; mk_shared "$d"
+run_closure "$d"
+[[ ! -e "$d/sysstore/env-x" && ! -e "$d/sysstore/dep1-x" ]] || pnote "ordinary case: shared referrer or dependency remain"
+grep -q 'outside closure, will delete: .*env-x' "$d/campaign.log" || pnote "ordinary case: the outside referrer was not named before deletion"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 100 ]] || pnote "ordinary case: want warm 0, bytes 100: $(cat "$(csv_of "$d")")"
+verdict "purge opposite: the top path present, its outside referrer named and removed, warm 0"
+
+# pc00 cannot list the requisites: the failure names pc00 and the reason
+# (a pipeline used to hide it behind base64's exit 0)
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rm -rf "${d:?}/sysstore/$RELP"
+NIX_STUB="$QN_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
+grep -q "could not list the closure's requisites on pc00 (ssh exit 1)" "$d/campaign.log" || pnote "pc00's failed -qR was not logged with its exit: $(grep 'requisites' "$d/campaign.log" | tr '\n' ' ')"
+grep -q "leftover dependencies are not purged" "$d/campaign.log" || pnote "the consequence was not named"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "want joiner_warm 1 when pc00 requisites could not be had: $(cat "$(csv_of "$d")")"
+verdict "purge: pc00's failed requisite listing is logged with the PC and exit code, warm 1"
+
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rm -rf "${d:?}/sysstore/$RELP"
+run_closure "$d"
+! grep -q "could not list the closure's requisites" "$d/campaign.log" || pnote "a working pc00 listing was reported as failed"
+[[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "ordinary fallback did not purge the dependencies"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "ordinary case: want warm 0: $(cat "$(csv_of "$d")")"
+verdict "purge opposite: pc00's list is read, no failure logged, dependencies purged, warm 0"
+
+# G1 pre-existing Nix: outside paths are kept and not deleted
+d="$(newdir)"; mk_shared "$d"
+FAKE_PRE_EXISTING_NIX=1 run_closure "$d"
+[[ -e "$d/sysstore/env-x" ]] || pnote "pre-existing Nix: outside referrer was deleted: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ -e "$d/sysstore/dep1-x" ]] || pnote "pre-existing Nix: dependency kept by outside referrer was purged"
+grep -q 'Nix predates the campaign on pc01: 1 outside path(s) kept' "$d/campaign.log" || pnote "outside paths kept was not logged: $(grep 'predates' "$d/campaign.log" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "want warm 1 when < 90% purged (purged 20/100): $(cat "$(csv_of "$d")")"
+verdict "purge: pre-existing Nix keeps outside paths and records warm 1 when under 90% purged"
+
+# G1 pre-existing Nix where >= 90% still went -> recorded warm 0
+d="$(newdir)"
+mk_closure "$d" 50 5 45
+mkdir -p "$d/sysstore/env-x"
+echo 5 >"$d/sysstore/env-x.size"
+echo "$d/sysstore/env-x" >"$d/sysstore/dep1-x.blockers"
+printf '%s\n' "$d/sysstore/dep1-x" "$d/sysstore/env-x" >"$d/sysstore/dep1-x.refs"
+FAKE_PRE_EXISTING_NIX=1 run_closure "$d"
+[[ -e "$d/sysstore/env-x" ]] || pnote "outside path was deleted"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 95 ]] || pnote "want warm 0, purged 95: $(cat "$(csv_of "$d")")"
+verdict "purge: pre-existing Nix keeps outside paths but records warm 0 when >= 90% purged"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"

@@ -18,7 +18,8 @@
 # Environment (tests; the campaign leaves them alone):
 #   E17_START_WAIT_S (120), E17_JOIN_S (120), E17_POLL_S (1),
 #   E17_CONNECT_TIMEOUT_S (120), E17_OLD_INVITE_TIMEOUT_S (60),
-#   E17_JOB_TIMEOUT_S (600), E17_RESTART_WAIT_S (120).
+#   E17_JOB_TIMEOUT_S (600), E17_RESTART_WAIT_S (120), E17_MEDIAN_WALL_S (unset:
+#   the E1 median, else the W1 calibration target; sets the kill point).
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -29,6 +30,7 @@ D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 E17_MEMBERS=()
 E17_MOVED=() # "pc<TAB>file<TAB>existed"
 E17_JOB_PID=""
+E17_CONNECT_PID=""
 E17_ENV_SET=0
 E17_RUN_ELAPSED_NS=0
 E17_POLL_NS=0
@@ -62,11 +64,18 @@ e17_plan() {
   printf 'KILL_AT 30%% of the pipedpeer E1 W1 median wall: SIGKILL then stop on %s\n' "${all[0]}"
 }
 
-# e17_median_wall: the E1 W1 median wall on pipedpeer at this N, else 10 s.
+# e17_median_wall: the wall the kill point is 30% of. E17_MEDIAN_WALL_S when
+# set; else the E1 W1 median on pipedpeer at this N; else (no E1 yet, as in
+# the Session 1 check) the W1 calibration target in sizes.env; else 10 s.
+# A fixed 10 s let a short calibrated job finish before the kill (emulated lab).
 e17_median_wall() {
-  python3 - "$LAB/runs.jsonl" "$N" <<'PY'
-import json, sys
-runs, n = sys.argv[1], int(sys.argv[2])
+  if [[ -n "${E17_MEDIAN_WALL_S:-}" ]]; then
+    printf '%s\n' "$E17_MEDIAN_WALL_S"
+    return 0
+  fi
+  python3 - "$LAB/runs.jsonl" "$N" "$LAB/sizes.env" <<'PY'
+import json, re, sys
+runs, n, sizes = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 vals = []
 try:
     for ln in open(runs):
@@ -78,9 +87,23 @@ try:
 except FileNotFoundError:
     sys.stderr.write("e17: no runs.jsonl; median wall taken as 10 s\n")
 vals.sort()
-if not vals:
-    sys.stderr.write("e17: no E1 W1 runs for pipedpeer at n=%d; median wall taken as 10 s\n" % n)
-print(vals[len(vals) // 2] if vals else 10)
+if vals:
+    print(vals[len(vals) // 2])
+    sys.exit(0)
+target = None
+try:
+    for ln in open(sizes):
+        m = re.search(r"plain W1=.*target ([0-9.]+)s", ln)
+        if m:
+            target = float(m.group(1))
+except FileNotFoundError:
+    pass
+if target:
+    sys.stderr.write("e17: no E1 W1 runs for pipedpeer at n=%d; median wall taken as the W1 calibration target, %g s\n" % (n, target))
+    print("%g" % target)
+else:
+    sys.stderr.write("e17: no E1 W1 runs for pipedpeer at n=%d and no W1 target in sizes.env; median wall taken as 10 s\n" % n)
+    print(10)
 PY
 }
 
@@ -116,11 +139,15 @@ e17_record() {
 import json, sys
 d = json.load(sys.stdin)
 w = d.get("wall_s")
-print("%s,%s" % ("" if not w else w, 1 if d.get("result_ok") is True else 0))
+r = d.get("result_ok")
+print("%s,%s" % ("" if not w else w, "" if r is None else (1 if r is True else 0)))
 ')"; then
     lab_log "E17 $id: the runs.jsonl record is not usable; wall and result left empty"
     printf ',\n'
     return 0
+  fi
+  if [[ "$out" == *, ]]; then
+    lab_log "E17 $id: result_ok is null in runs.jsonl (no reference checksum: run REF first); job_result_ok left empty, not 0"
   fi
   printf '%s\n' "$out"
 }
@@ -182,13 +209,21 @@ e17_wait_pc_healthy() {
   done
 }
 
-# e17_wait_join <observer> <joiner> <want> <limit_s> <t0_ns>: prints the
-# join's measured seconds when both views show want healthy rows; returns 1
-# (and logs both counts) on timeout.
+# e17_wait_join <observer> <joiner> <want> <limit_s> <t0_ns> [connect pid]:
+# prints the join's measured seconds when both views show want healthy rows;
+# returns 1 (and logs both counts) on timeout, or one poll after the connect
+# process ended without the join showing.
 e17_wait_join() {
-  local obs="$1" join="$2" want="$3" limit="$4" t0="$5" go gj now deadline
+  local obs="$1" join="$2" want="$3" limit="$4" t0="$5" cpid="${6:-}" go gj now deadline last=0
   deadline=$(($(date +%s) + limit))
   while :; do
+    if [[ -n "$cpid" ]] && ! kill -0 "$cpid" 2>/dev/null; then
+      ((last)) && {
+        lab_log "E17: connect on $join ended and $obs shows ${go:-unknown}, $join ${gj:-unknown} healthy; wanted $want on both"
+        return 1
+      }
+      last=1
+    fi
     go="$(e17_healthy_count_on "$obs" "$LAB/logs/e17-status-join-obs.txt" 2>/dev/null || echo 0)"
     gj="$(e17_healthy_count_on "$join" "$LAB/logs/e17-status-join-new.txt" 2>/dev/null || echo 0)"
     if ((go >= want && gj >= want)); then
@@ -293,8 +328,8 @@ e17_restore_files() {
 e17_small_job() {
   local joiner="$1" rc=0 jd txt out
   # shellcheck disable=SC2016  # expanded on the joiner
-  if ! lab_ssh "$joiner" "cd ~/pipedpeer-lab/work && timeout ${E17_JOB_TIMEOUT_S:-600} pipedpeer run --distribute force -e BENCH_ITEMS=64 -e BENCH_PROCS=0 pool_map.py" >/dev/null; then
-    rc=$?
+  lab_ssh "$joiner" "cd ~/pipedpeer-lab/work && timeout ${E17_JOB_TIMEOUT_S:-600} pipedpeer run --distribute force -e BENCH_ITEMS=64 -e BENCH_PROCS=0 pool_map.py" >/dev/null || rc=$?
+  if ((rc != 0)); then
     lab_log "E17 $joiner: the 64-item forced job failed (exit $rc); new_remote_items left empty"
     return 1
   fi
@@ -329,6 +364,11 @@ e17_cleanup() {
     kill "$E17_JOB_PID" 2>/dev/null || true
     wait "$E17_JOB_PID" 2>/dev/null || true
     E17_JOB_PID=""
+  fi
+  if [[ -n "${E17_CONNECT_PID:-}" ]]; then
+    kill "$E17_CONNECT_PID" 2>/dev/null || true
+    wait "$E17_CONNECT_PID" 2>/dev/null || true
+    E17_CONNECT_PID=""
   fi
   e17_restore_files
   if ((E17_ENV_SET)); then
@@ -429,12 +469,20 @@ e17_main() {
       echo "skipped $id"
       continue
     fi
-    kill_at="" wall="" okv="" join_s="" join_ok="" remote="" old_joined="0"
+    kill_at="" wall="" okv="" join_s="" join_ok="" remote="" old_joined=""
+
+    # the joiners leave the cluster before the job: a joiner still running
+    # as a member took the job's work on the emulated lab (N+1 machines)
+    local j
+    for j in "${joiners[@]}"; do
+      lab_ssh "$j" 'pipedpeer stop' || lab_log "E17 $id: could not stop $j's daemon before the job; it may take work (ssh or pipedpeer stop failed)"
+      e17_move_aside "$j" || lab_log "E17 $id: $j's files were not moved aside; its state is not isolated"
+    done
 
     # the old invite must be issued before the introducer dies
     old_code="$(e17_invite "$pc00" 2>/dev/null)" || old_code=""
     if [[ -z "$old_code" ]]; then
-      lab_log "E17 $id: no invite from $pc00 before the kill; the old-invite arm is recorded as 0"
+      lab_log "E17 $id: no invite from $pc00 before the kill; the old-invite arm is recorded empty"
     fi
 
     CAMPAIGN_SUBMIT_PC="$submit" campaign_run_one E17 W1 pipedpeer "$N" "$i" 0 1800 &
@@ -458,42 +506,50 @@ e17_main() {
 
     # a new code from the surviving introducer, on a fresh joiner
     join_ok=0
-    local j
-    for j in "${joiners[@]}"; do
-      e17_move_aside "$j" || lab_log "E17 $id: $j's files were not moved aside; its state is not isolated"
-    done
     code="$(e17_invite "$submit" 2>/dev/null)" || code=""
     if [[ -z "$code" ]]; then
       lab_log "E17 $id: no invite from $submit after the kill; new_join_s and new_join_ok left empty"
       join_ok=""
     else
-      local t0 rc2
+      local t0 rc2 seen=0 js=""
       t0="$(date +%s%N)"
       rc2=0
-      lab_ssh "${joiners[0]}" "cd ~/pipedpeer-lab/work && timeout ${E17_CONNECT_TIMEOUT_S:-120} pipedpeer connect $(printf '%q' "$code")" || rc2=$?
-      if ((rc2 == 0)); then
-        if join_s="$(e17_wait_join "$submit" "${joiners[0]}" "$N" "${E17_JOIN_S:-120}" "$t0")"; then
-          join_ok=1
-        else
-          join_ok=0
-          join_s=""
-        fi
+      # connect runs while both views are polled: with the dead introducer in
+      # the survivor's invite connect waits its full 60 s for it, long after
+      # the join is visible, so timing connect would time that wait
+      lab_ssh "${joiners[0]}" "cd ~/pipedpeer-lab/work && timeout ${E17_CONNECT_TIMEOUT_S:-120} pipedpeer connect $(printf '%q' "$code")" &
+      E17_CONNECT_PID=$!
+      if js="$(e17_wait_join "$submit" "${joiners[0]}" "$N" "${E17_JOIN_S:-120}" "$t0" "$E17_CONNECT_PID")"; then
+        seen=1
+      fi
+      wait "$E17_CONNECT_PID" || rc2=$?
+      E17_CONNECT_PID=""
+      if ((rc2 == 2)); then
+        # partly connected: the join counts when both views confirm it (install.sh's rule)
+        lab_log "E17 $id: connect on ${joiners[0]} exited 2 (partly connected); the join counts only as both views confirm it"
+      fi
+      if ((seen)) && ((rc2 == 0 || rc2 == 2)); then
+        join_ok=1
+        join_s="$js"
       else
         join_ok=0
         join_s=""
-        lab_log "E17 $id: connect on ${joiners[0]} failed (exit $rc2; a timeout is 124)"
+        if ((rc2 != 0 && rc2 != 2)); then
+          lab_log "E17 $id: connect on ${joiners[0]} failed (exit $rc2; a timeout is 124)"
+        fi
       fi
       if [[ "$join_ok" == 1 ]]; then
         remote="$(e17_small_job "${joiners[0]}")" || remote=""
       fi
     fi
 
-    # the old invite arm, on the second joiner
+    # the old invite arm, on the second joiner. An arm that did not run
+    # leaves the field empty: 0 would read as "tested, did not join".
     if [[ -z "$old_code" ]]; then
-      old_joined=0
+      old_joined=""
     elif ((${#joiners[@]} < 2)); then
-      old_joined=0
-      lab_log "E17 $id: only one joiner; the old-invite arm is recorded as 0"
+      old_joined=""
+      lab_log "E17 $id: only one joiner; the old-invite arm did not run (recorded empty)"
     else
       rc2=0
       lab_ssh "${joiners[1]}" "timeout ${E17_OLD_INVITE_TIMEOUT_S:-60} pipedpeer connect $(printf '%q' "$old_code")" || rc2=$?

@@ -42,9 +42,19 @@ The rehearsal installs the local build, so build it first:
 
 ## Session 1
 
-Start with the two-PC check. It is the first thing run on real PCs, before any
+**When anything in this sheet fails, do not try to fix it.** Run
+
+    scripts/campaign/collect.sh --bug
+
+It prints `BUG-BUNDLE <folder>`: logs, versions and memory evidence from the
+driver and every PC, with keys, `r2.env`, `cluster.json` and invite codes left
+out. Send that whole folder to the project owner and stop.
+
+Start with the three-PC check. It is the first thing run on real PCs, before any
 other test: Docker cannot show CPU-busy thresholds, real network transfer, the
-nix store mode or a real join. It runs on 2 PCs with its own results folder, so
+nix store mode or a real join. It runs the riskiest pieces first (E17 losing
+its introducer, a Ray cluster) so the worst surprises come in the first hour.
+It runs on 3 PCs (E17 needs three) with its own results folder, so
 nothing from it can reach `results/lab`. In every terminal used for the check
 (also the `serve.sh` one), first:
 
@@ -64,8 +74,10 @@ and usage text. Shared by both folders on purpose: the lab key
 results. The PCs are shared too: what the check installs stays on them until
 C10 and C11.
 
-C1. Serve and set up two PCs (second terminal, leave it running; `<driver ip>`
-    and `<lab cidr>` as in step 1 of the full session). On each of the two PCs
+C1. Serve and set up three PCs (second terminal, leave it running; `<driver ip>`
+    and `<lab cidr>` as in step 1 of the full session). pc00 should be the PC
+    with the most memory (8 GiB or more: it carries the Ray head and the Dask
+    scheduler). On each of the three PCs
     take the baseline snapshot (step 2 of the full session), then the user types
     the setup line printed here:
 
@@ -82,9 +94,15 @@ C2. Find them, then inventory, install, stage, venv:
         scripts/campaign/stage.sh
         scripts/campaign/pins.sh
         scripts/campaign/venv.sh
+        scripts/campaign/clocks.sh
+        scripts/campaign/preflight.sh
 
-    Pass: `scan.sh` lists exactly two PCs, and no command prints `FAIL`,
-    `FAILED` or exits non-zero. Otherwise stop and report the first failing line.
+    Pass: `scan.sh` lists exactly three PCs, no command prints `FAIL`,
+    `FAILED` or exits non-zero, and `preflight.sh` ends with `fail=0`. Each
+    `PREFLIGHT ... FAIL` line says what to do on that PC; do it and run
+    `preflight.sh` again. `WARN` lines: write them down and go on. A command
+    that fails after a fix may be run again; `install.sh` and `venv.sh` are
+    safe to rerun.
 
 C3. Short sizes (target 5 s, only in `$LAB_RESULTS`), then the smoke run:
 
@@ -93,6 +111,43 @@ C3. Short sizes (target 5 s, only in `$LAB_RESULTS`), then the smoke run:
 
     Pass: `calibrate.sh` ends by printing `sizes.env`; `run.sh` ends without
     `NOT-READY`, `TIMEOUT` or `FAILED`. Otherwise stop and report.
+
+C3a. The reference checksums E17 compares against, then a small E17 (about
+     5 minutes; it kills pc00's daemon on purpose and starts it again):
+
+        scripts/campaign/run.sh REF --sizes 1
+        scripts/campaign/e17.sh --n 2 --joiners 1 --repeats 2
+
+     Pass: it ends with `E17-DONE`, and every row of
+     `$LAB_RESULTS/analysis-input/e17.csv` after the header has `kill_at_s`
+     filled (pc00 really died mid-job), `job_result_ok` 1 (the job survived
+     with the right answer), `new_join_ok` 1 with a `new_join_s` of a few
+     seconds (the third PC joined through pc01's new invite), and
+     `new_remote_items` above 0 (work still left it). `old_invite_joined` is empty
+     here (that arm needs a second joiner and did not run; 0 means it ran and
+     the old invite did not join). On the emulated lab a
+     row looked like `6,1.617,2.589,1,1.233,1,20,0`. An empty field means a
+     step timed out: the reason is in `$LAB_RESULTS/campaign.log` (grep E17).
+     "partly connected" from connect is expected: pc01's invite still names
+     the dead pc00. Anything else: `collect.sh --bug` and stop.
+
+C3b. A small Ray job, the second worst surprise (pc00 hosts the Ray head):
+
+        scripts/campaign/e19.sh --n 1 --add 1 --repeats 1 --systems ray
+
+     Pass: exits 0 with no `NOT-READY` or `TIMEOUT`, and
+     `$LAB_RESULTS/analysis-input/e19.csv` has a `ray,baseline` and a
+     `ray,join` row with `result_ok` 1 and `join_status` ok. On the emulated
+     lab both took about 30 s. Memory: `cluster.sh` refuses a Ray head under
+     2 GiB and a worker under 1 GiB (`RAY-MEMORY ... refused` in the log,
+     `NOT-READY ray pc=<pc>`) and warns under 4 / 2 GiB. The emulated pc00
+     (Ray head, dashboard, Dask scheduler and workers, the daemon) peaked at
+     1.24 GB resident and 3.0-3.3 GB with page cache, so a real pc00 needs
+     4 GiB free beyond its desktop; `preflight.sh` asks for 8 GiB total. If
+     the run hangs (no new `wait ... not finished yet` progress for 10
+     minutes, pc00 slow to answer ssh), that is the stall seen on the laptop:
+     on pc00 run `free -m; cat /proc/pressure/memory` and note it, then
+     Ctrl-C, `collect.sh --bug`, and stop.
 
 C4. The four runs, one command at a time:
 
@@ -145,7 +200,7 @@ C10. Leave one PC (the Leaving section, with `LAB_RESULTS` still set, applied to
      the PC you choose by editing `$f` to one id). Pass: `journalctl -u lab-undo`
      on it ends with `undo complete`, and the snapshot comparison is clean.
 
-C11. Write down, per item above, "what differed from Docker, on 2 real PCs, one
+C11. Write down, per item above, "what differed from Docker, on 3 real PCs, one
      LAN" in `$LAB_RESULTS/rc-report.md`, and give the folder to the project owner.
      Then clean up so nothing from the check can be mistaken for a result:
 
@@ -154,7 +209,7 @@ C11. Write down, per item above, "what differed from Docker, on 2 real PCs, one
 
      Keep `$HOME/pipedpeer-rc-check` until the owner has read it. The other PC
      keeps the install; "The full session" repeats `install.sh`, which is safe
-     to repeat. E17 needs three PCs and is not part of this check.
+     to repeat.
 
 ## The full session
 
@@ -169,7 +224,7 @@ C11. Write down, per item above, "what differed from Docker, on 2 real PCs, one
    hibernate.target hybrid-sleep.target`. "Leaving" compares against it.
    Then the user types the setup line `serve.sh` printed (it is also in
    `results/lab/serve/SETUP-LINE.txt`). It prints one `LAB-PC host=...` line.
-   Before the full install, do the two-PC check above. Only then set up the rest.
+   Before the full install, do the three-PC check above. Only then set up the rest.
 3. Find the PCs; `<pc00 ip>` is the PC nearest the driver:
 
        scripts/campaign/scan.sh <lab cidr> --pc00 <pc00 ip>
@@ -258,11 +313,11 @@ commands over ssh):
     f=$LAB/hosts-leaving.txt         # every PC in hosts.tsv, also the excluded ones
     awk -F'\t' '!/^#/ && NF >= 2 { print $1 }' "$LAB/hosts.tsv" >"$f"
     lab_fanout uninstall "$f" 'pipedpeer uninstall -y'
-    lab_fanout undo "$f" 'sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo'
+    lab_fanout undo "$f" 'sudo systemd-run --unit=lab-undo bash /var/lib/pipedpeer-lab/lab-pc.sh undo'
 
 The undo stops sshd, so the fan-out cannot read its answer. Check on each PC
 (or its screen): `journalctl -u lab-undo` ends with `undo complete`. If
-`/tmp/lab-pc.sh` is gone (reboot), type the setup line's download part again
+`/var/lib/pipedpeer-lab/lab-pc.sh` is gone (it is removed only by a finished undo), type the setup line's download part again
 first. The undo also removes `~/pipedpeer-lab` and `~/.ssh/pipedpeer-lab-pc00*`
 on the PC, and Nix where setup found none (a Nix that was there before is left).
 Then compare each PC with the snapshot taken in Session 1, step 2, before
@@ -279,3 +334,4 @@ setup (same five commands, plus `ls ~/pipedpeer-lab ~/.ssh`).
 | `RAISE-REPEATS <k>` | `scripts/campaign/run.sh <experiment> --repeats <k>` for the experiment named in the `SPREAD` lines, then `analyse.py --spread` again |
 | `UPLOAD-FAILED <why>` | expected since Cloudflare R2 is not used; copy `results/lab/` to Google Drive manually after each session and before PC cleanup |
 | A line in `results/lab/BLOCKERS.md` | stop that experiment, read the line, tell the project owner; later experiments may go on |
+| Anything failing that this table does not cover | `scripts/campaign/collect.sh --bug`; send the folder it names (`BUG-BUNDLE <folder>`) to the project owner. Do not try fixes on the PCs or in the scripts |

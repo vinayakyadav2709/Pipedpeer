@@ -1,0 +1,126 @@
+Pipedpeer campaign bug report, 2026-11-09T21:53:34+00:00
+lab dir: /lab-results
+PCs: 3, reached: 3
+analyse: ok
+
+#### pcs/pc00.txt (first 120 lines)
+
+## host
+ubu1
+2026-11-09T21:53:35+00:00
+Linux ubu1 6.18.44-fc-v310 #1 SMP @0 x86_64 x86_64 x86_64 GNU/Linux
+PRETTY_NAME="Ubuntu 22.04.5 LTS"
+VERSION_ID="22.04"
+nproc=3
+Cpus_allowed_list:	1-3
+ 21:53:35 up  2:48,  0 users,  load average: 1.13, 1.15, 1.16
+
+## pipedpeer --version
+pipedpeer version dev
+
+## pipedpeer status
+daemon running (pid=23163 node-id=3e981a00ad6c60e7 port=4242 version=dev)
+
+NAME  STATE    PATH  CPU     MEM FREE  GPU  JOBS  NOTE
+ubu1  healthy  self  3c 19%  2.1 GiB   -    0     -
+ubu2  healthy  lan   3c 19%  2.0 GiB   -    0     -
+
+Recent runs:
+ID        SCRIPT        STATUS     WHERE         TOOK   STARTED
+52791209  sweep_map.py  succeeded  this machine  29.7s  1 minute ago
+04546819  sweep_map.py  succeeded  this machine  41.5s  10 minutes ago
+60159958  sweep_map.py  succeeded  this machine  32.5s  19 minutes ago
+
+## memory
+               total        used        free      shared  buff/cache   available
+Mem:           16086        1763        7279          30        7043       13721
+Swap:              0           0           0
+--- /proc/pressure/memory
+some avg10=0.00 avg60=0.00 avg300=0.00 total=4417668
+full avg10=0.00 avg60=0.00 avg300=0.00 total=3289050
+cgroup: v2 path [/docker/045877c4899d814ac1e45758d98dd4a58866f5d63d93e6a05ab18e577bc78279/user.slice/user-1000.slice/session-13.scope] v1 memory path [/docker/045877c4899d814ac1e45758d98dd4a58866f5d63d93e6a05ab18e577bc78279/user.slice/user-1000.slice/session-13.scope]
+
+## kernel OOM lines
+Nov 09 19:37:24 ubu1 kernel: oom_control is deprecated and will be removed. Please report your usecase to linux-mm-@kvack.org if you depend on this functionality.
+Nov 09 19:37:24 ubu1 kernel: python3 invoked oom-killer: gfp_mask=0xcc0(GFP_KERNEL), order=0, oom_score_adj=0
+Nov 09 19:37:24 ubu1 kernel:  oom_kill_process.cold+0x8/0x78
+Nov 09 19:37:24 ubu1 kernel: [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name
+Nov 09 19:37:24 ubu1 kernel: oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=1c6c39234a9000bf369a3c28dd2eb37e22724430853e357745bf87aaa3861d4b,mems_allowed=0,oom_memcg=/docker/1c6c39234a9000bf369a3c28dd2eb37e22724430853e357745bf87aaa3861d4b,task_memcg=/docker/1c6c39234a9000bf369a3c28dd2eb37e22724430853e357745bf87aaa3861d4b,task=python3,pid=5151,uid=0
+Nov 09 19:37:24 ubu1 kernel: Memory cgroup out of memory: Killed process 5151 (python3) total-vm:2165596kB, anon-rss:2070272kB, file-rss:6220kB, shmem-rss:0kB, UID:0 pgtables:4112kB oom_score_adj:0
+
+## largest processes (RSS kB)
+  45960 90624     148 ray::IDLE       ray::IDLE
+  45501 75596     154 MainThread      /home/lab/pipedpeer-lab/venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=16, pipe_handle=33) --multiprocessing-fork
+  45496 75284     154 MainThread      /home/lab/pipedpeer-lab/venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=16, pipe_handle=22) --multiprocessing-fork
+  45504 75312     154 MainThread      /home/lab/pipedpeer-lab/venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=16, pipe_handle=33) --multiprocessing-fork
+  45469 72616     154 dask            /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask scheduler --port 8786
+  45471 71960     154 dask            /home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/bin/dask worker tcp://10.136.162.16:8786 --nworkers 3 --nthreads 1
+  45512 50260     153 gcs_server      /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/gcs/gcs_server --log_dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs --config_list=eyJhdXRvbWF0aWNfb2JqZWN0X3NwaWxsaW5nX2VuYWJsZWQiOiB0cnVlLCAib2JqZWN0X3NwaWxsaW5nX2NvbmZpZyI6ICJ7XCJ0eXBlXCI6IFwiZmlsZXN5c3RlbVwiLCBcInBhcmFtc1wiOiB7XCJkaXJlY3RvcnlfcGF0aFwiOiBcIi90bXAvcmF5L3Nlc3Npb25fMjAyNi0xMS0wOV8yMS01MS0wM18xNDUzMzdfNDU0NjdcIn19IiwgImlzX2V4dGVybmFsX3N0b3JhZ2VfdHlwZV9mcyI6IHRydWV9 --gcs_server_port=6379 --metrics-agent-port=0 --node-ip-address=10.136.162.16 --session-name=session_2026-11-09_21-51-03_145337_45467 --ray-commit=b7f4259e944bf6959f721b106adc366ddfa0c356 --session-dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467 --node-id=ea03cf11c4597444d2a83866eac06b16639b99393b0a6edb2b2c0d18 --stdout_filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/gcs_server.out --stderr_filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/gcs_server.err
+   3656 37928    8011 nix-daemon      /nix/var/nix/profiles/default/bin/nix-daemon --option json-log-path /nix/var/determinate/determinate-nixd-logger.socket
+     24 32076    8172 systemd-journal /lib/systemd/systemd-journald
+  45841 32004     151 raylet          /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/core/src/ray/raylet/raylet --raylet_socket_name=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/sockets/raylet --store_socket_name=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/sockets/plasma_store --object_manager_port=0 --min_worker_port=10002 --max_worker_port=19999 --node_manager_port=0 --node_id=ea03cf11c4597444d2a83866eac06b16639b99393b0a6edb2b2c0d18 --node_ip_address=10.136.162.16 --maximum_startup_concurrency=3 --static_resource_list=node:10.136.162.16,1.0,node:__internal_head__,1.0,CPU,3,memory,10948621108,object_store_memory,4692266188 --python_worker_command=/home/lab/pipedpeer-lab/venv/bin/python /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/workers/setup_worker.py /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/workers/default_worker.py --node-ip-address=10.136.162.16 --node-manager-port=RAY_NODE_MANAGER_PORT_PLACEHOLDER --object-store-name=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/sockets/plasma_store --raylet-name=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/sockets/raylet --redis-address=None --metrics-agent-port=0 --logging-rotate-bytes=536870912 --logging-rotate-backup-count=5 --runtime-env-agent-port=0 --gcs-address=10.136.162.16:6379 --session-name=session_2026-11-09_21-51-03_145337_45467 --temp-dir=/tmp/ray --webui=127.0.0.1:8265 --cluster-id=91fd2044b9ddb8df378045280e67cf10136762b6500fac5d354d8e33 RAY_WORKER_DYNAMIC_OPTION_PLACEHOLDER --java_worker_command= --cpp_worker_command= --native_library_path=/home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/cpp/lib --temp_dir=/tmp/ray --session_dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467 --log_dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs --resource_dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/runtime_resources --metrics-agent-port=0 --metrics_export_port=0 --runtime_env_agent_port=0 --object_store_memory=4692266188 --plasma_directory=/tmp/ray --fallback_directory=/tmp/ray/session_2026-11-09_21-51-03_145337_45467 --ray-debugger-external=0 --gcs-address=10.136.162.16:6379 --session-name=session_2026-11-09_21-51-03_145337_45467 --labels= --cluster-id=91fd2044b9ddb8df378045280e67cf10136762b6500fac5d354d8e33 --stdout_filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/raylet.out --stderr_filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/raylet.err --head --num_prestart_python_workers=3 --dashboard_agent_command=/home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/dashboard/agent.py --node-id=ea03cf11c4597444d2a83866eac06b16639b99393b0a6edb2b2c0d18 --node-ip-address=10.136.162.16 --metrics-export-port=0 --grpc-port=0 --listen-port=52365 --node-manager-port=RAY_NODE_MANAGER_PORT_PLACEHOLDER --object-store-name=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/sockets/plasma_store --raylet-name=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/sockets/raylet --temp-dir=/tmp/ray --session-dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467 --log-dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs --logging-rotate-bytes=536870912 --logging-rotate-backup-count=5 --session-name=session_2026-11-09_21-51-03_145337_45467 --gcs-address=10.136.162.16:6379 --cluster-id-hex=91fd2044b9ddb8df378045280e67cf10136762b6500fac5d354d8e33 --stdout-filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/dashboard_agent.out --stderr-filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/dashboard_agent.err --logging-filename=dashboard_agent.log --head --runtime_env_agent_command=/home/lab/pipedpeer-lab/venv/bin/python -u /home/lab/pipedpeer-lab/venv/lib/python3.14/site-packages/ray/_private/runtime_env/agent/main.py --node-id=ea03cf11c4597444d2a83866eac06b16639b99393b0a6edb2b2c0d18 --node-ip-address=10.136.162.16 --runtime-env-agent-port=0 --session-dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467 --gcs-address=10.136.162.16:6379 --cluster-id-hex=91fd2044b9ddb8df378045280e67cf10136762b6500fac5d354d8e33 --runtime-env-dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/runtime_resources --logging-rotate-bytes=536870912 --logging-rotate-backup-count=5 --log-dir=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs --temp-dir=/tmp/ray --stdout-filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/runtime_env_agent.out --stderr-filepath=/tmp/ray/session_2026-11-09_21-51-03_145337_45467/logs/runtime_env_agent.err --logging-filename=runtime_env_agent.log
+  23163 29200    3345 pipedpeer       /usr/local/bin/pipedpeer __daemon__
+   3649 22916    8011 determinate-nix determinate-nixd daemon
+  45615 18832     152 python          /home/lab/pipedpeer-lab/venv/bin/python -c from multiprocessing.resource_tracker import main;main(26)
+  45493 16804     154 python          /home/lab/pipedpeer-lab/venv/bin/python -c from multiprocessing.resource_tracker import main;main(15)
+     40 14452    8172 systemd-resolve /lib/systemd/systemd-resolved
+      1  9660    8172 systemd         /lib/systemd/systemd
+   3668  9064    8011 crashpad_handle /nix/store/faw1bsypv9vv2ycx14r6r3ki5jbg5drc-sentry-native-0.17.4/bin/crashpad_handler --no-rate-limit --log-file=/root/.cache/nix/sentry/e21be637-4796-42c4-7134-d4ec33b50d63.run/crashpad-handler.log --database=/root/.cache/nix/sentry --metrics-dir=/root/.cache/nix/sentry --url=https://o4506062689927168.ingest.us.sentry.io:443/api/4511237220532224/minidump/?sentry_client=sentry.native/0.17.4&sentry_key=<redacted> --attachment=/root/.cache/nix/sentry/e21be637-4796-42c4-7134-d4ec33b50d63.run/__sentry-event --attachment=/root/.cache/nix/sentry/e21be637-4796-42c4-7134-d4ec33b50d63.run/__sentry-breadcrumb1 --attachment=/root/.cache/nix/sentry/e21be637-4796-42c4-7134-d4ec33b50d63.run/__sentry-breadcrumb2 --report-id=53318e07-6d15-4821-3b52-a81a61015201 --initial-client-fd=6 --shared-client-connection
+   1805  8776    8123 systemd         /lib/systemd/systemd --user
+   2198  8276    8047 sshd            sshd: lab [priv]
+   1773  7636    8123 sshd            sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+   2209  6800    8047 sshd            sshd: lab@notty
+    897  6620    8141 systemd-logind  /lib/systemd/systemd-logind
+   1806  5356    8123 (sd-pam)        (sd-pam)
+    572  3708    8145 dbus-daemon     @dbus-daemon --system --address=systemd: --nofork --nopidfile --systemd-activation --syslog-only
+  46454  3256       0 bash            bash
+  46450  3192       0 bash            bash -c echo ZXhwb3J0IExBQl9SQVlfU0VTU0lPTj0vdG1wL3JheS9zZXNzaW9uX2xhdGVzdApzZWMoKSB7IGxvY2FsIHQ9IiQxIiBuPSIkMiI7IHNoaWZ0IDI7IGVjaG87IGVjaG8gIiMjICR0IjsgeyAiJEAiIDI+JjEgfHwgZWNobyAiKGV4aXQgJD8pIjsgfSB8IHRhaWwgLW4gIiRuIjsgfQpzdD0iJHtYREdfU1RBVEVfSE9NRTotJEhPTUUvLmxvY2FsL3N0YXRlfS9waXBlZHBlZXIiCmNnbWVtKCkgewogIGxvY2FsIHAgdjEgZiBkCiAgcD0iJChhd2sgLUY6ICckMSA9PSAiMCIgeyBwcmludCAkMyB9JyAvcHJvYy9zZWxmL2Nncm91cCkiCiAgdjE9IiQoYXdrIC1GOiAnJDIgfiAvKF58LCltZW1vcnkoLHwkKS8geyBwcmludCAkMyB9JyAvcHJvYy9zZWxmL2Nncm91cCkiCiAgZWNobyAiY2dyb3VwOiB2MiBwYXRoIFske3A6LW5vbmV9XSB2MSBtZW1vcnkgcGF0aCBbJHt2MTotbm9uZX1dIgogIGZvciBkIGluICIkcCIgIiR2MSI7IGRvCiAgICBbIC1uICIkZCIgXSB8fCBjb250aW51ZQogICAgd2hpbGUgOjsgZG8KICAgICAgZm9yIGYgaW4gL3N5cy9mcy9jZ3JvdXAiJGQiL21lbW9yeS57Y3VycmVudCxtYXgscGVhayxldmVudHMscHJlc3N1cmV9IC9zeXMvZnMvY2dyb3VwL21lbW9yeSIkZCIvbWVtb3J5Lnt1c2FnZV9pbl9ieXRlcyxtYXhfdXNhZ2VfaW5fYnl0ZXMsbGltaXRfaW5fYnl0ZXMsZmFpbGNudCxvb21fY29udHJvbH07IGRvCiAgICAgICAgWyAtciAiJGYiIF0gJiYgeyBlY2hvICItLS0gJGYiOyBjYXQgIiRmIjsgfQogICAgICBkb25lCiAgICAgIGlmIFsgLXogIiRkIiBdIHx8IFsgIiRkIiA9IC8gXTsgdGhlbiBicmVhazsgZmkKICAgICAgZD0iJHtkJS8qfSIKICAgIGRvbmUKICBkb25lCn0Kc2VjIGhvc3QgNDAgc2ggLWMgJ2hvc3RuYW1lOyBkYXRlIC1JczsgdW5hbWUgLWE7IGdyZXAgLUUgIl4oUFJFVFRZX05BTUV8VkVSU0lPTl9JRCk9IiAvZXRjL29zLXJlbGVhc2U7IGVjaG8gIm5wcm9jPSQobnByb2MpIjsgZ3JlcCBDcHVzX2FsbG93ZWRfbGlzdCAvcHJvYy9zZWxmL3N0YXR1czsgdXB0aW1lJwpzZWMgInBpcGVkcGVlciAtLXZlcnNpb24iIDUgcGlwZWRwZWVyIC0tdmVyc2lvbgpzZWMgInBpcGVkcGVlciBzdGF0dXMiIDgwIHBpcGVkcGVlciBzdGF0dXMKc2VjIG1lbW9yeSA0MDAgc2ggLWMgJ2ZyZWUgLW07IGVjaG8gIi0tLSAvcHJvYy9wcmVzc3VyZS9tZW1vcnkiOyBjYXQgL3Byb2MvcHJlc3N1cmUvbWVtb3J5IDI+L2Rldi9udWxsIHx8IGVjaG8gIm5vIFBTSSI7ICciJChkZWNsYXJlIC1mIGNnbWVtKSInOyBjZ21lbScKc2VjICJrZXJuZWwgT09NIGxpbmVzIiA2MCBzaCAtYyAneyBzdWRvIC1uIGpvdXJuYWxjdGwgLWsgLS1uby1wYWdlciAtbiA1MDAwIDI+L2Rldi9udWxsIHx8IHN1ZG8gLW4gZG1lc2cgMj4vZGV2L251bGwgfHwgZG1lc2c7IH0gfCBncmVwIC1pRSAib29tfGtpbGxlZCBwcm9jZXNzfG91dCBvZiBtZW1vcnkiIHx8IGVjaG8gIm5vbmUgZm91bmQiJwpzZWMgImxhcmdlc3QgcHJvY2Vzc2VzIChSU1Mga0IpIiAzMCBwcyAtZW8gcGlkLHJzcyxldGltZXMsY29tbSxhcmdzIC0tc29ydD0tcnNzCnNlYyBkaXNrIDIwIGRmIC1oICIkSE9NRSIgL25peCAvdG1wCnNlYyAiZmFpbGVkIHVzZXIgdW5pdHMiIDMwIHN5c3RlbWN0bCAtLXVzZXIgLS1mYWlsZWQgLS1uby1wYWdlcgpzZWMgImpvdXJuYWwgcGlwZWRwZWVyLnNlcnZpY2UiIDMwMCBqb3VybmFsY3RsIC0tdXNlciAtdSBwaXBlZHBlZXIuc2VydmljZSAtLW5vLXBhZ2VyIC1uIDMwMApzZWMgImpvdXJuYWwgbGFiLXJheSIgMTUwIGpvdXJuYWxjdGwgLS11c2VyIC11IGxhYi1yYXkgLS1uby1wYWdlciAtbiAxNTAKc2VjICJqb3VybmFsIGxhYi1kYXNrIiAxNTAgam91cm5hbGN0bCAtLXVzZXIgLXUgbGFiLWRhc2std29ya2VyIC11IGxhYi1kYXNrLXNjaGVkdWxlciAtLW5vLXBhZ2VyIC1uIDE1MApzZWMgIndhcm11cC5sb2ciIDEyMCBjYXQgIiRzdC93YXJtdXAubG9nIgpzZWMgIndhcm11cC5sb2cucHJldiIgNjAgY2F0ICIkc3Qvd2FybXVwLmxvZy5wcmV2Igpmb3IgZiBpbiByYXlsZXQub3V0IGdjc19zZXJ2ZXIub3V0IG1vbml0b3IubG9nOyBkbwogIHNlYyAicmF5ICRmIiAyMDAgY2F0ICIkTEFCX1JBWV9TRVNTSU9OL2xvZ3MvJGYiCmRvbmUKc2VjICJyYXkgd29ya2VyIGxvZ3MiIDEwIHNoIC1jICdscyAiJExBQl9SQVlfU0VTU0lPTi9sb2dzIiB8IGdyZXAgLWMgIl53b3JrZXItIiB8fCB0cnVlJwpzZWMgInJ1bnMgb24gdGhpcyBQQyAobmV3ZXN0IDIwKSIgMjAgc2ggLWMgJ2xzIC10IH4vcGlwZWRwZWVyLWxhYi9ydW5zJwo= | base64 -d | timeout 120 bash
+  46503  2912       0 ps              ps -eo pid,rss,etimes,comm,args --sort=-rss
+  46453  1672       0 timeout         timeout 120 bash
+  46501  1592       0 bash            bash
+  46502  1520       0 tail            tail -n 30
+
+## disk
+Filesystem      Size  Used Avail Use% Mounted on
+overlay         252G   24G   15G  62% /
+overlay         252G   24G   15G  62% /
+overlay         252G   24G   15G  62% /
+
+## failed user units
+  UNIT LOAD ACTIVE SUB DESCRIPTION
+0 loaded units listed.
+
+## journal pipedpeer.service
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 WRN memory ceiling enforced by cgroup: 4.0 GiB for the daemon and its jobs component=daemon
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 INF daemon starting component=daemon max_concurrent=0 node_id=3e981a00 port=4242 role=
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: {"level":"info","peer":"d05797ac24c82edd","host":"ubu2","at":"10.136.162.17:4242","source":"lan","time":"2026-11-09T20:57:48Z","message":"peer up"}
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: {"level":"info","peer":"f7566abe8ce364a4","host":"ubu3","at":"10.136.162.18:4242","source":"gossip","time":"2026-11-09T20:57:48Z","message":"peer up"}
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 INF internet: peer f7566abe reachable at 127.0.0.1:42345 (gossip) component=daemon
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 INF internet: peer d05797ac reachable at 127.0.0.1:38641 (gossip) component=daemon
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 INF peer joined over the internet at=127.0.0.1:42345 component=daemon peer=f7566abe8ce364a4
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 INF peer joined over the internet at=127.0.0.1:38641 component=daemon peer=d05797ac24c82edd
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: {"level":"info","peer":"f7566abe8ce364a4","host":"ubu3","at":"127.0.0.1:42345","source":"internet","time":"2026-11-09T20:57:48Z","message":"peer up"}
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: {"level":"info","peer":"f7566abe8ce364a4","host":"ubu3","at":"10.136.162.18:4242","source":"gossip","time":"2026-11-09T20:57:48Z","message":"peer down"}
+Nov 09 20:57:48 ubu1 pipedpeer[23114]: 20:57:48 INF internet: direct: f7566abe connected from 10.136.162.18:4243 component=daemon
+Nov 09 20:57:49 ubu1 pipedpeer[23114]: 20:57:49 INF internet: peer f7566abe stopped checking in; released 127.0.0.1:42345 component=daemon
+Nov 09 20:57:49 ubu1 pipedpeer[23114]: 20:57:49 INF peer left component=daemon peer=f7566abe8ce364a4
+Nov 09 20:57:50 ubu1 systemd[1805]: Stopping pipedpeer daemon...
+Nov 09 20:57:50 ubu1 pipedpeer[23114]: 20:57:50 INF peer left component=daemon peer=d05797ac24c82edd
+Nov 09 20:57:50 ubu1 systemd[1805]: Stopped pipedpeer daemon.
+Nov 09 20:57:50 ubu1 systemd[1805]: Started pipedpeer daemon.
+Nov 09 20:57:50 ubu1 pipedpeer[23163]: 20:57:50 INF internet mode enabled; serving the cluster introducer component=daemon introducers=[] role=
+Nov 09 20:57:50 ubu1 pipedpeer[23163]: 2026/11/09 20:57:50 connection doesn't allow setting of receive buffer size. Not a *net.UDPConn?. See https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes for details.
+Nov 09 20:57:50 ubu1 pipedpeer[23163]: 20:57:50 INF internet: introducing this cluster's members on udp port 4244 component=daemon
+Nov 09 20:57:50 ubu1 pipedpeer[23163]: 20:57:50 WRN memory ceiling enforced by cgroup: 4.0 GiB for the daemon and its jobs component=daemon
+Nov 09 20:57:50 ubu1 pipedpeer[23163]: 20:57:50 INF daemon starting component=daemon max_concurrent=0 node_id=3e981a00 port=4242 role=
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: 20:57:51 INF internet: peer d05797ac is trying to reach us; punching back component=daemon
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: 20:57:51 INF internet: direct: d05797ac connected from 10.136.162.17:4243 component=daemon
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: 20:57:51 INF internet: peer d05797ac reachable at 127.0.0.1:38145 (punched-in) component=daemon
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: 20:57:51 INF internet: peer d05797ac: a newer connection replaced the old one (lan), still at 127.0.0.1:38145 component=daemon
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: {"level":"warn","error":"Get \"http://127.0.0.1:38145/health\": read tcp 127.0.0.1:34580->127.0.0.1:38145: read: connection reset by peer","at":"127.0.0.1:38145","time":"2026-11-09T20:57:51Z","message":"internet peer not answering yet; retrying shortly, then every poll"}
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: 20:57:51 INF peer joined over the internet at=127.0.0.1:38145 component=daemon peer=d05797ac24c82edd
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: {"level":"info","peer":"d05797ac24c82edd","at":"127.0.0.1:38145","time":"2026-11-09T20:57:51Z","message":"internet peer answered"}
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: {"level":"warn","error":"10.136.162.18:4242 did not answer the cluster token check; not sending it: dial tcp 10.136.162.18:4242: connect: connection refused","addr":"10.136.162.18:4242","time":"2026-11-09T20:57:51Z","message":"withholding the cluster token"}
+Nov 09 20:57:51 ubu1 pipedpeer[23163]: {"level":"info","peer":"d05797ac24c82edd","host":"ubu2","at":"10.136.162.17:4242","source":"lan","time":"2026-11-09T20:57:51Z","message":"peer up"}
+Nov 09 20:57:56 ubu1 pipedpeer[23163]: 20:57:56 INF internet: no port mapping: no port mapping available: pcp: no usable reply from the router: read udp4 10.136.162.16:44512->10.136.162.1:5351: i/o timeout; nat-pmp: no usable reply from the router: read udp4 10.136.162.16:35564->10.136.162.1:5351: read: connection refused; upnp: no router answered a UPnP search component=daemon
+Nov 09 20:58:56 ubu1 pipedpeer[23163]: 20:58:56 INF internet: peer d05797ac stopped checking in; released 127.0.0.1:38145 component=daemon

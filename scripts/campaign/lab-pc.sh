@@ -2,8 +2,9 @@
 # Lab PC setup for the PipedPeer campaign. Run as root:
 #   wget -qO /tmp/lab-pc.sh http://DRIVER:8000/lab-pc.sh &&
 #     echo "<sha256>  /tmp/lab-pc.sh" | sha256sum -c && sudo bash /tmp/lab-pc.sh setup
-#   sudo bash /tmp/lab-pc.sh ports    # re-check firewall ports (every session)
-#   sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo   # last session
+#   sudo bash /var/lib/pipedpeer-lab/lab-pc.sh ports    # re-check firewall ports (every session)
+#   sudo systemd-run --unit=lab-undo bash /var/lib/pipedpeer-lab/lab-pc.sh undo   # last session
+# (setup keeps its own copy there: /tmp/lab-pc.sh is gone after a reboot)
 # Ubuntu only (apt, ufw, systemd). serve.sh replaces the two placeholders below
 # and prints the exact setup line with this file's sha256.
 set -euo pipefail
@@ -243,7 +244,7 @@ stop_lab_runtime() {
 }
 
 # Run over SSH, start it detached so stopping sshd cannot cut it off halfway:
-#   sudo systemd-run --unit=lab-undo bash /tmp/lab-pc.sh undo
+#   sudo systemd-run --unit=lab-undo bash /var/lib/pipedpeer-lab/lab-pc.sh undo
 # then read `journalctl -u lab-undo` (or the PC's screen) for "undo complete".
 # A step that fails keeps its state line (and "cleanup" for the file work), so
 # a rerun retries exactly that; the state is removed only when all went through.

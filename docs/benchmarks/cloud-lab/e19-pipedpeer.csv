@@ -1,0 +1,8 @@
+system,kind,i,pc,join_s,first_work_s,wall_s,result_ok,seed_s,joiner_warm,join_status,purged_bytes,closure_bytes
+ray,baseline,0,,,,27.062,1,,,,,
+ray,join,1,pc01,5.258,0.189,30.084,1,,,ok,,
+pipedpeer,baseline,0,,,,31.456,1,,,,,
+pipedpeer,join,1,pc01,1.708,0.43,31.042,1,8.42,1,ok,223824,219985368
+pipedpeer,join,2,pc01,1.794,0.418,32.536,1,8.42,0,ok,0,0
+pipedpeer,join,3,pc01,2.082,0.445,50.823,1,8.42,0,ok,0,0
+pipedpeer,join,4,pc01,1.682,0.419,29.796,1,8.42,0,ok,219761544,219761544

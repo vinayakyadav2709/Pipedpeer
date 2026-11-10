@@ -31,5 +31,10 @@ ok=1; [ -x "$t/home/pipedpeer-lab/venv/bin/pip" ] && ok=0
 row "venv has its own pip" $ok "no venv/bin/pip"
 ok=1; [ ! -e "$t/home/.local/bin/python3.11" ] && ok=0
 row "no python3.11 link left in ~/.local/bin" $ok "uv wrote a bin link"
+# rerun over the venv the first run left (OPERATOR.md: fix, then run the same
+# script again): newer uv refuses an existing venv unless told to replace it
+out2=$(HOME="$t/home" UV_CACHE_DIR="$t/uvcache" timeout 300 bash -c "$cmd" 2>"$t/err2"); rc2=$?
+ok=1; [ "$rc2" = 0 ] && grep -q '^VERSIONS python=3\.11\.' <<<"$out2" && ok=0
+row "a second run over the existing venv exits 0 with its VERSIONS line" $ok "rc=$rc2 $(tail -2 "$t/err2" | tr '\n' ' ')"
 echo "PASS $pass/$total"
 [ "$pass" = "$total" ]

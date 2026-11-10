@@ -559,6 +559,41 @@ t22() {
 	verdict "exit file arrives inside the grace -> normal"
 }
 
+# --- Case 23: lab_usable_cpus and lab_mem_mib mktemp under $LAB, removed
+t23() {
+	local d rc=0 cpus mem
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		export LAB_CPUS_PROBE='echo 8'
+		export LAB_MEM_PROBE='echo "16777216 "'
+		cpus="$(lab_usable_cpus pc00)"
+		mem="$(lab_mem_mib pc00)"
+		printf 'cpus=%s\nmem=%s\n' "$cpus" "$mem"
+	) >"$d/log" 2>&1 || rc=$?
+	(($rc == 0)) || pnote "row exited $rc"
+	want_val "$d/log" cpus 8 "lab_usable_cpus count"
+	want_val "$d/log" mem 16384 "lab_mem_mib count"
+	[[ -z "$(ls "$d"/cpus_err.* "$d"/mem_err.* 2>/dev/null)" ]] || pnote "leftover temp files under LAB: $(ls "$d"/*_err.*)"
+	verdict "lab_usable_cpus and lab_mem_mib -> mktemp under LAB, cleaned up"
+}
+
+# --- Case 24: probe failure logs PC and cleans up temp file
+t24() {
+	local d rc=0 cpus_rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d"
+		export LAB_CPUS_PROBE='exit 1'
+		lab_usable_cpus pc00 || cpus_rc=$?
+		printf 'cpus_rc=%s\n' "$cpus_rc"
+	) >"$d/log" 2>&1 || rc=$?
+	want_val "$d/log" cpus_rc 1 "lab_usable_cpus failed rc"
+	grep -q 'pc00: could not read its usable CPU count' "$d/campaign.log" || pnote "failure not logged"
+	[[ -z "$(ls "$d"/cpus_err.* 2>/dev/null)" ]] || pnote "leftover temp file after failure"
+	verdict "lab_usable_cpus on probe failure -> returns 1, logged, temp file cleaned up"
+}
+
 t9
 t10
 t11
@@ -573,6 +608,8 @@ t19
 t20
 t21
 t22
+t23
+t24
 printf '\n'
 
 total=$((pass + failed))

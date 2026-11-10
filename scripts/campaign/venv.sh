@@ -77,10 +77,12 @@ _pin_of() {
 # venv_command <x.y>: the remote command that builds the venv. uv with an
 # install dir keeps CPython under py/ in its own directory and creates no
 # py/bin/python3.x, so the venv comes from `uv venv` (it finds the managed
-# interpreter through UV_PYTHON_INSTALL_DIR) with pip seeded.
+# interpreter through UV_PYTHON_INSTALL_DIR) with pip seeded. UV_VENV_CLEAR=1
+# replaces a venv an earlier run left: newer uv refuses an existing one, which
+# made every rerun fail on every PC (an older uv ignores the variable).
 # shellcheck disable=SC2088
 venv_command() {
-	printf '%s' "export UV_PYTHON_INSTALL_DIR=~/pipedpeer-lab/py && ~/pipedpeer-lab/bin/uv python install --no-bin $1 && ~/pipedpeer-lab/bin/uv venv --managed-python --python $1 --seed ~/pipedpeer-lab/venv && ${VENV_PIP:-~/pipedpeer-lab/venv/bin/pip install -q -r ~/pipedpeer-lab/requirements.txt} && cd ~/pipedpeer-lab/work && ~/pipedpeer-lab/venv/bin/python versions.py"
+	printf '%s' "export UV_PYTHON_INSTALL_DIR=~/pipedpeer-lab/py && ~/pipedpeer-lab/bin/uv python install --no-bin $1 && UV_VENV_CLEAR=1 ~/pipedpeer-lab/bin/uv venv --managed-python --python $1 --seed ~/pipedpeer-lab/venv && ${VENV_PIP:-~/pipedpeer-lab/venv/bin/pip install -q -r ~/pipedpeer-lab/requirements.txt} && cd ~/pipedpeer-lab/work && ~/pipedpeer-lab/venv/bin/python versions.py"
 }
 
 main() {
