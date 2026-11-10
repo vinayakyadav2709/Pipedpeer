@@ -130,10 +130,11 @@ def _groupby_shuffle_inner(gb, spec, args, kw):
             "globals": True,
             "no_split": True,
         }
-        header["required_mem"] = _pool_required(globals_pickle, [pickle.dumps(d) for d in remote])
+        frames = [pickle.dumps(d) for d in remote]
+        header["required_mem"] = _pool_required(globals_pickle, frames)
         if core._FORCE:
             header["force"] = True
-        blobs = _pool_send(header, globals_pickle, [pickle.dumps(d) for d in remote], 1800)
+        blobs = _pool_send(header, globals_pickle, frames, 1800)
         parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
     if (any(isinstance(df[k].dtype, _pd.CategoricalDtype) for k in keys)
@@ -247,10 +248,11 @@ def _merge_shuffle(left, right, kw):
             "globals": True,
             "no_split": True,
         }
-        header["required_mem"] = _pool_required(globals_pickle, [pickle.dumps(i) for i in items])
+        frames = [pickle.dumps(i) for i in items]
+        header["required_mem"] = _pool_required(globals_pickle, frames)
         if core._FORCE:
             header["force"] = True
-        blobs = _pool_send(header, globals_pickle, [pickle.dumps(i) for i in items], 1800)
+        blobs = _pool_send(header, globals_pickle, frames, 1800)
         parts.extend(pickle.loads(p) for p in blobs)
     res = _pd.concat(parts)
     if left_index or right_index:
