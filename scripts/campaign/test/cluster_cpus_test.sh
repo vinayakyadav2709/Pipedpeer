@@ -186,6 +186,23 @@ else
 	bad "e19 ray join script: the starter carries --num-cpus=3" "starter [$starter]"
 fi
 
+# e19's joiner Ray start carries the memory flags from the joiner's own probe
+d="$TMP/e19mem"
+out="$(
+	fakelab_init "$d" 2 >/dev/null 2>&1 || exit 90
+	mkdir -p "$d/nocg"
+	export LAB_RESULTS="$d" PP_CG_ROOT="$d/nocg" PP_PROC_CGROUP=/dev/null PP_MEMTOTAL_KIB=4194304
+	# shellcheck source=/dev/null
+	source "$REPO/scripts/campaign/e19.sh" >/dev/null 2>&1
+	e19_join_script ray E19-x 10.0.0.2 10.0.0.17 3 CODE pc01
+)"
+starter="$(printf '%s\n' "$out" | awk '/base64 -d/ {print $NF}' | base64 -d 2>/dev/null || true)"
+if [[ "$starter" == *"--num-cpus=3 --memory=4294967296 --object-store-memory=1288490188 --block"* ]]; then
+	ok "e19 ray join script: the starter carries --memory and --object-store-memory"
+else
+	bad "e19 ray join script: memory flags" "starter [$starter]"
+fi
+
 # --- memory for Ray -------------------------------------------------------------
 mem_row() { # <name> <pc> <role> <want rc> <log regex or - for none expected> [env...]
 	local name="$1" pc="$2" role="$3" want="$4" logre="$5" d rc
@@ -229,6 +246,39 @@ mem_row "a cgroup limit under MemTotal counts" pc00 head 1 'RAY-MEMORY pc00 have
 mem_row "probe fails: memory unknown, not refused" pc01 worker 0 'pc01: memory unknown' FAKELAB_FAIL=pc01 LAB_RETRY_SLEEP=0
 mem_row "probe fails: the ssh error is in the log, not just []" pc01 worker 0 'pc01: memory unknown .*fakelab ssh: pc01 is down' FAKELAB_FAIL=pc01 LAB_RETRY_SLEEP=0
 mem_row "opposite: a memory probe that answers is still used" pc01 worker 0 'RAY-MEMORY pc01 have=1536 MiB.*warning' PP_MEMTOTAL_KIB=1572864
+mkdir -p "$TMP/memcg4/cg/docker/x"
+printf '4294967296\n' >"$TMP/memcg4/cg/docker/x/memory.max"
+printf '0::/docker/x/user.slice\n' >"$TMP/memcg4/proc_cgroup"
+
+# --- the memory flags for Ray ---------------------------------------------------
+mflag_row() { # <name> <want flag> <want log regex or -> [env...]
+	local name="$1" want="$2" logre="$3" d out
+	shift 3
+	d="$TMP/mflag-${name//[^a-z]/_}"
+	out="$(
+		fakelab_init "$d" 2 >/dev/null 2>&1 || exit 90
+		mkdir -p "$d/nocg"
+		export LAB_RESULTS="$d" PP_CG_ROOT="$d/nocg" PP_PROC_CGROUP=/dev/null
+		local kv
+		for kv in "$@"; do export "${kv?}"; done
+		# shellcheck source=/dev/null
+		source "$REPO/scripts/campaign/cluster.sh"
+		_cluster_ray_mem_flag pc00 2>/dev/null
+	)" || out="rc=$?"
+	if [[ "$out" != "$want" ]]; then
+		bad "mem flag: $name" "got [$out] want [$want]"
+	elif [[ "$logre" != - ]] && ! grep -qE "$logre" "$d/campaign.log" 2>/dev/null; then
+		bad "mem flag: $name" "no log /$logre/"
+	else
+		ok "mem flag: $name -> [$want]"
+	fi
+}
+# 4 GiB = 4294967296 bytes, 30% = 1288490188; 16 GiB = 17179869184, 30% = 5153960755
+mflag_row "4 GiB cgroup on a 16 GiB host" " --memory=4294967296 --object-store-memory=1288490188" "ray on pc00: --memory=4294967296" \
+	PP_MEMTOTAL_KIB=16777216 PP_CG_ROOT="$TMP/memcg4/cg" PP_PROC_CGROUP="$TMP/memcg4/proc_cgroup"
+mflag_row "no cgroup limit: MemTotal" " --memory=17179869184 --object-store-memory=5153960755" - PP_MEMTOTAL_KIB=16777216
+mflag_row "probe fails: no flag, logged" "" "ray on pc00: no usable memory figure" FAKELAB_FAIL=pc00 LAB_RETRY_SLEEP=0
+mflag_row "explicit object store wins" " --memory=17179869184 --object-store-memory=1000" - PP_MEMTOTAL_KIB=16777216 CLUSTER_RAY_OBJECT_STORE_BYTES=1000
 
 printf 'PASS %s/%s\n' "$pass" "$((pass + failed))"
 ((failed == 0))

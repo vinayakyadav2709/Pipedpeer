@@ -577,6 +577,12 @@ e19_purge_script() {
   cat <<'EOS'
 d="${XDG_DATA_HOME:-$HOME/.local/share}/pipedpeer"
 rm -rf "$d/work/nar-cache" "$d/closure-cache" || echo "NOTE cache removal failed"
+# The warm-up's GC root (our own link, kept by `pipedpeer run`) would hold the
+# common environment and so the closure's shared paths: remove it first.
+root="${XDG_STATE_HOME:-$HOME/.local/state}/pipedpeer/warmup-env"
+if [ -L "$root" ] || [ -e "$root" ]; then
+  if rm -f "$root"; then echo "NOTE removed the warm-up GC root $root"; else echo "NOTE could not remove the warm-up GC root $root"; fi
+fi
 purged=0; total=0
 if [ -n "$rel" ]; then
   # private store: plain rm of the closure's top path
@@ -757,10 +763,10 @@ e19_purge_and_probe() {
   printf '%s|%s|%s' "$warm" "$purged" "$total"
 }
 
-# e19_join_script <sys> <id> <driver ip> <joiner ip> <cores> <invite code>:
+# e19_join_script <sys> <id> <driver ip> <joiner ip> <cores> <invite code> [pc]:
 # the bash run detached on the joiner.
 e19_join_script() {
-  local sys="$1" id="$2" driver="$3" jip="$4" cores="$5" code="$6" wait_s="${E19_JOIN_WAIT_S:-180}"
+  local sys="$1" id="$2" driver="$3" jip="$4" cores="$5" code="$6" jpc_="${7:-}" wait_s="${E19_JOIN_WAIT_S:-180}"
   case "$sys" in
     pipedpeer*)
       cat <<EOF
@@ -777,7 +783,7 @@ EOF
       [[ "$sys" == dask* ]] && pollsys="dask"
       poll_b64="$(e19_join_poll_py | base64 -w0)"
       if [[ "$pollsys" == ray ]]; then
-        starter="systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$driver:6379${cores:+ --num-cpus=$cores} --block"
+        starter="systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$driver:6379${cores:+ --num-cpus=$cores}${jpc_:+$(_cluster_ray_mem_flag "$jpc_")} --block"
       else
         starter="systemd-run --user --unit=lab-dask-worker --collect ~/pipedpeer-lab/venv/bin/dask worker tcp://$driver:8786 --nworkers $cores --nthreads 1"
         want="$cores"
@@ -893,7 +899,7 @@ e19_one_repeat() {
         status_of["$jpc"]="no_cores"
         continue
       fi
-      script="$(e19_join_script "$sys" "$run_id" "$driver_ip" "$(lab_ip "$jpc")" "${cores_of[$jpc]}" "$pp_code")"
+      script="$(e19_join_script "$sys" "$run_id" "$driver_ip" "$(lab_ip "$jpc")" "${cores_of[$jpc]}" "$pp_code" "$jpc")"
       b64="$(printf '%s' "$script" | base64 -w0)"
       launch="R=~/pipedpeer-lab/runs/$run_id; mkdir \"\$R/join.once\" 2>/dev/null || exit 0; setsid nohup bash -c \"\$(echo $b64 | base64 -d)\" >\"\$R/join.log\" 2>&1 </dev/null &"
       lab_ssh "$jpc" "$launch" >/dev/null 2>&1 &

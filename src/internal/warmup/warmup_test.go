@@ -25,7 +25,7 @@ func TestLogEndsInDone(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	exe := filepath.Join(t.TempDir(), "fake")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho \"built in 1s: $*\"\n"), 0o755); err != nil {
+	if err := os.WriteFile(exe, []byte("#!/bin/sh\necho \"built in 1s: $*\"\nln -sfn \"$PWD\" \"$PIPEDPEER_WARMUP_ROOT\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Start(exe, "v1", false); err != nil {
@@ -68,6 +68,7 @@ func setLog(t *testing.T, body *string, age time.Duration) {
 	if body == nil {
 		return
 	}
+	setRoot(t)
 	if err := os.MkdirAll(filepath.Dir(LogPath()), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +77,18 @@ func setLog(t *testing.T, body *string, age time.Duration) {
 	}
 	mt := time.Now().Add(-age)
 	if err := os.Chtimes(LogPath(), mt, mt); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// setRoot makes the GC-root link resolve to an existing directory.
+func setRoot(t *testing.T) {
+	t.Helper()
+	if err := os.MkdirAll(userdir.State(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(RootPath())
+	if err := os.Symlink(t.TempDir(), RootPath()); err != nil {
 		t.Fatal(err)
 	}
 }

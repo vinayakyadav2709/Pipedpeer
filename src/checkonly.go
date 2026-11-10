@@ -22,6 +22,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/nixstore"
 	"github.com/pipedpeer/pipedpeer/internal/pythondeps"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/warmup"
 )
 
 // checkOnlyOptions is everything `run --check-only` already knows when it
@@ -378,6 +379,7 @@ func runCheckOnly(o checkOnlyOptions) error {
 			c.block("environment", fmt.Sprintf("build failed: %v", err))
 		} else {
 			storePath = env.StorePath
+			warmup.RegisterRoot(storePath)
 			env.Close()
 			c.line("environment", fmt.Sprintf("built in %.1f s", time.Since(start).Seconds()))
 			c.line("store", storePath)

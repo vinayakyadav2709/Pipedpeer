@@ -140,14 +140,16 @@ const RetryEnv = "PIPEDPEER_WARMUP_RETRY"
 
 // Done reports whether the log is a finished warm-up for this build and torch
 // kind: the last line is "done" and the header ends with the marker
-// "build=<version> torch=<CPU|CUDA>". A log from a build without the marker
+// "build=<version> torch=<CPU|CUDA>", and the GC-root link of its environment
+// still resolves to a store path (a garbage collection since means a rebuild,
+// cheap when cached). A log from a build without the marker
 // is not Done, so the first run after an upgrade rebuilds once.
 func Done(version string, nvidia bool) bool {
 	lines := readLog()
 	if len(lines) < 2 || lines[len(lines)-1] != "done" {
 		return false
 	}
-	return sameBuild(lines[0], version, nvidia)
+	return sameBuild(lines[0], version, nvidia) && rootLive()
 }
 
 // recentlyFailed: the last line is a failure of this same build, written
@@ -227,7 +229,7 @@ func Start(exe, version string, nvidia bool) (Result, error) {
 	cmd := termuxexec.Command("sh", append([]string{"-c", shell, exe}, Args(script, nvidia)...)...)
 	cmd.Dir = dir
 	cmd.ExtraFiles = []*os.File{alive} // fd 3, inherited by the whole process tree
-	cmd.Env = append(os.Environ(), "PIPEDPEER_WARMUP_LOG="+LogPath())
+	cmd.Env = append(os.Environ(), "PIPEDPEER_WARMUP_LOG="+LogPath(), RootEnv+"="+RootPath())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		// A header-only log would read as "building" for an hour.

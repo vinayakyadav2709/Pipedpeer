@@ -211,6 +211,27 @@ lab_mem_mib() {
 	printf '%s\n' "$((t / 1024))"
 }
 
+# _cluster_ray_mem_flag <pc>: " --memory=B --object-store-memory=O" for every
+# Ray start, B being the PC's usable memory in bytes (lab_mem_mib: MemTotal or a
+# smaller cgroup limit; Ray's docs advise passing it in containers, where it
+# otherwise takes the host's) and O 30% of B (Ray's own default fraction). An
+# explicit CLUSTER_RAY_MEMORY_BYTES / CLUSTER_RAY_OBJECT_STORE_BYTES wins over
+# the probe. A probe that fails is logged and no flag is passed.
+_cluster_ray_mem_flag() {
+	local pc="$1" mib b o
+	b="${CLUSTER_RAY_MEMORY_BYTES:-}"
+	if [[ -z "$b" ]]; then
+		if ! mib="$(lab_mem_mib "$pc")"; then
+			lab_log "ray on $pc: no usable memory figure; Ray picks its own, which may count memory a cgroup limit denies"
+			return 0
+		fi
+		b=$((mib * 1024 * 1024))
+	fi
+	o="${CLUSTER_RAY_OBJECT_STORE_BYTES:-$((b * 30 / 100))}"
+	lab_log "ray on $pc: --memory=$b --object-store-memory=$o"
+	printf ' --memory=%s --object-store-memory=%s' "$b" "$o"
+}
+
 # --- transport ------------------------------------------------------------
 
 # lab_ssh <pc> <cmd...>: ssh -F $LAB/ssh_config <pc> -- <cmd>, retried up to

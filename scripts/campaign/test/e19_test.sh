@@ -955,5 +955,20 @@ FAKE_PRE_EXISTING_NIX=1 run_closure "$d"
 [[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 95 ]] || pnote "want warm 0, purged 95: $(cat "$(csv_of "$d")")"
 verdict "purge: pre-existing Nix keeps outside paths but records warm 0 when >= 90% purged"
 
+# W1: the warm-up's GC root link on the joiner is ours: removed before the delete, logged
+d="$(newdir)"; mk_closure "$d" 10 20 70
+rootdir="$d/pc01/.local/state/pipedpeer"; mkdir -p "$rootdir"
+ln -s "$d/sysstore/dep1-x" "$rootdir/warmup-env"
+run_closure "$d"
+[[ ! -L "$rootdir/warmup-env" && ! -e "$rootdir/warmup-env" ]] || pnote "warm-up root link remains"
+grep -q 'purge on pc01: removed the warm-up GC root' "$d/campaign.log" || pnote "removal not logged"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "want warm 0 (cold): $(cat "$(csv_of "$d")")"
+verdict "W1 purge removes the warm-up GC root link, logs it, the row is cold"
+
+d="$(newdir)"; mk_closure "$d" 10 20 70
+run_closure "$d"
+grep -q 'warm-up GC root' "$d/campaign.log" && pnote "logged a root removal with no root"
+verdict "W1 opposite: no root link, nothing logged about one"
+
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"

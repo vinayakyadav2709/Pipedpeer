@@ -543,7 +543,7 @@ for n in ray.nodes():
 				lab_log "cap $pc: Ray HEAD reports $found CPUs, capped to ${CLUSTER_CAP_CPU[$k]}; not restarted"
 			elif ((found != CLUSTER_CAP_CPU[k])); then
 				lab_log "ray ignores AllowedCPUs on $pc; passed --num-cpus=${CLUSTER_CAP_CPU[$k]}"
-				if ! lab_ssh "$pc" "systemctl --user stop lab-ray; systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --num-cpus=${CLUSTER_CAP_CPU[$k]} --block"; then
+				if ! lab_ssh "$pc" "systemctl --user stop lab-ray; systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379 --num-cpus=${CLUSTER_CAP_CPU[$k]}$(_cluster_ray_mem_flag "$pc") --block"; then
 					lab_log "cap $pc: restarting the Ray worker with --num-cpus FAILED"
 				else
 					# the old node entry lingers until it times out: wait for the new one
@@ -613,11 +613,11 @@ cluster_up() {
 		if ((_CLUSTER_WORKER_FAILED)); then
 			_cluster_fail "up: a PC has too little memory for Ray; nothing of Ray was started" || return 1
 		fi
-		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --head --port=6379$(_cluster_ray_cpus_flag "$pc00_id") --block"; then
+		if ! lab_ssh "$pc00_id" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --head --port=6379$(_cluster_ray_cpus_flag "$pc00_id")$(_cluster_ray_mem_flag "$pc00_id") --block"; then
 			_cluster_fail "up: could not start the Ray head on $pc00_id" || return 1
 		fi
 		for ((i = 1; i < CLUSTER_N; i++)); do
-			if ! lab_ssh "${CLUSTER_IDS[$i]}" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379$(_cluster_ray_cpus_flag "${CLUSTER_IDS[$i]}") --block"; then
+			if ! lab_ssh "${CLUSTER_IDS[$i]}" "systemd-run --user --unit=lab-ray --collect ~/pipedpeer-lab/venv/bin/ray start --address=$pc00_ip:6379$(_cluster_ray_cpus_flag "${CLUSTER_IDS[$i]}")$(_cluster_ray_mem_flag "${CLUSTER_IDS[$i]}") --block"; then
 				_cluster_worker_fail ray "${CLUSTER_IDS[$i]}" "could not start the Ray worker"
 			fi
 		done

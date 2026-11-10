@@ -57,6 +57,9 @@ type connResult struct {
 	healthy  []string // machine names
 	problems []string // "<machine>: <reason> — fix: <what to do>"
 	why, fix string   // failed only
+	// refusedOnly: every problem is a refused connection (a machine that is
+	// reachable with no daemon listening), so waiting longer will not help.
+	refusedOnly bool
 }
 
 func getJSON(client *http.Client, url string, into any) error {
@@ -101,12 +104,19 @@ func short8(id string) string {
 // fixFor turns a peer's reason into what to do about it.
 func fixFor(reason string) string {
 	switch {
+	case refused(reason):
+		return "that machine is reachable but its pipedpeer daemon is not running: run `pipedpeer status` there, and `pipedpeer start` if it is down"
 	case noAnswer(reason):
 		return "the machines cannot reach each other on 4242/tcp: run `pipedpeer doctor` on both (router or firewall between them)"
 	case secretRejected(reason):
 		return "this machine and that one hold different secrets: run `pipedpeer invite` on a connected machine and `pipedpeer connect` again here"
 	}
 	return "run `pipedpeer doctor` on both machines"
+}
+
+// refused: the connection was actively refused, not left unanswered.
+func refused(reason string) bool {
+	return strings.Contains(strings.ToLower(reason), "connection refused")
 }
 
 // noAnswer: the reason says nothing answered. A timeout inside the token
@@ -159,7 +169,7 @@ func classify(s connSnapshot) connResult {
 	// unreachable entry, or unreachable more than once (once per path), and
 	// was counted and printed each time ("4 not" for two machines).
 	healthyIDs, reported := map[string]bool{}, map[string]bool{}
-	rejected := false
+	rejected, allRefused := false, true
 	for _, n := range s.nodes {
 		if n.Source == "self" || n.Path == "self" {
 			continue
@@ -174,6 +184,7 @@ func classify(s connSnapshot) connResult {
 			why = n.State
 		}
 		rejected = rejected || secretRejected(why)
+		allRefused = allRefused && refused(why)
 		reported[short8(n.NodeID)] = true
 		res.problems = append(res.problems, name(n)+": "+why+" — fix: "+fixFor(why))
 	}
@@ -184,6 +195,7 @@ func classify(s connSnapshot) connResult {
 		}
 		reported[id] = true
 		rejected = rejected || secretRejected(u.Reason)
+		allRefused = allRefused && refused(u.Reason)
 		res.problems = append(res.problems, short8(u.Peer)+": "+u.Reason+" — fix: "+fixFor(u.Reason))
 	}
 	sort.Strings(res.healthy)
@@ -193,6 +205,7 @@ func classify(s connSnapshot) connResult {
 		return res
 	case len(res.healthy) > 0:
 		res.outcome = connPartly
+		res.refusedOnly = allRefused
 		return res
 	}
 	res.outcome = connFailed
@@ -230,6 +243,14 @@ func classify(s connSnapshot) connResult {
 	return res
 }
 
+// connSettle is how long the picture must stay the same (a machine healthy,
+// every problem a refused connection) before waitConnected stops early; connPoll
+// is the polling step. Vars so tests can shorten them.
+var (
+	connSettle = 10 * time.Second
+	connPoll   = time.Second
+)
+
 // waitConnected polls the daemon at base until connected or wait runs out,
 // with a countdown line on a terminal.
 func waitConnected(base string, wait time.Duration) connResult {
@@ -238,6 +259,8 @@ func waitConnected(base string, wait time.Duration) connResult {
 	deadline := time.Now().Add(wait)
 	var res connResult
 	lastErr := ""
+	var settledSince time.Time // since when the refused-only picture has been the same
+	settledKey := ""
 	for {
 		s, err := snapshot(base)
 		if err != nil {
@@ -254,10 +277,20 @@ func waitConnected(base string, wait time.Duration) connResult {
 		if res.outcome == connConnected || left <= 0 {
 			break
 		}
+		// A machine is up and the rest only refuse: nothing a longer wait fixes.
+		if res.outcome == connPartly && res.refusedOnly {
+			if key := strings.Join(res.problems, "\n"); key != settledKey || settledSince.IsZero() {
+				settledKey, settledSince = key, time.Now()
+			} else if time.Since(settledSince) >= connSettle {
+				break
+			}
+		} else {
+			settledSince, settledKey = time.Time{}, ""
+		}
 		if tty {
 			fmt.Printf("\r\033[K  waiting for the cluster · %d s left · %d found", int(left.Seconds()+0.5), len(res.healthy))
 		}
-		time.Sleep(time.Second)
+		time.Sleep(connPoll)
 	}
 	if tty {
 		fmt.Print("\r\033[K")
