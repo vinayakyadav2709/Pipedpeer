@@ -66,11 +66,22 @@ real machines:
   pool body limit, torchrun at N=2 and a real join are checked by the two-PC
   check at the start of Session 1 in `scripts/campaign/OPERATOR.md`. Two arms
   have not completed even in containers, so the first real session is their
-  first run. Ray forms a 2-node cluster with a 3 GB head (ready in 13 s, no
-  out-of-memory kill), but E19's Ray run then held its container at the 3 GB
-  limit until it stopped answering: Ray counts the host's 16 CPUs there, and
-  no Ray workload finished. On the first real PC, watch Ray's memory on the
-  first run. E17 needs three PCs.
+  first run. Ray with a 4 GB head finishes its E19 workload in containers on
+  both cgroup versions (emulated): on one cgroup v1 VM in all six variants
+  (about 1.24 GB resident), and on one cgroup v2 PC (baseline 15.3 s, join
+  18.2 s, head peak 3.76 GB of 4.29 GB, no OOM, `memory.high` events 0;
+  [cloud-lab/local-v2](benchmarks/cloud-lab/local-v2/README.md)). The earlier
+  stall, a 3 GB head held at its limit until it stopped answering, did not
+  come back with 4 GB. Ray still reads the host's memory and CPU count inside
+  a cgroup, so on the first real PC, watch Ray's memory on the first run.
+  Small E17 (two PCs, one joiner, introducer killed) is clean in both
+  emulations; its old-invite arm needs four PCs and has never run.
+- **Only real PCs can answer** (the emulations cannot): the cgroup v2 Ray
+  stall on a real 4 GB or 8 GB PC; `AllowedCPUs` with `--cap`; real networks,
+  UDP and firewalls between PCs; whether the `wget` segfault returns (not
+  seen in either emulation, with CPU 0 avoided); speed; E17's old-invite arm;
+  the E19 purge on a PC whose Nix predates the campaign (it then keeps paths
+  outside the closure and logs them).
 - **The phone** (Samsung S20 FE 5G, Snapdragon 865): run on 2026-10-16 with
   Play Termux, Debian + Nix in proot: pool and torch chunks from laptop A
   verified (numbers in the report's results table). Still open: a run
@@ -169,6 +180,14 @@ Dropped: Optuna interception, NPU support.
 
 1. Whatever the verification pass and the real-hardware runs (section 2)
    found.
+   - **Three product bugs from the emulated lab** (one cgroup v1 VM,
+     [cloud-lab-risk-report.md](benchmarks/cloud-lab-risk-report.md)):
+     `pipedpeer connect` waits the full 60 s for a dead invite member and
+     then blames 4242/tcp (`connectWait`, `src/connect_cmd.go`); the
+     warm-up's common environment is not GC-rooted, so `nix-store --gc`
+     removes it while `warmup.log` still says done; Ray reads host memory
+     inside a cgroup (10.21 GiB in a 4 GiB container), so its own memory
+     limits are wrong there.
    - **Workspace selection.** Today `pipedpeer run` tars the whole folder up
      to the nearest `.git` or `.pipedpeerignore`, which can be far bigger
      than the script needs.
