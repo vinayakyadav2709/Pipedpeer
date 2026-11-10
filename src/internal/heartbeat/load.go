@@ -14,8 +14,13 @@ import (
 // activeJobs is the current count of jobs being executed by the daemon.
 // reservedMemBytes is the sum of all active pipedpeer job reservations.
 func CollectLoad(activeJobs int, reservedMemBytes int64) registry.LoadInfo {
-	totalMem := readTotalMemBytes()
-	osFree := readAvailableMemBytes()
+	var totalMem, osFree int64
+	var memPercent float64
+	if v, err := mem.VirtualMemory(); err == nil {
+		totalMem = int64(v.Total)
+		osFree = int64(v.Available)
+		memPercent = v.UsedPercent
+	}
 	available := osFree - reservedMemBytes
 	if available < 0 {
 		available = 0
@@ -23,7 +28,7 @@ func CollectLoad(activeJobs int, reservedMemBytes int64) registry.LoadInfo {
 
 	info := registry.LoadInfo{
 		CPUPercent:        readCPUPercent(),
-		MemPercent:        readMemPercent(),
+		MemPercent:        memPercent,
 		ActiveJobs:        activeJobs,
 		TotalMemBytes:     totalMem,
 		AvailableMemBytes: available,
@@ -69,31 +74,4 @@ func readCPUPercent() float64 {
 		pct = 100
 	}
 	return pct
-}
-
-func readMemPercent() float64 {
-	v, err := mem.VirtualMemory()
-	if err != nil {
-		return 0
-	}
-	return v.UsedPercent
-}
-
-// readTotalMemBytes reads total physical memory in bytes using gopsutil.
-func readTotalMemBytes() int64 {
-	v, err := mem.VirtualMemory()
-	if err != nil {
-		return 0
-	}
-	return int64(v.Total)
-}
-
-// readAvailableMemBytes reads available memory in bytes using gopsutil.
-// This is real OS-level available memory (accounts for all non-pipedpeer usage).
-func readAvailableMemBytes() int64 {
-	v, err := mem.VirtualMemory()
-	if err != nil {
-		return 0
-	}
-	return int64(v.Available)
 }
