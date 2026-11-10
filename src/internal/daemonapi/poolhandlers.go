@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -292,6 +293,10 @@ func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		if s.poolCancelled(r, len(items), started) {
+			return
+		}
+		if answered := (*workerError)(nil); errors.As(err, &answered) {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error(), "ran": true})
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

@@ -80,6 +80,18 @@ def _fan_width(n_items, required_mem):
     return max(1, min(n, n_items))
 
 
+class _Raised:
+    def __init__(self, exc):
+        self.exc = exc
+
+
+def _call_guarded(item):
+    try:
+        return _call_one(item)
+    except Exception as e:
+        return _Raised(e)
+
+
 def run_items(func, items, starmap, req):
     global _FUNC, _STARMAP
     _FUNC, _STARMAP = func, starmap
@@ -89,13 +101,21 @@ def run_items(func, items, starmap, req):
     stateful = bool(req.get("cache_keys") or req.get("item_keys"))
     width = 1 if stateful else _fan_width(len(items), int(req.get("required_mem") or 0))
     if width > 1:
+        # The function's own exceptions come back as values, so only a pool
+        # that fails falls back here: rerunning after a raise would call the
+        # function twice.
         try:
             import multiprocessing
             with multiprocessing.get_context("fork").Pool(width, _mute_stdout) as pool:
-                return pool.map(_call_one, items, chunksize=1)
+                out = pool.map(_call_guarded, items, chunksize=1)
         except Exception as e:
             sys.stderr.write("[pipedpeer] worker pool of %d failed (%r); running %d items single-process\n"
                              % (width, e, len(items)))
+        else:
+            for r in out:
+                if isinstance(r, _Raised):
+                    raise r.exc
+            return out
     return [_call_one(item) for item in items]
 `
 

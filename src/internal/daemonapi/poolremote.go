@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/pipedpeer/pipedpeer/internal/schedule"
@@ -84,6 +85,13 @@ func (pm *poolManager) runRemote(peer, storePath string, ch *chunk, timeout time
 		return nil, 0, fmt.Errorf("peer %s: %w", peer, err)
 	}
 	if status != http.StatusOK {
+		var failed struct {
+			Error string `json:"error"`
+			Ran   bool   `json:"ran"`
+		}
+		if json.Unmarshal(body, &failed) == nil && failed.Ran {
+			return nil, 0, &workerError{fmt.Sprintf("on peer %s: %s", peer, strings.TrimPrefix(failed.Error, "worker: "))}
+		}
 		return nil, 0, fmt.Errorf("peer %s returned %d", peer, status)
 	}
 	if ch.frames {

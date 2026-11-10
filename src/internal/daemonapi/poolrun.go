@@ -2,6 +2,7 @@ package daemonapi
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"sort"
@@ -390,6 +391,10 @@ func (pm *poolManager) runPart(ch *chunk, i int, p part, runPath, storePath stri
 			if raced {
 				break // both copies failed; the local one was the fallback
 			}
+			if answered := (*workerError)(nil); errors.As(e, &answered) {
+				ran = true // the function ran there; another run would call it twice
+				break
+			}
 			ch.dead.mark(peer)
 		}
 		if !ran && ctx.Err() == nil && !raced {
@@ -532,6 +537,9 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 		// forget it (the next request re-warms) and run nothing in its place.
 		pm.dropWorker(storePath, worker)
 		return nil, ctx.Err()
+	}
+	if answered := (*workerError)(nil); errors.As(err, &answered) {
+		return nil, err
 	}
 	if err != nil {
 		// Worker died mid-flight (or could not take the task) — drop it, stop

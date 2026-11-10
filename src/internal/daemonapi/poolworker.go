@@ -69,6 +69,13 @@ func (pm *poolManager) spawn(runPath, storePath string) (*poolWorker, error) {
 	return w, nil
 }
 
+// workerError is a failure the worker reported for a task it ran, such as an
+// exception the function raised. The function has run and the worker is
+// alive, so the task is neither rerun nor moved, and the worker is kept.
+type workerError struct{ msg string }
+
+func (e *workerError) Error() string { return "worker: " + e.msg }
+
 func (w *poolWorker) dead() bool {
 	return w == nil || w.cmd == nil || w.killed.Load()
 }
@@ -193,7 +200,7 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 			continue // stale line from a concurrent write; ignore
 		}
 		if ack.Error != "" {
-			return nil, fmt.Errorf("worker: %s", ack.Error)
+			return nil, &workerError{ack.Error}
 		}
 		if !ack.Done {
 			return nil, fmt.Errorf("worker: no done ack")
