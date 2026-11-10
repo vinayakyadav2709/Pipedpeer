@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/netaddr"
 	"github.com/pipedpeer/pipedpeer/internal/phone"
 	"github.com/pipedpeer/pipedpeer/internal/rendezvous"
+	"github.com/pipedpeer/pipedpeer/internal/rtctransport"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 	"github.com/rs/zerolog/log"
@@ -150,7 +152,15 @@ func runDaemon(args []string) {
 		log.Fatal().Err(err).Msg("failed to load identity")
 	}
 
+	rtc, webrtc := webRTCConfig()
+	if webrtc {
+		http.DefaultTransport = daemonapi.WebRTCTransport(rtc, http.DefaultTransport)
+	}
 	server := daemonapi.New(nodeID.NodeID)
+	if webrtc {
+		server.EnableWebRTC(rtc)
+		log.Info().Strs("ice_servers", rtc.ICEServers).Msg("peer calls go over WebRTC first")
+	}
 	server.EnablePersistence()
 	// Both closure caches are bounded here rather than only when something is
 	// transferred, so a node that has gone quiet still gives the disk back
@@ -328,6 +338,25 @@ func runDaemon(args []string) {
 	if err := server.ListenAndServe(port); err != nil {
 		log.Fatal().Err(err).Msg("daemon listen failed")
 	}
+}
+
+// webRTCConfig reports whether PIPEDPEER_TRANSPORT=webrtc asks for peer calls
+// over WebRTC, and the STUN URLs in the comma-separated PIPEDPEER_ICE_SERVERS.
+// Without them only host candidates are offered, which reach peers on the same
+// network. TURN servers are dropped: they relay the data (ADR-0005).
+func webRTCConfig() (rtctransport.Config, bool) {
+	var cfg rtctransport.Config
+	for _, s := range strings.Split(os.Getenv("PIPEDPEER_ICE_SERVERS"), ",") {
+		s = strings.TrimSpace(s)
+		switch {
+		case s == "":
+		case strings.HasPrefix(s, "turn:") || strings.HasPrefix(s, "turns:"):
+			log.Warn().Str("ice_server", s).Msg("ignoring a TURN server: pipedpeer sends no job traffic through a relay")
+		default:
+			cfg.ICEServers = append(cfg.ICEServers, s)
+		}
+	}
+	return cfg, os.Getenv("PIPEDPEER_TRANSPORT") == "webrtc"
 }
 
 // splitPeerAddr splits the host:port internet mode hands over.

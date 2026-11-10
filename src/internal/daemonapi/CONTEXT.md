@@ -64,6 +64,7 @@ What the daemon can still promise to a new job: its budget minus what it and its
 - Memory: `execution.go` `grantableMemory`, `applyMemLimit`, `oomKills`; `cgroups/cgroups.go` `Prepare`; `cgroups/budget.go` `SelfBudget`.
 - Nix cache: `/nix-cache` (`nixcache.go`, exempt from the token for GET/HEAD from loopback only) and `/v1/store/narinfo`, `/v1/store/nar` (`peerstore.go`); see [nixstore](../nixstore/CONTEXT.md) and ADR-0021.
 - Persistence: `daemonapi/server.go` `EnablePersistence`, `daemonapi/state.go`.
+- WebRTC (opt-in, `PIPEDPEER_TRANSPORT=webrtc`, STUN only via `PIPEDPEER_ICE_SERVERS`): `src/daemon_cmd.go` `webRTCConfig`; `daemonapi/rtc.go` `EnableWebRTC` (offers at `/v1/rtc/offer` behind the token), `WebRTCTransport` (wraps `http.DefaultTransport`; a POST that may have been sent is never replayed over HTTP); data channels in `internal/rtctransport`.
 - Submitter side: `app/run.go` `Run`, `RunTask`; `daemonctl/execution.go` `UploadJob`, `StreamExecute`, `DownloadResults`; daemon lifecycle `daemonctl/manager.go` `Start`.
 - History: `jobhistory/history.go` `BaseDir`.
 - Run record: `runrec` (`Save`/`Load` steps.json beside the receipt, `WriteSimple`, `WriteDetailed`, `ExportAll`); served by `GET /v1/history?id=<job>` (`daemonapi/ui.go` `handleHistory`).

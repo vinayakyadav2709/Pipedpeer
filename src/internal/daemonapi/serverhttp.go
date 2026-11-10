@@ -26,6 +26,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/peercache"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
 	"github.com/pipedpeer/pipedpeer/internal/resourceest"
+	"github.com/pipedpeer/pipedpeer/internal/rtctransport"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
 
@@ -74,6 +75,9 @@ func (s *Server) buildRouter() {
 	r.Get("/v1/introducers", s.handleIntroducers)
 	r.Get("/v1/addresses", s.handleAddresses)
 	r.Get("/v1/history", s.handleHistory)
+	if s.rtcListener != nil {
+		r.Method(http.MethodPost, rtctransport.SignalPath, rtcRemoteAddr(limitPending(maxPendingOffers, s.rtcListener.SignalHandler())))
+	}
 
 	s.router = r
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/pipedpeer/pipedpeer/internal/narpack"
 	"github.com/pipedpeer/pipedpeer/internal/nodestore"
 	"github.com/pipedpeer/pipedpeer/internal/registry"
+	"github.com/pipedpeer/pipedpeer/internal/rtctransport"
 	"github.com/pipedpeer/pipedpeer/internal/tlsid"
 	"github.com/pipedpeer/pipedpeer/internal/userdir"
 )
@@ -78,6 +79,7 @@ type Server struct {
 	// bytes per environment.
 	recipes         sync.Map
 	router          chi.Router
+	rtcListener     *rtctransport.Listener // nil unless EnableWebRTC was called
 	leaseDuration   time.Duration
 	gracePeriod     time.Duration
 	sweepInterval   time.Duration
@@ -327,6 +329,9 @@ func (s *Server) ListenAndServe(port int) error {
 	// nodes are updated, instead of every daemon having to switch at the same
 	// moment with anything missed simply going silent.
 	cert, certErr := tlsid.EnsureCert()
+	if s.rtcListener != nil {
+		go func() { _ = (&http.Server{Handler: s.Handler()}).Serve(s.rtcListener) }()
+	}
 	if certErr != nil {
 		log.Warn().Err(certErr).Msg("no TLS certificate; serving plain HTTP only")
 		return (&http.Server{Handler: s.Handler()}).Serve(ln)

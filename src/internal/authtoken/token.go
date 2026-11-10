@@ -369,5 +369,11 @@ func Install() {
 	if _, already := http.DefaultTransport.(*transport); already {
 		return
 	}
-	http.DefaultTransport = &transport{base: http.DefaultTransport}
+	http.DefaultTransport = Wrap(http.DefaultTransport)
+}
+
+// Wrap returns base attaching the token to daemon calls the way Install makes
+// http.DefaultTransport do, for a route to peers that does not go through it.
+func Wrap(base http.RoundTripper) http.RoundTripper {
+	return &transport{base: base}
 }
