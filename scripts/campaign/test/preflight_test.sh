@@ -70,9 +70,10 @@ row() {
 row "good pc00" pc00 '^PREFLIGHT pc00 OK' ' (WARN|FAIL) '
 row "pc00 below the Ray head minimum" pc00 'PREFLIGHT pc00 FAIL ram: .*Ray head' - mem_kib=4194304
 row "worker below the worker minimum" pc01 'PREFLIGHT pc01 FAIL ram: ' - mem_kib=2097152
-row "a cgroup memory limit under MemTotal" pc01 'PREFLIGHT pc01 FAIL ram: 3 GiB.*cgroup' - mem_limit_kib=3145728
+row "a cgroup memory limit under MemTotal" pc01 'PREFLIGHT pc01 FAIL ram: 3\.0 GiB.*cgroup' - mem_limit_kib=3145728
 row "worker at the minimum" pc01 '^PREFLIGHT pc01 OK' 'FAIL ram' "mem_kib=$((PF_MIN_RAM_GIB * 1048576))"
 row "a nominal 8 GB pc00 reports 7.6 GiB" pc00 '^PREFLIGHT pc00 OK' 'FAIL ram' mem_kib=7969177
+row "worker ram failure displays memory with one decimal" pc01 'PREFLIGHT pc01 FAIL ram: 3\.3 GiB' - mem_kib=3500000
 row "opposite: a real 6 GB pc00 is still refused" pc00 'PREFLIGHT pc00 FAIL ram: ' - mem_kib=6291456
 row "usable CPUs below nproc" pc01 'PREFLIGHT pc01 WARN cpus: .*usable 3 of 16' - usable_cpus=3
 row "suspend not masked" pc01 'PREFLIGHT pc01 FAIL sleep: .*systemctl mask' - suspend.target=enabled
@@ -97,6 +98,24 @@ if grep -qE 'PREFLIGHT pc02 FAIL probe: .*no answer' <<<"$out"; then pass=$((pas
 } >"$T/count.txt"
 counted="$(pf_count "$T/count.txt" 2>/dev/null || true)"
 if [[ "$counted" == "1 1 0" ]]; then pass=$((pass + 1)); echo "ok   counting: a warned PC is not also counted OK"; else failed=$((failed + 1)); echo "FAIL counting: a warned PC is not also counted OK -- got [$counted] want [1 1 0]"; fi
+
+# noise lines (blank line, ssh error) must not add a PC
+{
+	printf 'PREFLIGHT pc00 OK\n'
+	printf '\n'
+	printf 'ssh: connect to host pc01 port 22: Connection refused\n'
+} >"$T/noise.txt"
+counted="$(pf_count "$T/noise.txt" 2>/dev/null || true)"
+if [[ "$counted" == "1 0 0" ]]; then pass=$((pass + 1)); echo "ok   counting: blank line and ssh error do not add a PC"; else failed=$((failed + 1)); echo "FAIL counting: blank line and ssh error do not add a PC -- got [$counted] want [1 0 0]"; fi
+
+# valid lines counted accurately
+{
+	printf 'PREFLIGHT pc00 OK\n'
+	printf 'PREFLIGHT pc01 FAIL ram: 3.2 GiB\n'
+	printf 'PREFLIGHT pc02 WARN clock: NTP\n'
+} >"$T/valid.txt"
+counted="$(pf_count "$T/valid.txt" 2>/dev/null || true)"
+if [[ "$counted" == "1 1 1" ]]; then pass=$((pass + 1)); echo "ok   counting: valid OK WARN FAIL lines counted"; else failed=$((failed + 1)); echo "FAIL counting: valid OK WARN FAIL lines counted -- got [$counted] want [1 1 1]"; fi
 
 # the opposite: plain OK PCs and a plain FAIL still count as they are
 {

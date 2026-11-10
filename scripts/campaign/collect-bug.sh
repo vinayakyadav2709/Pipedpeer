@@ -62,11 +62,11 @@ _bug_redact() {
 	while IFS= read -r -d '' f; do
 		grep -Iq . "$f" 2>/dev/null || continue
 		sed -E -i \
-			-e 's/(Authorization:[[:space:]]*(Bearer[[:space:]]+)?)[^[:space:],]+/\1<redacted>/Ig' \
+			-e 's/(Authorization:[[:space:]]*)[^\r\n,;]+/\1<redacted>/Ig' \
 			-e 's/(Bearer[[:space:]]+)[^[:space:],]+/\1<redacted>/Ig' \
-			-e 's#(://)[^/[:space:]@]+:[^/[:space:]@]+@#\1<redacted>@#g' \
-			-e 's/([A-Za-z0-9_.-]*(key|token|secret|password|credential)[A-Za-z0-9_.-]*["'\'']?[[:space:]]*[=:][[:space:]]*["'\'']?)[^[:space:]"'\'',}]+/\1<redacted>/Ig' \
-			-e 's/(pipedpeer connect[[:space:]]+)["'\'']?[^[:space:]"'\'']+["'\'']?/\1<redacted>/g' \
+			-e 's#(://)[^/[:space:]@]+@#\1<redacted>@#g' \
+			-e 's/([A-Za-z0-9_.-]*(key|token|secret|password|credential)[A-Za-z0-9_.-]*[[:space:]]*[=:][[:space:]]*)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]"'\'',}]+)/\1<redacted>/Ig' \
+			-e 's/(((pipedpeer[[:space:]]+)?(connect|setup[[:space:]]+--connect)[[:space:]]+|--connect=|PIPEDPEER_CONNECT_CODE=)[[:space:]]*)("[^"]*"|'\''[^'\'']*'\''|[^[:space:]"'\'',}]+)/\1<redacted>/g' \
 			"$f"
 	done < <(find "$1" -type f -print0)
 }

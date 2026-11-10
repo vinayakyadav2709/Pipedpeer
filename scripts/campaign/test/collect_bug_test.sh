@@ -150,6 +150,43 @@ _bug_redact "$d/f"
 cmp -s "$d/before.txt" "$d/f/plain.txt" || pnote "ordinary text was changed: $(cat "$d/f/plain.txt")"
 verdict "B6 opposite: keyboard and plain prose stay readable")
 
+# --- B9 cold2 findings 2 and 3: Authorization schemes, quoted secrets with spaces, token URLs, and setup/env invite codes
+(d="$(mktemp -d "$ROOT/b9.XXXX")"
+mkdir -p "$d/f"
+cat >"$d/f/secrets2.txt" <<'EOF'
+Authorization: Basic dXNlcjpwYXNzd29yZA==
+Authorization: Token ghp_secret123
+Authorization: ApiKey secretkey
+password="correct horse battery staple"
+api_key: 'key with spaces'
+https://ghp_token123@github.com/repo.git
+pipedpeer setup --connect PPCONNECT1
+setup --connect "PPCONNECT2"
+--connect=PPCONNECT3
+--connect="PPCONNECT4"
+PIPEDPEER_CONNECT_CODE=PPCONNECT5
+PIPEDPEER_CONNECT_CODE="PPCONNECT6"
+EOF
+_bug_redact "$d/f"
+for s in dXNlcjpwYXNzd29yZA== ghp_secret123 secretkey "correct horse battery staple" "key with spaces" ghp_token123 PPCONNECT1 PPCONNECT2 PPCONNECT3 PPCONNECT4 PPCONNECT5 PPCONNECT6; do
+	grep -qF -- "$s" "$d/f/secrets2.txt" && pnote "[$s] not redacted: $(grep -F -- "$s" "$d/f/secrets2.txt")"
+done
+grep -q 'Authorization: <redacted>' "$d/f/secrets2.txt" || pnote "Authorization header not fully redacted"
+verdict "B9 Authorization schemes, quoted passwords with spaces, token URLs and connect codes are redacted")
+
+# --- B10 cold2 near-misses: https://github.com/x, user@host, --connect-timeout 5 stay readable
+(d="$(mktemp -d "$ROOT/b10.XXXX")"
+mkdir -p "$d/f"
+cat >"$d/f/plain2.txt" <<'EOF'
+visit https://github.com/x for details
+contact user@host for questions
+curl --connect-timeout 5 https://example.com
+EOF
+cp "$d/f/plain2.txt" "$d/before2.txt"
+_bug_redact "$d/f"
+cmp -s "$d/before2.txt" "$d/f/plain2.txt" || pnote "near-misses were modified: $(cat "$d/f/plain2.txt")"
+verdict "B10 opposite: https://github.com/x, user@host and --connect-timeout stay readable")
+
 # --- B7 cgroup memory files are collected when the remote shell is dash,
 # on cgroup v2 and v1 (the brace expansion dash does not do left this empty)
 (d="$(mktemp -d "$ROOT/b7.XXXX")"

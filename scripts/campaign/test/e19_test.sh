@@ -51,6 +51,13 @@ setup_lab() {
   mkdir -p "$v"
   export HOME="$dir/home" LAB_RESULTS="$dir" LAB_RETRY_SLEEP=0.1 LAB_POLL_S=1
   export CLUSTER_SH="$v/cluster.sh" METRICS_SH="$v/metrics.sh" UPLOAD_SH="$v/upload.sh"
+  mkdir -p "$dir/lab-state"
+  if [[ -n "${FAKE_PRE_EXISTING_NIX:-}" ]]; then
+    : >"$dir/lab-state/state"
+  else
+    echo "nix-campaign determinate" >"$dir/lab-state/state"
+  fi
+  export E19_LAB_STATE="$dir/lab-state/state"
 
   cat >"$v/cluster.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -916,14 +923,37 @@ rm -rf "${d:?}/sysstore/$RELP"
 NIX_STUB="$QN_STUB" E19_SYS_STORE="$d/sysstore" E19_STORE_PATH="$SP" run_e19 "$d" 2 --n 1 --add 1 --repeats 1 --systems pipedpeer || pnote "exit $?"
 grep -q "could not list the closure's requisites on pc00 (ssh exit 1)" "$d/campaign.log" || pnote "pc00's failed -qR was not logged with its exit: $(grep 'requisites' "$d/campaign.log" | tr '\n' ' ')"
 grep -q "leftover dependencies are not purged" "$d/campaign.log" || pnote "the consequence was not named"
-verdict "purge: pc00's failed requisite listing is logged with the PC and exit code"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "want joiner_warm 1 when pc00 requisites could not be had: $(cat "$(csv_of "$d")")"
+verdict "purge: pc00's failed requisite listing is logged with the PC and exit code, warm 1"
 
 d="$(newdir)"; mk_closure "$d" 10 20 70
 rm -rf "${d:?}/sysstore/$RELP"
 run_closure "$d"
 ! grep -q "could not list the closure's requisites" "$d/campaign.log" || pnote "a working pc00 listing was reported as failed"
 [[ ! -e "$d/sysstore/dep1-x" && ! -e "$d/sysstore/dep2-x" ]] || pnote "ordinary fallback did not purge the dependencies"
-verdict "purge opposite: pc00's list is read, no failure logged, dependencies purged"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 ]] || pnote "ordinary case: want warm 0: $(cat "$(csv_of "$d")")"
+verdict "purge opposite: pc00's list is read, no failure logged, dependencies purged, warm 0"
+
+# G1 pre-existing Nix: outside paths are kept and not deleted
+d="$(newdir)"; mk_shared "$d"
+FAKE_PRE_EXISTING_NIX=1 run_closure "$d"
+[[ -e "$d/sysstore/env-x" ]] || pnote "pre-existing Nix: outside referrer was deleted: $(ls "$d/sysstore" | tr '\n' ' ')"
+[[ -e "$d/sysstore/dep1-x" ]] || pnote "pre-existing Nix: dependency kept by outside referrer was purged"
+grep -q 'Nix predates the campaign on pc01: 1 outside path(s) kept' "$d/campaign.log" || pnote "outside paths kept was not logged: $(grep 'predates' "$d/campaign.log" | tr '\n' ' ')"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 1 ]] || pnote "want warm 1 when < 90% purged (purged 20/100): $(cat "$(csv_of "$d")")"
+verdict "purge: pre-existing Nix keeps outside paths and records warm 1 when under 90% purged"
+
+# G1 pre-existing Nix where >= 90% still went -> recorded warm 0
+d="$(newdir)"
+mk_closure "$d" 50 5 45
+mkdir -p "$d/sysstore/env-x"
+echo 5 >"$d/sysstore/env-x.size"
+echo "$d/sysstore/env-x" >"$d/sysstore/dep1-x.blockers"
+printf '%s\n' "$d/sysstore/dep1-x" "$d/sysstore/env-x" >"$d/sysstore/dep1-x.refs"
+FAKE_PRE_EXISTING_NIX=1 run_closure "$d"
+[[ -e "$d/sysstore/env-x" ]] || pnote "outside path was deleted"
+[[ "$(col "$(csv_of "$d")" 10 join)" == 0 && "$(col "$(csv_of "$d")" 12 join)" == 95 ]] || pnote "want warm 0, purged 95: $(cat "$(csv_of "$d")")"
+verdict "purge: pre-existing Nix keeps outside paths but records warm 0 when >= 90% purged"
 
 echo "TOTAL: pass=$pass failed=$failed"
 exit "$failed"

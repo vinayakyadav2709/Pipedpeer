@@ -445,30 +445,33 @@ printf "OK\t%s\t%s\t%s\t%s\n" "$mtime" "$head_line" "$tail_line" "$nlines"
 
 				# pc00 never gets the token-swap retry, so its only restart is the
 				# stale one above: wait for that restart too when it happened.
-				if [[ "$p_tail" == failed* ]] &&
-					{ [[ "$pc" != pc00 ]] || [[ -n "${warmup_retry_sig[$pc]:-}" ]]; }; then
+				if [[ "$p_tail" == failed* ]]; then
 					sig="$p_mtime:$p_nl"
-					if [[ "$sig" == "${warmup_retry_sig[$pc]:-}" ]] &&
-						((t_now - warmup_retry_at[$pc] < restart_wait_s)); then
-						# the restart has not rewritten the log yet
-						next_pending+=("$pc")
-						continue
-					fi
-					if ((${warmup_retries[$pc]:-0} < retry_max)); then
-						warmup_retries[$pc]=$((${warmup_retries[$pc]:-0} + 1))
-						host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
-						lab_log "install: warmup $pc ($host_r): $p_tail; restarting it (${warmup_retries[$pc]}/$retry_max, the connect token swap can kill a running build)"
-						if lab_ssh "$pc" 'PIPEDPEER_WARMUP_RETRY=1 pipedpeer setup -y' >/dev/null 2>&1; then
-							warmup_retry_sig[$pc]="$sig"
-							warmup_retry_at[$pc]="$t_now"
-							warmup_last_change[$pc]="$t_now"
+					if [[ -n "${warmup_retry_sig[$pc]:-}" ]]; then
+						if [[ "$sig" == "${warmup_retry_sig[$pc]:-}" ]] &&
+							((t_now - warmup_retry_at[$pc] < restart_wait_s)); then
+							# the restart has not rewritten the log yet
 							next_pending+=("$pc")
 							continue
 						fi
-						lab_log "install: warmup $pc ($host_r): restart command failed"
-					elif ((${warmup_retries[$pc]:-0} > 0)); then
-						host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
-						lab_log "install: warmup $pc ($host_r): $p_tail; retries exhausted (${warmup_retries[$pc]}/$retry_max)"
+					fi
+					if [[ "$pc" != pc00 ]]; then
+						if ((${warmup_retries[$pc]:-0} < retry_max)); then
+							warmup_retries[$pc]=$((${warmup_retries[$pc]:-0} + 1))
+							host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+							lab_log "install: warmup $pc ($host_r): $p_tail; restarting it (${warmup_retries[$pc]}/$retry_max, the connect token swap can kill a running build)"
+							if lab_ssh "$pc" 'PIPEDPEER_WARMUP_RETRY=1 pipedpeer setup -y' >/dev/null 2>&1; then
+								warmup_retry_sig[$pc]="$sig"
+								warmup_retry_at[$pc]="$t_now"
+								warmup_last_change[$pc]="$t_now"
+								next_pending+=("$pc")
+								continue
+							fi
+							lab_log "install: warmup $pc ($host_r): restart command failed"
+						elif ((${warmup_retries[$pc]:-0} > 0)); then
+							host_r="$(awk -F'\t' -v p="$pc" '$1 == p { print $4; exit }' "$LAB/hosts.tsv")"
+							lab_log "install: warmup $pc ($host_r): $p_tail; retries exhausted (${warmup_retries[$pc]}/$retry_max)"
+						fi
 					fi
 				fi
 

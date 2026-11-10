@@ -479,12 +479,49 @@ t13_stale_pc00_async_restart() {
 	verdict "a stale restart on pc00 with an unchanged log for a poll -> waited, not failed, then done"
 }
 
+# --- Case 14: pc00 stale restart that fails -> failed without token-swap retries
+t14_stale_pc00_restart_fails() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 600 "failed (exit 1); stale failure"
+		set_warmup_log "$d/pc01" 10 "done"
+		echo "failed (exit 1); persistent failure" >"$d/pc00/retry-result"
+		CAMPAIGN_WARMUP_RESTART_WAIT_S=1 bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q '^rc=1$' "$d/log" || pnote "expected exit 1 when pc00 warmup fails"
+	grep -q 'FAILED pc00:' "$d/log" || pnote "pc00 failure not reported in FAILED"
+	! grep -q 'restarting it (1/2' "$d/campaign.log" || pnote "pc00 was subjected to token-swap retries: $(grep 'restarting it' "$d/campaign.log")"
+	[[ "$(count "$d/pc00/setup-calls" 'setup 1')" == 1 ]] || pnote "want pc00 restarted only once (the stale restart), got $(count "$d/pc00/setup-calls" 'setup 1')"
+	verdict "pc00 stale restart that fails is failed with no 'restarting it (1/2' line"
+}
+
+# --- Case 15: non-pc00 PC keeps its token-swap retries
+t15_non_pc00_token_swap_retries() {
+	local d rc=0
+	d="$(newdir)"
+	(
+		case_setup "$d" 2
+		set_warmup_log "$d/pc00" 10 "done"
+		printf 'compiling\nfailed (exit 1); details above\n' >"$d/pc01/setup-writes"
+		echo "failed (exit 1); retry 1 fails" >"$d/pc01/retry-result"
+		bash "$REPO/scripts/campaign/install.sh" 0.0.1-test.20261108-abc1234
+		printf 'rc=%s\n' "$?"
+	) >"$d/log" 2>&1 || rc=$?
+	grep -q 'warmup pc01 (pc01.lab): .*restarting it (1/2' "$d/campaign.log" || pnote "non-pc00 did not get token-swap retry 1/2"
+	verdict "a non-pc00 PC keeps its token-swap retries"
+}
+
 t1_all_done
 t9_token_swap_retry
 t10_no_swap_no_retry
 t11_retries_exhausted
 t12_stale_failed_log
 t13_stale_pc00_async_restart
+t14_stale_pc00_restart_fails
+t15_non_pc00_token_swap_retries
 t2_already_done
 t3_one_failed
 t4_log_stalls

@@ -482,7 +482,7 @@ e17_main() {
     # the old invite must be issued before the introducer dies
     old_code="$(e17_invite "$pc00" 2>/dev/null)" || old_code=""
     if [[ -z "$old_code" ]]; then
-      lab_log "E17 $id: no invite from $pc00 before the kill; the old-invite arm is recorded as 0"
+      lab_log "E17 $id: no invite from $pc00 before the kill; the old-invite arm is recorded empty"
     fi
 
     CAMPAIGN_SUBMIT_PC="$submit" campaign_run_one E17 W1 pipedpeer "$N" "$i" 0 1800 &

@@ -159,11 +159,14 @@ echo "$n"'
 # (and logs the PC and what came back) when the probe fails or prints no number.
 lab_usable_cpus() {
 	local pc="${1:?usage: lab_usable_cpus <pc>}" n raw err rc=0
-	err="$(mktemp)"
+	mkdir -p "$LAB"
+	err="$(mktemp "$LAB/cpus_err.XXXXXX")"
+	trap 'rm -f "$err"' RETURN INT TERM
 	# stdout is the count; stderr (ssh's own message) is kept for the log only
 	n="$(lab_ssh "$pc" "$LAB_CPUS_PROBE" 2>"$err")" || rc=$?
 	raw="$(tr '\n' ' ' <"$err")"
 	rm -f "$err"
+	trap - RETURN INT TERM
 	n="$(printf '%s' "$n" | tr -d '[:space:]')"
 	if ((rc == 0)) && [[ "$n" =~ ^[0-9]+$ ]] && ((n >= 1)); then
 		printf '%s\n' "$n"
@@ -192,10 +195,13 @@ echo "$t $lim"'
 # a smaller cgroup limit). Returns 1, logged with the PC, when the probe fails.
 lab_mem_mib() {
 	local pc="${1:?usage: lab_mem_mib <pc>}" out t lim err raw rc=0
-	err="$(mktemp)"
+	mkdir -p "$LAB"
+	err="$(mktemp "$LAB/mem_err.XXXXXX")"
+	trap 'rm -f "$err"' RETURN INT TERM
 	out="$(lab_ssh "$pc" "$LAB_MEM_PROBE" 2>"$err")" || rc=$?
 	raw="$(tr '\n' ' ' <"$err")"
 	rm -f "$err"
+	trap - RETURN INT TERM
 	read -r t lim <<<"$out"
 	if ((rc != 0)) || [[ ! "${t:-}" =~ ^[0-9]+$ ]]; then
 		lab_log "$pc: memory unknown (ssh exit $rc, probe gave [$out], stderr [$raw])"

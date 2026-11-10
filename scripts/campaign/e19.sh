@@ -593,7 +593,7 @@ if [ -n "$rel" ]; then
   # an earlier repeat removed leaves its dependencies here: pc00's list
   # ($pc00reqs, base64) names them.
   pc00list="$(printf '%s' "${pc00reqs:-}" | base64 -d 2>/dev/null)"
-  if [ ! -e "$sys/$rel" ] && [ -z "$pc00list" ] && [ "$had_private" = 0 ]; then echo NEED-PC00-REQS; fi
+  if [ -d "$sys" ] && command -v nix-store >/dev/null 2>&1 && [ ! -e "$sys/$rel" ] && [ -z "$pc00list" ] && [ "$had_private" = 0 ]; then echo NEED-PC00-REQS; fi
   if [ -e "$sys/$rel" ] || [ -n "$pc00list" ]; then
     if command -v nix-store >/dev/null 2>&1; then
       if [ -e "$sys/$rel" ]; then
@@ -643,6 +643,20 @@ if [ -n "$rel" ]; then
       else
         echo "NOTE no closure path exists here; there are no referrers to delete"
       fi
+      # Outside-closure paths may be deleted only on a PC whose Nix the campaign
+      # installed (lab-pc.sh records "nix-campaign ..."). When Nix predated the
+      # campaign, do not delete outside paths: log and let byte count decide warm.
+      nix_campaign=0
+      lab_state="${state:-${E19_LAB_STATE:-/var/lib/pipedpeer-lab/state}}"
+      if [ -f "$lab_state" ] && grep -q '^nix-campaign ' "$lab_state" 2>/dev/null; then
+        nix_campaign=1
+      fi
+      if [ "$nix_campaign" = 0 ]; then
+        n_extra=0
+        for p in $extra; do [ -e "$p" ] && n_extra=$((n_extra + 1)); done
+        [ "$n_extra" = 0 ] || echo "NOTE Nix predates the campaign on ${pc:-unknown}: $n_extra outside path(s) kept"
+        extra=""
+      fi
       # These were not all created by the harness: name each one before it goes.
       for p in $extra; do
         [ -e "$p" ] && echo "NOTE outside closure, will delete: $p"
@@ -687,21 +701,23 @@ EOS
 # path. Prints nothing when it cannot be told or no path is known.
 e19_purge_and_probe() {
   local pc="$1" path="$2" id="$3" out rc=0 rel="" b64 note bytes="" purged="" total="" last warm=""
+  local reqs_failed=0
   [[ -z "$path" ]] || rel="${path#/nix/store/}"
   b64="$(e19_purge_script | base64 -w0)"
-  out="$(lab_ssh "$pc" "sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
+  out="$(lab_ssh "$pc" "pc='$pc'; state='${E19_LAB_STATE:-/var/lib/pipedpeer-lab/state}'; sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
   # the joiner had lost the top path (an earlier repeat's purge): its
   # dependencies are named by pc00's list, where the closure is whole
   if ((rc == 0)) && grep -q '^NEED-PC00-REQS$' <<<"$out"; then
     local pc00reqs="" reqs_raw="" reqs_rc=0
     reqs_raw="$(lab_ssh pc00 "nix-store -qR '${E19_SYS_STORE:-/nix/store}/$rel'" 2>&1)" || reqs_rc=$?
     if ((reqs_rc != 0)); then
+      reqs_failed=1
       lab_log "e19 $id: could not list the closure's requisites on pc00 (ssh exit $reqs_rc): ${reqs_raw:-(no output)}; $pc's leftover dependencies are not purged"
     else
       pc00reqs="$(printf '%s' "$reqs_raw" | base64 -w0)"
     fi
     if [[ -n "$pc00reqs" ]]; then
-      out="$(lab_ssh "$pc" "sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; pc00reqs='$pc00reqs'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
+      out="$(lab_ssh "$pc" "pc='$pc'; state='${E19_LAB_STATE:-/var/lib/pipedpeer-lab/state}'; sys='${E19_SYS_STORE:-/nix/store}'; rel='$rel'; pc00reqs='$pc00reqs'; eval \"\$(echo $b64 | base64 -d)\"" 2>&1)" || rc=$?
     fi
   fi
   if ((rc != 0)); then
@@ -718,7 +734,9 @@ e19_purge_and_probe() {
     purged="${BASH_REMATCH[1]}"
     total="${BASH_REMATCH[2]}"
   fi
-  if [[ -n "$total" ]] && ((total > 0)); then
+  if ((reqs_failed)); then
+    warm=1
+  elif [[ -n "$total" ]] && ((total > 0)); then
     if ((purged * 100 >= total * 90)); then
       warm=0
     else

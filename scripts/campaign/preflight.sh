@@ -74,9 +74,11 @@ pf_judge() {
 	local mkib="${kv[mem_kib]}" via=""
 	if [[ "${kv[mem_limit_kib]:-}" =~ ^[0-9]+$ ]] && ((kv[mem_limit_kib] < mkib)); then
 		mkib="${kv[mem_limit_kib]}"
-		via=" (a cgroup memory limit, under the machine's $((kv[mem_kib] / 1048576)) GiB)"
+		local host_t=$(( (kv[mem_kib] * 10 + 524288) / 1048576 ))
+		via=" (a cgroup memory limit, under the machine's $((host_t / 10)).$((host_t % 10)) GiB)"
 	fi
-	gib=$((mkib / 1048576))
+	local gib_t=$(( (mkib * 10 + 524288) / 1048576 ))
+	gib="$((gib_t / 10)).$((gib_t % 10))"
 	# A nominal 8 GB PC reports about 7.6-7.9 GiB after the kernel's own
 	# reservation, so a nominal amount in MiB with 10% slack: 4 and 8 GB PCs
 	# pass, a real 3 or 6 GB one does not.
@@ -145,7 +147,9 @@ pf_judge() {
 # followed by a clock-offset WARN is one PC warned, not one OK and one WARN.
 pf_count() {
 	awk '
-		{ s[$2] = (s[$2] == "fail" || $3 == "FAIL") ? "fail" : (s[$2] == "warn" || $3 == "WARN") ? "warn" : "ok" }
+		$1 == "PREFLIGHT" && NF >= 3 {
+			s[$2] = (s[$2] == "fail" || $3 == "FAIL") ? "fail" : (s[$2] == "warn" || $3 == "WARN") ? "warn" : "ok"
+		}
 		END { for (p in s) { if (s[p] == "fail") f++; else if (s[p] == "warn") w++; else o++ }
 		      print o + 0, w + 0, f + 0 }' "$1"
 }
