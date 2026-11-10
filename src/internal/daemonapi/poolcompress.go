@@ -112,9 +112,9 @@ func observeLink(peerKey string, n int64, d time.Duration) {
 }
 
 // timedRead reads a peer's reply body and records how fast it arrived.
-func timedRead(peerKey string, r io.Reader) ([]byte, error) {
+func timedRead(peerKey string, r io.Reader, n int64) ([]byte, error) {
 	start := time.Now()
-	b, err := io.ReadAll(r)
+	b, err := readAllSized(r, n)
 	if err == nil {
 		observeLink(peerKey, int64(len(b)), time.Since(start))
 	}

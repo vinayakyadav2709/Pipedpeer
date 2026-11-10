@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
@@ -71,7 +72,14 @@ func parseFrames(body []byte, hasGlobals bool, itemCount int) ([]byte, []json.Ra
 
 // buildFrames assembles a frames body from a header line and optional globals.
 func buildFrames(header []byte, globals []byte, items []json.RawMessage) []byte {
-	buf := make([]byte, 0, 1024)
+	size := len(header) + 1 + 4*len(items)
+	if globals != nil {
+		size += 4 + len(globals)
+	}
+	for _, it := range items {
+		size += len(it)
+	}
+	buf := make([]byte, 0, size)
 	buf = append(buf, header...)
 	buf = append(buf, '\n')
 	if globals != nil {
@@ -81,6 +89,44 @@ func buildFrames(header []byte, globals []byte, items []json.RawMessage) []byte 
 		buf = putFrame(buf, it)
 	}
 	return buf
+}
+
+// buildResultFrames assembles a frames reply from its header line and results.
+// A result carries raw pickle bytes under "pickle"; anything else is an empty
+// frame.
+func buildResultFrames(header []byte, results []any) []byte {
+	pickles := make([]string, len(results))
+	size := len(header) + 4*len(results)
+	for i, r := range results {
+		if m, ok := r.(map[string]string); ok {
+			pickles[i] = m["pickle"]
+		}
+		size += len(pickles[i])
+	}
+	body := make([]byte, 0, size)
+	body = append(body, header...)
+	for _, p := range pickles {
+		body = binary.BigEndian.AppendUint32(body, uint32(len(p)))
+		body = append(body, p...)
+	}
+	return body
+}
+
+// presizeMaxBytes is the largest declared length trusted enough to allocate
+// for in one go; a larger body grows as it arrives.
+const presizeMaxBytes = 1 << 30
+
+// readAllSized is io.ReadAll sized up front from a declared length n, so a
+// multi-megabyte body is not regrown and recopied on the way in. n only
+// sizes the buffer: a body shorter or longer than declared still reads whole.
+func readAllSized(rd io.Reader, n int64) ([]byte, error) {
+	if n <= 0 || n > presizeMaxBytes {
+		return io.ReadAll(rd)
+	}
+	var buf bytes.Buffer
+	buf.Grow(int(n) + bytes.MinRead)
+	_, err := buf.ReadFrom(rd)
+	return buf.Bytes(), err
 }
 
 func chunkDirFor(storePath string) string {
@@ -98,16 +144,6 @@ func poolFramesHeader(n int, node string, parts []provPart) []byte {
 }
 
 const framesContentType = "application/vnd.pipedpeer.frames"
-
-// resultPickle extracts the raw pickle bytes a result carries. Results are
-// standardised on raw pickle bytes internally; only the wire edges base64.
-func resultPickle(r any) []byte {
-	m, ok := r.(map[string]string)
-	if !ok {
-		return nil
-	}
-	return []byte(m["pickle"])
-}
 
 // --- The peer link (C21): U27 implements, U18 calls from pool.go.
 //

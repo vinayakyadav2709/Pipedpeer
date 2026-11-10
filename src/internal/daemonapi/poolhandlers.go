@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -88,7 +87,7 @@ func (s *Server) poolCancelled(r *http.Request, items int, started time.Time) bo
 func (s *Server) handlePoolMap(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	limit := s.poolBodyLimit()
-	rawBody, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	rawBody, err := readAllSized(http.MaxBytesReader(w, r.Body, limit), min(r.ContentLength, limit))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
 			"error": fmt.Sprintf("pool request body exceeds %d bytes", limit),
@@ -314,12 +313,7 @@ func (s *Server) writePoolReply(w http.ResponseWriter, frames bool, results []an
 	// ran, not merely that it was accepted.
 	w.Header().Set("Content-Type", framesContentType)
 	w.WriteHeader(http.StatusOK)
-	body := make([]byte, 0, 1024)
-	body = append(body, poolFramesHeader(len(results), s.nodeID, prov.snapshot())...)
-	for _, r := range results {
-		body = putFrame(body, resultPickle(r))
-	}
-	w.Write(body)
+	w.Write(buildResultFrames(poolFramesHeader(len(results), s.nodeID, prov.snapshot()), results))
 }
 
 // runMicroChunks splits a too-large request into sequential sub-batches sized
@@ -441,7 +435,7 @@ func (pm *poolManager) postPeer(ctx context.Context, peer string, raw []byte, hd
 		if err != nil {
 			return 0, "", nil, err
 		}
-		body, err = timedRead(key, resp.Body)
+		body, err = timedRead(key, resp.Body, resp.ContentLength)
 		resp.Body.Close()
 		if err != nil {
 			return 0, "", nil, fmt.Errorf("reading reply: %w", err)
