@@ -7,6 +7,7 @@ test_results/
 __pycache__/
 *.pyc
 node_modules/
+src/internal/console/web/dist/
 codedb.snapshot
 docker/logs/
 docker/workspaces/

@@ -22,6 +22,12 @@ jobs:
         with:
           go-version-file: 'src/go.mod'
           
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build the console frontend
+        run: make console
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:

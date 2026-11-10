@@ -1,7 +1,21 @@
-.PHONY: build install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check campaign-test campaign-lint campaign-test-files
+.PHONY: build console console-optional install test test-integration test-net fmt lint lab-up lab-down lab-fail lab-nat lab-emu-up lab-emu-down shim-check campaign-test campaign-lint campaign-test-files
 
-build:
+build: console-optional
 	cd src && CGO_ENABLED=0 go build -o ../bin/pipedpeer .
+
+# Builds the `pipedpeer console` frontend into src/internal/console/web/dist,
+# which the Go build embeds.
+console:
+	cd console && bun install --frozen-lockfile && bun run build
+
+# Without bun the build still succeeds and `pipedpeer console` serves a stub
+# page that says to run `make console`.
+console-optional:
+	@if command -v bun >/dev/null 2>&1; then \
+		$(MAKE) console; \
+	else \
+		echo "bun not found: skipping the console frontend (pipedpeer console will serve a stub page)"; \
+	fi
 
 install:
 	./scripts/install-pipedpeer.sh
