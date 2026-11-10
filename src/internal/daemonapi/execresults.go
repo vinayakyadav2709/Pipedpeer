@@ -75,6 +75,16 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		if err != nil {
 			return err
 		}
+		rel, err := filepath.Rel(job.WorkDir, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		// pipedpeer's own files - the shim, its bytecode, the receipt - are
+		// not the job's output and must not land in the user's project.
+		if d.IsDir() && rel == ".pipedpeer" {
+			return filepath.SkipDir
+		}
 		if d.IsDir() || !d.Type().IsRegular() {
 			return nil
 		}
@@ -82,17 +92,7 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 		if err != nil {
 			return nil
 		}
-		rel, err := filepath.Rel(job.WorkDir, path)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
 		present[rel] = true
-		// pipedpeer's own files - the shim, its bytecode, the receipt - are
-		// not the job's output and must not land in the user's project.
-		if strings.HasPrefix(rel, ".pipedpeer/") {
-			return nil
-		}
 
 		if prev, uploaded := job.Uploaded[rel]; uploaded && !stampOf(info).changed(prev) {
 			return nil
@@ -123,7 +123,7 @@ func writeResultsTar(w io.Writer, job *JobRecord) error {
 	// returns before downloading on failure), so a crash cannot wipe files.
 	var deleted []string
 	for rel := range job.Uploaded {
-		if !present[rel] {
+		if !present[rel] && !strings.HasPrefix(rel, ".pipedpeer/") {
 			deleted = append(deleted, rel)
 		}
 	}

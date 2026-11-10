@@ -198,3 +198,31 @@ func TestGPUDriverLibsEmptyWhenNoDriver(t *testing.T) {
 		t.Fatalf("empty dir should yield no mounts, got %v", libs)
 	}
 }
+
+// .pipedpeer/ is injected into the work dir for the run (the shim, and the
+// bytecode Python caches beside it). None of it is the user's, so none of it
+// may come back into their project, whether as a new file or as a deletion.
+func TestResultsNeverIncludePipedpeerDir(t *testing.T) {
+	workDir := t.TempDir()
+	shim := writeFile(t, filepath.Join(workDir, ".pipedpeer", "shim", "sitecustomize.py"), "# shim")
+	writeFile(t, filepath.Join(workDir, ".pipedpeer", "shim", "__pycache__", "sitecustomize.cpython-314.pyc"), "bytecode")
+	writeFile(t, filepath.Join(workDir, "out.txt"), "result")
+
+	job := &JobRecord{
+		WorkDir: workDir,
+		Uploaded: map[string]FileStamp{
+			".pipedpeer/shim/sitecustomize.py": stampOf(shim),
+			".pipedpeer/shim/removed.py":       {},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := writeResultsTar(&buf, job); err != nil {
+		t.Fatalf("writeResultsTar: %v", err)
+	}
+
+	got := readTar(t, &buf)
+	if len(got) != 1 || got["out.txt"] != "result" {
+		t.Fatalf("expected only out.txt, got %v", got)
+	}
+}
