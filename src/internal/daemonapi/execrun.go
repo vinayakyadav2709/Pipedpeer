@@ -232,7 +232,7 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 	// nix libs, so this is additive).
 	if cfg.GPU {
 		if dir := gpuDriverLibDir(); dir != "" && !envsContain(cfg.Envs, "LD_LIBRARY_PATH=") {
-			cfg.Envs = append(cfg.Envs, "LD_LIBRARY_PATH="+dir+os.Getenv("LD_LIBRARY_PATH"))
+			cfg.Envs = append(cfg.Envs, "LD_LIBRARY_PATH="+gpuLibraryPath(dir, os.Getenv("LD_LIBRARY_PATH")))
 		}
 	}
 
@@ -583,3 +583,12 @@ func (s *Server) handleJobExec(w http.ResponseWriter, r *http.Request) {
 
 // phoneBoxOnce logs the phone sandbox note once per daemon.
 var phoneBoxOnce sync.Once
+
+// gpuLibraryPath is the LD_LIBRARY_PATH of a GPU job: the driver lib dir ahead
+// of the directories the daemon itself searches.
+func gpuLibraryPath(driverDir, daemonPath string) string {
+	if daemonPath == "" {
+		return driverDir
+	}
+	return driverDir + ":" + daemonPath
+}
