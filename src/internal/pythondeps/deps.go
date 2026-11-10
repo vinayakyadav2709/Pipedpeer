@@ -2,6 +2,7 @@ package pythondeps
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -270,7 +271,13 @@ func ExtractImportScan(scriptPath string) ImportScan {
 			if err != nil {
 				break
 			}
-			for _, imp := range importedModules(strings.TrimSpace(string(line))) {
+			// Almost no line is an import: check the keyword on the bytes so
+			// the rest are never copied into a string.
+			line = bytes.TrimSpace(line)
+			if !bytes.HasPrefix(line, []byte("from ")) && !bytes.HasPrefix(line, []byte("import ")) {
+				continue
+			}
+			for _, imp := range importedModules(string(line)) {
 				found := false
 				for _, dir := range []string{modDir, rootDir} {
 					if f := filepath.Join(dir, imp+".py"); exists(f) {
