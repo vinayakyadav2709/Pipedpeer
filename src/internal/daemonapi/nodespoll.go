@@ -92,13 +92,15 @@ func candidateOrder(paths []nodestore.Path) []nodestore.Path {
 // until one answers as this node. A path that answers is verified (PathOK, and
 // its certificate pinned to the node id); one that fails or answers as another
 // node is marked so. While the active path is not a LAN one, LAN candidates are
-// still tried so a verified LAN path can take over (nodestore decides).
-func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
+// still tried so a verified LAN path can take over (nodestore decides). A node
+// that answered comes back as the row for the caller to MarkHealthy, so a
+// round's health results are written together.
+func (s *Server) pollOne(node nodestore.Node) (*PeerHealth, *nodestore.Node) {
 	since := s.pathGeneration()
 	paths, err := s.store.Paths(node.NodeID)
 	if err != nil {
 		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not read node paths")
-		return nil
+		return nil, nil
 	}
 	ph := &PeerHealth{Host: node.Host, Port: node.Port, NodeID: node.NodeID, Source: string(node.Source), Status: "unreachable"}
 	var verified *healthResponse
@@ -158,7 +160,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 		if err := s.store.MarkUnreachable(node.NodeID); err != nil {
 			log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not record unreachable peer")
 		}
-		return ph
+		return ph, nil
 	}
 	for _, p := range unproven {
 		s.dropStranger(node.NodeID, p, ph)
@@ -185,7 +187,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 	}
 	// Host/Port/Source are the store's (the active path); MarkHealthy never
 	// moves them.
-	if err := s.store.MarkHealthy(nodestore.Node{
+	return ph, &nodestore.Node{
 		NodeID:       node.NodeID,
 		Arch:         h.Capabilities["arch"],
 		Hostname:     h.Capabilities["hostname"],
@@ -196,10 +198,7 @@ func (s *Server) pollOne(node nodestore.Node) *PeerHealth {
 		CPUPercent:   h.Load.CPUPercent,
 		CapsJSON:     string(capsJSON),
 		LoadJSON:     string(loadJSON),
-	}); err != nil {
-		log.Warn().Err(err).Str("peer", node.NodeID).Msg("could not record healthy peer")
 	}
-	return ph
 }
 
 // dropStranger drops a candidate where a machine outside the cluster answered,

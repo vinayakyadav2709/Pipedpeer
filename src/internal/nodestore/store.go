@@ -275,6 +275,12 @@ func (s *Store) migrate(p string) error {
 // of a node's details must not wipe the richer hardware detail that the
 // health poller wrote.
 func (s *Store) UpsertNode(n Node) error {
+	return upsertNode(s.db, n)
+}
+
+func upsertNode(db interface {
+	Exec(string, ...any) (sql.Result, error)
+}, n Node) error {
 	if n.NodeID == "" {
 		return errors.New("nodestore: upsert without a node id")
 	}
@@ -284,7 +290,7 @@ func (s *Store) UpsertNode(n Node) error {
 	if n.State == "" {
 		n.State = "unknown"
 	}
-	_, err := s.db.Exec(`
+	_, err := db.Exec(`
 		INSERT INTO nodes (node_id, ssh_endpoint, arch, hostname, state,
 			active_jobs, available_mem, reserved_mem, total_mem, cpu_percent,
 			health_score, last_seen, caps_json, load_json, created)
@@ -660,23 +666,35 @@ func (s *Store) PruneStale() error {
 	return nil
 }
 
-// MarkHealthy records a successful health poll, refreshing both the indexed
+// MarkHealthy records successful health polls, refreshing both the indexed
 // scalars and the full capability/load payload. It does not verify a path;
-// the poller calls PathOK for the address that answered.
-func (s *Store) MarkHealthy(n Node) error {
-	n.State = "healthy"
-	n.LastSeen = now().Unix()
-	// Health recovers a step per answered poll; a node never seen before
-	// starts at 1.0. The caller's value is ignored: only this store lowers it.
-	n.HealthScore = 1.0
-	var prev float64
-	switch err := s.db.QueryRow(`SELECT health_score FROM nodes WHERE node_id=?`, n.NodeID).Scan(&prev); {
-	case err == nil:
-		n.HealthScore = min(1.0, prev+HealthRecovery)
-	case !errors.Is(err, sql.ErrNoRows):
-		return fmt.Errorf("nodestore: read health of %s: %w", n.NodeID, err)
+// the poller calls PathOK for the address that answered. All of nodes are
+// written in one transaction: a poll round is one commit, not one per peer.
+func (s *Store) MarkHealthy(nodes ...Node) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
 	}
-	return s.UpsertNode(n)
+	defer tx.Rollback()
+	t := now().Unix()
+	for _, n := range nodes {
+		n.State = "healthy"
+		n.LastSeen = t
+		// Health recovers a step per answered poll; a node never seen before
+		// starts at 1.0. The caller's value is ignored: only this store lowers it.
+		n.HealthScore = 1.0
+		var prev float64
+		switch err := tx.QueryRow(`SELECT health_score FROM nodes WHERE node_id=?`, n.NodeID).Scan(&prev); {
+		case err == nil:
+			n.HealthScore = min(1.0, prev+HealthRecovery)
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("nodestore: read health of %s: %w", n.NodeID, err)
+		}
+		if err := upsertNode(tx, n); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // Health factor bounds: a failure halves it down to HealthFloor, each healthy

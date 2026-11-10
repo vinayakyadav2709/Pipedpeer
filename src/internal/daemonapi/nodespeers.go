@@ -218,6 +218,7 @@ func (s *Server) pollAllNodes() {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	finalHealths := make(map[string]*PeerHealth)
+	var healthy []nodestore.Node
 
 	for _, n := range nodes {
 		if n.NodeID == s.nodeID {
@@ -226,16 +227,24 @@ func (s *Server) pollAllNodes() {
 		wg.Add(1)
 		go func(node nodestore.Node) {
 			defer wg.Done()
-			ph := s.pollOne(node)
+			ph, row := s.pollOne(node)
 			if ph == nil {
 				return
 			}
 			mu.Lock()
 			finalHealths[net.JoinHostPort(ph.Host, strconv.Itoa(ph.Port))] = ph
+			if row != nil {
+				healthy = append(healthy, *row)
+			}
 			mu.Unlock()
 		}(n)
 	}
 	wg.Wait()
+	if len(healthy) > 0 {
+		if err := s.store.MarkHealthy(healthy...); err != nil {
+			log.Warn().Err(err).Int("peers", len(healthy)).Msg("could not record healthy peers")
+		}
+	}
 
 	s.peersMu.Lock()
 	prev := s.peerHealths
