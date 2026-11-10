@@ -148,12 +148,13 @@ func scoreNode(n registry.NodeRecord) float64 {
 	// similar load. Each term is normalised to [0,1] and defaults to 0.5 when
 	// the node does not report it, so a node with sparse telemetry lands in
 	// the middle instead of being starved of work.
-	cores := normalized(float64(totalCores(n)), 32.0)
+	total := totalCores(n)
+	cores := normalized(float64(total), 32.0)
 	mhz := normalized(capFloat(n, "cpu_mhz"), 4000.0)
 	freeRAM := normalized(float64(n.Load.AvailableMemBytes)/(1<<30), 32.0)
 	freeCoreRatio := 0.5
-	if c := totalCores(n); c > 0 {
-		freeCoreRatio = freeCores(n) / float64(c)
+	if total > 0 {
+		freeCoreRatio = max(float64(total)*(1.0-n.Load.CPUPercent/100.0), 0) / float64(total)
 	}
 
 	// Centred on zero: an average node gets no adjustment either way.
@@ -268,8 +269,14 @@ func bestFreeVRAM(n registry.NodeRecord) int64 {
 	return best
 }
 
+// capInt and capFloat return 0 for a missing key before parsing: a failed
+// parse allocates its error, and scoring asks for absent keys on every node.
 func capInt(n registry.NodeRecord, key string) int {
-	v, err := strconv.Atoi(n.Capabilities[key])
+	raw := n.Capabilities[key]
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0
 	}
@@ -277,7 +284,11 @@ func capInt(n registry.NodeRecord, key string) int {
 }
 
 func capFloat(n registry.NodeRecord, key string) float64 {
-	v, err := strconv.ParseFloat(n.Capabilities[key], 64)
+	raw := n.Capabilities[key]
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return 0
 	}
