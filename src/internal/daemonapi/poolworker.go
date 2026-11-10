@@ -96,6 +96,12 @@ func (w *poolWorker) killOnce() bool {
 	return true
 }
 
+// wait reaps the worker's process once, however many callers ask.
+func (w *poolWorker) wait() error {
+	w.waitOnce.Do(func() { w.waitErr = w.cmd.Wait() })
+	return w.waitErr
+}
+
 // submit sends one task over the pipes and waits for its result file. The
 // payload (pickled items can be ~100s of MB) is written to a temp file and the
 // worker is told the path, so the full blob never passes through the pipe or
@@ -154,7 +160,7 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	stop := context.AfterFunc(ctx, w.kill)
 	defer func() {
 		if !stop() {
-			err := w.cmd.Wait()
+			err := w.wait()
 			log.Printf("[pool] warm worker pid %d stopped for a cancelled request: %v", w.cmd.Process.Pid, err)
 		}
 	}()
@@ -236,13 +242,14 @@ func (w *poolWorker) submit(ch *chunk) ([]any, error) {
 	}
 }
 
-// stopAll terminates every warm worker; used on server shutdown.
+// stopAll terminates and reaps every warm worker; used on server shutdown.
 func (pm *poolManager) stopAll() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	for _, w := range pm.workers {
 		if w != nil {
 			w.kill()
+			w.wait()
 		}
 	}
 	pm.workers = map[string]*poolWorker{}

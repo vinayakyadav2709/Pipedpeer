@@ -541,7 +541,7 @@ func (pm *poolManager) runLocal(runPath, storePath string, ch *chunk) ([]any, er
 		pm.dropWorker(storePath, worker)
 		if worker.killOnce() {
 			go func() {
-				err := worker.cmd.Wait()
+				err := worker.wait()
 				log.Printf("[pool] warm worker pid %d stopped after a failed submit: %v", worker.cmd.Process.Pid, err)
 			}()
 		}

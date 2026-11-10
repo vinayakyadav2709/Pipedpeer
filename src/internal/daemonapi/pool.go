@@ -183,6 +183,9 @@ type poolWorker struct {
 	// killed is set once the worker was stopped (its request was cancelled,
 	// or the server shut down); a killed worker is never reused.
 	killed atomic.Bool
+	// waitOnce reaps the process; every caller of wait gets waitErr.
+	waitOnce sync.Once
+	waitErr  error
 	// mu serialises submits on this worker: stdin writes and stdout reads must
 	// not interleave when several fan-out goroutines hit the same store.
 	mu sync.Mutex
