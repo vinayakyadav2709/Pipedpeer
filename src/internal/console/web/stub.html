@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipedpeer console</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    font: 16px/1.5 system-ui, sans-serif;
+    background: Canvas; color: CanvasText;
+  }
+  main { max-width: 34rem; padding: 2rem; }
+  h1 { font-size: 1.25rem; margin: 0 0 .5rem; }
+  p { margin: .5rem 0; }
+  code {
+    font: 0.9em ui-monospace, monospace; padding: .1em .35em;
+    border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pipedpeer console</h1>
+  <p>The console server is running, but its web assets are not built into this binary.</p>
+  <p>Run <code>make console</code> in the repository root, then rebuild and restart <code>pipedpeer console</code>.</p>
+  <p>The API is available under <code>/api</code>.</p>
+</main>
+</body>
+</html>

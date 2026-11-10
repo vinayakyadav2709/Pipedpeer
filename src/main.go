@@ -118,6 +118,7 @@ func main() {
 		newEventsCmd(),
 		newAttachCmd(),
 		newUICmd(),
+		newConsoleCmd(),
 	)
 
 	rootCmd.SetArgs(os.Args[1:])
